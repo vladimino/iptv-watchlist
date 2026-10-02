@@ -2,7 +2,7 @@
 let CUTOFF = Date.now();
 const MAX_YEAR = Number(new Intl.DateTimeFormat('en',{timeZone:'Europe/Madrid',year:'numeric'}).format(new Date()));
 let report = null;
-const state = { period: 'all', sort: 'time', query: '', genres: new Set(), from: 1900, to: MAX_YEAR };
+const state = { period: 'all', sort: 'title', query: '', genres: new Set(), from: 1900, to: MAX_YEAR };
 let films = [];
 const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
