@@ -12,7 +12,7 @@ async function beginSync(env){
  const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,cursor:0,remaining:pending.length,pages,failures:[]};await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
 }
 async function metadataSync(env,run){
- const cache=await loadJSON(env,'metadata.json')||{};const ids=run.pending.slice(run.cursor,run.cursor+12);
+ const cache=await loadJSON(env,'metadata.json')||{};const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);
  for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{if(run.watchlist[idx].peopleVersion===1&&run.watchlist[idx].metadataAt&&Date.now()-Date.parse(run.watchlist[idx].metadataAt)<30*86400000)return;const result=parseFilm(await getHTML(run.watchlist[idx].url),run.watchlist[idx]);cache[id]=result;run.watchlist[idx]=result;}catch(e){run.failures.push({id,error:e.message});}}));
  const people=await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>ids.includes(f.id)&&f.peopleVersion===1);
  try{await localizePeople(batch,people);for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
