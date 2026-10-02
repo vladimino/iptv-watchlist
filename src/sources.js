@@ -43,7 +43,7 @@ async function scanEPG(stream,watchlist,now){
 async function localizePeople(films,cache){
  const ids=[...new Set(films.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
  if(!ids.length)return;
- const query=`SELECT ?tmdb ?en ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; (wdt:P161|wdt:P57) ?person. ?person rdfs:label ?en, ?ru. FILTER(LANG(?en)="en" && LANG(?ru)="ru") }`;
+ const query=`SELECT ?tmdb ?en ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; (wdt:P161|wdt:P57|wdt:P725) ?person. ?person (rdfs:label|skos:altLabel) ?en; rdfs:label ?ru. FILTER(LANG(?en)="en" && LANG(?ru)="ru") }`;
  const url='https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'});
  const response=await fetch(url,{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(45000)});
  if(!response.ok)throw new Error('Russian names HTTP '+response.status);
