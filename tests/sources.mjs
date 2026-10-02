@@ -1,0 +1,11 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {Readable} from 'node:stream';
+const context=vm.createContext({TextDecoder,Date,Map,Set,Number,String,JSON,Math,RegExp,Error,Promise,AbortSignal,fetch});
+vm.runInContext(fs.readFileSync('src/sources.js','utf8')+';globalThis.api={parseWatchlist,parseFilm,scanEPG,xmlTime,norm};',context);const a=context.api;
+const list=a.parseWatchlist(fs.readFileSync('../sources/letterboxd.html','utf8'));assert.equal(list.total,413);assert.equal(list.films.length,28);assert.equal(list.next,'/demo-user/watchlist/page/2/');
+const heat=a.parseFilm(fs.readFileSync('../sources/film.html','utf8'),{id:'heat',title:'Heat',original:'Heat',year:1995});assert(heat.aliases.includes('Схватка'));assert.equal(heat.runtime,170);assert(heat.genres.includes('Криминал'));
+assert.equal(a.xmlTime('20261002170000 +0200'),Date.parse('2026-10-02T15:00:00Z'));assert.equal(a.norm('Ёлки — 2'),'елки 2');
+const now=Date.parse('2026-10-02T18:00:00Z');
+const xml='<tv><channel id="one"><display-name>Кино</display-name></channel><channel id="two"><display-name>US: Movies</display-name></channel><programme channel="one" start="20261002170000 +0000" stop="20261002200000 +0000"><title>Схватка (1995)</title></programme><programme channel="two" start="20261002170000 +0000" stop="20261002200000 +0000"><title>Схватка (1995)</title></programme></tv>';
+const chunks=Array.from(Buffer.from(xml)).map(b=>Buffer.from([b]));const result=await a.scanEPG(Readable.toWeb(Readable.from(chunks)),[heat],now);assert.equal(result.stats.scanned,2);assert.equal(result.films.length,1);assert.equal(result.films[0].shows.length,1);assert.equal(result.films[0].title,'Схватка');
+await assert.rejects(()=>a.scanEPG(Readable.toWeb(Readable.from([Buffer.from(xml.replace('</tv>',''))])),[heat],now),/incomplete/);
+const actual=await a.scanEPG(Readable.toWeb(fs.createReadStream('../sources/epg.xml')),[heat],now);console.log(JSON.stringify({tests:'passed',watchlistFirstPage:list.films.length,epg:actual.stats,heatShows:actual.films[0]?.shows.length||0}));
