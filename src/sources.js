@@ -52,3 +52,13 @@ async function localizePeople(films,cache){
  for(const f of films)for(const p of [...f.directors,...f.actors]){const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}if(cache[p.id])p.name=cache[p.id].name;}
 }
 function peopleCatalog(films){const collect=key=>[...new Map(films.flatMap(f=>f[key]||[]).map(p=>[p.id,p])).values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));return {directors:collect('directors'),actors:collect('actors')};}
+async function localizeByLetterboxd(films,cache){
+ const missing=[...new Map(films.flatMap(f=>[...(f.directors||[]),...(f.actors||[])]).filter(p=>!cache[p.id]).map(p=>[p.id,p])).values()];
+ for(let offset=0;offset<missing.length;offset+=80){
+  const batch=missing.slice(offset,offset+80);const slugs=[...new Set(batch.map(p=>p.id.split('/')[1]).filter(s=>/^[a-z0-9-]+$/.test(s)))];if(!slugs.length)continue;
+  const query=`SELECT ?slug ?ru WHERE { VALUES ?slug { ${slugs.map(s=>JSON.stringify(s)).join(' ')} } ?person (wdt:P6119|wdt:P12383) ?slug; rdfs:label ?ru. FILTER(LANG(?ru)="ru") }`;
+  const response=await fetch('https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0'},signal:AbortSignal.timeout(15000)});
+  if(!response.ok)continue;const data=await response.json();const labels=new Map();for(const r of data.results.bindings){const names=labels.get(r.slug.value)||new Set();names.add(r.ru.value);labels.set(r.slug.value,names);}
+  for(const p of batch){const names=labels.get(p.id.split('/')[1]);if(names?.size===1){const raw=[...names][0];cache[p.id]={name:raw.includes(', ')?raw.split(', ').reverse().join(' '):raw,original:p.original};}}
+ }
+}

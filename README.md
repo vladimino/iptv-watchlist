@@ -22,3 +22,9 @@ Archive means past scheduled broadcasts, not verified playable catch-up. Retain 
 ## Checks
 
 `node tests/sources.mjs` tests time offsets, title normalization, real Letterboxd parsing, stream chunk boundaries, excluded channels, incomplete XML rejection and a full source scan (local source fixtures reside outside the checkout). The live cloud workflow must additionally be run and read back after changes to source adapters or authorization.
+
+## People filters
+
+Every watchlist film stores all directors and the first ten actors in Letterboxd billing order, each keyed by its Letterboxd role URL. Russian names come from Wikidata, matched using the film's TMDB ID and the person's English name. A failed Russian-name request is retried on a later sync; unknown names retain the source spelling rather than an invented translation. `people.json` caches resolved names. `/api/watchlist` exposes the last complete current watchlist including credits; `/api/programme` contains the complete watchlist's people catalog and only films with broadcasts.
+
+Director and actor comboboxes search Russian and original names without case sensitivity, sort alphabetically, accept keyboard navigation and apply an exact person selection. Both person filters intersect with each other and existing filters. Reset clears both; alphabetical film sorting remains the default.

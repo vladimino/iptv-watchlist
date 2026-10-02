@@ -22,6 +22,7 @@ async function metadataSync(env,run){
 }
 async function epgSync(env,run){
  const people=await loadJSON(env,'people.json')||{};
+ try{await localizeByLetterboxd(run.watchlist,people);await saveJSON(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  for(const f of run.watchlist)for(const p of [...(f.directors||[]),...(f.actors||[])])if(people[p.id])p.name=people[p.id].name;
  const now=Date.now(),r=await fetch(SOURCES.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const result=await scanEPG(r.body,run.watchlist,now);if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
  const previous=await loadJSON(env,'programme.json');const fresh=new Map(result.films.map(f=>[f.id,f]));const currentFilms=new Map(run.watchlist.map(f=>[f.id,f]));const channelMin=new Map(result.coverage.map(c=>[c.name,c.min]));
