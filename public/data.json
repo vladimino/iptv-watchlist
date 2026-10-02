@@ -1,0 +1,211 @@
+[
+  {
+    "id": "heat",
+    "title": "Схватка",
+    "original": "Heat",
+    "year": 1995,
+    "genres": [
+      "Криминал",
+      "Триллер"
+    ],
+    "poster": "https://image.tmdb.org/t/p/w440_and_h660_face/5GBF1XoM0hlfgA3zwob8Kmf3wEQ.jpg",
+    "posterSource": "https://www.themoviedb.org/movie/949-heat/images/posters",
+    "shows": [
+      {
+        "offset": -7,
+        "channel": "MM Криминал HD"
+      },
+      {
+        "offset": -25,
+        "channel": "CineMan Thriller"
+      },
+      {
+        "offset": -49,
+        "channel": "Liberty Кино"
+      },
+      {
+        "offset": 6,
+        "channel": "Liberty Кино Микс"
+      },
+      {
+        "offset": 19,
+        "channel": "MM Криминал HD"
+      }
+    ]
+  },
+  {
+    "id": "dune",
+    "title": "Дюна: Часть вторая",
+    "original": "Dune: Part Two",
+    "year": 2024,
+    "genres": [
+      "Фантастика",
+      "Приключения"
+    ],
+    "poster": "https://images.fandango.com/ImageRenderer/500/0/redesign/static/img/default_poster--dark-mode.png/0/images/masterrepository/Fandango/234877/DUNE2_VERT_MAIN_2764x4096_DOM_REV.jpg",
+    "posterSource": "https://www.fandango.com/dune-part-two-the-imax-70mm-experience-2024-234877/movie-overview",
+    "shows": [
+      {
+        "offset": -5,
+        "channel": "TEAM Action HD"
+      },
+      {
+        "offset": -30,
+        "channel": "MM Sci-Fi"
+      },
+      {
+        "offset": 3,
+        "channel": "Liberty Кино 4K"
+      }
+    ]
+  },
+  {
+    "id": "sicario",
+    "title": "Убийца",
+    "original": "Sicario",
+    "year": 2015,
+    "genres": [
+      "Триллер",
+      "Криминал",
+      "Боевик"
+    ],
+    "poster": "https://image.tmdb.org/t/p/original/7e7oiyKPZDlZIXxRBW2eDrGwAaj.jpg",
+    "posterSource": "https://www.themoviedb.org/movie/273481-sicario/images/posters",
+    "shows": [
+      {
+        "offset": -4,
+        "channel": "CineMan Thriller"
+      },
+      {
+        "offset": -20,
+        "channel": "MM Криминал HD"
+      },
+      {
+        "offset": -50,
+        "channel": "TEAM Action HD"
+      },
+      {
+        "offset": 1.5,
+        "channel": "BCU Action HD"
+      }
+    ]
+  },
+  {
+    "id": "nice",
+    "title": "Славные парни",
+    "original": "The Nice Guys",
+    "year": 2016,
+    "genres": [
+      "Криминал",
+      "Комедия"
+    ],
+    "poster": "https://www.originalfilmart.com/cdn/shop/products/niceguys_2016_teaser_original_film_art_600x.jpg?v=1612333202",
+    "posterSource": "https://www.originalfilmart.com/es-ar/products/the-nice-guys-2016",
+    "shows": [
+      {
+        "offset": -2,
+        "channel": "Liberty Кино"
+      },
+      {
+        "offset": -47,
+        "channel": "MM Криминал HD"
+      }
+    ]
+  },
+  {
+    "id": "alien",
+    "title": "Чужой",
+    "original": "Alien",
+    "year": 1979,
+    "genres": [
+      "Ужасы",
+      "Фантастика"
+    ],
+    "poster": "https://www.originalfilmart.com/cdn/shop/products/alien_1979_original_film_art_1200x.jpg?v=1607204162",
+    "posterSource": "https://www.originalfilmart.com/products/alien-1979",
+    "shows": [
+      {
+        "offset": -52,
+        "channel": "MM UFO HD"
+      },
+      {
+        "offset": 8.5,
+        "channel": "CineMan Ужасы"
+      }
+    ]
+  },
+  {
+    "id": "departed",
+    "title": "Отступники",
+    "original": "The Departed",
+    "year": 2006,
+    "genres": [
+      "Криминал",
+      "Триллер"
+    ],
+    "poster": "https://image.tmdb.org/t/p/original/jxVgqJ6d43qqUpqjHTPHQHju2Xz.jpg",
+    "posterSource": "https://www.themoviedb.org/movie/1422-the-departed/images/posters",
+    "shows": [
+      {
+        "offset": -1,
+        "channel": "Liberty Оскар HD"
+      },
+      {
+        "offset": -28,
+        "channel": "CineMan Thriller"
+      },
+      {
+        "offset": -68,
+        "channel": "MM Криминал HD"
+      }
+    ]
+  },
+  {
+    "id": "max",
+    "title": "Безумный Макс: Дорога ярости",
+    "original": "Mad Max: Fury Road",
+    "year": 2015,
+    "genres": [
+      "Боевик",
+      "Фантастика"
+    ],
+    "poster": "https://filmartgallery.com/cdn/shop/files/Mad-Max-Fury-Road-Vintage-Movie-Poster-Original_d9c91133.jpg?v=1741756719",
+    "posterSource": "https://filmartgallery.com/products/mad-max-fury-road-1",
+    "shows": [
+      {
+        "offset": 4.25,
+        "channel": "TEAM Action HD"
+      },
+      {
+        "offset": 14,
+        "channel": "BCU Action HD"
+      },
+      {
+        "offset": 21,
+        "channel": "Liberty Кино 4K"
+      }
+    ]
+  },
+  {
+    "id": "blade",
+    "title": "Бегущий по лезвию 2049",
+    "original": "Blade Runner 2049",
+    "year": 2017,
+    "genres": [
+      "Фантастика",
+      "Триллер"
+    ],
+    "poster": "https://image.tmdb.org/t/p/original/aorqf8wS8UD3EEMSWXxl2YgUX1m.jpg",
+    "posterSource": "https://www.themoviedb.org/movie/335984-blade-runner-2049/images/posters",
+    "shows": [
+      {
+        "offset": 5.5,
+        "channel": "MM Sci-Fi"
+      },
+      {
+        "offset": 20.25,
+        "channel": "CineMan Future"
+      }
+    ]
+  }
+]
