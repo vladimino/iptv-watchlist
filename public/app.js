@@ -2,7 +2,7 @@
 let CUTOFF = Date.now();
 const MAX_YEAR = Number(new Intl.DateTimeFormat('en',{timeZone:'Europe/Madrid',year:'numeric'}).format(new Date()));
 let report = null;
-const state = { period: 'all', sort: 'title', query: '', genres: new Set(), from: 1900, to: MAX_YEAR };
+const state = { period: 'all', sort: 'title', directors: '', actors: '', query: '', genres: new Set(), from: 1900, to: MAX_YEAR };
 let films = [];
 const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -10,7 +10,7 @@ let genres = ['Боевик','Триллер','Криминал','Фантаст
 const isArchive = show => show.offset >= -72 && show.offset < 0;
 const isFuture = show => show.offset >= 0 && show.offset < 24;
 const normalizeTitle = text => text.toLocaleLowerCase('ru').replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
-function eligible(film) { const query = normalizeTitle(state.query); const titleMatch = !query || [film.title,film.original,...(film.aliases||[])].some(t => normalizeTitle(t).includes(query)); return titleMatch && film.year >= state.from && film.year <= state.to && (!state.genres.size || film.genres.some(g => state.genres.has(g))); }
+function eligible(film) { const query = normalizeTitle(state.query); const titleMatch = !query || [film.title,film.original,...(film.aliases||[])].some(t => normalizeTitle(t).includes(query)); return titleMatch && ['directors','actors'].every(key=>!state[key]||(film[key]||[]).some(p=>p.id===state[key])) && film.year >= state.from && film.year <= state.to && (!state.genres.size || film.genres.some(g => state.genres.has(g))); }
 function periodShows(film,period=state.period) { return film.shows.filter(s => period==='archive'?isArchive(s):period==='future'?isFuture(s):isArchive(s)||isFuture(s)); }
 function filmWord(n){return n%10===1&&n%100!==11?'фильм':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'фильма':'фильмов';}
 function showWord(n){return n%10===1&&n%100!==11?'показ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'показа':'показов';}
@@ -24,7 +24,7 @@ function render(){
   const valid = Number.isInteger(state.from)&&Number.isInteger(state.to)&&state.from>=1900&&state.to<=MAX_YEAR&&state.from<=state.to;
   $('#year-error').hidden=valid;
   document.querySelectorAll('[data-year-from]').forEach(b=>b.setAttribute('aria-pressed',String(valid&&state.from===Number(b.dataset.yearFrom)&&state.to===(b.dataset.yearTo==='current'?MAX_YEAR:Number(b.dataset.yearTo)))));
-  $('#filter-summary').textContent = state.genres.size || state.from!==1900 || state.to!==MAX_YEAR ? `${state.genres.size ? [...state.genres].join(', ') : 'Все жанры'} · ${state.from}–${state.to}` : 'Все фильмы';
+  $('#filter-summary').textContent = state.directors || state.actors || state.genres.size || state.from!==1900 || state.to!==MAX_YEAR ? `${state.genres.size ? [...state.genres].join(', ') : 'Все жанры'} · ${state.from}–${state.to}${state.directors?' · Режиссёр':''}${state.actors?' · Актёр':''}` : 'Все фильмы';
   ['#year-from','#year-to'].forEach(s=>$(s).setAttribute('aria-invalid',String(!valid)));
   const filtered=valid?films.filter(eligible):[];
   for(const p of ['all','archive','future'])$(`#count-${p}`).textContent=filtered.filter(f=>periodShows(f,p).length).length;
@@ -37,10 +37,10 @@ function render(){
   $('#sort-time').textContent=state.period==='archive'?'Свежие показы — сначала':'Ближайшие эфиры — сначала';
   return {period:state.period,query:state.query,genres:[...state.genres],years:[state.from,state.to],films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
 }
-function reset(){state.period='all';state.query='';$('#search').value='';state.genres.clear();state.from=1900;state.to=MAX_YEAR;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;document.querySelectorAll('#genres input').forEach(i=>i.checked=false);render();}
+function reset(){for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.query='';$('#search').value='';state.genres.clear();state.from=1900;state.to=MAX_YEAR;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;document.querySelectorAll('#genres input').forEach(i=>i.checked=false);render();}
 function applyFilters(input){if(!input||typeof input!=='object'||Array.isArray(input))throw new Error('Expected a filters object');if(input.query!==undefined&&typeof input.query!=='string')throw new Error('Invalid search query');if(input.period!==undefined&&!['all','archive','future'].includes(input.period))throw new Error('Invalid period');if(input.genres!==undefined&&(!Array.isArray(input.genres)||input.genres.some(g=>!genres.includes(g))))throw new Error('Invalid genre');const from=input.from??state.from,to=input.to??state.to;if(!Number.isInteger(from)||!Number.isInteger(to)||from<1900||to>MAX_YEAR||from>to)throw new Error('Invalid year range');state.query=input.query??state.query;$('#search').value=state.query;state.period=input.period??state.period;state.genres=new Set(input.genres??state.genres);state.from=from;state.to=to;$('#year-from').value=from;$('#year-to').value=to;document.querySelectorAll('#genres input').forEach(i=>i.checked=state.genres.has(i.value));return render();}
 async function init(){
- try{$('#year-to').value=MAX_YEAR;$('#year-to').max=MAX_YEAR;$('#year-from').max=MAX_YEAR;$('#year-error').textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;const response=await fetch('/api/programme');if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');report=await response.json();CUTOFF=Date.now();films=report.films.map(f=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:f.shows.map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));genres=[...new Set(films.flatMap(f=>f.genres))].sort((a,b)=>a.localeCompare(b,'ru'));updateSourceInfo();
+ try{$('#year-to').value=MAX_YEAR;$('#year-to').max=MAX_YEAR;$('#year-from').max=MAX_YEAR;$('#year-error').textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;const response=await fetch('/api/programme');if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');report=await response.json();CUTOFF=Date.now();films=report.films.map(f=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:f.shows.map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));genres=[...new Set(films.flatMap(f=>f.genres))].sort((a,b)=>a.localeCompare(b,'ru'));updateSourceInfo();initPeopleFilters();
  $('#genres').innerHTML=genres.map(g=>`<label class="genre-label"><input type="checkbox" value="${g}"><span>${g}</span><span class="genre-count">${films.filter(f=>f.genres.includes(g)).length}</span></label>`).join('');
  $('#sort').addEventListener('change',e=>{state.sort=e.target.value;render();});
  $('#search').addEventListener('input',e=>{state.query=e.target.value;render();});
@@ -60,5 +60,22 @@ function updateSourceInfo(){
  $('#connection-badge').textContent=age>26*3600000?'Данные устарели':'Источники подключены';
  const details=[`${report.watchlistCount} фильмов в watchlist`, `EPG до ${fmt(report.stats.epgEnd)}`];if(report.stats.futureFullChannels<report.stats.channels)details.push('не все каналы дают полные сутки вперёд');if(report.stats.metadataMissing)details.push(`метаданные ${report.stats.metadataMissing} фильмов пока недоступны`);if(age>26*3600000)details.push('последнее обновление старше суток');
  $('#source-note').textContent=details.join(' · ');$('#source-summary').textContent=`EPG Team · Letterboxd · ${report.stats.scanned.toLocaleString('ru')} передач проверено`;
+}
+function initPeopleFilters(){
+ for(const key of ['directors','actors']){
+  const root=document.querySelector(`[data-person="${key}"]`),input=$('#'+key+'-input'),list=$('#'+key+'-options');
+  const people=(report.people?.[key]||[]).slice().sort((a,b)=>a.name.localeCompare(b.name,'ru',{sensitivity:'base'}));
+  let matches=[],active=-1;
+  const close=()=>{list.hidden=true;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');active=-1;};
+  const open=()=>{const q=normalizeTitle(input.value);matches=people.filter(p=>!q||[p.name,p.original].some(n=>normalizeTitle(n).includes(q)));active=-1;list.innerHTML=matches.length?matches.map((p,i)=>`<li role="option" id="${key}-option-${i}" data-index="${i}" aria-selected="${p.id===state[key]}">${escapeHTML(p.name)}${p.name!==p.original?`<small>${escapeHTML(p.original)}</small>`:''}</li>`).join(''):'<li class="no-options" role="presentation">Нет совпадений</li>';list.hidden=false;input.setAttribute('aria-expanded','true');input.removeAttribute('aria-activedescendant');};
+  const choose=i=>{if(!matches[i])return;state[key]=matches[i].id;input.value=matches[i].name;close();render();};
+  input.addEventListener('focus',open);
+  input.addEventListener('input',()=>{state[key]='';render();open();});
+  input.addEventListener('keydown',e=>{if(e.key==='Escape'){close();return;}if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();if(list.hidden)open();if(!matches.length)return;active=(active+(e.key==='ArrowDown'?1:-1)+matches.length)%matches.length;list.querySelectorAll('[role="option"]').forEach((el,i)=>el.classList.toggle('active',i===active));const el=$('#'+key+'-option-'+active);input.setAttribute('aria-activedescendant',el.id);el.scrollIntoView({block:'nearest'});}else if(e.key==='Enter'&&!list.hidden){e.preventDefault();choose(active>=0?active:0);}else if(e.key==='Tab')close();});
+  list.addEventListener('mousedown',e=>e.preventDefault());list.addEventListener('click',e=>{const el=e.target.closest('[data-index]');if(el)choose(Number(el.dataset.index));});
+  root.querySelector('.person-clear').addEventListener('click',()=>{state[key]='';input.value='';render();input.focus();open();});
+  root.querySelector('.person-toggle').addEventListener('click',()=>{if(list.hidden){input.focus();open();}else close();});
+  document.addEventListener('click',e=>{if(!root.contains(e.target))close();});
+ }
 }
 init();

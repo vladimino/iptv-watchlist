@@ -15,7 +15,9 @@ function parseFilm(html,base){
  const raw=html.match(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/)?.[1];if(!raw)throw new Error('Film metadata missing');const meta=JSON.parse(raw.replace(/\/\*[\s\S]*?\*\//g,''));if(!meta.name)throw new Error('Film name missing');
  const alt=html.match(/Alternative Titles<\/span><\/h3>\s*<div[^>]*>\s*<p>([\s\S]*?)<\/p>/)?.[1]||'';
  const d=meta.duration?.match(/PT(?:(\d+)H)?(?:(\d+)M)?/);const runtime=d?(Number(d[1]||0)*60+Number(d[2]||0)):null;
- return {...base,original:decode(meta.name),aliases:[...new Set([base.title,decode(meta.name),...plain(alt).split(/,\s*/)].filter(Boolean))],genres:(Array.isArray(meta.genre)?meta.genre:meta.genre?[meta.genre]:[]).map(g=>GENRE_MAP[g]||g),poster:typeof meta.image==='string'&&meta.image.startsWith('https://')?meta.image:null,runtime,metadataAt:new Date().toISOString()};
+ const people=(value,role)=>[...new Map((Array.isArray(value)?value:value?[value]:[]).filter(p=>p.name).map(p=>{const path=String(p.sameAs||p.url||'').match(new RegExp('/'+role+'/([a-z0-9-]+)/'));const name=decode(p.name);return [path?.[1]||name,{id:role+'/'+(path?.[1]||name),original:name,name}];})).values()];
+ const directors=people(meta.director,'director'),actors=people(meta.actor,'actor').slice(0,10);
+ return {...base,directors,actors,peopleVersion:1,tmdbId:html.match(/data-tmdb-id="(\d+)"/)?.[1]||null,original:decode(meta.name),aliases:[...new Set([base.title,decode(meta.name),...plain(alt).split(/,\s*/)].filter(Boolean))],genres:(Array.isArray(meta.genre)?meta.genre:meta.genre?[meta.genre]:[]).map(g=>GENRE_MAP[g]||g),poster:typeof meta.image==='string'&&meta.image.startsWith('https://')?meta.image:null,runtime,metadataAt:new Date().toISOString()};
 }
 function xmlTime(s){const m=s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-])(\d{2})(\d{2})$/);if(!m)return NaN;return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6])-(m[7]==='+'?1:-1)*(+m[8]*60 + +m[9])*60000;}
 async function scanEPG(stream,watchlist,now){
@@ -37,3 +39,16 @@ async function scanEPG(stream,watchlist,now){
  complete=complete||buffer.includes('</tv>');if(!complete||scanned===0)throw new Error('EPG incomplete: closing tv tag or programmes missing');
  return {films:[...matched.values()],coverage:[...coverage.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size},uncertain:[...uncertain.values()].slice(0,100)};
 }
+
+async function localizePeople(films,cache){
+ const ids=[...new Set(films.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
+ if(!ids.length)return;
+ const query=`SELECT ?tmdb ?en ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; (wdt:P161|wdt:P57) ?person. ?person rdfs:label ?en, ?ru. FILTER(LANG(?en)="en" && LANG(?ru)="ru") }`;
+ const url='https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'});
+ const response=await fetch(url,{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(45000)});
+ if(!response.ok)throw new Error('Russian names HTTP '+response.status);
+ const data=await response.json();const index=new Map();
+ for(const row of data.results.bindings){const key=row.tmdb.value+':'+norm(row.en.value);const names=index.get(key)||new Set();names.add(row.ru.value);index.set(key,names);}
+ for(const f of films)for(const p of [...f.directors,...f.actors]){const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}if(cache[p.id])p.name=cache[p.id].name;}
+}
+function peopleCatalog(films){const collect=key=>[...new Map(films.flatMap(f=>f[key]||[]).map(p=>[p.id,p])).values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));return {directors:collect('directors'),actors:collect('actors')};}
