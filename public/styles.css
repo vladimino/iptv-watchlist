@@ -7,3 +7,5 @@
 .no-poster{display:grid;place-items:center;color:var(--muted);font-size:14px}
 
 .match-hint{color:#e3c48e;font-size:16px;cursor:help}.match-legend{color:#c4b18f}
+
+.year-presets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:12px}.year-presets button{padding:8px 4px;border:1px solid #465044;border-radius:6px;background:var(--surface);color:var(--muted);font-size:14px;min-height:40px}.year-presets button:hover{border-color:var(--lime);color:var(--text)}.year-presets button[aria-pressed=true]{background:#303b26;border-color:var(--lime);color:var(--lime)}

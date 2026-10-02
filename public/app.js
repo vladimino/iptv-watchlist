@@ -23,6 +23,7 @@ function visibleFilms(){return films.filter(eligible).filter(f=>periodShows(f).l
 function render(){
   const valid = Number.isInteger(state.from)&&Number.isInteger(state.to)&&state.from>=1900&&state.to<=MAX_YEAR&&state.from<=state.to;
   $('#year-error').hidden=valid;
+  document.querySelectorAll('[data-year-from]').forEach(b=>b.setAttribute('aria-pressed',String(valid&&state.from===Number(b.dataset.yearFrom)&&state.to===(b.dataset.yearTo==='current'?MAX_YEAR:Number(b.dataset.yearTo)))));
   $('#filter-summary').textContent = state.genres.size || state.from!==1900 || state.to!==MAX_YEAR ? `${state.genres.size ? [...state.genres].join(', ') : 'Все жанры'} · ${state.from}–${state.to}` : 'Все фильмы';
   ['#year-from','#year-to'].forEach(s=>$(s).setAttribute('aria-invalid',String(!valid)));
   const filtered=valid?films.filter(eligible):[];
@@ -45,6 +46,7 @@ async function init(){
  $('#genres').addEventListener('change',e=>{const i=e.target;i.checked?state.genres.add(i.value):state.genres.delete(i.value);render();});
  document.querySelectorAll('[data-period]').forEach(b=>b.addEventListener('click',()=>{state.period=b.dataset.period;render();}));
  for(const [selector,key] of [['#year-from','from'],['#year-to','to']])$(selector).addEventListener('input',e=>{state[key]=e.target.value===''?NaN:Number(e.target.value);render();});
+ document.querySelectorAll('[data-year-from]').forEach(b=>b.addEventListener('click',()=>applyFilters({from:Number(b.dataset.yearFrom),to:b.dataset.yearTo==='current'?MAX_YEAR:Number(b.dataset.yearTo)})));
  $('#filter-toggle').addEventListener('click',()=>{const b=$('#filter-toggle');const open=b.getAttribute('aria-expanded')!=='true';b.setAttribute('aria-expanded',String(open));$('#filters').dataset.open=String(open);});
  $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);render();
  setInterval(()=>{CUTOFF=Date.now();films.forEach(f=>f.shows.forEach(s=>s.offset=(s.start-CUTOFF)/3600000));updateSourceInfo();render();},60000);
