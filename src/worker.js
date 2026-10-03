@@ -2,6 +2,14 @@ const SOURCES={epg:'https://example.invalid/epg.xml',watchlist:'https://letterbo
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
 const loadJSON=async(env,key)=>{const o=await env.BUCKET.get(key);return o?o.json():null;};
 const saveJSON=(env,key,value)=>env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});
+// Independent per-film markers preserve progress across programme refreshes and concurrent edits to different films.
+async function startedFilms(env){let cursor;const ids=[];do{const page=await env.BUCKET.list({prefix:'started/',...(cursor?{cursor}:{})});for(const object of page.objects){const match=object.key.match(/^started\/([a-zA-Z0-9_-]+)\.json$/);if(match)ids.push(match[1]);}cursor=page.truncated?page.cursor:undefined;}while(cursor);return ids;}
+async function setStarted(env,body){
+ if(typeof body.id!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(body.id)||typeof body.started!=='boolean')return json({error:'Invalid film or state'},400);
+ if(body.started){const metadata=await loadJSON(env,'metadata.json')||{};if(!Object.hasOwn(metadata,body.id))return json({error:'Unknown film'},404);await saveJSON(env,'started/'+body.id+'.json',{id:body.id,startedAt:new Date().toISOString()});}
+ else await env.BUCKET.delete('started/'+body.id+'.json');
+ return json({id:body.id,started:body.started});
+}
 async function beginSync(env){
  const current=await loadJSON(env,'sync.json');if(current&&['metadata','epg'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
  let url=SOURCES.watchlist,pages=0,total=null;const films=new Map();
@@ -37,6 +45,8 @@ export default {async fetch(request,env){
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(request.method==='POST'&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
+  if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
+  if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
   if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');return data?json(reviewedPeople(data)):json({error:'Первое обновление ещё выполняется'},503);}
   if(url.pathname==='/api/watchlist'&&request.method==='GET')return json(reviewedPeople(await loadJSON(env,'watchlist.json'))||{films:[]});
   if(url.pathname==='/api/status'&&request.method==='GET'){const run=await loadJSON(env,'sync.json');return json(run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error}: {stage:'not_started'});}

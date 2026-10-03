@@ -1,0 +1,11 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
+const records=new Map([['metadata.json',{one:{id:'one'},two:{id:'two'}}]]);const env={BUCKET:{get:async k=>records.has(k)?{json:async()=>records.get(k)}:null,put:async(k,v)=>records.set(k,JSON.parse(v)),delete:async k=>records.delete(k),list:async({prefix,cursor})=>{const keys=[...records.keys()].filter(k=>k.startsWith(prefix));const i=Number(cursor||0);return {objects:keys.slice(i,i+1).map(key=>({key})),truncated:i+1<keys.length,cursor:String(i+1)};}}};
+const ctx=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,console});vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
+const call=(method,body,headers={})=>ctx.worker.fetch(new Request('https://site.example/api/started',{method,headers:{'Content-Type':'application/json',...headers},...(body!==undefined?{body:JSON.stringify(body)}:{})}),env);
+assert.deepEqual(await (await call('GET')).json(),{ids:[]});
+await Promise.all([call('POST',{id:'one',started:true}),call('POST',{id:'two',started:true})]);assert.deepEqual((await (await call('GET')).json()).ids.sort(),['one','two']);
+records.set('programme.json',{films:[]});assert.equal((await (await call('GET')).json()).ids.length,2);
+await call('POST',{id:'one',started:false});assert.deepEqual((await (await call('GET')).json()).ids,['two']);
+assert.equal((await call('POST',{id:'../metadata',started:true})).status,400);assert.equal((await call('POST',{id:'one',started:'true'})).status,400);assert.equal((await call('POST',null)).status,400);assert.equal((await call('POST',{id:'unknown',started:true})).status,404);assert.equal((await call('POST',{id:'one',started:true},{Origin:'https://other.example'})).status,403);
+env.BUCKET.put=async()=>{throw new Error('Unavailable')};assert.equal((await call('POST',{id:'one',started:true})).status,502);assert.deepEqual((await (await call('GET')).json()).ids,['two']);
+console.log('Started markers: persistence, independent concurrent writes, pagination, refresh isolation, removal, validation, origin and storage errors passed');
