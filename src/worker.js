@@ -62,7 +62,7 @@ export default {async fetch(request,env){
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
-  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');return data?json(reviewedPeople(data)):json({error:'Первое обновление ещё выполняется'},503);}
+  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');return json(reviewedPeople(programmeWithWatchlist(data,watchlist)));}
   if(url.pathname==='/api/watchlist'&&request.method==='GET')return json(reviewedPeople(await loadJSON(env,'watchlist.json'))||{films:[]});
   if(url.pathname==='/api/status'&&request.method==='GET'){const run=await loadJSON(env,'sync.json');return json(run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error}: {stage:'not_started'});}
   if(url.pathname==='/api/sync/start'&&request.method==='POST')return json(await beginSync(env));

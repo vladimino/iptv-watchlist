@@ -1,0 +1,23 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
+const ctx=vm.createContext({console,Intl,Date,Set,Map});
+vm.runInContext(fs.readFileSync('src/sources.js','utf8'),ctx);
+const report=JSON.parse(fs.readFileSync('../sources/cloud-programme.json','utf8')),watchlist=JSON.parse(fs.readFileSync('../sources/cloud-watchlist.json','utf8'));
+const merged=ctx.programmeWithWatchlist(report,watchlist);
+assert.equal(merged.films.length,watchlist.films.length);assert.equal(new Set(merged.films.map(f=>f.id)).size,watchlist.films.length);
+for(const f of report.films){const found=merged.films.find(x=>x.id===f.id);if(found){assert.equal(found.title,f.title);assert.deepEqual(found.shows,f.shows);}}
+vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+ctx.fixture=merged;ctx.cutoff=Date.parse(report.updatedAt);
+vm.runInContext("CUTOFF=cutoff;MAX_YEAR=Math.max(MAX_YEAR,...fixture.films.map(f=>Number(f.year)||0));state.to=MAX_YEAR;films=fixture.films.map(f=>({...f,genres:f.genres||[],shows:f.shows.map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));",ctx);
+assert.equal(vm.runInContext('state.includeUnscheduled',ctx),false);
+const original=vm.runInContext('visibleFilms().length',ctx);assert.equal(original,report.films.length);
+assert.equal(vm.runInContext('state.includeUnscheduled=true;visibleFilms().length',ctx),watchlist.films.length);
+const nolan=vm.runInContext("state.directors='director/christopher-nolan';visibleFilms().length",ctx);
+assert.equal(nolan,watchlist.films.filter(f=>f.directors?.some(p=>p.id==='director/christopher-nolan')).length);
+vm.runInContext("state.directors='';globalThis.noShow=films.find(f=>!periodShows(f,'all').length);state.query=noShow.original;",ctx);
+assert.ok(vm.runInContext('visibleFilms().some(f=>f.id===noShow.id)',ctx));
+assert.match(vm.runInContext('card(noShow)',ctx),/Нет показов в текущем окне программы/);
+assert.match(vm.runInContext('startedReady=true;card(noShow)',ctx),/data-started-id=/);
+assert.ok(vm.runInContext("startedIds.add(String(noShow.id));state.startedOnly=true;visibleFilms().some(f=>f.id===noShow.id)",ctx));
+assert.match(vm.runInContext('card(noShow)',ctx),/is-started/);
+assert.equal(vm.runInContext('state.includeUnscheduled=false;visibleFilms().length',ctx),0);
+console.log(`Full watchlist: ${watchlist.films.length}; default: ${original}; Nolan: ${nolan}. Search, started filter and no-show cards passed.`);
