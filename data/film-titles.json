@@ -1,0 +1,5425 @@
+[
+  {
+    "id": "H11k",
+    "tmdbId": "1137844",
+    "original": "Mayday",
+    "year": 2026,
+    "title": "Мэйдэй",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q124743667"
+    ],
+    "kinopoiskId": "6446910",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2Eao",
+    "tmdbId": "76640",
+    "original": "The Last Stand",
+    "year": 2013,
+    "title": "Возвращение героя",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q45672"
+    ],
+    "kinopoiskId": "489439",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "w0e6",
+    "tmdbId": "848187",
+    "original": "Role Play",
+    "year": 2023,
+    "title": "Моя жена – киллер",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4987450/"
+    ],
+    "kinopoiskId": "4987450",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "BNNu",
+    "tmdbId": "1000075",
+    "original": "Largo Winch: The Price of Money",
+    "year": 2024,
+    "title": "Ларго Винч: Гнев прошлого",
+    "sources": [
+      "https://www.kinopoisk.ru/media/article/4009895/"
+    ],
+    "kinopoiskId": null,
+    "aliases": [
+      "Цена денег: Приключение Ларго Винча"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "d2hI",
+    "tmdbId": "375262",
+    "original": "The Favourite",
+    "year": 2018,
+    "title": "Фаворитка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q22001133"
+    ],
+    "kinopoiskId": "938644",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "oHQc",
+    "tmdbId": "663870",
+    "original": "Riders of Justice",
+    "year": 2020,
+    "title": "Рыцари справедливости",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q87126473"
+    ],
+    "kinopoiskId": "1345158",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "20o6",
+    "tmdbId": "8292",
+    "original": "Four Brothers",
+    "year": 2005,
+    "title": "Кровь за кровь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1411345"
+    ],
+    "kinopoiskId": "86314",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28No",
+    "tmdbId": "1417",
+    "original": "Pan's Labyrinth",
+    "year": 2006,
+    "title": "Лабиринт фавна",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q216006"
+    ],
+    "kinopoiskId": "103733",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1TFk",
+    "tmdbId": "11517",
+    "original": "Money Train",
+    "year": 1995,
+    "title": "Денежный поезд",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4345/"
+    ],
+    "kinopoiskId": "4345",
+    "aliases": [
+      "Поезд с деньгами"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "21NG",
+    "tmdbId": "6341",
+    "original": "Blue Thunder",
+    "year": 1983,
+    "title": "Голубой гром",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1171141"
+    ],
+    "kinopoiskId": "12373",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "19ww",
+    "tmdbId": "36909",
+    "original": "American Yakuza",
+    "year": 1993,
+    "title": "Американский якудза",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4634/"
+    ],
+    "kinopoiskId": "4634",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1k3g",
+    "tmdbId": "31017",
+    "original": "Truth or Consequences, N.M.",
+    "year": 1997,
+    "title": "Правда и последствия",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4740/"
+    ],
+    "kinopoiskId": "4740",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1TLW",
+    "tmdbId": "11471",
+    "original": "A Better Tomorrow",
+    "year": 1986,
+    "title": "Светлое будущее",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q641346"
+    ],
+    "kinopoiskId": "5381",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "44P0",
+    "tmdbId": "123770",
+    "original": "The Last of the Finest",
+    "year": 1990,
+    "title": "Последний из достойнейших",
+    "sources": [
+      "https://www.kinopoisk.ru/film/2232/"
+    ],
+    "kinopoiskId": "2232",
+    "aliases": [
+      "Последний из лучших"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "1D0g",
+    "tmdbId": "20721",
+    "original": "Code of Silence",
+    "year": 1985,
+    "title": "Кодекс молчания",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1145931"
+    ],
+    "kinopoiskId": "19036",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29XY",
+    "tmdbId": "627",
+    "original": "Trainspotting",
+    "year": 1996,
+    "title": "На игле",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q109135"
+    ],
+    "kinopoiskId": "515",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "26x4",
+    "tmdbId": "2640",
+    "original": "Heathers",
+    "year": 1989,
+    "title": "Смертельное влечение",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1551916"
+    ],
+    "kinopoiskId": "16955",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "mViu",
+    "tmdbId": "619730",
+    "original": "Don't Worry Darling",
+    "year": 2022,
+    "title": "Не беспокойся, дорогая",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q100801718"
+    ],
+    "kinopoiskId": "1379512",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "Off0",
+    "tmdbId": "1317288",
+    "original": "Marty Supreme",
+    "year": 2025,
+    "title": "Марти Великолепный",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q130118681"
+    ],
+    "kinopoiskId": "6290547",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "43bI",
+    "tmdbId": "122906",
+    "original": "About Time",
+    "year": 2013,
+    "title": "Бойфренд из будущего",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q4668586"
+    ],
+    "kinopoiskId": "662596",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2qn4",
+    "tmdbId": "71677",
+    "original": "Assassination Games",
+    "year": 2011,
+    "title": "Игры киллеров",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q31540"
+    ],
+    "kinopoiskId": "467086",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "18JY",
+    "tmdbId": "37233",
+    "original": "The Firm",
+    "year": 1993,
+    "title": "Фирма",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q821692"
+    ],
+    "kinopoiskId": "8127",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29nw",
+    "tmdbId": "881",
+    "original": "A Few Good Men",
+    "year": 1992,
+    "title": "Несколько хороших парней",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q108946"
+    ],
+    "kinopoiskId": "1588",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "18cU",
+    "tmdbId": "37498",
+    "original": "Knock Off",
+    "year": 1998,
+    "title": "Взрыватель",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q768609"
+    ],
+    "kinopoiskId": "5925",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Yzm",
+    "tmdbId": "9482",
+    "original": "Judge Dredd",
+    "year": 1995,
+    "title": "Судья Дредд",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q645597"
+    ],
+    "kinopoiskId": "5927",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1XoW",
+    "tmdbId": "9972",
+    "original": "Lock Up",
+    "year": 1989,
+    "title": "Тюряга",
+    "sources": [
+      "https://www.kinopoisk.ru/film/6241/"
+    ],
+    "kinopoiskId": "6241",
+    "aliases": [
+      "Взаперти"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "1BCs",
+    "tmdbId": "21610",
+    "original": "Nighthawks",
+    "year": 1981,
+    "title": "Ночные ястребы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1535201"
+    ],
+    "kinopoiskId": "9190",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Hb8",
+    "tmdbId": "18316",
+    "original": "Black Dog",
+    "year": 1998,
+    "title": "Чёрный пёс",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q880226"
+    ],
+    "kinopoiskId": "1985",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1FEs",
+    "tmdbId": "19124",
+    "original": "Blind Fury",
+    "year": 1989,
+    "title": "Слепая ярость",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q884220"
+    ],
+    "kinopoiskId": "17467",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Vdi",
+    "tmdbId": "10859",
+    "original": "Stakeout",
+    "year": 1987,
+    "title": "Слежка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1047663"
+    ],
+    "kinopoiskId": "4071",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2abQ",
+    "tmdbId": "534",
+    "original": "Terminator Salvation",
+    "year": 2009,
+    "title": "Терминатор: Да придёт спаситель",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q191543"
+    ],
+    "kinopoiskId": "160932",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "35s0",
+    "tmdbId": "87101",
+    "original": "Terminator Genisys",
+    "year": 2015,
+    "title": "Терминатор: Генезис",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q15140437"
+    ],
+    "kinopoiskId": "436225",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1XCa",
+    "tmdbId": "9884",
+    "original": "Collateral Damage",
+    "year": 2002,
+    "title": "Возмещение ущерба",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q506605"
+    ],
+    "kinopoiskId": "4031",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1VSg",
+    "tmdbId": "10592",
+    "original": "Hart's War",
+    "year": 2002,
+    "title": "Война Харта",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q765356"
+    ],
+    "kinopoiskId": "691",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "QPk",
+    "tmdbId": "44896",
+    "original": "Rango",
+    "year": 2011,
+    "title": "Ранго",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q275432"
+    ],
+    "kinopoiskId": "426053",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3GNa",
+    "tmdbId": "109445",
+    "original": "Frozen",
+    "year": 2013,
+    "title": "Холодное сердце",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q246283"
+    ],
+    "kinopoiskId": "493208",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "aPvo",
+    "tmdbId": "330457",
+    "original": "Frozen II",
+    "year": 2019,
+    "title": "Холодное сердце 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q24733929"
+    ],
+    "kinopoiskId": "903831",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "OFpg",
+    "tmdbId": "1327819",
+    "original": "Hoppers",
+    "year": 2026,
+    "title": "Прыгуны",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q128798957"
+    ],
+    "kinopoiskId": "6111021",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Yws",
+    "tmdbId": "9502",
+    "original": "Kung Fu Panda",
+    "year": 2008,
+    "title": "Кунг-фу панда",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q129193"
+    ],
+    "kinopoiskId": "103734",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "G36",
+    "tmdbId": "49444",
+    "original": "Kung Fu Panda 2",
+    "year": 2011,
+    "title": "Кунг-фу панда 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q487447"
+    ],
+    "kinopoiskId": "427878",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "sxVa",
+    "tmdbId": "760104",
+    "original": "X",
+    "year": 2022,
+    "title": "Икс",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4382899/"
+    ],
+    "kinopoiskId": "4382899",
+    "aliases": [
+      "X"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "io92",
+    "tmdbId": "508439",
+    "original": "Onward",
+    "year": 2020,
+    "title": "Вперёд",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q59690895"
+    ],
+    "kinopoiskId": "1080513",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "4pDO",
+    "tmdbId": "137106",
+    "original": "The Lego Movie",
+    "year": 2014,
+    "title": "Лего Фильм",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2608065"
+    ],
+    "kinopoiskId": "471644",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Xik",
+    "tmdbId": "10016",
+    "original": "Ghosts of Mars",
+    "year": 2001,
+    "title": "Призраки Марса",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q261700"
+    ],
+    "kinopoiskId": "3849",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "lLBk",
+    "tmdbId": "591273",
+    "original": "Fear Street: 1994",
+    "year": 2021,
+    "title": "Улица страха. Часть 1: 1994",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q62066191"
+    ],
+    "kinopoiskId": "1236880",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "4Xg0",
+    "tmdbId": "158015",
+    "original": "The Purge",
+    "year": 2013,
+    "title": "Судная ночь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q7758789"
+    ],
+    "kinopoiskId": "661022",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bUeE",
+    "tmdbId": "353486",
+    "original": "Jumanji: Welcome to the Jungle",
+    "year": 2017,
+    "title": "Джуманджи: Зов джунглей",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q20762680"
+    ],
+    "kinopoiskId": "695609",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ixu4",
+    "tmdbId": "512200",
+    "original": "Jumanji: The Next Level",
+    "year": 2019,
+    "title": "Джуманджи: Новый уровень",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q60501923"
+    ],
+    "kinopoiskId": "1112539",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bakw",
+    "tmdbId": "336843",
+    "original": "Maze Runner: The Death Cure",
+    "year": 2018,
+    "title": "Бегущий в лабиринте: Лекарство от смерти",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q23068002"
+    ],
+    "kinopoiskId": "896631",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "qV7a",
+    "tmdbId": "718821",
+    "original": "Twisters",
+    "year": 2024,
+    "title": "Смерч 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q115932556"
+    ],
+    "kinopoiskId": "5388362",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29S0",
+    "tmdbId": "664",
+    "original": "Twister",
+    "year": 1996,
+    "title": "Смерч",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1722/"
+    ],
+    "kinopoiskId": "1722",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1YVC",
+    "tmdbId": "9340",
+    "original": "The Goonies",
+    "year": 1985,
+    "title": "Балбесы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q636043"
+    ],
+    "kinopoiskId": "3926",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "a2qk",
+    "tmdbId": "312221",
+    "original": "Creed",
+    "year": 2015,
+    "title": "Крид: Наследие Рокки",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q18822138"
+    ],
+    "kinopoiskId": "782932",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "zu4c",
+    "tmdbId": "940721",
+    "original": "Godzilla Minus One",
+    "year": 2023,
+    "title": "Годзилла: Минус один",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q115053037"
+    ],
+    "kinopoiskId": "5354707",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "Ozne",
+    "tmdbId": "1324923",
+    "original": "A Quiet Place Part III",
+    "year": 2027,
+    "title": "Тихое место 3",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q101426457"
+    ],
+    "kinopoiskId": "8738134",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "7z3s",
+    "tmdbId": "256474",
+    "original": "In the Blood",
+    "year": 2014,
+    "title": "Кровавая месть",
+    "sources": [
+      "https://www.kinopoisk.ru/film/646313/"
+    ],
+    "kinopoiskId": "646313",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1AXE",
+    "tmdbId": "22164",
+    "original": "Blood and Bone",
+    "year": 2009,
+    "title": "Кровь и кость",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q885161"
+    ],
+    "kinopoiskId": "395708",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "kpCI",
+    "tmdbId": "557946",
+    "original": "Last Looks",
+    "year": 2021,
+    "title": "Вальдо",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q61939510"
+    ],
+    "kinopoiskId": "1236433",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "jsp6",
+    "tmdbId": "534490",
+    "original": "Avengement",
+    "year": 2019,
+    "title": "Британский психопат",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q64007628"
+    ],
+    "kinopoiskId": "1179007",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "lnuk",
+    "tmdbId": "581528",
+    "original": "The Gangster, the Cop, the Devil",
+    "year": 2019,
+    "title": "Гангстер, коп и дьявол",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q63198576"
+    ],
+    "kinopoiskId": "1177510",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2aLO",
+    "tmdbId": "250",
+    "original": "In China They Eat Dogs",
+    "year": 1999,
+    "title": "В Китае едят собак",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1423329"
+    ],
+    "kinopoiskId": "23502",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1ZbA",
+    "tmdbId": "9091",
+    "original": "Sudden Death",
+    "year": 1995,
+    "title": "Внезапная смерть",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q241309"
+    ],
+    "kinopoiskId": "18193",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1XDW",
+    "tmdbId": "9873",
+    "original": "F/X",
+    "year": 1986,
+    "title": "Иллюзия убийства",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q402181"
+    ],
+    "kinopoiskId": "15286",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "21d4",
+    "tmdbId": "7007",
+    "original": "Rising Sun",
+    "year": 1993,
+    "title": "Восходящее солнце",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1217573"
+    ],
+    "kinopoiskId": "5431",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "LcIM",
+    "tmdbId": "1242265",
+    "original": "Fuze",
+    "year": 2025,
+    "title": "Ограбить Лондон",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q127324468"
+    ],
+    "kinopoiskId": null,
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "FF9a",
+    "tmdbId": "1101383",
+    "original": "The End of Oak Street",
+    "year": 2026,
+    "title": "На краю Оук-стрит",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q124804916"
+    ],
+    "kinopoiskId": "5287148",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "MZEw",
+    "tmdbId": "1284041",
+    "original": "The Last House",
+    "year": 2026,
+    "title": "Последний дом",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q129165193"
+    ],
+    "kinopoiskId": "6943600",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "35Bc",
+    "tmdbId": "87513",
+    "original": "Motor City",
+    "year": 2025,
+    "title": "Мотор Сити",
+    "sources": [
+      "https://www.kinopoisk.ru/film/602885/"
+    ],
+    "kinopoiskId": "602885",
+    "aliases": [
+      "Моторный город"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "bRa",
+    "tmdbId": "62206",
+    "original": "30 Minutes or Less",
+    "year": 2011,
+    "title": "Успеть за 30 минут",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q224133"
+    ],
+    "kinopoiskId": "506133",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1U5W",
+    "tmdbId": "11338",
+    "original": "Into the Night",
+    "year": 1985,
+    "title": "В ночи",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1753804"
+    ],
+    "kinopoiskId": "8876",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1X3a",
+    "tmdbId": "10117",
+    "original": "Action Jackson",
+    "year": 1988,
+    "title": "Боевик Джексон",
+    "sources": [
+      "https://www.kinopoisk.ru/film/2444/"
+    ],
+    "kinopoiskId": "2444",
+    "aliases": [
+      "Джексон по кличке «Мотор»"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "1Lvw",
+    "tmdbId": "15797",
+    "original": "Only the Strong",
+    "year": 1993,
+    "title": "Только сильнейшие",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q765489"
+    ],
+    "kinopoiskId": "18114",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1RMI",
+    "tmdbId": "12528",
+    "original": "Southern Comfort",
+    "year": 1981,
+    "title": "Южное гостеприимство",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q8884557"
+    ],
+    "kinopoiskId": "2708",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "26HI",
+    "tmdbId": "2453",
+    "original": "Harley Davidson and the Marlboro Man",
+    "year": 1991,
+    "title": "Харли Дэвидсон и ковбой Мальборо",
+    "sources": [
+      "https://www.kinopoisk.ru/film/3669/"
+    ],
+    "kinopoiskId": "3669",
+    "aliases": [
+      "Харли Дэвидсон и Ковбой Мальборо"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "1QI6",
+    "tmdbId": "13153",
+    "original": "Rapid Fire",
+    "year": 1992,
+    "title": "Беглый огонь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1747612"
+    ],
+    "kinopoiskId": "13705",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1vxQ",
+    "tmdbId": "25571",
+    "original": "Drive",
+    "year": 1997,
+    "title": "Драйв",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1814939"
+    ],
+    "kinopoiskId": "5473",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Vuo",
+    "tmdbId": "10750",
+    "original": "Toy Soldiers",
+    "year": 1991,
+    "title": "Игрушечные солдатики",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q895856"
+    ],
+    "kinopoiskId": "5546",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1BbQ",
+    "tmdbId": "22004",
+    "original": "Trespass",
+    "year": 1992,
+    "title": "Чужая территория",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1422782"
+    ],
+    "kinopoiskId": "2225",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "736",
+    "tmdbId": "6",
+    "original": "Judgment Night",
+    "year": 1993,
+    "title": "Ночь страшного суда",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1710973"
+    ],
+    "kinopoiskId": "21916",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1ZuM",
+    "tmdbId": "8963",
+    "original": "Crimson Tide",
+    "year": 1995,
+    "title": "Багровый прилив",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1140085"
+    ],
+    "kinopoiskId": "5332",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "kLDI",
+    "tmdbId": "566525",
+    "original": "Shang-Chi and the Legend of the Ten Rings",
+    "year": 2021,
+    "title": "Шан-Чи и легенда десяти колец",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q65768589"
+    ],
+    "kinopoiskId": "1219149",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "igPu",
+    "tmdbId": "505642",
+    "original": "Black Panther: Wakanda Forever",
+    "year": 2022,
+    "title": "Чёрная пантера: Ваканда навеки",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q54860489"
+    ],
+    "kinopoiskId": "1199773",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2aSA",
+    "tmdbId": "205",
+    "original": "Hotel Rwanda",
+    "year": 2004,
+    "title": "Отель «Руанда»",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q223884"
+    ],
+    "kinopoiskId": "77859",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3SWy",
+    "tmdbId": "116745",
+    "original": "The Secret Life of Walter Mitty",
+    "year": 2013,
+    "title": "Невероятная жизнь Уолтера Митти",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q3522637"
+    ],
+    "kinopoiskId": "6034",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28Tm",
+    "tmdbId": "1372",
+    "original": "Blood Diamond",
+    "year": 2006,
+    "title": "Кровавый алмаз",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q74958"
+    ],
+    "kinopoiskId": "102376",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "21IG",
+    "tmdbId": "6415",
+    "original": "Three Kings",
+    "year": 1999,
+    "title": "Три короля",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1357016"
+    ],
+    "kinopoiskId": "4987",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "9yAa",
+    "tmdbId": "300673",
+    "original": "The Finest Hours",
+    "year": 2016,
+    "title": "И грянул шторм",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q18031184"
+    ],
+    "kinopoiskId": "608559",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "i1VW",
+    "tmdbId": "499701",
+    "original": "Dora and the Lost City of Gold",
+    "year": 2019,
+    "title": "Дора и Затерянный город",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q56064745"
+    ],
+    "kinopoiskId": "1108415",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "tXF0",
+    "tmdbId": "796185",
+    "original": "The Three Musketeers: D'Artagnan",
+    "year": 2023,
+    "title": "Три мушкетёра: Д’Артаньян",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q105998710"
+    ],
+    "kinopoiskId": "4368100",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1YVi",
+    "tmdbId": "9342",
+    "original": "The Mask of Zorro",
+    "year": 1998,
+    "title": "Маска Зорро",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q309621"
+    ],
+    "kinopoiskId": "7096",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28nq",
+    "tmdbId": "1656",
+    "original": "The Legend of Zorro",
+    "year": 2005,
+    "title": "Легенда Зорро",
+    "sources": [
+      "https://www.kinopoisk.ru/film/77407/"
+    ],
+    "kinopoiskId": "77407",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27BG",
+    "tmdbId": "2023",
+    "original": "Hidalgo",
+    "year": 2004,
+    "title": "Идальго: Погоня в пустыне",
+    "sources": [
+      "https://www.kinopoisk.ru/film/5121/"
+    ],
+    "kinopoiskId": "5121",
+    "aliases": [
+      "Идальго"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "2bcq",
+    "tmdbId": "79",
+    "original": "Hero",
+    "year": 2002,
+    "title": "Герой",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q260379"
+    ],
+    "kinopoiskId": "889",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Sc2",
+    "tmdbId": "12246",
+    "original": "Mongol: The Rise of Genghis Khan",
+    "year": 2007,
+    "title": "Монгол",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q733059"
+    ],
+    "kinopoiskId": "84675",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1S6y",
+    "tmdbId": "12289",
+    "original": "Red Cliff",
+    "year": 2008,
+    "title": "Битва у Красной скалы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q815606"
+    ],
+    "kinopoiskId": "88123",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "b5Cq",
+    "tmdbId": "335778",
+    "original": "Risen",
+    "year": 2016,
+    "title": "Восставший",
+    "sources": [
+      "https://www.kinopoisk.ru/film/804709/"
+    ],
+    "kinopoiskId": "804709",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1T6u",
+    "tmdbId": "11780",
+    "original": "Rob Roy",
+    "year": 1995,
+    "title": "Роб Рой",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1141727"
+    ],
+    "kinopoiskId": "3592",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27Bw",
+    "tmdbId": "2024",
+    "original": "The Patriot",
+    "year": 2000,
+    "title": "Патриот",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q646633"
+    ],
+    "kinopoiskId": "781",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bOr8",
+    "tmdbId": "351339",
+    "original": "Anthropoid",
+    "year": 2016,
+    "title": "Антропоид",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q20814438"
+    ],
+    "kinopoiskId": "892635",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "gcxi",
+    "tmdbId": "454227",
+    "original": "Outlaw King",
+    "year": 2018,
+    "title": "Король вне закона",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q38463058"
+    ],
+    "kinopoiskId": "1045725",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29s2",
+    "tmdbId": "853",
+    "original": "Enemy at the Gates",
+    "year": 2001,
+    "title": "Враг у ворот",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q271006"
+    ],
+    "kinopoiskId": "659",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1VSA",
+    "tmdbId": "10590",
+    "original": "We Were Soldiers",
+    "year": 2002,
+    "title": "Мы были солдатами",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q623502"
+    ],
+    "kinopoiskId": "877",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "275g",
+    "tmdbId": "2253",
+    "original": "Valkyrie",
+    "year": 2008,
+    "title": "Операция «Валькирия»",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q159054"
+    ],
+    "kinopoiskId": "309475",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "a4wE",
+    "tmdbId": "313297",
+    "original": "Kubo and the Two Strings",
+    "year": 2016,
+    "title": "Кубо. Легенда о самурае",
+    "sources": [
+      "https://www.kinopoisk.ru/film/882290/"
+    ],
+    "kinopoiskId": "882290",
+    "aliases": [
+      "Кубо и две струны"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "2b4w",
+    "tmdbId": "128",
+    "original": "Princess Mononoke",
+    "year": 1997,
+    "title": "Принцесса Мононокэ",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q186572"
+    ],
+    "kinopoiskId": "441",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "20Xg",
+    "tmdbId": "7443",
+    "original": "Chicken Run",
+    "year": 2000,
+    "title": "Побег из курятника",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q156401"
+    ],
+    "kinopoiskId": "635",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Znm",
+    "tmdbId": "9016",
+    "original": "Treasure Planet",
+    "year": 2002,
+    "title": "Планета сокровищ",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q392530"
+    ],
+    "kinopoiskId": "864",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Vck",
+    "tmdbId": "10865",
+    "original": "Atlantis: The Lost Empire",
+    "year": 2001,
+    "title": "Атлантида: Затерянный мир",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q318975"
+    ],
+    "kinopoiskId": "597",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "eL34",
+    "tmdbId": "417859",
+    "original": "Puss in Boots",
+    "year": 2011,
+    "title": "Кот в сапогах",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q324262"
+    ],
+    "kinopoiskId": "102146",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "aaie",
+    "tmdbId": "315162",
+    "original": "Puss in Boots: The Last Wish",
+    "year": 2022,
+    "title": "Кот в сапогах 2: Последнее желание",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q31271384"
+    ],
+    "kinopoiskId": "840821",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "i7xm",
+    "tmdbId": "501929",
+    "original": "The Mitchells vs. the Machines",
+    "year": 2021,
+    "title": "Митчеллы против машин",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q54021143"
+    ],
+    "kinopoiskId": "1146303",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Wow",
+    "tmdbId": "10386",
+    "original": "The Iron Giant",
+    "year": 1999,
+    "title": "Стальной гигант",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q867283"
+    ],
+    "kinopoiskId": "538",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1XGQ",
+    "tmdbId": "9837",
+    "original": "The Prince of Egypt",
+    "year": 1998,
+    "title": "Принц Египта",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q245227"
+    ],
+    "kinopoiskId": "3469",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ykgU",
+    "tmdbId": "911916",
+    "original": "Spider-Man: Beyond the Spider-Verse",
+    "year": 2027,
+    "title": "Человек-паук: За пределами Вселенной",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4763456/"
+    ],
+    "kinopoiskId": "4763456",
+    "aliases": [
+      "Человек-паук: За пределами вселенных"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "kSz4",
+    "tmdbId": "569094",
+    "original": "Spider-Man: Across the Spider-Verse",
+    "year": 2023,
+    "title": "Человек-паук: Паутина вселенных",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q76448600"
+    ],
+    "kinopoiskId": "1219177",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "azpY",
+    "tmdbId": "324857",
+    "original": "Spider-Man: Into the Spider-Verse",
+    "year": 2018,
+    "title": "Человек-паук: Через вселенные",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q29588607"
+    ],
+    "kinopoiskId": "920265",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bQ2",
+    "tmdbId": "62213",
+    "original": "Dark Shadows",
+    "year": 2012,
+    "title": "Мрачные тени",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q323318"
+    ],
+    "kinopoiskId": "395060",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "sn8W",
+    "tmdbId": "755566",
+    "original": "Day Shift",
+    "year": 2022,
+    "title": "Дневная смена",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q106725885"
+    ],
+    "kinopoiskId": "1438923",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "nzTq",
+    "tmdbId": "635910",
+    "original": "The Last Voyage of the Demeter",
+    "year": 2023,
+    "title": "Последнее путешествие «Деметра»",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q107394970"
+    ],
+    "kinopoiskId": "462128",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "A1S",
+    "tmdbId": "52015",
+    "original": "Stake Land",
+    "year": 2010,
+    "title": "Земля вампиров",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2055033"
+    ],
+    "kinopoiskId": "490121",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "l1S",
+    "tmdbId": "58151",
+    "original": "Fright Night",
+    "year": 2011,
+    "title": "Ночь страха",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q268824"
+    ],
+    "kinopoiskId": "467118",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "24dw",
+    "tmdbId": "4513",
+    "original": "30 Days of Night",
+    "year": 2007,
+    "title": "30 дней ночи",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q224117"
+    ],
+    "kinopoiskId": "77658",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1XsY",
+    "tmdbId": "9945",
+    "original": "Vampires",
+    "year": 1998,
+    "title": "Вампиры",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q669231"
+    ],
+    "kinopoiskId": "7430",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "G0NA",
+    "tmdbId": "1111873",
+    "original": "Abigail",
+    "year": 2024,
+    "title": "Эбигейл",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q120758628"
+    ],
+    "kinopoiskId": "5437600",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1SCu",
+    "tmdbId": "11979",
+    "original": "Queen of the Damned",
+    "year": 2002,
+    "title": "Королева проклятых",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q202982"
+    ],
+    "kinopoiskId": "22412",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Yxq",
+    "tmdbId": "9495",
+    "original": "The Crow",
+    "year": 1994,
+    "title": "Ворон",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q250912"
+    ],
+    "kinopoiskId": "12362",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1ZMm",
+    "tmdbId": "8840",
+    "original": "DragonHeart",
+    "year": 1996,
+    "title": "Сердце дракона",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q330612"
+    ],
+    "kinopoiskId": "6508",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "5vJA",
+    "tmdbId": "179826",
+    "original": "Odd Thomas",
+    "year": 2013,
+    "title": "Странный Томас",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2329403"
+    ],
+    "kinopoiskId": "572461",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Vq2",
+    "tmdbId": "10779",
+    "original": "The Frighteners",
+    "year": 1996,
+    "title": "Страшилы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1332274"
+    ],
+    "kinopoiskId": "5909",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28dg",
+    "tmdbId": "1729",
+    "original": "The Forbidden Kingdom",
+    "year": 2008,
+    "title": "Запретное царство",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q176568"
+    ],
+    "kinopoiskId": "271999",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1sGg",
+    "tmdbId": "27022",
+    "original": "The Sorcerer's Apprentice",
+    "year": 2010,
+    "title": "Ученик чародея",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q477865"
+    ],
+    "kinopoiskId": "429739",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1W2q",
+    "tmdbId": "10529",
+    "original": "Outlander",
+    "year": 2008,
+    "title": "Викинги против пришельцев",
+    "sources": [
+      "https://www.kinopoisk.ru/film/195457/"
+    ],
+    "kinopoiskId": "195457",
+    "aliases": [
+      "Викинги"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "21QA",
+    "tmdbId": "6278",
+    "original": "Reign of Fire",
+    "year": 2002,
+    "title": "Власть огня",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q925384"
+    ],
+    "kinopoiskId": "5207",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28HK",
+    "tmdbId": "1487",
+    "original": "Hellboy",
+    "year": 2004,
+    "title": "Хеллбой: Герой из пекла",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q461540"
+    ],
+    "kinopoiskId": "5052",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "21OY",
+    "tmdbId": "6312",
+    "original": "Brotherhood of the Wolf",
+    "year": 2001,
+    "title": "Братство волка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1123891"
+    ],
+    "kinopoiskId": "777",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1TwW",
+    "tmdbId": "11569",
+    "original": "Hellraiser III: Hell on Earth",
+    "year": 1992,
+    "title": "Восставший из ада 3: Ад на земле",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q763024"
+    ],
+    "kinopoiskId": "33788",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Ys6",
+    "tmdbId": "9529",
+    "original": "Candyman",
+    "year": 1992,
+    "title": "Кэндимэн",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1033108"
+    ],
+    "kinopoiskId": "15859",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "qIvo",
+    "tmdbId": "713704",
+    "original": "Evil Dead Rise",
+    "year": 2023,
+    "title": "Восстание зловещих мертвецов",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q107203508"
+    ],
+    "kinopoiskId": "1446132",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2a0o",
+    "tmdbId": "609",
+    "original": "Poltergeist",
+    "year": 1982,
+    "title": "Полтергейст",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q497622"
+    ],
+    "kinopoiskId": "7116",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1CgM",
+    "tmdbId": "21208",
+    "original": "Orphan",
+    "year": 2009,
+    "title": "Дитя тьмы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q387414"
+    ],
+    "kinopoiskId": "400615",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Y6E",
+    "tmdbId": "9664",
+    "original": "Flyboys",
+    "year": 2006,
+    "title": "Эскадрилья «Лафайет»",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q580869"
+    ],
+    "kinopoiskId": "103156",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2a7Y",
+    "tmdbId": "559",
+    "original": "Spider-Man 3",
+    "year": 2007,
+    "title": "Человек-паук 3: Враг в отражении",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q182212"
+    ],
+    "kinopoiskId": "82441",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2a8i",
+    "tmdbId": "557",
+    "original": "Spider-Man",
+    "year": 2002,
+    "title": "Человек-паук",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q484442"
+    ],
+    "kinopoiskId": "838",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2a88",
+    "tmdbId": "558",
+    "original": "Spider-Man 2",
+    "year": 2004,
+    "title": "Человек-паук 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q190145"
+    ],
+    "kinopoiskId": "2898",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "f9a4",
+    "tmdbId": "427641",
+    "original": "Rampage",
+    "year": 2018,
+    "title": "Рэмпейдж",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q29470162"
+    ],
+    "kinopoiskId": "666865",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bAL4",
+    "tmdbId": "345940",
+    "original": "The Meg",
+    "year": 2018,
+    "title": "Мег: Монстр глубины",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q27957869"
+    ],
+    "kinopoiskId": "918627",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1RFi",
+    "tmdbId": "12577",
+    "original": "Steal",
+    "year": 2002,
+    "title": "Неудержимые",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q43925"
+    ],
+    "kinopoiskId": "22124",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Ile",
+    "tmdbId": "17635",
+    "original": "Daylight Robbery",
+    "year": 2008,
+    "title": "Идеальное ограбление",
+    "sources": [
+      "https://www.kinopoisk.ru/film/272500/"
+    ],
+    "kinopoiskId": "272500",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27GG",
+    "tmdbId": "1991",
+    "original": "Death Proof",
+    "year": 2007,
+    "title": "Доказательство смерти",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1137310"
+    ],
+    "kinopoiskId": "273064",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1gju",
+    "tmdbId": "32985",
+    "original": "Solomon Kane",
+    "year": 2009,
+    "title": "Соломон Кейн",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1781432"
+    ],
+    "kinopoiskId": "279791",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1W6W",
+    "tmdbId": "10498",
+    "original": "Point of No Return",
+    "year": 1993,
+    "title": "Убийца",
+    "sources": [
+      "https://www.kinopoisk.ru/film/9318/"
+    ],
+    "kinopoiskId": "9318",
+    "aliases": [
+      "Возврата нет"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "1S3Y",
+    "tmdbId": "12403",
+    "original": "A Perfect Getaway",
+    "year": 2009,
+    "title": "Идеальный побег",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q300517"
+    ],
+    "kinopoiskId": "281409",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "297o",
+    "tmdbId": "1018",
+    "original": "Mulholland Drive",
+    "year": 2001,
+    "title": "Малхолланд-драйв",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q272608"
+    ],
+    "kinopoiskId": "466",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29BI",
+    "tmdbId": "793",
+    "original": "Blue Velvet",
+    "year": 1986,
+    "title": "Синий бархат",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q660950"
+    ],
+    "kinopoiskId": "5893",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2aii",
+    "tmdbId": "483",
+    "original": "Wild at Heart",
+    "year": 1990,
+    "title": "Дикие сердцем",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q751382"
+    ],
+    "kinopoiskId": "4393",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "MYKI",
+    "tmdbId": "1284046",
+    "original": "Onslaught",
+    "year": 2026,
+    "title": "Натиск",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q131451703"
+    ],
+    "kinopoiskId": "5595288",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "MwlA",
+    "tmdbId": "1272837",
+    "original": "28 Years Later: The Bone Temple",
+    "year": 2026,
+    "title": "28 лет спустя: Храм костей",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q129423731"
+    ],
+    "kinopoiskId": "6745035",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28Bi",
+    "tmdbId": "1562",
+    "original": "28 Weeks Later",
+    "year": 2007,
+    "title": "28 недель спустя",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q221102"
+    ],
+    "kinopoiskId": "197615",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2aXU",
+    "tmdbId": "170",
+    "original": "28 Days Later",
+    "year": 2002,
+    "title": "28 дней спустя",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q221075"
+    ],
+    "kinopoiskId": "577",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "SLa",
+    "tmdbId": "44115",
+    "original": "127 Hours",
+    "year": 2010,
+    "title": "127 часов",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q174371"
+    ],
+    "kinopoiskId": "484878",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "qPFK",
+    "tmdbId": "716258",
+    "original": "Black Box",
+    "year": 2020,
+    "title": "Чёрный ящик",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q100265988"
+    ],
+    "kinopoiskId": "1379736",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3m4k",
+    "tmdbId": "97020",
+    "original": "RoboCop",
+    "year": 2014,
+    "title": "Робокоп",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q864518"
+    ],
+    "kinopoiskId": "416183",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "zrUa",
+    "tmdbId": "939979",
+    "original": "Paradise Highway",
+    "year": 2022,
+    "title": "Последний рейс",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q113070883"
+    ],
+    "kinopoiskId": "4510525",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "zPHu",
+    "tmdbId": "949484",
+    "original": "Hounds of War",
+    "year": 2024,
+    "title": "Псы войны",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q130332926"
+    ],
+    "kinopoiskId": null,
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "23nq",
+    "tmdbId": "5072",
+    "original": "Severance",
+    "year": 2006,
+    "title": "Корпоративка",
+    "sources": [
+      "https://www.kinopoisk.ru/film/106279/"
+    ],
+    "kinopoiskId": "106279",
+    "aliases": [
+      "Изоляция"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "muwk",
+    "tmdbId": "608994",
+    "original": "The Cleansing Hour",
+    "year": 2019,
+    "title": "Час дьявола",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q101245294"
+    ],
+    "kinopoiskId": null,
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "isnC",
+    "tmdbId": "510388",
+    "original": "Villains",
+    "year": 2019,
+    "title": "Злодеи",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q55637127"
+    ],
+    "kinopoiskId": "1115111",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "zo6G",
+    "tmdbId": "938614",
+    "original": "Late Night with the Devil",
+    "year": 2023,
+    "title": "Полночь с дьяволом",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q119718080"
+    ],
+    "kinopoiskId": "5024418",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "q2CM",
+    "tmdbId": "696822",
+    "original": "Bloody Hell",
+    "year": 2020,
+    "title": "Адский ад",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1236234/"
+    ],
+    "kinopoiskId": "1236234",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1QA2",
+    "tmdbId": "13220",
+    "original": "Splinter",
+    "year": 2008,
+    "title": "Заноза",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2320121"
+    ],
+    "kinopoiskId": "392405",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "blCw",
+    "tmdbId": "341006",
+    "original": "The Belko Experiment",
+    "year": 2016,
+    "title": "Эксперимент Офис",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q20022669"
+    ],
+    "kinopoiskId": "893603",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "gKFA",
+    "tmdbId": "467632",
+    "original": "Bad Samaritan",
+    "year": 2018,
+    "title": "Логово Монстра",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q36492115"
+    ],
+    "kinopoiskId": "799482",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "9AX6",
+    "tmdbId": "301608",
+    "original": "The Trust",
+    "year": 2016,
+    "title": "Доверие",
+    "sources": [
+      "https://www.kinopoisk.ru/film/858101/"
+    ],
+    "kinopoiskId": "858101",
+    "aliases": [
+      "Доверие (фильм, 2016)"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "17Vk",
+    "tmdbId": "37616",
+    "original": "Palookaville",
+    "year": 1995,
+    "title": "Город хулиганов",
+    "sources": [
+      "https://www.kinopoisk.ru/film/13550/other/"
+    ],
+    "kinopoiskId": "2963",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1zvO",
+    "tmdbId": "23201",
+    "original": "Gettin' Square",
+    "year": 2003,
+    "title": "Я завязал",
+    "sources": [
+      "https://www.kinopoisk.ru/film/6765/"
+    ],
+    "kinopoiskId": "6765",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1gUK",
+    "tmdbId": "32577",
+    "original": "The Parole Officer",
+    "year": 2001,
+    "title": "Надзиратель",
+    "sources": [
+      "https://www.kinopoisk.ru/film/10272/"
+    ],
+    "kinopoiskId": "10272",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Xfq",
+    "tmdbId": "10034",
+    "original": "High Heels and Low Lifes",
+    "year": 2001,
+    "title": "Ограбление по-английски",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q498814"
+    ],
+    "kinopoiskId": "6357",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1KHQ",
+    "tmdbId": "16155",
+    "original": "Safe Men",
+    "year": 1998,
+    "title": "Медвежатники",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4539/"
+    ],
+    "kinopoiskId": "4539",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Xpq",
+    "tmdbId": "9968",
+    "original": "The Big White",
+    "year": 2005,
+    "title": "Большая белая обуза",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q470219"
+    ],
+    "kinopoiskId": "77395",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1VGu",
+    "tmdbId": "10668",
+    "original": "Suicide Kings",
+    "year": 1997,
+    "title": "Короли самоубийства",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1781835"
+    ],
+    "kinopoiskId": "6899",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Knc",
+    "tmdbId": "16311",
+    "original": "The Hard Word",
+    "year": 2002,
+    "title": "Слово вора",
+    "sources": [
+      "https://www.kinopoisk.ru/film/7952/"
+    ],
+    "kinopoiskId": "7952",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Bqm",
+    "tmdbId": "21755",
+    "original": "The Brothers Bloom",
+    "year": 2008,
+    "title": "Братья Блум",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q990840"
+    ],
+    "kinopoiskId": "263787",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1YM6",
+    "tmdbId": "9401",
+    "original": "2 Days in the Valley",
+    "year": 1996,
+    "title": "Два дня в долине",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q222873"
+    ],
+    "kinopoiskId": "6183",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "10oS",
+    "tmdbId": "41009",
+    "original": "Perrier's Bounty",
+    "year": 2009,
+    "title": "Щедрость Перрье",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q970779"
+    ],
+    "kinopoiskId": "436170",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "6fQ8",
+    "tmdbId": "209247",
+    "original": "The Art of the Steal",
+    "year": 2013,
+    "title": "Черные метки",
+    "sources": [
+      "https://www.kinopoisk.ru/film/660706/"
+    ],
+    "kinopoiskId": "660706",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1UFA",
+    "tmdbId": "11088",
+    "original": "Heist",
+    "year": 2001,
+    "title": "Грабёж",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q964779"
+    ],
+    "kinopoiskId": "696",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "qbus",
+    "tmdbId": "700391",
+    "original": "65",
+    "year": 2023,
+    "title": "65",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1382210/"
+    ],
+    "kinopoiskId": "1382210",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "fuqC",
+    "tmdbId": "436274",
+    "original": "Radius",
+    "year": 2017,
+    "title": "Радиус",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q48672827"
+    ],
+    "kinopoiskId": "1005623",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ewqM",
+    "tmdbId": "411999",
+    "original": "OtherLife",
+    "year": 2017,
+    "title": "ДругаяЖизнь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q42531215"
+    ],
+    "kinopoiskId": "914831",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2192",
+    "tmdbId": "7191",
+    "original": "Cloverfield",
+    "year": 2008,
+    "title": "Монстро",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q123742"
+    ],
+    "kinopoiskId": "374718",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ejUu",
+    "tmdbId": "406990",
+    "original": "What Happened to Monday",
+    "year": 2017,
+    "title": "Тайна 7 сестёр",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q20814900"
+    ],
+    "kinopoiskId": "484628",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1YVs",
+    "tmdbId": "9341",
+    "original": "The Core",
+    "year": 2003,
+    "title": "Земное ядро",
+    "sources": [
+      "https://www.kinopoisk.ru/film/20158/"
+    ],
+    "kinopoiskId": "20158",
+    "aliases": [
+      "Земное ядро: Бросок в преисподнюю"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "5LAY",
+    "tmdbId": "190847",
+    "original": "The Last Days on Mars",
+    "year": 2013,
+    "title": "Последние дни на Марсе",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q3218379"
+    ],
+    "kinopoiskId": "566111",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27w2",
+    "tmdbId": "2067",
+    "original": "Mission to Mars",
+    "year": 2000,
+    "title": "Миссия на Марс",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q128582"
+    ],
+    "kinopoiskId": "7353",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "5n0s",
+    "tmdbId": "174772",
+    "original": "Europa Report",
+    "year": 2013,
+    "title": "Европа",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q3060692"
+    ],
+    "kinopoiskId": "623379",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "22W0",
+    "tmdbId": "5551",
+    "original": "Space Cowboys",
+    "year": 2000,
+    "title": "Космические ковбои",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q502189"
+    ],
+    "kinopoiskId": "836",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1ZI0",
+    "tmdbId": "8870",
+    "original": "Red Planet",
+    "year": 2000,
+    "title": "Красная планета",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q945685"
+    ],
+    "kinopoiskId": "3758",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Qu4",
+    "tmdbId": "13291",
+    "original": "Traitor",
+    "year": 2008,
+    "title": "Предатель",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1536329"
+    ],
+    "kinopoiskId": "391751",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "6gEs",
+    "tmdbId": "209764",
+    "original": "The Terror Live",
+    "year": 2013,
+    "title": "Террор в прямом эфире",
+    "sources": [
+      "https://www.kinopoisk.ru/film/764902/"
+    ],
+    "kinopoiskId": "764902",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "gGJI",
+    "tmdbId": "466081",
+    "original": "The Informer",
+    "year": 2019,
+    "title": "Три секунды",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q46223211"
+    ],
+    "kinopoiskId": "651909",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "olb2",
+    "tmdbId": "654739",
+    "original": "Hard Hit",
+    "year": 2021,
+    "title": "Обратный отсчёт",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q106882211"
+    ],
+    "kinopoiskId": "1387171",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "l94W",
+    "tmdbId": "575604",
+    "original": "The Call",
+    "year": 2020,
+    "title": "Звонок из прошлого",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1197741/"
+    ],
+    "kinopoiskId": "1197741",
+    "aliases": [
+      "Звонок"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "85lS",
+    "tmdbId": "269494",
+    "original": "A Hard Day",
+    "year": 2014,
+    "title": "Трудный день",
+    "sources": [
+      "https://www.kinopoisk.ru/film/839823/"
+    ],
+    "kinopoiskId": "839823",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "uy4K",
+    "tmdbId": "811592",
+    "original": "One Shot",
+    "year": 2021,
+    "title": "Последний шанс",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q109716480"
+    ],
+    "kinopoiskId": "4390372",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "gfr8",
+    "tmdbId": "455236",
+    "original": "Accident Man",
+    "year": 2018,
+    "title": "Несчастный случай",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1008357/"
+    ],
+    "kinopoiskId": "1008357",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2Kqi",
+    "tmdbId": "79070",
+    "original": "Sleepless Night",
+    "year": 2011,
+    "title": "Бессонная ночь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q3346111"
+    ],
+    "kinopoiskId": "535442",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "Cseq",
+    "tmdbId": "1017163",
+    "original": "The Roundup: Punishment",
+    "year": 2024,
+    "title": "Криминальный город: Возмездие",
+    "sources": [
+      "https://www.kinopoisk.ru/film/5133406/"
+    ],
+    "kinopoiskId": "5133406",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "A4E6",
+    "tmdbId": "955555",
+    "original": "The Roundup: No Way Out",
+    "year": 2023,
+    "title": "Криминальный город: Разборки в Пусане",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4961757/"
+    ],
+    "kinopoiskId": "4961757",
+    "aliases": [
+      "Криминальный город 3"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "mVnO",
+    "tmdbId": "619803",
+    "original": "The Roundup",
+    "year": 2022,
+    "title": "Криминальный город 2",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1169291/"
+    ],
+    "kinopoiskId": "1169291",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "hewo",
+    "tmdbId": "479718",
+    "original": "The Outlaws",
+    "year": 2017,
+    "title": "Криминальный город",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1045942/"
+    ],
+    "kinopoiskId": "1045942",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "lhMM",
+    "tmdbId": "579047",
+    "original": "Reminiscence",
+    "year": 2021,
+    "title": "Воспоминания",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q81207836"
+    ],
+    "kinopoiskId": "811078",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "97WI",
+    "tmdbId": "291289",
+    "original": "National Theatre Live: A Streetcar Named Desire",
+    "year": 2014,
+    "title": "Трамвай «Желание»",
+    "sources": [
+      "https://www.kinopoisk.ru/film/843290/"
+    ],
+    "kinopoiskId": "843290",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "5rje",
+    "tmdbId": "177572",
+    "original": "Big Hero 6",
+    "year": 2014,
+    "title": "Город героев",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q13091172"
+    ],
+    "kinopoiskId": "693126",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "dZrW",
+    "tmdbId": "399174",
+    "original": "Isle of Dogs",
+    "year": 2018,
+    "title": "Остров собак",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q28065409"
+    ],
+    "kinopoiskId": "939785",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "15gO",
+    "tmdbId": "38757",
+    "original": "Tangled",
+    "year": 2010,
+    "title": "Рапунцель: Запутанная история",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q188439"
+    ],
+    "kinopoiskId": "84049",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ipoi",
+    "tmdbId": "508965",
+    "original": "Klaus",
+    "year": 2019,
+    "title": "Клаус",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q67208596"
+    ],
+    "kinopoiskId": "957887",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1NhQ",
+    "tmdbId": "14836",
+    "original": "Coraline",
+    "year": 2009,
+    "title": "Коралина в Стране Кошмаров",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q632668"
+    ],
+    "kinopoiskId": "49166",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1WyQ",
+    "tmdbId": "10315",
+    "original": "Fantastic Mr. Fox",
+    "year": 2009,
+    "title": "Бесподобный мистер Фокс",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q465275"
+    ],
+    "kinopoiskId": "86621",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bQm",
+    "tmdbId": "62211",
+    "original": "Monsters University",
+    "year": 2013,
+    "title": "Университет монстров",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q641362"
+    ],
+    "kinopoiskId": "468904",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2a46",
+    "tmdbId": "585",
+    "original": "Monsters, Inc.",
+    "year": 2001,
+    "title": "Корпорация монстров",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q187726"
+    ],
+    "kinopoiskId": "458",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "4aAA",
+    "tmdbId": "127380",
+    "original": "Finding Dory",
+    "year": 2016,
+    "title": "В поисках Дори",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q9321426"
+    ],
+    "kinopoiskId": "692957",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "72i",
+    "tmdbId": "12",
+    "original": "Finding Nemo",
+    "year": 2003,
+    "title": "В поисках Немо",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q132863"
+    ],
+    "kinopoiskId": "7908",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "7IPg",
+    "tmdbId": "260513",
+    "original": "Incredibles 2",
+    "year": 2018,
+    "title": "Суперсемейка 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q24832112"
+    ],
+    "kinopoiskId": "839650",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1XLm",
+    "tmdbId": "9806",
+    "original": "The Incredibles",
+    "year": 2004,
+    "title": "Суперсемейка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q213326"
+    ],
+    "kinopoiskId": "38903",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "Dh8e",
+    "tmdbId": "1038392",
+    "original": "The Conjuring: Last Rites",
+    "year": 2025,
+    "title": "Заклятие 4: Последний обряд",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q114802043"
+    ],
+    "kinopoiskId": "5146965",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "kOQg",
+    "tmdbId": "567646",
+    "original": "Extreme Job",
+    "year": 2019,
+    "title": "Экстремальная работа",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q55106022"
+    ],
+    "kinopoiskId": "1108600",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29tY",
+    "tmdbId": "841",
+    "original": "Dune",
+    "year": 1984,
+    "title": "Дюна",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q114819"
+    ],
+    "kinopoiskId": "2882",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "E50O",
+    "tmdbId": "1059345",
+    "original": "Cult Killer",
+    "year": 2024,
+    "title": "Охота на киллера",
+    "sources": [
+      "https://www.kinopoisk.ru/film/5023998/"
+    ],
+    "kinopoiskId": "5023998",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "mcHk",
+    "tmdbId": "601666",
+    "original": "I Care a Lot",
+    "year": 2020,
+    "title": "Аферистка",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1248786/"
+    ],
+    "kinopoiskId": "1248786",
+    "aliases": [
+      "Мне не всё равно"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "3mDu",
+    "tmdbId": "97367",
+    "original": "The Place Beyond the Pines",
+    "year": 2012,
+    "title": "Место под соснами",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1754980"
+    ],
+    "kinopoiskId": "577673",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "nKiA",
+    "tmdbId": "639988",
+    "original": "No Other Choice",
+    "year": 2025,
+    "title": "Метод исключения",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q129906152"
+    ],
+    "kinopoiskId": "484791",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "948A",
+    "tmdbId": "290098",
+    "original": "The Handmaiden",
+    "year": 2016,
+    "title": "Служанка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q20444585"
+    ],
+    "kinopoiskId": "851960",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1TSo",
+    "tmdbId": "11423",
+    "original": "Memories of Murder",
+    "year": 2003,
+    "title": "Воспоминания об убийстве",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q488169"
+    ],
+    "kinopoiskId": "65770",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "eDGs",
+    "tmdbId": "414906",
+    "original": "The Batman",
+    "year": 2022,
+    "title": "Бэтмен",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q61117344"
+    ],
+    "kinopoiskId": "590286",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Y52",
+    "tmdbId": "9676",
+    "original": "The Black Dahlia",
+    "year": 2006,
+    "title": "Чёрная орхидея",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q313874"
+    ],
+    "kinopoiskId": "64012",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "jB2q",
+    "tmdbId": "537996",
+    "original": "The Ballad of Buster Scruggs",
+    "year": 2018,
+    "title": "Баллада Бастера Скраггса",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q37342034"
+    ],
+    "kinopoiskId": "1008879",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ajZw",
+    "tmdbId": "318846",
+    "original": "The Big Short",
+    "year": 2015,
+    "title": "Игра на понижение",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q19850715"
+    ],
+    "kinopoiskId": "501333",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1ZoE",
+    "tmdbId": "9008",
+    "original": "The Insider",
+    "year": 1999,
+    "title": "Свой человек",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q463832"
+    ],
+    "kinopoiskId": "467",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "F1Nk",
+    "tmdbId": "1084736",
+    "original": "The Count of Monte Cristo",
+    "year": 2024,
+    "title": "Граф Монте-Кристо",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q119998666"
+    ],
+    "kinopoiskId": "5452393",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "hjDE",
+    "tmdbId": "481848",
+    "original": "The Call of the Wild",
+    "year": 2020,
+    "title": "Зов предков",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q57982258"
+    ],
+    "kinopoiskId": "1060511",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "daU4",
+    "tmdbId": "378779",
+    "original": "War and Peace",
+    "year": 2016,
+    "title": "Война и мир",
+    "sources": [
+      "https://www.kinopoisk.ru/film/893150/"
+    ],
+    "kinopoiskId": "893150",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "aSVk",
+    "tmdbId": "331482",
+    "original": "Little Women",
+    "year": 2019,
+    "title": "Маленькие женщины",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q56881140"
+    ],
+    "kinopoiskId": "807339",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "32iQ",
+    "tmdbId": "85735",
+    "original": "Love Lasts Three Years",
+    "year": 2011,
+    "title": "Любовь живёт три года",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2074684"
+    ],
+    "kinopoiskId": "558523",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2aVE",
+    "tmdbId": "185",
+    "original": "A Clockwork Orange",
+    "year": 1971,
+    "title": "Заводной апельсин",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q181086"
+    ],
+    "kinopoiskId": "391",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29Mc",
+    "tmdbId": "702",
+    "original": "A Streetcar Named Desire",
+    "year": 1951,
+    "title": "Трамвай «Желание»",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q212129"
+    ],
+    "kinopoiskId": "486",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28LW",
+    "tmdbId": "1427",
+    "original": "Perfume: The Story of a Murderer",
+    "year": 2006,
+    "title": "Парфюмер. История одного убийцы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q164813"
+    ],
+    "kinopoiskId": "78378",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1ZNY",
+    "tmdbId": "8827",
+    "original": "99 Francs",
+    "year": 2007,
+    "title": "99 франков",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q228667"
+    ],
+    "kinopoiskId": "262771",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1WPs",
+    "tmdbId": "10204",
+    "original": "Around the World in 80 Days",
+    "year": 2004,
+    "title": "Вокруг света за 80 дней",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q156519"
+    ],
+    "kinopoiskId": "6297",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1OyS",
+    "tmdbId": "14202",
+    "original": "The Painted Veil",
+    "year": 2006,
+    "title": "Разрисованная вуаль",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q128854"
+    ],
+    "kinopoiskId": "102201",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1zaw",
+    "tmdbId": "23488",
+    "original": "Dorian Gray",
+    "year": 2009,
+    "title": "Дориан Грей",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q921510"
+    ],
+    "kinopoiskId": "415663",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1scq",
+    "tmdbId": "27260",
+    "original": "Brave New World",
+    "year": 1998,
+    "title": "Дивный новый мир",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q4958386"
+    ],
+    "kinopoiskId": "229983",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "H08",
+    "tmdbId": "49046",
+    "original": "All Quiet on the Western Front",
+    "year": 2022,
+    "title": "На Западном фронте без перемен",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q108837349"
+    ],
+    "kinopoiskId": "316376",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "g97G",
+    "tmdbId": "452736",
+    "original": "Pride and Prejudice",
+    "year": 1995,
+    "title": "Гордость и предубеждение",
+    "sources": [
+      "https://www.kinopoisk.ru/film/89518/"
+    ],
+    "kinopoiskId": "89518",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bgbA",
+    "tmdbId": "338970",
+    "original": "Tomb Raider",
+    "year": 2018,
+    "title": "Tomb Raider: Лара Крофт",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q28489891"
+    ],
+    "kinopoiskId": "446136",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "am5m",
+    "tmdbId": "319661",
+    "original": "Old Goriot",
+    "year": 2004,
+    "title": "Отец Горио",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q3226121"
+    ],
+    "kinopoiskId": "271742",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "41o6",
+    "tmdbId": "121674",
+    "original": "Great Expectations",
+    "year": 2012,
+    "title": "Большие надежды",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2079954"
+    ],
+    "kinopoiskId": "582269",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3tCe",
+    "tmdbId": "101915",
+    "original": "Tess of the D'Urbervilles",
+    "year": 2008,
+    "title": "Тэсс из рода Д’Эрбервиллей",
+    "sources": [
+      "https://www.kinopoisk.ru/film/439883/"
+    ],
+    "kinopoiskId": "439883",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3lyy",
+    "tmdbId": "96724",
+    "original": "Anna Karenina",
+    "year": 2012,
+    "title": "Анна Каренина",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q80204"
+    ],
+    "kinopoiskId": "575195",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Tng",
+    "tmdbId": "11632",
+    "original": "Vanity Fair",
+    "year": 2004,
+    "title": "Ярмарка тщеславия",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1046841"
+    ],
+    "kinopoiskId": "21539",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1IUo",
+    "tmdbId": "17266",
+    "original": "The Odyssey",
+    "year": 1997,
+    "title": "Одиссей",
+    "sources": [
+      "https://www.kinopoisk.ru/film/77183/"
+    ],
+    "kinopoiskId": "77183",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "15rs",
+    "tmdbId": "38684",
+    "original": "Jane Eyre",
+    "year": 2011,
+    "title": "Джейн Эйр",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q258979"
+    ],
+    "kinopoiskId": "463437",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "14US",
+    "tmdbId": "38904",
+    "original": "Mrs. Dalloway",
+    "year": 1997,
+    "title": "Миссис Дэллоуэй",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q12126327"
+    ],
+    "kinopoiskId": "21049",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "R08",
+    "tmdbId": "44826",
+    "original": "Hugo",
+    "year": 2011,
+    "title": "Хранитель времени",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q206576"
+    ],
+    "kinopoiskId": "462247",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "F0vO",
+    "tmdbId": "1084242",
+    "original": "Zootopia 2",
+    "year": 2025,
+    "title": "Зверополис 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q116764712"
+    ],
+    "kinopoiskId": "5265603",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "oAY4",
+    "tmdbId": "661231",
+    "original": "Operation Mincemeat",
+    "year": 2021,
+    "title": "Операция «Мясной фарш»",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q85790963"
+    ],
+    "kinopoiskId": "650762",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "mQbe",
+    "tmdbId": "617653",
+    "original": "The Last Duel",
+    "year": 2021,
+    "title": "Последняя дуэль",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q85000980"
+    ],
+    "kinopoiskId": "1289738",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "k9j6",
+    "tmdbId": "551271",
+    "original": "Medieval",
+    "year": 2022,
+    "title": "Средневековье",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q30602709"
+    ],
+    "kinopoiskId": "1188722",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bkc8",
+    "tmdbId": "340442",
+    "original": "Pilgrimage",
+    "year": 2017,
+    "title": "Паломничество",
+    "sources": [
+      "https://www.kinopoisk.ru/film/893498/"
+    ],
+    "kinopoiskId": "893498",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "8tfY",
+    "tmdbId": "277834",
+    "original": "Moana",
+    "year": 2016,
+    "title": "Моана",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q18647981"
+    ],
+    "kinopoiskId": "837530",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Zmo",
+    "tmdbId": "9023",
+    "original": "Spirit: Stallion of the Cimarron",
+    "year": 2002,
+    "title": "Спирит: Душа прерий",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q641315"
+    ],
+    "kinopoiskId": "839",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1WRy",
+    "tmdbId": "10191",
+    "original": "How to Train Your Dragon",
+    "year": 2010,
+    "title": "Как приручить дракона",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q373096"
+    ],
+    "kinopoiskId": "280172",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1tVc",
+    "tmdbId": "26428",
+    "original": "Agora",
+    "year": 2009,
+    "title": "Агора",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q395411"
+    ],
+    "kinopoiskId": "405952",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "FRE",
+    "tmdbId": "49519",
+    "original": "The Croods",
+    "year": 2013,
+    "title": "Семейка Крудс",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q495850"
+    ],
+    "kinopoiskId": "198116",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "HoaE",
+    "tmdbId": "1147572",
+    "original": "Narnia: The Magician's Nephew",
+    "year": 2027,
+    "title": "Хроники Нарнии: Племянник чародея",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q134235227"
+    ],
+    "kinopoiskId": null,
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "hN1A",
+    "tmdbId": "493529",
+    "original": "Dungeons & Dragons: Honor Among Thieves",
+    "year": 2023,
+    "title": "Подземелья и драконы: Честь среди воров",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q105554572"
+    ],
+    "kinopoiskId": "762646",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "e1H8",
+    "tmdbId": "400106",
+    "original": "Bright",
+    "year": 2017,
+    "title": "Яркость",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q27825886"
+    ],
+    "kinopoiskId": "978838",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "6JxA",
+    "tmdbId": "228161",
+    "original": "Home",
+    "year": 2015,
+    "title": "Дом",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q4499813"
+    ],
+    "kinopoiskId": "688384",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29QI",
+    "tmdbId": "672",
+    "original": "Harry Potter and the Chamber of Secrets",
+    "year": 2002,
+    "title": "Гарри Поттер и тайная комната",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q102244"
+    ],
+    "kinopoiskId": "688",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29Qy",
+    "tmdbId": "673",
+    "original": "Harry Potter and the Prisoner of Azkaban",
+    "year": 2004,
+    "title": "Гарри Поттер и узник Азкабана",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q102448"
+    ],
+    "kinopoiskId": "322",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29Qo",
+    "tmdbId": "674",
+    "original": "Harry Potter and the Goblet of Fire",
+    "year": 2005,
+    "title": "Гарри Поттер и Кубок огня",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q102225"
+    ],
+    "kinopoiskId": "8408",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29Qe",
+    "tmdbId": "675",
+    "original": "Harry Potter and the Order of the Phoenix",
+    "year": 2007,
+    "title": "Гарри Поттер и Орден Феникса",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q102235"
+    ],
+    "kinopoiskId": "48356",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29FU",
+    "tmdbId": "767",
+    "original": "Harry Potter and the Half-Blood Prince",
+    "year": 2009,
+    "title": "Гарри Поттер и Принц-полукровка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q161687"
+    ],
+    "kinopoiskId": "89515",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1RYu",
+    "tmdbId": "12444",
+    "original": "Harry Potter and the Deathly Hallows: Part 1",
+    "year": 2010,
+    "title": "Гарри Поттер и Дары Смерти. Часть 1",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q161678"
+    ],
+    "kinopoiskId": "276762",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1RYk",
+    "tmdbId": "12445",
+    "original": "Harry Potter and the Deathly Hallows: Part 2",
+    "year": 2011,
+    "title": "Гарри Поттер и Дары Смерти. Часть 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q232009"
+    ],
+    "kinopoiskId": "407636",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1DD8",
+    "tmdbId": "20352",
+    "original": "Despicable Me",
+    "year": 2010,
+    "title": "Гадкий я",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q4447"
+    ],
+    "kinopoiskId": "432724",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "SEXE",
+    "tmdbId": "1423191",
+    "original": "Resident Evil",
+    "year": 2026,
+    "title": "Обитель зла",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q136565785"
+    ],
+    "kinopoiskId": "7378605",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "SxgI",
+    "tmdbId": "1419229",
+    "original": "Silent Zone",
+    "year": 2025,
+    "title": "Мёртвая зона",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1194671/"
+    ],
+    "kinopoiskId": "1194671",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "RTVm",
+    "tmdbId": "1400940",
+    "original": "Clayface",
+    "year": 2026,
+    "title": "Глиноликий",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q131460936"
+    ],
+    "kinopoiskId": "6712328",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "MMUQ",
+    "tmdbId": "1278950",
+    "original": "The Ritual",
+    "year": 2025,
+    "title": "Ритуал",
+    "sources": [
+      "https://www.kinopoisk.ru/film/6357721/"
+    ],
+    "kinopoiskId": "6357721",
+    "aliases": [
+      "Ритуал (фильм, 2025)"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "sFY2",
+    "tmdbId": "763215",
+    "original": "Damsel",
+    "year": 2024,
+    "title": "Дева и дракон",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q112811482"
+    ],
+    "kinopoiskId": "4673636",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "dUu2",
+    "tmdbId": "397243",
+    "original": "The Autopsy of Jane Doe",
+    "year": 2016,
+    "title": "Демон внутри",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q27458304"
+    ],
+    "kinopoiskId": "807313",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "87wo",
+    "tmdbId": "270303",
+    "original": "It Follows",
+    "year": 2014,
+    "title": "Оно приходит за тобой",
+    "sources": [
+      "https://www.kinopoisk.ru/film/804697/"
+    ],
+    "kinopoiskId": "804697",
+    "aliases": [
+      "Оно"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "3v8q",
+    "tmdbId": "102780",
+    "original": "Byzantium",
+    "year": 2012,
+    "title": "Византия",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2081750"
+    ],
+    "kinopoiskId": "483364",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29QS",
+    "tmdbId": "671",
+    "original": "Harry Potter and the Philosopher's Stone",
+    "year": 2001,
+    "title": "Гарри Поттер и философский камень",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q102438"
+    ],
+    "kinopoiskId": "689",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27Jq",
+    "tmdbId": "1970",
+    "original": "The Grudge",
+    "year": 2004,
+    "title": "Проклятие",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q310204"
+    ],
+    "kinopoiskId": "71065",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "jIBM",
+    "tmdbId": "540901",
+    "original": "Hustlers",
+    "year": 2019,
+    "title": "Стриптизёрши",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q61951916"
+    ],
+    "kinopoiskId": "1200603",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "gdKW",
+    "tmdbId": "454639",
+    "original": "Masters of the Universe",
+    "year": 2026,
+    "title": "Властелины Вселенной",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q112040381"
+    ],
+    "kinopoiskId": "88124",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "6Iag",
+    "tmdbId": "227300",
+    "original": "Stretch",
+    "year": 2014,
+    "title": "Драйвер на ночь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q14948589"
+    ],
+    "kinopoiskId": "717025",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1VVY",
+    "tmdbId": "10569",
+    "original": "Small Time Crooks",
+    "year": 2000,
+    "title": "Мелкие мошенники",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q610163"
+    ],
+    "kinopoiskId": "834",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1U8m",
+    "tmdbId": "11322",
+    "original": "Public Enemies",
+    "year": 2009,
+    "title": "Джонни Д.",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q329448"
+    ],
+    "kinopoiskId": "400599",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "Ogf6",
+    "tmdbId": "1317088",
+    "original": "The Assessment",
+    "year": 2024,
+    "title": "Оценка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q126086644"
+    ],
+    "kinopoiskId": "6042919",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "NCIM",
+    "tmdbId": "1300968",
+    "original": "The Hunger Games: Sunrise on the Reaping",
+    "year": 2026,
+    "title": "Голодные игры: Рассвет жатвы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q126390739"
+    ],
+    "kinopoiskId": "5927239",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "MDJY",
+    "tmdbId": "1275779",
+    "original": "Disclosure Day",
+    "year": 2026,
+    "title": "День разоблачения",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q126683577"
+    ],
+    "kinopoiskId": "4510025",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ImWe",
+    "tmdbId": "1170608",
+    "original": "Dune: Part Three",
+    "year": 2026,
+    "title": "Дюна: Часть третья",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q124714245"
+    ],
+    "kinopoiskId": "5458743",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ESyU",
+    "tmdbId": "1081003",
+    "original": "Supergirl",
+    "year": 2026,
+    "title": "Супергёрл",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q116921951"
+    ],
+    "kinopoiskId": "1184898",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "BVqy",
+    "tmdbId": "1003596",
+    "original": "Avengers: Doomsday",
+    "year": 2026,
+    "title": "Мстители: Доктор Дум",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q113244839"
+    ],
+    "kinopoiskId": "5060245",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ACJE",
+    "tmdbId": "969681",
+    "original": "Spider-Man: Brand New Day",
+    "year": 2026,
+    "title": "Человек-паук: Новый день",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q113244935"
+    ],
+    "kinopoiskId": "5494049",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "q1FA",
+    "tmdbId": "696393",
+    "original": "Cold Storage",
+    "year": 2026,
+    "title": "Зараза",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q117805784"
+    ],
+    "kinopoiskId": null,
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "pUfA",
+    "tmdbId": "693134",
+    "original": "Dune: Part Two",
+    "year": 2024,
+    "title": "Дюна: Часть вторая",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q109228991"
+    ],
+    "kinopoiskId": "4540126",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "fA7G",
+    "tmdbId": "438631",
+    "original": "Dune",
+    "year": 2021,
+    "title": "Дюна",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q60834962"
+    ],
+    "kinopoiskId": "409424",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "26uk",
+    "tmdbId": "2666",
+    "original": "Dark City",
+    "year": 1998,
+    "title": "Тёмный город",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1127281"
+    ],
+    "kinopoiskId": "4739",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "TZdY",
+    "tmdbId": "1457866",
+    "original": "The Further Mis-Adventures of Cliff Booth",
+    "year": 2026,
+    "title": "Приключения Клиффа Бута",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q134236545"
+    ],
+    "kinopoiskId": null,
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "DQsy",
+    "tmdbId": "1052939",
+    "original": "The Boat",
+    "year": 2022,
+    "title": "Остаться в живых",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4543609/"
+    ],
+    "kinopoiskId": "4543609",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "i2tY",
+    "tmdbId": "499932",
+    "original": "The Devil All the Time",
+    "year": 2020,
+    "title": "Дьявол всегда здесь",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1072788/"
+    ],
+    "kinopoiskId": "1072788",
+    "aliases": [
+      "Дьявол навсегда"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "gSIM",
+    "tmdbId": "471014",
+    "original": "Wheelman",
+    "year": 2017,
+    "title": "Водила",
+    "sources": [
+      "https://www.kinopoisk.ru/film/980316/"
+    ],
+    "kinopoiskId": "980316",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "e6gc",
+    "tmdbId": "401469",
+    "original": "Widows",
+    "year": 2018,
+    "title": "Вдовы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q29163736"
+    ],
+    "kinopoiskId": "965901",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bdow",
+    "tmdbId": "337730",
+    "original": "French Blood",
+    "year": 2015,
+    "title": "Француз",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q20004257"
+    ],
+    "kinopoiskId": "845628",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ayqQ",
+    "tmdbId": "324560",
+    "original": "Brimstone",
+    "year": 2016,
+    "title": "Преисподняя",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q19571121"
+    ],
+    "kinopoiskId": "607928",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "9GCS",
+    "tmdbId": "303858",
+    "original": "Money Monster",
+    "year": 2016,
+    "title": "Финансовый монстр",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q19363691"
+    ],
+    "kinopoiskId": "667291",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "788K",
+    "tmdbId": "242661",
+    "original": "Not My Day",
+    "year": 2014,
+    "title": "Не мой день",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q15623092"
+    ],
+    "kinopoiskId": "777807",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "5ylc",
+    "tmdbId": "182560",
+    "original": "Dark Places",
+    "year": 2015,
+    "title": "Тёмные тайны",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q15109729"
+    ],
+    "kinopoiskId": "681657",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3Jsa",
+    "tmdbId": "111083",
+    "original": "The Body",
+    "year": 2012,
+    "title": "Тело",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q3050323"
+    ],
+    "kinopoiskId": "609349",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3n3i",
+    "tmdbId": "97614",
+    "original": "Deadfall",
+    "year": 2012,
+    "title": "Чёрный дрозд",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q622631"
+    ],
+    "kinopoiskId": "555966",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1aAY",
+    "tmdbId": "36419",
+    "original": "After.Life",
+    "year": 2009,
+    "title": "Жизнь за гранью",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q388873"
+    ],
+    "kinopoiskId": "261182",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "4W9M",
+    "tmdbId": "157547",
+    "original": "Oculus",
+    "year": 2013,
+    "title": "Окулус",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q3349019"
+    ],
+    "kinopoiskId": "680499",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "25Aw",
+    "tmdbId": "3172",
+    "original": "Bandits",
+    "year": 2001,
+    "title": "Бандиты",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q587847"
+    ],
+    "kinopoiskId": "602",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "20PG",
+    "tmdbId": "7552",
+    "original": "Fun with Dick and Jane",
+    "year": 2005,
+    "title": "Аферисты Дик и Джейн",
+    "sources": [
+      "https://www.kinopoisk.ru/film/61438/"
+    ],
+    "kinopoiskId": "61438",
+    "aliases": [
+      "Аферисты: Дик и Джейн развлекаются"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "JY",
+    "tmdbId": "64682",
+    "original": "The Great Gatsby",
+    "year": 2013,
+    "title": "Великий Гэтсби",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q892735"
+    ],
+    "kinopoiskId": "463724",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3hTi",
+    "tmdbId": "94348",
+    "original": "Alex Cross",
+    "year": 2012,
+    "title": "Я, Алекс Кросс",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q604876"
+    ],
+    "kinopoiskId": "566232",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Irc",
+    "tmdbId": "17578",
+    "original": "The Adventures of Tintin",
+    "year": 2011,
+    "title": "Приключения Тинтина: Тайна «Единорога»",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q980041"
+    ],
+    "kinopoiskId": "406186",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28tS",
+    "tmdbId": "1613",
+    "original": "The 51st State",
+    "year": 2001,
+    "title": "Формула 51",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1852729"
+    ],
+    "kinopoiskId": "578",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "15LW",
+    "tmdbId": "38543",
+    "original": "Ironclad",
+    "year": 2011,
+    "title": "Железный рыцарь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1150930"
+    ],
+    "kinopoiskId": "415112",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "25nW",
+    "tmdbId": "3432",
+    "original": "Mr. Brooks",
+    "year": 2007,
+    "title": "Кто вы, мистер Брукс?",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q548906"
+    ],
+    "kinopoiskId": "252107",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1NV2",
+    "tmdbId": "14527",
+    "original": "Foolproof",
+    "year": 2003,
+    "title": "Защита от дурака",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q534744"
+    ],
+    "kinopoiskId": "21018",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Zlg",
+    "tmdbId": "9030",
+    "original": "The Eye",
+    "year": 2008,
+    "title": "Глаз",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1139236"
+    ],
+    "kinopoiskId": "81965",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1VSK",
+    "tmdbId": "10589",
+    "original": "After the Sunset",
+    "year": 2004,
+    "title": "После заката",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q389151"
+    ],
+    "kinopoiskId": "61265",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "haG",
+    "tmdbId": "59965",
+    "original": "Abduction",
+    "year": 2011,
+    "title": "Погоня",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q143716"
+    ],
+    "kinopoiskId": "501293",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2hDC",
+    "tmdbId": "69668",
+    "original": "Dream House",
+    "year": 2011,
+    "title": "Дом грёз",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2528642"
+    ],
+    "kinopoiskId": "468444",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "FEGM",
+    "tmdbId": "1100988",
+    "original": "28 Years Later",
+    "year": 2025,
+    "title": "28 лет спустя",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q125392328"
+    ],
+    "kinopoiskId": "5445182",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "272Q",
+    "tmdbId": "2268",
+    "original": "The Golden Compass",
+    "year": 2007,
+    "title": "Золотой компас",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q637021"
+    ],
+    "kinopoiskId": "91843",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "24Lo",
+    "tmdbId": "4147",
+    "original": "Road to Perdition",
+    "year": 2002,
+    "title": "Проклятый путь",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q468033"
+    ],
+    "kinopoiskId": "548",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1UEW",
+    "tmdbId": "11092",
+    "original": "Presumed Innocent",
+    "year": 1990,
+    "title": "Презумпция невиновности",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q777629"
+    ],
+    "kinopoiskId": "8170",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2N9Y",
+    "tmdbId": "80274",
+    "original": "Ender's Game",
+    "year": 2013,
+    "title": "Игра Эндера",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1758112"
+    ],
+    "kinopoiskId": "568687",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "mLvo",
+    "tmdbId": "615656",
+    "original": "Meg 2: The Trench",
+    "year": 2023,
+    "title": "Мег 2: Бездна",
+    "sources": [
+      "https://www.kinopoisk.ru/film/1208708/"
+    ],
+    "kinopoiskId": "1208708",
+    "aliases": [
+      "Мег 2: Впадина"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "75Yo",
+    "tmdbId": "241259",
+    "original": "Alice Through the Looking Glass",
+    "year": 2016,
+    "title": "Алиса в Зазеркалье",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q17485699"
+    ],
+    "kinopoiskId": "723988",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27Xs",
+    "tmdbId": "1878",
+    "original": "Fear and Loathing in Las Vegas",
+    "year": 1998,
+    "title": "Страх и ненависть в Лас-Вегасе",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q23395"
+    ],
+    "kinopoiskId": "4385",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Spq",
+    "tmdbId": "12155",
+    "original": "Alice in Wonderland",
+    "year": 2010,
+    "title": "Алиса в Стране чудес",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q174385"
+    ],
+    "kinopoiskId": "405609",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "272w",
+    "tmdbId": "2270",
+    "original": "Stardust",
+    "year": 2007,
+    "title": "Звёздная пыль",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q244398"
+    ],
+    "kinopoiskId": "197863",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1YSo",
+    "tmdbId": "9361",
+    "original": "The Last of the Mohicans",
+    "year": 1992,
+    "title": "Последний из могикан",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q144483"
+    ],
+    "kinopoiskId": "8468",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "o14A",
+    "tmdbId": "646683",
+    "original": "The Exorcism",
+    "year": 2024,
+    "title": "Экзорцизм",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q73792046"
+    ],
+    "kinopoiskId": "1320930",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1D6o",
+    "tmdbId": "20662",
+    "original": "Robin Hood",
+    "year": 2010,
+    "title": "Робин Гуд",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q223559"
+    ],
+    "kinopoiskId": "278177",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "200S",
+    "tmdbId": "8619",
+    "original": "Master and Commander: The Far Side of the World",
+    "year": 2003,
+    "title": "Хозяин морей: На краю земли",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1125384"
+    ],
+    "kinopoiskId": "5565",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "tLOk",
+    "tmdbId": "791373",
+    "original": "Zack Snyder's Justice League",
+    "year": 2021,
+    "title": "Лига справедливости Зака Снайдера",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q94998134"
+    ],
+    "kinopoiskId": "1387021",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "QFQU",
+    "tmdbId": "1368337",
+    "original": "The Odyssey",
+    "year": 2026,
+    "title": "Одиссея",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q131547207"
+    ],
+    "kinopoiskId": "6385370",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1ZTM",
+    "tmdbId": "8741",
+    "original": "The Thin Red Line",
+    "year": 1998,
+    "title": "Тонкая красная линия",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q221491"
+    ],
+    "kinopoiskId": "3983",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "24d2",
+    "tmdbId": "4517",
+    "original": "Elizabeth: The Golden Age",
+    "year": 2007,
+    "title": "Золотой век",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q727846"
+    ],
+    "kinopoiskId": "84037",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "24he",
+    "tmdbId": "4477",
+    "original": "The Devil's Own",
+    "year": 1997,
+    "title": "Собственность дьявола",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q521094"
+    ],
+    "kinopoiskId": "8673",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2FAs",
+    "tmdbId": "77221",
+    "original": "Black Gold",
+    "year": 2011,
+    "title": "Черное золото",
+    "sources": [
+      "https://www.kinopoisk.ru/film/557955/"
+    ],
+    "kinopoiskId": "557955",
+    "aliases": [
+      "Чёрное золото"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "28yy",
+    "tmdbId": "1579",
+    "original": "Apocalypto",
+    "year": 2006,
+    "title": "Апокалипсис",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q188035"
+    ],
+    "kinopoiskId": "160977",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1YAa",
+    "tmdbId": "9477",
+    "original": "King Arthur",
+    "year": 2004,
+    "title": "Король Артур",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q337090"
+    ],
+    "kinopoiskId": "22138",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "41IK",
+    "tmdbId": "121856",
+    "original": "Assassin's Creed",
+    "year": 2016,
+    "title": "Кредо убийцы",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q18816889"
+    ],
+    "kinopoiskId": "690615",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1WwU",
+    "tmdbId": "10329",
+    "original": "Congo",
+    "year": 1995,
+    "title": "Конго",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q598860"
+    ],
+    "kinopoiskId": "2907",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "20XK",
+    "tmdbId": "7364",
+    "original": "Sahara",
+    "year": 2005,
+    "title": "Сахара",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1331014"
+    ],
+    "kinopoiskId": "23048",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2sX4",
+    "tmdbId": "70667",
+    "original": "Kon-Tiki",
+    "year": 2012,
+    "title": "Кон-Тики",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1759619"
+    ],
+    "kinopoiskId": "506432",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "5fdI",
+    "tmdbId": "169881",
+    "original": "The Physician",
+    "year": 2013,
+    "title": "Лекарь: Ученик Авиценны",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q5952747"
+    ],
+    "kinopoiskId": "645276",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1cke",
+    "tmdbId": "35552",
+    "original": "The Extraordinary Adventures of Adèle Blanc-Sec",
+    "year": 2010,
+    "title": "Необычайные приключения Адель",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q380349"
+    ],
+    "kinopoiskId": "462666",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "cdjy",
+    "tmdbId": "359246",
+    "original": "Hell House LLC",
+    "year": 2015,
+    "title": "Дом ада",
+    "sources": [
+      "https://www.kinopoisk.ru/film/868781/"
+    ],
+    "kinopoiskId": "868781",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "9X0m",
+    "tmdbId": "310131",
+    "original": "The Witch",
+    "year": 2015,
+    "title": "Ведьма",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q19057481"
+    ],
+    "kinopoiskId": "865302",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1XNC",
+    "tmdbId": "9792",
+    "original": "The Hills Have Eyes",
+    "year": 2006,
+    "title": "У холмов есть глаза",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1141519"
+    ],
+    "kinopoiskId": "160931",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "21XQ",
+    "tmdbId": "6171",
+    "original": "Dreamcatcher",
+    "year": 2003,
+    "title": "Ловец снов",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1256231"
+    ],
+    "kinopoiskId": "6060",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "3dqc",
+    "tmdbId": "91586",
+    "original": "Insidious: Chapter 2",
+    "year": 2013,
+    "title": "Астрал: Глава 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q13423790"
+    ],
+    "kinopoiskId": "666804",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "H4k",
+    "tmdbId": "49018",
+    "original": "Insidious",
+    "year": 2010,
+    "title": "Астрал",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q122713"
+    ],
+    "kinopoiskId": "495892",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "eXZY",
+    "tmdbId": "423108",
+    "original": "The Conjuring: The Devil Made Me Do It",
+    "year": 2021,
+    "title": "Заклятие 3: По воле дьявола",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q64145552"
+    ],
+    "kinopoiskId": "1046638",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "7GJg",
+    "tmdbId": "259693",
+    "original": "The Conjuring 2",
+    "year": 2016,
+    "title": "Заклятие 2",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q21001651"
+    ],
+    "kinopoiskId": "780392",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "4sr2",
+    "tmdbId": "138843",
+    "original": "The Conjuring",
+    "year": 2013,
+    "title": "Заклятие",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q5540479"
+    ],
+    "kinopoiskId": "468994",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27xk",
+    "tmdbId": "2057",
+    "original": "Original Sin",
+    "year": 2001,
+    "title": "Соблазн",
+    "sources": [
+      "https://www.kinopoisk.ru/film/17663/"
+    ],
+    "kinopoiskId": "17663",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "aJMy",
+    "tmdbId": "328425",
+    "original": "The Gift",
+    "year": 2015,
+    "title": "Подарок",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q19750433"
+    ],
+    "kinopoiskId": "888304",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "zD38",
+    "tmdbId": "944401",
+    "original": "Dogman",
+    "year": 2023,
+    "title": "Догмен",
+    "sources": [
+      "https://www.kinopoisk.ru/film/4922959/"
+    ],
+    "kinopoiskId": "4922959",
+    "aliases": [
+      "Догмэн"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "5xtO",
+    "tmdbId": "181886",
+    "original": "Enemy",
+    "year": 2013,
+    "title": "Враг",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q2844879"
+    ],
+    "kinopoiskId": "673910",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ceBS",
+    "tmdbId": "359940",
+    "original": "Three Billboards Outside Ebbing, Missouri",
+    "year": 2017,
+    "title": "Три билборда на границе Эббинга, Миссури",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q24053277"
+    ],
+    "kinopoiskId": "944098",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "2bg8",
+    "tmdbId": "949",
+    "original": "Heat",
+    "year": 1995,
+    "title": "Схватка",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q42198"
+    ],
+    "kinopoiskId": "571",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28MA",
+    "tmdbId": "1422",
+    "original": "The Departed",
+    "year": 2006,
+    "title": "Отступники",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q172975"
+    ],
+    "kinopoiskId": "81314",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "23PY",
+    "tmdbId": "4787",
+    "original": "Cassandra's Dream",
+    "year": 2007,
+    "title": "Мечта Кассандры",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q833530"
+    ],
+    "kinopoiskId": "255368",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Z2o",
+    "tmdbId": "9296",
+    "original": "S1m0ne",
+    "year": 2002,
+    "title": "Симона",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q909461"
+    ],
+    "kinopoiskId": "813",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "294Y",
+    "tmdbId": "1090",
+    "original": "The Thirteenth Floor",
+    "year": 1999,
+    "title": "Тринадцатый этаж",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q630289"
+    ],
+    "kinopoiskId": "1086",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "fsJW",
+    "tmdbId": "435615",
+    "original": "Possessor",
+    "year": 2020,
+    "title": "В чужой шкуре",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q60849823"
+    ],
+    "kinopoiskId": "996875",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1k44",
+    "tmdbId": "31011",
+    "original": "Mr. Nobody",
+    "year": 2009,
+    "title": "Господин Никто",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q732022"
+    ],
+    "kinopoiskId": "232785",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "8lDS",
+    "tmdbId": "274857",
+    "original": "King Arthur: Legend of the Sword",
+    "year": 2017,
+    "title": "Меч короля Артура",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q19569225"
+    ],
+    "kinopoiskId": "824437",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27Ss",
+    "tmdbId": "1911",
+    "original": "The 13th Warrior",
+    "year": 1999,
+    "title": "13-й воин",
+    "sources": [
+      "https://www.kinopoisk.ru/film/10273/"
+    ],
+    "kinopoiskId": "10273",
+    "aliases": [
+      "Тринадцатый воин"
+    ],
+    "status": "verified"
+  },
+  {
+    "id": "nK2s",
+    "tmdbId": "639933",
+    "original": "The Northman",
+    "year": 2022,
+    "title": "Варяг",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q87126244"
+    ],
+    "kinopoiskId": "1313198",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "5B7s",
+    "tmdbId": "184315",
+    "original": "Hercules",
+    "year": 2014,
+    "title": "Геракл",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q14522493"
+    ],
+    "kinopoiskId": "461958",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "4FV0",
+    "tmdbId": "147441",
+    "original": "Exodus: Gods and Kings",
+    "year": 2014,
+    "title": "Исход: Цари и боги",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q14942871"
+    ],
+    "kinopoiskId": "484611",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "6aje",
+    "tmdbId": "205584",
+    "original": "Gods of Egypt",
+    "year": 2016,
+    "title": "Боги Египта",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q15972938"
+    ],
+    "kinopoiskId": "682886",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "nlU",
+    "tmdbId": "57165",
+    "original": "Wrath of the Titans",
+    "year": 2012,
+    "title": "Гнев титанов",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q226773"
+    ],
+    "kinopoiskId": "518128",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "6JwC",
+    "tmdbId": "228150",
+    "original": "Fury",
+    "year": 2014,
+    "title": "Ярость",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q14786561"
+    ],
+    "kinopoiskId": "740644",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29ro",
+    "tmdbId": "857",
+    "original": "Saving Private Ryan",
+    "year": 1998,
+    "title": "Спасти рядового Райана",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q165817"
+    ],
+    "kinopoiskId": "371",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "shJM",
+    "tmdbId": "753342",
+    "original": "Napoleon",
+    "year": 2023,
+    "title": "Наполеон",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q105806948"
+    ],
+    "kinopoiskId": "1437923",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1YZO",
+    "tmdbId": "9313",
+    "original": "The Man in the Iron Mask",
+    "year": 1998,
+    "title": "Человек в железной маске",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1123463"
+    ],
+    "kinopoiskId": "6872",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ieZs",
+    "tmdbId": "504949",
+    "original": "The King",
+    "year": 2019,
+    "title": "Король Англии",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q54801155"
+    ],
+    "kinopoiskId": "1114570",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ZUI",
+    "tmdbId": "41215",
+    "original": "Black Death",
+    "year": 2010,
+    "title": "Чёрная смерть",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q679833"
+    ],
+    "kinopoiskId": "404200",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1Q3W",
+    "tmdbId": "13491",
+    "original": "Arn: The Knight Templar",
+    "year": 2007,
+    "title": "Арн: Рыцарь-тамплиер",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1507766"
+    ],
+    "kinopoiskId": "266758",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28Gs",
+    "tmdbId": "1495",
+    "original": "Kingdom of Heaven",
+    "year": 2005,
+    "title": "Царство небесное",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q207698"
+    ],
+    "kinopoiskId": "2602",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27K4",
+    "tmdbId": "1966",
+    "original": "Alexander",
+    "year": 2004,
+    "title": "Александр",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q162277"
+    ],
+    "kinopoiskId": "4721",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "ynqo",
+    "tmdbId": "912649",
+    "original": "Venom: The Last Dance",
+    "year": 2024,
+    "title": "Веном: Последний танец",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q113371337"
+    ],
+    "kinopoiskId": "4766559",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "29FA",
+    "tmdbId": "769",
+    "original": "GoodFellas",
+    "year": 1990,
+    "title": "Славные парни",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q42047"
+    ],
+    "kinopoiskId": "350",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "IWFy",
+    "tmdbId": "1184918",
+    "original": "The Wild Robot",
+    "year": 2024,
+    "title": "Дикий робот",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q124378349"
+    ],
+    "kinopoiskId": "5457899",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bYJQ",
+    "tmdbId": "354912",
+    "original": "Coco",
+    "year": 2017,
+    "title": "Тайна Коко",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q5815826"
+    ],
+    "kinopoiskId": "679486",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "28Vs",
+    "tmdbId": "1359",
+    "original": "American Psycho",
+    "year": 2000,
+    "title": "Американский психопат",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q1405126"
+    ],
+    "kinopoiskId": "588",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "wUow",
+    "tmdbId": "872585",
+    "original": "Oppenheimer",
+    "year": 2023,
+    "title": "Оппенгеймер",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q108839994"
+    ],
+    "kinopoiskId": "4664634",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "1OEc",
+    "tmdbId": "14160",
+    "original": "Up",
+    "year": 2009,
+    "title": "Вверх",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q174811"
+    ],
+    "kinopoiskId": "325381",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "27ww",
+    "tmdbId": "2062",
+    "original": "Ratatouille",
+    "year": 2007,
+    "title": "Рататуй",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q170035"
+    ],
+    "kinopoiskId": "89514",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "bCLK",
+    "tmdbId": "346698",
+    "original": "Barbie",
+    "year": 2023,
+    "title": "Барби",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q55436290"
+    ],
+    "kinopoiskId": "478052",
+    "aliases": [],
+    "status": "verified"
+  },
+  {
+    "id": "hTha",
+    "tmdbId": "496243",
+    "original": "Parasite",
+    "year": 2019,
+    "title": "Паразиты",
+    "sources": [
+      "https://www.wikidata.org/wiki/Q61448040"
+    ],
+    "kinopoiskId": "1043758",
+    "aliases": [],
+    "status": "verified"
+  }
+]

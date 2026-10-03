@@ -68,7 +68,7 @@ async function localizeByLetterboxd(films,cache){
 const REVIEWED_PEOPLE=Object.fromEntries((typeof PERSON_NAME_DICTIONARY==='undefined'?[]:PERSON_NAME_DICTIONARY).map(p=>[p.id,{name:p.name,aliases:p.aliases,nameStatus:p.status,nameVerificationBasis:p.verification_basis,nameSource:p.source_url}]));
 REVIEWED_PEOPLE['actor/chris-pratt']={name:'Крис Прэтт',aliases:['Крис Пратт'],nameStatus:'verified',nameSource:'https://ru.wikipedia.org/wiki/Прэтт,_Крис'};
 function applyReviewedPerson(p){const match=REVIEWED_PEOPLE[p.id];if(!match)return p;const aliases=[...new Set([...(p.aliases||[]),...(match.aliases||[]),p.original,p.name].filter(n=>n&&n!==match.name))];Object.assign(p,match,{aliases});return p;}
-function reviewedPeople(data){if(!data)return data;for(const f of data.films||[])for(const key of ['actors','directors'])for(const p of f[key]||[])applyReviewedPerson(p);for(const key of ['actors','directors']){for(const p of data.people?.[key]||[])applyReviewedPerson(p);data.people?.[key]?.sort((a,b)=>a.name.localeCompare(b.name,'ru'));}return data;}
+function reviewedPeople(data){if(!data)return data;for(const film of data.films||[])applyReviewedTitle(film);for(const f of data.films||[])for(const key of ['actors','directors'])for(const p of f[key]||[])applyReviewedPerson(p);for(const key of ['actors','directors']){for(const p of data.people?.[key]||[])applyReviewedPerson(p);data.people?.[key]?.sort((a,b)=>a.name.localeCompare(b.name,'ru'));}return data;}
 
 function programmeWithWatchlist(report,watchlist){
  if(!watchlist?.films)return report;
@@ -76,3 +76,8 @@ function programmeWithWatchlist(report,watchlist){
  const films=watchlist.films.map(f=>({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
  return {...report,films,people:peopleCatalog(films)};
 }
+
+// Canonical titles are independent of EPG presence and language. Match stable IDs only.
+const REVIEWED_TITLES=new Map((typeof FILM_TITLE_DICTIONARY==='undefined'?[]:FILM_TITLE_DICTIONARY).map(f=>[String(f.id),f]));
+function reviewedTitle(film){const match=REVIEWED_TITLES.get(String(film.id));return match&&(!film.tmdbId||!match.tmdbId||String(film.tmdbId)===String(match.tmdbId))?match:null;}
+function applyReviewedTitle(film){const match=reviewedTitle(film);if(!match)return film;film.aliases=[...new Set([...(film.aliases||[]),...(match.aliases||[]),film.title,film.original,match.title].filter(Boolean))];film.title=match.title;film.titleRu=match.title;film.titleStatus=match.status;film.titleSources=match.sources;return film;}
