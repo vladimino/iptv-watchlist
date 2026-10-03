@@ -41,6 +41,7 @@ async function scanEPG(stream,watchlist,now){
 }
 
 async function localizePeople(films,cache){
+ for(const f of films)for(const p of [...f.directors,...f.actors])if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);cache[p.id]={...p};}
  const ids=[...new Set(films.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
  if(!ids.length)return;
  const query=`SELECT ?tmdb ?en ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; (wdt:P161|wdt:P57|wdt:P725) ?person. ?person (rdfs:label|skos:altLabel) ?en; rdfs:label ?ru. FILTER(LANG(?en)="en" && LANG(?ru)="ru") }`;
@@ -49,11 +50,11 @@ async function localizePeople(films,cache){
  if(!response.ok)throw new Error('Russian names HTTP '+response.status);
  const data=await response.json();const index=new Map();
  for(const row of data.results.bindings){const key=row.tmdb.value+':'+norm(row.en.value);const names=index.get(key)||new Set();names.add(row.ru.value);index.set(key,names);}
- for(const f of films)for(const p of [...f.directors,...f.actors]){const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}if(cache[p.id])p.name=cache[p.id].name;}
+ for(const f of films)for(const p of [...f.directors,...f.actors]){if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);continue;}const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}if(cache[p.id])p.name=cache[p.id].name;}
 }
 function peopleCatalog(films){const collect=key=>[...new Map(films.flatMap(f=>f[key]||[]).map(p=>[p.id,p])).values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));return {directors:collect('directors'),actors:collect('actors')};}
 async function localizeByLetterboxd(films,cache){
- const missing=[...new Map(films.flatMap(f=>[...(f.directors||[]),...(f.actors||[])]).filter(p=>!cache[p.id]).map(p=>[p.id,p])).values()];
+ const missing=[...new Map(films.flatMap(f=>[...(f.directors||[]),...(f.actors||[])]).filter(p=>!cache[p.id]&&!REVIEWED_PEOPLE[p.id]).map(p=>[p.id,p])).values()];
  for(let offset=0;offset<missing.length;offset+=80){
   const batch=missing.slice(offset,offset+80);const slugs=[...new Set(batch.map(p=>p.id.split('/')[1]).filter(s=>/^[a-z0-9-]+$/.test(s)))];if(!slugs.length)continue;
   const query=`SELECT ?slug ?ru WHERE { VALUES ?slug { ${slugs.map(s=>JSON.stringify(s)).join(' ')} } ?person (wdt:P6119|wdt:P12383) ?slug; rdfs:label ?ru. FILTER(LANG(?ru)="ru") }`;
@@ -63,6 +64,8 @@ async function localizeByLetterboxd(films,cache){
  }
 }
 
-// Reviewed spelling and alias: https://ru.wikipedia.org/wiki/Прэтт,_Крис
-const REVIEWED_PEOPLE={'actor/chris-pratt':{name:'Крис Прэтт',aliases:['Крис Пратт']}};
-function reviewedPeople(data){if(!data)return data;for(const f of data.films||[])for(const key of ['actors','directors'])for(const p of f[key]||[])if(REVIEWED_PEOPLE[p.id])Object.assign(p,REVIEWED_PEOPLE[p.id]);for(const key of ['actors','directors'])for(const p of data.people?.[key]||[])if(REVIEWED_PEOPLE[p.id])Object.assign(p,REVIEWED_PEOPLE[p.id]);return data;}
+// Stable Letterboxd IDs take precedence over name-only or external matches.
+const REVIEWED_PEOPLE=Object.fromEntries((typeof PERSON_NAME_DICTIONARY==='undefined'?[]:PERSON_NAME_DICTIONARY).map(p=>[p.id,{name:p.name,aliases:p.aliases,nameStatus:p.status,nameVerificationBasis:p.verification_basis,nameSource:p.source_url}]));
+REVIEWED_PEOPLE['actor/chris-pratt']={name:'Крис Прэтт',aliases:['Крис Пратт'],nameStatus:'verified',nameSource:'https://ru.wikipedia.org/wiki/Прэтт,_Крис'};
+function applyReviewedPerson(p){const match=REVIEWED_PEOPLE[p.id];if(!match)return p;const aliases=[...new Set([...(p.aliases||[]),...(match.aliases||[]),p.original,p.name].filter(n=>n&&n!==match.name))];Object.assign(p,match,{aliases});return p;}
+function reviewedPeople(data){if(!data)return data;for(const f of data.films||[])for(const key of ['actors','directors'])for(const p of f[key]||[])applyReviewedPerson(p);for(const key of ['actors','directors']){for(const p of data.people?.[key]||[])applyReviewedPerson(p);data.people?.[key]?.sort((a,b)=>a.name.localeCompare(b.name,'ru'));}return data;}
