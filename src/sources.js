@@ -81,3 +81,26 @@ function programmeWithWatchlist(report,watchlist){
 const REVIEWED_TITLES=new Map((typeof FILM_TITLE_DICTIONARY==='undefined'?[]:FILM_TITLE_DICTIONARY).map(f=>[String(f.id),f]));
 function reviewedTitle(film){const match=REVIEWED_TITLES.get(String(film.id));return match&&(!film.tmdbId||!match.tmdbId||String(film.tmdbId)===String(match.tmdbId))?match:null;}
 function applyReviewedTitle(film){const match=reviewedTitle(film);if(!match)return film;film.aliases=[...new Set([...(film.aliases||[]),...(match.aliases||[]),film.title,film.original,match.title].filter(Boolean))];film.title=match.title;film.titleRu=match.title;film.titleStatus=match.status;film.titleSources=match.sources;return film;}
+
+// Newly added films use an exact TMDB film identifier; reviewed titles always win.
+async function localizeFilmTitles(films,cache){
+ const pending=films.filter(f=>!reviewedTitle(f)&&f.tmdbId&&!((cache[f.id]?.tmdbId===f.tmdbId)&&cache[f.id]?.title));
+ const ids=[...new Set(pending.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
+ if(ids.length){
+  const query=`SELECT ?tmdb ?film ?ru WHERE { VALUES ?tmdb { ${ids.map(x=>JSON.stringify(x)).join(' ')} } ?film wdt:P4947 ?tmdb; rdfs:label ?ru. FILTER(LANG(?ru)="ru") }`;
+  const response=await fetch('https://query.wikidata.org/sparql?'+new URLSearchParams({query,format:'json'}),{headers:{'Accept':'application/sparql-results+json','User-Agent':'WatchlistAirtime/1.0 (personal film programme)'},signal:AbortSignal.timeout(30000)});
+  if(!response.ok)throw new Error('Russian film titles HTTP '+response.status);
+  const data=await response.json(),byId=new Map();
+  for(const row of data.results.bindings){const id=row.tmdb.value,ru=row.ru.value,source=row.film.value;if(!/[а-яё]/i.test(ru))continue;const labels=byId.get(id)||new Map();labels.set(ru,source);byId.set(id,labels);}
+  for(const f of pending){const labels=byId.get(f.tmdbId);if(labels?.size===1){const [title,source]=[...labels][0];cache[f.id]={tmdbId:f.tmdbId,title,status:'provisional',sources:[source.replace('http:','https:').replace('/entity/','/wiki/')]};}}
+ }
+ for(const f of films){if(reviewedTitle(f)){applyReviewedTitle(f);continue;}const match=cache[f.id];if(match&&match.tmdbId===f.tmdbId&&match.title){f.aliases=[...new Set([...(f.aliases||[]),f.original,f.title,match.title].filter(Boolean))];f.title=match.title;f.titleRu=match.title;f.titleStatus=match.status;f.titleSources=match.sources;}}
+}
+function assertEPGContinuity(result,previous,watchlistCount,now){
+ if(result.stats.epgEnd<now+8*3600000)throw new Error('EPG horizon is too short for the next update');
+ if(!previous?.stats)return;
+ const old=previous.stats,ratio=watchlistCount/(previous.watchlistCount||watchlistCount);
+ if(old.scanned>10000&&result.stats.scanned<old.scanned*.65)throw new Error('EPG has too few programmes compared with the last good update');
+ if(old.channels>100&&result.coverage.length<old.channels*.65)throw new Error('EPG has too few channels compared with the last good update');
+ if(ratio>.8&&ratio<1.2&&old.broadcasts>100&&result.films.reduce((n,f)=>n+f.shows.length,0)<old.broadcasts*.35)throw new Error('EPG has too few matching broadcasts compared with the last good update');
+}

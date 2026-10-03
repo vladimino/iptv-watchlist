@@ -9,7 +9,7 @@ vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,
 ctx.fixture=merged;ctx.cutoff=Date.parse(report.updatedAt);
 vm.runInContext("CUTOFF=cutoff;MAX_YEAR=Math.max(MAX_YEAR,...fixture.films.map(f=>Number(f.year)||0));state.to=MAX_YEAR;films=fixture.films.map(f=>({...f,genres:f.genres||[],shows:f.shows.map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));",ctx);
 assert.equal(vm.runInContext('state.includeUnscheduled',ctx),false);
-const original=vm.runInContext('visibleFilms().length',ctx);assert.equal(original,report.films.length);
+const original=vm.runInContext('visibleFilms().length',ctx);assert.equal(original,report.stats.uniqueFilms);
 assert.equal(vm.runInContext('state.includeUnscheduled=true;visibleFilms().length',ctx),watchlist.films.length);
 const nolan=vm.runInContext("state.directors='director/christopher-nolan';visibleFilms().length",ctx);
 assert.equal(nolan,watchlist.films.filter(f=>f.directors?.some(p=>p.id==='director/christopher-nolan')).length);
