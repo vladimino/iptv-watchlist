@@ -62,3 +62,7 @@ async function localizeByLetterboxd(films,cache){
   for(const p of batch){const names=labels.get(p.id.split('/')[1]);if(names?.size===1){const raw=[...names][0];cache[p.id]={name:raw.includes(', ')?raw.split(', ').reverse().join(' '):raw,original:p.original};}}
  }
 }
+
+// Reviewed spelling and alias: https://ru.wikipedia.org/wiki/Прэтт,_Крис
+const REVIEWED_PEOPLE={'actor/chris-pratt':{name:'Крис Прэтт',aliases:['Крис Пратт']}};
+function reviewedPeople(data){if(!data)return data;for(const f of data.films||[])for(const key of ['actors','directors'])for(const p of f[key]||[])if(REVIEWED_PEOPLE[p.id])Object.assign(p,REVIEWED_PEOPLE[p.id]);for(const key of ['actors','directors'])for(const p of data.people?.[key]||[])if(REVIEWED_PEOPLE[p.id])Object.assign(p,REVIEWED_PEOPLE[p.id]);return data;}

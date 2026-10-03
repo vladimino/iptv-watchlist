@@ -37,8 +37,8 @@ export default {async fetch(request,env){
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(request.method==='POST'&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
-  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');return data?json(data):json({error:'Первое обновление ещё выполняется'},503);}
-  if(url.pathname==='/api/watchlist'&&request.method==='GET')return json(await loadJSON(env,'watchlist.json')||{films:[]});
+  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');return data?json(reviewedPeople(data)):json({error:'Первое обновление ещё выполняется'},503);}
+  if(url.pathname==='/api/watchlist'&&request.method==='GET')return json(reviewedPeople(await loadJSON(env,'watchlist.json'))||{films:[]});
   if(url.pathname==='/api/status'&&request.method==='GET'){const run=await loadJSON(env,'sync.json');return json(run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error}: {stage:'not_started'});}
   if(url.pathname==='/api/sync/start'&&request.method==='POST')return json(await beginSync(env));
   if(['/api/sync/metadata','/api/sync/epg'].includes(url.pathname)&&request.method==='POST'){
