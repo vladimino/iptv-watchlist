@@ -71,6 +71,7 @@ function applyReviewedPerson(p){const match=REVIEWED_PEOPLE[p.id];if(!match)retu
 function reviewedPeople(data){if(!data)return data;for(const film of data.films||[])applyReviewedTitle(film);for(const f of data.films||[])for(const key of ['actors','directors'])for(const p of f[key]||[])applyReviewedPerson(p);for(const key of ['actors','directors']){for(const p of data.people?.[key]||[])applyReviewedPerson(p);data.people?.[key]?.sort((a,b)=>a.name.localeCompare(b.name,'ru'));}return data;}
 
 function programmeWithWatchlist(report,watchlist){
+ if(report.films.length===report.watchlistCount)return report;
  if(!watchlist?.films)return report;
  const scheduled=new Map(report.films.map(f=>[String(f.id),f]));
  const films=watchlist.films.map(f=>({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
