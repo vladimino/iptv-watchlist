@@ -11,13 +11,20 @@ function parseWatchlist(html){
  const films=[];for(const m of html.matchAll(/<div\b[^>]*data-component-class="LazyPoster"[^>]*>/g)){const tag=m[0],display=attr(tag,'data-item-name'),path=attr(tag,'data-item-link');if(!/^\/film\/[a-z0-9-]+\/$/.test(path))continue;const identity=JSON.parse(attr(tag,'data-postered-identifier'));films.push({id:identity.lid,title:cleanTitle(display),original:cleanTitle(display),year:extractYear(display),url:'https://letterboxd.com'+path});}
  const total=Number(html.match(/js-watchlist-count[^>]*>([\d,]+)/)?.[1]?.replaceAll(',',''));const next=html.match(/<a\b[^>]*class="next"[^>]*href="([^"]+)"/)?.[1];return {films,total,next};
 }
+function parseSynopsis(html){
+ const tag=html.match(/<meta\b[^>]*\bname="description"[^>]*>/i)?.[0]||html.match(/<meta\b[^>]*\bproperty="og:description"[^>]*>/i)?.[0];
+ if(!tag)return null;
+ const description=plain(attr(tag,'content'));
+ if(!description||/^watch .+ on letterboxd/i.test(description)||description.length>2500)return null;
+ return description;
+}
 function parseFilm(html,base){
  const raw=html.match(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/)?.[1];if(!raw)throw new Error('Film metadata missing');const meta=JSON.parse(raw.replace(/\/\*[\s\S]*?\*\//g,''));if(!meta.name)throw new Error('Film name missing');
  const alt=html.match(/Alternative Titles<\/span><\/h3>\s*<div[^>]*>\s*<p>([\s\S]*?)<\/p>/)?.[1]||'';
  const d=meta.duration?.match(/PT(?:(\d+)H)?(?:(\d+)M)?/);const runtime=d?(Number(d[1]||0)*60+Number(d[2]||0)):null;
  const people=(value,role)=>[...new Map((Array.isArray(value)?value:value?[value]:[]).filter(p=>p.name).map(p=>{const path=String(p.sameAs||p.url||'').match(new RegExp('/'+role+'/([a-z0-9-]+)/'));const name=decode(p.name);return [path?.[1]||name,{id:role+'/'+(path?.[1]||name),original:name,name}];})).values()];
  const directors=people(meta.director,'director'),actors=people(meta.actor,'actor').slice(0,10);
- return {...base,directors,actors,peopleVersion:1,tmdbId:html.match(/data-tmdb-id="(\d+)"/)?.[1]||null,original:decode(meta.name),aliases:[...new Set([base.title,decode(meta.name),...plain(alt).split(/,\s*/)].filter(Boolean))],genres:(Array.isArray(meta.genre)?meta.genre:meta.genre?[meta.genre]:[]).map(g=>GENRE_MAP[g]||g),poster:typeof meta.image==='string'&&meta.image.startsWith('https://')?meta.image:null,runtime,metadataAt:new Date().toISOString()};
+ return {...base,directors,actors,peopleVersion:1,tmdbId:html.match(/data-tmdb-id="(\d+)"/)?.[1]||null,original:decode(meta.name),aliases:[...new Set([base.title,decode(meta.name),...plain(alt).split(/,\s*/)].filter(Boolean))],genres:(Array.isArray(meta.genre)?meta.genre:meta.genre?[meta.genre]:[]).map(g=>GENRE_MAP[g]||g),poster:typeof meta.image==='string'&&meta.image.startsWith('https://')?meta.image:null,runtime,synopsis:parseSynopsis(html),synopsisFetchedAt:new Date().toISOString(),metadataAt:new Date().toISOString()};
 }
 function xmlTime(s){const m=s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-])(\d{2})(\d{2})$/);if(!m)return NaN;return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6])-(m[7]==='+'?1:-1)*(+m[8]*60 + +m[9])*60000;}
 async function scanEPG(stream,watchlist,now){
