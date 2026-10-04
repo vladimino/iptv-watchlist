@@ -26,7 +26,7 @@ async function beginSync(env){
  if(films.size!==total)throw new Error(`Incomplete watchlist: ${films.size}/${total}`);
  const verify=parseWatchlist(await getHTML(SOURCES.watchlist));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
  const cache=await loadJSON(env,'metadata.json')||{};const all=[...films.values()].map(f=>cache[f.id]?{...cache[f.id],...f,aliases:cache[f.id].aliases}:f);const pending=all.filter(f=>!f.metadataAt||f.peopleVersion!==1||f.peopleNamesVersion!==2||!f.synopsisFetchedAt||Date.now()-Date.parse(f.metadataAt)>30*86400000).map(f=>f.id);
- const priorList=await loadJSON(env,'watchlist.json'),priorRun=await loadJSON(env,'sync.json'),ratingIndex=await loadJSON(env,'enrichment/view-index.json')||{},priorIds=new Set((priorList?.films||[]).map(f=>String(f.id)));const ratedIds=Object.entries(ratingIndex).filter(([,value])=>value.actualRating!==null&&value.actualRating!==undefined).map(([id])=>id);const ratingPending=[...new Set([...all.filter(f=>!priorIds.has(String(f.id))).map(f=>String(f.id)),...ratedIds,...(priorRun?.ratingRetry||[])])].filter(id=>all.some(f=>String(f.id)===id));
+ const ratingPending=['public-films-list'];
  const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,ratingPending,cursor:0,remaining:pending.length,pages,failures:[]};await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
 }
 async function metadataSync(env,run){
@@ -44,9 +44,8 @@ async function metadataSync(env,run){
 async function finishSync(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)});for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 async function completeWithRatings(env,run,report){
  const result=await finishSync(env,run,report);if(!run.ratingPending?.length)return result;
- const films=new Map((report.films||[]).map(f=>[String(f.id),f])),retry=[];let saved=0;
- for(const id of run.ratingPending){const film=films.get(id);if(!film)continue;try{const response=await refreshPersonalRating(env,film);if(response.status==='saved')saved++;}catch{retry.push(id);}}
- run.ratingRetry=retry;delete run.ratingPending;await saveJSON(env,'sync.json',run);return {...result,personalRatingsSaved:saved,personalRatingRetry:retry.length};
+ try{const ratings=await refreshRatingsFromFilms(env,report);delete run.ratingPending;delete run.ratingError;await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
+ catch(e){run.ratingError=String(e.message).slice(0,200);await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError};}
 }
 async function epgSync(env,run){
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId)return completeWithRatings(env,run,committed);}
@@ -78,7 +77,7 @@ export default {async fetch(request,env){
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
   if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const merged=programmeWithWatchlist(data,watchlist);for(const f of merged.films){const t=titles[f.id];if(!reviewedTitle(f)&&t?.tmdbId===f.tmdbId&&t.title){f.title=t.title;f.titleRu=t.title;f.titleStatus=t.status;f.titleSources=t.sources;}}return json(reviewedPeople(merged));}
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};for(const f of data.films){const t=titles[f.id];if(!reviewedTitle(f)&&t?.tmdbId===f.tmdbId&&t.title){f.title=t.title;f.titleRu=t.title;f.titleStatus=t.status;f.titleSources=t.sources;}}return json(reviewedPeople(data));}
-  if(url.pathname==='/api/status'&&request.method==='GET'){const run=await loadJSON(env,'sync.json');return json(run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error}: {stage:'not_started'});}
+  if(url.pathname==='/api/status'&&request.method==='GET'){const run=await loadJSON(env,'sync.json');return json(run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingsPending:!!run.ratingPending?.length}: {stage:'not_started'});}
   if(url.pathname==='/api/sync/start'&&request.method==='POST')return json(await beginSync(env));
   if(['/api/sync/metadata','/api/sync/epg'].includes(url.pathname)&&request.method==='POST'){
    const body=await request.json();const run=await loadJSON(env,'sync.json');if(!run||body.runId!==run.runId)return json({error:'Run id mismatch'},409);
