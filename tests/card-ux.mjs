@@ -1,0 +1,11 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
+const html=fs.readFileSync('public/index.html','utf8'),css=fs.readFileSync('public/styles.css','utf8');
+assert(!html.includes('class="demo-note"'));assert(html.includes('class="footer-status"'));assert(!html.includes('archive-note'));assert(html.includes('id="archive-range"')&&html.includes('id="future-range"'));
+assert(css.includes('.score-badge{')&&css.includes('clip-path:polygon('));assert(css.includes('.started-action{position:absolute;right:18px;bottom:16px'));
+const ctx=vm.createContext({Date,Intl,Set,Map,document:{querySelector:()=>({})}});vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+ctx.film={id:'one',title:'Фильм',original:'Film',year:2020,runtime:120,genres:['Драма'],shows:[],directors:[],actors:[]};
+let card=vm.runInContext('card(film)',ctx);assert(!card.includes('score-badge'));assert(card.includes('120 мин'));assert(card.includes('data-started-id="one"'));assert(!card.includes('Начал смотреть</span>'));assert(card.indexOf('started-action')>card.indexOf('screenings'));
+ctx.input={profile:null,films:{one:{actualRating:4.5,prediction:null}}};vm.runInContext('enrichment=input',ctx);card=vm.runInContext('card(film)',ctx);assert(card.includes('score-actual'));assert(card.includes('4.5'));assert(!card.includes('score-predicted'));
+ctx.input.films.one={actualRating:null,prediction:{predictedRating:4,probability4Plus:.7,moodLabels:['расследование','напряжённый']}};card=vm.runInContext('card(film)',ctx);assert(!card.includes('score-actual'));assert(card.includes('score-predicted'));assert(card.includes('расследование'));
+ctx.input.films.one.actualRating=4.5;card=vm.runInContext('card(film)',ctx);assert(card.includes('score-actual')&&card.includes('score-predicted'));
+console.log('Card UX: corner badges, actual and predicted coexistence, compact eye action, footer and date placeholders passed');

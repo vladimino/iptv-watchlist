@@ -12,7 +12,6 @@
   <main>
     <section class="page-heading"><div><p class="eyebrow">ЛИЧНАЯ КИНОПРОГРАММА</p><h1>Что посмотреть</h1><p class="intro">Твои фильмы. Все показы в одном месте.</p></div><div class="snapshot" id="snapshot"><span>Загрузка программы…</span><span class="muted">Время — Europe/Madrid</span></div></section>
     <label class="search-box"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" type="search" placeholder="Название фильма — русское или оригинальное" aria-label="Поиск по русскому или оригинальному названию" autocomplete="off"><span>Поиск по фильмам</span></label>
-    <div class="demo-note" id="source-note"><span class="info-icon" aria-hidden="true">i</span><span>Получаем последнее сохранённое расписание.</span></div>
     <div class="workspace">
       <button class="filter-toggle" id="filter-toggle" aria-expanded="false" aria-controls="filters">Фильтры <span id="filter-summary">Все фильмы</span></button>
       <aside class="filters" id="filters" aria-label="Фильтры фильмов">
@@ -24,7 +23,7 @@
         <fieldset><legend>Жанры</legend><div id="genres" class="genre-list"></div><p class="hint">Хотя бы один из выбранных</p></fieldset>
         <fieldset class="year-filter"><legend>Год выпуска</legend><div class="years"><label><span>От</span><input id="year-from" type="number" min="1900" max="2026" value="1900" inputmode="numeric"></label><span class="year-dash">—</span><label><span>До</span><input id="year-to" type="number" min="1900" max="2026" value="2026" inputmode="numeric"></label></div><div class="year-presets" role="group" aria-label="Быстрый выбор годов"><button type="button" data-year-from="1900" data-year-to="1989" aria-pressed="false" title="По 1989 включительно">Старые</button><button type="button" data-year-from="1990" data-year-to="1999" aria-pressed="false" title="1990–1999">1990-е</button><button type="button" data-year-from="2000" data-year-to="2009" aria-pressed="false" title="2000–2009">2000-е</button><button type="button" data-year-from="2010" data-year-to="2019" aria-pressed="false" title="2010–2019">2010-е</button><button type="button" data-year-from="2020" data-year-to="current" aria-pressed="false" title="С 2020 по текущий год">2020-е</button><button type="button" data-year-from="2025" data-year-to="current" aria-pressed="false" title="С 2025 по текущий год">Свежие</button></div><p id="year-error" class="error" hidden>Укажи годы от 1900 до 2026; «от» не должно быть больше «до».</p></fieldset>
         <section class="activity" aria-labelledby="activity-title"><h2 id="activity-title">События</h2><div class="activity-scroll" role="region" aria-label="История событий" tabindex="0"><ol id="activity-list"></ol><p id="activity-status" role="status">Загружаем события…</p><button type="button" id="activity-more" hidden>Более давние события</button></div></section>
-        <div class="coverage"><span class="coverage-label">ОКНО ПРОГРАММЫ</span><div><span class="legend-dot archive-dot"></span><strong>Последние 3 дня</strong><p>Последние 72 часа</p></div><div><span class="legend-dot future-dot"></span><strong>Следующие сутки</strong><p>Ближайшие 24 часа</p></div><p class="archive-note">Прошедшие эфиры по EPG. Наличие записи в архиве провайдера не проверено.</p></div>
+        <div class="coverage"><span class="coverage-label">ОКНО ПРОГРАММЫ</span><div><span class="legend-dot archive-dot"></span><strong>Последние 3 дня</strong><p id="archive-range">Уточняем даты…</p></div><div><span class="legend-dot future-dot"></span><strong>Следующие сутки</strong><p id="future-range">Уточняем даты…</p></div></div>
       </aside>
       <section class="results" aria-label="Фильмы и показы">
         <div class="period-tabs" role="group" aria-label="Период показов"><button data-period="all" aria-pressed="true">Все показы <span id="count-all"></span></button><button data-period="archive" aria-pressed="false">Архив <span id="count-archive"></span></button><button data-period="future" aria-pressed="false">Следующие сутки <span id="count-future"></span></button></div>
@@ -34,7 +33,7 @@
         <div id="empty" class="empty" hidden><span aria-hidden="true">◌</span><h2>Таких фильмов не найдено</h2><p>Измени название, выбери другой жанр или расширь диапазон лет.</p><button id="empty-reset">Сбросить фильтры</button></div>
       </section>
     </div>
-    <footer><span>В эфире / Watchlist</span><span class="match-legend">≈ — совпадение без года в EPG</span><span id="taste-version">Модель вкуса: не настроена</span><span id="source-summary">EPG Team · Letterboxd</span></footer>
+    <footer><span>В эфире / Watchlist</span><span class="match-legend">≈ — совпадение без года в EPG</span><div class="footer-status"><span id="taste-version">Модель вкуса: не настроена</span><span id="source-note">Получаем последнее сохранённое расписание.</span><span id="source-summary">EPG Team · Letterboxd</span></div></footer>
   </main>
   <script src="app.js"></script>
 </body>
