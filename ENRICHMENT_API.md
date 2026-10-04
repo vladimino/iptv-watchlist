@@ -59,3 +59,11 @@ Use `rating:null` to clear one. The film's actual rating never enters the `/next
 ## Failure behavior
 
 `GET /api/enrichment/status` returns the latest run, failures, pending/stale count, schema/prompt versions. The programme API does not read enrichment storage. A failed recompute keeps the previously committed prediction and its history, and the UI continues to show the programme. Ordinary successful daily checks need no ChatGPT notification; the Site's Events panel is the user-facing record.
+
+## Letterboxd personal ratings and runtime
+
+Film runtime is already parsed from each Letterboxd film page as minutes and is included in the programme snapshot. Some unreleased films have no published runtime; their value remains `null` until Letterboxd supplies it. The card displays runtime when available.
+
+The user's own rating is fetched from the public member-film page (`https://letterboxd.com/demo-user/film/<slug>/`) and identity-checked against the exact film URL and member before persistence. It is stored in `enrichment/films/<id>/actual.json`, never in a fingerprint or prediction input. A missing member-film page means no verified rating from that source; it does not erase an older known rating.
+
+After a successful programme commit, the existing daily sync checks newly added watchlist IDs (including re-added films with cached metadata) and retries transient rating failures on the next run. A failed rating lookup never rolls back programme or watchlist data. One-time or later manual audits can call `POST /api/enrichment/ratings/backfill` with `{"cursor":0,"batchSize":10}` and continue using `nextCursor` until `done`; pass the first response's `programmeRunId` to detect a changing source snapshot. Results include saved, unchanged, not_found, not_rated or a per-film error. This endpoint only writes ratings; it does not update the programme timestamp.

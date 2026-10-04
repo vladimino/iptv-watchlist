@@ -44,6 +44,31 @@ const predictionCurrent=(p,profile,f)=>!!p&&!!profile&&fingerprintCurrent(f)&&p.
 function publicPrediction(p,profile,f){return predictionCurrent(p,profile,f)?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodLabels:p.moodLabels}:null;}
 async function readFilmState(env,id){const key=filmKey(id);const [fingerprint,predictions,actual]=await Promise.all([loadJSON(env,key+'fingerprint.json'),loadJSON(env,key+'predictions.json'),loadJSON(env,key+'actual.json')]);return {fingerprint,predictions,actual};}
 async function updateViewIndex(env,id,changes){const key=ENRICHMENT_KEY+'view-index.json',index=await loadJSON(env,key)||{};index[id]={...(index[id]||{}),...changes};await saveJSON(env,key,index);}
+function parsePersonalRating(html,filmUrl){
+ for(const script of html.matchAll(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)){
+  let value;try{value=JSON.parse(script[1].replace(/\/\*[\s\S]*?\*\//g,''));}catch{continue;}
+  const author=Array.isArray(value.author)?value.author:[value.author];
+  if(value['@type']!=='Review'||!author.some(a=>a?.sameAs==='https://letterboxd.com/demo-user/')||value.itemReviewed?.sameAs!==filmUrl)continue;
+  const rating=Number(value.reviewRating?.ratingValue);if(Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)return rating;
+ }
+ return null;
+}
+async function refreshPersonalRating(env,film){
+ const id=String(film.id),match=String(film.url||'').match(/^https:\/\/letterboxd\.com\/film\/([a-z0-9-]+)\/$/);if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!match)throw new Error('Invalid Letterboxd film identity');
+ const sourceUrl='https://letterboxd.com/demo-user/film/'+match[1]+'/';let response;
+ try{response=await fetch(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html'},signal:AbortSignal.timeout(15000)});}catch(e){throw new Error('Rating lookup failed: '+e.message);}
+ if(response.status===404)return {filmId:id,status:'not_found'};if(!response.ok)throw new Error('Rating source HTTP '+response.status);
+ const rating=parsePersonalRating(await response.text(),film.url);if(rating===null)return {filmId:id,status:'not_rated'};
+ const previous=await loadJSON(env,filmKey(id)+'actual.json');if(previous?.rating===rating)return {filmId:id,status:'unchanged',rating};
+ await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:new Date().toISOString()});await updateViewIndex(env,id,{actualRating:rating});return {filmId:id,status:'saved',rating};
+}
+async function ratingsBackfill(env,body){
+ if(!Number.isInteger(body.cursor)||body.cursor<0||!Number.isInteger(body.batchSize)||body.batchSize<1||body.batchSize>10)return json({error:'Invalid cursor or batchSize'},400);
+ const report=await loadJSON(env,'programme.json');if(!report?.runId||!Array.isArray(report.films))return json({error:'No published programme'},409);if(body.programmeRunId&&body.programmeRunId!==report.runId)return json({error:'Programme changed; restart backfill'},409);
+ const films=[...new Map(report.films.map(f=>[String(f.id),f])).values()].sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));const selected=films.slice(body.cursor,body.cursor+body.batchSize),results=[];
+ for(const film of selected){try{results.push(await refreshPersonalRating(env,film));}catch(e){results.push({filmId:String(film.id),error:String(e.message).slice(0,200)});}}
+ return json({programmeRunId:report.runId,total:films.length,cursor:body.cursor,nextCursor:body.cursor+selected.length,done:body.cursor+selected.length>=films.length,results});
+}
 function eligibleEnrichmentFilms(report){const ids=new Set();return (report.films||[]).filter(f=>{const id=String(f.id);if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||ids.has(id)||!Array.isArray(f.shows)||!f.shows.some(s=>s.start>=report.window?.from&&s.start<report.window?.to))return false;ids.add(id);return true;}).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
 function modelMetadata(film){return {id:String(film.id),letterboxdUri:film.url,title:film.title,original:film.original,year:film.year,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,runtime:film.runtime||null};}
 async function enrichmentStart(env,body){
@@ -92,5 +117,6 @@ async function enrichmentRoute(request,env,url){const path=url.pathname;let body
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:Object.keys(EXECUTION).slice(0,13),moodLabels:'2–4 short labels',strengths:'short string array',risks:'short string array',confidence:['low','medium','high'],sourceBasis:['metadata','model_knowledge','web_research','mixed'],sourceRefs:'URL or model_knowledge'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:['low','medium','high'],matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels'},rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film']});
  if(path==='/api/enrichment/view'&&request.method==='GET')return json(await enrichmentView(env));
  if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt:new Date().toISOString()});await updateViewIndex(env,id,{actualRating:rating});results.push({filmId:id,status:'saved'});}return json({results});}
+ if(path==='/api/enrichment/ratings/backfill'&&request.method==='POST')return ratingsBackfill(env,body);
  return json({error:'Not found'},404);
 }
