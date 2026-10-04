@@ -28,13 +28,13 @@
       </aside>
       <section class="results" aria-label="Фильмы и показы">
         <div class="period-tabs" role="group" aria-label="Период показов"><button data-period="all" aria-pressed="true">Все показы <span id="count-all"></span></button><button data-period="archive" aria-pressed="false">Архив <span id="count-archive"></span></button><button data-period="future" aria-pressed="false">Следующие сутки <span id="count-future"></span></button></div>
-        <div class="results-caption"><p id="result-count" role="status" aria-live="polite"></p><select id="sort" aria-label="Сортировка фильмов"><option value="title" selected>Название · А–Я</option><option id="sort-time" value="time">Ближайшие эфиры — сначала</option></select></div>
+        <div class="results-caption"><p id="result-count" role="status" aria-live="polite"></p><select id="sort" aria-label="Сортировка фильмов"><option value="title" selected>Название · А–Я</option><option value="personal">Для меня</option><option id="sort-time" value="time">Ближайшие эфиры — сначала</option></select></div>
         <div id="progress-error" class="progress-error" role="alert" hidden><span id="progress-error-text"></span> <button type="button" id="progress-retry">Повторить</button></div>
         <div class="movie-grid" id="movies"></div>
         <div id="empty" class="empty" hidden><span aria-hidden="true">◌</span><h2>Таких фильмов не найдено</h2><p>Измени название, выбери другой жанр или расширь диапазон лет.</p><button id="empty-reset">Сбросить фильтры</button></div>
       </section>
     </div>
-    <footer><span>В эфире / Watchlist</span><span class="match-legend">≈ — совпадение без года в EPG</span><span id="source-summary">EPG Team · Letterboxd</span></footer>
+    <footer><span>В эфире / Watchlist</span><span class="match-legend">≈ — совпадение без года в EPG</span><span id="taste-version">Модель вкуса: не настроена</span><span id="source-summary">EPG Team · Letterboxd</span></footer>
   </main>
   <script src="app.js"></script>
 </body>

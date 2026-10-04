@@ -63,7 +63,8 @@ export default {async fetch(request,env){
  try{
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
-  if(request.method==='POST'&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
+  if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
+  if(url.pathname.startsWith('/api/enrichment/'))return enrichmentRoute(request,env,url);
   if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
