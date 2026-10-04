@@ -77,11 +77,15 @@ REVIEWED_PEOPLE['actor/chris-pratt']={name:'Крис Прэтт',aliases:['Кр�
 function applyReviewedPerson(p){const match=REVIEWED_PEOPLE[p.id];if(!match)return p;const aliases=[...new Set([...(p.aliases||[]),...(match.aliases||[]),p.original,p.name].filter(n=>n&&n!==match.name))];Object.assign(p,match,{aliases});return p;}
 function reviewedPeople(data){if(!data)return data;for(const film of data.films||[])applyReviewedTitle(film);for(const f of data.films||[])for(const key of ['actors','directors'])for(const p of f[key]||[])applyReviewedPerson(p);for(const key of ['actors','directors']){for(const p of data.people?.[key]||[])applyReviewedPerson(p);data.people?.[key]?.sort((a,b)=>a.name.localeCompare(b.name,'ru'));}return data;}
 
+function availabilityDeadline(film){
+ const starts=(film.shows||[]).map(show=>Number(show.start)).filter(Number.isFinite);
+ return starts.length?new Date(Math.max(...starts)+72*3600000).toISOString():null;
+}
+function withAvailability(film){return {...film,availableUntil:availabilityDeadline(film)};}
 function programmeWithWatchlist(report,watchlist){
- if(report.films.length===report.watchlistCount)return report;
- if(!watchlist?.films)return report;
+ if(report.films.length===report.watchlistCount||!watchlist?.films){for(const film of report.films)film.availableUntil=availabilityDeadline(film);return report;}
  const scheduled=new Map(report.films.map(f=>[String(f.id),f]));
- const films=watchlist.films.map(f=>({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
+ const films=watchlist.films.map(f=>withAvailability({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
  return {...report,films,people:peopleCatalog(films)};
 }
 
