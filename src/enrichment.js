@@ -40,7 +40,7 @@ function validatePrediction(p){
 const fingerprintCurrent=f=>!!f&&f.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&!f.invalidatedAt;
 const predictionCurrent=(p,profile,f)=>!!p&&!!profile&&fingerprintCurrent(f)&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===f.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;
 function publicPrediction(p,profile,f){return predictionCurrent(p,profile,f)?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodLabels:p.moodLabels}:null;}
-async function readFilmState(env,id){const key=filmKey(id);const [fingerprint,predictions,actual]=await Promise.all([loadJSON(env,key+'fingerprint.json'),loadJSON(env,key+'predictions.json'),loadJSON(env,key+'actual.json')]);return {fingerprint,predictions,actual};}
+async function readFilmState(env,id){const key=filmKey(id);const [fingerprint,predictions]=await Promise.all([loadJSON(env,key+'fingerprint.json'),loadJSON(env,key+'predictions.json')]);return {fingerprint,predictions};}
 async function updateViewIndex(env,id,changes){const key=ENRICHMENT_KEY+'view-index.json',index=await loadJSON(env,key)||{};index[id]={...(index[id]||{}),...changes};await saveJSON(env,key,index);}
 async function ensureInitialRatings(env){
  const key=ENRICHMENT_KEY+'view-index.json',index=await loadJSON(env,key)||{};
@@ -104,10 +104,10 @@ async function ratingsBackfill(env,body){
  for(const film of selected){try{results.push(await refreshPersonalRating(env,film));}catch(e){results.push({filmId:String(film.id),error:String(e.message).slice(0,200)});}}
  return json({programmeRunId:report.runId,total:films.length,cursor:body.cursor,nextCursor:body.cursor+selected.length,done:body.cursor+selected.length>=films.length,results});
 }
-function eligibleEnrichmentFilms(report){const ids=new Set();return (report.films||[]).filter(f=>{const id=String(f.id);if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||ids.has(id)||!Array.isArray(f.shows)||!f.shows.some(s=>s.start>=report.window?.from&&s.start<report.window?.to))return false;ids.add(id);return true;}).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
+function eligibleEnrichmentFilms(report){const ids=new Set();return (report.films||[]).filter(f=>{const id=String(f.id);if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||ids.has(id))return false;ids.add(id);return true;}).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
 function modelMetadata(film){return {id:String(film.id),letterboxdUri:film.url,title:film.title,original:film.original,year:film.year,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,runtime:film.runtime||null};}
 async function enrichmentStart(env,body){
- if(body?.scope!=='watchlist_available'||(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1)))return json({error:'Invalid scope or limit'},400);
+ if(!['watchlist_available','watchlist_all'].includes(body?.scope)||(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1)))return json({error:'Invalid scope or limit'},400);
  const [profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);if(!profile)return json({error:'Taste profile is not configured'},409);if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return json({error:'No completed programme snapshot'},409);
  const eligible=eligibleEnrichmentFilms(report),selected=body.limit===undefined?eligible:eligible.slice(0,body.limit);const states=await Promise.all(selected.map(f=>readFilmState(env,f.id)));const baseline=Object.fromEntries(selected.map((f,i)=>[String(f.id),states[i].predictions?.current?.generatedAt||null]));const pendingCount=states.filter((s)=>!predictionCurrent(s.predictions?.current,profile,s.fingerprint)).length;
  const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');if(previous?.status==='running'&&previous.sourceProgrammeRunId===report.runId&&previous.tasteProfileHash===profile.profileHash&&previous.selectedIds?.join('|')===selected.map(f=>String(f.id)).join('|'))return json({...runSummary(previous),pendingCount});
