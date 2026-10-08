@@ -5,6 +5,8 @@ const ENRICHMENT_KEY='enrichment/';
 const filmKey=id=>ENRICHMENT_KEY+'films/'+encodeURIComponent(String(id))+'/';
 const profileKey=ENRICHMENT_KEY+'profile/current.json';
 const runKey=id=>ENRICHMENT_KEY+'runs/'+id+'.json';
+const diagnosticSnapshotKey=ENRICHMENT_KEY+'diagnostics/baseline.json';
+const ratingObservationsKey=ENRICHMENT_KEY+'diagnostics/rating-observations.json';
 const isObject=x=>!!x&&typeof x==='object'&&!Array.isArray(x);
 const isText=(x,max=500)=>typeof x==='string'&&x.trim().length>0&&x.length<=max;
 const isTextList=(x,max=30)=>Array.isArray(x)&&x.length<=max&&x.every(v=>isText(v));
@@ -93,9 +95,35 @@ async function refreshRatingsFromFilms(env,report){
  }
  if(seen.size!==total)throw new Error('Incomplete Letterboxd films: '+seen.size+'/'+total);
  const index=await ensureInitialRatings(env),ids=[...new Set((report.films||[]).map(f=>String(f.id)))];let changed=0,rated=0;
- for(const id of ids){const rating=seen.get(id)??null;if(rating!==null)rated++;if(index[id]?.actualRating!==rating){index[id]={...(index[id]||{}),actualRating:rating};changed++;}}
+ const baseline=await loadJSON(env,diagnosticSnapshotKey),observations=baseline?await loadJSON(env,ratingObservationsKey)||[]:null;
+ for(const id of ids){const rating=seen.get(id)??null;if(rating!==null)rated++;if(index[id]?.actualRating!==rating){
+  const before=index[id]?.actualRating??null;
+  if(observations&&!observations.some(o=>o.filmId===id&&o.programmeRunId===report.runId&&o.before===before&&o.after===rating))observations.push({filmId:id,before,after:rating,observedAt:new Date().toISOString(),source:'letterboxd_public_films',programmeRunId:report.runId});
+  index[id]={...(index[id]||{}),actualRating:rating};changed++;
+ }}
+ if(observations&&changed)await saveJSON(env,ratingObservationsKey,observations);
  if(changed)await saveJSON(env,ENRICHMENT_KEY+'view-index.json',index);
  return {pages,watched:total,watchlistRated:rated,changed};
+}
+async function freezeDiagnosticSnapshot(env){
+ const existing=await loadJSON(env,diagnosticSnapshotKey);if(existing)return {snapshot:existing,created:false};
+ const [programme,index,profile]=await Promise.all([loadJSON(env,'programme.json'),ensureInitialRatings(env),loadJSON(env,profileKey)]);
+ if(!programme?.films?.length)return {error:'No programme snapshot'};
+ const unique=eligibleEnrichmentFilms(programme),states=await Promise.all(unique.map(f=>readFilmState(env,f.id)));
+ const actuals=await Promise.all(unique.map(f=>loadJSON(env,filmKey(f.id)+'actual.json')));
+ const snapshot={schemaVersion:1,frozenAt:new Date().toISOString(),programmeRunId:programme.runId,programmeUpdatedAt:programme.updatedAt,profileVersion:profile?.version??null,profileHash:profile?.profileHash??null,films:unique.map((film,i)=>({filmId:String(film.id),title:film.title,original:film.original,year:film.year,genres:film.genres||[],runtime:film.runtime??null,letterboxdUri:film.url,actualAtFreeze:index[String(film.id)]?.actualRating??null,actualRecord:actuals[i]||null,prediction:states[i].predictions?.current||null,fingerprint:states[i].fingerprint||null}))};
+ await saveJSON(env,diagnosticSnapshotKey,snapshot);return {snapshot,created:true};
+}
+function prospectiveAccuracy(snapshot,observations){
+ const candidates=[],excluded=[];
+ for(const film of snapshot.films){
+  const prediction=film.prediction;if(!prediction?.generatedAt)continue;
+  const events=(observations||[]).filter(o=>o.filmId===film.filmId&&o.before===null&&Number.isFinite(o.after)&&Date.parse(o.observedAt)>Date.parse(prediction.generatedAt)).sort((a,b)=>a.observedAt.localeCompare(b.observedAt));
+  if(film.actualAtFreeze!==null){excluded.push({filmId:film.filmId,title:film.title,reason:'rated_at_freeze',actualRating:film.actualAtFreeze,actualRecordAt:film.actualRecord?.updatedAt??null});continue;}
+  if(events.length){const o=events[0],error=o.after-prediction.predictedRating;candidates.push({filmId:film.filmId,title:film.title,year:film.year,predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus,generatedAt:prediction.generatedAt,actualRating:o.after,observedAt:o.observedAt,exactHit:error===0,absoluteError:Math.abs(error),signedError:error,predicted4Plus:prediction.probability4Plus>=.5,actual4Plus:o.after>=4});}
+ }
+ const n=candidates.length,mean=key=>n?candidates.reduce((sum,x)=>sum+x[key],0)/n:null;
+ return {snapshotFrozenAt:snapshot.frozenAt,observations:candidates,excludedRatedAtFreeze:excluded.length,metrics:{n,exactHits:candidates.filter(x=>x.exactHit).length,exactHitRate:n?candidates.filter(x=>x.exactHit).length/n:null,MAE:mean('absoluteError'),bias:mean('signedError'),classification4Plus:{correct:candidates.filter(x=>x.predicted4Plus===x.actual4Plus).length,accuracy:n?candidates.filter(x=>x.predicted4Plus===x.actual4Plus).length/n:null},calibration:n>=30?{note:'Use probability bins with sufficient observations'}:null}};
 }
 async function ratingsBackfill(env,body){
  if(!Number.isInteger(body.cursor)||body.cursor<0||!Number.isInteger(body.batchSize)||body.batchSize<1||body.batchSize>10)return json({error:'Invalid cursor or batchSize'},400);
@@ -142,6 +170,9 @@ async function enrichmentComplete(env,body){
 async function enrichmentStatus(env){const [profile,run,report]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json')]);const films=report?eligibleEnrichmentFilms(report):[];const states=await Promise.all(films.map(f=>readFilmState(env,f.id)));return {profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:profile?states.filter(s=>!predictionCurrent(s.predictions?.current,profile,s.fingerprint)).length:0};}
 async function enrichmentView(env){const [profile,index]=await Promise.all([loadJSON(env,profileKey),ensureInitialRatings(env)]);return {profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction;return [id,{prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodLabels:p.moodLabels,stale:!profile||p.tasteProfileVersion!==profile.version||p.tasteProfileHash!==profile.profileHash||p.fingerprintHash!==item.fingerprintHash||p.predictionPromptVersion!==PREDICTION_PROMPT_VERSION||p.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION}:null,actualRating:item.actualRating??null}];}))};}
 async function enrichmentRoute(request,env,url){const path=url.pathname;let body=null;if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!isObject(body))return json({error:'Invalid request'},400);}
+ if(path==='/api/enrichment/diagnostics/freeze'&&request.method==='POST'){const result=await freezeDiagnosticSnapshot(env);return result.error?json({error:result.error},409):json({created:result.created,frozenAt:result.snapshot.frozenAt,programmeRunId:result.snapshot.programmeRunId,filmCount:result.snapshot.films.length,predictionCount:result.snapshot.films.filter(f=>!!f.prediction).length});}
+ if(path==='/api/enrichment/diagnostics/snapshot'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(snapshot):json({error:'No frozen diagnostic snapshot'},404);}
+ if(path==='/api/enrichment/diagnostics/accuracy'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(prospectiveAccuracy(snapshot,await loadJSON(env,ratingObservationsKey)||[])):json({error:'No frozen diagnostic snapshot'},404);}
  if(path==='/api/enrichment/profile'&&request.method==='GET'){const p=await loadJSON(env,profileKey);return p?json(p):json({error:'Taste profile is not configured'},404);}
  if(path==='/api/enrichment/profile'&&request.method==='PUT'){if(body.schemaVersion!==1||!Number.isInteger(body.version)||body.version<1)return json({error:'Invalid version or schemaVersion'},400);const issue=validateProfile(body.profile);if(issue)return json({error:issue},400);const current=await loadJSON(env,profileKey);if(current&&body.version<=current.version)return json({error:'Version must increase'},409);const value={version:body.version,schemaVersion:1,updatedAt:new Date().toISOString(),profileHash:await contentHash(body.profile),profile:body.profile};await saveJSON(env,ENRICHMENT_KEY+'profile/versions/'+body.version+'.json',value);await saveJSON(env,profileKey,value);return json(value);}
  if(path==='/api/enrichment/start'&&request.method==='POST')return enrichmentStart(env,body);
