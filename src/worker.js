@@ -45,8 +45,9 @@ async function finishSync(env,run,report){const list=await loadJSON(env,'watchli
 async function completeWithRatings(env,run,report){
  const result=await finishSync(env,run,report);if(!run.ratingPending?.length)return result;
  try{const ratings=await refreshRatingsFromFilms(env,report);delete run.ratingPending;delete run.ratingError;await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
- catch(e){let repair;try{repair=await repairRemovedBaselineRatings(env,report);}catch(repairError){repair={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
-  run.ratingError=String(e.message).slice(0,200);run.ratingRepair=repair;await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
+ catch(e){let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
+  try{diary=await repairRecentDiaryRatings(env,report);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
+  const repair={removed,diary};run.ratingError=String(e.message).slice(0,200);run.ratingRepair=repair;await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
 }
 async function epgSync(env,run){
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId)return completeWithRatings(env,run,committed);}

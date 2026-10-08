@@ -123,6 +123,24 @@ async function repairRemovedBaselineRatings(env,report){
  const results=[];for(const f of candidates){try{results.push(await refreshPersonalRating(env,{id:f.filmId,url:f.letterboxdUri}));}catch(e){results.push({filmId:f.filmId,error:String(e.message).slice(0,160)});}}
  return {attempted:results.length,saved:results.filter(r=>r.status==='saved').length,errors:results.filter(r=>r.error)};
 }
+function parsePublicDiaryPage(html){
+ const entries=[];
+ for(const row of html.matchAll(/<tr\b[^>]*class="[^"]*\bdiary-entry-row\b[^"]*"[^>]*>([\s\S]*?)<\/tr>/gi)){
+  const id=row[1].match(/data-postered-identifier="[^"]*?&quot;lid&quot;:&quot;([a-zA-Z0-9_-]+)&quot;/),stars=row[1].match(/\brated-(10|[1-9])\b/);
+  if(id&&stars)entries.push({id:id[1],rating:Number(stars[1])/2});
+ }
+ if(!entries.length)throw new Error('Incomplete Letterboxd diary page');
+ return entries;
+}
+async function repairRecentDiaryRatings(env,report){
+ const response=await fetch('https://letterboxd.com/demo-user/diary/',{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});
+ if(!response.ok)throw new Error('Letterboxd diary HTTP '+response.status);
+ const entries=parsePublicDiaryPage(await response.text()),baseline=await loadJSON(env,diagnosticSnapshotKey),index=await ensureInitialRatings(env);
+ const films=new Map([...(report.films||[]).map(f=>[String(f.id),{id:String(f.id),url:f.url}]),...(baseline?.films||[]).map(f=>[f.filmId,{id:f.filmId,url:f.letterboxdUri}])]);
+ const changed=new Map(entries.filter(e=>films.has(e.id)&&index[e.id]?.actualRating!==e.rating).map(e=>[e.id,e]));
+ const results=[];for(const id of changed.keys()){try{results.push(await refreshPersonalRating(env,films.get(id)));}catch(e){results.push({filmId:id,error:String(e.message).slice(0,160)});}}
+ return {diaryEntries:entries.length,attempted:results.length,saved:results.filter(r=>r.status==='saved').length,errors:results.filter(r=>r.error)};
+}
 async function freezeDiagnosticSnapshot(env){
  const existing=await loadJSON(env,diagnosticSnapshotKey);if(existing)return {snapshot:existing,created:false};
  const [programme,index,profile]=await Promise.all([loadJSON(env,'programme.json'),ensureInitialRatings(env),loadJSON(env,profileKey)]);
