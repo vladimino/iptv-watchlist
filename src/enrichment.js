@@ -104,9 +104,10 @@ async function refreshRatingsFromFilms(env,report){
   url=page.next?'https://letterboxd.com'+page.next:null;
  }
  if(seen.size!==total)throw new Error('Incomplete Letterboxd films: '+seen.size+'/'+total);
- const index=await ensureInitialRatings(env),ids=[...new Set((report.films||[]).map(f=>String(f.id)))];let changed=0,rated=0;
- const baseline=await loadJSON(env,diagnosticSnapshotKey),observations=baseline?await loadJSON(env,ratingObservationsKey)||[]:null;
- for(const id of ids){const rating=seen.get(id)??null;if(rating!==null)rated++;if(index[id]?.actualRating!==rating){
+ const index=await ensureInitialRatings(env),baseline=await loadJSON(env,diagnosticSnapshotKey);
+ const watchlistIds=new Set((report.films||[]).map(f=>String(f.id))),ids=[...new Set([...watchlistIds,...(baseline?.films||[]).map(f=>f.filmId)])];let changed=0,rated=0;
+ const observations=baseline?await loadJSON(env,ratingObservationsKey)||[]:null;
+ for(const id of ids){const rating=seen.get(id)??null,inWatchlist=watchlistIds.has(id);if(rating!==null&&inWatchlist)rated++;if(!inWatchlist&&rating===null)continue;if(index[id]?.actualRating!==rating){
   const before=index[id]?.actualRating??null;
   if(observations&&!observations.some(o=>o.filmId===id&&o.programmeRunId===report.runId&&o.before===before&&o.after===rating))observations.push({filmId:id,before,after:rating,observedAt:new Date().toISOString(),source:'letterboxd_public_films',programmeRunId:report.runId});
   index[id]={...(index[id]||{}),actualRating:rating};changed++;
