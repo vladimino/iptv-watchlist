@@ -35,14 +35,18 @@ Each text field must be nonempty. `anchorFilms` can be empty if no anchored actu
 
 `GET /api/enrichment/profile` returns the published profile or 404 before publication. The Site footer displays the current version. Publishing a new version makes old predictions stale without deleting them or invalidating fingerprints.
 
-## Run a batch
+## Run a bounded batch (manual and scheduled)
 
-1. Verify `GET /api/status` has a completed programme snapshot. If `GET /api/enrichment/profile` is 404, stop quietly.
-2. `POST /api/enrichment/start` with `{"scope":"watchlist_available"}`. The server selects every unique watchlist film with a broadcast in the latest successfully published programme snapshot, ordered by stable film ID. An optional positive integer `limit` is available for a deliberately smaller run; there is no default 100-film cap. Repeating `start` for the same programme, profile and selection resumes the running run, and already current predictions are skipped by `next`.
-3. `POST /api/enrichment/next` with `{"runId":"...","batchSize":5}`. The response includes the current profile and items. Each item says `fingerprint_and_prediction` with safe metadata, or `prediction_only` with a cached fingerprint. Actual user ratings are deliberately absent.
+After a successful programme commit or taste profile update, the Site reconciles a persistent `enrichment/prediction-queue.json` from every watchlist film whose prediction is missing or stale. Broadcast times never make a prediction stale. Films available in the current archive or next 24 hours come first, then the rest. A valid fingerprint is reused even when its prediction is stale. Programme sync succeeds even if queue reconciliation fails; the next batch reconciles again.
+
+1. Verify `GET /api/status` has a completed programme snapshot. If `GET /api/enrichment/profile` is 404, stop quietly. `GET /api/enrichment/queue/status` exposes `pendingCount`, `lastBatch`, and `nextCatchUpAt`.
+2. `POST /api/enrichment/start` with `{"scope":"watchlist_all","mode":"queued","batchSize":4,"trigger":"scheduled"}` (use `manual` for a manual trigger). Queued mode is the default even when `mode` is omitted, so older callers cannot accidentally launch an unbounded run. `batchSize` defaults to 4 and is capped at 5. A response with `status:"noop"` needs no further calls. A still-active run is resumed; an abandoned run is marked partial, then its remaining work is selected again.
+3. `POST /api/enrichment/next` with `{"runId":"...","batchSize":4}`. The response includes the current profile and at most the selected batch. Each item says `fingerprint_and_prediction` with safe metadata, or `prediction_only` with a cached fingerprint. Actual user ratings are deliberately absent.
 4. For new fingerprints, return a `fingerprint` object according to `GET /api/enrichment/schema`. Every core `execution` field is required; use `unknown` when there is no evidence. Never infer execution quality solely from the premise. Use model knowledge and, where necessary, a targeted public web lookup. Keep `sourceRefs` to real HTTPS references or `model_knowledge`. Also return a `prediction` based on the full taste profile and fingerprint. There is no hand-coded scoring formula.
 5. `POST /api/enrichment/submit` with `{"runId":"...","items":[{"filmId":"...","fingerprint":{...},"prediction":{...}}]}`. For `prediction_only`, omit `fingerprint`. A film's validation/storage failure does not roll back other films in the batch. Repeat transient HTTP failures at most twice; validation/model failures are reported in `results` and not repeated indefinitely.
-6. Continue `next`/`submit` until no items remain, then `POST /api/enrichment/complete` with `{"runId":"..."}` and verify `GET /api/enrichment/status`. Completion writes one user-facing event. Repeating `complete` does not duplicate it.
+6. Continue `next`/`submit` only within this selected batch, then `POST /api/enrichment/complete` with `{"runId":"..."}` and verify `GET /api/enrichment/status`. On a time/quota/error interruption, call `complete` with a short `reason` when possible. Completion writes one user-facing event; repeating it does not duplicate it. Submitted films leave the queue immediately, so the next hourly invocation resumes the remainder. If the job dies before `complete`, the next invocation expires its lease and records a partial batch. A no-op is cheap and silent.
+
+The hourly Site schedule should start at 18:00 Europe/Madrid and continue each hour. It must execute one bounded batch per invocation, not a loop over the full backlog. The prior daily invocation is also bounded by the server default. A manual invocation uses the same queued API. Only explicit `mode:"legacy"` permits the old all-film selection for diagnostic compatibility.
 
 The API persists fingerprints and prediction histories per film ID independently of watchlist membership. A later discovery scope can reuse both. New programme runs alone do not invalidate them. A profile or prompt version change only invalidates predictions; a fingerprint schema change invalidates fingerprints.
 
@@ -58,7 +62,7 @@ Use `rating:null` to clear one. The film's actual rating never enters the `/next
 
 ## Failure behavior
 
-`GET /api/enrichment/status` returns the latest run, failures, pending/stale count, schema/prompt versions. The programme API does not read enrichment storage. A failed recompute keeps the previously committed prediction and its history, and the UI continues to show the programme. Ordinary successful daily checks need no ChatGPT notification; the Site's Events panel is the user-facing record.
+`GET /api/enrichment/status` returns the latest run with trigger, start/finish, checked/added/updated/failed, and queue status with remaining count, last batch stage/reason, and next catch-up time. The programme API does not read enrichment storage. A failed recompute keeps the previously committed prediction and its history, and the UI continues to show the programme. Ordinary successful checks need no ChatGPT notification; the Site's Events panel and footer expose progress.
 
 ## Letterboxd personal ratings and runtime
 
