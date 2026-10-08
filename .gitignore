@@ -1,0 +1,2 @@
+# Owner-only diagnostic exports are retained locally; the Site stores its frozen baseline in R2.
+outputs/diagnostics/

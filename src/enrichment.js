@@ -68,8 +68,18 @@ async function refreshPersonalRating(env,film){
  try{response=await fetch(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html'},signal:AbortSignal.timeout(15000)});}catch(e){throw new Error('Rating lookup failed: '+e.message);}
  if(response.status===404)return {filmId:id,status:'not_found'};if(!response.ok)throw new Error('Rating source HTTP '+response.status);
  const rating=parsePersonalRating(await response.text(),film.url);if(rating===null)return {filmId:id,status:'not_rated'};
- const previous=await loadJSON(env,filmKey(id)+'actual.json');if(previous?.rating===rating)return {filmId:id,status:'unchanged',rating};
- await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:new Date().toISOString()});await updateViewIndex(env,id,{actualRating:rating});return {filmId:id,status:'saved',rating};
+ const [previous,index]=await Promise.all([loadJSON(env,filmKey(id)+'actual.json'),ensureInitialRatings(env)]),before=index[id]?.actualRating??null;
+ if(previous?.rating===rating&&before===rating)return {filmId:id,status:'unchanged',rating};
+ if(before!==rating)await recordRatingObservation(env,{filmId:id,before,after:rating,observedAt:new Date().toISOString(),source:'letterboxd_member_film',sourceUrl});
+ if(previous?.rating!==rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:new Date().toISOString()});
+ await updateViewIndex(env,id,{actualRating:rating});return {filmId:id,status:'saved',rating};
+}
+async function recordRatingObservation(env,observation){
+ if(!await loadJSON(env,diagnosticSnapshotKey))return;
+ const observations=await loadJSON(env,ratingObservationsKey)||[];
+ if(!observations.some(o=>o.filmId===observation.filmId&&o.before===observation.before&&o.after===observation.after&&o.sourceUrl===observation.sourceUrl)){
+  observations.push(observation);await saveJSON(env,ratingObservationsKey,observations);
+ }
 }
 function parsePublicFilmsPage(html){
  const count=html.match(/title="([\d,]+)&nbsp;films"/i),total=count?Number(count[1].replaceAll(',','')):null;
@@ -123,7 +133,8 @@ function prospectiveAccuracy(snapshot,observations){
   if(events.length){const o=events[0],error=o.after-prediction.predictedRating;candidates.push({filmId:film.filmId,title:film.title,year:film.year,predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus,generatedAt:prediction.generatedAt,actualRating:o.after,observedAt:o.observedAt,exactHit:error===0,absoluteError:Math.abs(error),signedError:error,predicted4Plus:prediction.probability4Plus>=.5,actual4Plus:o.after>=4});}
  }
  const n=candidates.length,mean=key=>n?candidates.reduce((sum,x)=>sum+x[key],0)/n:null;
- return {snapshotFrozenAt:snapshot.frozenAt,observations:candidates,excludedRatedAtFreeze:excluded.length,metrics:{n,exactHits:candidates.filter(x=>x.exactHit).length,exactHitRate:n?candidates.filter(x=>x.exactHit).length/n:null,MAE:mean('absoluteError'),bias:mean('signedError'),classification4Plus:{correct:candidates.filter(x=>x.predicted4Plus===x.actual4Plus).length,accuracy:n?candidates.filter(x=>x.predicted4Plus===x.actual4Plus).length/n:null},calibration:n>=30?{note:'Use probability bins with sufficient observations'}:null}};
+ const calibration=n>=30?{brier:candidates.reduce((sum,x)=>sum+(x.probability4Plus-Number(x.actual4Plus))**2,0)/n,bins:[0,.2,.4,.6,.8].map((lower,i)=>{const upper=lower+.2,items=candidates.filter(x=>x.probability4Plus>=lower&&(i===4?x.probability4Plus<=1:x.probability4Plus<upper));return {from:lower,to:upper,count:items.length,meanPrediction:items.length?items.reduce((sum,x)=>sum+x.probability4Plus,0)/items.length:null,observed4Plus:items.length?items.filter(x=>x.actual4Plus).length/items.length:null};})}:null;
+ return {snapshotFrozenAt:snapshot.frozenAt,observations:candidates,excludedRatedAtFreeze:excluded.length,metrics:{n,exactHits:candidates.filter(x=>x.exactHit).length,exactHitRate:n?candidates.filter(x=>x.exactHit).length/n:null,MAE:mean('absoluteError'),bias:mean('signedError'),classification4Plus:{correct:candidates.filter(x=>x.predicted4Plus===x.actual4Plus).length,accuracy:n?candidates.filter(x=>x.predicted4Plus===x.actual4Plus).length/n:null},calibration}};
 }
 async function ratingsBackfill(env,body){
  if(!Number.isInteger(body.cursor)||body.cursor<0||!Number.isInteger(body.batchSize)||body.batchSize<1||body.batchSize>10)return json({error:'Invalid cursor or batchSize'},400);
