@@ -6,6 +6,65 @@ let report = null;
 let enrichment={profile:null,films:{}};
 let ratingsLoaded=false;
 const state = { period: 'all', sort: 'title', viewing: 'any', minPrediction: null, minProbability: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', genres: new Set(), from: 1900, to: MAX_YEAR, maxRuntime: null };
+const APP_QUERY_KEYS = ['view','period','q','sort','genre','from','to','runtime','viewing','started','lastChance','director','actor','prediction','chance'];
+let urlReady=false,urlRestoring=false;
+function readUrlState(url){
+ const p=url.searchParams,defaults={period:'all',sort:'title',viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',genres:new Set(),from:1900,to:MAX_YEAR,maxRuntime:null};
+ if(p.get('view')==='watchlist')defaults.includeUnscheduled=true;
+ if(['all','archive','future'].includes(p.get('period')))defaults.period=p.get('period');
+ if(['title','personal','expiring','time'].includes(p.get('sort')))defaults.sort=p.get('sort');
+ if(['any','new','rewatch'].includes(p.get('viewing')))defaults.viewing=p.get('viewing');
+ defaults.query=p.get('q')||'';
+ defaults.genres=new Set(p.getAll('genre').filter(g=>genres.includes(g)));
+ const year=key=>/^\d{4}$/.test(p.get(key)||'')?Number(p.get(key)):null;
+ const from=year('from'),to=year('to');
+ if(from!==null&&from>=1900&&from<=MAX_YEAR)defaults.from=from;
+ if(to!==null&&to>=1900&&to<=MAX_YEAR)defaults.to=to;
+ if(defaults.from>defaults.to){defaults.from=1900;defaults.to=MAX_YEAR;}
+ const runtime=p.get('runtime');if(/^[1-9]\d*$/.test(runtime||'')&&Number.isSafeInteger(Number(runtime)))defaults.maxRuntime=Number(runtime);
+ if(p.get('started')==='1')defaults.startedOnly=true;
+ if(p.get('lastChance')==='1')defaults.lastChanceOnly=true;
+ for(const [key,param] of [['directors','director'],['actors','actor']]){const id=p.get(param);if(id&&(report.people?.[key]||[]).some(person=>person.id===id))defaults[key]=id;}
+ const prediction=Number(p.get('prediction')),chance=Number(p.get('chance'));
+ if([3.5,4,4.5].includes(prediction))defaults.minPrediction=prediction;
+ if([0.5,0.7,0.85].includes(chance))defaults.minProbability=chance;
+ return defaults;
+}
+function urlForState(current){
+ const url=new URL(current);for(const key of APP_QUERY_KEYS)url.searchParams.delete(key);
+ const add=(key,value)=>url.searchParams.append(key,String(value));
+ if(state.includeUnscheduled)add('view','watchlist');
+ if(state.period!=='all')add('period',state.period);
+ if(state.query)add('q',state.query);
+ if(state.sort!=='title')add('sort',state.sort);
+ for(const genre of [...state.genres].sort((a,b)=>a.localeCompare(b,'ru')))add('genre',genre);
+ if(state.from!==1900)add('from',state.from);
+ if(state.to!==MAX_YEAR)add('to',state.to);
+ if(state.maxRuntime!==null)add('runtime',state.maxRuntime);
+ if(state.viewing!=='any')add('viewing',state.viewing);
+ if(state.startedOnly)add('started',1);
+ if(state.lastChanceOnly)add('lastChance',1);
+ if(state.directors)add('director',state.directors);
+ if(state.actors)add('actor',state.actors);
+ if(state.minPrediction!==null)add('prediction',state.minPrediction);
+ if(state.minProbability!==null)add('chance',state.minProbability);
+ return url;
+}
+function syncUrl(){
+ if(!urlReady||urlRestoring||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
+ const next=urlForState(window.location.href);
+ if(next.href!==window.location.href)window.history.replaceState(window.history.state,'',next.pathname+next.search+next.hash);
+}
+function restoreUrl(){
+ urlRestoring=true;
+ Object.assign(state,readUrlState(new URL(window.location.href)));
+ $('#sort').value=state.sort;$('#search').value=state.query;
+ $('#include-unscheduled').checked=state.includeUnscheduled;$('#started-only').checked=state.startedOnly;$('#last-chance-only').checked=state.lastChanceOnly;
+ $('#year-from').value=state.from;$('#year-to').value=state.to;$('#runtime-max').value=state.maxRuntime??'';
+ document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
+ for(const key of ['directors','actors']){const input=$('#'+key+'-input');input.value=report.people?.[key]?.find(person=>person.id===state[key])?.name||'';input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');$('#'+key+'-options').hidden=true;}
+ render();urlRestoring=false;
+}
 let films = [];
 let eventCursor=null,eventLoading=false;const loadedEvents=new Map();
 let startedIds=new Set(),startedReady=false,startedLoading=false;const savingStarted=new Set();
@@ -90,6 +149,7 @@ function render(){
   const shows=visible.reduce((n,f)=>n+periodShows(f).length,0);
   $('#result-count').textContent=valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
   $('#sort-time').textContent=state.period==='archive'?'Свежие показы — сначала':'Ближайшие эфиры — сначала';
+  syncUrl();
   return {period:state.period,query:state.query,genres:[...state.genres],years:[state.from,state.to],maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
 }
 function reset(){state.viewing='any';state.minPrediction=null;state.minProbability=null;state.includeUnscheduled=false;$('#include-unscheduled').checked=false;state.startedOnly=false;$('#started-only').checked=false;state.lastChanceOnly=false;$('#last-chance-only').checked=false;for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.query='';$('#search').value='';state.genres.clear();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;$('#runtime-max').value='';document.querySelectorAll('#genres input').forEach(i=>i.checked=false);render();}
@@ -121,6 +181,8 @@ function applyFilters(input){
 async function init(){
  try{$('#year-to').value=MAX_YEAR;$('#year-to').max=MAX_YEAR;$('#year-from').max=MAX_YEAR;$('#year-error').textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;const response=await fetch('/api/programme');if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');report=await response.json();MAX_YEAR=Math.max(MAX_YEAR,...report.films.map(f=>Number(f.year)||0));state.to=MAX_YEAR;$('#year-to').value=MAX_YEAR;$('#year-to').max=MAX_YEAR;$('#year-from').max=MAX_YEAR;$('#year-error').textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;({start:WINDOW_START,cutoff:CUTOFF,end:WINDOW_END}=programmeWindow(report));films=report.films.map(f=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:f.shows.map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));genres=[...new Set(films.flatMap(f=>f.genres))].sort((a,b)=>a.localeCompare(b,'ru'));updateSourceInfo();initPeopleFilters();
  $('#genres').innerHTML=genres.map(g=>`<label class="genre-label"><input type="checkbox" value="${g}"><span>${g}</span><span class="genre-count">${films.filter(f=>f.genres.includes(g)).length}</span></label>`).join('');
+ restoreUrl();urlReady=true;
+ window.addEventListener('popstate',restoreUrl);
  $('#include-unscheduled').addEventListener('change',e=>{state.includeUnscheduled=e.target.checked;render();});
  $('#started-only').addEventListener('change',e=>{state.startedOnly=e.target.checked;render();});
  $('#last-chance-only').addEventListener('change',e=>{state.lastChanceOnly=e.target.checked;render();});
