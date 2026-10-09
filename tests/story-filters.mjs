@@ -23,7 +23,7 @@ vm.runInContext('state.genres=new Set();state.maxRuntime=null;state.query="";sta
 assert.deepEqual(ids(),[],'unknown mechanics are safely ignored on films');
 assert.equal(vm.runInContext('normalizeMood("  МРАЧНЫЙ   ")',ctx),'мрачный');
 assert.equal(vm.runInContext('filmFacets(sample[3]).moods.size',ctx),0,'missing fingerprint and prediction do not match');
-const elements=Object.fromEntries(['#mechanics','#moods','#mechanics-empty','#moods-empty'].map(key=>[key,{innerHTML:'',hidden:false}]));
+const elements=Object.fromEntries(['#mechanics','#moods','#mechanics-empty','#moods-empty','#mood-search','#mood-option-count'].map(key=>[key,{innerHTML:'',hidden:false,value:'',textContent:''}]));
 ctx.document={querySelector:key=>elements[key],querySelectorAll:()=>[]};
 vm.runInContext('state.mechanics=new Set();state.moods=new Set();updateFacetOptions()',ctx);
 assert.deepEqual(Array.from(vm.runInContext('mechanics',ctx)).sort(),['heist','rescue','survival']);
