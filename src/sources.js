@@ -29,7 +29,7 @@ function parseFilm(html,base){
 function xmlTime(s){const m=s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-])(\d{2})(\d{2})$/);if(!m)return NaN;return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6])-(m[7]==='+'?1:-1)*(+m[8]*60 + +m[9])*60000;}
 async function scanEPG(stream,watchlist,now){
  const index=new Map();for(const film of watchlist){for(const title of new Set((film.aliases||[film.original]).map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
- const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map();let scanned=0,min=Infinity,max=-Infinity,kept=0,buffer='',complete=false,bytes=0;
+ const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map();let scanned=0,min=Infinity,max=-Infinity,kept=0,buffer='',complete=false,bytes=0;
  const reader=stream.getReader(),decoder=new TextDecoder();
  try{while(true){const {done,value}=await reader.read();if(done){buffer+=decoder.decode();break;}bytes+=value.length;if(bytes>400000000)throw new Error('EPG exceeds supported size');buffer+=decoder.decode(value,{stream:true});
  while(true){const start=buffer.search(/<(?:channel|programme)\s/);if(start<0){if(buffer.includes('</tv>'))complete=true;buffer=buffer.slice(-1000);break;}if(start>0)buffer=buffer.slice(start);const type=buffer.startsWith('<channel ')?'channel':'programme',end=buffer.indexOf('</'+type+'>');if(end<0){if(buffer.length>1000000)throw new Error('EPG record exceeds limit');break;}const xml=buffer.slice(0,end+type.length+3);buffer=buffer.slice(end+type.length+3);
@@ -38,13 +38,13 @@ async function scanEPG(stream,watchlist,now){
  if(startAt<now-72*3600000||startAt>=now+24*3600000)continue;kept++;
  const title=field(xml,'title'),titleYear=extractYear(title),key=norm(cleanTitle(title)),candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
  const valid=candidates.filter(f=>titleYear?f.year&&Math.abs(f.year-titleYear)<=1:f.runtime&&f.runtime>=55&&Math.abs(duration-f.runtime)<=Math.max(8,f.runtime*.12));
- if(valid.length!==1){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});continue;}
+ if(valid.length!==1){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc');if(previous){previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);}else discovery.set(discoveryKey,{key:discoveryKey,title:cleanTitle(title),normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,firstAiring:startAt,lastAiring:startAt,airings:1});}continue;}
  const f=valid[0];if(!matched.has(f.id))matched.set(f.id,{...f,title:/[а-яё]/i.test(title)?cleanTitle(title):f.original,shows:[]});if(!/[а-яё]/i.test(matched.get(f.id).title)&&/[а-яё]/i.test(title))matched.get(f.id).title=cleanTitle(title);matched.get(f.id).shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title,basis:titleYear?'title_year':'title_duration'});
  }
  }
  }finally{reader.releaseLock();}
  complete=complete||buffer.includes('</tv>');if(!complete||scanned===0)throw new Error('EPG incomplete: closing tv tag or programmes missing');
- return {films:[...matched.values()],coverage:[...coverage.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size},uncertain:[...uncertain.values()].slice(0,100)};
+ return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,discoveryCandidates:discovery.size},uncertain:[...uncertain.values()].slice(0,100)};
 }
 
 async function localizePeople(films,cache){
