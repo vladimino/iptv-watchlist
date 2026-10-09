@@ -181,13 +181,14 @@ function eligibleEnrichmentFilms(report){const ids=new Set();return (report.film
 function allEnrichmentFilms(report,catalog){const watchlist=eligibleEnrichmentFilms(report),knownTmdb=new Set(watchlist.map(f=>String(f.tmdbId||'')).filter(Boolean));return [...watchlist,...Object.values(catalog||{}).filter(f=>!knownTmdb.has(String(f.tmdbId)))].sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
 function modelMetadata(film){return {id:String(film.id),letterboxdUri:film.url?.startsWith('https://letterboxd.com/')?film.url:null,tmdbUri:film.tmdbId?'https://www.themoviedb.org/movie/'+film.tmdbId:null,title:film.title,original:film.original,year:film.year,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,runtime:film.runtime||null};}
 async function tmdbRequest(env,path){const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(12000)});if(!response.ok)throw new Error('TMDB HTTP '+response.status);return response.json();}
-async function resolveDiscoveryBatch(env,report,limit=6){
+async function resolveDiscoveryBatch(env,report,limit=24){
  if(!env.TMDB_API_READ_ACCESS_TOKEN)return {stage:'missing_secret',checked:0,remaining:null};
  const [source,resolution,catalog]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json')]);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  const decisions=resolution||{},films=catalog||{},knownTmdb=new Map((report.films||[]).filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)]));
  const pending=source.items.filter(c=>!decisions[c.key]).sort((a,b)=>Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring);
- let checked=0,added=0,error=null;
+ let checked=0,added=0,error=null,dirty=0,catalogDirty=false;
+ const checkpoint=async()=>{if(!dirty)return;if(catalogDirty)await saveJSON(env,'epg/discovered-films.json',films);await saveJSON(env,'epg/discovery-resolution.json',decisions);dirty=0;catalogDirty=false;};
  for(const candidate of pending.slice(0,limit)){
   try{
    const query=new URLSearchParams({query:candidate.title,language:'ru-RU',include_adult:'false',...(candidate.year?{year:String(candidate.year)}:{})});
@@ -197,14 +198,15 @@ async function resolveDiscoveryBatch(env,report,limit=6){
     movie=await tmdbRequest(env,'movie/'+exact[0].id+'?language=ru-RU&append_to_response=credits');
     const delta=movie.runtime?Math.abs(movie.runtime-candidate.duration):Infinity,tolerance=candidate.year?Math.max(25,movie.runtime*.2):Math.max(10,movie.runtime*.12);
     if(movie.id===exact[0].id&&delta<=tolerance){status='verified';const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
-     if(!knownTmdb.has(String(movie.id))){const people=(entries,prefix)=>(entries||[]).slice(0,10).map(p=>({id:prefix+'/'+p.id,name:p.name,original:p.name}));films[id]={id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(g=>g.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,directors:people((movie.credits?.crew||[]).filter(p=>p.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor'),epgLastAiring:candidate.lastAiring};added++;}
+     if(!knownTmdb.has(String(movie.id))){const people=(entries,prefix)=>(entries||[]).slice(0,10).map(p=>({id:prefix+'/'+p.id,name:p.name,original:p.name}));if(!films[id])added++;films[id]={id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(g=>g.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,directors:people((movie.credits?.crew||[]).filter(p=>p.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor'),epgLastAiring:candidate.lastAiring};catalogDirty=true;}
      decisions[candidate.key]={status,filmId:id,tmdbId:String(movie.id),checkedAt:new Date().toISOString()};
     }else status='duration_mismatch';
    }else if(exact.length>1)status='ambiguous';
    if(status!=='verified')decisions[candidate.key]={status,checkedAt:new Date().toISOString()};
-   checked++;await saveJSON(env,'epg/discovery-resolution.json',decisions);if(status==='verified')await saveJSON(env,'epg/discovered-films.json',films);
+   checked++;dirty++;if(dirty>=4)await checkpoint();
   }catch(e){error=String(e.message).slice(0,120);break;}
  }
+ try{await checkpoint();}catch(e){error=String(e.message).slice(0,120);}
  const summary={stage:error?'partial':'complete',checked,added,remaining:Math.max(0,pending.length-checked),error,at:new Date().toISOString(),programmeRunId:source.programmeRunId};await saveJSON(env,'epg/discovery-status.json',summary);return summary;
 }
 const nextCatchUpAt=()=>new Date(Math.floor(Date.now()/3600000+1)*3600000).toISOString();
