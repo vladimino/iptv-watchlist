@@ -186,16 +186,19 @@ async function resolveDiscoveryBatch(env,report,limit=24){
  const [source,resolution,catalog]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json')]);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  const decisions=resolution||{},films=catalog||{},knownTmdb=new Map((report.films||[]).filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)]));
+ const aliasIndex=new Map(),indexFilm=film=>{if(!film?.year||!film?.tmdbId)return;const identity={...film,id:knownTmdb.get(String(film.tmdbId))||film.id};for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=norm(alias)+'|'+film.year;if(key==='|'+film.year)continue;const ids=aliasIndex.get(key)||new Map();ids.set(String(film.tmdbId),identity);aliasIndex.set(key,ids);}};
+ for(const film of [...Object.values(films),...(report.films||[])])indexFilm(film);
  const cutoff=Date.parse(report.updatedAt)||Date.now(),available=c=>Number(c.lastAiring>=cutoff-72*3600000&&c.lastAiring<cutoff+24*3600000);
  const unresolved=source.items.filter(c=>!decisions[c.key]);let screenedOut=0;
  for(const candidate of unresolved){const reason=nonFilmEPGReason(candidate.title);if(!reason)continue;decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:new Date().toISOString()};screenedOut++;}
  if(screenedOut)await saveJSON(env,'epg/discovery-resolution.json',decisions);
  const pending=unresolved.filter(c=>!decisions[c.key]).sort((a,b)=>available(b)-available(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring);
- let checked=0,added=0,error=null,dirty=0,catalogDirty=false,tmdbCalls=0;
+ let checked=0,added=0,reused=0,error=null,dirty=0,catalogDirty=false,tmdbCalls=0;
  const queryTmdb=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
  const checkpoint=async()=>{if(!dirty)return;if(catalogDirty)await saveJSON(env,'epg/discovered-films.json',films);await saveJSON(env,'epg/discovery-resolution.json',decisions);dirty=0;catalogDirty=false;};
  for(const candidate of pending.slice(0,limit)){
   try{
+   if(candidate.year){const matches=[...(aliasIndex.get(candidate.normalizedTitle+'|'+candidate.year)?.values()||[])].filter(film=>film.runtime&&(candidate.durations||[candidate.duration]).some(minutes=>Math.abs(film.runtime-minutes)<=Math.max(8,film.runtime*.08)));if(matches.length===1){const film=matches[0];decisions[candidate.key]={status:'verified',filmId:String(film.id),tmdbId:String(film.tmdbId),identitySource:'known_alias_year_runtime',checkedAt:new Date().toISOString()};checked++;reused++;dirty++;if(dirty>=4)await checkpoint();continue;}}
    if(tmdbCalls>=46)break;
    const languages=/[іїєґ]/i.test(candidate.title)?['uk-UA','ru-RU']:['ru-RU','uk-UA'];let search=null,exact=[],deferred=false;
    for(const language of languages){if(tmdbCalls>=48){deferred=true;break;}const query=new URLSearchParams({query:candidate.title,language,include_adult:'false',...(candidate.year?{year:String(candidate.year)}:{})});search=await queryTmdb('search/movie?'+query);exact=(search.results||[]).filter(movie=>[movie.title,movie.original_title].some(title=>norm(title)===candidate.normalizedTitle)&&(!candidate.year||Math.abs(Number(movie.release_date?.slice(0,4))-candidate.year)<=1));if(exact.length)break;}
@@ -203,10 +206,10 @@ async function resolveDiscoveryBatch(env,report,limit=24){
    let status='no_confident_match',movie=null;
    if(exact.length===1&&(candidate.year||search.total_pages<=1)){
     if(tmdbCalls>=48)break;
-    movie=await queryTmdb('movie/'+exact[0].id+'?language=ru-RU&append_to_response=credits');
+    movie=await queryTmdb('movie/'+exact[0].id+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
     const tolerance=candidate.year?Math.max(25,movie.runtime*.2):Math.max(10,movie.runtime*.12),durationMatch=movie.runtime&&(candidate.durations||[candidate.duration]).some(minutes=>Math.abs(movie.runtime-minutes)<=tolerance);
     if(movie.id===exact[0].id&&durationMatch){status='verified';const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
-     if(!knownTmdb.has(String(movie.id))){const people=(entries,prefix)=>(entries||[]).slice(0,10).map(p=>({id:prefix+'/'+p.id,name:p.name,original:p.name}));if(!films[id])added++;films[id]={id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(g=>g.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,directors:people((movie.credits?.crew||[]).filter(p=>p.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor'),epgLastAiring:candidate.lastAiring};catalogDirty=true;}
+     if(!knownTmdb.has(String(movie.id))){const people=(entries,prefix)=>(entries||[]).slice(0,10).map(p=>({id:prefix+'/'+p.id,name:p.name,original:p.name}));if(!films[id])added++;const localized=(movie.translations?.translations||[]).filter(t=>['ru','uk','en'].includes(t.iso_639_1)).map(t=>t.data?.title),alternates=(movie.alternative_titles?.titles||[]).filter(t=>['RU','UA','US','GB'].includes(t.iso_3166_1)).map(t=>t.title);films[id]={id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,aliases:[...new Set([...(films[id]?.aliases||[]),candidate.title,movie.title,movie.original_title,...localized,...alternates].filter(Boolean))].slice(0,40),year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(g=>g.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,directors:people((movie.credits?.crew||[]).filter(p=>p.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor'),epgLastAiring:Math.max(films[id]?.epgLastAiring||0,candidate.lastAiring)};catalogDirty=true;indexFilm(films[id]);}
      decisions[candidate.key]={status,filmId:id,tmdbId:String(movie.id),checkedAt:new Date().toISOString()};
     }else status='duration_mismatch';
    }else if(exact.length>1)status='ambiguous';
@@ -215,7 +218,7 @@ async function resolveDiscoveryBatch(env,report,limit=24){
   }catch(e){error=String(e.message).slice(0,120);break;}
  }
  try{await checkpoint();}catch(e){error=String(e.message).slice(0,120);}
- const summary={stage:error?'partial':'complete',checked:checked+screenedOut,screenedOut,tmdbCalls,added,remaining:Math.max(0,pending.length-checked),error,at:new Date().toISOString(),programmeRunId:source.programmeRunId};await saveJSON(env,'epg/discovery-status.json',summary);return summary;
+ const summary={stage:error?'partial':'complete',checked:checked+screenedOut,screenedOut,reused,tmdbCalls,added,remaining:Math.max(0,pending.length-checked),error,at:new Date().toISOString(),programmeRunId:source.programmeRunId};await saveJSON(env,'epg/discovery-status.json',summary);return summary;
 }
 const nextCatchUpAt=()=>new Date(Math.floor(Date.now()/3600000+1)*3600000).toISOString();
 function indexedPredictionCurrent(item,profile){const p=item?.prediction;return !!p&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===item.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;}
