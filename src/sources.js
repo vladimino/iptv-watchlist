@@ -5,6 +5,14 @@ const attr=(tag,key)=>decode(tag.match(new RegExp('\\b'+key+'=(?:"([^"\\n]*)"|\x
 const field=(xml,tag)=>plain(xml.match(new RegExp('<'+tag+'(?:\\s[^>]*)?>([\\s\\S]*?)</'+tag+'>'))?.[1]||'');
 const extractYear=title=>Number(title.match(/\((19\d{2}|20\d{2})\)\s*$/)?.[1])||null;
 const cleanTitle=title=>title.replace(/\s*\((?:19|20)\d{2}\)\s*$/,'').trim();
+function nonFilmEPGReason(title){
+ const value=String(title||'');
+ if(/^(?:т\/с|м\/с|телесериал|мультсериал|сериал)(?:\s|[.:,-])/i.test(value))return 'series_label';
+ if(/(?:\bseason\s*\d+|\bep\.?\s*\d+|\bs\d{1,2}e\d{1,3}\b|сезон\s*\d+|\d+\s*(?:серия|серии|серий)|(?:серия|серии|эпизод)\s*\d+)/i.test(value))return 'episode_label';
+ if(/[-–]\s*\d{1,2}\s*[-–]\s*\d{1,3}(?:\s*(?:серия|серии|с))?\s*$/i.test(value))return 'season_episode_suffix';
+ if(/(?:выпуск\s*[№#]?\s*\d+|\d+\s*[-–]\s*\d+\s*серии)/i.test(value))return 'broadcast_episode';
+ return null;
+}
 function mergeDiscoveryCandidates(previous,latest){
  const merged=new Map((previous||[]).map(item=>[item.key,item]));
  for(const item of latest||[]){const old=merged.get(item.key);merged.set(item.key,old?{...old,...item,firstAiring:Math.min(old.firstAiring,item.firstAiring),lastAiring:Math.max(old.lastAiring,item.lastAiring),airings:Math.max(old.airings,item.airings),description:item.description||old.description}:item);}

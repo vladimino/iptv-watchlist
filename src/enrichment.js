@@ -187,7 +187,10 @@ async function resolveDiscoveryBatch(env,report,limit=24){
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  const decisions=resolution||{},films=catalog||{},knownTmdb=new Map((report.films||[]).filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)]));
  const cutoff=Date.parse(report.updatedAt)||Date.now(),available=c=>Number(c.lastAiring>=cutoff-72*3600000&&c.lastAiring<cutoff+24*3600000);
- const pending=source.items.filter(c=>!decisions[c.key]).sort((a,b)=>available(b)-available(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring);
+ const unresolved=source.items.filter(c=>!decisions[c.key]);let screenedOut=0;
+ for(const candidate of unresolved){const reason=nonFilmEPGReason(candidate.title);if(!reason)continue;decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:new Date().toISOString()};screenedOut++;}
+ if(screenedOut)await saveJSON(env,'epg/discovery-resolution.json',decisions);
+ const pending=unresolved.filter(c=>!decisions[c.key]).sort((a,b)=>available(b)-available(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring);
  let checked=0,added=0,error=null,dirty=0,catalogDirty=false;
  const checkpoint=async()=>{if(!dirty)return;if(catalogDirty)await saveJSON(env,'epg/discovered-films.json',films);await saveJSON(env,'epg/discovery-resolution.json',decisions);dirty=0;catalogDirty=false;};
  for(const candidate of pending.slice(0,limit)){
@@ -208,7 +211,7 @@ async function resolveDiscoveryBatch(env,report,limit=24){
   }catch(e){error=String(e.message).slice(0,120);break;}
  }
  try{await checkpoint();}catch(e){error=String(e.message).slice(0,120);}
- const summary={stage:error?'partial':'complete',checked,added,remaining:Math.max(0,pending.length-checked),error,at:new Date().toISOString(),programmeRunId:source.programmeRunId};await saveJSON(env,'epg/discovery-status.json',summary);return summary;
+ const summary={stage:error?'partial':'complete',checked:checked+screenedOut,screenedOut,added,remaining:Math.max(0,pending.length-checked),error,at:new Date().toISOString(),programmeRunId:source.programmeRunId};await saveJSON(env,'epg/discovery-status.json',summary);return summary;
 }
 const nextCatchUpAt=()=>new Date(Math.floor(Date.now()/3600000+1)*3600000).toISOString();
 function indexedPredictionCurrent(item,profile){const p=item?.prediction;return !!p&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===item.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;}
