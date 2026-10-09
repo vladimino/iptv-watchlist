@@ -48,6 +48,12 @@
 .archive-only{padding-right:66px}
 /* Quiet source details and concrete programme window */
 footer .footer-status{display:flex;flex-direction:column;gap:4px;max-width:42ch;text-align:right}
+footer .footer-details summary{cursor:pointer;list-style:none;color:var(--muted)}
+footer .footer-details summary::-webkit-details-marker{display:none}
+footer .footer-details summary::after{content:' · Подробнее';color:var(--lime)}
+footer .footer-details[open] summary::after{content:' · Скрыть'}
+footer .footer-details-body{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);line-height:1.5}
+footer .footer-details-body p{margin:0 0 6px}
 #source-note{color:var(--muted);line-height:1.5}
 .coverage p time{display:block;font-variant-numeric:tabular-nums}
 .coverage p time+time::before{content:'→ ';color:var(--lime)}
