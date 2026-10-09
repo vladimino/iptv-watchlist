@@ -191,17 +191,21 @@ async function resolveDiscoveryBatch(env,report,limit=24){
  for(const candidate of unresolved){const reason=nonFilmEPGReason(candidate.title);if(!reason)continue;decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:new Date().toISOString()};screenedOut++;}
  if(screenedOut)await saveJSON(env,'epg/discovery-resolution.json',decisions);
  const pending=unresolved.filter(c=>!decisions[c.key]).sort((a,b)=>available(b)-available(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring);
- let checked=0,added=0,error=null,dirty=0,catalogDirty=false;
+ let checked=0,added=0,error=null,dirty=0,catalogDirty=false,tmdbCalls=0;
+ const queryTmdb=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
  const checkpoint=async()=>{if(!dirty)return;if(catalogDirty)await saveJSON(env,'epg/discovered-films.json',films);await saveJSON(env,'epg/discovery-resolution.json',decisions);dirty=0;catalogDirty=false;};
  for(const candidate of pending.slice(0,limit)){
   try{
-   const query=new URLSearchParams({query:candidate.title,language:'ru-RU',include_adult:'false',...(candidate.year?{year:String(candidate.year)}:{})});
-   const search=await tmdbRequest(env,'search/movie?'+query),exact=(search.results||[]).filter(movie=>[movie.title,movie.original_title].some(title=>norm(title)===candidate.normalizedTitle)&&(!candidate.year||Math.abs(Number(movie.release_date?.slice(0,4))-candidate.year)<=1));
+   if(tmdbCalls>=46)break;
+   const languages=/[іїєґ]/i.test(candidate.title)?['uk-UA','ru-RU']:['ru-RU','uk-UA'];let search=null,exact=[],deferred=false;
+   for(const language of languages){if(tmdbCalls>=48){deferred=true;break;}const query=new URLSearchParams({query:candidate.title,language,include_adult:'false',...(candidate.year?{year:String(candidate.year)}:{})});search=await queryTmdb('search/movie?'+query);exact=(search.results||[]).filter(movie=>[movie.title,movie.original_title].some(title=>norm(title)===candidate.normalizedTitle)&&(!candidate.year||Math.abs(Number(movie.release_date?.slice(0,4))-candidate.year)<=1));if(exact.length)break;}
+   if(deferred)break;
    let status='no_confident_match',movie=null;
    if(exact.length===1&&(candidate.year||search.total_pages<=1)){
-    movie=await tmdbRequest(env,'movie/'+exact[0].id+'?language=ru-RU&append_to_response=credits');
-    const delta=movie.runtime?Math.abs(movie.runtime-candidate.duration):Infinity,tolerance=candidate.year?Math.max(25,movie.runtime*.2):Math.max(10,movie.runtime*.12);
-    if(movie.id===exact[0].id&&delta<=tolerance){status='verified';const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
+    if(tmdbCalls>=48)break;
+    movie=await queryTmdb('movie/'+exact[0].id+'?language=ru-RU&append_to_response=credits');
+    const tolerance=candidate.year?Math.max(25,movie.runtime*.2):Math.max(10,movie.runtime*.12),durationMatch=movie.runtime&&(candidate.durations||[candidate.duration]).some(minutes=>Math.abs(movie.runtime-minutes)<=tolerance);
+    if(movie.id===exact[0].id&&durationMatch){status='verified';const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
      if(!knownTmdb.has(String(movie.id))){const people=(entries,prefix)=>(entries||[]).slice(0,10).map(p=>({id:prefix+'/'+p.id,name:p.name,original:p.name}));if(!films[id])added++;films[id]={id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(g=>g.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,directors:people((movie.credits?.crew||[]).filter(p=>p.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor'),epgLastAiring:candidate.lastAiring};catalogDirty=true;}
      decisions[candidate.key]={status,filmId:id,tmdbId:String(movie.id),checkedAt:new Date().toISOString()};
     }else status='duration_mismatch';
@@ -211,7 +215,7 @@ async function resolveDiscoveryBatch(env,report,limit=24){
   }catch(e){error=String(e.message).slice(0,120);break;}
  }
  try{await checkpoint();}catch(e){error=String(e.message).slice(0,120);}
- const summary={stage:error?'partial':'complete',checked:checked+screenedOut,screenedOut,added,remaining:Math.max(0,pending.length-checked),error,at:new Date().toISOString(),programmeRunId:source.programmeRunId};await saveJSON(env,'epg/discovery-status.json',summary);return summary;
+ const summary={stage:error?'partial':'complete',checked:checked+screenedOut,screenedOut,tmdbCalls,added,remaining:Math.max(0,pending.length-checked),error,at:new Date().toISOString(),programmeRunId:source.programmeRunId};await saveJSON(env,'epg/discovery-status.json',summary);return summary;
 }
 const nextCatchUpAt=()=>new Date(Math.floor(Date.now()/3600000+1)*3600000).toISOString();
 function indexedPredictionCurrent(item,profile){const p=item?.prediction;return !!p&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===item.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;}
@@ -274,6 +278,15 @@ async function enrichmentComplete(env,body){
 async function enrichmentStatus(env){const [profile,run,report,queue,catalog,discovery]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json')]);const films=report?allEnrichmentFilms(report,catalog):[];return {profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:queue?.pendingCount??null,discovery:discovery||null,queue};}
 async function enrichmentView(env){const [profile,index]=await Promise.all([loadJSON(env,profileKey),ensureInitialRatings(env)]);return {profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction;return [id,{prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodLabels:p.moodLabels,stale:!profile||p.tasteProfileVersion!==profile.version||p.tasteProfileHash!==profile.profileHash||p.fingerprintHash!==item.fingerprintHash||p.predictionPromptVersion!==PREDICTION_PROMPT_VERSION||p.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION}:null,actualRating:item.actualRating??null}];}))};}
 async function enrichmentRoute(request,env,url){const path=url.pathname;let body=null;if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!isObject(body))return json({error:'Invalid request'},400);}
+ if(path==='/api/enrichment/discovery/reconcile'&&request.method==='POST'){
+  let [source,decisions]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')]);if(!source?.items)return json({error:'No discovery catalog'},409);
+  if(source.canonicalizedAt&&source.canonicalizedAt!==decisions?.__canonicalizedAt){[source,decisions]=await Promise.all([loadJSON(env,'epg/discovery-before-canonical.json'),loadJSON(env,'epg/discovery-resolution-before-canonical.json')]);if(!source?.items)return json({error:'Canonicalization backup missing'},409);}
+  let result;try{result=canonicalizeDiscoveryLedger(source,decisions||{});}catch(e){return json({error:String(e.message).slice(0,160)},409);}
+  const changed=result.duplicatesRemoved>0||result.items.some((item,i)=>item.key!==source.items[i]?.key);
+  if(changed){await saveJSON(env,'epg/discovery-before-canonical.json',source);await saveJSON(env,'epg/discovery-resolution-before-canonical.json',decisions||{});
+   const at=new Date().toISOString();await saveJSON(env,'epg/discovery-latest.json',{...source,items:result.items,canonicalizedAt:at});await saveJSON(env,'epg/discovery-resolution.json',{...result.decisions,__canonicalizedAt:at});}
+  return json({changed,before:source.items.length,after:result.items.length,duplicatesRemoved:result.duplicatesRemoved,carriedVerified:result.carriedVerified,retried:result.retried});
+ }
  if(path==='/api/enrichment/discovery/resolve'&&request.method==='POST'){
   if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24))return json({error:'Invalid limit'},400);
   const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);

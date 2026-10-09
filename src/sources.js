@@ -5,6 +5,12 @@ const attr=(tag,key)=>decode(tag.match(new RegExp('\\b'+key+'=(?:"([^"\\n]*)"|\x
 const field=(xml,tag)=>plain(xml.match(new RegExp('<'+tag+'(?:\\s[^>]*)?>([\\s\\S]*?)</'+tag+'>'))?.[1]||'');
 const extractYear=title=>Number(title.match(/\((19\d{2}|20\d{2})\)\s*$/)?.[1])||null;
 const cleanTitle=title=>title.replace(/\s*\((?:19|20)\d{2}\)\s*$/,'').trim();
+function epgTitleParts(raw){
+ let title=plain(raw).replace(/^\s*(?:х\s*[.\/-]?\s*ф|к\s*[.\/-]?\s*ф|художественный\s+фильм|кинофильм|телефильм)\s*[:.\-–—]?\s*/iu,'').trim();
+ const match=title.match(/(?:\s*\(((?:19|20)\d{2})\)|\s+((?:19|20)\d{2}))[.!?]?\s*$/u);
+ let year=null;if(match){const base=title.slice(0,match.index).replace(/[\s:.,;!?–—-]+$/u,'').trim();if(norm(base).length>=2){title=base;year=Number(match[1]||match[2]);}}
+ return {title:title||plain(raw),year,normalizedTitle:norm(title||raw)};
+}
 function nonFilmEPGReason(title){
  const value=String(title||'');
  if(/^(?:т\/с|м\/с|телесериал|мультсериал|сериал)(?:\s|[.:,-])/i.test(value))return 'series_label';
@@ -13,10 +19,25 @@ function nonFilmEPGReason(title){
  if(/(?:выпуск\s*[№#]?\s*\d+|\d+\s*[-–]\s*\d+\s*серии)/i.test(value))return 'broadcast_episode';
  return null;
 }
+function canonicalDiscoveryCandidate(item){
+ const parts=epgTitleParts(item.title),year=item.year||parts.year||null;
+ return {...item,key:parts.normalizedTitle+'|'+(year||''),title:parts.title,normalizedTitle:parts.normalizedTitle,year,rawTitles:[...new Set(item.rawTitles||[item.title])].slice(0,8),durations:[...new Set(item.durations||[item.duration])].filter(Number.isFinite).slice(0,12)};
+}
 function mergeDiscoveryCandidates(previous,latest){
- const merged=new Map((previous||[]).map(item=>[item.key,item]));
- for(const item of latest||[]){const old=merged.get(item.key);merged.set(item.key,old?{...old,...item,firstAiring:Math.min(old.firstAiring,item.firstAiring),lastAiring:Math.max(old.lastAiring,item.lastAiring),airings:Math.max(old.airings,item.airings),description:item.description||old.description}:item);}
+ const merged=new Map();
+ for(const raw of [...(previous||[]),...(latest||[])]){const item=canonicalDiscoveryCandidate(raw),old=merged.get(item.key);merged.set(item.key,old?{...old,...item,rawTitles:[...new Set([...old.rawTitles,...item.rawTitles])].slice(0,8),durations:[...new Set([...old.durations,...item.durations])].slice(0,12),firstAiring:Math.min(old.firstAiring,item.firstAiring),lastAiring:Math.max(old.lastAiring,item.lastAiring),airings:Math.max(old.airings,item.airings),description:item.description||old.description}:item);}
  return [...merged.values()];
+}
+function canonicalizeDiscoveryLedger(source,decisions){
+ const groups=new Map();for(const raw of source.items||[]){const key=canonicalDiscoveryCandidate(raw).key,list=groups.get(key)||[];list.push(raw.key);groups.set(key,list);}
+ const items=mergeDiscoveryCandidates(source.items,[]),next={};let carriedVerified=0,retried=0;
+ for(const item of items){const keys=groups.get(item.key),states=keys.map(key=>decisions?.[key]).filter(Boolean),verified=states.filter(s=>s.status==='verified'),ids=new Set(verified.map(s=>s.tmdbId));
+  if(ids.size>1)throw new Error('Conflicting verified TMDB identities for '+item.key);
+  if(verified.length){next[item.key]=verified[0];carriedVerified++;continue;}
+  if(nonFilmEPGReason(item.title)){next[item.key]={status:'excluded_nonfilm',reason:nonFilmEPGReason(item.title),checkedAt:states[0]?.checkedAt||new Date().toISOString()};continue;}
+  if(states.length)retried++;
+ }
+ return {items,decisions:next,duplicatesRemoved:(source.items||[]).length-items.length,carriedVerified,retried};
 }
 const GENRE_MAP={Action:'Боевик',Thriller:'Триллер',Crime:'Криминал','Science Fiction':'Фантастика',Horror:'Ужасы',Adventure:'Приключения',Comedy:'Комедия',Drama:'Драма',Fantasy:'Фэнтези',Animation:'Мультфильм',History:'Исторический',War:'Военный',Mystery:'Детектив',Romance:'Мелодрама',Family:'Семейный',Documentary:'Документальный',Western:'Вестерн',Music:'Музыкальный','TV Movie':'Телефильм'};
 async function getHTML(url){const r=await fetch(url,{signal:AbortSignal.timeout(25000)});if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${new URL(url).pathname}`);const h=await r.text();if(h.length>3000000)throw new Error('Unexpected page size');return h;}
@@ -49,9 +70,9 @@ async function scanEPG(stream,watchlist,now){
  if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));continue;}
  scanned++;const startAt=xmlTime(attr(xml,'start')),endAt=xmlTime(attr(xml,'stop'));if(!Number.isFinite(startAt)||!Number.isFinite(endAt)||endAt<=startAt)continue;min=Math.min(min,startAt);max=Math.max(max,startAt);const channelId=attr(xml,'channel'),channel=channels.get(channelId)||channelId;if(/^[A-Z]{2}:/.test(channel))continue;const c=coverage.get(channelId)||{name:channel,min:startAt,max:endAt};c.min=Math.min(c.min,startAt);c.max=Math.max(c.max,endAt);coverage.set(channelId,c);
  if(startAt<now-72*3600000||startAt>=now+24*3600000)continue;kept++;
- const title=field(xml,'title'),titleYear=extractYear(title),key=norm(cleanTitle(title)),candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
+ const title=field(xml,'title'),parts=epgTitleParts(title),titleYear=parts.year,key=parts.normalizedTitle,candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
  const valid=candidates.filter(f=>titleYear?f.year&&Math.abs(f.year-titleYear)<=1:f.runtime&&f.runtime>=55&&Math.abs(duration-f.runtime)<=Math.max(8,f.runtime*.12));
- if(valid.length!==1){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc');if(previous){previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);}else discovery.set(discoveryKey,{key:discoveryKey,title:cleanTitle(title),normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,firstAiring:startAt,lastAiring:startAt,airings:1});}continue;}
+ if(valid.length!==1){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc');if(previous){previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);}else discovery.set(discoveryKey,{key:discoveryKey,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,firstAiring:startAt,lastAiring:startAt,airings:1});}continue;}
  const f=valid[0];if(!matched.has(f.id))matched.set(f.id,{...f,title:/[а-яё]/i.test(title)?cleanTitle(title):f.original,shows:[]});if(!/[а-яё]/i.test(matched.get(f.id).title)&&/[а-яё]/i.test(title))matched.get(f.id).title=cleanTitle(title);matched.get(f.id).shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title,basis:titleYear?'title_year':'title_duration'});
  }
  }
