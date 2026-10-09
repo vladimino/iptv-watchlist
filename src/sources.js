@@ -5,6 +5,11 @@ const attr=(tag,key)=>decode(tag.match(new RegExp('\\b'+key+'=(?:"([^"\\n]*)"|\x
 const field=(xml,tag)=>plain(xml.match(new RegExp('<'+tag+'(?:\\s[^>]*)?>([\\s\\S]*?)</'+tag+'>'))?.[1]||'');
 const extractYear=title=>Number(title.match(/\((19\d{2}|20\d{2})\)\s*$/)?.[1])||null;
 const cleanTitle=title=>title.replace(/\s*\((?:19|20)\d{2}\)\s*$/,'').trim();
+function mergeDiscoveryCandidates(previous,latest){
+ const merged=new Map((previous||[]).map(item=>[item.key,item]));
+ for(const item of latest||[]){const old=merged.get(item.key);merged.set(item.key,old?{...old,...item,firstAiring:Math.min(old.firstAiring,item.firstAiring),lastAiring:Math.max(old.lastAiring,item.lastAiring),airings:Math.max(old.airings,item.airings),description:item.description||old.description}:item);}
+ return [...merged.values()];
+}
 const GENRE_MAP={Action:'Боевик',Thriller:'Триллер',Crime:'Криминал','Science Fiction':'Фантастика',Horror:'Ужасы',Adventure:'Приключения',Comedy:'Комедия',Drama:'Драма',Fantasy:'Фэнтези',Animation:'Мультфильм',History:'Исторический',War:'Военный',Mystery:'Детектив',Romance:'Мелодрама',Family:'Семейный',Documentary:'Документальный',Western:'Вестерн',Music:'Музыкальный','TV Movie':'Телефильм'};
 async function getHTML(url){const r=await fetch(url,{signal:AbortSignal.timeout(25000)});if(!r.ok)throw new Error(`Source HTTP ${r.status}: ${new URL(url).pathname}`);const h=await r.text();if(h.length>3000000)throw new Error('Unexpected page size');return h;}
 function parseWatchlist(html){

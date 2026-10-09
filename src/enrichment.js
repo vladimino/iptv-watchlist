@@ -186,7 +186,8 @@ async function resolveDiscoveryBatch(env,report,limit=24){
  const [source,resolution,catalog]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json')]);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  const decisions=resolution||{},films=catalog||{},knownTmdb=new Map((report.films||[]).filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)]));
- const pending=source.items.filter(c=>!decisions[c.key]).sort((a,b)=>Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring);
+ const cutoff=Date.parse(report.updatedAt)||Date.now(),available=c=>Number(c.lastAiring>=cutoff-72*3600000&&c.lastAiring<cutoff+24*3600000);
+ const pending=source.items.filter(c=>!decisions[c.key]).sort((a,b)=>available(b)-available(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring);
  let checked=0,added=0,error=null,dirty=0,catalogDirty=false;
  const checkpoint=async()=>{if(!dirty)return;if(catalogDirty)await saveJSON(env,'epg/discovered-films.json',films);await saveJSON(env,'epg/discovery-resolution.json',decisions);dirty=0;catalogDirty=false;};
  for(const candidate of pending.slice(0,limit)){
@@ -274,7 +275,7 @@ async function enrichmentRoute(request,env,url){const path=url.pathname;let body
   const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);
   const now=Date.now(),response=await fetch('https://example.invalid/epg.xml',{signal:AbortSignal.timeout(110000)});if(!response.ok)return json({error:'EPG HTTP '+response.status},502);
   const result=await scanEPG(response.body,report.films,now);if(result.stats.epgEnd<now+8*3600000)return json({error:'EPG horizon too short'},502);
-  await saveJSON(env,'epg/discovery-latest.json',{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),items:result.discovery});return json({programmeRunId:report.runId,candidates:result.discovery.length,scanned:result.stats.scanned});
+  const old=await loadJSON(env,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery);await saveJSON(env,'epg/discovery-latest.json',{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),items});return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned});
  }
  if(path==='/api/enrichment/discovery/status'&&request.method==='GET'){
   const [source,decisions,catalog,last]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json')]);const current=new Set((source?.items||[]).map(c=>c.key)),statuses={};for(const [key,value] of Object.entries(decisions||{}))if(current.has(key))statuses[value.status]=(statuses[value.status]||0)+1;
