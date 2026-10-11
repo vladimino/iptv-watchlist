@@ -38,13 +38,13 @@ async function resolveDiscoveryChunk(env,report,limit){
  const decisions=resolution||{},films=catalog||{},watchlist=(report.films||[]),knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
  const indexFilm=film=>{if(!film?.tmdbId)return;for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=epgTitleParts(alias).normalizedTitle;if(!key)continue;const entries=aliasIndex.get(key)||new Map();entries.set(String(film.tmdbId),film);aliasIndex.set(key,entries);}};
  for(const film of [...Object.values(films),...watchlist])indexFilm(film);
- let screenedOut=0,knownAliases=0,touched=0;
+ let screenedOut=0,knownAliases=0,touched=0,migrated=0;for(const film of Object.values(films))if(film.tmdbId&&film.canonicalIdentity!=='tmdb:'+film.tmdbId){film.canonicalIdentity='tmdb:'+film.tmdbId;migrated++;}
  // Cheap pass updates availability for known identities even though no new lookup is needed.
  for(const candidate of source.items){const reason=nonFilmEPGReason(candidate.title),decision=decisions[candidate.key];if(reason){if(decision?.status!=='excluded_nonfilm'){decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:startedAt};screenedOut++;}continue;}
   if(candidate.confirmedTmdbId&&!decision){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
   const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate);indexFilm(films[key]);touched++;}}
  }
- if(touched)await saveJSON(env,'epg/discovered-films.json',films);if(screenedOut||knownAliases)await saveJSON(env,'epg/discovery-resolution.json',decisions);
+ if(touched||migrated)await saveJSON(env,'epg/discovered-films.json',films);if(screenedOut||knownAliases)await saveJSON(env,'epg/discovery-resolution.json',decisions);
  const now=Date.now(),pending=source.items.filter(c=>discoveryReady(c,decisions[c.key],now)).sort((a,b)=>Number(candidateIsHot(b,now))-Number(candidateIsHot(a,now))||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
  let checked=0,added=0,reused=0,tmdbCalls=0,error=null,retryAt=null;
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
@@ -74,12 +74,12 @@ async function resolveDiscoveryChunk(env,report,limit){
   }catch(e){error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
  }
  const currentReport=await loadJSON(env,'programme.json');try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint');}catch(e){error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
- const ready=source.items.filter(c=>discoveryReady(c,decisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
+ const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
  await saveJSON(env,'epg/discovery-status.json',summary);return summary;
 }
 async function continueDiscovery(request,env,execution,result,body={}){
  const chunks=Number.isInteger(body.chunks)?Math.min(12,Math.max(0,body.chunks)):12;
- if(!execution?.waitUntil||chunks===0||!result.remaining||result.retryAt||result.stage==='busy')return {scheduled:false,reason:result.retryAt?'backoff':chunks===0?'chunk_budget':'idle'};
+ if(!execution?.waitUntil||chunks===0||!result.remaining||result.retryAt||result.stage==='busy'){const reason=result.retryAt?'backoff':chunks===0?'chunk_budget':result.stage==='busy'?'busy':'idle';if(execution?.waitUntil&&result.stage!=='busy')await saveJSON(env,'epg/resolver-continuation.json',{stage:result.remaining?'paused':'complete',at:new Date().toISOString(),reason,remaining:result.remaining,retryAt:result.retryAt||null,nextCatchUpAt:result.remaining?nextCatchUpAt():null});return {scheduled:false,reason};}
  const authorization=env.EPG_SITE_SERVICE_TOKEN?'Bearer '+env.EPG_SITE_SERVICE_TOKEN:request.headers.get('OAI-Sites-Authorization'),cookie=request.headers.get('Cookie');
  if(!authorization&&!cookie){await saveJSON(env,'epg/resolver-continuation.json',{stage:'error',at:new Date().toISOString(),reason:'site_auth_unavailable',nextCatchUpAt:nextCatchUpAt()});return {scheduled:false,reason:'site_auth_unavailable'};}
  const headers={'Content-Type':'application/json',...(authorization?{'OAI-Sites-Authorization':authorization}:{}),...(cookie?{Cookie:cookie}:{})},url=new URL('/api/enrichment/discovery/resolve',request.url);
