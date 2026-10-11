@@ -95,3 +95,11 @@ Urgent hot films expiring within 24 hours precede other hot films; cold backfill
 Run results expose batchSize, hotProcessed, coldProcessed, failed, hotRemaining, coldRemaining and a sanitized reason. Discovery readiness is reported at 100 hot EPG predictions, with target 200, independently of backlog completion.
 
 The isolated benchmark start/trial routes store shadow results only, without overwriting production predictions. The offline benchmark compares JSON payload overhead and parsing at 4/8/12/20; it does not measure model latency, billed tokens or prediction quality. Multiple fingerprints per model call remain disabled until an actual model benchmark establishes comparable outputs.
+
+## Controlled mood vocabulary v1
+
+Mood presentation uses 28 stable canonical IDs. The original fingerprint/prediction JSON, hashes, generatedAt, rating, probability and immutable histories are unchanged. `/api/enrichment/view` exposes only canonical moodIds and Russian vocabulary labels; raw values are not UI options or card tags. Count each film once per canonical ID, combining fingerprint and prediction labels. Pure plot mechanics produce no mood option. Unknown labels remain diagnostic only.
+
+`POST /api/enrichment/moods/backfill` takes a cursor and optional limit (server caps the R2 scan to 12 objects per invocation). Continue nextCursor until done; retries are idempotent. It reads all persisted film records, including films outside the watchlist, and saves derived mood-facet sidecars and view-index facets. Historical raw labels are included in sidecar historyMoodFacets. Source records are never rewritten. New submissions apply the same versioned mapping when writing the view index and sidecar. `GET /api/enrichment/moods/diagnostics` exposes raw-to-canonical mappings, unknown labels and canonical per-film counts. Mapping changes do not invalidate fingerprints or forecasts.
+
+URL mood params contain canonical IDs (e.g. mood=dark&mood=military). Exact legacy Russian vocabulary labels migrate to IDs; unknown old values are ignored. OR within moods and AND across filters are preserved.

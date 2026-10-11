@@ -33,7 +33,7 @@ r=await api('enrichment/submit','POST',{runId,items:[{filmId:'film000',fingerpri
 assert(records.has('enrichment/films/film001/fingerprint.json'));r=await api('enrichment/next','POST',{runId,batchSize:5});assert.equal(r.data.items[0].filmId,'film002');
 assert.deepEqual((await api('enrichment/view')).data.films.film001.fingerprint.plotMechanics,['investigation']);
 delete records.get('enrichment/view-index.json').film000.fingerprint;
-const facetBackfill=await api('enrichment/fingerprint-view/backfill','POST',{limit:100});assert.equal(facetBackfill.status,200);assert(facetBackfill.data.added>=1);assert.deepEqual((await api('enrichment/view')).data.films.film000.fingerprint.moodLabels,['напряжённый','расследование']);
+const facetBackfill=await api('enrichment/fingerprint-view/backfill','POST',{limit:100});assert.equal(facetBackfill.status,200);assert(facetBackfill.data.added>=1);assert.deepEqual((await api('enrichment/view')).data.films.film000.fingerprint.moodIds,['tense']);
 const before=structuredClone(records.get('programme.json'));assert.equal((await api('enrichment/profile','PUT',{version:2,schemaVersion:1,profile:{...profile,pace:'Slower okay'}})).status,200);assert.deepEqual(records.get('programme.json'),before);assert.equal((await api('enrichment/view')).data.films.film000.prediction.stale,true);
 assert.equal((await api('enrichment/next','POST',{runId,batchSize:5})).status,409);
 r=await api('enrichment/start','POST',{scope:'watchlist_available',mode:'legacy',limit:100});const run2=r.data.runId;r=await api('enrichment/next','POST',{runId:run2,batchSize:1});assert.equal(r.data.items[0].requiredWork,'prediction_only');assert(!JSON.stringify(r.data.items).includes('actualRating'));
