@@ -13,3 +13,6 @@ assert.doesNotMatch(html,/Прогнозы обновлены частично/)
 context.partial={...context.latest,stage:'partial',failed:1,reason:'quota'};
 assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет прогнозов прерван/);
 console.log('Activity UI: completed batch, growing queue and partial failure labels passed');
+context.hotEvent={id:'adaptive',type:'enrichment',at:'2026-10-11T17:00:00Z',queueSchemaVersion:3,batchSize:20,added:20,hotRemaining:200,coldRemaining:4000,stage:'complete'};
+const adaptiveHTML=vm.runInContext('eventHTML(hotEvent)',context);assert.match(adaptiveHTML,/Добавлено: 20/);assert.match(adaptiveHTML,/В окне просмотра ждут прогноза: 200/);assert.doesNotMatch(adaptiveHTML,/4000|hash|prompt/i);
+context.hotEvent.reason='quota';context.hotEvent.stage='partial';assert.match(vm.runInContext('eventHTML(hotEvent)',context),/лимит использования/);
