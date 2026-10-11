@@ -1,0 +1,41 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+import {webcrypto} from 'node:crypto';
+const records=new Map(),etags=new Map();let revision=0,failDecision=false,calls=[];
+const env={TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;if(failDecision&&key==='epg/discovery-resolution.json'){failDecision=false;throw new Error('checkpoint interrupted');}records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};},list:async()=>({objects:[],truncated:false})}};
+let responseMode='normal';
+const movie={id:42,title:'Горячий фильм',original_title:'Hot Film',release_date:'2020-01-01',runtime:100,genres:[],credits:{crew:[],cast:[]},translations:{translations:[{iso_639_1:'uk',data:{title:'Гарячий фільм'}}]}};
+const context=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async url=>{calls.push(String(url));if(responseMode==='429')return new Response('{}',{status:429,headers:{'Retry-After':'30'}});return new Response(JSON.stringify(String(url).includes('/search/')?{total_pages:1,results:[movie]}:movie));}});
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+context.env=env;
+const now=Date.now(),candidate=(title,year,lastAiring)=>({key:title.toLowerCase()+'|'+year,title,normalizedTitle:title.toLowerCase(),year,duration:100,durations:[100],firstAiring:lastAiring,lastAiring,airings:1}),hot=candidate('Hot Film',2020,now),cold=candidate('Cold Film',2020,now-10*86400000),report={runId:'test',updatedAt:new Date(now-5*86400000).toISOString(),films:[]};
+records.set('programme.json',report);records.set('enrichment/profile/current.json',{version:1,profileHash:'p'});
+// Use actual key constant rather than a duplicated contract in fixtures.
+const profileKey=vm.runInContext('profileKey',context);records.set(profileKey,{version:1,profileHash:'p'});
+records.set('epg/discovery-latest.json',{items:[cold,hot]});context.report=report;
+let result=await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);
+assert.equal(result.added,1);assert(calls[0].includes('Hot+Film'),'hot title bypasses a cold candidate at the head of the source');assert.equal(records.get('epg/discovered-films.json').tmdb_42.canonicalIdentity,'tmdb:42');
+const queueKey=vm.runInContext('predictionQueueKey',context);assert.deepEqual(records.get(queueKey).pending,['tmdb_42']);
+// Return aliases, including a yearless alias, without another lookup or another entity.
+records.get('epg/discovery-latest.json').items.push(candidate('Гарячий фільм',2020,now),candidate('Hot Film',null,now));calls=[];
+result=await vm.runInContext('resolveDiscoveryBatch(env,report,2)',context);assert.equal(result.reused,2);assert.equal(calls.length,0);assert.equal(Object.keys(records.get('epg/discovered-films.json')).length,1);
+// Expiration doesn't delete cached film identity or prediction metadata; it only defers forecast work.
+const cached=records.get('epg/discovered-films.json').tmdb_42;cached.epgLastAiring=now-10*86400000;cached.shows=[];
+await vm.runInContext('refreshPredictionQueue(env,report)',context);assert.equal(records.get(queueKey).pending.length,0);assert.equal(records.get(queueKey).coldWithoutPrediction,1);
+// Promotion uses a verified alias and refreshes availability without a TMDB lookup.
+calls=[];await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);assert.equal(records.get(queueKey).pending[0],'tmdb_42');assert.equal(calls.length,2,'only the unresolved cold candidate requires TMDB; known hot aliases do not');
+// A live lease rejects overlapping writers, and an expired lease can be recovered.
+records.set('epg/resolver-lease.json',{id:'running',expiresAt:Date.now()+60000});assert.equal((await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context)).stage,'busy');records.get('epg/resolver-lease.json').expiresAt=0;
+// Interrupted decision persistence recovers the catalog write by using its aliases.
+records.set('epg/discovery-latest.json',{items:[candidate('Hot Film',2020,now)]});records.set('epg/discovery-resolution.json',{});records.set('epg/discovered-films.json',{});failDecision=true;calls=[];
+result=await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);assert.equal(result.stage,'partial');assert.equal(Object.keys(records.get('epg/discovered-films.json')).length,1);records.get('epg/discovery-status.json').retryAt=null;calls=[];
+result=await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);assert.equal(result.reused,1);assert.equal(calls.length,0);assert.equal(records.get('epg/discovery-resolution.json')[hot.key].status,'verified');
+// TMDB rate limits pause rather than marking a candidate as a non-film or losing its queue entry.
+records.set('epg/discovery-latest.json',{items:[candidate('Other',2020,now)]});responseMode='429';calls=[];
+result=await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);assert.equal(result.error,'TMDB HTTP 429');assert(result.retryAt);assert.equal(result.remaining,1);const count=calls.length;assert.equal((await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context)).stage,'backoff');assert.equal(calls.length,count);
+// Continuation uses a new invocation, bounded hop count, and no persisted credentials.
+context.request=new Request('https://site.example/api/enrichment/discovery/resolve',{headers:{'OAI-Sites-Authorization':'Bearer test'}});const tasks=[];context.execution={waitUntil:p=>tasks.push(p)};context.result={remaining:1,stage:'partial'};responseMode='normal';calls=[];
+assert.equal((await vm.runInContext('continueDiscovery(request,env,execution,result,{chunks:2})',context)).scheduled,true);await Promise.all(tasks);assert(calls[0].endsWith('/api/enrichment/discovery/resolve'));assert(!JSON.stringify([...records]).includes('Bearer test'));
+assert.equal(vm.runInContext("nonFilmEPGReason('TV series Example')",context),'show_label');assert.equal(vm.runInContext("nonFilmEPGReason('Example episode 4')",context),'episode_label');
+console.log('Discovery pipeline: hot priority, alias/yearless reuse, canonical identity, cold deferral, promotion, leases, restart checkpoints, 429 backoff and invocation continuation passed');

@@ -57,22 +57,22 @@ async function epgSync(env,run){
  try{await localizeByLetterboxd(run.watchlist,people);await saveJSON(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  for(const f of run.watchlist)for(const p of [...(f.directors||[]),...(f.actors||[])])if(people[p.id])p.name=people[p.id].name;
  for(const film of run.watchlist)applyReviewedTitle(film);
- const now=Date.now(),r=await fetch(SOURCES.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const result=await scanEPG(r.body,run.watchlist,now);if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
+ const now=Date.now(),r=await fetch(SOURCES.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
  const previous=await loadJSON(env,'programme.json');assertEPGContinuity(result,previous,run.watchlist.length,now);const fresh=new Map(result.films.map(f=>[f.id,f]));const currentFilms=new Map(run.watchlist.map(f=>[f.id,f]));const channelMin=new Map(result.coverage.map(c=>[c.name,c.min]));
  for(const old of previous?.films||[]){if(!currentFilms.has(old.id))continue;const historical=old.shows.filter(s=>s.start>=now-72*3600000&&s.start<now&&s.start<(channelMin.get(s.channel)??Infinity));if(!historical.length)continue;const target=fresh.get(old.id)||{...currentFilms.get(old.id),title:old.title,shows:[]};const keys=new Set(target.shows.map(s=>`${s.channelId}:${s.start}`));target.shows.push(...historical.filter(s=>!keys.has(`${s.channelId}:${s.start}`)));fresh.set(old.id,target);}
  const matched=[...fresh.values()].map(f=>({...f,shows:f.shows.sort((a,b)=>a.start-b.start)}));const currentById=new Map(matched.map(f=>[String(f.id),f]));const films=run.watchlist.map(f=>withAvailability({...f,...currentById.get(String(f.id)),shows:currentById.get(String(f.id))?.shows||[]}));const countShows=matched.reduce((n,f)=>n+f.shows.length,0);
  const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:SOURCES,archiveVerified:false};
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
  if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];await saveJSON(env,'sync.json',run);}
- await saveJSON(env,'programme.json',report);await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});try{const old=await loadJSON(env,'epg/discovery-latest.json');await saveJSON(env,'epg/discovery-latest.json',{programmeRunId:run.runId,updatedAt:report.updatedAt,items:mergeDiscoveryCandidates(old?.items,result.discovery)});}catch(e){run.discoveryError=String(e.message).slice(0,160);}return completeWithRatings(env,run,report);
+ await saveJSON(env,'programme.json',report);await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});try{const old=await loadJSON(env,'epg/discovery-latest.json');await saveJSON(env,'epg/discovery-latest.json',{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items:mergeDiscoveryCandidates(old?.items,result.discovery)});}catch(e){run.discoveryError=String(e.message).slice(0,160);}return completeWithRatings(env,run,report);
 }
-export default {async fetch(request,env){
+export default {async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
-  if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url);
+  if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
   if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
@@ -91,7 +91,7 @@ export default {async fetch(request,env){
    const body=await request.json();const run=await loadJSON(env,'sync.json');if(!run||body.runId!==run.runId)return json({error:'Run id mismatch'},409);
    if(url.pathname.endsWith('metadata')){if(run.stage!=='metadata')return json({runId:run.runId,stage:run.stage,remaining:run.remaining});return json(await metadataSync(env,run));}
    if(run.stage==='complete'){if(run.ratingPending?.length){const report=await loadJSON(env,'programme.json');if(report?.runId===run.runId)return json(await completeWithRatings(env,run,report));}return json({runId:run.runId,stage:run.stage});}if(run.stage!=='epg')return json({error:'Metadata stage is not complete'},409);
-   try{return json(await epgSync(env,run));}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
+   try{const result=await epgSync(env,run);if(result.stage==='complete')await continueDiscovery(request,env,execution,{remaining:1,stage:'ready'},{chunks:12});return json(result);}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
   }
   return json({error:'Not found'},404);
  }
