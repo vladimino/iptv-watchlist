@@ -23,3 +23,5 @@ context.itemFinal={...context.itemProgress,stage:'complete',stopReason:'eligible
 context.itemFinal.stage='partial';context.itemFinal.reason='format_error_storm';assert.match(vm.runInContext('eventHTML(itemFinal)',context),/проход прерван/);
 
 context.systemStop={...context.itemFinal,queueSchemaVersion:5,stage:'partial',reason:'quota',added:0,hotRemaining:100,coldRemaining:50};const stopHTML=vm.runInContext('eventHTML(systemStop)',context);assert.match(stopHTML,/Прогнозы приостановлены/);assert.match(stopHTML,/Причина: quota/);assert.match(stopHTML,/Добавлено: 0/);assert.doesNotMatch(stopHTML,/hash|token|prompt/);
+
+context.startEvent={type:'enrichment',stage:'started',queueSchemaVersion:5,at:'2026-10-12T10:00:00Z',hotRemaining:100,coldRemaining:10,currentBatchSize:12};assert.match(vm.runInContext('eventHTML(startEvent)',context),/Прогнозы запущены/);context.startEvent.stage='resumed';assert.match(vm.runInContext('eventHTML(startEvent)',context),/Прогнозы продолжены/);

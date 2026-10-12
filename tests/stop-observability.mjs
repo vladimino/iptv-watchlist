@@ -12,7 +12,7 @@ records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile
 
 
 
-const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v),catalog={};for(let i=1;i<=5;i++)catalog['tmdb_'+i]=film('tmdb_'+i,now);catalog.tmdb_99=film('tmdb_99',now-10*86400000);records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);
+const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')&&!k.includes('prediction-start-')).map(([,v])=>v),catalog={};for(let i=1;i<=5;i++)catalog['tmdb_'+i]=film('tmdb_'+i,now);catalog.tmdb_99=film('tmdb_99',now-10*86400000);records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);
 // Quota blocked start writes a safe, final zero-success Event. Repeating the blocked trigger is idempotent.
 let blocked=(await api('start',{scope:'watchlist_all',trigger:'scheduled',capacity:{remainingPercent:0}})).data;assert.equal(blocked.status,'blocked');assert.equal(events().length,1);assert.equal(events()[0].added,0);assert.equal(events()[0].reason,'quota');assert.equal(events()[0].hotRemaining,5);assert.equal(events()[0].coldRemaining,1);await api('start',{scope:'watchlist_all',trigger:'scheduled',capacity:{remainingPercent:0}});assert.equal(events().length,1);
 let start=(await api('start',{scope:'watchlist_all'})).data;const before=events().length;assert.equal((await api('start',{scope:'watchlist_all'})).data.status,'already_running');assert.equal(events().length,before);
