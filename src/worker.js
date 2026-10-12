@@ -73,7 +73,7 @@ export default {async fetch(request,env,execution){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
-  if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
+  if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}

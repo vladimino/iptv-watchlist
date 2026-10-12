@@ -21,3 +21,5 @@ context.itemProgress={id:'progress',type:'enrichment',at:'2026-10-12T05:00:00Z',
 let itemHTML=vm.runInContext('eventHTML(itemProgress)',context);assert.match(itemHTML,/Добавлено: 48/);assert.match(itemHTML,/не удалось: 2/);assert.doesNotMatch(itemHTML,/прерван/);
 context.itemFinal={...context.itemProgress,stage:'complete',stopReason:'eligible_queue_empty',reason:null};itemHTML=vm.runInContext('eventHTML(itemFinal)',context);assert.doesNotMatch(itemHTML,/прерван/);
 context.itemFinal.stage='partial';context.itemFinal.reason='format_error_storm';assert.match(vm.runInContext('eventHTML(itemFinal)',context),/проход прерван/);
+
+context.systemStop={...context.itemFinal,queueSchemaVersion:5,stage:'partial',reason:'quota',added:0,hotRemaining:100,coldRemaining:50};const stopHTML=vm.runInContext('eventHTML(systemStop)',context);assert.match(stopHTML,/Прогнозы приостановлены/);assert.match(stopHTML,/Причина: quota/);assert.match(stopHTML,/Добавлено: 0/);assert.doesNotMatch(stopHTML,/hash|token|prompt/);

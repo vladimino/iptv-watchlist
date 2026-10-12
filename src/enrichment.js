@@ -220,7 +220,7 @@ function adaptivePredictionBatch(queue,capacity={},lastBatch=queue?.lastBatch){
  return {batchSize:size,reason:known?'backlog_and_usage':'backlog_usage_unknown_conservative',usageKnown:known,remainingPercent:remaining,};
 }
 function safePredictionReason(value){
- const text=String(value||'');if(['external_termination','retry_backoff','format_error_storm'].includes(text))return text;if(/quota|usage|limit/i.test(text))return 'quota';if(/time|deadline/i.test(text))return 'time_budget';if(/parse|json/i.test(text))return 'parse_error';if(/profile/i.test(text))return 'profile_changed';if(/lease|interrupt/i.test(text))return 'lease_expired';if(/storage|persist|checkpoint/i.test(text))return 'storage_error';if(/supersed|priority/i.test(text))return 'priority_changed';return text?'model_error':null;
+ const text=String(value||'');if(['external_termination','retry_backoff','format_error_storm','model_unavailable','api_error','lease_lost'].includes(text))return text;if(/quota|usage|limit/i.test(text))return 'quota';if(/time|deadline/i.test(text))return 'time_budget';if(/parse|json/i.test(text))return 'parse_error';if(/profile/i.test(text))return 'profile_changed';if(/lease|interrupt/i.test(text))return 'lease_expired';if(/storage|persist|checkpoint/i.test(text))return 'storage_error';if(/supersed|priority/i.test(text))return 'priority_changed';return text?'model_error':null;
 }
 const RUNNER_LEASE_KEY=ENRICHMENT_KEY+'runner-lease.json';
 const RUNNER_LEASE_TTL=60*60000;
@@ -243,8 +243,39 @@ async function runnerProgress(env,run,queue,final=false){
  run.hotRemaining=queue?.priorityCount??0;run.coldRemaining=queue?.coldRemaining??0;
  if(!final&&success-(run.progressSavedCount||0)<50&&now-Date.parse(run.lastProgressAt||run.createdAt)<30*60000)return;
  const at=new Date(now).toISOString();run.progressSavedCount=success;run.lastProgressAt=at;
- await writeEvent(env,{id:'enrichment-'+run.runId+(final?'':'-progress-'+success),type:'enrichment',at,stage:final?run.status:'running',...summary,remaining:run.hotRemaining+run.coldRemaining,hotRemaining:run.hotRemaining,coldRemaining:run.coldRemaining,queueSchemaVersion:4,reason:run.stopReason||null,nextCatchUpAt:nextCatchUpAt()});
+ await writeEvent(env,{id:'enrichment-'+run.runId+(final?'':'-progress-'+success),type:'enrichment',at,stage:final?run.status:'running',runId:run.runId,trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,batchCount:summary.batchCount,remaining:run.hotRemaining+run.coldRemaining,hotRemaining:run.hotRemaining,coldRemaining:run.coldRemaining,queueSchemaVersion:4,reason:run.stopReason||null,nextCatchUpAt:nextCatchUpAt()});
  await savePredictionRun(env,run);
+}
+const STOP_EVENT_PREFIX=ENRICHMENT_KEY+'stop-events/';
+function systemicReason(reason){
+ const text=String(reason||'');if(['quota','model_unavailable','api_error','storage_error','lease_lost','format_error_storm','profile_changed','lease_expired','external_termination'].includes(text))return text;
+ if(/quota|usage|limit/i.test(text))return 'quota';if(/lease/i.test(text))return 'lease_lost';if(/profile|model/i.test(text))return 'model_unavailable';return 'storage_error';
+}
+async function flushStopEvent(env,record,key){
+ if(record.delivered)return true;
+ for(let attempt=0;attempt<3;attempt++){try{await writeEvent(env,record.event);if(key){record.delivered=true;await saveJSON(env,key,record);}return true;}catch{}}
+ return false;
+}
+async function recordRunStop(env,id,reason,fallback={}){
+ let run=await checkedRun(env,id)||{runId:id,mode:'queued',trigger:fallback.trigger==='scheduled'?'scheduled':'manual',createdAt:new Date().toISOString(),selectedIds:[],results:{},failures:{}};
+ const key=STOP_EVENT_PREFIX+id+'.json',existing=await loadJSON(env,key);let record=existing;
+ if(!record){let queue=null;try{queue=await loadJSON(env,predictionQueueKey);}catch{}const summary=runSummary(run),at=run.event?.at||run.completedAt||new Date().toISOString();
+ const event={remaining:queue?(queue.priorityCount||0)+(queue.coldRemaining||0):null,id:run.event?.id||'enrichment-'+id,type:'enrichment',runId:id,at,queueSchemaVersion:5,stage:'partial',title:'Прогнозы приостановлены',reason:systemicReason(reason),stopReason:systemicReason(reason),trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,checked:summary.checked,processed:summary.processed,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,batchCount:summary.batchCount,hotRemaining:queue?.priorityCount??fallback.hotRemaining??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??fallback.coldRemaining??run.coldRemaining??null};
+ record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key);
+ }
+ run.status='partial';run.reason=record.event.reason;run.stopReason=record.event.reason;run.completedAt=record.event.at;run.event=record.event;run.counts={created:record.event.added,recalculated:record.event.updated,failed:record.event.failed,pending:(record.event.hotRemaining||0)+(record.event.coldRemaining||0)};
+ await saveJSON(env,runKey(id),run);const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');if(!latest||latest.runId===id||fallback.start)await saveJSON(env,ENRICHMENT_KEY+'latest-run.json',run);
+ const written=await flushStopEvent(env,record,key);await runnerLease(env,id,'release');return {...record.event,status:'partial',mustComplete:true,eventPending:!written,counts:run.counts};
+}
+async function recoverStopEvents(env){
+ let cursor;do{const page=await env.BUCKET.list({prefix:STOP_EVENT_PREFIX,limit:100,...(cursor?{cursor}:{})});for(const item of page.objects){const record=await loadJSON(env,item.key);if(record&&!record.delivered)await recordRunStop(env,record.event.runId,record.event.reason);}cursor=page.truncated?page.cursor:null;}while(cursor);
+}
+async function observedPrediction(env,body,work,stage){
+ let response,data;try{response=await work();data=await response.clone().json();}catch(error){const id=body?.runId||'blocked-'+(body?.trigger==='scheduled'?'scheduled':'manual')+'-'+Math.floor(Date.now()/3600000);const stop=await recordRunStop(env,id,'storage_error',{start:stage==='start',trigger:body?.trigger});return json({...stop,error:'storage_error'},502);}
+ const normal=['queue_empty','eligible_queue_empty','retry_backoff'];
+ const stop=data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
+ if(stop){const id=body?.runId||'blocked-'+(body?.trigger==='scheduled'?'scheduled':'manual')+'-'+Math.floor(Date.now()/3600000);const final=await recordRunStop(env,id,stop,{...data,start:stage==='start',trigger:body?.trigger});return json({...data,...final,stage:stage==='start'?'blocked':final.stage,status:stage==='start'?'blocked':data.status||'partial'},response.status);}
+ return response;
 }
 async function predictionWriter(env,work){
  const object=await env.BUCKET.get(PREDICTION_MUTATION_LEASE),old=object?await object.json():null;
@@ -275,9 +306,9 @@ async function enrichmentStart(env,body,acquired=null){
  const batchSize=mode==='queued'?Math.min(plan.batchSize,body.batchSize!==undefined&&!(body.trigger==='scheduled'&&body.batchSize===4)?body.batchSize:MAX_PREDICTION_BATCH):eligible.length;
  const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');
  const runId=acquired?.runId||crypto.randomUUID(),lease=acquired||await runnerLease(env,runId,'acquire');if(lease.status!=='owned')return json({...lease,runner:predictionRunnerContract()});
- if(previous?.status==='running'){previous.status='partial';previous.stopReason='lease_expired';previous.completedAt=new Date().toISOString();await savePredictionRun(env,previous);await runnerProgress(env,previous,queue,true);}
+ if(previous?.status==='running')await recordRunStop(env,previous.runId,'lease_expired');
  const selected=mode==='queued'?queueReadyIds(queue).slice(0,batchSize).map(id=>eligible.find(f=>String(f.id)===id)).filter(Boolean):body.limit===undefined?eligible:eligible.slice(0,body.limit);
- if(mode==='queued'&&!selected.length){await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';queue.lastCheckAt=at;queue.lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await saveJSON(env,predictionQueueKey,queue);if(reason)await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...queue.lastBatch,nextCatchUpAt:nextCatchUpAt()});return json({status:stage,...queue.lastBatch,nextCatchUpAt:nextCatchUpAt()});}
+ if(mode==='queued'&&!selected.length){await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';queue.lastCheckAt=at;queue.lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await saveJSON(env,predictionQueueKey,queue);if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...queue.lastBatch,nextCatchUpAt:nextCatchUpAt()});return json({status:stage,...queue.lastBatch,nextCatchUpAt:nextCatchUpAt()});}
  const states=await Promise.all(selected.map(f=>readFilmState(env,f.id))),baseline=Object.fromEntries(selected.map((f,i)=>[String(f.id),states[i].predictions?.current?.generatedAt||null])),pendingCount=mode==='queued'?queue.pending.length:states.filter(s=>!predictionCurrent(s.predictions?.current,profile,s.fingerprint)).length;
  if(mode!=='queued'&&previous?.status==='running'&&previous.sourceProgrammeRunId===report.runId&&previous.tasteProfileHash===profile.profileHash&&previous.selectedIds?.join('|')===selected.map(f=>String(f.id)).join('|'))return json({...runSummary(previous),pendingCount});
  const createdAt=new Date().toISOString(),run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,status:'running',mode,trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,eligibleCount:eligible.length,batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(f=>String(f.id)),selectionKind:Object.fromEntries(selected.map(f=>[String(f.id),mode==='queued'&&queue.priority[f.id]?.hot?'hot':'cold'])),baseline,failures:{},results:{}};
@@ -287,9 +318,10 @@ function predictionRunnerContract(){return {pipelineVersion:5,continuous:true,it
 function runSummary(r){return {runId:r.runId,processed:Object.values(r.results||{}).filter(x=>x!=='failed').length,batchCount:r.batchCount||1,lastHeartbeatAt:r.lastHeartbeatAt||null,hotRemaining:r.hotRemaining??null,coldRemaining:r.coldRemaining??null,stopReason:r.stopReason||null,sourceProgrammeRunId:r.sourceProgrammeRunId,tasteProfileVersion:r.tasteProfileVersion,tasteProfileHash:r.tasteProfileHash,fingerprintSchemaVersion:r.fingerprintSchemaVersion,predictionPromptVersion:r.predictionPromptVersion,eligibleCount:r.eligibleCount,selectedCount:r.selectedIds.length,batchSize:r.batchSize??r.selectedIds.length,adaptivePlan:r.adaptivePlan||null,deadlineAt:r.deadlineAt||null,status:r.status,trigger:r.trigger||'manual',startedAt:r.createdAt,finishedAt:r.completedAt||null,checked:Object.keys(r.results||{}).length,added:Object.values(r.results||{}).filter(x=>x==='created').length,updated:Object.values(r.results||{}).filter(x=>x==='recalculated').length,failed:Object.keys(r.failures||{}).length,hotProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='hot').length,coldProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='cold').length};}
 async function checkedRun(env,id){if(!isText(id,100))return null;return loadJSON(env,runKey(id));}
 async function enrichmentNext(env,body){
- const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete'},409);const requestSize=body.batchSize??run.batchSize??MAX_PREDICTION_BATCH;if(!Number.isInteger(requestSize)||requestSize<1||requestSize>20)return json({error:'Invalid batchSize'},400);
+ const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);const requestSize=body.batchSize??run.batchSize??MAX_PREDICTION_BATCH;if(!Number.isInteger(requestSize)||requestSize<1||requestSize>20)return json({error:'Invalid batchSize'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({runId:run.runId,items:[],mustComplete:true,stopReason:run.systemicStopReason});
+ if(body.capacity?.remainingPercent===0||body.capacity?.quotaAvailable===false)return json({runId:run.runId,items:[],mustComplete:true,stopReason:'quota'});
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash)return json({error:'Profile changed; start a new run'},409);
  let source=await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{},states=await Promise.all(run.selectedIds.map(id=>readFilmState(env,id))),index=await loadJSON(env,ENRICHMENT_KEY+'view-index.json')||{},repair=false,runRepair=false;
  for(let i=0;i<run.selectedIds.length;i++){const id=run.selectedIds[i],s=states[i],p=s.predictions?.current;if(predictionCurrent(p,profile,s.fingerprint)&&index[id]?.prediction?.generatedAt!==p.generatedAt){index[id]={...(index[id]||{}),prediction:p,fingerprintHash:s.fingerprint.fingerprintHash,fingerprint:fingerprintFacet(s.fingerprint)};repair=true;}}
@@ -312,7 +344,7 @@ async function enrichmentNext(env,body){
  return json({runId:run.runId,profile:profile.profile,profileVersion:profile.version,profileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,items,pendingCount,batchSize:run.batchSize,deadlineAt:run.deadlineAt||null,modelBatching:predictionRunnerContract().modelBatching});
 }
 async function enrichmentSubmit(env,body){
- const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete'},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
+ const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({...runSummary(run),mustComplete:true,stopReason:run.systemicStopReason});
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash)return json({error:'Profile changed; start a new run'},409);
@@ -343,6 +375,7 @@ async function enrichmentComplete(env,body){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);
  if(run.status==='complete'||run.status==='partial'){if(run.event)await writeEvent(env,run.event);else await writeEvent(env,{id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts});await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...(run.event||{})});}
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
+ if(body.reason&&!['queue_empty','eligible_queue_empty','parse_error','retry_backoff'].includes(body.reason))return json(await recordRunStop(env,run.runId,systemicReason(body.reason)));
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&!body.reason)return json({error:'Profile changed; start a new run'},409);
  if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'completion_check');if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
  const states=await Promise.all(run.selectedIds.map(id=>readFilmState(env,id)));let created=0,recalculated=0,pending=0;
@@ -419,17 +452,17 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
  if(path==='/api/enrichment/benchmark/start'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkStart(env));
  if(path==='/api/enrichment/benchmark/trial'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkTrial(env,body));
  if(path==='/api/enrichment/runner'&&request.method==='GET')return json(predictionRunnerContract());
- if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return predictionWriter(env,()=>runnerHeartbeat(env,body));
- if(path==='/api/enrichment/start'&&request.method==='POST'){
+ if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>runnerHeartbeat(env,body)),'heartbeat');
+ if(path==='/api/enrichment/start'&&request.method==='POST')return observedPrediction(env,body,async()=>{
   const runId=crypto.randomUUID(),lease=await runnerLease(env,runId,'acquire');if(lease.status!=='owned')return json(lease);
   try{const response=await predictionWriter(env,()=>enrichmentStart(env,body,lease));if(response.status>=400)await runnerLease(env,runId,'release');return response;}catch(error){await runnerLease(env,runId,'release');throw error;}
- }
+ },'start');
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');const queue=await refreshPredictionQueue(env,report,'manual_reconcile');return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,nextCatchUpAt:nextCatchUpAt()});
- if(path==='/api/enrichment/next'&&request.method==='POST')return predictionWriter(env,()=>enrichmentNext(env,body));
- if(path==='/api/enrichment/submit'&&request.method==='POST')return predictionWriter(env,()=>enrichmentSubmit(env,body));
- if(path==='/api/enrichment/complete'&&request.method==='POST')return predictionWriter(env,()=>enrichmentComplete(env,body));
- if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
+ if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body)),'next');
+ if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body)),'submit');
+ if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body)),'complete');
+ if(path==='/api/enrichment/status'&&request.method==='GET'){await recoverStopEvents(env);return json(await enrichmentStatus(env));}
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:Object.keys(EXECUTION).slice(0,13),moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,strengths:'short string array',risks:'short string array',confidence:['low','medium','high'],sourceBasis:['metadata','model_knowledge','web_research','mixed'],sourceRefs:'URL or model_knowledge'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:['low','medium','high'],matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS},rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film']});
