@@ -45,9 +45,9 @@
       <div class="footer-status">
         <div class="status-summary" role="status" aria-live="polite">
           <div class="status-row"><span>Модель вкуса</span><strong id="taste-version">не настроена</strong></div>
-          <div class="status-row"><span>Локальная база</span><strong id="status-local-coverage">загрузка…</strong></div>
-          <div class="status-row"><span>Окно просмотра</span><strong id="status-window-coverage">загрузка…</strong></div>
-          <div class="status-row"><span>Последний run</span><strong id="status-last-run">загрузка…</strong></div>
+          <div class="status-row status-row-coverage"><span>Локальная база</span><strong id="status-local-coverage">загрузка…</strong></div>
+          <div class="status-row status-row-coverage"><span>Окно просмотра</span><strong id="status-window-coverage">загрузка…</strong></div>
+          <div class="status-row status-run-row"><span id="status-run-label">Последний run</span><div class="status-run-value"><strong id="status-last-run">загрузка…</strong><small id="status-next-run">Следующий запуск: —</small></div></div>
         </div>
         <details class="footer-details" id="status-details">
           <summary><span id="status-details-label">Показать детали</span></summary>
@@ -62,10 +62,10 @@
               <div><dt>Текущий пакет</dt><dd id="detail-current-batch">—</dd></div>
               <div><dt>Следующий пакет</dt><dd id="detail-next-batch">—</dd></div>
             </dl></section>
-            <section aria-labelledby="status-epg-title"><h3 id="status-epg-title">EPG / TMDB</h3><dl>
-              <div><dt>Распознано</dt><dd id="detail-epg-recognized">—</dd></div>
+            <section aria-labelledby="status-epg-title"><h3 id="status-epg-title">EPG / TMDB</h3><p class="status-section-help" id="status-epg-help">EPG-показатели относятся к текущему каталогу передач, локальная база — ко всем сохранённым canonical TMDB-фильмам. Эти totals независимы.</p><dl>
+              <div><dt title="Уникальные TMDB-фильмы, распознанные среди кандидатов текущего EPG.">Распознано в текущем EPG</dt><dd id="detail-epg-recognized">—</dd></div>
               <div><dt>Ждут распознавания</dt><dd id="detail-epg-pending">—</dd></div>
-              <div><dt>Подтверждённые фильмы</dt><dd id="detail-epg-confirmed">—</dd></div>
+              <div><dt title="Уникальные canonical TMDB film identities, подтверждённые как фильмы и сохранённые локально.">Фильмы в локальной базе</dt><dd id="detail-epg-confirmed">—</dd></div>
               <div><dt>Кеш вне окна</dt><dd id="detail-epg-cache">—</dd></div>
               <div><dt>Покрытие EPG</dt><dd id="detail-epg-coverage">—</dd></div>
               <div><dt>Каналы</dt><dd id="detail-epg-channels">—</dd></div>

@@ -4,19 +4,24 @@ import assert from 'node:assert/strict';
 
 const html=fs.readFileSync('public/index.html','utf8'),css=fs.readFileSync('public/styles.css','utf8'),app=fs.readFileSync('public/app.js','utf8');
 const footer=html.match(/<footer class="status-footer"[\s\S]*?<\/footer>/)?.[0]||'';
-assert.equal((footer.match(/class="status-row"/g)||[]).length,4,'collapsed status has exactly four rows');
+assert.equal((footer.match(/class="status-row(?: [^"]*)?"/g)||[]).length,4,'collapsed status has exactly four rows');
 assert.match(footer,/Модель вкуса[\s\S]*Локальная база[\s\S]*Окно просмотра[\s\S]*Последний run/);
+assert.match(footer,/id="status-run-label"/);assert.match(footer,/id="status-next-run">Следующий запуск:/);
 assert.match(footer,/<details class="footer-details" id="status-details">/,'details are collapsed by default');
 for(const heading of ['Прогнозы','EPG / TMDB','Watchlist','Последний запуск','Модель вкуса'])assert.match(footer,new RegExp('>'+heading+'<'));
 assert.match(footer,/Вне окна в кеше/);
 assert.match(footer,/Ждут фонового прогноза вне окна/);
+assert.match(footer,/Распознано в текущем EPG/);assert.match(footer,/Фильмы в локальной базе/);assert.match(footer,/Эти totals независимы/);
 assert.match(footer,/id="status-events-link" href="#activity-title">Смотреть события/);
 assert.doesNotMatch(footer,/Фоновый прогноз заполняется|Серии и передачи исключаются|уникальных нормализованных названий|hash|prompt|token/i,'collapsed footer contains no old prose or debug data');
 assert.match(app,/statusDetails\.addEventListener\('toggle'/,'expand/collapse label follows native details state');
 assert.match(app,/status-events-link[\s\S]*filters\.dataset\.open='true'[\s\S]*activity-title.*scrollIntoView/,'events action reveals and navigates to the Events log');
+assert.match(css,/\.status-footer \.footer-status\{[^}]*width:min\(100%,680px\)/,'footer grid has a bounded readable width');
+assert.match(css,/\.status-row\{[^}]*grid-template-columns:168px minmax\(0,1fr\)[^}]*gap:22px/,'compact labels and values share a predictable close grid');
 assert.match(css,/\.status-row>strong\{[^}]*overflow-wrap:anywhere/);
-assert.match(css,/@media\(max-width:760px\)[\s\S]*\.footer-details-body\{grid-template-columns:1fr/);
-assert.match(css,/@media\(max-width:420px\)[\s\S]*\.status-row\{display:block\}/);
+assert.match(css,/\.footer-details-body\{[^}]*grid-template-columns:repeat\(2,minmax\(0,326px\)\)[^}]*max-width:680px/,'expanded sections use the same bounded two-column grid');
+assert.match(css,/@media\(max-width:620px\)[\s\S]*\.footer-details-body\{grid-template-columns:minmax\(0,1fr\)/);
+assert.match(css,/@media\(max-width:520px\)[\s\S]*\.status-row\{display:block\}/,'narrow screens stack labels and values');
 
 const context=vm.createContext({Date,Intl,URL,Set,Map});
 vm.runInContext(app.replace(/init\(\);\s*$/,''),context);
@@ -24,6 +29,7 @@ context.input={profile:{version:7,updatedAt:'2026-10-12T18:00:00Z'},coverage:{co
 const text=vm.runInContext('footerStatusText(input)',context);
 assert.match(text.local,/75\/100 с актуальным прогнозом · 75%/);
 assert.match(text.windowCoverage,/18\/20 с актуальным прогнозом · 90%/);
-assert.match(text.runLine,/завершён \/ очередь обработана · следующий запуск/);
-for(const line of [text.profile,text.local,text.windowCoverage,text.runLine])assert(line.length<100,'collapsed lines stay compact');
+assert.equal(text.runLabel,'Последний run');assert.match(text.runLine,/завершён \/ очередь обработана/);assert.match(text.nextLine,/Следующий запуск:/);
+context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.match(active.nextLine,/Следующий запуск:/);assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
+for(const line of [text.profile,text.local,text.windowCoverage,text.runLine,text.nextLine])assert(line.length<100,'collapsed lines stay compact');
 console.log('Status footer UI: four-line default, structured details, expand/collapse, Events navigation and responsive layout passed');
