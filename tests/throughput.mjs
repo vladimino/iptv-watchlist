@@ -12,7 +12,9 @@ records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile
 const queue={priorityCount:1000,coldRemaining:3000,pending:Array(1000).fill('x')};ctx.queue=queue;
 for(const [remainingPercent,expected] of [[100,20],[22,8],[8,4],[0,0]]){ctx.capacity={remainingPercent};assert.equal(call('adaptivePredictionBatch(queue,capacity)').batchSize,expected)}
 assert.equal(call('adaptivePredictionBatch(queue,{})').batchSize,12);ctx.queue={priorityCount:2,pending:['a','b']};assert.equal(call('adaptivePredictionBatch(queue,{remainingPercent:100})').batchSize,2);
-ctx.queue={priorityCount:100,pending:['a'],lastBatch:{stage:'partial',reason:'quota',batchSize:20}};assert.equal(call('adaptivePredictionBatch(queue,{remainingPercent:22})').batchSize,8);
+ctx.queue={priorityCount:100,pending:['a'],lastBatch:{stage:'partial',reason:'quota',batchSize:12}};assert.equal(call('adaptivePredictionBatch(queue,{})').batchSize,12);assert.equal(call('adaptivePredictionBatch(queue,{})').reason,'backlog_usage_unknown_conservative_cap_12');assert.equal(call('adaptivePredictionBatch(queue,{remainingPercent:22})').batchSize,8);
+ctx.queue={priorityCount:100,pending:['a'],lastBatch:{stage:'partial',reason:'parse_error',batchSize:12}};assert.equal(call('adaptivePredictionBatch(queue,{})').batchSize,12,'item parse failures from a previous run do not reduce a new run');
+ctx.queue={priorityCount:0,coldRemaining:100,pending:Array(100).fill('x'),lastBatch:{stage:'partial',reason:'storage_error',batchSize:12}};assert.equal(call('adaptivePredictionBatch(queue,{})').batchSize,5,'cold-only work stays capped at five');
 const catalog={};for(let i=1;i<=50;i++)catalog['tmdb_'+i]=film('tmdb_'+i,now,{discoveredAt:new Date(now-10000).toISOString()});catalog.tmdb_900=film('tmdb_900',now-71*3600000);catalog.tmdb_901=film('tmdb_901',now-10*86400000);
 records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);
 let q=(await api('queue/reconcile',{})).data;assert.equal(q.hotRemaining,51);assert.equal(q.coldRemaining,1);assert.equal(q.urgentCount,1);assert.equal(records.get('enrichment/prediction-queue.json').pending[0],'tmdb_900');

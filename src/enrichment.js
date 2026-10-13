@@ -206,7 +206,7 @@ function predictionPriority(film,now=Date.now()){
  const hot=filmIsHot(film,now),availableNow=starts.some(t=>t<=now),today=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid'}).format(now),availableToday=starts.some(t=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid'}).format(t)===today),deadline=starts.length?Math.max(...starts)+72*3600000:null;
  return {hot,availableNow,availableToday,availableUntil:deadline?new Date(deadline).toISOString():null,rank:hot?(availableNow&&deadline-now<=24*3600000?0:1):2,expiresInMs:deadline?deadline-now:Infinity};
 }
-function adaptivePredictionBatch(queue,capacity={},lastBatch=queue?.lastBatch){
+function adaptivePredictionBatch(queue,capacity={}){
  const hot=queue?.priorityCount||0,cold=queue?.coldRemaining??queue?.pending?.length??0,backlog=hot||cold;
  if(!backlog)return {batchSize:0,reason:'empty',usageKnown:Number.isFinite(capacity.remainingPercent)};
  const known=Number.isFinite(capacity.remainingPercent),remaining=known?Math.max(0,Math.min(100,capacity.remainingPercent)):null;
@@ -214,10 +214,9 @@ function adaptivePredictionBatch(queue,capacity={},lastBatch=queue?.lastBatch){
  let size=backlog<=4?backlog:backlog<=15?8:backlog<100?12:20;
  const usageCap=remaining===null?12:remaining<=10?4:remaining<=25?8:20;
  size=Math.min(size,usageCap);
- if(lastBatch?.stage==='partial'&&['quota','model_error','parse_error','storage_error'].includes(lastBatch.reason)&&!(known&&remaining>=50))size=Math.min(size,Math.max(4,Math.floor((lastBatch.batchSize||8)/2)));
  // Cold never consumes capacity while any hot prediction remains outstanding, including retry backoff.
  if(!hot)size=Math.min(size,5);
- return {batchSize:size,reason:known?'backlog_and_usage':'backlog_usage_unknown_conservative',usageKnown:known,remainingPercent:remaining,};
+ return {batchSize:size,reason:known?'backlog_and_usage':'backlog_usage_unknown_conservative_cap_12',usageKnown:known,remainingPercent:remaining,};
 }
 function safePredictionReason(value){
  const text=String(value||'');if(['external_termination','retry_backoff','format_error_storm','model_unavailable','api_error','lease_lost'].includes(text))return text;if(/quota|usage|limit/i.test(text))return 'quota';if(/time|deadline/i.test(text))return 'time_budget';if(/parse|json/i.test(text))return 'parse_error';if(/profile/i.test(text))return 'profile_changed';if(/lease|interrupt/i.test(text))return 'lease_expired';if(/storage|persist|checkpoint/i.test(text))return 'storage_error';if(/supersed|priority/i.test(text))return 'priority_changed';return text?'model_error':null;
