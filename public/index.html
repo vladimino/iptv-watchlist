@@ -41,7 +41,57 @@
         <div id="empty" class="empty" hidden><span aria-hidden="true">◌</span><h2>Таких фильмов не найдено</h2><p>Измени название, выбери другой жанр или расширь диапазон лет.</p><button id="empty-reset">Сбросить фильтры</button></div>
       </section>
     </div>
-    <footer><span>В эфире / Watchlist</span><span class="match-legend">≈ — совпадение без года в EPG</span><div class="footer-status"><span id="taste-version">Модель вкуса: не настроена</span><details class="footer-details"><summary id="prediction-queue-status">Статус прогнозов</summary><div class="footer-details-body"><p id="prediction-queue-details">Загружаем состояние очереди и каталога.</p><p id="source-note">Получаем последнее сохранённое расписание.</p><p id="source-summary">EPG Team · Letterboxd</p></div></details></div></footer>
+    <footer class="status-footer" aria-label="Состояние данных и прогнозов">
+      <div class="footer-status">
+        <div class="status-summary" role="status" aria-live="polite">
+          <div class="status-row"><span>Модель вкуса</span><strong id="taste-version">не настроена</strong></div>
+          <div class="status-row"><span>Локальная база</span><strong id="status-local-coverage">загрузка…</strong></div>
+          <div class="status-row"><span>Окно просмотра</span><strong id="status-window-coverage">загрузка…</strong></div>
+          <div class="status-row"><span>Последний run</span><strong id="status-last-run">загрузка…</strong></div>
+        </div>
+        <details class="footer-details" id="status-details">
+          <summary><span id="status-details-label">Показать детали</span></summary>
+          <div class="footer-details-body">
+            <section aria-labelledby="status-predictions-title"><h3 id="status-predictions-title">Прогнозы</h3><dl>
+              <div><dt>Локальная база</dt><dd id="detail-local-coverage">—</dd></div>
+              <div><dt>Окно просмотра</dt><dd id="detail-window-coverage">—</dd></div>
+              <div><dt>Ждут в окне</dt><dd id="detail-pending-hot">—</dd></div>
+              <div><dt>Холодная очередь</dt><dd id="detail-pending-cold">—</dd></div>
+              <div><dt>Вне окна в кеше</dt><dd id="detail-cache-off-window">—</dd></div>
+              <div><dt>Ждут фонового прогноза вне окна</dt><dd id="detail-pending-off-window">—</dd></div>
+              <div><dt>Текущий пакет</dt><dd id="detail-current-batch">—</dd></div>
+              <div><dt>Следующий пакет</dt><dd id="detail-next-batch">—</dd></div>
+            </dl></section>
+            <section aria-labelledby="status-epg-title"><h3 id="status-epg-title">EPG / TMDB</h3><dl>
+              <div><dt>Распознано</dt><dd id="detail-epg-recognized">—</dd></div>
+              <div><dt>Ждут распознавания</dt><dd id="detail-epg-pending">—</dd></div>
+              <div><dt>Подтверждённые фильмы</dt><dd id="detail-epg-confirmed">—</dd></div>
+              <div><dt>Кеш вне окна</dt><dd id="detail-epg-cache">—</dd></div>
+              <div><dt>Покрытие EPG</dt><dd id="detail-epg-coverage">—</dd></div>
+              <div><dt>Каналы</dt><dd id="detail-epg-channels">—</dd></div>
+              <div><dt>Проверено передач</dt><dd id="detail-epg-checked">—</dd></div>
+            </dl></section>
+            <section aria-labelledby="status-watchlist-title"><h3 id="status-watchlist-title">Watchlist</h3><dl>
+              <div><dt>Фильмы</dt><dd id="detail-watchlist-films">—</dd></div>
+              <div><dt>Обновлён</dt><dd id="detail-watchlist-updated">—</dd></div>
+              <div><dt>Без метаданных</dt><dd id="detail-watchlist-metadata">—</dd></div>
+              <div><dt>Названия требуют проверки</dt><dd id="detail-watchlist-titles">—</dd></div>
+            </dl></section>
+            <section aria-labelledby="status-run-title"><h3 id="status-run-title">Последний запуск</h3><dl>
+              <div><dt>Начат</dt><dd id="detail-run-started">—</dd></div>
+              <div><dt>Добавлено</dt><dd id="detail-run-added">—</dd></div>
+              <div><dt>Ошибки</dt><dd id="detail-run-failed">—</dd></div>
+              <div><dt>Результат</dt><dd id="detail-run-reason">—</dd></div>
+              <div><dt>Следующий запуск</dt><dd id="detail-run-next">—</dd></div>
+            </dl><a class="status-events-link" id="status-events-link" href="#activity-title">Смотреть события</a></section>
+            <section aria-labelledby="status-profile-title"><h3 id="status-profile-title">Модель вкуса</h3><dl>
+              <div><dt>Версия</dt><dd id="detail-profile-version">—</dd></div>
+              <div><dt>Обновлена</dt><dd id="detail-profile-updated">—</dd></div>
+            </dl></section>
+          </div>
+        </details>
+      </div>
+    </footer>
   </main>
   <script src="app.js"></script>
 </body>

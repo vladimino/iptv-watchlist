@@ -301,6 +301,36 @@ async function refreshPredictionQueue(env,report,trigger='reconcile'){
  await saveJSON(env,predictionQueueKey,queue);return queue;
 }
 async function queueStatus(env){const q=await loadJSON(env,predictionQueueKey);return q?{schemaVersion:q.schemaVersion,hotCount:q.hotCount,coldCount:q.coldCount,coldWithoutPrediction:q.coldWithoutPrediction,hotPredicted:q.hotPredicted,profileVersion:q.profileVersion,programmeRunId:q.programmeRunId,refreshedAt:q.refreshedAt,pendingCount:q.pending.length,priorityCount:q.priorityCount,hotRemaining:q.priorityCount,coldRemaining:q.coldRemaining??q.coldWithoutPrediction??0,urgentCount:q.urgentCount||0,adaptiveBatch:adaptivePredictionBatch(q),discovery:q.discovery||null,metrics:q.metrics||null,lastBatch:q.lastBatch,lastCheckAt:q.lastCheckAt,nextCatchUpAt:nextCatchUpAt()}:null;}
+function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now()){
+ const groups=new Map();
+ for(const film of [...(report?.films||[]),...Object.values(catalog||{})]){
+  const tmdbId=String(film?.tmdbId||'').trim();if(!tmdbId)continue;
+  const identity='tmdb:'+tmdbId,group=groups.get(identity)||{ids:new Set(),films:[]};
+  group.ids.add(String(film.id));group.films.push(film);groups.set(identity,group);
+ }
+ let currentPredictionsTotal=0,windowFilmsTotal=0,windowCurrentPredictions=0,cacheOffWindowTotal=0,pendingOffWindowTotal=0;
+ for(const group of groups.values()){
+  const current=[...group.ids].some(id=>indexedPredictionCurrent(index?.[id],profile));
+  const inWindow=group.films.some(film=>filmIsHot(film,now));
+  if(current)currentPredictionsTotal++;
+  if(inWindow){windowFilmsTotal++;if(current)windowCurrentPredictions++;}
+  else{cacheOffWindowTotal++;if(!current)pendingOffWindowTotal++;}
+ }
+ return {confirmedFilmsTotal:groups.size,currentPredictionsTotal,windowFilmsTotal,windowCurrentPredictions,cacheOffWindowTotal,pendingOffWindowTotal};
+}
+async function footerStatus(env){
+ const [profile,index,report,catalog,queue,run,lease,source,decisions]=await Promise.all([
+  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,'programme.json'),loadJSON(env,'epg/discovered-films.json'),queueStatus(env),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')
+ ]);
+ const coverage=canonicalCoverageSummary(report,catalog,index,profile),items=source?.items||[];
+ const recognized=new Set();
+ for(const candidate of items){const decision=decisions?.[candidate.key];if(decision?.status==='verified'&&decision.tmdbId)recognized.add(String(decision.tmdbId));}
+ const pendingRecognition=items.filter(candidate=>!nonFilmEPGReason(candidate.title)&&decisions?.[candidate.key]?.status!=='verified'&&decisions?.[candidate.key]?.status!=='excluded_nonfilm').length;
+ const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
+ const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
+ const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:queue?.nextCatchUpAt||nextCatchUpAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null};
+}
 function queueReadyIds(queue){const ids=queue.priorityCount?queue.hotPending:queue.coldPending;return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>Date.now()));}
 const RUN_DIAGNOSTICS_PREFIX=ENRICHMENT_KEY+'run-diagnostics/';
 function diagnosticKey(id,at){return RUN_DIAGNOSTICS_PREFIX+String(9999999999999-Date.parse(at)).padStart(13,'0')+'-'+id+'.json';}
@@ -489,6 +519,7 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
  if(path==='/api/enrichment/runs'&&request.method==='GET'){const text=url.searchParams.get('limit')||'10';if(!/^\d+$/.test(text)||Number(text)<1||Number(text)>100)return json({error:'Invalid limit (1–100)'},400);return json(await diagnosticHistory(env,Number(text)));}
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');const queue=await refreshPredictionQueue(env,report,'manual_reconcile');return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,nextCatchUpAt:nextCatchUpAt()});
+ if(path==='/api/enrichment/footer/status'&&request.method==='GET')return json(await footerStatus(env));
  if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body)),'next');
  if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body)),'submit');
  if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body)),'complete');
