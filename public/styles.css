@@ -51,7 +51,7 @@
 .status-footer .footer-status{width:min(100%,680px);margin-inline:auto;min-width:0}
 .status-summary{display:grid;gap:7px;max-width:680px}
 .status-row{display:grid;grid-template-columns:168px minmax(0,1fr);gap:22px;align-items:baseline;min-width:0}
-.status-row>span{color:var(--muted)}
+.status-row>span{color:var(--muted);text-align:right}
 .status-row>strong{color:#dce8d2;font-weight:560;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .status-row-coverage>strong{font-weight:680;color:#e5eedc;font-size:13px}
 .status-run-value{display:grid;justify-items:end;min-width:0;text-align:right}

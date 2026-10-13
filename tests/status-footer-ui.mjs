@@ -18,10 +18,12 @@ assert.match(app,/statusDetails\.addEventListener\('toggle'/,'expand/collapse la
 assert.match(app,/status-events-link[\s\S]*filters\.dataset\.open='true'[\s\S]*activity-title.*scrollIntoView/,'events action reveals and navigates to the Events log');
 assert.match(css,/\.status-footer \.footer-status\{[^}]*width:min\(100%,680px\)/,'footer grid has a bounded readable width');
 assert.match(css,/\.status-row\{[^}]*grid-template-columns:168px minmax\(0,1fr\)[^}]*gap:22px/,'compact labels and values share a predictable close grid');
+assert.match(css,/\.status-row>span\{[^}]*text-align:right/,'desktop labels align toward their values');
 assert.match(css,/\.status-row>strong\{[^}]*overflow-wrap:anywhere/);
 assert.match(css,/\.footer-details-body\{[^}]*grid-template-columns:repeat\(2,minmax\(0,326px\)\)[^}]*max-width:680px/,'expanded sections use the same bounded two-column grid');
 assert.match(css,/@media\(max-width:620px\)[\s\S]*\.footer-details-body\{grid-template-columns:minmax\(0,1fr\)/);
 assert.match(css,/@media\(max-width:520px\)[\s\S]*\.status-row\{display:block\}/,'narrow screens stack labels and values');
+assert.match(css,/@media\(max-width:520px\)[\s\S]*\.status-row>span[^}]*text-align:left/,'stacked labels return to left alignment');
 
 const context=vm.createContext({Date,Intl,URL,Set,Map});
 vm.runInContext(app.replace(/init\(\);\s*$/,''),context);
