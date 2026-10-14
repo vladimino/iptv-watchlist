@@ -17,9 +17,13 @@ assert.doesNotMatch(footer,/Фоновый прогноз заполняется
 assert.match(app,/statusDetails\.addEventListener\('toggle'/,'expand/collapse label follows native details state');
 assert.match(app,/status-events-link[\s\S]*filters\.dataset\.open='true'[\s\S]*activity-title.*scrollIntoView/,'events action reveals and navigates to the Events log');
 assert.match(css,/\.status-footer \.footer-status\{[^}]*width:min\(100%,680px\)/,'footer grid has a bounded readable width');
-assert.match(css,/\.status-row\{[^}]*grid-template-columns:168px minmax\(0,1fr\)[^}]*gap:22px/,'compact labels and values share a predictable close grid');
+assert.match(css,/\.status-summary\{[^}]*grid-template-columns:max-content max-content[^}]*column-gap:18px[^}]*width:max-content[^}]*margin-inline:auto/,'desktop compact summary uses a centered content-sized grid');
+assert.match(css,/\.status-row\{display:contents\}/,'compact rows share one label/value grid');
 assert.match(css,/\.status-row>span\{[^}]*text-align:right/,'desktop labels align toward their values');
-assert.match(css,/\.status-row>strong\{[^}]*overflow-wrap:anywhere/);
+assert.match(css,/\.status-row>strong\{[^}]*text-align:left[^}]*overflow-wrap:anywhere/,'desktop values start beside the shared label column');
+assert.match(css,/\.status-run-value\{[^}]*justify-items:start[^}]*text-align:left/,'run value and next-run line align with other values');
+const desktopSummaryRule=css.match(/\.status-summary\{([^}]*)\}/)?.[1]||'';
+assert.doesNotMatch(desktopSummaryRule,/1fr/,'desktop value column does not stretch to the footer edge');
 assert.match(css,/\.footer-details-body\{[^}]*grid-template-columns:repeat\(2,minmax\(0,326px\)\)[^}]*max-width:680px/,'expanded sections use the same bounded two-column grid');
 assert.match(css,/@media\(max-width:620px\)[\s\S]*\.footer-details-body\{grid-template-columns:minmax\(0,1fr\)/);
 assert.match(css,/@media\(max-width:520px\)[\s\S]*\.status-row\{display:block\}/,'narrow screens stack labels and values');

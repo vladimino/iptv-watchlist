@@ -49,12 +49,12 @@
 /* Compact status summary and structured diagnostics */
 .status-footer{display:block;min-width:0}
 .status-footer .footer-status{width:min(100%,680px);margin-inline:auto;min-width:0}
-.status-summary{display:grid;gap:7px;max-width:680px}
-.status-row{display:grid;grid-template-columns:168px minmax(0,1fr);gap:22px;align-items:baseline;min-width:0}
+.status-summary{display:grid;grid-template-columns:max-content max-content;column-gap:18px;row-gap:7px;align-items:baseline;width:max-content;max-width:100%;margin-inline:auto}
+.status-row{display:contents}
 .status-row>span{color:var(--muted);text-align:right}
-.status-row>strong{color:#dce8d2;font-weight:560;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.status-row>strong{color:#dce8d2;font-weight:560;text-align:left;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .status-row-coverage>strong{font-weight:680;color:#e5eedc;font-size:13px}
-.status-run-value{display:grid;justify-items:end;min-width:0;text-align:right}
+.status-run-value{display:grid;justify-items:start;min-width:0;text-align:left}
 .status-run-value strong{color:#dce8d2;font-weight:560;overflow-wrap:anywhere}
 .status-run-value small{color:var(--muted);font-size:11px;font-weight:400;margin-top:1px}
 .footer-details{margin-top:12px;min-width:0}
@@ -71,7 +71,7 @@
 .status-events-link{display:inline-block;margin-top:11px;color:var(--lime);text-underline-offset:3px}
 .coverage p time{display:block;font-variant-numeric:tabular-nums}
 .coverage p time+time::before{content:'→ ';color:var(--lime)}
-@media(max-width:760px){.search-box{margin-bottom:20px}.movie-card.has-score .film-head{padding-right:118px;min-height:158px}.started-action{right:16px;bottom:14px;padding:0}.status-footer .footer-status{width:100%;margin:0}.status-row{grid-template-columns:144px minmax(0,1fr);gap:16px}.coverage{display:block;margin-top:6px}}
+@media(max-width:760px){.search-box{margin-bottom:20px}.movie-card.has-score .film-head{padding-right:118px;min-height:158px}.started-action{right:16px;bottom:14px;padding:0}.status-footer .footer-status{width:100%;margin:0}.status-summary{width:100%;grid-template-columns:144px minmax(0,1fr);column-gap:16px}.coverage{display:block;margin-top:6px}}
 @media(max-width:620px){.footer-details>summary{margin-left:0}.footer-details-body{grid-template-columns:minmax(0,1fr);gap:20px;max-width:440px}}
 @media(max-width:520px){.status-row{display:block}.status-row>span,.status-row>strong{display:block;text-align:left}.status-row>strong{margin-top:1px}.status-run-value{justify-items:start;text-align:left;margin-top:1px}.footer-details-body dl>div{grid-template-columns:minmax(0,1fr);gap:1px}.footer-details-body dd{text-align:left}}
 @media(max-width:410px){.movie-card.has-score .film-head{padding-top:98px;padding-right:17px;min-height:0}}
