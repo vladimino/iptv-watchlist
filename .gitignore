@@ -7,8 +7,6 @@
 *.p12
 *.cookie
 cookies*.txt
-.openai/hosting.json
-
 # Generated output and downloaded/runtime data
 dist/
 build/
