@@ -1,6 +1,13 @@
 const decode = s => String(s??'').replace(/&#(x[0-9a-f]+|\d+);/gi,(_,n)=>{const cp=n[0].toLowerCase()==='x'?parseInt(n.slice(1),16):+n;return cp<=0x10ffff?String.fromCodePoint(cp):'';}).replace(/&(quot|apos|amp|lt|gt|nbsp);/g,(_,n)=>({quot:'"',apos:"'",amp:'&',lt:'<',gt:'>',nbsp:' '}[n]));
 const plain = s => decode(String(s??'').replace(/<[^>]*>/g,' ')).replace(/\s+/g,' ').trim();
 const norm = s => plain(s).normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+function sourceConfig(env={}){
+ const letterboxdUsername=String(env.LETTERBOXD_USERNAME||'').trim();
+ const epgUrl=String(env.EPG_XML_URL||'').trim();
+ if(!/^[a-zA-Z0-9_-]{1,80}$/.test(letterboxdUsername))throw new Error('LETTERBOXD_USERNAME is not configured');
+ if(!/^https:\/\//.test(epgUrl))throw new Error('EPG_XML_URL is not configured');
+ return {letterboxdUsername,epg:epgUrl,watchlist:`https://letterboxd.com/${letterboxdUsername}/watchlist/`};
+}
 const attr=(tag,key)=>decode(tag.match(new RegExp('\\b'+key+'=(?:"([^"\\n]*)"|\x27([^\x27\\n]*)\x27)'))?.slice(1).find(x=>x!==undefined)||'');
 const field=(xml,tag)=>plain(xml.match(new RegExp('<'+tag+'(?:\\s[^>]*)?>([\\s\\S]*?)</'+tag+'>'))?.[1]||'');
 const extractYear=title=>Number(title.match(/\((19\d{2}|20\d{2})\)\s*$/)?.[1])||null;

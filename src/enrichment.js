@@ -69,21 +69,21 @@ async function ensureInitialRatings(env){
  if(changed)await saveJSON(env,key,index);
  return index;
 }
-function parsePersonalRating(html,filmUrl){
+function parsePersonalRating(html,filmUrl,username){
  for(const script of html.matchAll(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)){
   let value;try{value=JSON.parse(script[1].replace(/\/\*[\s\S]*?\*\//g,''));}catch{continue;}
   const author=Array.isArray(value.author)?value.author:[value.author];
-  if(value['@type']!=='Review'||!author.some(a=>a?.sameAs==='https://letterboxd.com/demo-user/')||value.itemReviewed?.sameAs!==filmUrl)continue;
+  if(value['@type']!=='Review'||!author.some(a=>a?.sameAs===`https://letterboxd.com/${username}/`)||value.itemReviewed?.sameAs!==filmUrl)continue;
   const rating=Number(value.reviewRating?.ratingValue);if(Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)return rating;
  }
  return null;
 }
 async function refreshPersonalRating(env,film){
  const id=String(film.id),match=String(film.url||'').match(/^https:\/\/letterboxd\.com\/film\/([a-z0-9-]+)\/$/);if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!match)throw new Error('Invalid Letterboxd film identity');
- const sourceUrl='https://letterboxd.com/demo-user/film/'+match[1]+'/';let response;
+ const username=sourceConfig(env).letterboxdUsername,sourceUrl=`https://letterboxd.com/${username}/film/${match[1]}/`;let response;
  try{response=await fetch(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html'},signal:AbortSignal.timeout(15000)});}catch(e){throw new Error('Rating lookup failed: '+e.message);}
  if(response.status===404)return {filmId:id,status:'not_found'};if(!response.ok)throw new Error('Rating source HTTP '+response.status);
- const rating=parsePersonalRating(await response.text(),film.url);if(rating===null)return {filmId:id,status:'not_rated'};
+ const rating=parsePersonalRating(await response.text(),film.url,username);if(rating===null)return {filmId:id,status:'not_rated'};
  const [previous,index]=await Promise.all([loadJSON(env,filmKey(id)+'actual.json'),ensureInitialRatings(env)]),before=index[id]?.actualRating??null;
  if(previous?.rating===rating&&before===rating)return {filmId:id,status:'unchanged',rating};
  if(before!==rating)await recordRatingObservation(env,{filmId:id,before,after:rating,observedAt:new Date().toISOString(),source:'letterboxd_member_film',sourceUrl});
@@ -97,23 +97,23 @@ async function recordRatingObservation(env,observation){
   observations.push(observation);await saveJSON(env,ratingObservationsKey,observations);
  }
 }
-function parsePublicFilmsPage(html){
+function parsePublicFilmsPage(html,username){
  const count=html.match(/title="([\d,]+)&nbsp;films"/i),total=count?Number(count[1].replaceAll(',','')):null;
  const entries=[];
  for(const item of html.matchAll(/<li\b[^>]*class="[^"]*\bgriditem\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi)){
   const id=item[1].match(/data-postered-identifier='[^']*?&quot;lid&quot;:&quot;([a-zA-Z0-9_-]+)&quot;/),stars=item[1].match(/\brated-(10|[1-9])\b/);
   if(id)entries.push({id:id[1],rating:stars?Number(stars[1])/2:null});
  }
- const next=html.match(/<a\b[^>]*class="next"[^>]*href="(\/demo-user\/films\/page\/\d+\/)"/i)?.[1]||null;
+ const next=html.match(new RegExp('<a\\b[^>]*class="next"[^>]*href="(/'+username+'/films/page/\\d+/)"','i'))?.[1]||null;
  if(!Number.isInteger(total)||!entries.length)throw new Error('Incomplete Letterboxd films page');
  return {total,entries,next};
 }
 async function refreshRatingsFromFilms(env,report){
- let url='https://letterboxd.com/demo-user/films/',total=null,pages=0;const seen=new Map();
+ const username=sourceConfig(env).letterboxdUsername;let url=`https://letterboxd.com/${username}/films/`,total=null,pages=0;const seen=new Map();
  while(url){
   let response;for(let attempt=0;attempt<3;attempt++){response=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});if(response.status!==403||attempt===2)break;await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));}
   if(!response.ok){const body=await response.text(),challenge=/cloudflare|just a moment|attention required|captcha|bot detection/i.test(body);throw new Error('Letterboxd films HTTP '+response.status+' on page '+(pages+1)+(challenge?' (anti-bot challenge)':''));}
-  const page=parsePublicFilmsPage(await response.text());pages++;
+  const page=parsePublicFilmsPage(await response.text(),username);pages++;
   if(pages>60||total!==null&&page.total!==total)throw new Error('Letterboxd films pagination changed');
   total=page.total;
   for(const item of page.entries){if(seen.has(item.id))throw new Error('Duplicate Letterboxd film');seen.set(item.id,item.rating);}
@@ -149,7 +149,7 @@ function parsePublicDiaryPage(html){
  return entries;
 }
 async function repairRecentDiaryRatings(env,report){
- const response=await fetch('https://letterboxd.com/demo-user/diary/',{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});
+ const username=sourceConfig(env).letterboxdUsername,response=await fetch(`https://letterboxd.com/${username}/diary/`,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});
  if(!response.ok)throw new Error('Letterboxd diary HTTP '+response.status);
  const entries=parsePublicDiaryPage(await response.text()),baseline=await loadJSON(env,diagnosticSnapshotKey),index=await ensureInitialRatings(env);
  const films=new Map([...(report.films||[]).map(f=>[String(f.id),{id:String(f.id),url:f.url}]),...(baseline?.films||[]).map(f=>[f.filmId,{id:f.filmId,url:f.letterboxdUri}])]);

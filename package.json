@@ -1,0 +1,13 @@
+{
+  "name": "iptv-watchlist",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node scripts/run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

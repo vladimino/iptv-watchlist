@@ -1,2 +1,33 @@
-# Owner-only diagnostic exports are retained locally; the Site stores its frozen baseline in R2.
-outputs/diagnostics/
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.cookie
+cookies*.txt
+.openai/hosting.json
+
+# Generated output and downloaded/runtime data
+dist/
+build/
+coverage/
+outputs/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+
+# Tool and OS state
+.DS_Store
+node_modules/
+.cache/
+.tmp/
+tmp/
+__pycache__/
+*.py[cod]
