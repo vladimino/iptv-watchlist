@@ -4,7 +4,7 @@
 
 GitHub `main` is the only production source. CI runs `npm ci --ignore-scripts`, `npm test`, and `npm run build`; it has read-only repository permissions and receives no production credentials.
 
-The production host is ChatGPT Sites. A deployment:
+The production host is ChatGPT Sites. The intended automatic deployment:
 
 1. selects the exact green commit SHA currently at `origin/main`;
 2. builds `dist/server/index.js`;
@@ -16,6 +16,17 @@ The production host is ChatGPT Sites. A deployment:
 8. records the SHA and result in GitHub deployment history and Sites version history.
 
 Runtime values and credentials remain in the Sites environment store. They are never committed or printed. CI and smoke checks do not call sync, enrichment, prediction, scheduled-job, or mutation endpoints.
+
+## Current cutover blocker
+
+CI is active, but automatic production deployment is not yet enabled. The existing private Sites source repository and the security-rewritten public GitHub repository have unrelated histories. Sites correctly rejects an ordinary non-fast-forward push and currently also rejects a guarded one-time `--force-with-lease` reset. Merging the old private history into the public repository is prohibited because it would republish removed personal/runtime artifacts.
+
+Complete the cutover only when Sites supports one of these:
+
+- reset/import the Site source branch to the exact GitHub `main` SHA without changing the existing Site, storage, URL, or runtime environment; or
+- issue a durable unattended deployment identity that accepts an archive and exact GitHub SHA without requiring that SHA to pre-exist in the internal source repository.
+
+Do not store the current ten-minute Sites source credential in GitHub Secrets; it expires and is not a viable CI identity. Until the cutover is supported, a green GitHub commit is not proof that production was updated.
 
 ## Rollback
 
