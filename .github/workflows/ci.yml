@@ -37,7 +37,7 @@ jobs:
         run: npm run build
 
       - name: Upload verified build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: worker-dist
           path: dist/
@@ -63,7 +63,7 @@ jobs:
           persist-credentials: false
 
       - name: Download verified build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: worker-dist
           path: dist/
@@ -73,6 +73,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           CURRENT_MAIN=$(git ls-remote \
             https://github.com/vladimino/iptv-watchlist.git \
             refs/heads/main | cut -f1)
@@ -85,10 +86,44 @@ jobs:
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Prepare release description
+        if: steps.freshness.outputs.deploy == 'true'
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          subject="$(git log -1 --format=%s)"
+          message="$subject"
+
+          # For GitHub merge commits, use the PR title.
+          if [[ "$subject" =~ ^Merge\ pull\ request\ \#([0-9]+) ]]; then
+            pr="${BASH_REMATCH[1]}"
+            title="$(git log -1 --format=%b |
+              sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}')"
+
+            if [[ -n "$title" ]]; then
+              message="PR #${pr}: ${title}"
+            fi
+          fi
+
+          # Normalize the message for Wrangler CLI arguments.
+          message="${message//$'\r'/ }"
+          message="${message//$'\n'/ }"
+          message="${message//\\/}"
+          message="${message//\"/}"
+          message="${message:0:160}"
+
+          printf 'message=%s\n' "$message" >> "$GITHUB_OUTPUT"
+          echo "Cloudflare release: $message"
+
       - name: Deploy verified build
         if: steps.freshness.outputs.deploy == 'true'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+          wranglerVersion: "4.151.1"
+          command: >-
+            deploy
+            --message "${{ steps.release.outputs.message }}"
