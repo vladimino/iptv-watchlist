@@ -39,7 +39,7 @@ Runtime values are configured separately in Cloudflare and legacy Sites. Their R
 
 ## Live refresh
 
-A visible tab rereads published snapshots about once a minute, and again as soon as the tab becomes visible. A hidden tab does not poll. Each pass sends only GET requests for `/api/events`, `/api/enrichment/footer/status`, `/api/enrichment/view`, `/api/started`, and `/api/programme`. It does not start EPG sync, watchlist sync, enrichment, or prediction. Search, sort, scroll, and selected filters stay as the user left them. A filter with no current matches remains active and applies again when matching films return. The same pass refreshes time-based presentation, including last chance and what is on now, even when the server snapshots are unchanged.
+A visible tab rereads published snapshots about once a minute, and again as soon as the tab becomes visible. A hidden tab does not poll. Each pass sends only GET requests for `/api/events`, `/api/enrichment/footer/status`, `/api/enrichment/view`, `/api/started`, and `/api/programme`. It does not start EPG sync, watchlist sync, enrichment, or prediction. Search, sort, scroll, and selected filters stay as the user left them. A filter with no current matches remains active and applies again when matching films return. Reloading the page restores those selections from the URL even when the current snapshot does not contain them. The same pass refreshes time-based presentation, including last chance and what is on now, even when the server snapshots are unchanged.
 
 ## Operational safety
 

@@ -23,7 +23,7 @@ function readUrlState(url){
  if(['title','personal','expiring','time'].includes(p.get('sort')))defaults.sort=p.get('sort');
  if(['any','new','rewatch'].includes(p.get('viewing')))defaults.viewing=p.get('viewing');
  defaults.query=p.get('q')||'';
- defaults.genres=new Set(p.getAll('genre').filter(g=>genres.includes(g)));
+ defaults.genres=new Set(p.getAll('genre').map(genre=>genre.trim()).filter(Boolean));
  defaults.mechanics=new Set(p.getAll('mechanic').filter(m=>Object.hasOwn(MECHANIC_LABELS,m)));
  defaults.moods=new Set(p.getAll('mood').flatMap(moodIdsFromUrl).filter(m=>Object.hasOwn(MOOD_LABELS,m)));
  const year=key=>/^\d{4}$/.test(p.get(key)||'')?Number(p.get(key)):null;
@@ -34,7 +34,7 @@ function readUrlState(url){
  const runtime=p.get('runtime');if(/^[1-9]\d*$/.test(runtime||'')&&Number.isSafeInteger(Number(runtime)))defaults.maxRuntime=Number(runtime);
  if(p.get('started')==='1')defaults.startedOnly=true;
  if(p.get('lastChance')==='1')defaults.lastChanceOnly=true;
- for(const [key,param] of [['directors','director'],['actors','actor']]){const id=p.get(param);if(id&&((report.people?.[key]||[]).some(person=>person.id===id)||state[key]===id))defaults[key]=id;}
+ for(const [key,param] of [['directors','director'],['actors','actor']]){const id=p.get(param);if(id&&id.length<=200&&!/[\s#&?]/.test(id))defaults[key]=id;}
  const prediction=Number(p.get('prediction')),chance=Number(p.get('chance'));
  if([3.5,4,4.5].includes(prediction))defaults.minPrediction=prediction;
  if([0.5,0.7,0.85].includes(chance))defaults.minProbability=chance;
@@ -74,10 +74,9 @@ function restoreUrl(){
  $('#sort').value=state.sort;$('#search').value=state.query;
  $('#include-unscheduled').checked=state.includeUnscheduled;$('#started-only').checked=state.startedOnly;$('#last-chance-only').checked=state.lastChanceOnly;
  $('#year-from').value=state.from;$('#year-to').value=state.to;$('#runtime-max').value=state.maxRuntime??'';
- document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
- document.querySelectorAll('#mechanics input').forEach(input=>input.checked=state.mechanics.has(input.value));
- document.querySelectorAll('#moods input').forEach(input=>input.checked=state.moods.has(input.value));
- for(const key of ['directors','actors']){const input=$('#'+key+'-input');input.value=report.people?.[key]?.find(person=>person.id===state[key])?.name||'';input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');$('#'+key+'-options').hidden=true;}
+ refreshGenreOptions();
+ updateFacetOptions();
+ for(const key of ['directors','actors']){const input=$('#'+key+'-input');const known=report?.people?.[key]?.find(person=>person.id===state[key]);input.value=known?.name||state[key]||'';input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');$('#'+key+'-options').hidden=true;}
  render();urlRestoring=false;
 }
 let films = [];

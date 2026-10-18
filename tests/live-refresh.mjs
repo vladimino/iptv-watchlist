@@ -240,5 +240,18 @@ assert.equal(paints,0,'a show starting does not rebuild every card when last cha
 assert.ok(shortPaints>=1);
 assert.match(el('#shortlist-cards').innerHTML,/Сейчас/);
 run('viewClock=null');
+run(`urlReady=true;state.query='';state.from=1900;state.to=MAX_YEAR;state.genres=new Set(['Фантастика']);state.directors='d-missing';state.actors='';state.mechanics=new Set();state.moods=new Set();state.lastChanceOnly=false;enrichment.films.back={actualRating:4,fingerprint:{plotMechanics:['heist'],moodIds:['dark']}};`);
+run('render()');
+assert.match(window.location.href,/genre=/);
+assert.match(window.location.href,/director=d-missing/);
+run('installProgramme(absent)');
+run(`state.genres=new Set();state.directors='';state.actors='';`);
+el('#directors-input').value='';
+run('restoreUrl()');
+assert.ok(run(`state.genres.has('Фантастика')&&state.directors==='d-missing'`),'reload keeps genre and director selections from the URL');
+assert.match(el('#genres').innerHTML,/Фантастика[\s\S]*genre-count">0</);
+assert.equal(el('#directors-input').value,'d-missing');
+run('installProgramme(returned);refreshGenreOptions();updateFacetOptions();');
+assert.equal(run(`films.filter(eligible).map(film=>film.id).join()`),'back','returning films match the restored filters without selecting them again');
 
 console.log('Live refresh: visibility pause and catch-up, one shared return pass, no overlapping requests, preserved filters, time boundaries, facet counts, and quiet error recovery passed');
