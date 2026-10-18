@@ -45,6 +45,6 @@ Generated `dist/`, archives, runtime caches, local diagnostics, `.env*`, persona
 
 GitHub `main` is the canonical production source. Before local changes, fetch and fast-forward from `origin/main`; dirty or diverged state must be resolved explicitly without discarding someone else's work. Changes are committed and pushed—production files are never edited or copied around Git.
 
-Branch and pull-request CI runs only the self-contained test/build commands above. Automatic Sites deployment is not enabled yet: the existing Site source repository predates the security-rewritten public Git history and currently rejects a guarded source reset. See the deployment document for the cutover requirement; do not deploy a different local tree in the meantime.
+Branch and pull-request CI runs only the self-contained test/build commands above. The existing Site has been cut over to content identical to GitHub `main` through a normal Sites-source merge (serving version 84). Automatic deployment is not enabled: an unattended, authorized Sites source/save/deploy identity is still unverified. A green CI run alone does not publish production. See the deployment document for the SHA mapping, release procedure, and rollback limits.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/deployment.md) for deployment and rollback.
