@@ -1,0 +1,209 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+
+const listeners={document:new Map(),window:new Map()};
+function add(map,type,fn){const list=map.get(type)||[];list.push(fn);map.set(type,list);}
+function remove(map,type,fn){map.set(type,(map.get(type)||[]).filter(item=>item!==fn));}
+const nodes=new Map();
+function el(selector){
+ if(!nodes.has(selector))nodes.set(selector,{selector,innerHTML:'',textContent:'',hidden:false,value:'',checked:false,disabled:false,scrollTop:0,dataset:{},style:{},classList:{toggle(){},add(){},remove(){}},setAttribute(){},getAttribute(){return null;},removeAttribute(){},addEventListener(){},removeEventListener(){},focus(){},scrollIntoView(){},closest(){return null;},contains(){return false;},querySelector(sel){return el(selector+' '+sel);},querySelectorAll(){return [];}});
+ return nodes.get(selector);
+}
+const document={
+ hidden:false,
+ addEventListener(type,fn){add(listeners.document,type,fn);},
+ removeEventListener(type,fn){remove(listeners.document,type,fn);},
+ querySelector(selector){return el(selector);},
+ querySelectorAll(){return [];},
+};
+const window={
+ scrollY:0,
+ scrollTo(x,y){window.scrollY=y;scrolls.push(y);},
+ addEventListener(type,fn){add(listeners.window,type,fn);},
+ removeEventListener(type,fn){remove(listeners.window,type,fn);},
+ location:{href:'https://iptv.example/'},
+ history:{state:null,replaceState(_state,_title,url){window.location.href=new URL(url,window.location.href).href;}},
+};
+let timer=null,inFlight=0,maxInFlight=0,programmeVersion=1;
+const calls=[],pending=[],scrolls=[];
+const failed=new Set();
+const startedIds=['keep'];
+let events=[{id:'e1',type:'epg',at:'2026-10-18T10:00:00Z',films:1,archive:0,future:1,broadcasts:1}];
+let footer={profile:null,coverage:{currentPredictionsTotal:1,confirmedFilmsTotal:2,windowCurrentPredictions:1,windowFilmsTotal:2,cacheOffWindowTotal:0,pendingOffWindowTotal:0},predictions:{pendingHot:0,pendingCold:0,pendingOffWindow:0,currentBatch:null,nextBatchSize:0,nextScheduledRun:'2026-10-18T18:00:00Z'},epgTmdb:{},watchlist:{films:1},lastRun:null};
+const enrichment={profile:null,films:{}};
+function programme(version){
+ const year=version===3?2031:version===2?2030:2020;
+ return {updatedAt:version===1?'2026-10-18T12:00:00Z':'2026-10-18T13:00:00Z',window:{from:Date.parse('2026-10-15T12:00:00Z'),to:Date.parse('2026-10-19T12:00:00Z')},films:[{id:'film-1',title:version===1?'Первый':'Второй',original:'First',year,runtime:100,genres:['Драма'],shows:[]}],people:{directors:[{id:'d1',name:'Нолан',original:'Nolan'}],actors:[]}};
+}
+function payload(url){
+ if(url==='/api/programme')return programme(programmeVersion);
+ if(url==='/api/events')return {events,cursor:null};
+ if(url==='/api/started')return {ids:[...startedIds]};
+ if(url==='/api/enrichment/view')return enrichment;
+ if(url==='/api/enrichment/footer/status')return footer;
+ throw new Error('unexpected '+url);
+}
+const context=vm.createContext({
+ Date,Intl,URL,Set,Map,Promise,console,document,window,
+ setInterval(fn,ms){timer={fn,ms};return 1;},
+ clearInterval(){timer=null;},
+ fetch(url){
+  const path=String(url);
+  calls.push(path);
+  inFlight++;
+  maxInFlight=Math.max(maxInFlight,inFlight);
+  return new Promise(resolve=>pending.push(()=>{
+   inFlight--;
+   resolve({ok:!failed.has(path),status:failed.has(path)?503:200,json:async()=>payload(path)});
+  }));
+ },
+});
+vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
+const run=code=>vm.runInContext(code,context);
+let paints=0;
+const originalRender=context.render;
+context.render=function(...args){paints++;window.scrollY=0;el('.activity-scroll').scrollTop=0;return originalRender.apply(this,args);};
+function resetTraffic(){calls.length=0;pending.length=0;scrolls.length=0;inFlight=0;maxInFlight=0;}
+function flush(){for(const finish of pending.splice(0))finish();}
+async function untilIdle(){
+ for(let i=0;i<50&&(pending.length||run('liveRunning')||run('livePending')||run('liveCoalesced'));i++){flush();await Promise.resolve();}
+}
+function handler(target,type){return listeners[target].get(type)?.[0];}
+
+failed.add('/api/programme');
+const failedProgramme=run('loadProgramme()');
+flush();
+await assert.rejects(failedProgramme,/ещё не готова/);
+assert.equal(run('films.length'),0,'a failed programme read leaves the page without a snapshot');
+failed.delete('/api/programme');
+const firstProgramme=run('loadProgramme({quiet:true})');
+await untilIdle();
+await firstProgramme;
+assert.equal(run('films[0].title'),'Первый');
+assert.equal(run('programmeReady'),true);
+assert.ok(!calls.some(url=>url.includes('/api/sync')||url.includes('/api/enrichment/start')),'refresh only reads published snapshots');
+
+resetTraffic();
+run('startLiveRefresh()');
+assert.equal(timer.ms,60000);
+document.hidden=true;
+handler('document','visibilitychange')();
+assert.equal(timer,null,'a hidden tab clears the poll timer');
+assert.equal(calls.length,0);
+const hiddenTick=timer;
+assert.equal(hiddenTick,null);
+document.hidden=false;
+handler('document','visibilitychange')();
+await untilIdle();
+assert.equal(calls.length,5,'returning to a visible tab refreshes once');
+assert.deepEqual([...new Set(calls)].sort(),['/api/enrichment/footer/status','/api/enrichment/view','/api/events','/api/programme','/api/started']);
+run('stopLiveRefresh()');
+
+resetTraffic();
+document.hidden=false;
+run('startLiveRefresh()');
+resetTraffic();
+handler('window','focus')();
+handler('document','visibilitychange')();
+await untilIdle();
+assert.equal(calls.length,5,'focus and visibility in the same turn share one refresh');
+run('stopLiveRefresh()');
+
+resetTraffic();
+const first=run('runLiveRefresh()');
+const second=run('runLiveRefresh()');
+assert.equal(calls.length,5);
+assert.equal(maxInFlight,5,'one refresh does not overlap its own requests');
+await untilIdle();
+assert.equal(calls.length,10,'a refresh requested while one is running waits for a single follow-up');
+assert.equal(maxInFlight,5);
+await first;
+await second;
+run('stopLiveRefresh()');
+
+resetTraffic();
+document.hidden=false;
+run('startLiveRefresh()');
+const tick=timer.fn;
+document.hidden=true;
+tick();
+assert.equal(calls.length,0,'a hidden tab does not poll on the interval');
+document.hidden=false;
+run('stopLiveRefresh()');
+assert.equal(listeners.document.get('visibilitychange')?.length||0,0);
+assert.equal(listeners.window.get('focus')?.length||0,0);
+assert.equal(timer,null,'stop removes the timer and both listeners');
+
+resetTraffic();
+paints=0;
+const primed=run('runLiveRefresh()');
+await untilIdle();
+await primed;
+run(`state.query='поиск';state.sort='personal';state.directors='d1';startedIds=new Set(['keep']);`);
+window.scrollY=180;
+el('.activity-scroll').scrollTop=40;
+const listBefore=el('#activity-list').innerHTML;
+paints=0;
+scrolls.length=0;
+const unchanged=run('runLiveRefresh()');
+await untilIdle();
+await unchanged;
+assert.equal(paints,0,'an unchanged programme snapshot does not rebuild the cards');
+assert.equal(scrolls.length,0);
+assert.equal(run('state.query'),'поиск');
+assert.equal(run('state.sort'),'personal');
+assert.equal(run('state.directors'),'d1');
+assert.equal(el('#activity-list').innerHTML,listBefore);
+programmeVersion=2;
+window.scrollY=180;
+el('.activity-scroll').scrollTop=40;
+paints=0;
+const changedRefresh=run('runLiveRefresh()');
+await untilIdle();
+await changedRefresh;
+assert.equal(paints,1,'a changed snapshot renders once');
+assert.equal(run('films[0].title'),'Второй');
+assert.equal(run('state.query'),'поиск');
+assert.equal(run('state.sort'),'personal');
+assert.equal(run('state.directors'),'d1');
+assert.ok(run('startedIds.has("keep")'));
+assert.equal(window.scrollY,180);
+assert.equal(el('.activity-scroll').scrollTop,40);
+assert.equal(el('#activity-list').innerHTML,listBefore);
+
+const previousMax=run('MAX_YEAR');
+assert.equal(run('state.to'),previousMax);
+run('installProgramme({updatedAt:"2026-10-18T14:00:00Z",window:{from:1,to:90000000},films:[{id:"film-1",title:"Второй",original:"First",year:2030,genres:["Драма"],shows:[]}],people:{directors:[{id:"d1",name:"Нолан",original:"Nolan"}],actors:[]}})');
+assert.equal(run('state.to'),2030);
+run('state.to=1990');
+run('installProgramme({updatedAt:"2026-10-18T15:00:00Z",window:{from:1,to:90000000},films:[{id:"film-1",title:"Второй",original:"First",year:2031,genres:["Драма"],shows:[]}],people:{directors:[{id:"d1",name:"Нолан",original:"Nolan"}],actors:[]}})');
+assert.equal(run('state.to'),1990,'an explicit year range stays in place');
+
+const coverage=el('#status-local-coverage').textContent;
+const eventsHtml=el('#activity-list').innerHTML;
+el('#activity-status').textContent='события на месте';
+failed.add('/api/enrichment/footer/status');
+failed.add('/api/events');
+const failedRefresh=run('runLiveRefresh()');
+await untilIdle();
+await failedRefresh;
+assert.equal(el('#status-local-coverage').textContent,coverage,'a footer error keeps the last numbers');
+assert.equal(el('#activity-list').innerHTML,eventsHtml);
+assert.equal(el('#activity-status').textContent,'события на месте');
+failed.delete('/api/enrichment/footer/status');
+failed.delete('/api/events');
+footer={...footer,coverage:{...footer.coverage,currentPredictionsTotal:9,confirmedFilmsTotal:9}};
+const recoveredFooter=run('loadPredictionQueue({quiet:true})');
+await untilIdle();
+await recoveredFooter;
+assert.match(el('#status-local-coverage').textContent,/9/);
+failed.add('/api/events');
+const failedEvents=run('loadEvents()');
+flush();
+await failedEvents;
+assert.equal(el('#activity-status').textContent,'Не удалось загрузить события.');
+assert.equal(el('#activity-list').innerHTML,eventsHtml,'an event error does not clear the list');
+failed.delete('/api/events');
+
+console.log('Live refresh: visibility pause and catch-up, one shared return pass, no overlapping requests, preserved UI state, snapshot render only on change, and quiet error recovery passed');
