@@ -13,7 +13,8 @@ function moodIdsFromUrl(value){const key=normalizeMood(value).replace(/ё/g,"е"
 let mechanics=[],moods=[];
 const state = { shortlistMode:'now', period: 'all', sort: 'title', viewing: 'any', minPrediction: null, minProbability: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', genres: new Set(), mechanics:new Set(), moods:new Set(), from: 1900, to: MAX_YEAR, maxRuntime: null };
 const APP_QUERY_KEYS = ['shortlist','view','period','q','sort','genre','mechanic','mood','from','to','runtime','viewing','started','lastChance','director','actor','prediction','chance'];
-let urlReady=false,urlRestoring=false;
+let urlReady=false,urlRestoring=false,viewClock=null;
+function nowMs(){return viewClock??Date.now();}
 function readUrlState(url){
  const p=url.searchParams,defaults={shortlistMode:'now',period:'all',sort:'title',viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',genres:new Set(),mechanics:new Set(),moods:new Set(),from:1900,to:MAX_YEAR,maxRuntime:null};
  if(p.get('shortlist')==='today')defaults.shortlistMode='today';
@@ -23,8 +24,8 @@ function readUrlState(url){
  if(['any','new','rewatch'].includes(p.get('viewing')))defaults.viewing=p.get('viewing');
  defaults.query=p.get('q')||'';
  defaults.genres=new Set(p.getAll('genre').filter(g=>genres.includes(g)));
- defaults.mechanics=new Set(p.getAll('mechanic').filter(m=>Object.hasOwn(MECHANIC_LABELS,m)&&(!ratingsLoaded||mechanics.includes(m))));
- defaults.moods=new Set(p.getAll('mood').flatMap(moodIdsFromUrl).filter(m=>Object.hasOwn(MOOD_LABELS,m)&&(!ratingsLoaded||moods.includes(m))));
+ defaults.mechanics=new Set(p.getAll('mechanic').filter(m=>Object.hasOwn(MECHANIC_LABELS,m)));
+ defaults.moods=new Set(p.getAll('mood').flatMap(moodIdsFromUrl).filter(m=>Object.hasOwn(MOOD_LABELS,m)));
  const year=key=>/^\d{4}$/.test(p.get(key)||'')?Number(p.get(key)):null;
  const from=year('from'),to=year('to');
  if(from!==null&&from>=1900&&from<=MAX_YEAR)defaults.from=from;
@@ -33,7 +34,7 @@ function readUrlState(url){
  const runtime=p.get('runtime');if(/^[1-9]\d*$/.test(runtime||'')&&Number.isSafeInteger(Number(runtime)))defaults.maxRuntime=Number(runtime);
  if(p.get('started')==='1')defaults.startedOnly=true;
  if(p.get('lastChance')==='1')defaults.lastChanceOnly=true;
- for(const [key,param] of [['directors','director'],['actors','actor']]){const id=p.get(param);if(id&&(report.people?.[key]||[]).some(person=>person.id===id))defaults[key]=id;}
+ for(const [key,param] of [['directors','director'],['actors','actor']]){const id=p.get(param);if(id&&((report.people?.[key]||[]).some(person=>person.id===id)||state[key]===id))defaults[key]=id;}
  const prediction=Number(p.get('prediction')),chance=Number(p.get('chance'));
  if([3.5,4,4.5].includes(prediction))defaults.minPrediction=prediction;
  if([0.5,0.7,0.85].includes(chance))defaults.minProbability=chance;
@@ -90,18 +91,18 @@ const isArchive = show => WINDOW_START===null?show.offset>=-72&&show.offset<0:sh
 const isFuture = show => WINDOW_END===null?show.offset>=0&&show.offset<24:show.start>=CUTOFF&&show.start<=WINDOW_END;
 const normalizeTitle = text => text.toLocaleLowerCase('ru').replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function availabilityTime(film){const time=Date.parse(film.availableUntil||'');return Number.isFinite(time)?time:null;}
-function isLastChance(film,now=Date.now()){const until=availabilityTime(film);return until!==null&&until>now&&until-now<8*3600000;}
+function isLastChance(film,now=nowMs()){const until=availabilityTime(film);return until!==null&&until>now&&until-now<8*3600000;}
 function hasActualRating(film){const rating=enrichment.films[String(film.id)]?.actualRating;return rating!==null&&rating!==undefined;}
 function filmFacets(film){const item=enrichment.films[String(film.id)]||{},fingerprint=item.fingerprint||{},mechanics=(fingerprint.plotMechanics||[]).filter(m=>Object.hasOwn(MECHANIC_LABELS,m)),moods=(item.moodIds||fingerprint.moodIds||item.prediction?.moodIds||[]).filter(id=>Object.hasOwn(MOOD_LABELS,id));return {mechanics:new Set(mechanics),moods:new Set(moods)};}
 function filterMoodOptions(){const query=normalizeMood($('#mood-search').value);let visible=0;document.querySelectorAll('#moods label').forEach(label=>{const show=!query||normalizeMood(moodLabel(label.querySelector('input').value)).replace(/ё/g,'е').includes(query.replace(/ё/g,'е'));label.hidden=!show;if(show)visible++;});$('#mood-option-count').textContent=query?`${visible} из ${moods.length} вариантов`:`${moods.length} вариантов · частые выше`;}
 function updateFacetOptions(){
  const counts={mechanics:new Map(),moods:new Map()};
  for(const film of films){const facets=filmFacets(film);for(const key of ['mechanics','moods'])for(const value of facets[key])counts[key].set(value,(counts[key].get(value)||0)+1);}
- mechanics=[...counts.mechanics.keys()].sort((a,b)=>MECHANIC_LABELS[a].localeCompare(MECHANIC_LABELS[b],'ru'));
- moods=[...counts.moods.keys()].sort((a,b)=>counts.moods.get(b)-counts.moods.get(a)||a.localeCompare(b,'ru'));
- const options=(values,key,label)=>values.map(value=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(value)}"><span>${escapeHTML(label(value))}</span><span class="genre-count">${counts[key].get(value)}</span></label>`).join('');
+ const listed=(key,known)=>[...new Set([...counts[key].keys(),...state[key]])].filter(known);
+ mechanics=listed('mechanics',value=>Object.hasOwn(MECHANIC_LABELS,value)).sort((a,b)=>MECHANIC_LABELS[a].localeCompare(MECHANIC_LABELS[b],'ru'));
+ moods=listed('moods',value=>Object.hasOwn(MOOD_LABELS,value)).sort((a,b)=>(counts.moods.get(b)||0)-(counts.moods.get(a)||0)||a.localeCompare(b,'ru'));
+ const options=(values,key,label)=>values.map(value=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(value)}"><span>${escapeHTML(label(value))}</span><span class="genre-count">${counts[key].get(value)||0}</span></label>`).join('');
  $('#mechanics').innerHTML=options(mechanics,'mechanics',value=>MECHANIC_LABELS[value]);$('#moods').innerHTML=options(moods,'moods',moodLabel);
- state.mechanics=new Set([...state.mechanics].filter(value=>mechanics.includes(value)));state.moods=new Set([...state.moods].filter(value=>moods.includes(value)));
  document.querySelectorAll('#mechanics input').forEach(input=>input.checked=state.mechanics.has(input.value));document.querySelectorAll('#moods input').forEach(input=>input.checked=state.moods.has(input.value));
  $('#mechanics-empty').hidden=mechanics.length>0;$('#moods-empty').hidden=moods.length>0;filterMoodOptions();
 }
@@ -154,7 +155,7 @@ function card(film){
  const item=enrichment.films[String(film.id)]||{},hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
  return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}" aria-label="${escapeHTML(film.title)}">${recommendation(film)}<div class="film-head">${film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`}<div class="film-info"><h3>${escapeHTML(film.title)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
 }
-function visibleFilms(){const now=Date.now();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return state.period==='archive'?Math.max(...b.shows.filter(isArchive).map(s=>s.offset))-Math.max(...a.shows.filter(isArchive).map(s=>s.offset)):Math.min(...a.shows.filter(isFuture).map(s=>s.offset),Infinity)-Math.min(...b.shows.filter(isFuture).map(s=>s.offset),Infinity)||title;});}
+function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return state.period==='archive'?Math.max(...b.shows.filter(isArchive).map(s=>s.offset))-Math.max(...a.shows.filter(isArchive).map(s=>s.offset)):Math.min(...a.shows.filter(isFuture).map(s=>s.offset),Infinity)-Math.min(...b.shows.filter(isFuture).map(s=>s.offset),Infinity)||title;});}
 
 function shortlistDay(time){return new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(time));}
 function shortlistAvailability(film,mode='now',now=Date.now()){
@@ -170,7 +171,7 @@ function shortlistAvailability(film,mode='now',now=Date.now()){
  return null;
 }
 function shortlistCompare(a,b){const x=personal(a),y=personal(b);return (y.rating??-Infinity)-(x.rating??-Infinity)||Number(y.actual)-Number(x.actual)||(!x.actual&&!y.actual?y.probability-x.probability:0)||a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
-function buildShortlist(input=visibleFilms(),mode=state.shortlistMode,now=Date.now()){
+function buildShortlist(input=visibleFilms(),mode=state.shortlistMode,now=nowMs()){
  const candidates=input.filter(eligible).filter(f=>inSelectedScope(f)).map(f=>({film:f,availability:shortlistAvailability(f,mode,now)})).filter(x=>x.availability&&personal(x.film).rating!==null).sort((a,b)=>shortlistCompare(a.film,b.film));
  const seen=new Set(),unique=candidates.filter(x=>{const id=String(x.film.tmdbId||x.film.id);if(seen.has(id))return false;seen.add(id);return true;});if(!unique.length)return [];
  const best=personal(unique[0].film).rating,strong=Math.max(3.5,best-.5),runtimes=unique.map(x=>Number(x.film.runtime)).filter(n=>Number.isFinite(n)&&n>0).sort((a,b)=>a-b),shortLimit=runtimes.length?runtimes[Math.floor((runtimes.length-1)*.25)]:0;
@@ -212,6 +213,7 @@ function render(){
   $('#result-count').textContent=valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
   $('#sort-time').textContent=state.period==='archive'?'Свежие показы — сначала':'Ближайшие эфиры — сначала';
   syncUrl();
+  noteTimeView(valid?visible:[]);
   return {period:state.period,query:state.query,genres:[...state.genres],mechanics:[...state.mechanics],moods:[...state.moods],years:[state.from,state.to],maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
 }
 function reset(){state.shortlistMode='now';state.viewing='any';state.minPrediction=null;state.minProbability=null;state.includeUnscheduled=false;$('#include-unscheduled').checked=false;state.startedOnly=false;$('#started-only').checked=false;state.lastChanceOnly=false;$('#last-chance-only').checked=false;for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.query='';$('#search').value='';state.genres.clear();state.mechanics.clear();state.moods.clear();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;$('#runtime-max').value='';for(const selector of ['#genres input','#mechanics input','#moods input'])document.querySelectorAll(selector).forEach(i=>i.checked=false);render();}
@@ -255,16 +257,27 @@ function setYearBounds(followValue){
  if(yearError)yearError.textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;
 }
 function syncPeopleSources(){
- for(const key of ['directors','actors']){
-  peopleSources[key]=(report.people?.[key]||[]).slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru',{sensitivity:'base'}));
-  if(state[key]&&!peopleSources[key].some(person=>person.id===state[key])){state[key]='';const input=$('#'+key+'-input');if(input)input.value='';}
- }
+ for(const key of ['directors','actors']) peopleSources[key]=(report.people?.[key]||[]).slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru',{sensitivity:'base'}));
 }
 function refreshGenreOptions(){
  const box=$('#genres');if(!box)return;
- box.innerHTML=genres.map(g=>`<label class="genre-label"><input type="checkbox" value="${g}"><span>${g}</span><span class="genre-count">${films.filter(f=>f.genres.includes(g)).length}</span></label>`).join('');
- state.genres=new Set([...state.genres].filter(g=>genres.includes(g)));
+ const counts=new Map();
+ for(const film of films) for(const genre of film.genres||[]) counts.set(genre,(counts.get(genre)||0)+1);
+ const ordered=[...counts.keys()].sort((a,b)=>a.localeCompare(b,'ru'));
+ for(const genre of state.genres) if(!counts.has(genre)) ordered.push(genre);
+ genres=ordered;
+ box.innerHTML=ordered.map(genre=>`<label class="genre-label"><input type="checkbox" value="${genre}"><span>${genre}</span><span class="genre-count">${counts.get(genre)||0}</span></label>`).join('');
  document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
+}
+let gridTimeKey='',shortTimeKey='';
+function gridTimeKeyOf(visible){return visible.map(film=>`${film.id}:${isLastChance(film)?1:0}`).join('|');}
+function shortTimeKeyOf(visible){return ['now','today'].map(mode=>buildShortlist(visible,mode).map(item=>`${item.film.id}:${item.availability.kind}:${item.availability.show?.start??''}:${item.availability.show?.end??''}`).join(',')).join(';');}
+function noteTimeView(visible=visibleFilms()){gridTimeKey=gridTimeKeyOf(visible);shortTimeKey=shortTimeKeyOf(visible);}
+function refreshTimeSensitiveView(){
+ if(!report)return;
+ const visible=visibleFilms(),grid=gridTimeKeyOf(visible),short=shortTimeKeyOf(visible);
+ if(grid!==gridTimeKey){renderPreservingScroll();return;}
+ if(short!==shortTimeKey){shortTimeKey=short;renderShortlist(visible);}
 }
 function installProgramme(data){
  const key=JSON.stringify(data);
@@ -345,7 +358,7 @@ async function loadProgramme({quiet}={}){
   if(!data||!Array.isArray(data.films))throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
   const changed=installProgramme(data);
   if(!programmeReady)await finishProgrammeUi();
-  else if(changed){refreshGenreOptions();updateSourceInfo();renderPreservingScroll();}
+  else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();}
   else updateSourceInfo();
   return true;
  }catch(error){
@@ -385,6 +398,7 @@ async function runLiveRefresh(followUp=false){
    loadProgramme({quiet:true})
   ]);
   if(!followUp&&done.some(ok=>ok==='busy'))livePending=true;
+  refreshTimeSensitiveView();
  }finally{
   liveRunning=false;
   if(livePending){livePending=false;if(!document.hidden)await runLiveRefresh(true);}

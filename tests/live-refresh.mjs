@@ -61,9 +61,11 @@ const context=vm.createContext({
 });
 vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
 const run=code=>vm.runInContext(code,context);
-let paints=0;
+let paints=0,shortPaints=0;
 const originalRender=context.render;
 context.render=function(...args){paints++;window.scrollY=0;el('.activity-scroll').scrollTop=0;return originalRender.apply(this,args);};
+const originalShortlist=context.renderShortlist;
+context.renderShortlist=function(...args){shortPaints++;return originalShortlist.apply(this,args);};
 function resetTraffic(){calls.length=0;pending.length=0;scrolls.length=0;inFlight=0;maxInFlight=0;}
 function flush(){for(const finish of pending.splice(0))finish();}
 async function untilIdle(){
@@ -206,4 +208,37 @@ assert.equal(el('#activity-status').textContent,'Не удалось загру�
 assert.equal(el('#activity-list').innerHTML,eventsHtml,'an event error does not clear the list');
 failed.delete('/api/events');
 
-console.log('Live refresh: visibility pause and catch-up, one shared return pass, no overlapping requests, preserved UI state, snapshot render only on change, and quiet error recovery passed');
+const absent={updatedAt:'2026-10-18T16:00:00Z',window:{from:Date.parse('2026-10-15T12:00:00Z'),to:Date.parse('2026-10-19T12:00:00Z')},films:[{id:'drama',title:'Драма',original:'Drama',year:2010,genres:['Драма'],directors:[],actors:[],shows:[]}],people:{directors:[],actors:[]}};
+const returned={updatedAt:'2026-10-18T17:00:00Z',window:absent.window,films:[{id:'back',title:'Фантастика',original:'Fantasy',year:2011,genres:['Фантастика'],directors:[{id:'d-missing',name:'Пропавший'}],actors:[],shows:[{start:Date.parse('2026-10-18T13:00:00Z'),end:Date.parse('2026-10-18T15:00:00Z'),channel:'Кино',channelId:'k'}]}],people:{directors:[{id:'d-missing',name:'Пропавший',original:'Missing'}],actors:[]}};
+context.absent=absent;context.returned=returned;
+run(`state.query='';state.from=1900;state.to=MAX_YEAR;state.genres=new Set(['Фантастика']);state.directors='d-missing';state.actors='';state.mechanics=new Set(['heist']);state.moods=new Set(['dark']);enrichment.films.back={actualRating:4,fingerprint:{plotMechanics:['heist'],moodIds:['dark']}};`);
+el('#directors-input').value='Пропавший';
+run('installProgramme(absent);refreshGenreOptions();updateFacetOptions();');
+assert.ok(run(`state.genres.has('Фантастика')&&state.directors==='d-missing'&&state.mechanics.has('heist')&&state.moods.has('dark')`),'selected filters survive a snapshot with no matches');
+assert.match(el('#genres').innerHTML,/Фантастика[\s\S]*genre-count">0</);
+assert.match(el('#mechanics').innerHTML,/value="heist"[\s\S]*genre-count">0</);
+assert.match(el('#moods').innerHTML,/value="dark"[\s\S]*genre-count">0</);
+assert.equal(el('#directors-input').value,'Пропавший');
+assert.equal(run('films.some(eligible)'),false);
+run('installProgramme(returned);refreshGenreOptions();updateFacetOptions();');
+assert.equal(run(`films.filter(eligible).map(film=>film.id).join()`),'back','the same filters match again when the film returns');
+assert.match(el('#genres').innerHTML,/genre-count">1</);
+assert.match(el('#mechanics').innerHTML,/value="heist"[\s\S]*genre-count">1</);
+
+run(`state.genres=new Set();state.mechanics=new Set();state.moods=new Set();state.directors='';state.lastChanceOnly=false;`);
+const clock=Date.parse('2026-10-18T18:00:00Z');
+context.timed={updatedAt:'2026-10-18T18:00:00Z',window:{from:clock-72*3600000,to:clock+24*3600000},films:[{id:'live',title:'Сейчас',original:'Now',year:2024,genres:['Драма'],directors:[],actors:[],availableUntil:new Date(clock+8*3600000).toISOString(),shows:[{start:clock+30000,end:clock+7200000,channel:'Кино',channelId:'k'}]}],people:{directors:[],actors:[]}};
+run(`enrichment.films.live={actualRating:5};viewClock=${clock};installProgramme(timed);render();`);
+paints=0;shortPaints=0;
+run(`viewClock=${clock+1000};refreshTimeSensitiveView();`);
+assert.equal(paints,1,'crossing the last-chance boundary rerenders the programme');
+assert.equal(run('isLastChance(films[0])'),true);
+run(`films[0].availableUntil=new Date(${clock+48*3600000}).toISOString();viewClock=${clock};render();`);
+paints=0;shortPaints=0;
+run(`viewClock=${clock+30000};refreshTimeSensitiveView();`);
+assert.equal(paints,0,'a show starting does not rebuild every card when last chance and order stay put');
+assert.ok(shortPaints>=1);
+assert.match(el('#shortlist-cards').innerHTML,/Сейчас/);
+run('viewClock=null');
+
+console.log('Live refresh: visibility pause and catch-up, one shared return pass, no overlapping requests, preserved filters, time boundaries, facet counts, and quiet error recovery passed');

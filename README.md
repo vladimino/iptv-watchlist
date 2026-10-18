@@ -37,6 +37,10 @@ Runtime values are configured separately in Cloudflare and legacy Sites. Their R
 
 `npm test` runs the self-contained suite and does not contact Letterboxd, EPG, TMDB, or production. Historical source-adapter tests that depended on downloaded HTML/XML snapshots are not part of the public test command because those local captures are intentionally excluded.
 
+## Live refresh
+
+A visible tab rereads published snapshots about once a minute, and again as soon as the tab becomes visible. A hidden tab does not poll. Each pass sends only GET requests for `/api/events`, `/api/enrichment/footer/status`, `/api/enrichment/view`, `/api/started`, and `/api/programme`. It does not start EPG sync, watchlist sync, enrichment, or prediction. Search, sort, scroll, and selected filters stay as the user left them. A filter with no current matches remains active and applies again when matching films return. The same pass refreshes time-based presentation, including last chance and what is on now, even when the server snapshots are unchanged.
+
 ## Operational safety
 
 Do not manually run EPG sync, the prediction runner, recurring/scheduled jobs, diagnostic exports, or production backfills merely to test the code. They mutate durable production state and may consume external model/API quota. Use the local test suite; run production jobs only for an explicit operational task against an environment you own.
