@@ -1,6 +1,10 @@
 # Read-only export from the old Sites-managed R2
 
-This exporter is **prepared but not published to the old Site**. Merging its PR only updates GitHub and the separate Cloudflare Worker; it does not make the old Site's `env.BUCKET` available to that Worker. Do not run a real export or change Sites environment/deployment without a separate owner approval.
+The exporter implementation is merged into GitHub `main` and included in Cloudflare CI/CD builds.
+
+As of the latest confirmed preflight, publication on the legacy Site and a complete source-R2 snapshot were not verified. Recheck the current Sites serving version before updating this status.
+
+Cloudflare deployments do not publish the exporter on the old Site or provide access to Sites-managed R2. Both runtimes have independent `BUCKET` bindings. Do not run a real export or change Sites environment/deployment without a separate owner approval.
 
 ## Scope and safety
 
@@ -13,6 +17,8 @@ The local downloader stores every listing page, each object under a SHA-256-deri
 R2 listing is not an atomic transaction. `provisional_no_change_detected` means two listings and object checks found no difference; it does **not** prove no writes occurred between checks. While Scheduled Tasks continue, every snapshot remains provisional. A final cutover snapshot requires separately authorized writer quiescence and a fresh export/reverification.
 
 ## Publication plan — requires separate approval
+
+The current GitHub `main` SHA may differ from the SHA used to prepare an earlier local Sites merge candidate. Before reusing any candidate or archive, confirm both HEADs, the selected green GitHub SHA and exact Git tree. Recreate stale artifacts rather than publishing an outdated candidate.
 
 1. Confirm the exact approved GitHub SHA, green CI, current Sites source HEAD, serving version, owner-only access policy, Site ID/URL, `BUCKET` binding, environment key names, and enabled schedules. Preserve the current saved version as a code rollback checkpoint. Record that redeploying it uses the *current* environment revision, not necessarily its original one.
 2. Produce a normal merge commit with current GitHub and Sites HEADs as parents and a tree identical to the approved GitHub SHA. Verify tree IDs, `npm ci`, `npm test`, `npm run build`, and the Sites archive. Never push the Sites merge commit back to public GitHub.

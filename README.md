@@ -9,7 +9,9 @@ Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV progr
 - `data/` — reviewed public title/person dictionaries used at build time.
 - `tests/` — self-contained unit and contract tests.
 - `build.mjs` — dependency-free Worker bundle builder.
-- `.openai/hosting.json` — production Sites identity and R2 binding (contains no credential).
+- `.openai/hosting.json` — legacy Sites identity and R2 binding (contains no credential).
+- `.github/workflows/ci.yml` — Cloudflare CI/CD.
+- `wrangler.jsonc` — Cloudflare Worker configuration.
 
 ## Local setup
 
@@ -29,7 +31,7 @@ Configure the deployment environment rather than committing values:
 - `EPG_SITE_SERVICE_TOKEN` — optional service credential used by the hosted update workflow.
 - `BUCKET` — R2 binding declared by the hosting platform.
 
-Runtime values are configured in the Sites environment store. The tracked hosting manifest contains only the Site identity and R2 binding; it is required to map each Git commit to the matching Sites version.
+Runtime values are configured separately in Cloudflare and legacy Sites. Their R2 buckets are independent. The tracked hosting manifest contains only the legacy Site identity and R2 binding; it is required to map each Git commit to the matching Sites version.
 
 ## Tests
 
@@ -45,7 +47,9 @@ Generated `dist/`, archives, runtime caches, local diagnostics, `.env*`, persona
 
 GitHub `main` is the canonical production source. Before local changes, fetch and fast-forward from `origin/main`; dirty or diverged state must be resolved explicitly without discarding someone else's work. Changes are committed and pushed—production files are never edited or copied around Git.
 
-Branch and pull-request CI runs only the self-contained test/build commands above. The existing Site has been cut over to content identical to GitHub `main` through a normal Sites-source merge (serving version 84). Automatic deployment is not enabled: an unattended, authorized Sites source/save/deploy identity is still unverified. A green CI run alone does not publish production. See the deployment document for the SHA mapping, release procedure, and rollback limits.
+Branch and pull-request CI runs only the self-contained test/build commands above. Successful GitHub Actions runs for `main` automatically deploy the verified artifact to Cloudflare Worker `iptv`. The former independent Workers Builds integration is disabled.
+
+Legacy Sites remains authoritative until data cutover. Publishing its code still requires a separate authorized Sites release procedure. Cloudflare CD does not migrate data. See the deployment document for the SHA mapping, release procedure, and rollback limits.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/deployment.md) for deployment and rollback.
 

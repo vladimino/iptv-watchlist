@@ -11,7 +11,9 @@ Before local work:
 
 Resolve dirty or diverged state explicitly. Do not overwrite other changes, force-push in the normal workflow, or copy files directly to production.
 
-All changes go through commits and pushes. Pull requests and pushes to `main` run the same self-contained tests and build. Production deploy is eligible only when CI succeeds for the exact commit in `main`; it currently requires an explicit authorized Sites operation, because unattended CD is not enabled. The Sites source merge SHA may differ from the GitHub SHA, but their Git trees must match.
+All changes go through commits and pushes. Pull requests run self-contained tests and build. Successful pushes to `main` automatically publish the verified artifact to Cloudflare using GitHub Actions and environment `Cloudflare Prod`.
+
+Deployments to legacy Sites remain separate manual operations requiring explicit authorization. Cloudflare CD does not migrate Sites-managed R2 or switch Scheduled Tasks. The Sites source merge SHA may differ from the GitHub SHA, but their Git trees must match.
 
 Never run EPG sync, prediction, scheduled jobs, or mutation endpoints as part of CI or deployment verification. Emergency fixes follow the same Git-first rule: commit the fix first, let CI validate it, and deploy that commit.
 
