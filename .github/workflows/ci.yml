@@ -1,40 +1,129 @@
-name: CI
+name: CI/CD
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
 
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   test-and-build:
     name: Test and build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     steps:
-      - name: Check out the tested commit
+      - name: Checkout
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Use Node.js 20
+      - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
 
-      - name: Install from lockfile
+      - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Run self-contained tests
+      - name: Run tests
         run: npm test
 
-      - name: Build deployment artifact
+      - name: Build
         run: npm run build
+
+      - name: Upload verified build
+        uses: actions/upload-artifact@v6
+        with:
+          name: worker-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: Deploy to Cloudflare
+    needs: test-and-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: "Cloudflare Prod"
+
+    concurrency:
+      group: cloudflare-iptv-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download verified build
+        uses: actions/download-artifact@v7
+        with:
+          name: worker-dist
+          path: dist/
+
+      - name: Check commit freshness
+        id: freshness
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT_MAIN=$(git ls-remote \
+            https://github.com/vladimino/iptv-watchlist.git \
+            refs/heads/main | cut -f1)
+
+          if [ "$CURRENT_MAIN" = "$GITHUB_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping outdated commit $GITHUB_SHA"
+            echo "Current main: $CURRENT_MAIN"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare release description
+        if: steps.freshness.outputs.deploy == 'true'
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          subject="$(git log -1 --format=%s)"
+          message="$subject"
+
+          # For GitHub merge commits, use the PR title.
+          if [[ "$subject" =~ ^Merge\ pull\ request\ \#([0-9]+) ]]; then
+            pr="${BASH_REMATCH[1]}"
+            title="$(git log -1 --format=%b |
+              sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}')"
+
+            if [[ -n "$title" ]]; then
+              message="PR #${pr}: ${title}"
+            fi
+          fi
+
+          # Normalize the message for Wrangler CLI arguments.
+          message="${message//$'\r'/ }"
+          message="${message//$'\n'/ }"
+          message="${message//\\/}"
+          message="${message//\"/}"
+          message="${message:0:160}"
+
+          printf 'message=%s\n' "$message" >> "$GITHUB_OUTPUT"
+          echo "Cloudflare release: $message"
+
+      - name: Deploy verified build
+        if: steps.freshness.outputs.deploy == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.151.1"
+          command: >-
+            deploy
+            --message "${{ steps.release.outputs.message }}"

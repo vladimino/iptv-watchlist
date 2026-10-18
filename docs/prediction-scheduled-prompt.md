@@ -1,3 +1,11 @@
+# Scheduled prediction prompt — legacy Sites
+
+This prompt is specific to the existing Sites-aware Scheduled Task and remains valid before AIR-62.
+
+Do not simply replace the URL with the Cloudflare Worker. The Sites bypass token is not a Cloudflare credential.
+
+Unattended authentication from ChatGPT Scheduled Tasks to Cloudflare must first be verified under AIR-58. Change Task URLs and authorization only during the approved production cutover (AIR-62).
+
 Почасовые прогнозы «В эфире»: сохрани существующую Site-aware привязку и почасовое расписание Europe/Madrid.
 
 В начале получи Sites get_site для связанного сайта. Используй current_live_url и siwc_bypass_bearer_token только для запросов к этому сайту; не сохраняй токен в output, URL или Events. Проверь GET /api/enrichment/runner, /api/enrichment/schema и /api/enrichment/profile. При отсутствии доступа уведомь с конкретной стадией сбоя без секретов.

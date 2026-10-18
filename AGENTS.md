@@ -9,6 +9,8 @@
 
 - Preserve existing architecture and API contracts. Before publishing, run `npm ci`, `npm test`, and `npm run build`.
 - Never commit or expose real secrets or personal data in source, fixtures, build artifacts, or logs.
+- Documentation is part of the Definition of Done. Any change to architecture, workflows, CI/CD, deployment, operations, integrations, or migration procedures must update the relevant documentation in the same PR or commit.
+- Before completing a task, explicitly verify whether `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, or `docs/` require updates. Do not defer documentation drift to a separate cleanup task.
 
 ## Deployment and migration
 
