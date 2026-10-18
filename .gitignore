@@ -20,6 +20,8 @@ outputs/
 *.sqlite3
 *.db
 *.dump
+migration-snapshots/
+migration-export.auth
 
 # Tool and OS state
 .DS_Store

@@ -48,3 +48,5 @@ GitHub `main` is the canonical production source. Before local changes, fetch an
 Branch and pull-request CI runs only the self-contained test/build commands above. Automatic Sites deployment is not enabled yet: the existing Site source repository predates the security-rewritten public Git history and currently rejects a guarded source reset. See the deployment document for the cutover requirement; do not deploy a different local tree in the meantime.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/deployment.md) for deployment and rollback.
+
+The proposed read-only backup of the old Sites-managed R2, its local verifier, and the approval-gated publication procedure are documented in [docs/migration-export.md](docs/migration-export.md). GitHub/Cloudflare deployment alone cannot read that source bucket.
