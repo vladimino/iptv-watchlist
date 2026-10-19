@@ -117,6 +117,44 @@ jobs:
           printf 'message=%s\n' "$message" >> "$GITHUB_OUTPUT"
           echo "Cloudflare release: $message"
 
+      - name: Check Cloudflare API access
+        if: steps.freshness.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          classify() {
+            case "$1" in
+              200) echo "ok" ;;
+              401) echo "token rejected" ;;
+              403) echo "permission denied" ;;
+              404) echo "not found" ;;
+              429) echo "rate limited" ;;
+              5*) echo "cloudflare unavailable" ;;
+              *) echo "unexpected" ;;
+            esac
+          }
+
+          token_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            https://api.cloudflare.com/client/v4/user/tokens/verify)"
+          echo "token verify: HTTP ${token_status} ($(classify "$token_status"))"
+
+          settings_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/iptv/settings")"
+          echo "worker settings: HTTP ${settings_status} ($(classify "$settings_status"))"
+
+          if [ "$token_status" != "200" ] || [ "$settings_status" != "200" ]; then
+            echo "Cloudflare API diagnostics failed; deployment was not started."
+            exit 1
+          fi
+
+          echo "Cloudflare API diagnostics succeeded; continuing deployment."
+
       - name: Deploy verified build
         if: steps.freshness.outputs.deploy == 'true'
         uses: cloudflare/wrangler-action@v4
