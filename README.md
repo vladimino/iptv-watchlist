@@ -43,6 +43,10 @@ A visible tab rereads published snapshots about once a minute, and again as soon
 
 Those requests are GET, but two of them can still write. `GET /api/events` looks for an undelivered stop or start event and, only when one exists, saves the recovered event and related run record. `GET /api/enrichment/view` writes a built-in personal rating into `enrichment/view-index.json` when that film is missing from the index. The committed seed is empty, so that particular write does not happen until the seed contains an entry. `/api/enrichment/footer/status`, `/api/started`, and `/api/programme` only read on this pass. A filter with no current matches remains active and applies again when matching films return. Reloading the page restores those selections from the URL even when the current snapshot does not contain them. The same pass refreshes time-based presentation, including last chance and what is on now, even when the server snapshots are unchanged.
 
+## Execution filters
+
+«Исполнение» filters the general execution dimensions already stored on a fingerprint: plot engine, pace, stakes, decision logic, competence, problem solving, plans, chemistry, payoff, ending, and technical plausibility. Choices inside one dimension use OR. Different dimensions use AND, as do mechanics, mood, genre, year, runtime, and search. `unknown` and `not_applicable` are not choices. Filtering reads the compact object on the enrichment view; it does not call a model. Older view-index entries gain that object from the existing fingerprint-view backfill or the next fingerprint save. Genre-specific execution fields stay out of this sidebar.
+
 ## Operational safety
 
 Do not manually run EPG sync, the prediction runner, recurring/scheduled jobs, diagnostic exports, or production backfills merely to test the code. They mutate durable production state and may consume external model/API quota. Use the local test suite; run production jobs only for an explicit operational task against an environment you own.

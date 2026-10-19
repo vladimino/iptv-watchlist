@@ -68,7 +68,7 @@ Actual Letterboxd ratings are stored separately with `PUT /api/enrichment/actual
 {"items":[{"filmId":"123456","rating":4.5}]}
 ```
 
-Use `rating:null` to clear one. The film's actual rating never enters the `/next` model payload. The owner's UI can display actual and predicted ratings together. `GET /api/enrichment/view` supplies only current predictions to the UI while preserving stale prediction history internally.
+Use `rating:null` to clear one. The film's actual rating never enters the `/next` model payload. The owner's UI can display actual and predicted ratings together. `GET /api/enrichment/view` supplies current predictions to the UI while preserving stale prediction history internally. Its fingerprint facet also includes the thirteen general `execution` dimensions when they were saved, omitting `unknown` and `not_applicable`. Genre-specific execution fields are not part of that facet. An older index entry receives the compact execution object from `POST /api/enrichment/fingerprint-view/backfill` or the next fingerprint save; the view request does not reread every fingerprint.
 
 ## Failure behavior
 

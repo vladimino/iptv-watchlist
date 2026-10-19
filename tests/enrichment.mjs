@@ -32,8 +32,14 @@ const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',mat
 r=await api('enrichment/submit','POST',{runId,items:[{filmId:'film000',fingerprint,prediction},{filmId:'film001',fingerprint,prediction:{...prediction,predictedRating:4.2}}]});assert.equal(r.data.results[0].status,'created');assert(r.data.results[1].error);assert(records.has('enrichment/films/film000/predictions.json'));
 assert(records.has('enrichment/films/film001/fingerprint.json'));r=await api('enrichment/next','POST',{runId,batchSize:5});assert.equal(r.data.items[0].filmId,'film002');
 assert.deepEqual((await api('enrichment/view')).data.films.film001.fingerprint.plotMechanics,['investigation']);
+assert.equal((await api('enrichment/view')).data.films.film001.fingerprint.execution.pace,'fast');
+assert.equal((await api('enrichment/view')).data.films.film001.fingerprint.execution.decision_logic,undefined,'unknown execution values are not offered to the page');
 delete records.get('enrichment/view-index.json').film000.fingerprint;
 const facetBackfill=await api('enrichment/fingerprint-view/backfill','POST',{limit:100});assert.equal(facetBackfill.status,200);assert(facetBackfill.data.added>=1);assert.deepEqual((await api('enrichment/view')).data.films.film000.fingerprint.moodIds,['tense']);
+assert.equal((await api('enrichment/view')).data.films.film000.fingerprint.execution.pace,'fast');
+const savedFingerprint=records.get('enrichment/films/film001/fingerprint.json'),viewIndex=records.get('enrichment/view-index.json');
+viewIndex.film001.fingerprint={plotMechanics:savedFingerprint.plotMechanics,moodLabels:savedFingerprint.moodLabels,fingerprintHash:savedFingerprint.fingerprintHash};
+const executionRepair=await api('enrichment/fingerprint-view/backfill','POST',{limit:100});assert.equal(executionRepair.status,200);const repaired=records.get('enrichment/view-index.json').film001.fingerprint;assert.equal(repaired.execution.pace,'fast');assert.equal(repaired.fingerprintHash,savedFingerprint.fingerprintHash);
 const before=structuredClone(records.get('programme.json'));assert.equal((await api('enrichment/profile','PUT',{version:2,schemaVersion:1,profile:{...profile,pace:'Slower okay'}})).status,200);assert.deepEqual(records.get('programme.json'),before);assert.equal((await api('enrichment/view')).data.films.film000.prediction.stale,true);
 assert.equal((await api('enrichment/next','POST',{runId,batchSize:5})).status,409);
 await api('enrichment/complete','POST',{runId,reason:'profile_changed'});r=await api('enrichment/start','POST',{scope:'watchlist_available',mode:'legacy',limit:100});let run2=r.data.runId;r=await api('enrichment/next','POST',{runId:run2,batchSize:1});assert.equal(r.data.items[0].requiredWork,'prediction_only');assert(!JSON.stringify(r.data.items).includes('actualRating'));
