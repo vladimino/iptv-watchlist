@@ -1,10 +1,8 @@
 # Scheduled prediction prompt — legacy Sites
 
-This prompt is specific to the existing Sites-aware Scheduled Task and remains valid before AIR-62.
+Data cutover to Cloudflare finished on 19 October 2026. This prompt still targets the legacy Site and must stay disabled. Do not run it against the Site, and do not point it at the Cloudflare Worker until unattended Cloudflare authorization is separately verified. The Sites bypass token is not a Cloudflare credential. Do not relax Cloudflare Access to make the task work.
 
-Do not simply replace the URL with the Cloudflare Worker. The Sites bypass token is not a Cloudflare credential.
-
-Unattended authentication from ChatGPT Scheduled Tasks to Cloudflare must first be verified under AIR-58. Change Task URLs and authorization only during the approved production cutover (AIR-62).
+The historical prompt below is kept so the disabled task can be recognized. It is not permission to resume predictions.
 
 Почасовые прогнозы «В эфире»: сохрани существующую Site-aware привязку и почасовое расписание Europe/Madrid.
 
