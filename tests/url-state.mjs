@@ -38,8 +38,8 @@ assert.equal(serialize(canonical),'https://iptv.example/?campaign=save#films','d
 
 const malformed=read('https://iptv.example/?view=garbage&period=old&sort=oops&genre=Invalid&genre=%D0%94%D1%80%D0%B0%D0%BC%D0%B0&mechanic=unknown&mood=%20%20&from=2028&to=abc&runtime=-2&viewing=nope&started=yes&lastChance=2&director=other&actor=other&prediction=5&chance=0.99');
 assert.deepEqual([malformed.includeUnscheduled,malformed.period,malformed.sort,malformed.from,malformed.to,malformed.maxRuntime], [false,'all','title',1900,2027,null]);
-assert.deepEqual([...malformed.genres],['Драма']);
+assert.deepEqual([...malformed.genres],['Invalid','Драма'],'a genre stays selected even when it is absent from the current snapshot');
 assert.deepEqual([...malformed.mechanics],[]);assert.deepEqual([...malformed.moods],[]);
-assert.deepEqual([malformed.viewing,malformed.startedOnly,malformed.lastChanceOnly,malformed.directors,malformed.actors,malformed.minPrediction,malformed.minProbability],['any',false,false,'','',null,null]);
+assert.deepEqual([malformed.viewing,malformed.startedOnly,malformed.lastChanceOnly,malformed.directors,malformed.actors,malformed.minPrediction,malformed.minProbability],['any',false,false,'other','other',null,null]);
 assert.deepEqual([read('https://iptv.example/?from=2020&to=1990').from,read('https://iptv.example/?from=2020&to=1990').to],[1900,2027]);
 console.log('URL state: complete deep-link round trip, multi-value genres, defaults, foreign params, deterministic order and invalid values passed');

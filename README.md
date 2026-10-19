@@ -37,6 +37,12 @@ Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 
 
 `npm test` runs the self-contained suite and does not contact Letterboxd, EPG, TMDB, or production. Historical source-adapter tests that depended on downloaded HTML/XML snapshots are not part of the public test command because those local captures are intentionally excluded.
 
+## Live refresh
+
+A visible tab rereads published snapshots about once a minute, and again as soon as the tab becomes visible. A hidden tab does not poll. Each pass requests `/api/events`, `/api/enrichment/footer/status`, `/api/enrichment/view`, `/api/started`, and `/api/programme`. It does not start EPG sync, watchlist sync, an enrichment run, or prediction. Search, sort, scroll, and selected filters stay as the user left them.
+
+Those requests are GET, but two of them can still write. `GET /api/events` looks for an undelivered stop or start event and, only when one exists, saves the recovered event and related run record. `GET /api/enrichment/view` writes a built-in personal rating into `enrichment/view-index.json` when that film is missing from the index. The committed seed is empty, so that particular write does not happen until the seed contains an entry. `/api/enrichment/footer/status`, `/api/started`, and `/api/programme` only read on this pass. A filter with no current matches remains active and applies again when matching films return. Reloading the page restores those selections from the URL even when the current snapshot does not contain them. The same pass refreshes time-based presentation, including last chance and what is on now, even when the server snapshots are unchanged.
+
 ## Operational safety
 
 Do not manually run EPG sync, the prediction runner, recurring/scheduled jobs, diagnostic exports, or production backfills merely to test the code. They mutate durable production state and may consume external model/API quota. Use the local test suite; run production jobs only for an explicit operational task against an environment you own.

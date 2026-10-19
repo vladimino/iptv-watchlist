@@ -13,7 +13,8 @@ function moodIdsFromUrl(value){const key=normalizeMood(value).replace(/ё/g,"е"
 let mechanics=[],moods=[];
 const state = { shortlistMode:'now', period: 'all', sort: 'title', viewing: 'any', minPrediction: null, minProbability: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', genres: new Set(), mechanics:new Set(), moods:new Set(), from: 1900, to: MAX_YEAR, maxRuntime: null };
 const APP_QUERY_KEYS = ['shortlist','view','period','q','sort','genre','mechanic','mood','from','to','runtime','viewing','started','lastChance','director','actor','prediction','chance'];
-let urlReady=false,urlRestoring=false;
+let urlReady=false,urlRestoring=false,viewClock=null;
+function nowMs(){return viewClock??Date.now();}
 function readUrlState(url){
  const p=url.searchParams,defaults={shortlistMode:'now',period:'all',sort:'title',viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',genres:new Set(),mechanics:new Set(),moods:new Set(),from:1900,to:MAX_YEAR,maxRuntime:null};
  if(p.get('shortlist')==='today')defaults.shortlistMode='today';
@@ -22,9 +23,9 @@ function readUrlState(url){
  if(['title','personal','expiring','time'].includes(p.get('sort')))defaults.sort=p.get('sort');
  if(['any','new','rewatch'].includes(p.get('viewing')))defaults.viewing=p.get('viewing');
  defaults.query=p.get('q')||'';
- defaults.genres=new Set(p.getAll('genre').filter(g=>genres.includes(g)));
- defaults.mechanics=new Set(p.getAll('mechanic').filter(m=>Object.hasOwn(MECHANIC_LABELS,m)&&(!ratingsLoaded||mechanics.includes(m))));
- defaults.moods=new Set(p.getAll('mood').flatMap(moodIdsFromUrl).filter(m=>Object.hasOwn(MOOD_LABELS,m)&&(!ratingsLoaded||moods.includes(m))));
+ defaults.genres=new Set(p.getAll('genre').map(genre=>genre.trim()).filter(Boolean));
+ defaults.mechanics=new Set(p.getAll('mechanic').filter(m=>Object.hasOwn(MECHANIC_LABELS,m)));
+ defaults.moods=new Set(p.getAll('mood').flatMap(moodIdsFromUrl).filter(m=>Object.hasOwn(MOOD_LABELS,m)));
  const year=key=>/^\d{4}$/.test(p.get(key)||'')?Number(p.get(key)):null;
  const from=year('from'),to=year('to');
  if(from!==null&&from>=1900&&from<=MAX_YEAR)defaults.from=from;
@@ -33,7 +34,7 @@ function readUrlState(url){
  const runtime=p.get('runtime');if(/^[1-9]\d*$/.test(runtime||'')&&Number.isSafeInteger(Number(runtime)))defaults.maxRuntime=Number(runtime);
  if(p.get('started')==='1')defaults.startedOnly=true;
  if(p.get('lastChance')==='1')defaults.lastChanceOnly=true;
- for(const [key,param] of [['directors','director'],['actors','actor']]){const id=p.get(param);if(id&&(report.people?.[key]||[]).some(person=>person.id===id))defaults[key]=id;}
+ for(const [key,param] of [['directors','director'],['actors','actor']]){const id=p.get(param);if(id&&id.length<=200&&!/[\s#&?]/.test(id))defaults[key]=id;}
  const prediction=Number(p.get('prediction')),chance=Number(p.get('chance'));
  if([3.5,4,4.5].includes(prediction))defaults.minPrediction=prediction;
  if([0.5,0.7,0.85].includes(chance))defaults.minProbability=chance;
@@ -73,15 +74,15 @@ function restoreUrl(){
  $('#sort').value=state.sort;$('#search').value=state.query;
  $('#include-unscheduled').checked=state.includeUnscheduled;$('#started-only').checked=state.startedOnly;$('#last-chance-only').checked=state.lastChanceOnly;
  $('#year-from').value=state.from;$('#year-to').value=state.to;$('#runtime-max').value=state.maxRuntime??'';
- document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
- document.querySelectorAll('#mechanics input').forEach(input=>input.checked=state.mechanics.has(input.value));
- document.querySelectorAll('#moods input').forEach(input=>input.checked=state.moods.has(input.value));
- for(const key of ['directors','actors']){const input=$('#'+key+'-input');input.value=report.people?.[key]?.find(person=>person.id===state[key])?.name||'';input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');$('#'+key+'-options').hidden=true;}
+ refreshGenreOptions();
+ updateFacetOptions();
+ for(const key of ['directors','actors']){const input=$('#'+key+'-input');const known=report?.people?.[key]?.find(person=>person.id===state[key]);input.value=known?.name||state[key]||'';input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');$('#'+key+'-options').hidden=true;}
  render();urlRestoring=false;
 }
 let films = [];
 let eventCursor=null,eventLoading=false;const loadedEvents=new Map();
 let startedIds=new Set(),startedReady=false,startedLoading=false;const savingStarted=new Set();
+const peopleSources={directors:[],actors:[]};
 const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let genres = ['Боевик','Триллер','Криминал','Фантастика','Ужасы','Приключения','Комедия'];
@@ -89,18 +90,18 @@ const isArchive = show => WINDOW_START===null?show.offset>=-72&&show.offset<0:sh
 const isFuture = show => WINDOW_END===null?show.offset>=0&&show.offset<24:show.start>=CUTOFF&&show.start<=WINDOW_END;
 const normalizeTitle = text => text.toLocaleLowerCase('ru').replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function availabilityTime(film){const time=Date.parse(film.availableUntil||'');return Number.isFinite(time)?time:null;}
-function isLastChance(film,now=Date.now()){const until=availabilityTime(film);return until!==null&&until>now&&until-now<8*3600000;}
+function isLastChance(film,now=nowMs()){const until=availabilityTime(film);return until!==null&&until>now&&until-now<8*3600000;}
 function hasActualRating(film){const rating=enrichment.films[String(film.id)]?.actualRating;return rating!==null&&rating!==undefined;}
 function filmFacets(film){const item=enrichment.films[String(film.id)]||{},fingerprint=item.fingerprint||{},mechanics=(fingerprint.plotMechanics||[]).filter(m=>Object.hasOwn(MECHANIC_LABELS,m)),moods=(item.moodIds||fingerprint.moodIds||item.prediction?.moodIds||[]).filter(id=>Object.hasOwn(MOOD_LABELS,id));return {mechanics:new Set(mechanics),moods:new Set(moods)};}
 function filterMoodOptions(){const query=normalizeMood($('#mood-search').value);let visible=0;document.querySelectorAll('#moods label').forEach(label=>{const show=!query||normalizeMood(moodLabel(label.querySelector('input').value)).replace(/ё/g,'е').includes(query.replace(/ё/g,'е'));label.hidden=!show;if(show)visible++;});$('#mood-option-count').textContent=query?`${visible} из ${moods.length} вариантов`:`${moods.length} вариантов · частые выше`;}
 function updateFacetOptions(){
  const counts={mechanics:new Map(),moods:new Map()};
  for(const film of films){const facets=filmFacets(film);for(const key of ['mechanics','moods'])for(const value of facets[key])counts[key].set(value,(counts[key].get(value)||0)+1);}
- mechanics=[...counts.mechanics.keys()].sort((a,b)=>MECHANIC_LABELS[a].localeCompare(MECHANIC_LABELS[b],'ru'));
- moods=[...counts.moods.keys()].sort((a,b)=>counts.moods.get(b)-counts.moods.get(a)||a.localeCompare(b,'ru'));
- const options=(values,key,label)=>values.map(value=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(value)}"><span>${escapeHTML(label(value))}</span><span class="genre-count">${counts[key].get(value)}</span></label>`).join('');
+ const listed=(key,known)=>[...new Set([...counts[key].keys(),...state[key]])].filter(known);
+ mechanics=listed('mechanics',value=>Object.hasOwn(MECHANIC_LABELS,value)).sort((a,b)=>MECHANIC_LABELS[a].localeCompare(MECHANIC_LABELS[b],'ru'));
+ moods=listed('moods',value=>Object.hasOwn(MOOD_LABELS,value)).sort((a,b)=>(counts.moods.get(b)||0)-(counts.moods.get(a)||0)||a.localeCompare(b,'ru'));
+ const options=(values,key,label)=>values.map(value=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(value)}"><span>${escapeHTML(label(value))}</span><span class="genre-count">${counts[key].get(value)||0}</span></label>`).join('');
  $('#mechanics').innerHTML=options(mechanics,'mechanics',value=>MECHANIC_LABELS[value]);$('#moods').innerHTML=options(moods,'moods',moodLabel);
- state.mechanics=new Set([...state.mechanics].filter(value=>mechanics.includes(value)));state.moods=new Set([...state.moods].filter(value=>moods.includes(value)));
  document.querySelectorAll('#mechanics input').forEach(input=>input.checked=state.mechanics.has(input.value));document.querySelectorAll('#moods input').forEach(input=>input.checked=state.moods.has(input.value));
  $('#mechanics-empty').hidden=mechanics.length>0;$('#moods-empty').hidden=moods.length>0;filterMoodOptions();
 }
@@ -124,7 +125,7 @@ function startedButton(film){
  return `<div class="started-action"><button type="button" class="started-button" data-started-id="${escapeHTML(id)}" aria-pressed="${on}" aria-busy="${busy}" aria-label="${on?'Снять отметку «Начал смотреть»':'Начал смотреть'}: ${escapeHTML(film.title)}" title="${on?'Снять отметку «Начал смотреть»':'Отметить начатый просмотр'}" ${!startedReady||busy?'disabled':''}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div>`;
 }
 function progressError(message){$('#progress-error-text').textContent=message;$('#progress-error').hidden=!message;}
-async function loadStarted(){if(startedLoading||savingStarted.size)return;startedLoading=true;try{const r=await fetch('/api/started');if(!r.ok)throw new Error();const data=await r.json();if(!Array.isArray(data.ids))throw new Error();startedIds=new Set(data.ids.map(String));startedReady=true;$('#started-only').disabled=false;progressError('');render();}catch{progressError('Не удалось загрузить отметки просмотра. Повтори попытку.');}finally{startedLoading=false;}}
+async function loadStarted(options={}){if(startedLoading||savingStarted.size)return 'busy';startedLoading=true;try{const r=await fetch('/api/started');if(!r.ok)throw new Error();const data=await r.json();if(!Array.isArray(data.ids))throw new Error();const next=new Set(data.ids.map(String)),wasReady=startedReady,same=next.size===startedIds.size&&[...next].every(id=>startedIds.has(id));startedIds=next;startedReady=true;$('#started-only').disabled=false;progressError('');if(!same||!wasReady)renderPreservingScroll();return true;}catch{if(!options.quiet)progressError('Не удалось загрузить отметки просмотра. Повтори попытку.');return false;}finally{startedLoading=false;}}
 async function toggleStarted(id){if(!startedReady||startedLoading||savingStarted.has(id))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();try{const r=await fetch('/api/started',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();const b=document.querySelector(`[data-started-id="${id}"]`);if(b)b.focus({preventScroll:true});}}
 function creditLinks(people,key){return (people||[]).map(p=>`<button type="button" class="credit-link" data-credit-kind="${key}" data-credit-id="${escapeHTML(p.id)}" title="Показать фильмы: ${escapeHTML(p.name)}">${escapeHTML(p.name)}</button>`).join(', ');}
 function credits(film){return `<div class="film-credits">${film.directors?.length?`<p><span class="credit-label">${film.directors.length>1?'Режиссёры':'Режиссёр'}</span> ${creditLinks(film.directors,'directors')}</p>`:''}${film.actors?.length?`<p><span class="credit-label">В ролях</span> ${creditLinks(film.actors,'actors')}</p>`:''}</div>`;}
@@ -153,7 +154,7 @@ function card(film){
  const item=enrichment.films[String(film.id)]||{},hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
  return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}" aria-label="${escapeHTML(film.title)}">${recommendation(film)}<div class="film-head">${film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`}<div class="film-info"><h3>${escapeHTML(film.title)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
 }
-function visibleFilms(){const now=Date.now();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return state.period==='archive'?Math.max(...b.shows.filter(isArchive).map(s=>s.offset))-Math.max(...a.shows.filter(isArchive).map(s=>s.offset)):Math.min(...a.shows.filter(isFuture).map(s=>s.offset),Infinity)-Math.min(...b.shows.filter(isFuture).map(s=>s.offset),Infinity)||title;});}
+function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return state.period==='archive'?Math.max(...b.shows.filter(isArchive).map(s=>s.offset))-Math.max(...a.shows.filter(isArchive).map(s=>s.offset)):Math.min(...a.shows.filter(isFuture).map(s=>s.offset),Infinity)-Math.min(...b.shows.filter(isFuture).map(s=>s.offset),Infinity)||title;});}
 
 function shortlistDay(time){return new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(time));}
 function shortlistAvailability(film,mode='now',now=Date.now()){
@@ -169,7 +170,7 @@ function shortlistAvailability(film,mode='now',now=Date.now()){
  return null;
 }
 function shortlistCompare(a,b){const x=personal(a),y=personal(b);return (y.rating??-Infinity)-(x.rating??-Infinity)||Number(y.actual)-Number(x.actual)||(!x.actual&&!y.actual?y.probability-x.probability:0)||a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
-function buildShortlist(input=visibleFilms(),mode=state.shortlistMode,now=Date.now()){
+function buildShortlist(input=visibleFilms(),mode=state.shortlistMode,now=nowMs()){
  const candidates=input.filter(eligible).filter(f=>inSelectedScope(f)).map(f=>({film:f,availability:shortlistAvailability(f,mode,now)})).filter(x=>x.availability&&personal(x.film).rating!==null).sort((a,b)=>shortlistCompare(a.film,b.film));
  const seen=new Set(),unique=candidates.filter(x=>{const id=String(x.film.tmdbId||x.film.id);if(seen.has(id))return false;seen.add(id);return true;});if(!unique.length)return [];
  const best=personal(unique[0].film).rating,strong=Math.max(3.5,best-.5),runtimes=unique.map(x=>Number(x.film.runtime)).filter(n=>Number.isFinite(n)&&n>0).sort((a,b)=>a-b),shortLimit=runtimes.length?runtimes[Math.floor((runtimes.length-1)*.25)]:0;
@@ -211,6 +212,7 @@ function render(){
   $('#result-count').textContent=valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
   $('#sort-time').textContent=state.period==='archive'?'Свежие показы — сначала':'Ближайшие эфиры — сначала';
   syncUrl();
+  noteTimeView(valid?visible:[]);
   return {period:state.period,query:state.query,genres:[...state.genres],mechanics:[...state.mechanics],moods:[...state.moods],years:[state.from,state.to],maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
 }
 function reset(){state.shortlistMode='now';state.viewing='any';state.minPrediction=null;state.minProbability=null;state.includeUnscheduled=false;$('#include-unscheduled').checked=false;state.startedOnly=false;$('#started-only').checked=false;state.lastChanceOnly=false;$('#last-chance-only').checked=false;for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.query='';$('#search').value='';state.genres.clear();state.mechanics.clear();state.moods.clear();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;$('#runtime-max').value='';for(const selector of ['#genres input','#mechanics input','#moods input'])document.querySelectorAll(selector).forEach(i=>i.checked=false);render();}
@@ -243,10 +245,72 @@ function applyFilters(input){
  document.querySelectorAll('#moods input').forEach(i=>i.checked=state.moods.has(i.value));
  return render();
 }
-async function init(){
- try{$('#year-to').value=MAX_YEAR;$('#year-to').max=MAX_YEAR;$('#year-from').max=MAX_YEAR;$('#year-error').textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;const response=await fetch('/api/programme');if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');report=await response.json();MAX_YEAR=Math.max(MAX_YEAR,...report.films.map(f=>Number(f.year)||0));state.to=MAX_YEAR;$('#year-to').value=MAX_YEAR;$('#year-to').max=MAX_YEAR;$('#year-from').max=MAX_YEAR;$('#year-error').textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;({start:WINDOW_START,cutoff:CUTOFF,end:WINDOW_END}=programmeWindow(report));films=report.films.map(f=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:f.shows.map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));genres=[...new Set(films.flatMap(f=>f.genres))].sort((a,b)=>a.localeCompare(b,'ru'));updateSourceInfo();initPeopleFilters();
- $('#genres').innerHTML=genres.map(g=>`<label class="genre-label"><input type="checkbox" value="${g}"><span>${g}</span><span class="genre-count">${films.filter(f=>f.genres.includes(g)).length}</span></label>`).join('');
- restoreUrl();urlReady=true;
+const LIVE_REFRESH_MS=60000;
+let programmeKey='',programmeSeen=false,programmeReady=false,programmeLoading=false;
+let enrichmentKey='',enrichmentLoading=false,footerReady=false,footerLoading=false;
+let liveTimer=null,liveHandlers=null,liveRunning=false,livePending=false,liveCoalesced=false,controlsReady=false;
+function setYearBounds(followValue){
+ const yearTo=$('#year-to'),yearFrom=$('#year-from'),yearError=$('#year-error');
+ if(yearTo){yearTo.max=MAX_YEAR;if(followValue)yearTo.value=state.to;}
+ if(yearFrom)yearFrom.max=MAX_YEAR;
+ if(yearError)yearError.textContent=`Укажи годы от 1900 до ${MAX_YEAR}; «от» не должно быть больше «до».`;
+}
+function syncPeopleSources(){
+ for(const key of ['directors','actors']) peopleSources[key]=(report.people?.[key]||[]).slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru',{sensitivity:'base'}));
+}
+function refreshGenreOptions(){
+ const box=$('#genres');if(!box)return;
+ const counts=new Map();
+ for(const film of films) for(const genre of film.genres||[]) counts.set(genre,(counts.get(genre)||0)+1);
+ const ordered=[...counts.keys()].sort((a,b)=>a.localeCompare(b,'ru'));
+ for(const genre of state.genres) if(!counts.has(genre)) ordered.push(genre);
+ genres=ordered;
+ box.innerHTML=ordered.map(genre=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(genre)}"><span>${escapeHTML(genre)}</span><span class="genre-count">${counts.get(genre)||0}</span></label>`).join('');
+ document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
+}
+let gridTimeKey='',shortTimeKey='';
+function gridTimeKeyOf(visible){return visible.map(film=>`${film.id}:${isLastChance(film)?1:0}`).join('|');}
+function shortTimeKeyOf(visible){return ['now','today'].map(mode=>buildShortlist(visible,mode).map(item=>`${item.film.id}:${item.availability.kind}:${item.availability.show?.start??''}:${item.availability.show?.end??''}`).join(',')).join(';');}
+function noteTimeView(visible=visibleFilms()){gridTimeKey=gridTimeKeyOf(visible);shortTimeKey=shortTimeKeyOf(visible);}
+function refreshTimeSensitiveView(){
+ if(!report)return;
+ const visible=visibleFilms(),grid=gridTimeKeyOf(visible),short=shortTimeKeyOf(visible);
+ if(grid!==gridTimeKey){renderPreservingScroll();return;}
+ if(short!==shortTimeKey){shortTimeKey=short;renderShortlist(visible);}
+}
+function installProgramme(data){
+ const key=JSON.stringify(data);
+ if(programmeSeen&&key===programmeKey)return false;
+ const previousMax=MAX_YEAR,followYear=!programmeSeen||state.to===previousMax;
+ programmeSeen=true;programmeKey=key;report=data;
+ MAX_YEAR=Math.max(previousMax,...report.films.map(f=>Number(f.year)||0));
+ if(followYear)state.to=MAX_YEAR;
+ setYearBounds(followYear);
+ ({start:WINDOW_START,cutoff:CUTOFF,end:WINDOW_END}=programmeWindow(report));
+ films=report.films.map(f=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:(f.shows||[]).map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));
+ genres=[...new Set(films.flatMap(f=>f.genres))].sort((a,b)=>a.localeCompare(b,'ru'));
+ syncPeopleSources();
+ return true;
+}
+function renderPreservingScroll(){
+ const y=window.scrollY||0;
+ const activity=document.querySelector('.activity-scroll');
+ const top=activity?activity.scrollTop:0;
+ render();
+ if(activity)activity.scrollTop=top;
+ if(typeof window.scrollTo==='function')window.scrollTo(0,y);
+}
+function showProgrammeUnavailable(error){
+ $('#result-count').textContent='Программа временно недоступна';
+ $('#snapshot').textContent=error.message;
+ $('#connection-badge').textContent='Ожидаем обновление';
+}
+async function registerModelTool(){
+ if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},query:{type:'string',description:'Part of the Russian or original title, case insensitive'},period:{type:'string',enum:['all','archive','future']},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
+}
+function bindControls(){
+ if(controlsReady)return;
+ controlsReady=true;
  window.addEventListener('popstate',restoreUrl);
  $('#include-unscheduled').addEventListener('change',e=>{state.includeUnscheduled=e.target.checked;render();});
  $('#started-only').addEventListener('change',e=>{state.startedOnly=e.target.checked;render();});
@@ -271,13 +335,105 @@ async function init(){
  $('#filter-toggle').addEventListener('click',()=>{const b=$('#filter-toggle');const open=b.getAttribute('aria-expanded')!=='true';b.setAttribute('aria-expanded',String(open));$('#filters').dataset.open=String(open);});
  const statusDetails=$('#status-details');statusDetails.addEventListener('toggle',()=>{$('#status-details-label').textContent=statusDetails.open?'Скрыть детали':'Показать детали';});
  $('#status-events-link').addEventListener('click',()=>{const filters=$('#filters'),toggle=$('#filter-toggle');filters.dataset.open='true';toggle.setAttribute('aria-expanded','true');requestAnimationFrame(()=>{document.querySelector('.activity-scroll').focus({preventScroll:true});$('#activity-title').scrollIntoView({behavior:'smooth',block:'start'});});});
- $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);render();loadStarted();loadEvents();loadEnrichment();loadPredictionQueue();$('#activity-more').addEventListener('click',()=>loadEvents(true));
- window.addEventListener('focus',()=>{if(!savingStarted.size)loadStarted();loadEvents();loadEnrichment();loadPredictionQueue();});
- setInterval(()=>{updateSourceInfo();render();loadEvents();loadPredictionQueue();},60000);
- if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},query:{type:'string',description:'Part of the Russian or original title, case insensitive'},period:{type:'string',enum:['all','archive','future']},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
- }catch(e){$('#result-count').textContent='Программа временно недоступна';$('#snapshot').textContent=e.message;$('#connection-badge').textContent='Ожидаем обновление';console.error(e);}
+ $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>loadEvents(true));
 }
-async function loadEnrichment(){try{const response=await fetch('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();enrichment=data;ratingsLoaded=true;updateFacetOptions();render();}catch{if(!ratingsLoaded)render();}}
+async function finishProgrammeUi(){
+ if(programmeReady)return;
+ updateSourceInfo();
+ initPeopleFilters();
+ refreshGenreOptions();
+ restoreUrl();
+ urlReady=true;
+ programmeReady=true;
+ await registerModelTool();
+}
+async function loadProgramme({quiet}={}){
+ if(programmeLoading)return 'busy';
+ programmeLoading=true;
+ try{
+  const response=await fetch('/api/programme');
+  if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
+  const data=await response.json();
+  if(!data||!Array.isArray(data.films))throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
+  const changed=installProgramme(data);
+  if(!programmeReady)await finishProgrammeUi();
+  else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();}
+  else updateSourceInfo();
+  return true;
+ }catch(error){
+  if(!programmeReady&&!quiet)throw error;
+  return false;
+ }finally{programmeLoading=false;}
+}
+function armLiveTimer(){
+ if(liveTimer)clearInterval(liveTimer);
+ liveTimer=setInterval(()=>{if(!document.hidden)runLiveRefresh();},LIVE_REFRESH_MS);
+}
+function pauseLiveTimer(){
+ if(liveTimer)clearInterval(liveTimer);
+ liveTimer=null;
+}
+function requestLiveRefresh(){
+ if(document.hidden)return;
+ if(liveCoalesced)return;
+ liveCoalesced=true;
+ Promise.resolve().then(()=>{
+  liveCoalesced=false;
+  if(document.hidden)return;
+  armLiveTimer();
+  return runLiveRefresh();
+ });
+}
+async function runLiveRefresh(followUp=false){
+ if(document.hidden)return;
+ if(liveRunning){livePending=true;return;}
+ liveRunning=true;
+ try{
+  const done=await Promise.all([
+   loadEvents(false,{quiet:true}),
+   loadPredictionQueue({quiet:true}),
+   loadEnrichment({quiet:true}),
+   loadStarted({quiet:true}),
+   loadProgramme({quiet:true})
+  ]);
+  if(!followUp&&done.some(ok=>ok==='busy'))livePending=true;
+  refreshTimeSensitiveView();
+ }finally{
+  liveRunning=false;
+  if(livePending){livePending=false;if(!document.hidden)await runLiveRefresh(true);}
+ }
+}
+function startLiveRefresh(){
+ stopLiveRefresh();
+ const onFocus=()=>requestLiveRefresh();
+ const onVisibility=()=>{if(document.hidden)pauseLiveTimer();else requestLiveRefresh();};
+ window.addEventListener('focus',onFocus);
+ document.addEventListener('visibilitychange',onVisibility);
+ liveHandlers={onFocus,onVisibility};
+ if(!document.hidden)armLiveTimer();
+}
+function stopLiveRefresh(){
+ pauseLiveTimer();
+ livePending=false;
+ liveCoalesced=false;
+ if(!liveHandlers)return;
+ window.removeEventListener('focus',liveHandlers.onFocus);
+ document.removeEventListener('visibilitychange',liveHandlers.onVisibility);
+ liveHandlers=null;
+}
+async function init(){
+ bindControls();
+ setYearBounds(true);
+ try{await loadProgramme();}
+ catch(error){showProgrammeUnavailable(error);console.error(error);}
+ loadStarted();
+ loadEvents();
+ loadEnrichment();
+ loadPredictionQueue();
+ startLiveRefresh();
+}
+
+async function loadEnrichment(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetch('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;updateFacetOptions();renderPreservingScroll();return true;}catch{if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
 const FOOTER_RUN_STATUS={idle:'не запускался',running:'выполняется',completed:'завершён',blocked:'приостановлен',interrupted:'прерван'};
 const FOOTER_RUN_REASON={queue_empty:'очередь обработана',eligible_queue_empty:'пакет завершён',retry_backoff:'повтор позже',quota:'лимит',time_budget:'лимит времени',parse_error:'ошибка формата',storage_error:'ошибка хранения',model_error:'ошибка модели',model_unavailable:'модель недоступна',api_error:'ошибка API',lease_lost:'сеанс потерян',lease_expired:'сеанс истёк',profile_changed:'модель вкуса обновлена',format_error_storm:'ошибки формата',external_termination:'внешняя остановка',priority_changed:'приоритет обновлён'};
 function footerStatusText(data){
@@ -294,7 +450,7 @@ function renderFooterStatus(data){const text=footerStatusText(data),values={
  'detail-epg-recognized':text.epgRecognized,'detail-epg-pending':text.epgPending,'detail-epg-confirmed':text.epgConfirmed,'detail-epg-cache':text.epgCache,'detail-epg-coverage':text.epgCoverage,'detail-epg-channels':text.epgChannels,'detail-epg-checked':text.epgChecked,
  'detail-watchlist-films':text.watchlistFilms,'detail-watchlist-updated':text.watchlistUpdated,'detail-watchlist-metadata':text.watchlistMetadata,'detail-watchlist-titles':text.watchlistTitles,
  'detail-run-started':text.runStarted,'detail-run-added':text.runAdded,'detail-run-failed':text.runFailed,'detail-run-reason':text.runResult,'detail-run-next':text.nextRun,'detail-profile-version':text.profileVersion,'detail-profile-updated':text.profileUpdated};for(const [id,value] of Object.entries(values)){const node=$('#'+id);if(node)node.textContent=value;}}
-async function loadPredictionQueue(){try{const response=await fetch('/api/enrichment/footer/status');if(!response.ok)throw new Error();renderFooterStatus(await response.json());}catch{const unavailable='статус недоступен';$('#status-local-coverage').textContent=unavailable;$('#status-window-coverage').textContent=unavailable;$('#status-last-run').textContent=unavailable;}}
+async function loadPredictionQueue(options={}){if(footerLoading)return 'busy';footerLoading=true;try{const response=await fetch('/api/enrichment/footer/status');if(!response.ok)throw new Error();renderFooterStatus(await response.json());footerReady=true;return true;}catch{if(!footerReady&&!options.quiet){const unavailable='статус недоступен';$('#status-local-coverage').textContent=unavailable;$('#status-window-coverage').textContent=unavailable;$('#status-last-run').textContent=unavailable;}return false;}finally{footerLoading=false;}}
 function updateCoverageDates(){
  const format=ms=>new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(ms));
  const range=(from,to)=>`<time datetime="${new Date(from).toISOString()}">${format(from)}</time><time datetime="${new Date(to).toISOString()}">${format(to)}</time>`;
@@ -316,14 +472,13 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
  else if(event.type==='enrichment'&&event.queueSchemaVersion>=3){const added=event.added??event.created??0,updated=event.updated??event.recalculated??0,reason={quota:'Достигнут лимит использования. Сохранённый прогресс продолжится в следующем запуске.',time_budget:'Закончилось время прохода. Прогресс сохранён.',parse_error:'Не удалось разобрать часть ответов. Эти фильмы остаются в очереди.',storage_error:'Часть результатов не удалось сохранить. Следующий запуск повторит попытку.',model_error:'Часть прогнозов не рассчитана. Следующий запуск продолжит очередь.',lease_expired:'Предыдущий запуск оборвался. Сохранённые прогнозы переиспользуются.',profile_changed:'Модель вкуса изменилась между запусками.',format_error_storm:'Несколько фильмов подряд получили ответы неверного формата. Проход остановлен, результаты сохранены.'}[event.reason];body=`<p>${event.stage==='running'?'Прогнозы считаются · промежуточный итог':event.stage==='blocked'?'Прогнозы ждут следующего запуска':event.stage==='partial'?(event.queueSchemaVersion>=5?'Прогнозы приостановлены':'Прогнозы сохранены, проход прерван'):'Прогнозы обновлены'}</p><p class="event-note">Добавлено: ${added}${updated?` · пересчитано: ${updated}`:''}${event.failed?` · не удалось: ${event.failed}`:''}.</p><p class="event-note">В окне просмотра ждут прогноза: ${event.hotRemaining??(event.queueSchemaVersion>=5?'нет данных':0)}${event.queueSchemaVersion>=4?` · вне окна: ${event.coldRemaining??(event.queueSchemaVersion>=5?'нет данных':0)}`:''}.</p>${event.queueSchemaVersion>=5&&event.reason?`<p class="event-note">Причина: ${escapeHTML(event.reason)}</p>`:''}${event.stopReason==='eligible_queue_empty'&&event.failed?`<p class="event-note">Фильмы с ошибками сохранены для повторной попытки.</p>`:''}${reason?`<p class="event-note">${reason}</p>`:''}`;}
  else if(event.type==='enrichment'){const added=event.added??event.created??0,updated=event.updated??event.recalculated??0,changed=added+updated,remaining=Number.isInteger(event.remaining)?event.remaining:null,previous=Number.isInteger(olderEnrichment?.remaining)&&(!event.queueSchemaVersion||event.queueSchemaVersion===olderEnrichment.queueSchemaVersion)?olderEnrichment.remaining:null,arrived=previous===null||remaining===null?null:remaining-previous+changed;body=`<p>${event.stage==='partial'||event.failed||event.pending?'Пакет прогнозов прерван':changed?'Прогнозы рассчитаны':'Очередь проверена'}</p><p class="event-note">За проход: ${added} новых${updated?` · ${updated} пересчитано`:''}${event.failed?` · ${event.failed} не удалось`:''}.</p>${remaining!==null?`<p class="event-note">После прохода ждут прогноза: ${remaining}${Number.isInteger(event.hotRemaining)?` (в окне просмотра: ${event.hotRemaining})`:""}.</p>`:''}${arrived>0?`<p class="event-note">Очередь: ${previous} + ${arrived} поступило − ${changed} готово = ${remaining}. Новые задачи появляются при проверке EPG.</p>`:''}${event.reason?`<p class="event-note">Причина: ${escapeHTML(event.reason)}</p>`:''}`;}
  return `<li class="activity-event"><time datetime="${escapeHTML(event.at)}">${date}</time>${body}</li>`;}
-async function loadEvents(more=false){if(eventLoading)return;eventLoading=true;const button=$('#activity-more');button.disabled=true;try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''));if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);const scroll=document.querySelector('.activity-scroll'),position=scroll.scrollTop,ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();let older=null;for(const event of [...ordered].reverse())if(event.type==='enrichment'){olderById.set(event.id,older);older=event;}$('#activity-list').innerHTML=ordered.map(event=>eventHTML(event,olderById.get(event.id))).join('');scroll.scrollTop=position;if(!keepCursor)eventCursor=data.cursor;$('#activity-status').textContent=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';}catch{$('#activity-status').textContent='Не удалось загрузить события.';button.hidden=false;button.textContent='Повторить';}finally{eventLoading=false;button.disabled=false;}}
+async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');button.disabled=true;try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''));if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);const scroll=document.querySelector('.activity-scroll'),position=scroll.scrollTop,ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();let older=null;for(const event of [...ordered].reverse())if(event.type==='enrichment'){olderById.set(event.id,older);older=event;}$('#activity-list').innerHTML=ordered.map(event=>eventHTML(event,olderById.get(event.id))).join('');scroll.scrollTop=position;if(!keepCursor)eventCursor=data.cursor;$('#activity-status').textContent=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';return true;}catch{if(!options.quiet){$('#activity-status').textContent='Не удалось загрузить события.';button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;button.disabled=false;}}
 function initPeopleFilters(){
  for(const key of ['directors','actors']){
   const root=document.querySelector(`[data-person="${key}"]`),input=$('#'+key+'-input'),list=$('#'+key+'-options');
-  const people=(report.people?.[key]||[]).slice().sort((a,b)=>a.name.localeCompare(b.name,'ru',{sensitivity:'base'}));
   let matches=[],active=-1;
   const close=()=>{list.hidden=true;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');active=-1;};
-  const open=()=>{const q=normalizeTitle(input.value);matches=people.filter(p=>!q||[p.name,p.original,...(p.aliases||[])].some(n=>normalizeTitle(n).includes(q)));active=-1;list.innerHTML=matches.length?matches.map((p,i)=>`<li role="option" id="${key}-option-${i}" data-index="${i}" aria-selected="${p.id===state[key]}">${escapeHTML(p.name)}${p.name!==p.original?`<small>${escapeHTML(p.original)}</small>`:''}</li>`).join(''):'<li class="no-options" role="presentation">Нет совпадений</li>';list.hidden=false;input.setAttribute('aria-expanded','true');input.removeAttribute('aria-activedescendant');};
+  const open=()=>{const people=peopleSources[key];const q=normalizeTitle(input.value);matches=people.filter(p=>!q||[p.name,p.original,...(p.aliases||[])].some(n=>normalizeTitle(n).includes(q)));active=-1;list.innerHTML=matches.length?matches.map((p,i)=>`<li role="option" id="${key}-option-${i}" data-index="${i}" aria-selected="${p.id===state[key]}">${escapeHTML(p.name)}${p.name!==p.original?`<small>${escapeHTML(p.original)}</small>`:''}</li>`).join(''):'<li class="no-options" role="presentation">Нет совпадений</li>';list.hidden=false;input.setAttribute('aria-expanded','true');input.removeAttribute('aria-activedescendant');};
   const choose=i=>{if(!matches[i])return;close();selectPerson(key,matches[i].id);};
   input.addEventListener('focus',open);
   input.addEventListener('input',()=>{state[key]='';render();open();});
