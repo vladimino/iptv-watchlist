@@ -4,7 +4,7 @@ Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV progr
 
 ## Project layout
 
-- `src/` — Worker source, sync pipeline, discovery and prediction orchestration.
+- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/mcp.js` is the experimental MCP probe endpoint.
 - `public/` — browser UI.
 - `data/` — reviewed public title/person dictionaries used at build time.
 - `tests/` — self-contained unit and contract tests.
@@ -30,6 +30,8 @@ Configure the deployment environment rather than committing values:
 - `TMDB_API_READ_ACCESS_TOKEN` — server-side TMDB read token.
 - `EPG_SITE_SERVICE_TOKEN` — optional service credential used by the hosted update workflow.
 - `BUCKET` — R2 binding declared by the hosting platform.
+- `MCP_ACCESS_TEAM_DOMAIN` — Cloudflare Zero Trust team domain, `https://<team>.cloudflareaccess.com`, used to verify Access JWTs on `/mcp`.
+- `MCP_ACCESS_AUD` — AUD tag of Access application `IPTV MCP`. Without it and the team domain, `/mcp` fails closed with `503`.
 
 Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 bucket `iptv`, the authoritative production store since the 19 October 2026 cutover. The legacy Site keeps a separate R2 store as a temporary reserve and as the source of the historical snapshot. Do not run sync, prediction, or other writers there, and do not browse it for diagnosis: some of its GET routes can write. The tracked hosting manifest records only that legacy Site identity and binding.
 
@@ -48,6 +50,10 @@ Those requests are GET, but two of them can still write. `GET /api/events` looks
 «Исполнение» filters the general execution dimensions already stored on a fingerprint: plot engine, pace, stakes, decision logic, competence, problem solving, plans, chemistry, payoff, ending, and technical plausibility. Choices inside one dimension use OR. Different dimensions use AND, as do mechanics, mood, genre, year, runtime, and search. `unknown` and `not_applicable` are not choices. Filtering reads the compact object on the enrichment view; it does not call a model. Genre-specific execution fields stay out of this sidebar.
 
 Deploying this change does not add `execution` to existing `enrichment/view-index.json` records. Until a film's fingerprint is saved again, or a separately approved `POST /api/enrichment/fingerprint-view/backfill` copies the saved fingerprints into the index, some execution choices stay absent. That backfill reads stored fingerprints and does not call a model. This change does not run it.
+
+## Experimental MCP endpoint
+
+`/mcp` is a minimal remote MCP server (Streamable HTTP, JSON responses, no sessions) for testing ChatGPT access. It has two tools: `probe_read` returns a fixed diagnostic report, and `probe_echo` returns a short text unchanged. Neither touches R2 or starts any production process. A separate Cloudflare Access application, `IPTV MCP`, protects the path with Managed OAuth and handles the whole OAuth flow, including discovery and dynamic client registration. The Worker accepts a request only after verifying the signed `Cf-Access-Jwt-Assertion` against the team signing keys and that application's audience. Architecture, configuration, the required Access settings, ChatGPT setup, limitations, and the safe verification procedure are in [docs/mcp.md](docs/mcp.md).
 
 ## Operational safety
 
