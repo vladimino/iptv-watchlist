@@ -140,8 +140,8 @@ jobs:
 
           token_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
             -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            https://api.cloudflare.com/client/v4/user/tokens/verify)"
-          echo "token verify: HTTP ${token_status} ($(classify "$token_status"))"
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/tokens/verify")"
+          echo "account token verify: HTTP ${token_status} ($(classify "$token_status"))"
 
           settings_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
             -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
