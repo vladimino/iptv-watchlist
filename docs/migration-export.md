@@ -2,7 +2,7 @@
 
 The exporter implementation is merged into GitHub `main` and included in Cloudflare CI/CD builds.
 
-As of the latest confirmed preflight, publication on the legacy Site and a complete source-R2 snapshot were not verified. Recheck the current Sites serving version before updating this status.
+The legacy Site exporter is published. A trial snapshot was taken on 19 October 2026 and is specified for a future Cloudflare R2 importer in [docs/r2-import.md](r2-import.md). That snapshot is provisional and is not a final cutover archive. The importer itself is not implemented yet.
 
 Cloudflare deployments do not publish the exporter on the old Site or provide access to Sites-managed R2. Both runtimes have independent `BUCKET` bindings. Do not run a real export or change Sites environment/deployment without a separate owner approval.
 
