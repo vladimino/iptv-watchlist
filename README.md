@@ -23,7 +23,7 @@ npm test
 npm run build
 ```
 
-Local browsing uses dummy films from the repository. See [docs/local-setup.md](docs/local-setup.md).
+Local browsing uses dummy films from the repository and a gitignored local R2 store. `npm run dev` builds the Worker when the bundle is missing or older than the sources. See [docs/local-setup.md](docs/local-setup.md).
 
 ```bash
 npm run dev
