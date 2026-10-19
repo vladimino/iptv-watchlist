@@ -20,6 +20,8 @@ An owner-authorized, read-only trial export from the legacy Site completed to a 
 
 The owner stopped the scheduled job during the trial, but writers were not quiesced for the entire export. R2 listing is not atomic; therefore this is suitable for an **authorized trial restore into an isolated target**, not a final migration baseline. A final cutover requires separately approved writer quiescence and a fresh complete export/verification. No Cloudflare R2 import or production data switch was performed.
 
+The importer is not implemented. Its contract, separate Cloudflare credentials, lease handling, and the ban on a real import without new approval are recorded in [docs/r2-import.md](r2-import.md).
+
 ## Scope and safety
 
 The source is the existing Site `appgprj_6abfed826e148191903dec4175166ff7` at `https://iptv.vladimino.chatgpt.site/`. Its `BUCKET` binding is the authoritative R2 source until migration cutover. The new Cloudflare Worker `iptv` has a **different** R2 bucket. The endpoint is disabled by default, including on Cloudflare: it requires the old Site ID, an explicit enable flag, and a dedicated export key in the Sites environment. The Site's access policy must remain owner-only; the extra key is defense in depth, not a replacement for Sites authentication. All exporter routes are GET-only and invoke only `R2.list`, `R2.head`, or conditional `R2.get`. They never create, update, delete, or lease an R2 object.
