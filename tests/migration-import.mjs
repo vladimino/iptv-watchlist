@@ -103,13 +103,16 @@ try{
  await expectKind(importSnapshot({directory,client:raced,auth}),'conflict');
  assert.equal(raced.items.get(racedKey).bytes.toString(),'racer','a concurrent create is not overwritten');
 
- const recorded=[];const gzip=Buffer.from([0x1f,0x8b,0x08,0x00,0xff,0x01]);let lists=0;
+ const recorded=[];const gzip=Buffer.from([0x1f,0x8b,0x08,0x00,0xff,0x01]);let lists=0,savedMeta='';
  const server=http.createServer((request,response)=>{
-  recorded.push({method:request.method,url:request.url,headers:request.headers});
-  if(request.url.includes('list-type=2')){lists++;if(lists===1){response.writeHead(503);response.end('busy');return;}if(lists===2){response.writeHead(200,{'content-type':'application/xml'});response.end('<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>page&amp;2</NextContinuationToken><Contents><Key>a&amp;b</Key><Size>1</Size></Contents></ListBucketResult>');return;}response.writeHead(200,{'content-type':'application/xml'});response.end('<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>dir//name</Key><Size>1</Size></Contents></ListBucketResult>');return;}
-  if(request.method==='PUT'){response.writeHead(request.url.endsWith('/race-key')?412:200);response.end();return;}
-  if(request.method==='GET'){response.writeHead(200,{'content-encoding':'gzip','content-type':'application/octet-stream','content-length':String(gzip.length)});response.end(gzip);return;}
-  response.writeHead(200);response.end();
+  const chunks=[];request.on('data',chunk=>chunks.push(chunk));request.on('end',()=>{
+   const body=Buffer.concat(chunks);recorded.push({method:request.method,url:request.url,headers:request.headers,body});
+   if(request.url.includes('list-type=2')){lists++;if(lists===1){response.writeHead(503);response.end('busy');return;}if(lists===2){response.writeHead(200,{'content-type':'application/xml'});response.end('<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>page&amp;2</NextContinuationToken><Contents><Key>a&amp;b</Key><Size>1</Size></Contents></ListBucketResult>');return;}response.writeHead(200,{'content-type':'application/xml'});response.end('<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>dir//name</Key><Size>1</Size></Contents></ListBucketResult>');return;}
+   if(request.method==='PUT'){if(request.url.endsWith('/meta-key'))savedMeta=request.headers['x-amz-meta-note']||'';response.writeHead(request.url.endsWith('/race-key')?412:200);response.end();return;}
+   if(request.method==='GET'){response.writeHead(200,{'content-encoding':'gzip','content-type':'application/octet-stream','content-length':String(gzip.length)});response.end(gzip);return;}
+   if(request.method==='HEAD'&&request.url.endsWith('/meta-key')){response.writeHead(200,{'content-length':'0','x-amz-meta-note':savedMeta});response.end();return;}
+   response.writeHead(200);response.end();
+  });
  });
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const endpoint=`http://127.0.0.1:${server.address().port}`,local=createR2Client(auth,{endpoint});
@@ -120,6 +123,19 @@ try{
  assert.deepEqual(raw,gzip);
  await expectKind(local.put('race-key',Buffer.from('new'),{httpMetadata:{cacheExpiry:'2026-11-06T08:49:37.000Z'}}),'conflict');
  assert.equal(recorded.some(item=>item.method==='PUT'&&item.headers['if-none-match']==='*'&&item.headers.expires==='Fri, 06 Nov 2026 08:49:37 GMT'),true);
+ const payload=Buffer.from('{"title":"кино"}');
+ await local.put('meta-key',payload,{httpMetadata:{contentType:'application/json'},customMetadata:{note:'кино'}});
+ const stored=recorded.find(item=>item.method==='PUT'&&item.url.endsWith('/meta-key'));
+ assert.equal(stored.headers['content-length'],String(payload.length));
+ assert.equal(stored.headers['transfer-encoding'],undefined);
+ assert.deepEqual(stored.body,payload);
+ assert.match(stored.headers['x-amz-meta-note'],/^=\?UTF-8\?B\?/);
+ assert.equal((await local.head('meta-key')).customMetadata.note,'кино');
+ const unicode=await snapshot({'note.json':{bytes:Buffer.from('{}'),customMetadata:{note:'кино'}}});
+ const restored=createMemoryBucket();await importSnapshot({directory:unicode,client:restored,auth});
+ assert.equal(restored.items.get('note.json').metadata.customMetadata.note,'кино');
+ const blocked=createMemoryBucket();await expectKind(dryRun({directory:await snapshot({'bad.json':{bytes:Buffer.from('{}'),customMetadata:{'не ключ':'x'}}}),client:blocked,auth}),'metadata');
+ assert.equal(blocked.calls.list+blocked.calls.put,0);
  const encoded=canonicalUri('iptv','dir//фильм !*\'()');
  await local.head('dir//фильм !*\'()');
  assert.equal(recorded.at(-1).url,encoded);

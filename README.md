@@ -53,4 +53,4 @@ Legacy Sites remains authoritative until data cutover. Publishing its code still
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/deployment.md) for deployment and rollback.
 
-The read-only backup of the old Sites-managed R2 is documented in [docs/migration-export.md](docs/migration-export.md). The trial restore into Cloudflare R2, which does not run without a separate approval, is documented in [docs/r2-import.md](r2-import.md). GitHub/Cloudflare deployment alone cannot read the source bucket.
+The read-only backup of the old Sites-managed R2 is documented in [docs/migration-export.md](docs/migration-export.md). The trial restore into Cloudflare R2, which does not run without a separate approval, is documented in [docs/r2-import.md](docs/r2-import.md). GitHub/Cloudflare deployment alone cannot read the source bucket.

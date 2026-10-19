@@ -18,6 +18,23 @@ const keyHash=key=>sha256(Buffer.from(key,'utf8')).slice(0,12);
 const encodeRfc3986=value=>encodeURIComponent(value).replace(/[!'()*]/g,char=>`%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 export function canonicalUri(bucket,key){const segments=[bucket];if(key!==undefined)segments.push(...String(key).split('/'));return '/'+segments.map(encodeRfc3986).join('/');}
 function httpDate(value){const time=Date.parse(value);return Number.isNaN(time)?String(value):new Date(time).toUTCString();}
+function encodeHeaderValue(value){
+ if(/^[\t\x20-\x7e]*$/.test(value))return value;
+ const words=[];let bytes=[];
+ const flush=()=>{if(!bytes.length)return;words.push(`=?UTF-8?B?${Buffer.from(bytes).toString('base64')}?=`);bytes=[];};
+ for(const char of value){const encoded=Buffer.from(char,'utf8');if(bytes.length+encoded.length>45)flush();bytes.push(...encoded);}
+ flush();return words.join(' ');
+}
+function decodeHeaderValue(value){
+ const parts=String(value).split(/[ \t]+/);
+ if(!parts.length||!parts.every(part=>/^=\?UTF-8\?[BQbq]\?[^?]*\?=$/.test(part)))return value;
+ return parts.map(part=>{const match=part.match(/^=\?UTF-8\?([BQbq])\?([^?]*)\?=$/);if(match[1].toUpperCase()==='B')return Buffer.from(match[2],'base64').toString('utf8');const bytes=[];for(let i=0;i<match[2].length;i++){const char=match[2][i];if(char==='_'){bytes.push(0x20);continue;}if(char==='='&&/^[0-9A-Fa-f]{2}$/.test(match[2].slice(i+1,i+3))){bytes.push(parseInt(match[2].slice(i+1,i+3),16));i+=2;continue;}bytes.push(char.charCodeAt(0));}return Buffer.from(bytes).toString('utf8');}).join('');
+}
+function assertPortable(metadata={}){
+ const seen=new Set();
+ for(const [name,value] of Object.entries(metadata.customMetadata||{})){if(!/^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/.test(name)||seen.has(name.toLowerCase()))throw new ImportError('metadata','Metadata key is not portable');seen.add(name.toLowerCase());const text=String(value);if(Buffer.from(text,'utf8').toString('utf8')!==text)throw new ImportError('metadata','Metadata value is not portable');}
+ for(const field of HTTP_FIELDS){const value=metadata.httpMetadata?.[field];if(value===undefined||value===null||value==='')continue;if(field==='cacheExpiry'){if(Number.isNaN(Date.parse(String(value))))throw new ImportError('metadata','HTTP metadata is not portable');continue;}if(/[^\t\x20-\x7e]/.test(String(value)))throw new ImportError('metadata','HTTP metadata is not portable');}
+}
 
 export function isLeaseKey(key){return LEASE_KEYS.has(key)||key.endsWith('-lease.json')||key.endsWith('/lease.json');}
 export function portableMetadata(metadata={}){
@@ -64,17 +81,19 @@ function headerMetadata(headers){
  const read=(name,field)=>{const value=headers.get(name);if(value)httpMetadata[field]=value;};
  read('content-type','contentType');read('content-language','contentLanguage');read('content-disposition','contentDisposition');read('content-encoding','contentEncoding');read('cache-control','cacheControl');read('expires','cacheExpiry');
  const customMetadata={};
- for(const [name,value] of headers)if(name.startsWith('x-amz-meta-'))customMetadata[name.slice('x-amz-meta-'.length)]=value;
+ for(const [name,value] of headers)if(name.startsWith('x-amz-meta-'))customMetadata[name.slice('x-amz-meta-'.length)]=decodeHeaderValue(value);
  return {size:Number(headers.get('content-length')),httpMetadata,customMetadata};
 }
 
 function rawHttp(url,{method,headers,body}){
  const target=new URL(url),transport=target.protocol==='https:'?https:http;
  return new Promise((resolve,reject)=>{
-  const request=transport.request({protocol:target.protocol,hostname:target.hostname,port:target.port,method,path:target.pathname+target.search,headers},response=>{
+  const payload=body&&method!=='GET'&&method!=='HEAD'?Buffer.from(body):null;
+  const outgoing={...headers};if(payload)outgoing['content-length']=String(payload.length);
+  const request=transport.request({protocol:target.protocol,hostname:target.hostname,port:target.port,method,path:target.pathname+target.search,headers:outgoing},response=>{
    const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('end',()=>resolve({status:response.statusCode,headers:new Headers(response.headers),body:Buffer.concat(chunks)}));
   });
-  request.on('error',reject);if(body&&method!=='GET'&&method!=='HEAD')request.write(body);request.end();
+  request.on('error',reject);if(payload)request.write(payload);request.end();
  });
 }
 export function createR2Client(auth,{requestImpl=rawHttp,now=()=>new Date(),endpoint}={}){
@@ -104,7 +123,7 @@ export function createR2Client(auth,{requestImpl=rawHttp,now=()=>new Date(),endp
   async put(key,bytes,metadata){const headers={'if-none-match':'*'};
    const http=portableMetadata(metadata).httpMetadata,custom=portableMetadata(metadata).customMetadata;
    if(http.contentType)headers['content-type']=http.contentType;if(http.contentLanguage)headers['content-language']=http.contentLanguage;if(http.contentDisposition)headers['content-disposition']=http.contentDisposition;if(http.contentEncoding)headers['content-encoding']=http.contentEncoding;if(http.cacheControl)headers['cache-control']=http.cacheControl;if(http.cacheExpiry)headers.expires=http.cacheExpiry;
-   for(const [name,value] of Object.entries(custom)){if(/[\r\n]/.test(name+value))throw new ImportError('metadata','Metadata is not portable');headers[`x-amz-meta-${name}`]=value;}
+   for(const [name,value] of Object.entries(custom))headers[`x-amz-meta-${name}`]=encodeHeaderValue(value);
    await call('PUT',key,new URLSearchParams(),headers,bytes);this.writes++;}
  };
 }
@@ -124,6 +143,7 @@ async function loadSnapshot(directory){
  const manifest=JSON.parse(await readFile(path.join(directory,'manifest.json'),'utf8'));
  const report=JSON.parse(await readFile(path.join(directory,'report.json'),'utf8'));
  if(manifest.status!=='provisional_no_change_detected'||report.status!==manifest.status||manifest.changes?.length)throw new ImportError('snapshot','Snapshot is not a complete provisional export');
+ for(const entry of manifest.objects)assertPortable(entry.metadata);
  if(verified.objects!==manifest.totals.objects||verified.aggregateSha256!==manifest.totals.aggregateSha256)throw new ImportError('snapshot','Snapshot verification does not match the manifest');
  return manifest;
 }
