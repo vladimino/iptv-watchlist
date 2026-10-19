@@ -16,5 +16,7 @@
 
 - GitHub `main` is the sole canonical code source; a push to `main` automatically deploys the Cloudflare Worker `iptv`. Prepare changes on a branch and in a PR; do not push directly to `main` without explicit authorization.
 - Do not modify production environment, Cloudflare R2, ChatGPT Sites, or Scheduled Tasks without action-specific authorization. Keep every HTTP endpoint private; never relax Cloudflare Access for testing.
-- The old ChatGPT Site and new Cloudflare Worker use separate R2 stores. Until final migration cutover, Sites-managed R2 is authoritative for user data. GitHub-to-Cloudflare CD does not update the old Site's source.
+- Since the 19 October 2026 cutover at GitHub `main` `58737738275fca182afd8afbdd035870db63315e`, Cloudflare R2 bucket `iptv` is the authoritative production store for Worker `iptv`. The old ChatGPT Site is a temporary reserve and the source of the historical snapshot. Do not run sync, prediction, or other writers on that Site. GitHub-to-Cloudflare CD deploys Worker code only; it does not copy R2 data and does not update the old Site.
+- Do not automatically import, replay, or overwrite production R2 from the historical Sites snapshot. A future restore needs a separate procedure and explicit approval.
+- Scheduled Tasks stay disabled. Restoring unattended ChatGPT authorization to Cloudflare is a separate task. Before any background process resumes, confirm the three copied lease objects are not stale locks.
 - For a Sites R2 exporter, verify a supported way to execute it against the **old Site and its complete source storage** before claiming success. If the old Site's code must change, prepare a publication plan and obtain separate approval before deploying. Never mutate or clean up source R2 data.

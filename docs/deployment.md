@@ -1,13 +1,25 @@
-# Deployment and rollback: Cloudflare and legacy Sites
+# Deployment and rollback: Cloudflare production and legacy Sites reserve
 
-## Deployment topology (18 October 2026)
+## Production topology (19 October 2026)
 
-GitHub `main` is the canonical code source. Two independent runtimes currently coexist:
+GitHub `main` is the canonical code source. Cloudflare is the production runtime:
 
-- Cloudflare Worker `iptv`: https://iptv.vladimino.workers.dev/. Automatically deployed by GitHub Actions. Private behind Cloudflare Access. R2 bucket: `iptv`. Not authoritative until AIR-62.
-- Legacy ChatGPT Sites: https://iptv.vladimino.chatgpt.site/. Still authoritative for user data. GitHub/Cloudflare deployments do not update this Site or its separate R2 storage.
+- Production: https://iptv.vladimino.workers.dev/. Worker `iptv`, deployed by GitHub Actions, private behind Cloudflare Access. R2 bucket `iptv`, binding `BUCKET`, is the authoritative production store.
+- Legacy reserve: https://iptv.vladimino.chatgpt.site/, Site `appgprj_6abfed826e148191903dec4175166ff7`. Its separate R2 store is a temporary reserve and the source of the historical snapshot. It is not the destination for current writes. Do not run sync, prediction, or other mutating processes there. GitHub/Cloudflare deployment does not update this Site.
 
-The GitHub environment `Cloudflare Prod` identifies deployment credentials, not completion of data cutover.
+Scheduled Tasks are off. Automatic data refresh has not resumed. Unattended ChatGPT authorization to Cloudflare remains a separate problem. Keep Cloudflare Access enabled.
+
+The GitHub environment `Cloudflare Prod` identifies deployment credentials. It does not authorize a data restore or a schedule change.
+
+## Data cutover (19 October 2026)
+
+Cutover base SHA: `58737738275fca182afd8afbdd035870db63315e`.
+
+The historical Sites snapshot contained 6,520 objects and 97,759,255 bytes, including three lease objects copied unchanged. Independent Cloudflare verification matched every key, size, raw-byte SHA-256, and portable metadata. Independent legacy listing covered 66 pages and matched all 6,520 objects to the source manifest metadata. Metadata fingerprint: `623a68daeba9513b1aa6b6313187230612af4049aaf79a27a06da0e994385815`.
+
+That snapshot is historical. Do not automatically import, replay, or overwrite production R2 with it. A future backup or restore needs its own procedure and explicit approval. Details are in [docs/migration-export.md](migration-export.md) and [docs/r2-import.md](r2-import.md).
+
+Before any background process resumes, confirm these copied leases are not stale locks: `enrichment/runner-lease.json`, `enrichment/writer-lease.json`, and `epg/resolver-lease.json`. An expired lease is not an active lock, and it must not be deleted or rewritten as part of an ordinary deploy.
 
 ## Cloudflare: automatic GitHub Actions CI/CD
 
@@ -75,9 +87,9 @@ An unattended Sites implementation needs a documented non-human principal author
 
 Identify the previous known-good version in Cloudflare Deployments and roll back the Worker if needed. Verify Access, bindings, live version and read-only APIs.
 
-Code rollback does not restore R2 data, secrets, environment configuration or Scheduled Tasks. It also does not change GitHub `main`; a later push may supersede the rollback.
+Code rollback does not restore R2 data, secrets, environment configuration, or Scheduled Tasks. It also does not change GitHub `main`; a later push may supersede the rollback. Do not roll data back by replaying the 19 October 2026 snapshot over production R2. Backup of production data is a separate authorized read of bucket `iptv`, not a write from the legacy reserve.
 
-For a permanent fix, merge a revert or corrective commit into `main` and deploy it through GitHub Actions.
+For a permanent fix, merge a revert or corrective commit into `main` and deploy it through GitHub Actions. After deployment, use authorized read-only checks. Do not call sync, enrichment, prediction, schedule, or mutation endpoints as smoke tests. Do not enable Scheduled Tasks to prove a deploy.
 
 ### Legacy Sites
 
@@ -85,7 +97,7 @@ Version 84 was the last verified working checkpoint before exporter publication.
 
 The read-only migration exporter was subsequently deployed on the same Site as version 85 (`appgprj_6abfed826e148191903dec4175166ff7~appgver_881c8227516481919ffb6abe71b9b61a`), Sites source `0640e760d2140ae053952d8ae93f2fe0904d4728`, using environment revision 4. Version 84 is the preferred pre-exporter code rollback checkpoint; re-query serving state before using it. See `docs/migration-export.md` for the trial snapshot and restore procedure. No GitHub-to-Sites CD was enabled by this release.
 
-The 19 October 2026 read-only trial export completed and passed local verification, but remains provisional because source writes were not quiesced for its entire duration. It did not import data into Cloudflare or change either runtime's deployment contract.
+The 19 October 2026 export was then restored into Cloudflare R2 and independently verified. That completed the data cutover recorded above. It did not enable GitHub-to-Sites CD, and it did not make the legacy Site authoritative again. Do not repeat the import against production R2.
 
 Version 83 remains an older fallback, not the automatically preferred rollback target.
 

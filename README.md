@@ -31,7 +31,7 @@ Configure the deployment environment rather than committing values:
 - `EPG_SITE_SERVICE_TOKEN` — optional service credential used by the hosted update workflow.
 - `BUCKET` — R2 binding declared by the hosting platform.
 
-Runtime values are configured separately in Cloudflare and legacy Sites. Their R2 buckets are independent. The tracked hosting manifest contains only the legacy Site identity and R2 binding; it is required to map each Git commit to the matching Sites version.
+Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 bucket `iptv`, the authoritative production store since the 19 October 2026 cutover. The legacy Site keeps a separate R2 store as a temporary reserve and as the source of the historical snapshot. Do not run sync, prediction, or other writers there. The tracked hosting manifest records only that legacy Site identity and binding.
 
 ## Tests
 
@@ -49,8 +49,8 @@ GitHub `main` is the canonical production source. Before local changes, fetch an
 
 Branch and pull-request CI runs only the self-contained test/build commands above. Successful GitHub Actions runs for `main` automatically deploy the verified artifact to Cloudflare Worker `iptv`. The former independent Workers Builds integration is disabled.
 
-Legacy Sites remains authoritative until data cutover. Publishing its code still requires a separate authorized Sites release procedure. Cloudflare CD does not migrate data. See the deployment document for the SHA mapping, release procedure, and rollback limits.
+Production is Cloudflare Worker `iptv` at `https://iptv.vladimino.workers.dev/`, private behind Cloudflare Access. Scheduled Tasks are off, so automatic data refresh has not resumed. Unattended ChatGPT access to Cloudflare is a separate problem; do not relax Access to solve it. The historical Sites snapshot must not be imported over production R2 again. Publishing the legacy Site still requires a separate authorized Sites release, and that release must not resume writers there.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/deployment.md) for deployment and rollback.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/deployment.md) for deployment, backup, and rollback.
 
-The read-only backup of the old Sites-managed R2 is documented in [docs/migration-export.md](docs/migration-export.md). The trial restore into Cloudflare R2, which does not run without a separate approval, is documented in [docs/r2-import.md](docs/r2-import.md). GitHub/Cloudflare deployment alone cannot read the source bucket.
+The historical Sites export is documented in [docs/migration-export.md](docs/migration-export.md). The completed Cloudflare restore and the ban on replaying it are documented in [docs/r2-import.md](docs/r2-import.md).

@@ -1,8 +1,10 @@
-# Read-only export from the old Sites-managed R2
+# Historical export from the old Sites-managed R2
+
+The 19 October 2026 export is the historical source of the Cloudflare production store. Cloudflare R2 bucket `iptv` is now authoritative. The legacy Site remains a temporary reserve. Do not run sync, prediction, or other writers there, and do not import this snapshot over production R2 again. The completed restore is recorded in [docs/r2-import.md](r2-import.md).
 
 The exporter implementation is merged into GitHub `main` and included in Cloudflare CI/CD builds. It was separately published to the existing legacy Site as version 85 (`appgprj_6abfed826e148191903dec4175166ff7~appgver_881c8227516481919ffb6abe71b9b61a`), source SHA `0640e760d2140ae053952d8ae93f2fe0904d4728`, with environment revision 4. The source tree matches GitHub `5ec19ac463b32c24cee4f261da267a0a5374ad5e`. Owner-authorized one-page listing succeeded; this did not constitute a complete export.
 
-Cloudflare deployments do not publish the exporter on the old Site or provide access to Sites-managed R2. Both runtimes have independent `BUCKET` bindings. Do not run a real export or change Sites environment/deployment without a separate owner approval.
+Cloudflare deployments do not publish the exporter on the old Site or provide access to the reserve R2 store. The two `BUCKET` bindings remain separate. Do not run another export or change the Sites environment without a separate owner approval.
 
 Version 84 remains the pre-exporter code rollback checkpoint. A code rollback does not roll back environment revision 4 or R2 data.
 
@@ -18,19 +20,19 @@ An owner-authorized, read-only trial export from the legacy Site completed to a 
 | `started/` | 25 | 5,349 |
 | Root | 7 | 4,222,357 |
 
-The owner stopped the scheduled job during the trial, but writers were not quiesced for the entire export. R2 listing is not atomic; therefore this is suitable for an **authorized trial restore into an isolated target**, not a final migration baseline. A final cutover requires separately approved writer quiescence and a fresh complete export/verification. No Cloudflare R2 import or production data switch was performed.
+The owner stopped the scheduled job during the trial. Writers were not quiesced for the entire export, and R2 listing is not atomic, so the snapshot status stayed `provisional_no_change_detected`. That snapshot was nevertheless the one restored into Cloudflare on 19 October 2026. Later independent checks, recorded in [docs/r2-import.md](r2-import.md), matched Cloudflare object bytes and matched the legacy listing to this manifest's metadata. It remains a historical archive, not a standing permission to overwrite production.
 
-The local importer is `scripts/migration-import.mjs`. Its contract, separate Cloudflare credentials, lease handling, and the ban on a real import without new approval are recorded in [docs/r2-import.md](r2-import.md).
+The local importer is `scripts/migration-import.mjs`. Its contract, the completed restore, lease handling, and the ban on replaying the snapshot are recorded in [docs/r2-import.md](r2-import.md).
 
 ## Scope and safety
 
-The source is the existing Site `appgprj_6abfed826e148191903dec4175166ff7` at `https://iptv.vladimino.chatgpt.site/`. Its `BUCKET` binding is the authoritative R2 source until migration cutover. The new Cloudflare Worker `iptv` has a **different** R2 bucket. The endpoint is disabled by default, including on Cloudflare: it requires the old Site ID, an explicit enable flag, and a dedicated export key in the Sites environment. The Site's access policy must remain owner-only; the extra key is defense in depth, not a replacement for Sites authentication. All exporter routes are GET-only and invoke only `R2.list`, `R2.head`, or conditional `R2.get`. They never create, update, delete, or lease an R2 object.
+The source was the existing Site `appgprj_6abfed826e148191903dec4175166ff7` at `https://iptv.vladimino.chatgpt.site/`. Its `BUCKET` binding was the pre-cutover source and is now only the temporary reserve. Cloudflare Worker `iptv` uses a different R2 bucket, `iptv`, which is the authoritative production store. The endpoint is disabled by default, including on Cloudflare: it requires the old Site ID, an explicit enable flag, and a dedicated export key in the Sites environment. The Site's access policy must remain owner-only; the extra key is defense in depth, not a replacement for Sites authentication. All exporter routes are GET-only and invoke only `R2.list`, `R2.head`, or conditional `R2.get`. They never create, update, delete, or lease an R2 object.
 
 `GET /api/migration-export/list` pages through the *entire* bucket with no prefix or delimiter and includes HTTP/custom metadata. `GET /api/migration-export/head` verifies current metadata for a key/version/ETag. `GET /api/migration-export/object` conditionally streams the original bytes for that version without buffering the object in Worker memory. A changed or missing object returns conflict, never silently substitutes newer bytes. The existing `/api/enrichment/diagnostics/export` is not a complete backup.
 
 The local downloader stores every listing page, each object under a SHA-256-derived filename, and a sidecar with the original R2 key, size, metadata, timestamp, ETag, version, and SHA-256 of the downloaded raw bytes. It resumes from saved pages and verified object files after interruption. A second full listing compares keys and metadata to the first. Duplicate keys, broken/repeated cursors, changed objects, local checksum mismatches, and missing/added keys fail or mark the snapshot inconsistent. `manifest.json` includes schema version, timestamps, object records, prefix totals, total bytes/count, and an aggregate checksum. `report.json` summarizes incomplete or inconsistent results.
 
-R2 listing is not an atomic transaction. `provisional_no_change_detected` means two listings and object checks found no difference; it does **not** prove no writes occurred between checks. While Scheduled Tasks continue, every snapshot remains provisional. A final cutover snapshot requires separately authorized writer quiescence and a fresh export/reverification.
+R2 listing is not an atomic transaction. `provisional_no_change_detected` means two listings and object checks found no difference; it does **not** prove no writes occurred between checks. Scheduled Tasks are currently off on both runtimes. A new archive of production still requires a separately authorized read of Cloudflare R2, not another write from this historical snapshot.
 
 ## Repeated Publication plan — requires separate approval
 
@@ -54,7 +56,8 @@ node scripts/migration-export.mjs --output /absolute/private/snapshot-directory 
 
 The first command is for the separately approved trial, **not** CI. It refuses output under this repository. Do not upload the snapshot, header file, manifest, or reports to GitHub, the new Cloudflare R2, public build artifacts, or logs. Keep the archive encrypted and access-restricted; delete temporary authorization material through the owner's normal secure handling after the export. Resume by rerunning the first command with the same output directory; do not edit checkpoint pages or object files. An `inconsistent` result requires investigation and a fresh export after writers are paused, not automatic acceptance.
 
-## Trial restore procedure (requires separate authorization)
+## Historical restore, now closed
 
-Treat a trial snapshot as a candidate for a **non-production** restore, not permission to import it into Cloudflare R2. Before any restore, run `--verify`, require a complete manifest and zero reported changes, and retain the original snapshot unchanged. 
-Test imports are permitted into an existing Cloudflare R2 IPTV bucket, unless it is already in authoritative production storage, only after separate owner confirmation. Before importing, verify the Cloudflare account, bucket name, and the absence of valuable data; delete or isolate temporary test objects. Restore the original keys and metadata, then independently verify the entire bucket against the manifest. Do not create an additional staging bucket. After a production cutover, use a separate restore procedure to prevent overwriting production data. For every manifest entry, read the referenced hashed `.bin` file, verify its size and SHA-256, then restore it under the original R2 key with the recorded HTTP and custom metadata. Re-list the destination and compare key count, key set, sizes and metadata; read every restored object and verify its raw-byte SHA-256 against the manifest. Record any metadata fields the destination cannot reproduce. A successful trial restore still does not make the snapshot a final cutover baseline while source writers remain active. Import, writer quiescence and production cutover each need separate approval.
+The 19 October 2026 snapshot was imported into production bucket `iptv` and independently verified. That procedure is closed. Do not run it again against production R2. Do not delete or overwrite production objects to make the old snapshot fit. A future restore needs a new approved procedure that refuses to clobber current production data.
+
+The importer still refuses an upload without `--confirm-import`, refuses a bucket other than `iptv`, and never deletes. Those guards are not approval to repeat the cutover import.
