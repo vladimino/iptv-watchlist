@@ -4,7 +4,7 @@ Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV progr
 
 ## Project layout
 
-- `src/` — Worker source, sync pipeline, discovery and prediction orchestration.
+- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/mcp.js` is the experimental MCP probe endpoint.
 - `public/` — browser UI.
 - `data/` — reviewed public title/person dictionaries used at build time.
 - `tests/` — self-contained unit and contract tests.
@@ -30,6 +30,8 @@ Configure the deployment environment rather than committing values:
 - `TMDB_API_READ_ACCESS_TOKEN` — server-side TMDB read token.
 - `EPG_SITE_SERVICE_TOKEN` — optional service credential used by the hosted update workflow.
 - `BUCKET` — R2 binding declared by the hosting platform.
+- `MCP_ACCESS_TEAM_DOMAIN` — Cloudflare Zero Trust team domain, `https://<team>.cloudflareaccess.com`, used to verify Access JWTs on `/mcp`.
+- `MCP_ACCESS_AUD` — AUD tag of Access application `IPTV MCP`. Without it and the team domain, `/mcp` fails closed with `503`.
 
 Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 bucket `iptv`, the authoritative production store since the 19 October 2026 cutover. The legacy Site keeps a separate R2 store as a temporary reserve and as the source of the historical snapshot. Do not run sync, prediction, or other writers there, and do not browse it for diagnosis: some of its GET routes can write. The tracked hosting manifest records only that legacy Site identity and binding.
 
@@ -42,6 +44,10 @@ Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 
 A visible tab rereads published snapshots about once a minute, and again as soon as the tab becomes visible. A hidden tab does not poll. Each pass requests `/api/events`, `/api/enrichment/footer/status`, `/api/enrichment/view`, `/api/started`, and `/api/programme`. It does not start EPG sync, watchlist sync, an enrichment run, or prediction. Search, sort, scroll, and selected filters stay as the user left them.
 
 Those requests are GET, but two of them can still write. `GET /api/events` looks for an undelivered stop or start event and, only when one exists, saves the recovered event and related run record. `GET /api/enrichment/view` writes a built-in personal rating into `enrichment/view-index.json` when that film is missing from the index. The committed seed is empty, so that particular write does not happen until the seed contains an entry. `/api/enrichment/footer/status`, `/api/started`, and `/api/programme` only read on this pass. A filter with no current matches remains active and applies again when matching films return. Reloading the page restores those selections from the URL even when the current snapshot does not contain them. The same pass refreshes time-based presentation, including last chance and what is on now, even when the server snapshots are unchanged.
+
+## Experimental MCP endpoint
+
+`/mcp` is a minimal remote MCP server (Streamable HTTP, JSON responses, no sessions) for testing ChatGPT access. It has two tools: `probe_read` returns a fixed diagnostic report, and `probe_echo` returns a short text unchanged. Neither touches R2 or starts any production process. A separate Cloudflare Access application, `IPTV MCP`, protects the path with Managed OAuth and handles the whole OAuth flow, including discovery and dynamic client registration. The Worker accepts a request only after verifying the signed `Cf-Access-Jwt-Assertion` against the team signing keys and that application's audience. Architecture, configuration, the required Access settings, ChatGPT setup, limitations, and the safe verification procedure are in [docs/mcp.md](docs/mcp.md).
 
 ## Operational safety
 

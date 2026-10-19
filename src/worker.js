@@ -68,6 +68,7 @@ async function epgSync(env,run){
 export default {async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
+ if(url.pathname==='/mcp')return await mcpRoute(request,env);
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(url.pathname.startsWith('/api/migration-export/'))return await migrationExportRoute(request,env,url);
