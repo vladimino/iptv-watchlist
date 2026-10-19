@@ -59,4 +59,8 @@ assert.equal(ctx.restored.execution.decision_logic.size,0);
 const again=vm.runInContext('Object.assign(state,restored);urlForState(new URL("https://iptv.example/?campaign=keep")).href',ctx);
 assert.equal(again,href,'execution deep links round-trip in a stable order');
 assert.match(vm.runInContext('executionSummary()',ctx),/Исполнение: Темп: средний, быстрый; Отдача: сильная/);
+for(const bad of ['__proto__:toString','constructor:prototype','pace:constructor','pace:__proto__']){
+ const restoredBad=vm.runInContext(`readUrlState(new URL(${JSON.stringify('https://iptv.example/?execution='+encodeURIComponent(bad))}))`,ctx);
+ assert.equal([...Object.values(restoredBad.execution)].every(values=>values.size===0),true,bad+' is ignored');
+}
 console.log('Execution filters: OR within a dimension, AND across dimensions, other filters, URL round trip, missing values and no per-render parsing passed');

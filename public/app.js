@@ -45,7 +45,7 @@ function readUrlState(url){
  defaults.genres=new Set(p.getAll('genre').map(genre=>genre.trim()).filter(Boolean));
  defaults.mechanics=new Set(p.getAll('mechanic').filter(m=>Object.hasOwn(MECHANIC_LABELS,m)));
  defaults.moods=new Set(p.getAll('mood').flatMap(moodIdsFromUrl).filter(m=>Object.hasOwn(MOOD_LABELS,m)));
- for(const item of p.getAll('execution')){const separator=item.indexOf(':');if(separator<1)continue;const dimension=item.slice(0,separator),value=item.slice(separator+1);if(EXECUTION_VALUES[dimension]?.[value])defaults.execution[dimension].add(value);}
+ for(const item of p.getAll('execution')){const separator=item.indexOf(':');if(separator<1)continue;const dimension=item.slice(0,separator),value=item.slice(separator+1);if(!Object.hasOwn(EXECUTION_VALUES,dimension)||!Object.hasOwn(EXECUTION_VALUES[dimension],value))continue;defaults.execution[dimension].add(value);}
  const year=key=>/^\d{4}$/.test(p.get(key)||'')?Number(p.get(key)):null;
  const from=year('from'),to=year('to');
  if(from!==null&&from>=1900&&from<=MAX_YEAR)defaults.from=from;

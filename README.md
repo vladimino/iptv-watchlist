@@ -45,7 +45,9 @@ Those requests are GET, but two of them can still write. `GET /api/events` looks
 
 ## Execution filters
 
-«Исполнение» filters the general execution dimensions already stored on a fingerprint: plot engine, pace, stakes, decision logic, competence, problem solving, plans, chemistry, payoff, ending, and technical plausibility. Choices inside one dimension use OR. Different dimensions use AND, as do mechanics, mood, genre, year, runtime, and search. `unknown` and `not_applicable` are not choices. Filtering reads the compact object on the enrichment view; it does not call a model. Older view-index entries gain that object from the existing fingerprint-view backfill or the next fingerprint save. Genre-specific execution fields stay out of this sidebar.
+«Исполнение» filters the general execution dimensions already stored on a fingerprint: plot engine, pace, stakes, decision logic, competence, problem solving, plans, chemistry, payoff, ending, and technical plausibility. Choices inside one dimension use OR. Different dimensions use AND, as do mechanics, mood, genre, year, runtime, and search. `unknown` and `not_applicable` are not choices. Filtering reads the compact object on the enrichment view; it does not call a model. Genre-specific execution fields stay out of this sidebar.
+
+Deploying this change does not add `execution` to existing `enrichment/view-index.json` records. Until a film's fingerprint is saved again, or a separately approved `POST /api/enrichment/fingerprint-view/backfill` copies the saved fingerprints into the index, some execution choices stay absent. That backfill reads stored fingerprints and does not call a model. This change does not run it.
 
 ## Operational safety
 

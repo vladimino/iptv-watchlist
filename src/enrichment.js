@@ -55,7 +55,7 @@ function validatePrediction(p){
  if(!Array.isArray(p.moodLabels)||p.moodLabels.length<2||p.moodLabels.length>4||!p.moodLabels.every(x=>isText(x,45)))return 'Invalid moodLabels';return null;
 }
 const fingerprintCurrent=f=>!!f&&f.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&!f.invalidatedAt;
-const GENERAL_EXECUTION=Object.keys(EXECUTION).slice(0,13);
+const GENERAL_EXECUTION=['plot_engine','pace','stakes','decision_logic','protagonist_competence','opposition_competence','problem_solving','plan_counterplan_strength','multi_party_goals','chemistry','payoff','ending_quality','technical_plausibility'];
 function executionFacet(execution){const out={};if(!execution||typeof execution!=='object')return out;for(const key of GENERAL_EXECUTION){const value=execution[key];if(typeof value==='string'&&EXECUTION[key].includes(value)&&value!=='unknown'&&value!=='not_applicable')out[key]=value;}return out;}
 const fingerprintFacet=f=>fingerprintCurrent(f)?{plotMechanics:f.plotMechanics||[],moodLabels:f.moodLabels||[],execution:executionFacet(f.execution),fingerprintHash:f.fingerprintHash}:null;
 const predictionCurrent=(p,profile,f)=>!!p&&!!profile&&fingerprintCurrent(f)&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===f.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;

@@ -26,7 +26,7 @@ r=await api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'});ass
 assert.equal((await api('enrichment/start','POST',{scope:'watchlist_available',mode:'legacy',limit:105})).data.status,'already_running');await api('enrichment/complete','POST',{runId:r.data.runId,reason:'model_error'});
 r=await api('enrichment/start','POST',{scope:'watchlist_available',mode:'legacy',limit:100});assert.equal(r.status,200);assert.equal(r.data.eligibleCount,105);assert.equal(r.data.selectedCount,100);assert.equal(r.data.pendingCount,100);const runId=r.data.runId;
 r=await api('enrichment/next','POST',{runId,batchSize:5});assert.equal(r.data.items.length,5);assert.equal(r.data.items[0].filmId,'film000');assert.equal(r.data.items[0].requiredWork,'fingerprint_and_prediction');assert(!JSON.stringify(r.data.items).includes('actualRating'));
-const execution={plot_engine:'strong',pace:'fast',stakes:'high',decision_logic:'unknown',protagonist_competence:'unknown',opposition_competence:'unknown',problem_solving:'unknown',plan_counterplan_strength:'unknown',multi_party_goals:'unknown',chemistry:'unknown',payoff:'unknown',ending_quality:'unknown',technical_plausibility:'unknown'};
+const execution={plot_engine:'strong',pace:'fast',stakes:'high',decision_logic:'unknown',protagonist_competence:'unknown',opposition_competence:'unknown',problem_solving:'unknown',plan_counterplan_strength:'unknown',multi_party_goals:'unknown',chemistry:'unknown',payoff:'unknown',ending_quality:'unknown',technical_plausibility:'unknown',horror_rule_consistency:'strong',action_readability:'strong'};
 const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution,moodLabels:['напряжённый','расследование'],strengths:['Good mystery'],risks:[],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
 const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',matchSignals:['Strong puzzle'],mainRisk:'Pace may lag',moodLabels:['напряжённый','расследование']};
 r=await api('enrichment/submit','POST',{runId,items:[{filmId:'film000',fingerprint,prediction},{filmId:'film001',fingerprint,prediction:{...prediction,predictedRating:4.2}}]});assert.equal(r.data.results[0].status,'created');assert(r.data.results[1].error);assert(records.has('enrichment/films/film000/predictions.json'));
@@ -34,6 +34,8 @@ assert(records.has('enrichment/films/film001/fingerprint.json'));r=await api('en
 assert.deepEqual((await api('enrichment/view')).data.films.film001.fingerprint.plotMechanics,['investigation']);
 assert.equal((await api('enrichment/view')).data.films.film001.fingerprint.execution.pace,'fast');
 assert.equal((await api('enrichment/view')).data.films.film001.fingerprint.execution.decision_logic,undefined,'unknown execution values are not offered to the page');
+assert.equal((await api('enrichment/view')).data.films.film001.fingerprint.execution.horror_rule_consistency,undefined,'genre-specific execution stays out of the view facet');
+assert.equal((await api('enrichment/view')).data.films.film001.fingerprint.execution.action_readability,undefined);
 delete records.get('enrichment/view-index.json').film000.fingerprint;
 const facetBackfill=await api('enrichment/fingerprint-view/backfill','POST',{limit:100});assert.equal(facetBackfill.status,200);assert(facetBackfill.data.added>=1);assert.deepEqual((await api('enrichment/view')).data.films.film000.fingerprint.moodIds,['tense']);
 assert.equal((await api('enrichment/view')).data.films.film000.fingerprint.execution.pace,'fast');
