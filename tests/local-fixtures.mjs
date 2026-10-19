@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import {buildLocalFixtures,loadLocalCatalog} from '../scripts/local-fixtures.mjs';
+
+const now=Date.parse('2026-10-20T12:00:00Z');
+const catalog=await loadLocalCatalog();
+const objects=buildLocalFixtures(catalog,now);
+const byKey=new Map(objects.map(item=>[item.key,item.json]));
+const programme=byKey.get('programme.json');
+assert.equal(programme.films.length,3);
+assert.deepEqual(programme.films.map(film=>film.title),['Movie1','Movie2','Movie3']);
+assert.deepEqual(programme.people.actors.map(person=>person.name),['Actor1','Actor2']);
+assert.deepEqual(programme.films[0].genres,['Genre1']);
+const movie1=programme.films[0];
+assert.equal(movie1.shows[0].start,now-5*3600000);
+assert.ok(movie1.shows[0].start>=programme.window.from&&movie1.shows[1].start<=programme.window.to);
+assert.equal(programme.films[2].shows.length,0);
+assert.equal(byKey.get('enrichment/view-index.json').films['movie-1'].fingerprint.execution.pace,'fast');
+assert.equal(objects.find(item=>item.key==='started/movie-1.json').customMetadata.started,'true');
+assert.equal(objects.some(item=>String(item.json).includes('letterboxd.com')),false);
+console.log('Local fixtures: Movie1, Actor1, Genre1, current broadcast window and no personal data passed');

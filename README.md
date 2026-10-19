@@ -23,14 +23,13 @@ npm test
 npm run build
 ```
 
-Local browsing with the private R2 snapshot:
+Local browsing uses dummy films from the repository. See [docs/local-setup.md](docs/local-setup.md).
 
 ```bash
-cp .local-dev.example.json .local-dev.json
 npm run dev
 ```
 
-`.local-dev.json` is gitignored. Set `snapshot` to the absolute path of the private export directory. `npm run dev` imports that snapshot into gitignored `.wrangler/state` when the local bucket is empty or the snapshot file changed, then serves `http://127.0.0.1:8787`. A later start reuses the imported data. `npm run dev -- --refresh` imports it again. This uses Wrangler 4.86 and compatibility date `2026-05-03` only for the local process, because that Wrangler release cannot accept the committed compatibility date on Node 20. It does not change production R2.
+A machine that has the private export can point `.local-dev.json` at it. That file is gitignored. The script does not change production R2.
 
 Configure the deployment environment rather than committing values:
 
