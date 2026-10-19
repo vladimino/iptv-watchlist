@@ -254,4 +254,15 @@ assert.equal(el('#directors-input').value,'d-missing');
 run('installProgramme(returned);refreshGenreOptions();updateFacetOptions();');
 assert.equal(run(`films.filter(eligible).map(film=>film.id).join()`),'back','returning films match the restored filters without selecting them again');
 
+const hostile='"><img src=x onerror=\'alert(1)\'>&';
+window.location.href='https://iptv.example/?genre='+encodeURIComponent(hostile);
+run('films=[{id:"plain",title:"Фильм",original:"Film",year:2020,genres:["Драма"],directors:[],actors:[],shows:[]}];restoreUrl();');
+const hostileHtml=el('#genres').innerHTML;
+assert.equal(hostileHtml.includes('<img'),false,'a genre from the URL is not inserted as HTML');
+assert.match(hostileHtml,/value="&quot;&gt;&lt;img src=x onerror=&#39;alert\(1\)&#39;&gt;&amp;"/);
+assert.match(hostileHtml,/<span>&quot;&gt;&lt;img src=x onerror=&#39;alert\(1\)&#39;&gt;&amp;<\/span>/);
+assert.match(hostileHtml,/genre-count">0</);
+assert.match(hostileHtml,/Драма[\s\S]*genre-count">1</);
+assert.equal(run(`state.genres.has(${JSON.stringify(hostile)})`),true,'the escaped option stays selected when the genre is absent from the snapshot');
+
 console.log('Live refresh: visibility pause and catch-up, one shared return pass, no overlapping requests, preserved filters, time boundaries, facet counts, and quiet error recovery passed');

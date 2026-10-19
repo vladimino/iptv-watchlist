@@ -265,7 +265,7 @@ function refreshGenreOptions(){
  const ordered=[...counts.keys()].sort((a,b)=>a.localeCompare(b,'ru'));
  for(const genre of state.genres) if(!counts.has(genre)) ordered.push(genre);
  genres=ordered;
- box.innerHTML=ordered.map(genre=>`<label class="genre-label"><input type="checkbox" value="${genre}"><span>${genre}</span><span class="genre-count">${counts.get(genre)||0}</span></label>`).join('');
+ box.innerHTML=ordered.map(genre=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(genre)}"><span>${escapeHTML(genre)}</span><span class="genre-count">${counts.get(genre)||0}</span></label>`).join('');
  document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
 }
 let gridTimeKey='',shortTimeKey='';
