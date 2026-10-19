@@ -58,7 +58,7 @@ EPG titles are canonicalized before deduplication: known format prefixes such as
 
 The hourly Site schedule should start at 18:00 Europe/Madrid and continue each hour. It must execute one bounded batch per invocation, not a loop over the full backlog. The prior daily invocation is also bounded by the server default. A manual invocation uses the same queued API. Only explicit `mode:"legacy"` permits the old all-film selection for diagnostic compatibility.
 
-The API persists fingerprints and prediction histories per film ID independently of watchlist membership. A later discovery scope can reuse both. New programme runs alone do not invalidate them. A profile or prompt version change only invalidates predictions; a fingerprint schema change invalidates fingerprints. The UI index contains only each current fingerprint's `plotMechanics` and `moodLabels` for local filtering; it does not replace or mutate the full saved fingerprint. `POST /api/enrichment/fingerprint-view/backfill` with `{"limit":1..100,"cursor":"previousNextCursor"}` materializes older persisted fingerprints into that index in bounded batches; a null `nextCursor` means complete.
+The API persists fingerprints and prediction histories per film ID independently of watchlist membership. A later discovery scope can reuse both. New programme runs alone do not invalidate them. A profile or prompt version change only invalidates predictions; a fingerprint schema change invalidates fingerprints. The UI index contains each current fingerprint's `plotMechanics`, mood facets, and the thirteen general execution dimensions. It does not replace or mutate the full saved fingerprint. Deploying the execution facet does not backfill older index entries; that needs a separately approved fingerprint-view backfill or the next fingerprint save. `POST /api/enrichment/fingerprint-view/backfill` with `{"limit":1..100,"cursor":"previousNextCursor"}` materializes older persisted fingerprints into that index in bounded batches; a null `nextCursor` means complete.
 
 ## Actual ratings
 
@@ -68,7 +68,7 @@ Actual Letterboxd ratings are stored separately with `PUT /api/enrichment/actual
 {"items":[{"filmId":"123456","rating":4.5}]}
 ```
 
-Use `rating:null` to clear one. The film's actual rating never enters the `/next` model payload. The owner's UI can display actual and predicted ratings together. `GET /api/enrichment/view` supplies only current predictions to the UI while preserving stale prediction history internally.
+Use `rating:null` to clear one. The film's actual rating never enters the `/next` model payload. The owner's UI can display actual and predicted ratings together. `GET /api/enrichment/view` supplies current predictions to the UI while preserving stale prediction history internally. Its fingerprint facet also includes the thirteen general `execution` dimensions when they were saved, omitting `unknown` and `not_applicable`. Genre-specific execution fields are not part of that facet. An older index entry receives the compact execution object from `POST /api/enrichment/fingerprint-view/backfill` or the next fingerprint save; the view request does not reread every fingerprint.
 
 ## Failure behavior
 
