@@ -1,6 +1,10 @@
 # Enrichment API for «В эфире»
 
-The Site is private. Use `get_site` for project `appgprj_REPLACE_ME` and its current `current_live_url` and `siwc_bypass_bearer_token`. Send the token only to that Site as `OAI-Sites-Authorization: Bearer <token>`. Never print or store the token. The browser uses the owner's normal Site session.
+The production API is Cloudflare Worker `iptv` at `https://iptv.vladimino.workers.dev/`, private behind Cloudflare Access. Scheduled Tasks are off. Unattended authorization to Cloudflare is not configured, and this document does not define one.
+
+`get_site`, `siwc_bypass_bearer_token`, and `OAI-Sites-Authorization` belong only to the legacy Site. They are not credentials for the Cloudflare Worker. Do not send them to `workers.dev`.
+
+The prediction launch steps later in this file are historical. The current runner contract is [docs/prediction-runner.md](docs/prediction-runner.md). Do not start predictions from the historical steps while Scheduled Tasks remain disabled.
 
 This subsystem uses a separate `enrichment/` R2 namespace. It does not write programme, watchlist, metadata, sync, or started records. It is safe for programme sync to work without it.
 
@@ -35,7 +39,9 @@ Each text field must be nonempty. `anchorFilms` can be empty if no anchored actu
 
 `GET /api/enrichment/profile` returns the published profile or 404 before publication. The Site footer displays the current version. Publishing a new version makes old predictions stale without deleting them or invalidating fingerprints.
 
-## Run a bounded batch (manual and scheduled)
+## Run a bounded batch (manual and scheduled) — historical
+
+This section is the older bounded-batch caller. It is not the current operating procedure. Follow [docs/prediction-runner.md](docs/prediction-runner.md) instead, and do not run either procedure until Scheduled Tasks are separately restored.
 
 After a successful programme commit or taste profile update, the Site reconciles a persistent `enrichment/prediction-queue.json` from every watchlist film whose prediction is missing or stale. Broadcast times never make a prediction stale. Films available in the current archive or next 24 hours come first, then the rest. A valid fingerprint is reused even when its prediction is stale. Programme sync succeeds even if queue reconciliation fails; the next batch reconciles again.
 

@@ -11,9 +11,9 @@ Before local work:
 
 Resolve dirty or diverged state explicitly. Do not overwrite other changes, force-push in the normal workflow, or copy files directly to production.
 
-All changes go through commits and pushes. Pull requests run self-contained tests and build. Successful pushes to `main` automatically publish the verified artifact to Cloudflare using GitHub Actions and environment `Cloudflare Prod`.
+All changes go through commits and pushes. Pull requests run self-contained tests and build. Successful pushes to `main` automatically publish the verified artifact to Cloudflare Worker `iptv` using GitHub Actions and environment `Cloudflare Prod`. That deploy updates Worker code only. It does not copy R2 data, enable Scheduled Tasks, or change Cloudflare Access.
 
-Deployments to legacy Sites remain separate manual operations requiring explicit authorization. Cloudflare CD does not migrate Sites-managed R2 or switch Scheduled Tasks. The Sites source merge SHA may differ from the GitHub SHA, but their Git trees must match.
+Production data lives in Cloudflare R2 bucket `iptv`. The legacy Site is a temporary reserve. Do not republish it in order to resume writers, and do not replay the 19 October 2026 snapshot onto production R2. A historical Sites publication used its own merge SHA and required that publication's Git tree to equal the GitHub SHA selected for it. That does not mean the legacy Site must match today's Cloudflare `main`. Scheduled Tasks stay disabled until unattended Cloudflare authorization is restored as its own approved change.
 
 Never run EPG sync, prediction, scheduled jobs, or mutation endpoints as part of CI or deployment verification. Emergency fixes follow the same Git-first rule: commit the fix first, let CI validate it, and deploy that commit.
 
