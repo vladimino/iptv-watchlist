@@ -20,7 +20,7 @@ An owner-authorized, read-only trial export from the legacy Site completed to a 
 
 The owner stopped the scheduled job during the trial, but writers were not quiesced for the entire export. R2 listing is not atomic; therefore this is suitable for an **authorized trial restore into an isolated target**, not a final migration baseline. A final cutover requires separately approved writer quiescence and a fresh complete export/verification. No Cloudflare R2 import or production data switch was performed.
 
-The importer is not implemented. Its contract, separate Cloudflare credentials, lease handling, and the ban on a real import without new approval are recorded in [docs/r2-import.md](r2-import.md).
+The local importer is `scripts/migration-import.mjs`. Its contract, separate Cloudflare credentials, lease handling, and the ban on a real import without new approval are recorded in [docs/r2-import.md](r2-import.md).
 
 ## Scope and safety
 

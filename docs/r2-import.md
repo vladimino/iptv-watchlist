@@ -1,6 +1,6 @@
 # Cloudflare R2 trial import
 
-Working memory for the next implementation. The importer is not built yet. Do not start it by inventing a snapshot format: the export contract is already implemented.
+The local importer is `scripts/migration-import.mjs`. It reads a snapshot produced by `scripts/migration-export.mjs` and can restore it into the existing Cloudflare bucket `iptv`. It does not contact the legacy Site. A real import still requires a separate owner approval; the command refuses to upload without `--confirm-import`.
 
 ## Authority
 
@@ -31,47 +31,38 @@ Portable metadata is `httpMetadata` and `customMetadata` from `migrationMetadata
 
 If the private directory is not mounted in the next session, say so and continue with synthetic fixtures. Never paste manifest contents, object bytes, secrets, or user records into the model context.
 
-## Importer to build next
+## Local tool
 
-A local Node.js CLI with three separate operations:
+Node.js 20 is enough. There is no extra npm dependency: the CLI signs S3 requests for the R2 endpoint `https://<account-id>.r2.cloudflarestorage.com` with the built-in `node:crypto` signer. The endpoint is derived from the account ID. The bucket argument must be `iptv`; any other bucket or a mismatched account confirmation is refused before a request is sent.
 
-- Dry-run: validate the snapshot, Cloudflare target, and plan. Write nothing.
-- Import: upload every object. Run only after a separate owner approval.
-- Verify: independently list the whole destination bucket and check keys, sizes, portable metadata, and SHA-256 of the bytes. Do not use ETag as the checksum.
+Create a mode-0600 JSON file outside the repository. Do not pass secrets as command arguments.
 
-Fail closed before any write:
-
-- Schema, completeness, report status, per-file size and SHA-256, totals, and aggregate checksum must match.
-- Account ID, bucket name `iptv`, and endpoint must be the expected Cloudflare target.
-- Credentials are a dedicated R2 authorization, not the Sites `X-Migration-Export-Key` and not a value passed on the command line or committed in the repo. Prefer a mode-0600 file or an environment variable supplied by the operator's secret store.
-- Refuse an unexpected existing object or different bytes. No implicit overwrite or delete.
-- Preserve original keys, bytes, and portable HTTP/custom metadata.
-- A retry must resume. Do not require a full restart after interruption.
-- Verification uses a full paginated listing, not a sample.
-- Keep durable data: watchlist, programme, started flags, fingerprints, predictions, profiles, events, overrides, and operation history.
-- Do not call the legacy Site or its R2.
-- Logs must not contain credentials, object bodies, or personal data.
-
-### Ephemeral leases
-
-Known lock objects include `enrichment/runner-lease.json`, `enrichment/writer-lease.json`, and `epg/resolver-lease.json`. Their `expiresAt` values are process leases, not user data.
-
-Proposed behavior, not yet approved for deletion: the trial import copies these objects unchanged and reports them as leases. An expired lease must not be treated as an active lock after restore. Do not drop or rewrite them until the cutover policy says so. Before the final switch, decide explicitly whether to import them as released (`expiresAt: 0`) or omit them.
-
-### Suggested Cloudflare access
-
-Use the S3-compatible R2 API from a Node.js AWS SDK client configured with the R2 endpoint `https://<account-id>.r2.cloudflarestorage.com`. Required scope is object list, get, and put on bucket `iptv` only. The GitHub Actions deploy token is a separate publication credential and must not be reused as the bulk-import key. The tool must compare the configured account ID and bucket name with the expected values and stop on any mismatch.
-
-Commands, once implemented, should look like:
-
-```bash
-node scripts/migration-import.mjs dry-run --snapshot /absolute/private/snapshot-directory
-node scripts/migration-import.mjs import --snapshot /absolute/private/snapshot-directory
-node scripts/migration-import.mjs verify --snapshot /absolute/private/snapshot-directory
+```json
+{
+  "accountId": "<32-hex Cloudflare account ID>",
+  "confirmAccountId": "<the same account ID>",
+  "bucket": "iptv",
+  "accessKeyId": "<R2 access key>",
+  "secretAccessKey": "<R2 secret>"
+}
 ```
 
-Import stays disabled until the owner gives a separate approval. Tests use synthetic fixtures and a fake bucket only: JSON, arbitrary bytes, Unicode keys, portable metadata, a corrupt snapshot, checksum mismatch, wrong account or bucket, an existing conflicting object, a repeated import, an interrupted resume, a missing or extra destination object, metadata mismatch, lease reporting, and a dry-run that performs no writes.
+The key needs list, get, and put on bucket `iptv` only. It is not the Sites export key and not the GitHub Actions deploy token. `chmod 600` the file. The tool prints counts only: it does not print credentials, object bodies, or object keys.
+
+```bash
+node scripts/migration-import.mjs dry-run --snapshot /absolute/private/snapshot-directory --auth-file /absolute/private/r2-import.auth
+node scripts/migration-import.mjs import --snapshot /absolute/private/snapshot-directory --auth-file /absolute/private/r2-import.auth --confirm-import
+node scripts/migration-import.mjs verify --snapshot /absolute/private/snapshot-directory --auth-file /absolute/private/r2-import.auth
+```
+
+Dry-run validates schema version 1, `provisional_no_change_detected`, every file hash, totals, and the aggregate checksum, then lists the destination. It writes nothing. Import uploads missing keys and skips objects whose bytes and portable metadata already match, so an interrupted run can be repeated. It refuses an extra destination key or different bytes and never deletes or overwrites. Verify lists the whole bucket and hashes every object. ETags are not checksums.
+
+Portable metadata is `httpMetadata` and `customMetadata`. Source `etag`, `version`, `uploaded`, and `storageClass` stay in the snapshot as provenance and are not rewritten onto the destination as system identity.
+
+`enrichment/runner-lease.json`, `enrichment/writer-lease.json`, and `epg/resolver-lease.json` are copied unchanged and counted as leases. An expired lease must not be treated as an active lock. They are not dropped or rewritten until a separate cutover decision says to release or omit them.
+
+Durable keys, including watchlist, programme, started flags, fingerprints, predictions, profiles, events, overrides, and operation history, are restored byte for byte.
 
 ## Still required before a trial import
 
-Read `AGENTS.md`, this file, `docs/migration-export.md`, `docs/deployment.md`, `scripts/migration-export.mjs`, `src/migration-export.js`, `tests/migration-export.mjs`, and `wrangler.jsonc`. Implement the CLI and synthetic tests in a new pull request. Run `npm ci`, `npm test`, and `npm run build`. Do not merge that pull request, run a real import, empty Cloudflare R2, change the legacy Site, start Scheduled Tasks, edit Cloudflare secrets, or perform the cutover without a new explicit approval.
+The private snapshot was not opened in development. Run dry-run against it only after the auth file exists. Do not pass `--confirm-import` until the owner approves that trial in writing. Do not empty Cloudflare R2, change the legacy Site, start Scheduled Tasks, edit Cloudflare secrets, or treat this snapshot as the final cutover archive. A final cutover still needs paused writers and a fresh export.
