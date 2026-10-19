@@ -126,6 +126,11 @@ assert.deepEqual(await result(rpc(22,'ping'),{headers:{Accept:'application/json'
 body=await expectError(await mcp(rpc(23,'tools/list'),{headers:{'MCP-Protocol-Version':'2026-07-28'}}),400,-32600);
 assert.equal(body.id,23);assert.match(body.error.message,/2025-11-25, 2025-06-18/);
 await expectError(await mcp({jsonrpc:'2.0',method:'notifications/initialized'},{headers:{'MCP-Protocol-Version':'1999-01-01'}}),400,-32600);
+for(const message of [rpc(231,'tools/list'),rpc(232,'tools/call',{name:'probe_echo',arguments:{text:'no version'}}),rpc(233,'ping'),{jsonrpc:'2.0',method:'notifications/initialized'}]){
+ body=await expectError(await mcp(message,{headers:{'MCP-Protocol-Version':undefined}}),400,-32600);
+ assert.equal(body.id,message.id??null);assert.match(body.error.message,/^Missing MCP-Protocol-Version header/);
+}
+assert.equal((await result(rpc(234,'tools/call',{name:'probe_read'}),{headers:{'MCP-Protocol-Version':'2025-06-18'}})).structuredContent.protocolVersion,'2025-06-18');
 await expectError(await mcp(rpc(24,'tools/call',{name:'probe_echo',arguments:{text:'x'.repeat(70*1024)}})),413,-32000);
 for(const method of ['GET','DELETE']){
  response=await mcp(undefined,{method});

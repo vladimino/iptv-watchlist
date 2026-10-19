@@ -22,7 +22,7 @@ ChatGPT (custom MCP server, OAuth)
 
 - Streamable HTTP, single endpoint, `POST` only. Every response is one JSON object (`Content-Type: application/json`). The server never opens an SSE stream.
 - Stateless: no `Mcp-Session-Id`. `GET` and `DELETE` return `405` with `Allow: POST`. That is the documented response when a server offers no standalone SSE stream and no sessions.
-- Protocol versions `2025-11-25` and `2025-06-18` (the `initialize`-based era). `initialize` echoes a supported requested version and otherwise answers `2025-11-25`. Later requests must send a supported `MCP-Protocol-Version` header, or omit it.
+- Protocol versions `2025-11-25` and `2025-06-18` (the `initialize`-based era). `initialize` echoes a supported requested version and otherwise answers `2025-11-25`. Every later message, including `notifications/initialized` and `ping`, must carry a supported `MCP-Protocol-Version` header. Without sessions, the header is the server's only record of the negotiated version. Under the 2025-11-25 transport rules a missing header means `2025-03-26`, which this server does not support, so it gets `400`. `probe_read` reports the version from that header.
 - A `2026-07-28` request (stateless era) gets `400` with JSON-RPC code `-32600`, not the modern `-32022`. Under the MCP backward-compatibility rules, a dual-era client treats that as a legacy server and falls back to `initialize`. A client that supports only `2026-07-28` cannot connect.
 - Batches, client-sent JSON-RPC responses, malformed JSON, invalid UTF-8, non-JSON `Content-Type` (`415`), an `Accept` header that excludes JSON (`406`), and bodies over 64 KiB (`413`) are rejected. Notifications get `202` with no body.
 - A browser `Origin` header must be the Worker's own origin or `https://chatgpt.com`. Any other origin gets `403`. Server-to-server requests without `Origin` are accepted once the Access JWT is valid.
@@ -115,14 +115,28 @@ These checks contact production only through Cloudflare Access and the two probe
 4. Ask it to call `probe_echo` with a marker such as `mcp-probe-2026-10-19`. Expect the identical text back.
 5. Repeat step 1. The unauthenticated request must still get `401` from Access.
 
-Do not use `/api/*` routes, the dashboard, sync, enrichment, prediction, or Scheduled Tasks as MCP checks. Some `GET` routes can write (see `README.md`).
+Leave Scheduled Tasks out of this initial smoke test. Unattended runs are the next stage, described below. Do not use `/api/*` routes, the dashboard, sync, enrichment, or prediction as MCP checks. Some `GET` routes can write (see `README.md`).
+
+## Next stage: unattended Scheduled Tasks
+
+The goal of this integration is unattended ChatGPT Scheduled Tasks that call the Worker. This change proves only the interactive connection. Scheduled Tasks stay disabled. Creating or enabling any task, even a probe-only one, is a separate change that needs approval. A probe-only task does not resume sync or prediction. Before any writer resumes, the lease check in [docs/deployment.md](deployment.md) still applies.
+
+Acceptance criteria, checked after the safe verification procedure passes:
+
+1. A dedicated probe-only Scheduled Task calls `probe_read`, then `probe_echo` with a per-run marker such as the run timestamp. Several consecutive real scheduled runs return matching results, with no confirmation prompt and no sign-in.
+2. The runs span longer than the Access token lifetime. ChatGPT must then renew the access token with its refresh token, unattended. Access re-evaluates the `IPTV MCP` policy on every refresh.
+3. Throughout the same period, an anonymous request (procedure step 1) still gets `401` from Access.
+4. Revocation, with separate approval: remove the owner from the `IPTV MCP` policy or revoke the owner's Access sessions. Once the current access token expires, the next scheduled run must fail to authorize. Restoring access must require a new interactive sign-in. Also record what happens when the grant session expires.
+5. Disable or delete the probe tasks afterwards unless their continued schedule is approved.
+
+`probe_echo` proves an authenticated MCP HTTP POST round trip. It does not prove a write to storage followed by a read back. To close the unattended-authorization task, a separate write, read, and cleanup test is needed. It must target an isolated temporary key, for example under a dedicated prefix, clean up explicitly, and leave production state untouched. That test needs its own design and approval. A key in bucket `iptv` is still a production R2 write, and this change adds no such tool.
 
 ## Limitations
 
 - Probe-only. Any tool that reads R2, changes settings, or triggers production work needs its own design, review, and approval.
 - No SSE, sessions, server-to-client requests, `list_changed` notifications, resources, prompts, or batches. Clients that support only `2026-07-28` are not supported.
 - The origin allow-list is fixed in code: the Worker's own origin and `https://chatgpt.com`.
-- Managed OAuth is in open beta. The end-to-end flow between ChatGPT and Access has not been exercised from this repository, because no production requests were made. Treat the procedure above as the acceptance test.
+- Managed OAuth is in open beta. The end-to-end flow between ChatGPT and Access has not been exercised from this repository, because no production requests were made. Treat the safe verification procedure as the acceptance test for the interactive connection, and the next-stage criteria as the acceptance test for unattended runs.
 - The first request after a cold start fetches Access signing keys from the team domain. If they are unreachable, the endpoint returns `503`.
 
 ## Rollback

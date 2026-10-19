@@ -152,10 +152,11 @@ async function mcpRoute(request,env){
   if(!('method' in message))return mcpError(null,-32600,('result' in message||'error' in message)?'Unexpected JSON-RPC response':'Invalid Request',400);
   const notification=!('id' in message);
   if(typeof message.method!=='string'||!message.method||(!notification&&!(typeof message.id==='string'||(typeof message.id==='number'&&Number.isFinite(message.id)))))return mcpError(null,-32600,'Invalid Request',400);
-  // Clients send the negotiated version on every request after initialize. A plain
-  // -32600 (not the 2026-07-28 code -32022) lets dual-era clients fall back to initialize.
+  // Without sessions the header is the only record of the negotiated version. A missing
+  // header means 2025-03-26 under the 2025-11-25 transport rules, which is unsupported.
+  // A plain -32600 (not the 2026-07-28 code -32022) lets dual-era clients fall back to initialize.
   const protocolVersion=request.headers.get('MCP-Protocol-Version');
-  if(protocolVersion!==null&&message.method!=='initialize'&&!MCP_PROTOCOL_VERSIONS.includes(protocolVersion))return mcpError(notification?null:message.id,-32600,'Unsupported MCP-Protocol-Version. Supported: '+MCP_PROTOCOL_VERSIONS.join(', '),400);
+  if(message.method!=='initialize'&&!MCP_PROTOCOL_VERSIONS.includes(protocolVersion))return mcpError(notification?null:message.id,-32600,(protocolVersion===null?'Missing':'Unsupported')+' MCP-Protocol-Version header. Supported: '+MCP_PROTOCOL_VERSIONS.join(', '),400);
   if(notification)return new Response(null,{status:202,headers:{'Cache-Control':'no-store'}});
   return mcpJson(mcpDispatch(message,protocolVersion));
  }catch{return mcpError(null,-32603,'Internal error',500);}
