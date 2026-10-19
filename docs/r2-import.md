@@ -55,7 +55,7 @@ node scripts/migration-import.mjs import --snapshot /absolute/private/snapshot-d
 node scripts/migration-import.mjs verify --snapshot /absolute/private/snapshot-directory --auth-file /absolute/private/r2-import.auth
 ```
 
-Dry-run validates schema version 1, `provisional_no_change_detected`, every file hash, totals, and the aggregate checksum, then lists the destination. It writes nothing. Import uploads missing keys and skips objects whose bytes and portable metadata already match, so an interrupted run can be repeated. It refuses an extra destination key or different bytes and never deletes or overwrites. Verify lists the whole bucket and hashes every object. ETags are not checksums.
+Dry-run validates schema version 1, `provisional_no_change_detected`, every file hash, totals, and the aggregate checksum, then lists the destination. It writes nothing and does not modify the snapshot directory. Import uploads missing keys with `If-None-Match: *`. HTTP 412 stops the import; the tool does not overwrite and does not re-check the object with HEAD. An interrupted run can be repeated: objects whose bytes and portable metadata already match are skipped. It refuses an extra destination key or different bytes and never deletes. Verify lists the whole bucket, rejects a repeated continuation token or a repeated key, and hashes every object. Responses are read without automatic decompression, so a gzip payload stays the original bytes. ETags are not checksums. `httpMetadata.cacheExpiry` is sent and compared as an HTTP `Expires` date.
 
 Portable metadata is `httpMetadata` and `customMetadata`. Source `etag`, `version`, `uploaded`, and `storageClass` stay in the snapshot as provenance and are not rewritten onto the destination as system identity.
 

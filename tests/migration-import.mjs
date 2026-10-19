@@ -4,7 +4,8 @@ import {mkdtemp,readFile,rm,stat,writeFile,chmod} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {exportSnapshot} from '../scripts/migration-export.mjs';
-import {ImportError,assertTarget,createMemoryBucket,createR2Client,dryRun,importSnapshot,isLeaseKey,parseAuth,runCli,signRequest,verifyDestination} from '../scripts/migration-import.mjs';
+import http from 'node:http';
+import {ImportError,assertTarget,canonicalUri,createMemoryBucket,createR2Client,dryRun,importSnapshot,isLeaseKey,parseAuth,runCli,signRequest,verifyDestination} from '../scripts/migration-import.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const account='a'.repeat(32);
@@ -92,8 +93,40 @@ try{
  await expectKind(runCli(['import','--snapshot',directory,'--auth-file',authFile]),'usage');
  await expectKind(runCli(['import','--snapshot',directory,'--auth-file',authFile,'--confirm-import']),'authorization');
  await chmod(authFile,0o600);
- let fetched=0;const client=createR2Client(auth,{fetchImpl:async()=>{fetched++;return new Response('<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>',{status:200});}});
+ let fetched=0;const client=createR2Client(auth,{requestImpl:async()=>{fetched++;return {status:200,headers:new Headers(),body:Buffer.from('<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>')};}});
  const output=[];await runCli(['dry-run','--snapshot',directory,'--auth-file',authFile],{clientFor:()=>client,stdout:line=>output.push(line)});
  assert.equal(JSON.parse(output[0]).writes,0);assert.equal(fetched,1);assert.equal((await stat(authFile)).mode&0o777,0o600);
+ assert.equal(canonicalUri('iptv','dir//фильм !*\'()'),'/iptv/dir//%D1%84%D0%B8%D0%BB%D1%8C%D0%BC%20%21%2A%27%28%29');
+
+ const raced=createMemoryBucket();let racedKey='';const originalPut=raced.put.bind(raced);
+ raced.put=async(key,bytes,metadata,options)=>{if(!racedKey){racedKey=key;raced.items.set(key,{key,bytes:Buffer.from('racer'),metadata:{httpMetadata:{},customMetadata:{}}});}return originalPut(key,bytes,metadata,options);};
+ await expectKind(importSnapshot({directory,client:raced,auth}),'conflict');
+ assert.equal(raced.items.get(racedKey).bytes.toString(),'racer','a concurrent create is not overwritten');
+
+ const recorded=[];const gzip=Buffer.from([0x1f,0x8b,0x08,0x00,0xff,0x01]);let lists=0;
+ const server=http.createServer((request,response)=>{
+  recorded.push({method:request.method,url:request.url,headers:request.headers});
+  if(request.url.includes('list-type=2')){lists++;if(lists===1){response.writeHead(503);response.end('busy');return;}if(lists===2){response.writeHead(200,{'content-type':'application/xml'});response.end('<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>page&amp;2</NextContinuationToken><Contents><Key>a&amp;b</Key><Size>1</Size></Contents></ListBucketResult>');return;}response.writeHead(200,{'content-type':'application/xml'});response.end('<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>dir//name</Key><Size>1</Size></Contents></ListBucketResult>');return;}
+  if(request.method==='PUT'){response.writeHead(request.url.endsWith('/race-key')?412:200);response.end();return;}
+  if(request.method==='GET'){response.writeHead(200,{'content-encoding':'gzip','content-type':'application/octet-stream','content-length':String(gzip.length)});response.end(gzip);return;}
+  response.writeHead(200);response.end();
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const endpoint=`http://127.0.0.1:${server.address().port}`,local=createR2Client(auth,{endpoint});
+ assert.deepEqual((await local.listAll()).map(item=>item.key),['a&b','dir//name']);
+ assert.equal(lists,3,'listing retries a transient error and follows the continuation token');
+ assert.equal(recorded.filter(item=>item.url.includes('continuation-token=page%262')).length,1);
+ const raw=await local.get('gzip-object');
+ assert.deepEqual(raw,gzip);
+ await expectKind(local.put('race-key',Buffer.from('new'),{httpMetadata:{cacheExpiry:'2026-11-06T08:49:37.000Z'}}),'conflict');
+ assert.equal(recorded.some(item=>item.method==='PUT'&&item.headers['if-none-match']==='*'&&item.headers.expires==='Fri, 06 Nov 2026 08:49:37 GMT'),true);
+ const encoded=canonicalUri('iptv','dir//фильм !*\'()');
+ await local.head('dir//фильм !*\'()');
+ assert.equal(recorded.at(-1).url,encoded);
+ const duplicate=createR2Client(auth,{endpoint:'http://127.0.0.1:9',requestImpl:async()=>({status:200,headers:new Headers(),body:Buffer.from('<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>a</Key><Size>1</Size></Contents><Contents><Key>a</Key><Size>1</Size></Contents></ListBucketResult>')})});
+ await expectKind(duplicate.listAll(),'target');
+ let repeatPage=0;const looping=createR2Client(auth,{endpoint:'http://127.0.0.1:9',requestImpl:async()=>({status:200,headers:new Headers(),body:Buffer.from(++repeatPage===1?'<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken><Contents><Key>a</Key><Size>1</Size></Contents></ListBucketResult>':'<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken><Contents><Key>b</Key><Size>1</Size></Contents></ListBucketResult>')})});
+ await expectKind(looping.listAll(),'target');
+ server.close();
 }finally{await Promise.all(directories.map(directory=>rm(directory,{recursive:true,force:true})));}
 console.log('R2 import: dry-run, import, verify, corrupt snapshot, checksum, target, conflict, resume, missing, extra, metadata, leases and no dry-run writes passed');
