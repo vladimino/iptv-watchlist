@@ -27,6 +27,8 @@ migration-export.auth
 .DS_Store
 node_modules/
 .cache/
+.wrangler/
+.local-dev.json
 .tmp/
 tmp/
 __pycache__/
