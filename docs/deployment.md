@@ -83,6 +83,10 @@ For a permanent fix, merge a revert or corrective commit into `main` and deploy 
 
 Version 84 was the last verified working checkpoint before exporter publication. Confirm the currently serving version before selecting a rollback target.
 
+The read-only migration exporter was subsequently deployed on the same Site as version 85 (`appgprj_6abfed826e148191903dec4175166ff7~appgver_881c8227516481919ffb6abe71b9b61a`), Sites source `0640e760d2140ae053952d8ae93f2fe0904d4728`, using environment revision 4. Version 84 is the preferred pre-exporter code rollback checkpoint; re-query serving state before using it. See `docs/migration-export.md` for the trial snapshot and restore procedure. No GitHub-to-Sites CD was enabled by this release.
+
+The 19 October 2026 read-only trial export completed and passed local verification, but remains provisional because source writes were not quiesced for its entire duration. It did not import data into Cloudflare or change either runtime's deployment contract.
+
 Version 83 remains an older fallback, not the automatically preferred rollback target.
 
 Sites code rollback does not restore an earlier environment revision or revert R2 data. Do not force-push/reset Sites source, alter GitHub history, or mutate R2 data. A serving-version rollback does **not** roll back the Sites source branch or runtime data.
