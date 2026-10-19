@@ -31,7 +31,7 @@ Configure the deployment environment rather than committing values:
 - `EPG_SITE_SERVICE_TOKEN` — optional service credential used by the hosted update workflow.
 - `BUCKET` — R2 binding declared by the hosting platform.
 
-Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 bucket `iptv`, the authoritative production store since the 19 October 2026 cutover. The legacy Site keeps a separate R2 store as a temporary reserve and as the source of the historical snapshot. Do not run sync, prediction, or other writers there. The tracked hosting manifest records only that legacy Site identity and binding.
+Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 bucket `iptv`, the authoritative production store since the 19 October 2026 cutover. The legacy Site keeps a separate R2 store as a temporary reserve and as the source of the historical snapshot. Do not run sync, prediction, or other writers there, and do not browse it for diagnosis: some of its GET routes can write. The tracked hosting manifest records only that legacy Site identity and binding.
 
 ## Tests
 
