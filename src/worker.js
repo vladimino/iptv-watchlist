@@ -107,7 +107,7 @@ export default {async fetch(request,env,execution){
   if(['/api/sync/metadata','/api/sync/epg'].includes(url.pathname)&&request.method==='POST'){const body=await request.json();return await postSync(env,execution,url.pathname,body);}
   return json({error:'Not found'},404);
  }
- const asset=ASSETS[url.pathname];if(asset&&request.method==='GET')return new Response(asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});
+ const asset=ASSETS[url.pathname==='/events'?'/':url.pathname];if(asset&&request.method==='GET')return new Response(asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});
  return json({error:'Not found'},404);
  }catch(e){return json({error:e.message},502);}
 }};

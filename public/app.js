@@ -90,10 +90,60 @@ function urlForState(current){
  if(state.minProbability!==null)add('chance',state.minProbability);
  return url;
 }
+function filterStateKey(snapshot=state){
+ const execution={};
+ for(const dimension of EXECUTION_FILTERS)execution[dimension.id]=[...(snapshot.execution?.[dimension.id]||[])].sort();
+ return JSON.stringify({shortlistMode:snapshot.shortlistMode,period:snapshot.period,sort:snapshot.sort,viewing:snapshot.viewing,minPrediction:snapshot.minPrediction,minProbability:snapshot.minProbability,startedOnly:!!snapshot.startedOnly,lastChanceOnly:!!snapshot.lastChanceOnly,includeUnscheduled:!!snapshot.includeUnscheduled,directors:snapshot.directors||'',actors:snapshot.actors||'',query:snapshot.query||'',genres:[...(snapshot.genres||[])].sort(),mechanics:[...(snapshot.mechanics||[])].sort(),moods:[...(snapshot.moods||[])].sort(),channels:[...(snapshot.channels||[])].sort(),execution,from:snapshot.from,to:snapshot.to,maxRuntime:snapshot.maxRuntime});
+}
+const FILM_QUERY_KEY='iptv-film-list-query';
+function eventsRequested(href=window.location.href){const url=new URL(href);if(url.searchParams.get('screen')==='events')return true;const path=url.pathname.replace(/\/+$/,'')||'/';return path==='/events';}
+function filmSearchFrom(href){const url=new URL(href);url.searchParams.delete('screen');return url.search;}
+function filmQueryStore(name){try{return globalThis[name]||null;}catch{return null;}}
+function writeFilmQuery(search){for(const name of ['sessionStorage','localStorage']){try{filmQueryStore(name)?.setItem(FILM_QUERY_KEY,search);}catch{}}}
+function readFilmQuery(){try{const session=filmQueryStore('sessionStorage');if(session){const value=session.getItem(FILM_QUERY_KEY);if(value!==null)return value;}}catch{}try{return filmQueryStore('localStorage')?.getItem(FILM_QUERY_KEY)||'';}catch{return '';}}
+function rememberFilmList(){if(eventsScreen||eventsRequested())return;writeFilmQuery(filmSearchFrom(window.location.href));}
+let eventsScreen=false,movieScrollY=0,eventsTrigger=null;
+function applyEventsScreen(on){
+ if(on&&!eventsScreen)movieScrollY=window.scrollY||0;
+ eventsScreen=!!on;
+ document.documentElement?.classList?.toggle('events-screen',eventsScreen);
+ const expand=$('#activity-expand'),back=$('#activity-back');
+ if(expand)expand.hidden=eventsScreen;
+ if(back)back.hidden=!eventsScreen;
+ if(typeof window.scrollTo==='function')window.scrollTo(0,eventsScreen?0:movieScrollY||0);
+}
+function openEventsScreen(trigger){
+ eventsTrigger=trigger||$('#activity-expand');
+ if(!eventsRequested()){rememberFilmList();window.history.pushState({iptvEvents:true},'','/events');}
+ else if(new URL(window.location.href).searchParams.get('screen')==='events'){writeFilmQuery(filmSearchFrom(window.location.href));window.history.replaceState(window.history.state,'','/events');}
+ applyEventsScreen(true);
+ $('#activity-title')?.focus?.({preventScroll:true});
+}
+function showFilmList(search){
+ const next='/'+(search.startsWith('?')||!search?search:'?'+search);
+ window.history.replaceState(null,'',next);
+ applyEventsScreen(false);
+ const incoming=readUrlState(new URL(window.location.href));
+ if(filterStateKey(incoming)!==filterStateKey(state))restoreUrl();
+ else (eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
+}
+function closeEventsScreen(){
+ if(window.history.state?.iptvEvents){window.history.back();return;}
+ showFilmList(readFilmQuery());
+}
+function onHistoryNavigation(){
+ const onEvents=eventsRequested();
+ if(!onEvents){const next=readUrlState(new URL(window.location.href));if(filterStateKey(next)!==filterStateKey(state))restoreUrl();}
+ if(onEvents!==eventsScreen)applyEventsScreen(onEvents);
+ if(eventsScreen)$('#activity-title')?.focus?.({preventScroll:true});
+ else (eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
+}
 function syncUrl(){
- if(!urlReady||urlRestoring||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
+ if(!urlReady||urlRestoring||eventsRequested()||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
  const next=urlForState(window.location.href);
- if(next.href!==window.location.href)window.history.replaceState(window.history.state,'',next.pathname+next.search+next.hash);
+ const target=next.pathname+next.search+next.hash,current=window.location.pathname+window.location.search+window.location.hash;
+ if(target!==current)window.history.replaceState(window.history.state,'',target);
+ writeFilmQuery(next.search);
 }
 function restoreUrl(){
  urlRestoring=true;
@@ -516,7 +566,7 @@ function deletePreset(id){return sendPreset('DELETE','/api/ui/filter-presets/'+e
 function bindControls(){
  if(controlsReady)return;
  controlsReady=true;
- window.addEventListener('popstate',restoreUrl);
+ window.addEventListener('popstate',onHistoryNavigation);
  $('#include-unscheduled').addEventListener('change',e=>{state.includeUnscheduled=e.target.checked;render();});
  $('#started-only').addEventListener('change',e=>{state.startedOnly=e.target.checked;render();});
  $('#last-chance-only').addEventListener('change',e=>{state.lastChanceOnly=e.target.checked;render();});
@@ -548,7 +598,9 @@ function bindControls(){
  document.querySelectorAll('[data-runtime-max]').forEach(b=>b.addEventListener('click',()=>applyFilters({maxRuntime:b.dataset.runtimeMax==='any'?null:Number(b.dataset.runtimeMax)})));
  $('#filter-toggle').addEventListener('click',()=>{const b=$('#filter-toggle');const open=b.getAttribute('aria-expanded')!=='true';b.setAttribute('aria-expanded',String(open));$('#filters').dataset.open=String(open);});
  const statusDetails=$('#status-details');statusDetails.addEventListener('toggle',()=>{$('#status-details-label').textContent=statusDetails.open?'Скрыть детали':'Показать детали';});
- $('#status-events-link').addEventListener('click',()=>{const filters=$('#filters'),toggle=$('#filter-toggle');filters.dataset.open='true';toggle.setAttribute('aria-expanded','true');requestAnimationFrame(()=>{document.querySelector('.activity-scroll').focus({preventScroll:true});$('#activity-title').scrollIntoView({behavior:'smooth',block:'start'});});});
+ $('#status-events-link').addEventListener('click',event=>{event.preventDefault();openEventsScreen($('#status-events-link'));});
+ const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
+ const activityBack=$('#activity-back');if(activityBack)activityBack.addEventListener('click',closeEventsScreen);
  $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>loadEvents(true));
  const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
  const presetEditorForm=$('#preset-editor');if(presetEditorForm)presetEditorForm.addEventListener('submit',event=>{event.preventDefault();const name=$('#preset-name').value;if(presetEditor?.mode==='rename')renamePreset(presetEditor.id,name);else createPreset(name);});
@@ -651,6 +703,7 @@ function stopLiveRefresh(){
 }
 async function init(){
  bindControls();
+ if(eventsRequested()){const here=new URL(window.location.href);if((here.pathname.replace(/\/+$/,'')||'/')!=='/events'){writeFilmQuery(filmSearchFrom(here.href));window.history.replaceState(window.history.state,'','/events');}applyEventsScreen(true);}
  setYearBounds(true);
  try{await loadProgramme();}
  catch(error){showProgrammeUnavailable(error);console.error(error);}
@@ -700,8 +753,20 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
  else if(event.type==='enrichment'&&['started','resumed'].includes(event.stage)){body=`<p>${event.stage==='resumed'?'Прогнозы продолжены':'Прогнозы запущены'}</p><p class="event-note">В окне просмотра ждут прогноза: ${event.hotRemaining??'нет данных'} · вне окна: ${event.coldRemaining??'нет данных'}.</p>${event.currentBatchSize?`<p class="event-note">Текущий пакет: ${event.currentBatchSize}.</p>`:''}`;}
  else if(event.type==='enrichment'&&event.queueSchemaVersion>=3){const added=event.added??event.created??0,updated=event.updated??event.recalculated??0,reason={quota:'Достигнут лимит использования. Сохранённый прогресс продолжится в следующем запуске.',time_budget:'Закончилось время прохода. Прогресс сохранён.',parse_error:'Не удалось разобрать часть ответов. Эти фильмы остаются в очереди.',storage_error:'Часть результатов не удалось сохранить. Следующий запуск повторит попытку.',model_error:'Часть прогнозов не рассчитана. Следующий запуск продолжит очередь.',lease_expired:'Предыдущий запуск оборвался. Сохранённые прогнозы переиспользуются.',profile_changed:'Модель вкуса изменилась между запусками.',format_error_storm:'Несколько фильмов подряд получили ответы неверного формата. Проход остановлен, результаты сохранены.'}[event.reason];body=`<p>${event.stage==='running'?'Прогнозы считаются · промежуточный итог':event.stage==='blocked'?'Прогнозы ждут следующего запуска':event.stage==='partial'?(event.queueSchemaVersion>=5?'Прогнозы приостановлены':'Прогнозы сохранены, проход прерван'):'Прогнозы обновлены'}</p><p class="event-note">Добавлено: ${added}${updated?` · пересчитано: ${updated}`:''}${event.failed?` · не удалось: ${event.failed}`:''}.</p><p class="event-note">В окне просмотра ждут прогноза: ${event.hotRemaining??(event.queueSchemaVersion>=5?'нет данных':0)}${event.queueSchemaVersion>=4?` · вне окна: ${event.coldRemaining??(event.queueSchemaVersion>=5?'нет данных':0)}`:''}.</p>${event.queueSchemaVersion>=5&&event.reason?`<p class="event-note">Причина: ${escapeHTML(event.reason)}</p>`:''}${event.stopReason==='eligible_queue_empty'&&event.failed?`<p class="event-note">Фильмы с ошибками сохранены для повторной попытки.</p>`:''}${reason?`<p class="event-note">${reason}</p>`:''}`;}
  else if(event.type==='enrichment'){const added=event.added??event.created??0,updated=event.updated??event.recalculated??0,changed=added+updated,remaining=Number.isInteger(event.remaining)?event.remaining:null,previous=Number.isInteger(olderEnrichment?.remaining)&&(!event.queueSchemaVersion||event.queueSchemaVersion===olderEnrichment.queueSchemaVersion)?olderEnrichment.remaining:null,arrived=previous===null||remaining===null?null:remaining-previous+changed;body=`<p>${event.stage==='partial'||event.failed||event.pending?'Пакет прогнозов прерван':changed?'Прогнозы рассчитаны':'Очередь проверена'}</p><p class="event-note">За проход: ${added} новых${updated?` · ${updated} пересчитано`:''}${event.failed?` · ${event.failed} не удалось`:''}.</p>${remaining!==null?`<p class="event-note">После прохода ждут прогноза: ${remaining}${Number.isInteger(event.hotRemaining)?` (в окне просмотра: ${event.hotRemaining})`:""}.</p>`:''}${arrived>0?`<p class="event-note">Очередь: ${previous} + ${arrived} поступило − ${changed} готово = ${remaining}. Новые задачи появляются при проверке EPG.</p>`:''}${event.reason?`<p class="event-note">Причина: ${escapeHTML(event.reason)}</p>`:''}`;}
- return `<li class="activity-event"><time datetime="${escapeHTML(event.at)}">${date}</time>${body}</li>`;}
-async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');button.disabled=true;try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''));if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);const scroll=document.querySelector('.activity-scroll'),position=scroll.scrollTop,ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();let older=null;for(const event of [...ordered].reverse())if(event.type==='enrichment'){olderById.set(event.id,older);older=event;}$('#activity-list').innerHTML=ordered.map(event=>eventHTML(event,olderById.get(event.id))).join('');scroll.scrollTop=position;if(!keepCursor)eventCursor=data.cursor;$('#activity-status').textContent=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';return true;}catch{if(!options.quiet){$('#activity-status').textContent='Не удалось загрузить события.';button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;button.disabled=false;}}
+ return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><time datetime="${escapeHTML(event.at)}">${date}</time>${body}</li>`;}
+function rememberActivityAnchor(scroll){
+ if(!scroll||scroll.scrollTop<=0||typeof scroll.querySelectorAll!=='function')return null;
+ const item=[...scroll.querySelectorAll('[data-event-id]')].find(node=>node.offsetTop+node.offsetHeight>scroll.scrollTop);
+ if(!item?.dataset?.eventId)return null;
+ return {id:item.dataset.eventId,offset:scroll.scrollTop-item.offsetTop};
+}
+function restoreActivityAnchor(scroll,anchor,fallback){
+ if(!scroll)return;
+ if(!anchor){scroll.scrollTop=fallback;return;}
+ const node=scroll.querySelector?.(`[data-event-id="${String(anchor.id).replace(/"/g,'')}"]`);
+ scroll.scrollTop=node?node.offsetTop+anchor.offset:fallback;
+}
+async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');button.disabled=true;try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''));if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);const scroll=document.querySelector('.activity-scroll'),anchor=rememberActivityAnchor(scroll),position=scroll?scroll.scrollTop:0,ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();let older=null;for(const event of [...ordered].reverse())if(event.type==='enrichment'){olderById.set(event.id,older);older=event;}$('#activity-list').innerHTML=ordered.map(event=>eventHTML(event,olderById.get(event.id))).join('');restoreActivityAnchor(scroll,anchor,position);if(!keepCursor)eventCursor=data.cursor;$('#activity-status').textContent=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';return true;}catch{if(!options.quiet){$('#activity-status').textContent='Не удалось загрузить события.';button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;button.disabled=false;}}
 function initPeopleFilters(){
  for(const key of ['directors','actors']){
   const root=document.querySelector(`[data-person="${key}"]`),input=$('#'+key+'-input'),list=$('#'+key+'-options');
