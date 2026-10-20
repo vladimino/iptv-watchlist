@@ -201,26 +201,36 @@ function mergeExternal(existing=[],incoming=[]){
  }
  return out;
 }
-function linkFilms(existing,incoming,at){
+function stable(value){return JSON.stringify(value);}
+function historyIdentity(entry){
+ if(entry&&typeof entry==='object'&&Object.prototype.hasOwnProperty.call(entry,'prediction')&&Object.prototype.hasOwnProperty.call(entry,'from'))return stable({from:entry.from??null,prediction:entry.prediction});
+ return stable(entry);
+}
+function remember(list,entry){const key=historyIdentity(entry);if(!list.some(item=>historyIdentity(item)===key))list.push(entry);return list;}
+function rememberRedirect(list,redirect){if(redirect&&!list.some(item=>item.from===redirect.from&&item.to===redirect.to))list.push(redirect);return list;}
+function rememberConflict(list,conflict){const key=stable({reason:conflict.reason??null,value:conflict.value??null,source:conflict.source??null});if(!list.some(item=>stable({reason:item.reason??null,value:item.value??null,source:item.source??null})===key))list.push(conflict);return list;}
+function linkFilms(existing,incoming,at,evidence){
  if(!existing?.id||incoming==null)return {ok:false,reason:'missing_record',survivor:existing||null,incoming:incoming??null};
  if(existing.identity?.status==='rejected'||incoming.identity?.status==='rejected')return {ok:false,reason:'rejected',survivor:existing,incoming};
  const leftLetterboxd=linkedValue(existing,'letterboxd'),rightLetterboxd=linkedValue(incoming,'letterboxd');
  const leftTmdb=linkedValue(existing,'tmdb',item=>!item.conflicting),rightTmdb=linkedValue(incoming,'tmdb',item=>!item.conflicting);
  const leftTrusted=linkedValue(existing,'tmdb',item=>item.trusted&&!item.conflicting),rightTrusted=linkedValue(incoming,'tmdb',item=>item.trusted&&!item.conflicting);
  if((leftLetterboxd&&rightLetterboxd&&leftLetterboxd!==rightLetterboxd)||(leftTmdb&&rightTmdb&&leftTmdb!==rightTmdb))return {ok:false,reason:'identity_collision',survivor:existing,incoming};
- const shared=(leftLetterboxd&&rightLetterboxd&&leftLetterboxd===rightLetterboxd)||(leftTmdb&&rightTmdb&&leftTmdb===rightTmdb);
- if(!shared&&incoming.id)return {ok:false,reason:'unrelated',survivor:existing,incoming};
+ const sameLetterboxd=leftLetterboxd&&rightLetterboxd&&leftLetterboxd===rightLetterboxd;
+ const sameTrusted=leftTrusted&&rightTrusted&&leftTrusted===rightTrusted;
+ const separate=incoming.id&&incoming.id!==existing.id;
+ if(separate&&!sameLetterboxd&&!sameTrusted&&evidence?.verified!==true)return {ok:false,reason:leftTmdb&&rightTmdb&&leftTmdb===rightTmdb?'unverified':'unrelated',survivor:existing,incoming};
  const trustedTmdb=leftTrusted||rightTrusted,tmdbId=trustedTmdb||leftTmdb||rightTmdb,letterboxdId=leftLetterboxd||rightLetterboxd;
  let identity=existing.identity;
  if(trustedTmdb&&identity?.status!=='resolved'){const moved=transition(identity,'resolved',{updatedAt:at,source:'link',sourceVersion:'tmdb:'+trustedTmdb,provenance:{letterboxdId,tmdbId:trustedTmdb},nextAction:'stop'});if(moved.ok)identity=moved.state;}
  let localization=existing.localization,localizationConflicts=[...(existing.localizationConflicts||[])];
  if(incoming.localization?.status==='reviewed'&&localization?.status!=='reviewed'){const moved=transition(localization,'reviewed',{updatedAt:at,source:incoming.localization.source,sourceVersion:incoming.localization.sourceVersion,provenance:incoming.localization.provenance,value:incoming.localization.value,nextAction:'keep_reviewed'});if(moved.ok)localization=moved.state;}
- else if(incoming.localization?.value&&incoming.localization.value!==localization?.value&&localization?.status==='reviewed')localizationConflicts.push({value:incoming.localization.value,source:incoming.localization.source||null,provenance:incoming.localization.provenance??null,at:stamp(at),reason:'link_kept_survivor'});
- const redirect=incoming.id&&incoming.id!==existing.id?{from:incoming.id,to:existing.id,at:stamp(at)}:null;
+ else if(incoming.localization?.value&&incoming.localization.value!==localization?.value&&localization?.status==='reviewed')rememberConflict(localizationConflicts,{value:incoming.localization.value,source:incoming.localization.source||null,provenance:incoming.localization.provenance??null,at:stamp(at),reason:'link_kept_survivor'});
+ const redirect=separate?{from:incoming.id,to:existing.id,at:stamp(at)}:null;
  const predictionHistory=[...(existing.predictionHistory||[])];
- for(const entry of incoming.predictionHistory||[])if(!predictionHistory.includes(entry))predictionHistory.push(entry);
- if(incoming.prediction&&incoming.prediction!==existing.prediction)predictionHistory.push({prediction:incoming.prediction,from:incoming.id||null,replacedAt:stamp(at)});
- const survivor={...existing,externalIds:mergeExternal(existing.externalIds,[letterboxdId&&{scheme:'letterboxd',value:letterboxdId,trusted:true,conflicting:false,provenance:null},tmdbId&&{scheme:'tmdb',value:tmdbId,trusted:!!trustedTmdb,conflicting:false,provenance:null},...(incoming.externalIds||[])].filter(Boolean)),aliases:mergeAliases(existing.aliases,incoming.aliases||[]),canonicalIdentity:trustedTmdb?'tmdb:'+trustedTmdb:existing.canonicalIdentity||null,identity,localization,localizationConflicts,fingerprint:existing.fingerprint,prediction:existing.prediction,metadata:existing.metadata,predictionHistory,redirects:[...(existing.redirects||[]),...(redirect?[redirect]:[])]};
+ for(const entry of incoming.predictionHistory||[])remember(predictionHistory,entry);
+ if(incoming.prediction&&incoming.prediction!==existing.prediction)remember(predictionHistory,{prediction:incoming.prediction,from:incoming.id||null,replacedAt:stamp(at)});
+ const survivor={...existing,externalIds:mergeExternal(existing.externalIds,[letterboxdId&&{scheme:'letterboxd',value:letterboxdId,trusted:true,conflicting:false,provenance:null},tmdbId&&{scheme:'tmdb',value:tmdbId,trusted:!!trustedTmdb,conflicting:false,provenance:null},...(incoming.externalIds||[])].filter(Boolean)),aliases:mergeAliases(existing.aliases,incoming.aliases||[]),canonicalIdentity:trustedTmdb?'tmdb:'+trustedTmdb:existing.canonicalIdentity||null,identity,localization,localizationConflicts,fingerprint:existing.fingerprint,prediction:existing.prediction,metadata:existing.metadata,predictionHistory,redirects:rememberRedirect([...(existing.redirects||[])],redirect)};
  return {ok:true,survivor,redirect,preserved:{fingerprint:incoming.fingerprint&&incoming.fingerprint!==existing.fingerprint?incoming.fingerprint:null,prediction:incoming.prediction&&incoming.prediction!==existing.prediction?incoming.prediction:null,predictionHistory:incoming.predictionHistory||[]}};
 }
 function invalidatePredictionForProfile(film,profile,at){
