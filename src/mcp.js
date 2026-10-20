@@ -133,7 +133,7 @@ function mcpCapacity(value,allowQuota){
 }
 function mcpPayload(httpStatus,body){
  const payload=mcpIsObject(body)?{httpStatus,...body}:{httpStatus,result:body};
- const failed=httpStatus>=500||httpStatus===400||httpStatus===404||httpStatus===503;
+ const failed=httpStatus>=500||httpStatus===400||httpStatus===404||httpStatus===409||httpStatus===503;
  return {result:{content:[{type:'text',text:JSON.stringify(payload)}],structuredContent:payload,...(failed?{isError:true}:{})}};
 }
 async function mcpFromResponse(response){

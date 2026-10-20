@@ -33,7 +33,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 
 ### Tools
 
-`probe_read` and `probe_echo` do not read or write R2. Every other tool returns `structuredContent.httpStatus` plus the JSON body of the existing HTTP contract. `httpStatus` 409 is a runner result, not a transport failure: `already_running` means stop and do not adopt that `runId`. `400`, `404`, `503`, and `5xx` set `isError`.
+`probe_read` and `probe_echo` do not read or write R2. Every other tool returns `structuredContent.httpStatus` plus the JSON body of the existing HTTP contract. `400`, `404`, `409`, `503`, and `5xx` set `isError`, and the body stays in `structuredContent` so the caller can still read `Run id mismatch`, `lease_lost`, `busy`, or `Queue not empty`. `already_running` is HTTP 200: stop and do not adopt that `runId`.
 
 | Tool | Writes | What it calls |
 | --- | --- | --- |
@@ -103,20 +103,18 @@ Saving a variable publishes a new Worker version. That is a production environme
 This repository change does not modify Cloudflare Access. Each item below must be confirmed by the owner, and any change needs separate approval. Do not add Bypass or Everyone policies, service-token shortcuts, or exceptions to `All Workers` to make discovery work.
 
 1. **`IPTV MCP` application.** Destination `iptv.vladimino.workers.dev/mcp`, owner-only Allow policy, Managed OAuth on. Cloudflare recommends a short access-token lifetime (5–15 minutes) with a longer grant session (1–2 weeks) for agents.
-2. **Redirect URI for dynamic client registration.** ChatGPT registers itself through DCR. Access accepts only redirect URIs on the Managed OAuth allow-list (Advanced settings → Allowed redirect URIs). Add the exact callback that ChatGPT shows in the connector form. It is either `https://chatgpt.com/connector/oauth/<callback_id>`, or `https://chatgpt.com/connector_platform_oauth_redirect` when the authorization server advertises RFC 9207 issuer identification (`authorization_response_iss_parameter_supported: true`). Prefer the exact URI to a `/*` wildcard. Without this entry, registration or the authorization redirect fails.
+2. **Redirect URI for dynamic client registration.** ChatGPT registers itself through DCR. Access accepts only redirect URIs on the Managed OAuth allow-list (Advanced settings → Allowed redirect URIs). The connected IPTV Watchlist server already has its callback on that list. A new client would use the exact callback ChatGPT shows, either `https://chatgpt.com/connector/oauth/<callback_id>` or `https://chatgpt.com/connector_platform_oauth_redirect` when the authorization server advertises RFC 9207 issuer identification (`authorization_response_iss_parameter_supported: true`). Prefer the exact URI to a `/*` wildcard.
 3. **RFC 8707 resource indicator.** Access Managed OAuth rejects `/authorize` without `resource` (`invalid_target`). ChatGPT sends the `resource` value from the protected-resource metadata on both the authorization and token requests. That value must be exactly `https://iptv.vladimino.workers.dev/mcp`, with no trailing slash, and the ChatGPT server URL must be the same string.
 4. **Discovery reachability on a path-scoped application.** `IPTV MCP` covers only `/mcp`, while `All Workers` covers the rest of the hostname, including `/.well-known/*`. Cloudflare documents that Access serves the challenge and `/.well-known/oauth-authorization-server` for a Managed OAuth application. It does not document which application answers well-known URLs outside the protected path. The 401 challenge must point to metadata that Access serves without an `All Workers` login redirect. Verify this with step 1 of the procedure below. If any discovery URL returns an HTML login page or a `302`, discovery is blocked. Stop and choose a fix with the owner. Possible options, each needing approval and a check against current Cloudflare documentation: an additional `IPTV MCP` destination for the metadata path, or a dedicated hostname for the same Worker that `IPTV MCP` covers entirely.
 5. **Authorization-server metadata.** It must include `registration_endpoint`, `code_challenge_methods_supported` with `S256`, and `token_endpoint_auth_methods_supported` with `none`. If it does not advertise `client_id_metadata_document_supported`, choose DCR in ChatGPT, not CIMD.
 
 ## Connecting ChatGPT
 
-Prerequisites: this change is merged and deployed, both variables are set, and every Access requirement above is confirmed.
+The connector is already connected. On 19–20 October 2026 ChatGPT on the web called `probe_read` and `probe_echo` through `https://iptv.vladimino.workers.dev/mcp` with Managed OAuth. That confirms interactive sign-in. It does not confirm unattended token refresh, and it does not confirm an EPG or prediction run.
 
-1. In ChatGPT on the web, add a custom MCP server ([OpenAI guide](https://developers.openai.com/api/docs/guides/custom-mcp-server)). The workspace must allow custom MCP servers.
-2. Server URL: `https://iptv.vladimino.workers.dev/mcp`. Authentication: OAuth. Leave the client ID and secret empty so ChatGPT uses dynamic client registration.
-3. Copy the callback URL shown in the form. The owner adds it to the `IPTV MCP` Allowed redirect URIs (requirement 2) before continuing.
-4. Create the server and sign in through the Cloudflare Access page with the owner identity.
-5. Refresh the tools. The list must be exactly `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `enrichment_status`, `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`.
+After this change is deployed, refresh the tools on that server. The list must be exactly `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `enrichment_status`, `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`. Do not call the write tools against production until AIR-62.
+
+To connect a replacement server, use the same URL and OAuth with an empty client ID and secret, sign in as the owner, and confirm the callback is on the `IPTV MCP` redirect allow-list (requirement 2).
 
 ## Safe verification procedure
 
@@ -132,7 +130,7 @@ These checks contact production only through Cloudflare Access and the two probe
    ```
 
    Expect `401` with `WWW-Authenticate: Bearer … resource_metadata="…"`. Fetch that `resource_metadata` URL with `curl -sS`: expect JSON whose `resource` is exactly `https://iptv.vladimino.workers.dev/mcp` and which lists `authorization_servers`. Fetch `<issuer>/.well-known/oauth-authorization-server` for that issuer and check requirement 5. Record whether `authorization_response_iss_parameter_supported` is `true`. Any HTML, `302`, or `403` here means discovery is blocked (requirement 4). Stop.
-2. Connect ChatGPT as described above.
+2. Use the connected ChatGPT server described above.
 3. In a chat, ask ChatGPT to call `probe_read` from this server. Expect `status: ok`, `storage: not_accessed`, `sideEffects: none`.
 4. Ask it to call `probe_echo` with a marker such as `mcp-probe-2026-10-19`. Expect the identical text back.
 5. Repeat step 1. The unauthenticated request must still get `401` from Access.
@@ -158,7 +156,7 @@ Acceptance criteria, checked after the safe verification procedure passes:
 - Probe tools do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. Enabling Scheduled Tasks is AIR-62.
 - No SSE, sessions, server-to-client requests, `list_changed` notifications, resources, prompts, or batches. Clients that support only `2026-07-28` are not supported.
 - The origin allow-list is fixed in code: the Worker's own origin and `https://chatgpt.com`.
-- Managed OAuth is in open beta. The end-to-end flow between ChatGPT and Access has not been exercised from this repository, because no production requests were made. Treat the safe verification procedure as the acceptance test for the interactive connection, and the next-stage criteria as the acceptance test for unattended runs.
+- Managed OAuth interactive access is confirmed: ChatGPT called `probe_read` and `probe_echo` through the connected server. Unattended refresh after the access token expires, and any real EPG or prediction run, have not passed. Those remain the next-stage criteria, and enabling the tasks is AIR-62.
 - The first request after a cold start fetches Access signing keys from the team domain. If they are unreachable, the endpoint returns `503`.
 
 ## Rollback
