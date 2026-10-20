@@ -24,7 +24,7 @@ const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',EPG_XML_URL:'https://
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,
  ASSETS:{'/':{body:'<!doctype html>',type:'text/html'}},INITIAL_PERSONAL_RATINGS:{w1:4},
  fetch:async input=>{const url=String(input instanceof Request?input.url:input);fetches.push(url);return url.startsWith('https://api.themoviedb.org/3/movie/11')?new Response('{"id":11}'):new Response('unexpected',{status:599});}});
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/migration-export.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/migration-export.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const constant=name=>vm.runInContext(name,context);
 const execution={waitUntil:()=>{background++;},exports:{DiscoveryContinuation:{fetch:async()=>{dispatches++;return new Response('{}');}}}};
 

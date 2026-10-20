@@ -435,6 +435,54 @@ function showProgrammeUnavailable(error){
 async function registerModelTool(){
  if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},query:{type:'string',description:'Part of the Russian or original title, case insensitive'},period:{type:'string',enum:['all','archive','future']},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
 }
+let presets=[],presetsEtag='"none"',presetEditor=null,presetPrompt=null,presetStatus='',presetSaving=false;
+function presetQuery(){return urlForState('https://iptv.example/').searchParams.toString();}
+function applyPresetQuery(query){
+ const url=new URL(window.location.href);
+ for(const key of APP_QUERY_KEYS)url.searchParams.delete(key);
+ for(const [key,value] of new URLSearchParams(String(query||'')))if(APP_QUERY_KEYS.includes(key))url.searchParams.append(key,value);
+ window.history.replaceState(window.history.state,'',url.pathname+url.search+url.hash);
+ restoreUrl();
+ syncUrl();
+}
+function renderPresets(){
+ const list=$('#preset-list'),empty=$('#presets-empty'),status=$('#preset-status'),editor=$('#preset-editor');
+ if(!list||!empty||!status)return;
+ empty.hidden=presets.length>0;
+ status.textContent=presetStatus;
+ if(editor)editor.hidden=!presetEditor;
+ list.innerHTML=presets.map(preset=>{
+  const prompt=presetPrompt?.id===preset.id;
+  const actions=prompt?`<p class="preset-confirm">${presetPrompt.action==='delete'?'Удалить этот сценарий?':'Заменить сохранённые условия текущими?'}</p><button type="button" data-preset-confirm="${presetPrompt.action}">Да</button><button type="button" data-preset-dismiss>Нет</button>`:`<button type="button" data-preset-rename>Переименовать</button><button type="button" data-preset-update>Обновить</button><button type="button" data-preset-delete>Удалить</button>`;
+  return `<li class="preset-row"><button type="button" class="preset-apply" data-preset-apply="${escapeHTML(preset.id)}">${escapeHTML(preset.name)}</button><details class="preset-actions"${prompt?' open':''}><summary aria-label="Действия: ${escapeHTML(preset.name)}">⋯</summary><div>${actions}</div></details></li>`;
+ }).join('');
+}
+async function loadPresets(){
+ try{const response=await fetch('/api/ui/filter-presets');if(!response.ok)throw new Error();const data=await response.json();presets=Array.isArray(data.presets)?data.presets:[];presetsEtag=response.headers.get('ETag')||'"none"';}
+ catch{presetStatus='Не удалось загрузить сценарии.';}
+ renderPresets();
+}
+async function sendPreset(method,path,body){
+ if(presetSaving)return false;
+ presetSaving=true;
+ try{
+  const headers={'If-Match':presetsEtag},options={method,headers};
+  if(body){headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
+  const response=await fetch(path,options);
+  if(response.status===412){await loadPresets();presetStatus='Сценарии изменились на другом устройстве. Список обновлён — повтори действие.';renderPresets();return false;}
+  if(!response.ok){presetStatus=response.status===400?'Проверь название или число сценариев: их может быть не больше 30.':'Не удалось сохранить сценарий.';renderPresets();return false;}
+  const data=await response.json();
+  presets=Array.isArray(data.presets)?data.presets:presets;
+  presetsEtag=response.headers.get('ETag')||presetsEtag;
+  presetStatus='';presetEditor=null;presetPrompt=null;renderPresets();
+  return true;
+ }catch{presetStatus='Не удалось сохранить сценарий.';renderPresets();return false;}
+ finally{presetSaving=false;}
+}
+function createPreset(name){return sendPreset('POST','/api/ui/filter-presets',{name,query:presetQuery()});}
+function renamePreset(id,name){return sendPreset('PATCH','/api/ui/filter-presets/'+encodeURIComponent(id),{name});}
+function updatePreset(id){return sendPreset('PATCH','/api/ui/filter-presets/'+encodeURIComponent(id),{query:presetQuery()});}
+function deletePreset(id){return sendPreset('DELETE','/api/ui/filter-presets/'+encodeURIComponent(id));}
 function bindControls(){
  if(controlsReady)return;
  controlsReady=true;
@@ -472,6 +520,20 @@ function bindControls(){
  const statusDetails=$('#status-details');statusDetails.addEventListener('toggle',()=>{$('#status-details-label').textContent=statusDetails.open?'Скрыть детали':'Показать детали';});
  $('#status-events-link').addEventListener('click',()=>{const filters=$('#filters'),toggle=$('#filter-toggle');filters.dataset.open='true';toggle.setAttribute('aria-expanded','true');requestAnimationFrame(()=>{document.querySelector('.activity-scroll').focus({preventScroll:true});$('#activity-title').scrollIntoView({behavior:'smooth',block:'start'});});});
  $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>loadEvents(true));
+ const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
+ const presetEditorForm=$('#preset-editor');if(presetEditorForm)presetEditorForm.addEventListener('submit',event=>{event.preventDefault();const name=$('#preset-name').value;if(presetEditor?.mode==='rename')renamePreset(presetEditor.id,name);else createPreset(name);});
+ const presetCancel=$('#preset-cancel');if(presetCancel)presetCancel.addEventListener('click',()=>{presetEditor=null;renderPresets();});
+ const presetList=$('#preset-list');if(presetList)presetList.addEventListener('click',event=>{
+  const apply=event.target.closest?.('[data-preset-apply]');
+  if(apply){const preset=presets.find(item=>item.id===apply.dataset.presetApply);if(preset)applyPresetQuery(preset.query);return;}
+  const id=event.target.closest?.('.preset-row')?.querySelector('[data-preset-apply]')?.dataset.presetApply;
+  if(event.target.closest?.('[data-preset-rename]')){presetEditor={mode:'rename',id};presetPrompt=null;renderPresets();const input=$('#preset-name');if(input){input.value=presets.find(item=>item.id===id)?.name||'';input.focus();}}
+  else if(event.target.closest?.('[data-preset-update]')){presetPrompt={id,action:'update'};renderPresets();}
+  else if(event.target.closest?.('[data-preset-delete]')){presetPrompt={id,action:'delete'};renderPresets();}
+  else if(event.target.closest?.('[data-preset-dismiss]')){presetPrompt=null;renderPresets();}
+  else if(event.target.closest?.('[data-preset-confirm="update"]'))updatePreset(id);
+  else if(event.target.closest?.('[data-preset-confirm="delete"]'))deletePreset(id);
+ });
 }
 async function finishProgrammeUi(){
  if(programmeReady)return;
@@ -563,6 +625,7 @@ async function init(){
  try{await loadProgramme();}
  catch(error){showProgrammeUnavailable(error);console.error(error);}
  loadStarted();
+ loadPresets();
  loadEvents();
  loadEnrichment();
  loadPredictionQueue();

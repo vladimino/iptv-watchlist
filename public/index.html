@@ -16,6 +16,13 @@
       <button class="filter-toggle" id="filter-toggle" aria-expanded="false" aria-controls="filters">Фильтры <span id="filter-summary">Все фильмы</span></button>
       <aside class="filters" id="filters" aria-label="Фильтры фильмов">
         <div class="filter-title"><h2>Фильтры</h2><button class="reset" id="reset">Сбросить</button></div>
+        <section class="presets" aria-labelledby="presets-title">
+          <div class="presets-head"><h2 id="presets-title">Сценарии</h2><button type="button" id="preset-save">Сохранить текущий</button></div>
+          <p id="presets-empty" class="hint">Пока нет сохранённых сценариев. Сохрани текущие фильтры под именем.</p>
+          <ul id="preset-list" class="preset-list"></ul>
+          <form id="preset-editor" hidden><input id="preset-name" maxlength="80" aria-label="Название сценария" placeholder="Название" autocomplete="off" required><button type="submit" id="preset-confirm">Сохранить</button><button type="button" id="preset-cancel">Отмена</button></form>
+          <p id="preset-status" class="hint" role="status"></p>
+        </section>
         <label class="started-filter"><input id="started-only" type="checkbox" disabled><span>Только начатые</span></label>
         <label class="started-filter"><input id="last-chance-only" type="checkbox"><span>Последний шанс</span></label>
         <fieldset class="viewing-filter"><legend>Просмотр</legend><div class="viewing-options" role="group" aria-label="Первый просмотр или пересмотр"><button type="button" data-viewing="new" aria-pressed="false" disabled>Новые</button><button type="button" data-viewing="rewatch" aria-pressed="false" disabled>Пересмотр</button><button type="button" data-viewing="any" aria-pressed="true">Любые</button></div></fieldset>
