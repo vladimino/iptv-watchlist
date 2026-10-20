@@ -1,0 +1,54 @@
+{
+  "films": [
+    {
+      "id": "movie-1",
+      "title": "Movie1",
+      "original": "Movie1",
+      "year": 2020,
+      "runtime": 100,
+      "genres": ["Genre1"],
+      "synopsis": "Dummy synopsis for Movie1.",
+      "directors": [{"id": "director-1", "name": "Director1", "original": "Director1"}],
+      "actors": [{"id": "actor-1", "name": "Actor1", "original": "Actor1"}],
+      "shows": [
+        {"offsetHours": -5, "durationHours": 2, "channel": "Channel1", "channelId": "channel-1"},
+        {"offsetHours": 3, "durationHours": 2, "channel": "Channel1", "channelId": "channel-1"}
+      ],
+      "started": true,
+      "actualRating": 4.5,
+      "mechanics": ["heist"],
+      "moods": ["tense"],
+      "execution": {"pace": "fast", "decision_logic": "strong", "payoff": "strong"}
+    },
+    {
+      "id": "movie-2",
+      "title": "Movie2",
+      "original": "Movie2",
+      "year": 2018,
+      "runtime": 120,
+      "genres": ["Genre2"],
+      "synopsis": "Dummy synopsis for Movie2.",
+      "directors": [{"id": "director-1", "name": "Director1", "original": "Director1"}],
+      "actors": [{"id": "actor-2", "name": "Actor2", "original": "Actor2"}],
+      "shows": [
+        {"offsetHours": 6, "durationHours": 2, "channel": "Channel1", "channelId": "channel-1"}
+      ],
+      "prediction": {"predictedRating": 4, "probability4Plus": 0.7, "confidence": "medium", "matchSignals": ["Genre2"], "mainRisk": "Dummy risk"},
+      "mechanics": ["rescue"],
+      "moods": ["light"],
+      "execution": {"pace": "slow", "decision_logic": "mixed", "payoff": "weak"}
+    },
+    {
+      "id": "movie-3",
+      "title": "Movie3",
+      "original": "Movie3",
+      "year": 2024,
+      "runtime": 90,
+      "genres": ["Genre1", "Genre2"],
+      "synopsis": "Dummy synopsis for Movie3. It has no broadcasts.",
+      "directors": [{"id": "director-1", "name": "Director1", "original": "Director1"}],
+      "actors": [{"id": "actor-1", "name": "Actor1", "original": "Actor1"}, {"id": "actor-2", "name": "Actor2", "original": "Actor2"}],
+      "shows": []
+    }
+  ]
+}

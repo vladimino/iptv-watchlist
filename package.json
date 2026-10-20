@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
+    "dev": "node scripts/local-dev.mjs",
     "test": "node scripts/run-tests.mjs",
     "smoke": "node scripts/smoke-check.mjs"
   },

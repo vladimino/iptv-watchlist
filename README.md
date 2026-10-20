@@ -23,6 +23,14 @@ npm test
 npm run build
 ```
 
+Local browsing uses dummy films from the repository and a gitignored local R2 store. `npm run dev` builds the Worker when the bundle is missing or older than the sources. See [docs/local-setup.md](docs/local-setup.md).
+
+```bash
+npm run dev
+```
+
+A machine that has the private export can point `.local-dev.json` at it. That file is gitignored. The script does not change production R2.
+
 Configure the deployment environment rather than committing values:
 
 - `LETTERBOXD_USERNAME` — public Letterboxd account whose watchlist is read.
