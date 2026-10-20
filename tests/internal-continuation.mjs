@@ -116,6 +116,24 @@ assert.equal(changed.stage,'programme_changed');assert.equal(changed.discovery.n
 assert.equal(continuation().reason,'programme_changed');assert.equal(records.get('epg/discovery-status.json').programmeRunId,'run-1');
 assert.equal(records.has(vm.runInContext('predictionQueueKey',context)),false);
 
+// wait without a stored timestamp must call nextCatchUpAt(), not the shadowed null.
+for(const source of ["{stage:'error',reason:'discovery_failed',remainingChunks:4}","{stage:'paused',reason:'chunk_budget',remainingChunks:0}"]){
+ const waiting=vm.runInContext('discoveryContract('+source+')',context);
+ assert.equal(waiting.nextAction,'wait');assert.match(waiting.nextCatchUpAt,/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,source);
+}
+const busyWithoutTime=vm.runInContext("discoveryContract({stage:'paused',remainingChunks:2},{state:'busy',nextAction:'wait',reason:'busy'})",context);
+assert.equal(busyWithoutTime.nextAction,'wait');assert.match(busyWithoutTime.nextCatchUpAt,/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+
+// A cheap pass with nothing to screen or touch still replaces the previous status before TMDB work.
+seed(1);records.set('epg/discovery-status.json',{schemaVersion:2,stage:'partial',programmeRunId:'old-programme',checked:5,at:'2026-10-11T20:29:24.482Z'});
+const originalPut=bucket.put.bind(bucket);let statusPuts=0;
+bucket.put=async(key,value,options)=>{if(key==='epg/discovery-status.json'&&++statusPuts===2)throw new Error('killed before final status');return originalPut(key,value,options);};
+try{await (await call('/api/enrichment/discovery/resolve',{limit:1})).json();}finally{bucket.put=originalPut;}
+const cheapPass=records.get('epg/discovery-status.json');
+assert.equal(cheapPass.checkpoint,'cheap_pass');assert.equal(cheapPass.programmeRunId,'run-1');
+assert.equal(cheapPass.touched,0);assert.equal(cheapPass.screenedOut,0);assert.equal(cheapPass.reused,0);assert.equal(cheapPass.checked,0);
+assert.notEqual(cheapPass.at,'2026-10-11T20:29:24.482Z');assert.notEqual(cheapPass.programmeRunId,'old-programme');
+
 // The entrypoint accepts only a well-formed hop and rejects everything else before touching R2.
 seed(5);
 const internal=(init,path='/discovery/continue',bindings=env)=>entrypoint.fetch(new Request('https://iptv.internal'+path,init),bindings,invocation());

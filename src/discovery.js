@@ -46,7 +46,7 @@ async function resolveDiscoveryChunk(env,report,limit){
   const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate);indexFilm(films[key]);touched++;}}
  }
  if(touched||migrated)await saveJSON(env,'epg/discovered-films.json',films);if(screenedOut||knownAliases)await saveJSON(env,'epg/discovery-resolution.json',decisions);
- if(touched||migrated||screenedOut||knownAliases)await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
+ await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
  const now=Date.now(),pending=source.items.filter(c=>discoveryReady(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
  pending.sort((a,b)=>hotRank.get(b)-hotRank.get(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
  let checked=0,added=0,reused=0,tmdbCalls=0,error=null,retryAt=null;
@@ -93,14 +93,14 @@ function discoveryContract(record,override={}){
  const reason=override.reason!==undefined?override.reason:record?.reason??null;
  const remainingChunks=override.remainingChunks!==undefined?override.remainingChunks:record?.remainingChunks??0;
  const retryAt=override.retryAt!==undefined?override.retryAt:record?.retryAt??null;
- const nextCatchUpAt=override.nextCatchUpAt!==undefined?override.nextCatchUpAt:record?.nextCatchUpAt??null;
+ const catchUpAt=override.nextCatchUpAt!==undefined?override.nextCatchUpAt:record?.nextCatchUpAt??null;
  let nextAction=override.nextAction;
  if(!nextAction){
   if(state==='busy'||reason==='chunk_budget'||reason==='backoff'||state==='error')nextAction='wait';
   else if(state==='complete'||['programme_changed','missing_secret','idle'].includes(reason)||remainingChunks<=0)nextAction='stop';
   else nextAction='continue';
  }
- return {state,remainingChunks,nextAction,reason:reason||null,at:override.at||record?.at||null,nextCatchUpAt:nextAction==='wait'?(nextCatchUpAt||nextCatchUpAt()):nextCatchUpAt,retryAt:retryAt||null,programmeRunId:override.programmeRunId!==undefined?override.programmeRunId:record?.programmeRunId??null};
+ return {state,remainingChunks,nextAction,reason:reason||null,at:override.at||record?.at||null,nextCatchUpAt:nextAction==='wait'?(catchUpAt||nextCatchUpAt()):catchUpAt,retryAt:retryAt||null,programmeRunId:override.programmeRunId!==undefined?override.programmeRunId:record?.programmeRunId??null};
 }
 function continuationDecision(current,now){
  if(!current)return {run:true,budget:DISCOVERY_CHUNK_BUDGET};
