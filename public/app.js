@@ -95,7 +95,13 @@ function filterStateKey(snapshot=state){
  for(const dimension of EXECUTION_FILTERS)execution[dimension.id]=[...(snapshot.execution?.[dimension.id]||[])].sort();
  return JSON.stringify({shortlistMode:snapshot.shortlistMode,period:snapshot.period,sort:snapshot.sort,viewing:snapshot.viewing,minPrediction:snapshot.minPrediction,minProbability:snapshot.minProbability,startedOnly:!!snapshot.startedOnly,lastChanceOnly:!!snapshot.lastChanceOnly,includeUnscheduled:!!snapshot.includeUnscheduled,directors:snapshot.directors||'',actors:snapshot.actors||'',query:snapshot.query||'',genres:[...(snapshot.genres||[])].sort(),mechanics:[...(snapshot.mechanics||[])].sort(),moods:[...(snapshot.moods||[])].sort(),channels:[...(snapshot.channels||[])].sort(),execution,from:snapshot.from,to:snapshot.to,maxRuntime:snapshot.maxRuntime});
 }
-function eventsRequested(href=window.location.href){return new URL(href).searchParams.get('screen')==='events';}
+const FILM_QUERY_KEY='iptv-film-list-query';
+function eventsRequested(href=window.location.href){const url=new URL(href);if(url.searchParams.get('screen')==='events')return true;const path=url.pathname.replace(/\/+$/,'')||'/';return path==='/events';}
+function filmSearchFrom(href){const url=new URL(href);url.searchParams.delete('screen');return url.search;}
+function filmQueryStore(name){try{return globalThis[name]||null;}catch{return null;}}
+function writeFilmQuery(search){for(const name of ['sessionStorage','localStorage']){try{filmQueryStore(name)?.setItem(FILM_QUERY_KEY,search);}catch{}}}
+function readFilmQuery(){try{const session=filmQueryStore('sessionStorage');if(session){const value=session.getItem(FILM_QUERY_KEY);if(value!==null)return value;}}catch{}try{return filmQueryStore('localStorage')?.getItem(FILM_QUERY_KEY)||'';}catch{return '';}}
+function rememberFilmList(){if(eventsScreen||eventsRequested())return;writeFilmQuery(filmSearchFrom(window.location.href));}
 let eventsScreen=false,movieScrollY=0,eventsTrigger=null;
 function applyEventsScreen(on){
  if(on&&!eventsScreen)movieScrollY=window.scrollY||0;
@@ -108,29 +114,32 @@ function applyEventsScreen(on){
 }
 function openEventsScreen(trigger){
  eventsTrigger=trigger||$('#activity-expand');
- const url=new URL(window.location.href);
- if(url.searchParams.get('screen')!=='events'){url.searchParams.set('screen','events');window.history.pushState(window.history.state,'',url.pathname+url.search+url.hash);}
+ if(!eventsRequested()){rememberFilmList();window.history.pushState(window.history.state,'','/events');}
+ else if(new URL(window.location.href).searchParams.get('screen')==='events'){writeFilmQuery(filmSearchFrom(window.location.href));window.history.replaceState(window.history.state,'','/events');}
  applyEventsScreen(true);
  $('#activity-title')?.focus?.({preventScroll:true});
 }
 function closeEventsScreen(){
- const url=new URL(window.location.href);
- url.searchParams.delete('screen');
- window.history.replaceState(window.history.state,'',url.pathname+url.search+url.hash);
+ const search=readFilmQuery();
+ const next='/'+(search.startsWith('?')||!search?search:'?'+search);
+ window.history.pushState(window.history.state,'',next);
  applyEventsScreen(false);
+ restoreUrl();
  (eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
 }
 function onHistoryNavigation(){
- const next=readUrlState(new URL(window.location.href));
- if(filterStateKey(next)!==filterStateKey(state))restoreUrl();
- if(eventsRequested()!==eventsScreen)applyEventsScreen(eventsRequested());
+ const onEvents=eventsRequested();
+ if(!onEvents){const next=readUrlState(new URL(window.location.href));if(filterStateKey(next)!==filterStateKey(state))restoreUrl();}
+ if(onEvents!==eventsScreen)applyEventsScreen(onEvents);
  if(eventsScreen)$('#activity-title')?.focus?.({preventScroll:true});
  else (eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
 }
 function syncUrl(){
- if(!urlReady||urlRestoring||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
+ if(!urlReady||urlRestoring||eventsRequested()||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
  const next=urlForState(window.location.href);
- if(next.href!==window.location.href)window.history.replaceState(window.history.state,'',next.pathname+next.search+next.hash);
+ const target=next.pathname+next.search+next.hash,current=window.location.pathname+window.location.search+window.location.hash;
+ if(target!==current)window.history.replaceState(window.history.state,'',target);
+ writeFilmQuery(next.search);
 }
 function restoreUrl(){
  urlRestoring=true;
@@ -690,7 +699,7 @@ function stopLiveRefresh(){
 }
 async function init(){
  bindControls();
- if(eventsRequested())applyEventsScreen(true);
+ if(eventsRequested()){const here=new URL(window.location.href);if((here.pathname.replace(/\/+$/,'')||'/')!=='/events'){writeFilmQuery(filmSearchFrom(here.href));window.history.replaceState(window.history.state,'','/events');}applyEventsScreen(true);}
  setYearBounds(true);
  try{await loadProgramme();}
  catch(error){showProgrammeUnavailable(error);console.error(error);}

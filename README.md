@@ -60,7 +60,7 @@ The EPG resolver works in bounded chunks. The EPG commit records a paused discov
 
 ## Events
 
-«События» can open across the main column without leaving the page. The address gains `screen=events`; filters, search, and sort stay in the same parameters and are not stored inside a preset. Back and Forward switch between the films and that wider list. «К фильмам» removes only `screen` and returns to the same catalogue position. The list itself is the existing events feed, still updated by the one live refresh.
+«События» open at `/events`, a bookmarkable page of their own. The film list keeps its filters in its own address. Leaving the list remembers that query in the tab and, as a fallback, in the browser. «К фильмам» and Back put it back on `/`. An explicit film-list link wins over the remembered query. The screen is not stored in a preset. The list itself is the existing events feed, still updated by the one live refresh.
 
 ## Search
 
