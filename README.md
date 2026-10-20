@@ -6,7 +6,7 @@ Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV progr
 
 - `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal-only entrypoint for one discovery chunk. `src/mcp.js` is the MCP endpoint: connection probes plus the EPG and prediction tools.
 - `public/` — browser UI.
-- `data/` — reviewed public title/person dictionaries used at build time.
+- `data/` — reviewed public title/person dictionaries used at build time. How those records relate to watchlist films, discovered films, and people is audited in [docs/film-person-lifecycle.md](docs/film-person-lifecycle.md).
 - `tests/` — self-contained unit and contract tests.
 - `build.mjs` — dependency-free Worker bundle builder.
 - `.openai/hosting.json` — legacy Sites identity and R2 binding (contains no credential).
