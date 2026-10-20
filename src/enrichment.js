@@ -497,16 +497,12 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
    const at=new Date().toISOString();await saveJSON(env,'epg/discovery-latest.json',{...source,items:result.items,canonicalizedAt:at});await saveJSON(env,'epg/discovery-resolution.json',{...result.decisions,__canonicalizedAt:at});}
   return json({changed,before:source.items.length,after:result.items.length,duplicatesRemoved:result.duplicatesRemoved,carriedVerified:result.carriedVerified,retried:result.retried});
  }
- if(path==='/api/enrichment/discovery/resolve'&&request.method==='POST'){
-  if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24))return json({error:'Invalid limit'},400);
-  const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);
-  const result=await resolveDiscoveryBatch(env,report,body.limit||24);result.continuation=await continueDiscovery(request,env,execution,result,body);return json(result);
- }
+ if(path==='/api/enrichment/discovery/resolve'&&request.method==='POST')return await resolveDiscoveryRequest(env,execution,body);
  if(path==='/api/enrichment/discovery/scan'&&request.method==='POST'){
   const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);
-  const now=Date.now(),response=await fetch('https://example.invalid/epg.xml',{signal:AbortSignal.timeout(110000)});if(!response.ok)return json({error:'EPG HTTP '+response.status},502);
+  const now=Date.now(),response=await fetch(sourceConfig(env).epg,{signal:AbortSignal.timeout(110000)});if(!response.ok)return json({error:'EPG HTTP '+response.status},502);
   const cache=await loadJSON(env,'epg/discovered-films.json')||{},known=new Set(report.films.map(f=>String(f.tmdbId)));const result=await scanEPG(response.body,[...report.films,...Object.values(cache).filter(f=>!known.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now+8*3600000)return json({error:'EPG horizon too short'},502);
-  const old=await loadJSON(env,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery);await saveJSON(env,'epg/discovery-latest.json',{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items});await refreshPredictionQueue(env,report,'epg_scan');await continueDiscovery(request,env,execution,{remaining:1,stage:'ready'},body);return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned});
+  const old=await loadJSON(env,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery);await saveJSON(env,'epg/discovery-latest.json',{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items});await refreshPredictionQueue(env,report,'epg_scan');await continueDiscovery(env,execution,{remaining:1,stage:'ready'},body);return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned});
  }
  if(['/api/enrichment/discovery/status','/api/enrichment/pipeline/status'].includes(path)&&request.method==='GET')return json(await discoveryPipelineStatus(env));
  // Read-only audit export. No lazy rating initialization, source fetch, or enrichment generation.

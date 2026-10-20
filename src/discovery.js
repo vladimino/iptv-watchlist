@@ -1,5 +1,6 @@
 // EPG title resolution is independent of the usage-limited prediction runner.
 const DISCOVERY_LEASE_KEY='epg/resolver-lease.json';
+const DISCOVERY_CONTINUATION_URL='https://iptv.internal/discovery/continue';
 function filmIsHot(film,now=Date.now()){
  const from=now-72*3600000,to=now+24*3600000;
  if(Array.isArray(film.shows)&&film.shows.length)return film.shows.some(s=>s.start>=from&&s.start<to);
@@ -77,15 +78,20 @@ async function resolveDiscoveryChunk(env,report,limit){
  const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
  await saveJSON(env,'epg/discovery-status.json',summary);return summary;
 }
-async function continueDiscovery(request,env,execution,result,body={}){
+// Hops stay on the ctx.exports loopback: a public self-fetch meets Cloudflare Access and same-zone error 1042.
+async function continueDiscovery(env,execution,result,body={}){
  const chunks=Number.isInteger(body.chunks)?Math.min(12,Math.max(0,body.chunks)):12;
  if(!execution?.waitUntil||chunks===0||!result.remaining||result.retryAt||result.stage==='busy'){const reason=result.retryAt?'backoff':chunks===0?'chunk_budget':result.stage==='busy'?'busy':'idle';if(execution?.waitUntil&&result.stage!=='busy')await saveJSON(env,'epg/resolver-continuation.json',{stage:result.remaining?'paused':'complete',at:new Date().toISOString(),reason,remaining:result.remaining,retryAt:result.retryAt||null,nextCatchUpAt:result.remaining?nextCatchUpAt():null});return {scheduled:false,reason};}
- const authorization=env.EPG_SITE_SERVICE_TOKEN?'Bearer '+env.EPG_SITE_SERVICE_TOKEN:request.headers.get('OAI-Sites-Authorization'),cookie=request.headers.get('Cookie');
- if(!authorization&&!cookie){await saveJSON(env,'epg/resolver-continuation.json',{stage:'error',at:new Date().toISOString(),reason:'site_auth_unavailable',nextCatchUpAt:nextCatchUpAt()});return {scheduled:false,reason:'site_auth_unavailable'};}
- const headers={'Content-Type':'application/json',...(authorization?{'OAI-Sites-Authorization':authorization}:{}),...(cookie?{Cookie:cookie}:{})},url=new URL('/api/enrichment/discovery/resolve',request.url);
+ const loopback=execution.exports?.DiscoveryContinuation;
+ if(typeof loopback?.fetch!=='function'){await saveJSON(env,'epg/resolver-continuation.json',{stage:'error',at:new Date().toISOString(),reason:'internal_dispatch_unavailable',nextCatchUpAt:nextCatchUpAt()});return {scheduled:false,reason:'internal_dispatch_unavailable'};}
  await saveJSON(env,'epg/resolver-continuation.json',{stage:'scheduled',at:new Date().toISOString(),remainingChunks:chunks-1});
- execution.waitUntil((async()=>{try{const response=await fetch(url,{method:'POST',headers,body:JSON.stringify({limit:24,chunks:chunks-1}),redirect:'manual',signal:AbortSignal.timeout(29000)});if(!response.ok)throw new Error('continuation HTTP '+response.status);}catch(e){await saveJSON(env,'epg/resolver-continuation.json',{stage:'error',at:new Date().toISOString(),reason:String(e.message).slice(0,120),nextCatchUpAt:nextCatchUpAt()});}})());
+ execution.waitUntil((async()=>{try{const response=await loopback.fetch(DISCOVERY_CONTINUATION_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chunks:chunks-1}),signal:AbortSignal.timeout(29000)});if(!response.ok)throw new Error('continuation HTTP '+response.status);}catch(e){await saveJSON(env,'epg/resolver-continuation.json',{stage:'error',at:new Date().toISOString(),reason:String(e.message).slice(0,120),nextCatchUpAt:nextCatchUpAt()});}})());
  return {scheduled:true,remainingChunks:chunks-1};
+}
+async function resolveDiscoveryRequest(env,execution,body){
+ if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24))return json({error:'Invalid limit'},400);
+ const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);
+ const result=await resolveDiscoveryBatch(env,report,body.limit||24);result.continuation=await continueDiscovery(env,execution,result,body);return json(result);
 }
 async function discoveryPipelineStatus(env){
  const [source,decisions,catalog,last,queue,continuation,persistedQueue]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),queueStatus(env),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,predictionQueueKey)]);
