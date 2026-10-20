@@ -1,6 +1,6 @@
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 const html=fs.readFileSync('public/index.html','utf8'),css=fs.readFileSync('public/styles.css','utf8');
-assert(!html.includes('class="demo-note"'));assert(html.includes('class="footer-status"'));assert(!html.includes('archive-note'));assert(html.includes('id="archive-range"')&&html.includes('id="future-range"'));
+assert(!html.includes('class="demo-note"'));assert(html.includes('class="footer-status"'));assert(!html.includes('archive-note'));assert(html.includes('id="snapshot-coverage"'));assert(!html.includes('id="archive-range"'));assert(!html.includes('Europe/Madrid</span>'));
 assert(css.includes('.score-badge{')&&css.includes('clip-path:polygon('));assert(css.includes('.started-action{position:absolute;right:18px;bottom:16px'));
 const ctx=vm.createContext({Date,Intl,Set,Map,document:{querySelector:()=>({})}});vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 ctx.film={id:'one',title:'Фильм',original:'Film',year:2020,runtime:120,genres:['Драма'],shows:[],directors:[],actors:[]};

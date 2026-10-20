@@ -26,7 +26,8 @@ ui.items=[
  {id:'eight',title:'В',availableUntil:new Date(now+8*hour+60000).toISOString()},
  {id:'expired',title:'Г',availableUntil:new Date(now-hour).toISOString()},
  {id:'unknown',title:'Д',availableUntil:null}
-].map(f=>({...f,original:f.title,year:2020,genres:['Драма'],runtime:90,directors:[],actors:[],shows:[{offset:-1}]}));
+].map(f=>{const until=Date.parse(f.availableUntil||'');const start=Number.isFinite(until)?until-72*hour:null;return {...f,original:f.title,year:2020,genres:['Драма'],runtime:90,directors:[],actors:[],shows:start===null?[]:[{start,end:start+2*hour}]};});
+vm.runInContext(`viewClock=${now}`,ui);
 assert.equal(vm.runInContext('isLastChance(items[0],now)',ui),true);
 assert.equal(vm.runInContext('isLastChance(items[1],now)',ui),true);
 assert.equal(vm.runInContext('isLastChance({...items[2],availableUntil:new Date(now+8*3600000).toISOString()},now)',ui),false,'Exactly eight hours is not less than eight');

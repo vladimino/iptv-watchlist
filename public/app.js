@@ -33,8 +33,33 @@ function moodIdsFromUrl(value){const key=normalizeMood(value).replace(/ё/g,"е"
 let mechanics=[],moods=[];
 const state = { shortlistMode:'now', period: 'all', sort: 'title', sortExplicit:false, viewing: 'any', minPrediction: null, minProbability: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', genres: new Set(), mechanics:new Set(), moods:new Set(), channels:new Set(), execution:emptyExecution(), from: 1900, to: MAX_YEAR, maxRuntime: null };
 const APP_QUERY_KEYS = ['shortlist','view','period','q','sort','genre','mechanic','mood','channel','execution','from','to','runtime','viewing','started','lastChance','director','actor','prediction','chance'];
-let urlReady=false,urlRestoring=false,viewClock=null;
+let urlReady=false,urlRestoring=false,viewClock=null,programmeRefreshError=false;
 function nowMs(){return viewClock??Date.now();}
+function finiteTime(value){const n=typeof value==='number'?value:Date.parse(value);return Number.isFinite(n)?n:null;}
+function effectiveWindow(snapshot,now){
+ const clock=finiteTime(now);
+ if(clock===null)return {basis:'unavailable',now:null,envelope:null,archive:null,future:null,black:true,epgEnd:null};
+ const from=finiteTime(snapshot?.window?.from),to=finiteTime(snapshot?.window?.to);
+ let envelope=null,basis='snapshot';
+ if(from!==null&&to!==null&&from<to)envelope={from,to};
+ else{const cutoff=finiteTime(snapshot?.cutoff)??finiteTime(snapshot?.updatedAt);if(cutoff===null)return {basis:'unavailable',now:clock,envelope:null,archive:null,future:null,black:true,epgEnd:finiteTime(snapshot?.stats?.epgEnd)};envelope={from:cutoff-72*3600000,to:cutoff+24*3600000};basis='estimate';}
+ const archiveFrom=Math.max(envelope.from,clock-72*3600000),archiveTo=Math.min(envelope.to,clock);
+ const archive=archiveFrom<archiveTo?{from:archiveFrom,to:archiveTo,fromExclusive:archiveFrom===clock-72*3600000}:null;
+ const futureFrom=Math.max(envelope.from,clock);
+ const future=futureFrom<envelope.to?{from:futureFrom,to:envelope.to}:null;
+ return {basis,now:clock,envelope,archive,future,black:!archive&&!future,epgEnd:finiteTime(snapshot?.stats?.epgEnd)};
+}
+function viewingClock(){if(viewClock!=null)return viewClock;if(!report&&WINDOW_START!=null&&Number.isFinite(CUTOFF))return CUTOFF;return Date.now();}
+function snapshotForClock(now){if(report)return report;if(WINDOW_START!=null&&WINDOW_END!=null)return {window:{from:WINDOW_START,to:WINDOW_END},cutoff:CUTOFF};return {updatedAt:now};}
+function viewingWindow(now=viewingClock()){return effectiveWindow(snapshotForClock(now),now);}
+function showStart(show){const start=finiteTime(show?.start);if(start!==null)return start;return Number.isFinite(CUTOFF)&&Number.isFinite(Number(show?.offset))?CUTOFF+Number(show.offset)*3600000:null;}
+function inEnvelope(model,start){return !!model?.envelope&&start!==null&&start>=model.envelope.from&&start<model.envelope.to;}
+function onAir(model,show){const start=showStart(show),end=finiteTime(show?.end);return inEnvelope(model,start)&&start<=model.now&&end!==null&&end>model.now;}
+function inArchive(model,show){const start=showStart(show);if(!model?.now||!inEnvelope(model,start)||start>model.now)return false;if(onAir(model,show))return true;return start>model.now-72*3600000&&start+72*3600000>model.now;}
+function inFuture(model,show){const start=showStart(show);return !!model?.now&&inEnvelope(model,start)&&start>model.now;}
+function blackZone(){const model=viewingWindow();return !!model?.envelope&&model.black;}
+function inSelectedScope(film,period=state.period){if(periodShows(film,period).length>0)return true;if(periodShows(film,'all').length>0)return false;if(blackZone()&&!state.lastChanceOnly)return true;return !!state.includeUnscheduled;}
+function countedScope(film,period){if(blackZone()&&period!=='all')return periodShows(film,period).length>0;return inSelectedScope(film,period);}
 function readUrlState(url){
  const p=url.searchParams,defaults={shortlistMode:'now',period:'all',sort:'title',sortExplicit:false,viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',genres:new Set(),mechanics:new Set(),moods:new Set(),channels:new Set(),execution:emptyExecution(),from:1900,to:MAX_YEAR,maxRuntime:null};
  if(p.get('shortlist')==='today')defaults.shortlistMode='today';
@@ -163,8 +188,8 @@ const peopleSources={directors:[],actors:[]};
 const $ = selector => document.querySelector(selector);
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let genres = ['Боевик','Триллер','Криминал','Фантастика','Ужасы','Приключения','Комедия'];
-const isArchive = show => WINDOW_START===null?show.offset>=-72&&show.offset<0:show.start>=WINDOW_START&&show.start<CUTOFF;
-const isFuture = show => WINDOW_END===null?show.offset>=0&&show.offset<24:show.start>=CUTOFF&&show.start<=WINDOW_END;
+function isArchive(show){return inArchive(viewingWindow(),show);}
+function isFuture(show){return inFuture(viewingWindow(),show);}
 const normalizeTitle = text => text.toLocaleLowerCase('ru').replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 function normalizeSearch(value){return String(value??'').replace(/\p{Script=Latin}+/gu,chunk=>chunk.normalize('NFD').replace(/\p{M}+/gu,'')).replace(/ё/gi,'е').toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim();}
 function searchTokens(query){const normalized=normalizeSearch(query);return {normalized,tokens:normalized?normalized.split(' '):[]};}
@@ -192,8 +217,8 @@ function applySearchInput(value){
  if(hasQuery&&!hadQuery&&!state.sortExplicit&&state.sort==='title')state.sort='relevance';
  if(!hasQuery&&hadQuery&&!state.sortExplicit&&state.sort==='relevance')state.sort='title';
 }
-function availabilityTime(film){const time=Date.parse(film.availableUntil||'');return Number.isFinite(time)?time:null;}
-function isLastChance(film,now=nowMs()){const until=availabilityTime(film);return until!==null&&until>now&&until-now<8*3600000;}
+function availabilityTime(film,now=viewingClock()){const model=viewingWindow(now);const starts=(film?.shows||[]).map(show=>inArchive(model,show)||inFuture(model,show)?showStart(show):null).filter(start=>start!==null);return starts.length?Math.max(...starts)+72*3600000:null;}
+function isLastChance(film,now=viewingClock()){const until=availabilityTime(film,now);return until!==null&&until>now&&until-now<8*3600000;}
 function hasActualRating(film){const rating=enrichment.films[String(film.id)]?.actualRating;return rating!==null&&rating!==undefined;}
 function filmFacets(film){const item=enrichment.films[String(film.id)]||{},fingerprint=item.fingerprint||{},mechanics=(fingerprint.plotMechanics||[]).filter(m=>Object.hasOwn(MECHANIC_LABELS,m)),moods=(item.moodIds||fingerprint.moodIds||item.prediction?.moodIds||[]).filter(id=>Object.hasOwn(MOOD_LABELS,id));return {mechanics:new Set(mechanics),moods:new Set(moods)};}
 function filterMoodOptions(){const search=$('#mood-search'),count=$('#mood-option-count');if(!search||!count)return;const query=normalizeMood(search.value);let visible=0;document.querySelectorAll('#moods label').forEach(label=>{const show=!query||normalizeMood(moodLabel(label.querySelector('input').value)).replace(/ё/g,'е').includes(query.replace(/ё/g,'е'));label.hidden=!show;if(show)visible++;});count.textContent=query?`${visible} из ${moods.length} вариантов`:`${moods.length} вариантов · частые выше`;}
@@ -312,7 +337,6 @@ function updateExecutionOptions(){
 }
 function eligible(film) { const parsed=searchTokens(state.query); const matched=searchRank(film,parsed.normalized,parsed.tokens)!==null; const prediction=enrichment.films[String(film.id)]?.prediction,facets=filmFacets(film); return matched && (state.viewing==='any'||ratingsLoaded&&((state.viewing==='rewatch')===hasActualRating(film))) && (state.minPrediction===null||Number.isFinite(prediction?.predictedRating)&&prediction.predictedRating>=state.minPrediction) && (state.minProbability===null||Number.isFinite(prediction?.probability4Plus)&&prediction.probability4Plus>=state.minProbability) && (!state.startedOnly||startedIds.has(String(film.id))) && (!state.lastChanceOnly||isLastChance(film)) && ['directors','actors'].every(key=>!state[key]||(film[key]||[]).some(p=>p.id===state[key])) && ((film.year >= state.from && film.year <= state.to)||(!film.year&&state.from===1900&&state.to===MAX_YEAR)) && (state.maxRuntime===null||(Number(film.runtime)>0&&Number(film.runtime)<=state.maxRuntime)) && (!state.genres.size || film.genres.some(g => state.genres.has(g))) && (!state.mechanics.size||[...state.mechanics].some(m=>facets.mechanics.has(m))) && (!state.moods.size||[...state.moods].some(m=>facets.moods.has(m))) && matchesChannels(film) && matchesExecution(film); }
 function periodShows(film,period=state.period) { return film.shows.filter(s => period==='archive'?isArchive(s):period==='future'?isFuture(s):isArchive(s)||isFuture(s)); }
-function inSelectedScope(film,period=state.period){return periodShows(film,period).length>0||(state.includeUnscheduled&&periodShows(film,'all').length===0);}
 function filmWord(n){return n%10===1&&n%100!==11?'фильм':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'фильма':'фильмов';}
 function showWord(n){return n%10===1&&n%100!==11?'показ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'показа':'показов';}
 function programmeWindow(snapshot){
@@ -321,10 +345,10 @@ function programmeWindow(snapshot){
  const cutoff=Date.parse(snapshot.updatedAt);
  return {start:cutoff-72*3600000,cutoff,end:cutoff+24*3600000};
 }
-function dateLabel(offset){ return new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short'}).format(new Date(CUTOFF+offset*3600000)); }
-
-function row(show) { const date=new Date(CUTOFF+show.offset*3600000);const time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(date);return `<div class="show-row"><span class="channel">${escapeHTML(show.channel)}${show.basis==='title_duration'?'<span class="match-hint" title="В EPG нет года: совпали название и длительность. Возможна другая версия фильма." aria-label="Предположительное совпадение по названию и длительности"> ≈</span>':''}</span><time class="show-time" datetime="${date.toISOString()}">${dateLabel(show.offset)}<b>${time}</b></time></div>`; }
-function group(film,type){const shows=film.shows.filter(type==='archive'?isArchive:isFuture).sort((a,b)=>type==='archive'?b.offset-a.offset:a.offset-b.offset);if(!shows.length)return '';return `<section class="show-group ${type}"><div class="group-title"><span>${type==='archive'?'АРХИВ · 3 ДНЯ':'СЛЕДУЮЩИЕ СУТКИ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
+function madridStamp(ms,options={day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}){return new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',...options}).format(new Date(ms));}
+function madridDay(ms){return new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(ms));}
+function row(show) { const start=showStart(show),date=new Date(start),time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(date);return `<div class="show-row"><span class="channel">${escapeHTML(show.channel)}${show.basis==='title_duration'?'<span class="match-hint" title="В EPG нет года: совпали название и длительность. Возможна другая версия фильма." aria-label="Предположительное совпадение по названию и длительности"> ≈</span>':''}</span><time class="show-time" datetime="${date.toISOString()}">${madridStamp(start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`; }
+function group(film,type){const shows=film.shows.filter(type==='archive'?isArchive:isFuture).sort((a,b)=>type==='archive'?showStart(b)-showStart(a):showStart(a)-showStart(b));if(!shows.length)return '';return `<section class="show-group ${type}"><div class="group-title"><span>${type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
 function startedButton(film){
  const id=String(film.id),on=startedIds.has(id),busy=savingStarted.has(id);
  return `<div class="started-action"><button type="button" class="started-button" data-started-id="${escapeHTML(id)}" aria-pressed="${on}" aria-busy="${busy}" aria-label="${on?'Снять отметку «Начал смотреть»':'Начал смотреть'}: ${escapeHTML(film.title)}" title="${on?'Снять отметку «Начал смотреть»':'Отметить начатый просмотр'}" ${!startedReady||busy?'disabled':''}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div>`;
@@ -359,18 +383,17 @@ function card(film){
  const item=enrichment.films[String(film.id)]||{},hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
  return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}" aria-label="${escapeHTML(film.title)}">${recommendation(film)}<div class="film-head">${film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`}<div class="film-info"><h3>${escapeHTML(film.title)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
 }
-function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return state.period==='archive'?Math.max(...b.shows.filter(isArchive).map(s=>s.offset))-Math.max(...a.shows.filter(isArchive).map(s=>s.offset)):Math.min(...a.shows.filter(isFuture).map(s=>s.offset),Infinity)-Math.min(...b.shows.filter(isFuture).map(s=>s.offset),Infinity)||title;});}
+function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}const extreme=(film,pred,empty,pick)=>{const values=film.shows.filter(pred).map(showStart).filter(start=>start!==null);return values.length?pick(...values):empty;};return state.period==='archive'?extreme(b,isArchive,-Infinity,Math.max)-extreme(a,isArchive,-Infinity,Math.max):extreme(a,isFuture,Infinity,Math.min)-extreme(b,isFuture,Infinity,Math.min)||title;});}
 
 function shortlistDay(time){return new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(time));}
-function shortlistAvailability(film,mode='now',now=Date.now()){
- const selected=periodShows(film).map(show=>({...show,start:Number.isFinite(show.start)?show.start:CUTOFF+show.offset*3600000})).filter(show=>Number.isFinite(show.start));
- const hot=selected.filter(show=>show.start>now-72*3600000&&show.start<=now+24*3600000);
- const current=hot.filter(show=>show.start<=now&&Number.isFinite(show.end)&&show.end>now).sort((a,b)=>a.start-b.start);
- const catchup=hot.filter(show=>show.start<=now).sort((a,b)=>b.start-a.start);
- const future=hot.filter(show=>show.start>now&&shortlistDay(show.start)===shortlistDay(now)).sort((a,b)=>a.start-b.start);
+function shortlistAvailability(film,mode='now',now=viewingClock()){
+ const model=viewingWindow(now);
+ const selected=(film.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&(inArchive(model,show)||inFuture(model,show)));
+ const current=selected.filter(show=>show.start<=now&&finiteTime(show.end)!==null&&show.end>now).sort((a,b)=>a.start-b.start);
+ const catchup=selected.filter(show=>show.start<=now).sort((a,b)=>b.start-a.start);
+ const future=selected.filter(show=>show.start>now&&shortlistDay(show.start)===shortlistDay(now)).sort((a,b)=>a.start-b.start);
  const show=current[0]||catchup[0]||(mode==='today'?future[0]:null),kind=current.length?'current':catchup.length?'catchup':mode==='today'&&future.length?'future':'unavailable';
- if(show)return {available:true,kind,show,archiveUntil:catchup.length?Math.max(...catchup.map(s=>s.start))+72*3600000:null,until:availabilityTime(film)??Math.max(...hot.map(s=>s.start))+72*3600000};
- // Full watchlist can include genuinely unscheduled films only outside “now”.
+ if(show)return {available:true,kind,show,archiveUntil:catchup.length?Math.max(...catchup.map(s=>s.start))+72*3600000:null,until:availabilityTime(film,now)};
  if(mode==='today'&&state.includeUnscheduled&&!periodShows(film,'all').length)return {available:false,kind:'unavailable',show:null,until:null};
  return null;
 }
@@ -408,12 +431,14 @@ function render(){
   ['#year-from','#year-to'].forEach(s=>$(s).setAttribute('aria-invalid',String(!validYear)));
   $('#runtime-max').setAttribute('aria-invalid',String(!validRuntime));
   const filtered=valid?films.filter(eligible):[];
-  for(const p of ['all','archive','future'])$(`#count-${p}`).textContent=filtered.filter(f=>inSelectedScope(f,p)).length;
+  for(const p of ['all','archive','future'])$(`#count-${p}`).textContent=filtered.filter(f=>countedScope(f,p)).length;
   document.querySelectorAll('[data-period]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.period===state.period)));
   const visible=valid?visibleFilms():[];
   $('#movies').innerHTML=visible.map(card).join('');
   renderShortlist(visible,valid);
   $('#empty').hidden=visible.length>0||!valid;
+  const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
+  updateProgrammeStatus();
   const shows=visible.reduce((n,f)=>n+periodShows(f).length,0);
   $('#result-count').textContent=valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
   const sortBox=$('#sort');if(sortBox)sortBox.value=state.sort;
@@ -475,15 +500,17 @@ function refreshGenreOptions(){
  box.innerHTML=ordered.map(genre=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(genre)}"><span>${escapeHTML(genre)}</span><span class="genre-count">${counts.get(genre)||0}</span></label>`).join('');
  document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
 }
-let gridTimeKey='',shortTimeKey='';
-function gridTimeKeyOf(visible){return visible.map(film=>`${film.id}:${isLastChance(film)?1:0}`).join('|');}
+let gridTimeKey='',shortTimeKey='',statusTimeKey='';
+function showBucket(show){return isFuture(show)?'f':isArchive(show)?'a':'x';}
+function gridTimeKeyOf(visible){const model=viewingWindow();const counts=['archive','future'].map(period=>films.filter(film=>eligible(film)&&countedScope(film,period)).length).join(',');return visible.map(film=>`${film.id}:${isLastChance(film)?1:0}:${(film.shows||[]).map(show=>`${showStart(show)}:${showBucket(show)}`).join(',')}`).join('|')+`|${model.black?1:0}|${counts}`;}
 function shortTimeKeyOf(visible){return ['now','today'].map(mode=>buildShortlist(visible,mode).map(item=>`${item.film.id}:${item.availability.kind}:${item.availability.show?.start??''}:${item.availability.show?.end??''}`).join(',')).join(';');}
-function noteTimeView(visible=visibleFilms()){gridTimeKey=gridTimeKeyOf(visible);shortTimeKey=shortTimeKeyOf(visible);}
+function noteTimeView(visible=visibleFilms()){gridTimeKey=gridTimeKeyOf(visible);shortTimeKey=shortTimeKeyOf(visible);statusTimeKey=JSON.stringify(programmeStatus());}
 function refreshTimeSensitiveView(){
  if(!report)return;
- const visible=visibleFilms(),grid=gridTimeKeyOf(visible),short=shortTimeKeyOf(visible);
+ const visible=visibleFilms(),grid=gridTimeKeyOf(visible),short=shortTimeKeyOf(visible),status=JSON.stringify(programmeStatus());
  if(grid!==gridTimeKey){renderPreservingScroll();return;}
  if(short!==shortTimeKey){shortTimeKey=short;renderShortlist(visible);}
+ if(status!==statusTimeKey){statusTimeKey=status;updateProgrammeStatus();}
 }
 function installProgramme(data){
  const key=JSON.stringify(data);
@@ -503,14 +530,16 @@ function renderPreservingScroll(){
  const y=window.scrollY||0;
  const activity=document.querySelector('.activity-scroll');
  const top=activity?activity.scrollTop:0;
+ const open=typeof document.querySelectorAll==='function'?[...document.querySelectorAll('#movies details[open]')].map(node=>({id:node.closest?.('article')?.dataset?.filmId,kind:String(node.className||'').includes('film-synopsis')?'film-synopsis':'more'})):[];
  render();
  if(activity)activity.scrollTop=top;
  if(typeof window.scrollTo==='function')window.scrollTo(0,y);
+ for(const item of open){if(!item.id)continue;const card=document.querySelector(`#movies article[data-film-id="${String(item.id).replace(/"/g,'')}"]`);const node=card?.querySelector?.(`details.${item.kind}`);if(node)node.open=true;}
 }
 function showProgrammeUnavailable(error){
  $('#result-count').textContent='Программа временно недоступна';
- $('#snapshot').textContent=error.message;
- $('#connection-badge').textContent='Ожидаем обновление';
+ const updated=$('#snapshot-updated');if(updated)updated.textContent=error.message;else if($('#snapshot'))$('#snapshot').textContent=error.message;
+ const badge=$('#connection-badge');if(badge){badge.textContent='Ошибка обновления';badge.title='Программу не удалось загрузить. Это не статус сохранённого окна.';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}
 }
 async function registerModelTool(){
  if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},query:{type:'string',description:'Part of the Russian or original title, case insensitive'},period:{type:'string',enum:['all','archive','future']},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
@@ -635,13 +664,16 @@ async function loadProgramme({quiet}={}){
   if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
+  programmeRefreshError=false;
   const changed=installProgramme(data);
   if(!programmeReady)await finishProgrammeUi();
   else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();}
   else updateSourceInfo();
   return true;
  }catch(error){
-  if(!programmeReady&&!quiet)throw error;
+  programmeRefreshError=true;
+  if(programmeReady)updateProgrammeStatus();
+  if(!programmeReady&&!quiet){showProgrammeUnavailable(error);throw error;}
   return false;
  }finally{programmeLoading=false;}
 }
@@ -733,18 +765,25 @@ function renderFooterStatus(data){const text=footerStatusText(data),values={
  'detail-watchlist-films':text.watchlistFilms,'detail-watchlist-updated':text.watchlistUpdated,'detail-watchlist-metadata':text.watchlistMetadata,'detail-watchlist-titles':text.watchlistTitles,
  'detail-run-started':text.runStarted,'detail-run-added':text.runAdded,'detail-run-failed':text.runFailed,'detail-run-reason':text.runResult,'detail-run-next':text.nextRun,'detail-profile-version':text.profileVersion,'detail-profile-updated':text.profileUpdated};for(const [id,value] of Object.entries(values)){const node=$('#'+id);if(node)node.textContent=value;}}
 async function loadPredictionQueue(options={}){if(footerLoading)return 'busy';footerLoading=true;try{const response=await fetch('/api/enrichment/footer/status');if(!response.ok)throw new Error();renderFooterStatus(await response.json());footerReady=true;return true;}catch{if(!footerReady&&!options.quiet){const unavailable='статус недоступен';$('#status-local-coverage').textContent=unavailable;$('#status-window-coverage').textContent=unavailable;$('#status-last-run').textContent=unavailable;}return false;}finally{footerLoading=false;}}
-function updateCoverageDates(){
- const format=ms=>new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(ms));
- const range=(from,to)=>`<time datetime="${new Date(from).toISOString()}">${format(from)}</time><time datetime="${new Date(to).toISOString()}">${format(to)}</time>`;
- $('#archive-range').innerHTML=range(WINDOW_START,CUTOFF);
- $('#future-range').innerHTML=range(CUTOFF,WINDOW_END);
+function endedPhrase(at,now){const hours=Math.max(0,Math.floor((now-at)/3600000));let previous=now;const today=madridDay(now);do{previous-=3600000;}while(madridDay(previous)===today);if(madridDay(at)===madridDay(previous))return 'вчера';if(hours<1)return 'только что';return `${hours} ч назад`;}
+function programmeStatus(model=viewingWindow()){
+ const title='Границы сохранённого снимка. Это не гарантия, что у каждого канала есть передача до конца окна.';
+ if(!model?.envelope||model.black)return {level:'critical',badge:'Нет актуального окна',coverage:'Программа и архив недоступны; ждём обновления',title:model?.basis==='estimate'?'У снимка не было окна. Оценка по времени снимка тоже закончилась.':'Сохранённое окно закончилось или его не удалось прочитать.'};
+ if(model.basis==='estimate')return {level:'warning',badge:'Окно оценено по снимку',coverage:`Оценка по времени снимка · программа до ${madridStamp(model.envelope.to)}`,title};
+ if(!model.future){const span=model.archive.to-model.archive.from;const ended=`Программа закончилась ${endedPhrase(model.envelope.to,model.now)}`;const archive=`Архив с ${madridStamp(model.archive.from)}`;if(span<=3600000)return {level:'warning',badge:'Архив заканчивается',coverage:`${ended} · ${archive} · осталось меньше часа`,title};return {level:'warning',badge:'Будущее закончилось',coverage:`${ended} · ${archive}`,title};}
+ const archive=model.archive?`Архив с ${madridStamp(model.archive.from)} · `:'';
+ return {level:'ok',badge:'Программа актуальна',coverage:`${archive}Программа до ${madridStamp(model.future.to)}`,title};
 }
-function updateSourceInfo(){
- const fmt=t=>new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(t));
- const age=Date.now()-Date.parse(report.updatedAt);$('#snapshot').innerHTML=`<span>Обновлено ${fmt(report.updatedAt)}</span><span class="muted">Время — Europe/Madrid</span>`;
- updateCoverageDates();
- $('#connection-badge').textContent=age>26*3600000?'Данные устарели':'Источники подключены';
+function updateProgrammeStatus(){
+ const badge=$('#connection-badge'),coverage=$('#snapshot-coverage'),updated=$('#snapshot-updated'),note=$('#window-note');
+ if(!report){if(badge&&programmeRefreshError){badge.textContent='Ошибка обновления';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}return;}
+ const status=programmeStatus();
+ if(updated)updated.textContent=`Обновлено ${madridStamp(Date.parse(report.updatedAt))}`;
+ if(coverage){coverage.textContent=status.coverage;coverage.title=status.title;}
+ if(badge){badge.classList?.remove('is-ok','is-warning','is-critical','is-error');if(programmeRefreshError){badge.textContent='Ошибка обновления';badge.title='Последний снимок сохранён. Ошибка обновления не заменяет состояние окна.';badge.classList?.add('is-error');}else{badge.textContent=status.badge;badge.title=status.title;badge.classList?.add(status.level==='ok'?'is-ok':status.level==='warning'?'is-warning':'is-critical');}}
+ if(note){note.hidden=!blackZone();note.textContent=state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет. Фильтры не изменены.':'Окно программы закончилось. Показаны фильмы из watchlist без расписания. Архив и следующие сутки пусты, пока не придёт новый снимок.';}
 }
+function updateSourceInfo(){updateProgrammeStatus();}
 function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=f=>`${escapeHTML(f.title)}${f.year?` (${escapeHTML(f.year)})`:''}`;let body='';
  if(event.type==='started'||event.type==='unstarted')body=`<p>${event.type==='started'?'Начал смотреть':'Снял отметку «Начал»'}: <strong>${film(event.film)}</strong></p>`;
  if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>`;
