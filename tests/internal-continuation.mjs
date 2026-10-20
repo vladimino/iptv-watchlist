@@ -197,6 +197,7 @@ assert.match(fs.readFileSync('src/continuation.js','utf8'),/^export const Discov
 const wrangler=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
 assert.equal(wrangler.limits.cpu_ms,120000);assert(wrangler.compatibility_date>='2025-11-17','ctx.exports is enabled by default from 2025-11-17');
 assert(!(wrangler.compatibility_flags||[]).includes('disable_ctx_exports'));
-for(const file of fs.readdirSync('src'))assert.doesNotMatch(fs.readFileSync('src/'+file,'utf8'),/OAI-Sites-Authorization|EPG_SITE_SERVICE_TOKEN|example\.invalid/,file);
+const sourceFiles=dir=>fs.readdirSync(dir).flatMap(name=>{const path=dir+'/'+name;return fs.statSync(path).isDirectory()?sourceFiles(path):[path];});
+for(const file of sourceFiles('src'))assert.doesNotMatch(fs.readFileSync(file,'utf8'),/OAI-Sites-Authorization|EPG_SITE_SERVICE_TOKEN|example\.invalid/,file);
 
 console.log('Internal continuation: one chunk per call, budget, leases, backoff, stale scheduled, overlap, programme change, entrypoint validation, public isolation, Origin checks, scan source and sync trigger passed');
