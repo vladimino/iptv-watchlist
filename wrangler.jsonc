@@ -9,6 +9,9 @@
   "observability": {
     "enabled": true
   },
+  "limits": {
+    "cpu_ms": 120000
+  },
   "r2_buckets": [
     {
       "binding": "BUCKET",
