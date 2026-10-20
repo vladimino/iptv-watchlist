@@ -60,7 +60,7 @@ The EPG resolver works in bounded chunks. The EPG commit records a paused discov
 
 ## Events
 
-«События» open at `/events`, a bookmarkable page of their own. The film list keeps its filters in its own address. Leaving the list remembers that query in the tab and, as a fallback, in the browser. «К фильмам» and Back put it back on `/`. An explicit film-list link wins over the remembered query. The screen is not stored in a preset. The list itself is the existing events feed, still updated by the one live refresh.
+«События» open at `/events`, a bookmarkable page of their own. The film list keeps its filters in its own address. Leaving the list remembers that query in the tab and, as a fallback, in the browser. «К фильмам» after opening the list steps back to that same history entry, so Browser Back does not open events again. A bookmarked `/events` falls back to the remembered list without leaving the site. Back and Forward still switch the two pages. An explicit film-list link wins over the remembered query. The screen is not stored in a preset. The list itself is the existing events feed, still updated by the one live refresh.
 
 ## Search
 
