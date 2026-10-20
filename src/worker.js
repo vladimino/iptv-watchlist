@@ -58,8 +58,8 @@ async function postSync(env,execution,pathname,body){
  const run=await loadJSON(env,'sync.json');if(!run||body.runId!==run.runId)return json({error:'Run id mismatch'},409);
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata')return json({runId:run.runId,stage:run.stage,remaining:run.remaining});return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg')return json({error:'Not found'},404);
- if(run.stage==='complete'){if(run.ratingPending?.length){const report=await loadJSON(env,'programme.json');if(report?.runId===run.runId)return json(await completeWithRatings(env,run,report));}return json({runId:run.runId,stage:run.stage});}if(run.stage!=='epg')return json({error:'Metadata stage is not complete'},409);
- try{const result=await epgSync(env,run);if(result.stage==='complete')try{await continueDiscovery(env,execution,{remaining:1,stage:'ready'},{chunks:12});}catch(e){run.discoveryError=String(e.message).slice(0,160);try{await saveJSON(env,'sync.json',run);}catch{}}return json(result);}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
+ if(run.stage==='complete'){const discovery=await advanceDiscovery(env);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:discovery.discovery});}if(run.stage!=='epg')return json({error:'Metadata stage is not complete'},409);
+ try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);return json({...result,discovery:await queueDiscovery(env,'epg_committed')});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId)return completeWithRatings(env,run,committed);}

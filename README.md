@@ -4,7 +4,7 @@ Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV progr
 
 ## Project layout
 
-- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal entrypoint for resolver continuation hops. `src/mcp.js` is the MCP endpoint: connection probes plus the EPG and prediction tools.
+- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal-only entrypoint for one discovery chunk. `src/mcp.js` is the MCP endpoint: connection probes plus the EPG and prediction tools.
 - `public/` — browser UI.
 - `data/` — reviewed public title/person dictionaries used at build time.
 - `tests/` — self-contained unit and contract tests.
@@ -56,7 +56,7 @@ Outside that pass, two more GET routes can write. `GET /api/enrichment/status` r
 
 ## Internal continuation
 
-The EPG resolver works in bounded chunks and chains up to twelve more chunks in new invocations of the same Worker. Each hop goes through the Worker's own `ctx.exports` loopback to the `DiscoveryContinuation` entrypoint, not over public HTTP, so it needs no credential and no Cloudflare Access exception. It needs no extra binding or Worker either: compatibility dates from 2025-11-17 enable `ctx.exports`. Internet traffic cannot reach that entrypoint. Statuses and failure reasons are described in [ENRICHMENT_API.md](ENRICHMENT_API.md#epg-resolver--hotcold-pipeline-v2).
+The EPG resolver works in bounded chunks. The EPG commit records a paused discovery series and does not start it. Each later `epg_sync_step`, or `POST /api/enrichment/discovery/resolve`, runs exactly one chunk and returns `discovery.nextAction`: `continue` means call again now, `wait` means do not call before `nextCatchUpAt`, and `stop` means wait for the next EPG commit. A separate request is a memory hypothesis, not a guarantee of a new isolate; that has to be checked in production after deploy. The `DiscoveryContinuation` entrypoint remains internal-only, so internet traffic cannot reach it and a public self-fetch is not a fallback. Statuses and failure reasons are described in [ENRICHMENT_API.md](ENRICHMENT_API.md#epg-resolver--hotcold-pipeline-v2).
 
 ## Execution filters
 

@@ -9,7 +9,7 @@
 
 - Preserve existing architecture and API contracts. Before publishing, run `npm ci`, `npm test`, and `npm run build`.
 - Never commit or expose real secrets or personal data in source, fixtures, build artifacts, or logs.
-- Internal continuation (the EPG resolver chain) runs only through the Worker's own `ctx.exports` loopback entrypoint in `src/continuation.js`. Never self-fetch the public hostname or forward cookies, Access JWTs, or `OAI-Sites-Authorization`, and never add an Access bypass for it. `tests/get-side-effects.mjs` and `README.md` pin the GET routes that may write to R2; change them together.
+- Discovery runs one chunk inside the request that asks for it (`epg_sync_step` or `POST /api/enrichment/discovery/resolve`). It does not nest continuation hops. The `DiscoveryContinuation` entrypoint in `src/continuation.js` stays internal-only: never self-fetch the public hostname or forward cookies, Access JWTs, or `OAI-Sites-Authorization`, and never add an Access bypass for it. `tests/get-side-effects.mjs` and `README.md` pin the GET routes that may write to R2; change them together.
 - Documentation is part of the Definition of Done. Any change to architecture, workflows, CI/CD, deployment, operations, integrations, or migration procedures must update the relevant documentation in the same PR or commit.
 - Before completing a task, explicitly verify whether `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, or `docs/` require updates. Do not defer documentation drift to a separate cleanup task.
 
