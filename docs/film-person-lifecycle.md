@@ -1,6 +1,6 @@
 # Film and Person lifecycle: legacy audit
 
-Phase 0 of [AIR-42](https://trello.com/c/drLBuWjl). This document maps the records that exist today. It does not change readers, writers, R2, Scheduled Tasks, or the MCP contract. Later phases in that card are not part of this change.
+Phase 0 of [AIR-42](https://trello.com/c/drLBuWjl) mapped the records that exist today. Phase 1 implements that decision table in `src/domain/film-person.js`. The module is pure: `build.mjs` does not bundle it, and the Worker, discovery, enrichment, and MCP processors do not call it. Readers, writers, R2, Scheduled Tasks, and the MCP contract are unchanged.
 
 The domain model has to be built from these objects. A Letterboxd id, a TMDB id, a title, and a current broadcast are different facts. Availability is computed from EPG show times. An EPG discovery candidate is not a Film.
 
@@ -100,7 +100,7 @@ Availability is not stored as a status. `shows` on a programme film are the matc
 
 ## Mapping to the future contract
 
-These rows are the decision table for phase 1. The statuses below are the AIR-42 vocabulary. Nothing in the Worker writes them yet.
+These rows are the decision table implemented by `src/domain/film-person.js`. The statuses below are the AIR-42 vocabulary. The Worker still does not write them.
 
 | What exists today | Dimension | Proposed status | Proposed next action |
 | --- | --- | --- | --- |
@@ -127,7 +127,19 @@ These rows are the decision table for phase 1. The statuses below are the AIR-42
 | `run.failures[id]` or queue `retries[id]` | prediction | `failed` | Existing backoff. Do not mark `current` |
 | `shows` / `availableUntil` / hot | availability | Projection | Recompute from the programme or `epgLastAiring`. Do not store a sixth status |
 
-`displayReady` can be true when identity is `resolved` enough to show a title, including `provisional` or `missing` localization. The dashboard already shows the Letterboxd or EPG title in that case. `catalogReady` means a stable external id is known (`tmdbId` or, for a watchlist film that never received one, the Letterboxd id alone) and metadata is `fresh` or `partial`. `predictionReady` means fingerprint and prediction are both `current` for the published profile. Phase 1 defines these three functions. This table is the input, not the implementation.
+`displayReady` is true when identity is `resolved`, or a Letterboxd id is already known, and some title exists: reviewed, provisional, original, or EPG. `rejected` identity is not displayable. Missing and provisional localization do not block display. The dashboard already shows the Letterboxd or EPG title in that case. `catalogReady` means a stable external id is known (a non-conflicting `tmdbId` or, for a watchlist film that never received one, the Letterboxd id alone) and metadata is `fresh` or `partial`. `predictionReady` means fingerprint and prediction are both `current` for the published profile. Conflicting verified TMDB ids do not become `canonicalIdentity`.
+
+## Phase 1 contract
+
+`DOMAIN_CONTRACT_VERSION` is 1. Tests in `tests/film-person.mjs` use the examples in this document, including `28nq` / TMDB `1656` / `Легенда Зорро`, the four `provisional_transcription` people, and the `actor/chris-pratt` override as input. The override stays in `src/sources.js` until [AIR-44](https://trello.com/c/ojtZjVc9). The domain module does not copy it.
+
+A local film id is `film:<letterboxd lid>` when a Letterboxd id is known, `film:tmdb:<tmdbId>` for one discovered TMDB id, and `film:conflict:<sorted ids>` when two verified TMDB ids disagree and no Letterboxd id is known. `canonicalIdentity` remains `tmdb:<id>` or null. It is not the object id. A person id is `person:` plus the current role id (`actor/<slug>`, `director/<slug>`, or `role/<name>`). The same slug as actor and director stays two people. Person dedupe is [AIR-44](https://trello.com/c/ojtZjVc9).
+
+Each dimension state is `status`, `updatedAt`, `source`, `sourceVersion`, `provenance`, `lastError`, `failureReason`, `retryAt`, `attempts`, and `nextAction`. Localization also has `value`, the preferred title or name. The state does not carry the metadata, fingerprint, or prediction payload. `peopleNamesVersion === 2` means the name pass finished. It does not mark a person `reviewed`. A record's own `status` wins over the dictionary file, so `provisional_transcription` stays `provisional`.
+
+`transition(state, status, patch)` refuses an edge outside the graph and returns the previous state. Resolved identity does not return to `resolving` or `unresolved`. Reviewed localization does not return to `provisional` or `missing`. An automatic title or name that arrives after a reviewed value is kept on `localizationConflicts` and in `aliases`. The preferred value stays. Fingerprint `current` does not become `missing`. `invalidatePredictionForProfile` moves prediction to `stale` and leaves the fingerprint state object in place. When that fingerprint is `current`, the next action is `prediction_only`. `observeMetadata` replaces the metadata observation only. A profile change or a metadata observation does not regenerate the fingerprint. `availabilityProjection` returns `{availableUntil, hot}` and no status. Hot uses the same window as `filmIsHot`: 72 hours back and 24 hours ahead, end exclusive. `availableUntil` is the latest show start plus 72 hours. An empty `shows` list uses `epgLastAiring` for hot and does not invent `availableUntil`.
+
+Next action tokens are `keep_letterboxd_id`, `continue_discovery`, `wait_retry`, `stop`, `surface_conflict`, `fetch_letterboxd_page`, `refresh_synopsis`, `full_parse`, `retry_metadata`, `localize_names`, `lookup_wikidata_title`, `lookup_wikidata_name`, `keep_provisional`, `keep_reviewed`, `fingerprint_and_prediction`, `prediction_only`, `retry_prediction`, `leave`, and `none`. `none` on fresh metadata means the credits and synopsis are present and the name pass has finished. `creditsRetained` is the synopsis-only refresh: metadata stays `partial`, and the next action is not a full parse.
 
 ## Invariants the adapter must keep
 
@@ -143,11 +155,11 @@ These rows are the decision table for phase 1. The statuses below are the AIR-42
 
 ## What the next PRs are, and what they are not
 
-This PR stops at the audit. The sequence on the card is:
+Phase 0 was the audit. The sequence on the card is:
 
-1. **Phase 1.** A pure module, with no Worker, R2, or network import. It defines local Film and Person ids, external ids, the five Film dimensions above, availability as a function, transition guards, `displayReady`, `catalogReady`, `predictionReady`, and the invalidation rules in the table. Person dedupe stays in [AIR-44](https://trello.com/c/ojtZjVc9). Tests use the examples in this document. No production path calls the module.
+1. **Phase 1, implemented.** `src/domain/film-person.js` is a pure module, with no Worker, R2, or network import. It defines local Film and Person ids, external ids, the five Film dimensions above, availability as a function, transition guards, `displayReady`, `catalogReady`, `predictionReady`, and the invalidation rules in the table. Person dedupe stays in [AIR-44](https://trello.com/c/ojtZjVc9). Tests use the examples in this document. No production path calls the module.
 2. **Phase 2.** A storage-neutral reader that builds those views from the keys in the inventory. It writes lifecycle metadata only beside existing objects, without rewriting `discovery-latest`, `programme.json`, or prediction history. Shadow parity compares counts and ids. Existing routes stay authoritative.
 3. **Phase 3.** One existing processor at a time, behind the current lease. The first safe connections are title localization and name localization, because their reviewed rule is already implemented. Identity stays on the current resolver until [AIR-43](https://trello.com/c/7NY6n1Az). The resolver algorithm, candidate retention, and fingerprint evidence rules do not change in AIR-42.
 4. **Phase 4.** Read-only diagnostics for one entity and for counts. [AIR-53](https://trello.com/c/gkuy1awG) is the owner UI. [AIR-49](https://trello.com/c/YNaLFwtW) is the later D1 move and is not required to finish AIR-42.
 
-Rollback for this phase is deleting the document. No data migration runs.
+Rollback for the audit is deleting this document. Rollback for the phase 1 module is deleting `src/domain/film-person.js` and `tests/film-person.mjs`. No data migration runs.

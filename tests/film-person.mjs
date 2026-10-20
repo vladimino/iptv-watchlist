@@ -1,0 +1,294 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+
+const source=fs.readFileSync('src/domain/film-person.js','utf8');
+assert.doesNotMatch(source,/\b(fetch|import|export|BUCKET|wrangler)\b/);
+assert.doesNotMatch(source,/chris-pratt|Крис Прэтт/);
+for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/domain\/film-person|filmView|invalidatePredictionForProfile|availabilityProjection/,file);
+
+const ctx=vm.createContext({Date,Map,Set,JSON});
+vm.runInContext(source+'\nglobalThis.contract={DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases};',ctx);
+const {DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases}=ctx.contract;
+
+const NOW=Date.parse('2026-10-20T12:00:00.000Z');
+const DAY=86400000;
+const FRESH=new Date(NOW-29*DAY).toISOString();
+const titles=JSON.parse(fs.readFileSync('data/film-titles.json','utf8'));
+const names=JSON.parse(fs.readFileSync('data/person-names.json','utf8'));
+const zorro=titles.find(film=>film.id==='28nq');
+assert.equal(zorro.title,'Легенда Зорро');
+assert.equal(String(zorro.tmdbId),'1656');
+assert.equal(zorro.status,'verified');
+
+assert.equal(DOMAIN_CONTRACT_VERSION,1);
+assert.deepEqual([...FILM_DIMENSIONS],['identity','metadata','localization','fingerprint','prediction']);
+assert.equal(FILM_DIMENSIONS.includes('availability'),false);
+assert.deepEqual([...IDENTITY_STATUSES],['unresolved','resolving','resolved','ambiguous','rejected']);
+assert.deepEqual([...METADATA_STATUSES],['missing','fetching','partial','fresh','stale','failed']);
+assert.deepEqual([...LOCALIZATION_STATUSES],['missing','provisional','reviewed']);
+assert.deepEqual([...GENERATED_STATUSES],['missing','generating','current','stale','failed']);
+
+const stateKeys=['attempts','dimension','failureReason','lastError','nextAction','provenance','retryAt','source','sourceVersion','status','updatedAt'];
+function assertState(state){assert.deepEqual(Object.keys(state).sort(),state.dimension==='localization'?[...stateKeys,'value'].sort():stateKeys);}
+
+function base(extra={}){
+ return {letterboxdId:'28nq',tmdbId:'1656',now:NOW,decision:{status:'verified'},metadata:{present:true,metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true},title:{original:zorro.original,dictionary:zorro},fingerprint:{present:true,schemaVersion:1,invalidatedAt:null,generatedAt:FRESH},prediction:{present:true,tasteProfileVersion:3,tasteProfileHash:'profile-a',fingerprintHash:'print-a',fingerprintSchemaVersion:1,predictionPromptVersion:1},profile:{version:3,profileHash:'profile-a'},currentFingerprintHash:'print-a',...extra};
+}
+const film=filmView(base());
+for(const dimension of FILM_DIMENSIONS)assertState(film[dimension]);
+assert.equal(film.contractVersion,1);
+assert.equal(film.id,'film:28nq');
+assert.equal(film.canonicalIdentity,'tmdb:1656');
+assert.notEqual(film.id,film.canonicalIdentity);
+assert.equal(film.identity.status,'resolved');
+assert.equal(film.identity.nextAction,'stop');
+assert.equal(film.localization.status,'reviewed');
+assert.equal(film.localization.value,'Легенда Зорро');
+assert.deepEqual(film.localization.provenance.sources,zorro.sources);
+assert.equal(film.metadata.status,'fresh');
+assert.equal(film.metadata.nextAction,'none');
+assert.equal(film.metadata.provenance.namesAttemptFinished,true);
+assert.equal(film.fingerprint.status,'current');
+assert.equal(film.prediction.status,'current');
+assert.equal(film.prediction.nextAction,'leave');
+assert.equal(preferredTitle(film),'Легенда Зорро');
+assert.equal(displayReady(film),true);
+assert.equal(catalogReady(film),true);
+assert.equal(predictionReady(film),true);
+assert.equal(film.availability,undefined);
+const catalogued=filmView(base({decision:null}));
+assert.equal(catalogued.identity.status,'resolved');
+assert.equal(catalogued.identity.source,'watchlist');
+assert.equal(catalogued.identity.nextAction,'stop');
+
+const epg=filmView(base({title:{original:zorro.original,dictionary:zorro,epgTitle:'Зорро по программе'}}));
+assert.equal(epg.localization.status,'reviewed');
+assert.equal(preferredTitle(epg),'Легенда Зорро');
+assert.equal(epg.aliases.find(alias=>alias.value==='Зорро по программе').provenance.source,'epg');
+assert.equal(epg.aliases.some(alias=>alias.value===zorro.original),true);
+
+const unmatched=filmView(base({tmdbId:'9999999',title:{original:'Other',dictionary:zorro}}));
+assert.equal(unmatched.localization.status,'missing');
+assert.equal(unmatched.localization.value,null);
+assert.equal(preferredTitle(unmatched),'Other');
+assert.equal(displayReady(unmatched),true);
+
+const noTmdb=filmView(base({tmdbId:null,decision:null,title:{original:'The Legend of Zorro',dictionary:zorro},metadata:{present:true,metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true}}));
+assert.equal(noTmdb.identity.status,'unresolved');
+assert.notEqual(noTmdb.identity.status,'rejected');
+assert.equal(noTmdb.identity.nextAction,'keep_letterboxd_id');
+assert.equal(noTmdb.canonicalIdentity,null);
+assert.equal(noTmdb.localization.status,'reviewed');
+assert.equal(noTmdb.id,'film:28nq');
+assert.equal(displayReady(noTmdb),true);
+assert.equal(catalogReady(noTmdb),true);
+assert.equal(localFilmId({letterboxdId:'28nq',tmdbId:'1656'}),'film:28nq');
+
+const pending=identityState({now:NOW,discoveryPending:true});
+assert.equal(pending.status,'unresolved');
+assert.equal(pending.nextAction,'continue_discovery');
+assert.equal(filmView({now:NOW,discoveryPending:true,candidateKey:'zorro|2005'}),null);
+assert.equal(filmView({now:NOW,decision:{status:'excluded_nonfilm',reason:'show_label'}}),null);
+assert.equal(identityState({now:NOW,decision:{status:'excluded_nonfilm'}}),null);
+
+const conflict=filmView({now:NOW,conflictingTmdbIds:['20','10'],decision:{status:'verified'},title:{original:'Heat'}});
+assert.equal(conflict.id,'film:conflict:10+20');
+assert.equal(conflict.identity.status,'ambiguous');
+assert.equal(conflict.identity.nextAction,'surface_conflict');
+assert.equal(conflict.identity.provenance.error,'two verified TMDB ids');
+assert.equal(conflict.canonicalIdentity,null);
+assert.equal(conflict.externalIds.filter(item=>item.scheme==='tmdb'&&!item.conflicting).length,0);
+assert.equal(catalogReady(conflict),false);
+assert.equal(displayReady(conflict),false);
+const watchedConflict=filmView(base({conflictingTmdbIds:['1656','999']}));
+assert.equal(watchedConflict.id,'film:28nq');
+assert.equal(watchedConflict.identity.nextAction,'surface_conflict');
+assert.equal(watchedConflict.canonicalIdentity,null);
+
+const later=new Date(NOW+DAY).toISOString();
+const ambiguous=identityState({now:NOW,letterboxdId:'28nq',decision:{status:'ambiguous',retryAt:later,attempts:2}});
+assert.equal(ambiguous.status,'ambiguous');
+assert.equal(ambiguous.nextAction,'wait_retry');
+assert.equal(ambiguous.retryAt,later);
+assert.equal(ambiguous.attempts,2);
+const weak=identityState({now:NOW,decision:{status:'no_confident_match',retryAt:later,attempts:4}});
+assert.equal(weak.status,'unresolved');
+assert.equal(weak.nextAction,'wait_retry');
+const duration=identityState({now:NOW,decision:{status:'duration_mismatch',retryAt:new Date(NOW-1000).toISOString(),attempts:1}});
+assert.equal(duration.status,'unresolved');
+assert.equal(duration.nextAction,'continue_discovery');
+
+const discovered=filmView({tmdbId:'1656',now:NOW,decision:{status:'verified'},title:{original:'The Legend of Zorro'},metadata:{present:false},fingerprint:{present:false},prediction:{present:false}});
+assert.equal(discovered.id,'film:tmdb:1656');
+assert.equal(discovered.identity.status,'resolved');
+assert.equal(discovered.identity.nextAction,'stop');
+assert.equal(discovered.metadata.status,'missing');
+assert.equal(discovered.metadata.nextAction,'fetch_letterboxd_page');
+assert.equal(catalogReady(discovered),false);
+assert.equal(displayReady(discovered),true);
+assert.equal(predictionReady(discovered),false);
+
+const namesOnly=filmView(base({metadata:{present:true,metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:1,synopsisPresent:true}}));
+assert.equal(namesOnly.metadata.status,'fresh');
+assert.equal(namesOnly.metadata.nextAction,'localize_names');
+assert.equal(namesOnly.metadata.provenance.namesAttemptFinished,false);
+const retained=filmView(base({metadata:{present:true,metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true,creditsRetained:true}}));
+assert.equal(retained.metadata.status,'partial');
+assert.equal(retained.metadata.nextAction,'none');
+assert.equal(catalogReady(retained),true);
+const synopsisOnly=filmView(base({metadata:{present:true,metadataAt:FRESH,peopleVersion:1,synopsisPresent:false}}));
+assert.equal(synopsisOnly.metadata.status,'partial');
+assert.equal(synopsisOnly.metadata.nextAction,'refresh_synopsis');
+const creditsMissing=filmView(base({metadata:{present:true,metadataAt:FRESH,peopleVersion:0,synopsisPresent:true}}));
+assert.equal(creditsMissing.metadata.status,'partial');
+assert.equal(creditsMissing.metadata.nextAction,'full_parse');
+const boundary=filmView(base({metadata:{present:true,metadataAt:new Date(NOW-30*DAY).toISOString(),peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true}}));
+assert.equal(boundary.metadata.status,'fresh');
+const expired=filmView(base({metadata:{present:true,metadataAt:new Date(NOW-30*DAY-1).toISOString(),peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true}}));
+assert.equal(expired.metadata.status,'stale');
+assert.equal(expired.metadata.nextAction,'full_parse');
+const failed=filmView(base({metadata:{present:true,metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true,failure:{error:'Letterboxd HTTP 503',attempts:2}}}));
+assert.equal(failed.metadata.status,'failed');
+assert.equal(failed.metadata.failureReason,'Letterboxd HTTP 503');
+assert.equal(failed.metadata.nextAction,'retry_metadata');
+assert.equal(failed.metadata.attempts,2);
+
+const provisional=filmView(base({title:{original:'The Legend of Zorro',provisional:{tmdbId:'1656',title:'Временное',status:'provisional',sources:['https://www.wikidata.org/wiki/Q220923']}}}));
+assert.equal(provisional.localization.status,'provisional');
+assert.equal(provisional.localization.nextAction,'keep_provisional');
+assert.equal(displayReady(provisional),true);
+const mismatchedProvisional=filmView(base({title:{original:'The Legend of Zorro',provisional:{tmdbId:'1',title:'Чужое',status:'provisional'}}}));
+assert.equal(mismatchedProvisional.localization.status,'missing');
+assert.equal(mismatchedProvisional.localization.nextAction,'lookup_wikidata_title');
+const reviewed=applyAutomaticLocalization(provisional,{status:'reviewed',value:'Легенда Зорро',source:'dictionary',provenance:{source:'dictionary'}},NOW);
+assert.equal(reviewed.localization.status,'reviewed');
+assert.equal(reviewed.localization.value,'Легенда Зорро');
+assert.equal(reviewed.aliases.some(alias=>alias.value==='Временное'),true);
+const blocked=applyAutomaticLocalization(reviewed,{status:'provisional',value:'Другое имя',source:'wikidata',provenance:{source:'wikidata'}},NOW);
+assert.equal(blocked.localization,reviewed.localization);
+assert.equal(blocked.localization.value,'Легенда Зорро');
+assert.equal(blocked.localizationConflicts.at(-1).value,'Другое имя');
+assert.equal(blocked.aliases.some(alias=>alias.value==='Временное'),true);
+assert.equal(blocked.aliases.some(alias=>alias.value==='Другое имя'),true);
+assert.equal(transition(reviewed.localization,'provisional').ok,false);
+assert.equal(transition(reviewed.localization,'provisional').state,reviewed.localization);
+const corrected=applyAutomaticLocalization(blocked,{status:'reviewed',value:'Легенда Зорро',source:'dictionary',sourceVersion:'verified',provenance:{source:'owner'}},NOW);
+assert.equal(corrected.localization.status,'reviewed');
+
+const bare=filmView(base({title:{original:'The Legend of Zorro'}}));
+assert.equal(bare.localization.status,'missing');
+assert.equal(displayReady(bare),true);
+assert.equal(catalogReady(bare),true);
+assert.equal(predictionReady(bare),true);
+
+const noPrint=filmView(base({fingerprint:{present:false},prediction:{present:false}}));
+assert.equal(noPrint.fingerprint.status,'missing');
+assert.equal(noPrint.fingerprint.nextAction,'fingerprint_and_prediction');
+assert.equal(noPrint.prediction.status,'missing');
+assert.equal(noPrint.prediction.nextAction,'fingerprint_and_prediction');
+assert.equal(displayReady(noPrint),true);
+assert.equal(predictionReady(noPrint),false);
+const badSchema=filmView(base({fingerprint:{present:true,schemaVersion:2,invalidatedAt:null}}));
+assert.equal(badSchema.fingerprint.status,'stale');
+assert.equal(badSchema.prediction.status,'stale');
+assert.equal(badSchema.prediction.nextAction,'fingerprint_and_prediction');
+const invalidated=filmView(base({fingerprint:{present:true,schemaVersion:1,invalidatedAt:FRESH}}));
+assert.equal(invalidated.fingerprint.status,'stale');
+const profileDrift=filmView(base({profile:{version:4,profileHash:'profile-b'}}));
+assert.equal(profileDrift.fingerprint.status,'current');
+assert.equal(profileDrift.prediction.status,'stale');
+assert.equal(profileDrift.prediction.nextAction,'prediction_only');
+assert.equal(predictionReady(profileDrift),false);
+const changed=invalidatePredictionForProfile(film,{version:4,profileHash:'profile-b'},NOW);
+assert.equal(changed.fingerprint,film.fingerprint);
+assert.equal(changed.fingerprint.status,'current');
+assert.equal(changed.prediction.status,'stale');
+assert.equal(changed.prediction.nextAction,'prediction_only');
+assert.equal(changed.prediction.provenance.reason,'profile_changed');
+assert.equal(transition(film.fingerprint,'missing').ok,false);
+assert.equal(transition(film.prediction,'missing').ok,false);
+const queued=filmView(base({prediction:{present:false}}));
+assert.equal(queued.prediction.status,'missing');
+assert.equal(queued.prediction.nextAction,'prediction_only');
+const retry=filmView(base({prediction:{present:true,tasteProfileVersion:3,tasteProfileHash:'profile-a',fingerprintHash:'print-a',fingerprintSchemaVersion:1,predictionPromptVersion:1,failure:'model timeout'}}));
+assert.equal(retry.prediction.status,'failed');
+assert.equal(retry.prediction.failureReason,'model timeout');
+assert.equal(retry.prediction.nextAction,'retry_prediction');
+assert.equal(predictionReady(retry),false);
+const afterFailure=invalidatePredictionForProfile(retry,{version:4,profileHash:'profile-b'},NOW);
+assert.equal(afterFailure.prediction.status,'stale');
+assert.equal(afterFailure.fingerprint,retry.fingerprint);
+
+const started=transition(noTmdb.identity,'resolving',{updatedAt:new Date(NOW).toISOString(),nextAction:'continue_discovery'});
+assert.equal(started.ok,true);
+const resolved=transition(started.state,'resolved',{updatedAt:new Date(NOW).toISOString(),sourceVersion:'tmdb:1656',nextAction:'stop'});
+assert.equal(resolved.ok,true);
+assert.equal(transition(resolved.state,'resolving').ok,false);
+assert.equal(transition(resolved.state,'unresolved').ok,false);
+assert.equal(transition(resolved.state,'unresolved').state,resolved.state);
+const explicitReject=transition(noTmdb.identity,'rejected',{nextAction:'stop'});
+assert.equal(explicitReject.ok,true);
+assert.equal(displayReady({...noTmdb,identity:explicitReject.state}),false);
+assert.equal(catalogReady({...noTmdb,identity:explicitReject.state}),false);
+
+const samePrint=observeMetadata(film,{present:true,metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true,now:NOW,poster:'https://example.test/poster.jpg'});
+assert.equal(samePrint.fingerprint,film.fingerprint);
+assert.equal(samePrint.prediction,film.prediction);
+assert.equal(samePrint.metadata.status,'fresh');
+const staleMeta=observeMetadata(film,{present:true,metadataAt:new Date(NOW-31*DAY).toISOString(),peopleVersion:1,peopleNamesVersion:2,synopsisPresent:true,now:NOW});
+assert.equal(staleMeta.metadata.status,'stale');
+assert.equal(staleMeta.fingerprint.status,'current');
+assert.equal(staleMeta.prediction.status,'current');
+
+const shown=attachAvailability(film,{shows:[{start:NOW-3600000},{start:NOW+2*3600000}],now:NOW});
+assert.equal(shown.fingerprint,film.fingerprint);
+assert.equal(shown.prediction,film.prediction);
+assert.equal(shown.availability.status,undefined);
+assert.equal(shown.availability.hot,true);
+assert.equal(shown.availability.availableUntil,new Date(NOW+2*3600000+72*3600000).toISOString());
+assert.equal(availabilityProjection({shows:[{start:NOW+24*3600000}],now:NOW}).hot,false);
+assert.equal(availabilityProjection({shows:[{start:NOW-72*3600000}],now:NOW}).hot,true);
+assert.equal(availabilityProjection({shows:[{start:NOW-72*3600000-1}],now:NOW}).hot,false);
+const fromAiring=availabilityProjection({shows:[],epgLastAiring:NOW,now:NOW});
+assert.equal(fromAiring.hot,true);
+assert.equal(fromAiring.availableUntil,null);
+assert.deepEqual(Object.keys(fromAiring).sort(),['availableUntil','hot']);
+
+const provisionalPeople=names.filter(person=>person.status==='provisional');
+assert.deepEqual(provisionalPeople.map(person=>person.id).sort(),['actor/delia-enea','actor/lee-chung-hee','actor/leonardo-orsolini','actor/luca-papp']);
+for(const record of provisionalPeople){
+ const view=personView({roleId:record.id,original:'Original',dictionary:record,now:NOW});
+ assert.equal(view.localization.status,'provisional',record.id);
+ assert.equal(view.localization.sourceVersion,'provisional_transcription',record.id);
+ assert.equal(view.localization.nextAction,'keep_provisional',record.id);
+}
+assert.equal(names.some(person=>person.id==='actor/chris-pratt'),false);
+const verified=names.find(person=>person.status==='verified');
+assert.equal(personView({roleId:verified.id,original:'Original',dictionary:verified,now:NOW}).localization.status,'reviewed');
+const override={name:'Крис Прэтт',aliases:['Крис Пратт'],status:'verified',source:'https://ru.wikipedia.org/wiki/Прэтт,_Крис'};
+const actor=personView({roleId:'actor/chris-pratt',original:'Chris Pratt',dictionary:override,cacheName:'Крис Пратт',now:NOW});
+const director=personView({roleId:'director/chris-pratt',original:'Chris Pratt',dictionary:override,now:NOW});
+assert.equal(actor.localization.status,'reviewed');
+assert.equal(actor.localization.value,'Крис Прэтт');
+assert.equal(actor.identity.provenance.dedupe,'deferred');
+assert.equal(actor.aliases.some(alias=>alias.value==='Крис Пратт'&&alias.provenance.source==='dictionary'),true);
+assert.notEqual(actor.id,director.id);
+assert.equal(localPersonId('role/Chris Pratt'),'person:role/Chris Pratt');
+assert.equal(localPersonId('Chris Pratt'),null);
+const kept=applyAutomaticLocalization(actor,{status:'provisional',value:'Крис Пратт',source:'wikidata',provenance:{source:'wikidata'}},NOW,'name');
+assert.equal(kept.localization.value,'Крис Прэтт');
+assert.equal(kept.localization.status,'reviewed');
+const wikidataName=personView({roleId:'actor/someone',original:'Someone',cacheName:'Кто-то',now:NOW});
+assert.equal(wikidataName.localization.status,'provisional');
+assert.equal(wikidataName.localization.source,'wikidata');
+const unnamed=personView({roleId:'actor/someone',original:'Someone',now:NOW});
+assert.equal(unnamed.localization.status,'missing');
+assert.equal(unnamed.localization.nextAction,'lookup_wikidata_name');
+assert.equal(personView({roleId:verified.id,dictionary:verified,now:NOW}).localization.status,'reviewed');
+
+const grown=mergeAliases([{kind:'title',value:'The Legend of Zorro',provenance:{source:'letterboxd'}}],[{kind:'title',value:'The Legend of Zorro',provenance:{source:'epg'}},{kind:'title',value:'Легенда Зорро',provenance:{source:'dictionary'}}]);
+assert.equal(grown.length,2);
+assert.equal(grown[0].value,'The Legend of Zorro');
+
+console.log('Film and Person lifecycle contract passed.');
