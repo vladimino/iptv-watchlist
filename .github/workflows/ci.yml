@@ -168,75 +168,9 @@ jobs:
             [ "$status" = "200" ] || failed=1
           }
 
-          probe() {
-            local name="$1"
-            local url="$2"
-            local body curl_exit=0 http_status parsed success codes
-            body="$(mktemp "${RUNNER_TEMP:-/tmp}/cf-probe.XXXXXX")"
-            http_status="$(curl -sS -o "$body" -w '%{http_code}' --max-time 20 \
-              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              "$url")" || curl_exit=$?
-            if [ "$curl_exit" -ne 0 ]; then
-              rm -f "$body"
-              echo "${name}: $(curl_class "$curl_exit") (curl exit ${curl_exit})"
-              failed=1
-              return 0
-            fi
-            parsed="$(python3 -c 'import textwrap,sys; exec(textwrap.dedent("""
-            import json
-            path = sys.argv[1]
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    data = json.load(handle)
-            except Exception:
-                print("missing")
-                raise SystemExit(0)
-            if not isinstance(data, dict):
-                print("missing")
-                raise SystemExit(0)
-            success = data.get("success")
-            if success is True:
-                label = "true"
-            elif success is False:
-                label = "false"
-            else:
-                label = "missing"
-            codes = []
-            errors = data.get("errors")
-            if isinstance(errors, list):
-                for item in errors:
-                    if not isinstance(item, dict):
-                        continue
-                    code = item.get("code")
-                    if isinstance(code, bool):
-                        continue
-                    if isinstance(code, int) or (isinstance(code, str) and code.isdigit()):
-                        codes.append(str(code))
-            print(label + (" " + " ".join(codes) if codes else " none"))
-            """))' "$body")" || parsed="missing"
-            rm -f "$body"
-            if [ "$parsed" = "missing" ]; then
-              success="missing"
-              codes="none"
-            else
-              success="${parsed%% *}"
-              codes="${parsed#* }"
-            fi
-            echo "${name}: HTTP ${http_status} success ${success} codes ${codes}"
-            if [ "$http_status" != "200" ] || [ "$success" != "true" ]; then
-              failed=1
-            fi
-          }
-
           api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}"
           status_check "account token verify" "${api}/tokens/verify"
           status_check "worker settings" "${api}/workers/scripts/iptv/settings"
-          probe "service bindings" "${api}/workers/services/iptv/environments/production/bindings"
-          probe "service routes" "${api}/workers/services/iptv/environments/production/routes?show_zonename=true"
-          probe "domain records" "${api}/workers/domains/records?page=0&per_page=5&service=iptv&environment=production"
-          probe "service subdomain" "${api}/workers/services/iptv/environments/production/subdomain"
-          probe "service environment" "${api}/workers/services/iptv/environments/production"
-          probe "script schedules" "${api}/workers/scripts/iptv/schedules"
 
           if [ "$failed" -ne 0 ]; then
             echo "Cloudflare API diagnostics failed; deployment was not started."
@@ -245,56 +179,13 @@ jobs:
 
           echo "Cloudflare API diagnostics succeeded; continuing deployment."
 
-      - name: Prepare Wrangler diagnostic log directory
-        if: steps.freshness.outputs.deploy == 'true' && steps.cloudflare-access.outcome == 'success'
-        shell: bash
-        run: mkdir -p "${{ runner.temp }}/wrangler-diagnostics"
-
       - name: Deploy verified build
-        id: deploy
         if: steps.freshness.outputs.deploy == 'true' && steps.cloudflare-access.outcome == 'success'
         uses: cloudflare/wrangler-action@v4
-        env:
-          WRANGLER_LOG: debug
-          WRANGLER_LOG_SANITIZE: "true"
-          WRANGLER_LOG_PATH: ${{ runner.temp }}/wrangler-diagnostics/wrangler.log
         with:
-          quiet: true
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4.151.1"
           command: >-
             deploy
             --message "${{ steps.release.outputs.message }}"
-
-      - name: Summarize Wrangler diagnostic log
-        id: wrangler-log
-        if: failure() && steps.freshness.outputs.deploy == 'true' && steps.deploy.outcome == 'failure'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          WRANGLER_LOG_PATH: ${{ runner.temp }}/wrangler-diagnostics/wrangler.log
-          SANITIZED_LOG_PATH: ${{ runner.temp }}/wrangler-diagnostics/wrangler.sanitized.log
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -s "$WRANGLER_LOG_PATH" ]; then
-            echo "Wrangler diagnostic log was not created. The deploy failure above is unchanged."
-            exit 0
-          fi
-          node scripts/wrangler-diagnostic-summary.mjs "$WRANGLER_LOG_PATH" > "$SANITIZED_LOG_PATH"
-          rm -f "$WRANGLER_LOG_PATH"
-          if [ ! -s "$SANITIZED_LOG_PATH" ]; then
-            echo "Wrangler diagnostic summary was empty. The deploy failure above is unchanged."
-            exit 0
-          fi
-          echo "publish=true" >> "$GITHUB_OUTPUT"
-          echo "Allowlisted Wrangler diagnostic summary is ready for upload."
-
-      - name: Upload Wrangler diagnostic log
-        if: failure() && steps.freshness.outputs.deploy == 'true' && steps.deploy.outcome == 'failure' && steps.wrangler-log.outputs.publish == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: wrangler-deploy-debug
-          path: ${{ runner.temp }}/wrangler-diagnostics/wrangler.sanitized.log
-          retention-days: 1
-          if-no-files-found: warn
