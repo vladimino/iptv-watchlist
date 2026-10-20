@@ -155,13 +155,56 @@ jobs:
 
           echo "Cloudflare API diagnostics succeeded; continuing deployment."
 
+      - name: Prepare Wrangler diagnostic log directory
+        if: steps.freshness.outputs.deploy == 'true'
+        shell: bash
+        run: mkdir -p "${{ runner.temp }}/wrangler-diagnostics"
+
       - name: Deploy verified build
+        id: deploy
         if: steps.freshness.outputs.deploy == 'true'
         uses: cloudflare/wrangler-action@v4
+        env:
+          WRANGLER_LOG: debug
+          WRANGLER_LOG_SANITIZE: "true"
+          WRANGLER_LOG_PATH: ${{ runner.temp }}/wrangler-diagnostics/wrangler.log
         with:
+          quiet: true
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4.151.1"
           command: >-
             deploy
             --message "${{ steps.release.outputs.message }}"
+
+      - name: Summarize Wrangler diagnostic log
+        id: wrangler-log
+        if: failure() && steps.freshness.outputs.deploy == 'true' && steps.deploy.outcome == 'failure'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRANGLER_LOG_PATH: ${{ runner.temp }}/wrangler-diagnostics/wrangler.log
+          SANITIZED_LOG_PATH: ${{ runner.temp }}/wrangler-diagnostics/wrangler.sanitized.log
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s "$WRANGLER_LOG_PATH" ]; then
+            echo "Wrangler diagnostic log was not created. The deploy failure above is unchanged."
+            exit 0
+          fi
+          node scripts/wrangler-diagnostic-summary.mjs "$WRANGLER_LOG_PATH" > "$SANITIZED_LOG_PATH"
+          rm -f "$WRANGLER_LOG_PATH"
+          if [ ! -s "$SANITIZED_LOG_PATH" ]; then
+            echo "Wrangler diagnostic summary was empty. The deploy failure above is unchanged."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "Allowlisted Wrangler diagnostic summary is ready for upload."
+
+      - name: Upload Wrangler diagnostic log
+        if: failure() && steps.freshness.outputs.deploy == 'true' && steps.deploy.outcome == 'failure' && steps.wrangler-log.outputs.publish == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: wrangler-deploy-debug
+          path: ${{ runner.temp }}/wrangler-diagnostics/wrangler.sanitized.log
+          retention-days: 1
+          if-no-files-found: warn
