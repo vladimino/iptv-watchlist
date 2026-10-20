@@ -169,6 +169,7 @@ jobs:
           WRANGLER_LOG_SANITIZE: "true"
           WRANGLER_LOG_PATH: ${{ runner.temp }}/wrangler-diagnostics/wrangler.log
         with:
+          quiet: true
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4.151.1"
@@ -176,7 +177,7 @@ jobs:
             deploy
             --message "${{ steps.release.outputs.message }}"
 
-      - name: Sanitize Wrangler diagnostic log
+      - name: Summarize Wrangler diagnostic log
         id: wrangler-log
         if: failure() && steps.freshness.outputs.deploy == 'true' && steps.deploy.outcome == 'failure'
         env:
@@ -186,42 +187,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - << 'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          source = Path(os.environ["WRANGLER_LOG_PATH"])
-          destination = Path(os.environ["SANITIZED_LOG_PATH"])
-          token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-          if not source.is_file() or source.stat().st_size == 0:
-              print("Wrangler diagnostic log was not created. The deploy failure above is unchanged.")
-              raise SystemExit(0)
-          text = source.read_text(errors="replace")
-          if token:
-              text = text.replace(token, "[redacted]")
-          patterns = [
-              r"(?i)authorization\s*[:=]\s*\S+",
-              r"(?i)\bbearer\s+[A-Za-z0-9\-._~+/=]+",
-              r"(?i)\bcookie\s*[:=]\s*\S+",
-              r"(?i)\bset-cookie\s*[:=]\s*\S+",
-              r"(?i)\b(?:api[_-]?token|secret|password|private[_-]?key)\b\s*[:=]\s*\S+",
-              r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-          ]
-          for pattern in patterns:
-              text = re.sub(pattern, "[redacted]", text)
-          if token and token in text:
-              destination.write_text(
-                  "The Wrangler debug log still contained the API token after redaction, so the log was not published.\n"
-              )
-              print("Redaction could not remove the API token. The original log was not published. The deploy failure above is unchanged.")
-          else:
-              destination.write_text(text)
-              print("Sanitized Wrangler diagnostic log is ready for upload.")
-          source.unlink()
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("publish=true\n")
-          PY
+          if [ ! -s "$WRANGLER_LOG_PATH" ]; then
+            echo "Wrangler diagnostic log was not created. The deploy failure above is unchanged."
+            exit 0
+          fi
+          node scripts/wrangler-diagnostic-summary.mjs "$WRANGLER_LOG_PATH" > "$SANITIZED_LOG_PATH"
+          rm -f "$WRANGLER_LOG_PATH"
+          if [ ! -s "$SANITIZED_LOG_PATH" ]; then
+            echo "Wrangler diagnostic summary was empty. The deploy failure above is unchanged."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "Allowlisted Wrangler diagnostic summary is ready for upload."
 
       - name: Upload Wrangler diagnostic log
         if: failure() && steps.freshness.outputs.deploy == 'true' && steps.deploy.outcome == 'failure' && steps.wrangler-log.outputs.publish == 'true'
