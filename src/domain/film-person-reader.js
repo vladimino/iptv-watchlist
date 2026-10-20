@@ -1,0 +1,110 @@
+// Storage-neutral Film and Person reader, phase 2 of AIR-42.
+// Builds lifecycle views from records the caller already loaded. It does not read or write storage.
+const LIFECYCLE_SIDECAR='.lifecycle.json';
+const FORBIDDEN_LIFECYCLE_KEYS=Object.freeze(['epg/discovery-latest.json','programme.json','enrichment/prediction-queue.json']);
+
+function indexRecords(records,key){const out={};for(const record of records||[])if(record&&record[key]!=null)out[String(record[key])]=record;return out;}
+function listOf(value){return Array.isArray(value)?value:value&&typeof value==='object'?Object.values(value):[];}
+function storedFilmId(film){
+ const letterboxd=(film?.externalIds||[]).find(item=>item.scheme==='letterboxd'&&item.value);
+ if(letterboxd)return String(letterboxd.value);
+ const tmdb=(film?.externalIds||[]).find(item=>item.scheme==='tmdb'&&!item.conflicting);
+ return tmdb?'tmdb_'+tmdb.value:film?.id||null;
+}
+function sidecarKey(key){return key.endsWith('.json')?key.slice(0,-5)+LIFECYCLE_SIDECAR:key+LIFECYCLE_SIDECAR;}
+function fingerprintFacts(file){if(!file)return {present:false};return {present:true,schemaVersion:file.fingerprintSchemaVersion,invalidatedAt:file.invalidatedAt||null,generatedAt:file.generatedAt||null};}
+function predictionFacts(file,failure){
+ const current=file?.current;
+ if(!current)return {present:false,failure};
+ return {present:true,tasteProfileVersion:current.tasteProfileVersion,tasteProfileHash:current.tasteProfileHash,fingerprintHash:current.fingerprintHash,fingerprintSchemaVersion:current.fingerprintSchemaVersion,predictionPromptVersion:current.predictionPromptVersion,failure};
+}
+function resolutionEntries(resolution){return Object.entries(resolution||{}).filter(([key,value])=>key!=='__canonicalizedAt'&&value&&typeof value==='object');}
+function decisionForFilm(film,resolution){
+ if(!String(film?.id||'').startsWith('tmdb_'))return null;
+ const matches=resolutionEntries(resolution).map(([,decision])=>decision).filter(decision=>decision.tmdbId!=null&&String(decision.tmdbId)===String(film.tmdbId)&&(!decision.filmId||decision.filmId===film.id));
+ const verified=matches.find(decision=>decision.status==='verified');
+ if(verified)return verified;
+ const specific=matches.find(decision=>decision.filmId===film.id&&['ambiguous','no_confident_match','duration_mismatch'].includes(decision.status));
+ return specific||(film.tmdbId?{status:'verified'}:null);
+}
+function syncFailure(sync,id){return (sync?.failures||[]).find(failure=>failure&&failure.id===id)||null;}
+function predictionFailure(store,id){return store.predictionRun?.failures?.[id]||store.predictionQueue?.retries?.[id]||null;}
+function peopleOn(record){return [...(record?.directors||[]),...(record?.actors||[]),...(record?.people?.directors||[]),...(record?.people?.actors||[])];}
+function filmFacts(record,store,resolution,now){
+ const id=String(record.id),metadata=store.metadata?.[id]||null,programme=(store.programme?.films||[]).find(film=>String(film.id)===id)||null,source=metadata||record;
+ const letterboxdId=id.startsWith('tmdb_')?null:id;
+ const decision=decisionForFilm(record,resolution);
+ return {letterboxdId,tmdbId:source.tmdbId?String(source.tmdbId):null,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||source.discoveredAt||source.metadataAt||source.synopsis),metadataAt:source.metadataAt||source.discoveredAt||null,peopleVersion:source.peopleVersion??((source.directors||source.actors)?1:null),peopleNamesVersion:source.peopleNamesVersion,synopsisPresent:!!(source.synopsis||source.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:source.original||record.original||null,titleRu:source.titleRu||null,titleStatus:source.titleStatus||null,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==source.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id)),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:programme?.shows||source.shows||[],epgLastAiring:source.epgLastAiring};
+}
+function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
+function lifecycleBody(film){return {contractVersion:film.contractVersion,id:film.id,storedId:storedFilmId(film),canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds,redirects:film.redirects||[],aliases:film.aliases,identity:film.identity,metadata:film.metadata,localization:film.localization,fingerprint:film.fingerprint,prediction:film.prediction,availability:film.availability||null};}
+function legacyEnrichmentIds(store){
+ const seen=new Set(),ids=[];
+ const add=film=>{if(!film?.id)return;const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))return;seen.add(identity);ids.push(String(film.id));};
+ for(const film of store.programme?.films||store.watchlist?.films||[])add(film);
+ for(const film of listOf(store.discoveredFilms).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en')))add(film);
+ return ids.sort((a,b)=>a.localeCompare(b,'en'));
+}
+function shadowParity(legacyIds,lifecycleIds){
+ const legacy=[...legacyIds].sort((a,b)=>a.localeCompare(b,'en')),lifecycle=[...lifecycleIds].sort((a,b)=>a.localeCompare(b,'en'));
+ const have=new Set(lifecycle),seen=new Set(legacy);
+ return {ok:legacy.length===lifecycle.length&&legacy.every((id,index)=>id===lifecycle[index]),legacy,lifecycle,missing:legacy.filter(id=>!have.has(id)),extra:lifecycle.filter(id=>!seen.has(id))};
+}
+function personFacts(person,store,now){
+ const roleId=person.id,dictionary=store.personOverrides?.[roleId]||store.personNameIndex?.[roleId]||null,cache=store.people?.[roleId]||null;
+ return {roleId,original:person.original||cache?.original||null,dictionary,cacheName:cache?.name||null,now};
+}
+function readLifecycle(store,now){
+ const filmTitleIndex=store.filmTitleIndex||indexRecords(store.filmTitles,'id'),personNameIndex=store.personNameIndex||indexRecords(store.personNames,'id');
+ const context={...store,filmTitleIndex,personNameIndex};
+ const resolution=store.discoveryResolution||{};
+ const films=new Map();
+ for(const record of store.programme?.films||store.watchlist?.films||[]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
+ for(const record of listOf(store.discoveredFilms)){
+  if(films.has(String(record.id)))continue;
+  const facts=filmFacts(record,context,resolution,now),incoming=projectFilm({...facts,letterboxdId:null,localId:null});
+  if(!incoming)continue;
+  const same=facts.tmdbId?[...films.values()].find(film=>(film.externalIds||[]).some(item=>item.scheme==='tmdb'&&item.trusted&&!item.conflicting&&item.value===facts.tmdbId)):null;
+  if(!same){films.set(storedFilmId(incoming),incoming);continue;}
+  const linked=linkFilms(same,incoming,now);
+  if(!linked.ok){films.set(storedFilmId(incoming),incoming);continue;}
+  films.delete(storedFilmId(same));films.set(storedFilmId(linked.survivor),linked.survivor);
+ }
+ const candidates=[],conflicts=[];
+ const items=new Map((store.discoveryLatest?.items||[]).map(item=>[item.key,item]));
+ for(const [key,decision] of resolutionEntries(resolution)){
+  if(Array.isArray(decision.conflictingTmdbIds)&&decision.conflictingTmdbIds.length>1){
+   const view=projectFilm({conflictingTmdbIds:decision.conflictingTmdbIds,now,decision,title:{original:items.get(key)?.title||null},metadata:{present:false},fingerprint:{present:false},prediction:{present:false},shows:[]});
+   if(view)conflicts.push(view);
+   candidates.push({key,film:view,identity:view?.identity||null,excluded:false});
+   continue;
+  }
+  const matched=[...films.values()].some(film=>decision.filmId&&(storedFilmId(film)===decision.filmId||film.id==='film:'+decision.filmId));
+  if(decision.status==='excluded_nonfilm'){candidates.push({key,film:null,identity:null,excluded:true});continue;}
+  if(matched)continue;
+  candidates.push({key,film:null,identity:identityState({now,decision,discoveryPending:!decision,tmdbId:decision.tmdbId?String(decision.tmdbId):null}),excluded:false,missingCatalog:decision.status==='verified'});
+ }
+ const people=new Map();
+ const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn)];
+ for(const person of embedded){if(!person?.id||people.has(person.id))continue;const view=personView(personFacts(person,context,now));if(view)people.set(person.id,view);}
+ const filmList=[...films.values()].sort((a,b)=>storedFilmId(a).localeCompare(storedFilmId(b),'en'));
+ const legacyIds=legacyEnrichmentIds(store),lifecycleIds=filmList.map(storedFilmId);
+ const sidecars={};
+ const watchlistBodies=Object.fromEntries(filmList.filter(film=>!String(storedFilmId(film)).startsWith('tmdb_')).map(film=>[storedFilmId(film),lifecycleBody(film)]));
+ if(store.watchlist)sidecars[sidecarKey('watchlist.json')]=watchlistBodies;
+ if(store.metadata)sidecars[sidecarKey('metadata.json')]=Object.fromEntries(Object.keys(store.metadata).filter(id=>watchlistBodies[id]).map(id=>[id,watchlistBodies[id]]));
+ if(store.discoveredFilms){
+  const discoveredBodies={};
+  for(const record of listOf(store.discoveredFilms)){
+   const film=filmList.find(item=>storedFilmId(item)===String(record.id)||(item.redirects||[]).some(redirect=>redirect.from==='film:tmdb:'+record.tmdbId)||(item.externalIds||[]).some(entry=>entry.scheme==='tmdb'&&entry.trusted&&entry.value===String(record.tmdbId)));
+   if(film)discoveredBodies[String(record.id)]=lifecycleBody(film);
+  }
+  sidecars[sidecarKey('epg/discovered-films.json')]=discoveredBodies;
+ }
+ for(const id of Object.keys(store.fingerprints||{})){
+  const film=filmList.find(item=>storedFilmId(item)===String(id));
+  if(film)sidecars['enrichment/films/'+encodeURIComponent(String(id))+'/fingerprint'+LIFECYCLE_SIDECAR]={id:film.id,storedId:storedFilmId(film),fingerprint:film.fingerprint};
+ }
+ for(const key of Object.keys(sidecars))if(FORBIDDEN_LIFECYCLE_KEYS.includes(key)||key.includes('discovery-latest')||key.includes('predictions'))throw new Error('lifecycle sidecar overwrites '+key);
+ return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,people:[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en')),candidates,conflicts,sidecars,parity:{...shadowParity(legacyIds,lifecycleIds),excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
+}
