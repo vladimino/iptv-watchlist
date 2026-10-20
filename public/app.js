@@ -58,7 +58,8 @@ function onAir(model,show){const start=showStart(show),end=finiteTime(show?.end)
 function inArchive(model,show){const start=showStart(show);if(!model?.now||!inEnvelope(model,start)||start>model.now)return false;if(onAir(model,show))return true;return start>model.now-72*3600000&&start+72*3600000>model.now;}
 function inFuture(model,show){const start=showStart(show);return !!model?.now&&inEnvelope(model,start)&&start>model.now;}
 function blackZone(){const model=viewingWindow();return !!model?.envelope&&model.black;}
-function presentUnscheduled(period='all'){if(state.includeUnscheduled)return true;return blackZone()&&!state.lastChanceOnly&&period==='all';}
+function inSelectedScope(film,period=state.period){if(periodShows(film,period).length>0)return true;if(periodShows(film,'all').length>0)return false;if(blackZone()&&!state.lastChanceOnly)return true;return !!state.includeUnscheduled;}
+function countedScope(film,period){if(blackZone()&&period!=='all')return periodShows(film,period).length>0;return inSelectedScope(film,period);}
 function readUrlState(url){
  const p=url.searchParams,defaults={shortlistMode:'now',period:'all',sort:'title',sortExplicit:false,viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',genres:new Set(),mechanics:new Set(),moods:new Set(),channels:new Set(),execution:emptyExecution(),from:1900,to:MAX_YEAR,maxRuntime:null};
  if(p.get('shortlist')==='today')defaults.shortlistMode='today';
@@ -336,7 +337,6 @@ function updateExecutionOptions(){
 }
 function eligible(film) { const parsed=searchTokens(state.query); const matched=searchRank(film,parsed.normalized,parsed.tokens)!==null; const prediction=enrichment.films[String(film.id)]?.prediction,facets=filmFacets(film); return matched && (state.viewing==='any'||ratingsLoaded&&((state.viewing==='rewatch')===hasActualRating(film))) && (state.minPrediction===null||Number.isFinite(prediction?.predictedRating)&&prediction.predictedRating>=state.minPrediction) && (state.minProbability===null||Number.isFinite(prediction?.probability4Plus)&&prediction.probability4Plus>=state.minProbability) && (!state.startedOnly||startedIds.has(String(film.id))) && (!state.lastChanceOnly||isLastChance(film)) && ['directors','actors'].every(key=>!state[key]||(film[key]||[]).some(p=>p.id===state[key])) && ((film.year >= state.from && film.year <= state.to)||(!film.year&&state.from===1900&&state.to===MAX_YEAR)) && (state.maxRuntime===null||(Number(film.runtime)>0&&Number(film.runtime)<=state.maxRuntime)) && (!state.genres.size || film.genres.some(g => state.genres.has(g))) && (!state.mechanics.size||[...state.mechanics].some(m=>facets.mechanics.has(m))) && (!state.moods.size||[...state.moods].some(m=>facets.moods.has(m))) && matchesChannels(film) && matchesExecution(film); }
 function periodShows(film,period=state.period) { return film.shows.filter(s => period==='archive'?isArchive(s):period==='future'?isFuture(s):isArchive(s)||isFuture(s)); }
-function inSelectedScope(film,period=state.period){if(periodShows(film,period).length>0)return true;if(periodShows(film,'all').length>0)return false;return presentUnscheduled(period);}
 function filmWord(n){return n%10===1&&n%100!==11?'фильм':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'фильма':'фильмов';}
 function showWord(n){return n%10===1&&n%100!==11?'показ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'показа':'показов';}
 function programmeWindow(snapshot){
@@ -431,7 +431,7 @@ function render(){
   ['#year-from','#year-to'].forEach(s=>$(s).setAttribute('aria-invalid',String(!validYear)));
   $('#runtime-max').setAttribute('aria-invalid',String(!validRuntime));
   const filtered=valid?films.filter(eligible):[];
-  for(const p of ['all','archive','future'])$(`#count-${p}`).textContent=filtered.filter(f=>inSelectedScope(f,p)).length;
+  for(const p of ['all','archive','future'])$(`#count-${p}`).textContent=filtered.filter(f=>countedScope(f,p)).length;
   document.querySelectorAll('[data-period]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.period===state.period)));
   const visible=valid?visibleFilms():[];
   $('#movies').innerHTML=visible.map(card).join('');
@@ -501,7 +501,8 @@ function refreshGenreOptions(){
  document.querySelectorAll('#genres input').forEach(input=>input.checked=state.genres.has(input.value));
 }
 let gridTimeKey='',shortTimeKey='',statusTimeKey='';
-function gridTimeKeyOf(visible){const model=viewingWindow();return visible.map(film=>`${film.id}:${isLastChance(film)?1:0}:${periodShows(film).map(showStart).join(',')}`).join('|')+`|${model.black?1:0}`;}
+function showBucket(show){return isFuture(show)?'f':isArchive(show)?'a':'x';}
+function gridTimeKeyOf(visible){const model=viewingWindow();const counts=['archive','future'].map(period=>films.filter(film=>eligible(film)&&countedScope(film,period)).length).join(',');return visible.map(film=>`${film.id}:${isLastChance(film)?1:0}:${(film.shows||[]).map(show=>`${showStart(show)}:${showBucket(show)}`).join(',')}`).join('|')+`|${model.black?1:0}|${counts}`;}
 function shortTimeKeyOf(visible){return ['now','today'].map(mode=>buildShortlist(visible,mode).map(item=>`${item.film.id}:${item.availability.kind}:${item.availability.show?.start??''}:${item.availability.show?.end??''}`).join(',')).join(';');}
 function noteTimeView(visible=visibleFilms()){gridTimeKey=gridTimeKeyOf(visible);shortTimeKey=shortTimeKeyOf(visible);statusTimeKey=JSON.stringify(programmeStatus());}
 function refreshTimeSensitiveView(){

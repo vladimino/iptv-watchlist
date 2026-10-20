@@ -72,8 +72,10 @@ run(`viewClock=${t0+96*hour};state.includeUnscheduled=false;state.lastChanceOnly
 assert.equal(run('blackZone()'),true);
 assert.equal(run('state.includeUnscheduled'),false);
 assert.equal(run(`films.filter(f=>inSelectedScope(f,'all')).length`),5);
-assert.equal(run(`films.filter(f=>inSelectedScope(f,'archive')).length`),0);
-assert.equal(run(`films.filter(f=>inSelectedScope(f,'future')).length`),0);
+assert.equal(run(`films.filter(f=>inSelectedScope(f,'archive')).length`),5,'the open archive tab still lists the watchlist');
+assert.equal(run(`films.filter(f=>inSelectedScope(f,'future')).length`),5,'the open next-day tab still lists the watchlist');
+assert.equal(run(`films.filter(f=>countedScope(f,'archive')).length`),0);
+assert.equal(run(`films.filter(f=>countedScope(f,'future')).length`),0);
 run(`state.query='nomatch';`);
 assert.equal(run(`films.filter(f=>eligible(f)&&inSelectedScope(f)).length`),0,'search still applies in the black zone');
 run(`state.query='';state.lastChanceOnly=true;`);
@@ -86,6 +88,7 @@ run('state.includeUnscheduled=false');
 
 run(`viewClock=${t0};noteTimeView();`);
 let paints=0;
+const realRender=ctx.render;
 ctx.render=()=>{paints++;};
 run(`viewClock=${t0+1000};refreshTimeSensitiveView();`);
 assert.equal(paints,0,'a tick inside the same shows does not rebuild the grid');
@@ -98,6 +101,42 @@ ctx.document.querySelector=selector=>selector.includes('data-film-id')?card:null
 ctx.render=()=>{details.open=false;};
 run('renderPreservingScroll()');
 assert.equal(details.open,true,'an open synopsis is restored after a time redraw');
+ctx.render=realRender;
+function box(){return {hidden:false,textContent:'',innerHTML:'',value:'',title:'',className:'',classList:{remove(){},add(){},contains(){return false}},style:{},dataset:{},setAttribute(){},getAttribute(){return null},removeAttribute(){},querySelector(){return box()},focus(){}};}
+const nodes=new Map();
+ctx.document.querySelector=selector=>{if(!nodes.has(selector))nodes.set(selector,box());return nodes.get(selector);};
+ctx.document.querySelectorAll=()=>[];
+const start=t0+60000;
+run(`report={updatedAt:new Date(${t0}).toISOString(),window:{from:${t0}-72*${hour},to:${t0}+24*${hour}},films:[]};films=[{id:'soon',title:'Soon',original:'Soon',year:2020,genres:['Драма'],runtime:90,directors:[],actors:[],shows:[{start:${start},end:${start}+2*${hour},channel:'One'}]}];state.period='all';state.includeUnscheduled=false;state.lastChanceOnly=false;state.query='';state.sort='title';state.sortExplicit=false;state.genres=new Set();state.mechanics=new Set();state.moods=new Set();state.channels=new Set();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;viewClock=${t0};`);
+run('render();noteTimeView()');
+assert.match(nodes.get('#movies').innerHTML,/ДАЛЬШЕ/);
+assert.doesNotMatch(nodes.get('#movies').innerHTML,/АРХИВ/);
+assert.equal(String(nodes.get('#count-future').textContent),'1');
+assert.equal(String(nodes.get('#count-archive').textContent),'0');
+run(`viewClock=${start};refreshTimeSensitiveView();`);
+assert.match(nodes.get('#movies').innerHTML,/АРХИВ/);
+assert.doesNotMatch(nodes.get('#movies').innerHTML,/ДАЛЬШЕ/);
+assert.equal(String(nodes.get('#count-archive').textContent),'1');
+assert.equal(String(nodes.get('#count-future').textContent),'0');
+assert.equal(run('state.period'),'all');
+run(`films.push({id:'bare',title:'Bare',original:'Bare',year:2020,genres:['Драма'],runtime:90,directors:[],actors:[],shows:[]});`);
+for(const period of ['all','archive','future'])for(const checked of [false,true]){
+ run(`state.period='${period}';state.includeUnscheduled=${checked};state.lastChanceOnly=false;state.query='';viewClock=${t0+96*hour};`);
+ assert.equal(run('visibleFilms().length'),2,`${period} with the box ${checked?'on':'off'} still lists the watchlist`);
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'archive')).length`),0);
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'future')).length`),0);
+ assert.equal(run('state.period'),period);
+ assert.equal(run('state.includeUnscheduled'),checked);
+ assert.equal(run("presetQuery().includes('view=watchlist')"),checked);
+ run(`viewClock=${t0};`);
+ assert.equal(run('blackZone()'),false);
+ const restored=period==='archive'?checked?1:0:checked?2:1;
+ assert.equal(run('visibleFilms().length'),restored,`${period} restores the schedule and keeps the box ${checked?'on':'off'}`);
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'future')).length`),checked?2:1);
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'archive')).length`),checked?1:0);
+ assert.equal(run('state.includeUnscheduled'),checked);
+ assert.equal(run('state.period'),period);
+}
 
 const html=fs.readFileSync('public/index.html','utf8'),css=fs.readFileSync('public/styles.css','utf8');
 assert.doesNotMatch(html,/id="archive-range"|id="future-range"|Время — Europe\/Madrid|Источники подключены/);
