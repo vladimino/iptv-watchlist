@@ -34,9 +34,10 @@ result=await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);asse
 // TMDB rate limits pause rather than marking a candidate as a non-film or losing its queue entry.
 records.set('epg/discovery-latest.json',{items:[candidate('Other',2020,now)]});responseMode='429';calls=[];
 result=await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);assert.equal(result.error,'TMDB HTTP 429');assert(result.retryAt);assert.equal(result.remaining,1);const count=calls.length;assert.equal((await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context)).stage,'backoff');assert.equal(calls.length,count);
-// Continuation is a new loopback invocation with a bounded hop count, no forwarded credentials, and no public fetch.
-const tasks=[],dispatched=[];context.execution={waitUntil:p=>tasks.push(p),exports:{DiscoveryContinuation:{fetch:async(url,init)=>{dispatched.push({url,init});return new Response('{}');}}}};context.result={remaining:1,stage:'partial'};responseMode='normal';calls=[];
-env.EPG_SITE_SERVICE_TOKEN='legacy-secret';assert.equal((await vm.runInContext('continueDiscovery(env,execution,result,{chunks:2})',context)).scheduled,true);await Promise.all(tasks);delete env.EPG_SITE_SERVICE_TOKEN;
-assert.equal(calls.length,0);assert.equal(dispatched[0].url,'https://iptv.internal/discovery/continue');assert.deepEqual(JSON.parse(dispatched[0].init.body),{chunks:1});assert.deepEqual(Object.keys(dispatched[0].init.headers),['Content-Type']);assert(!JSON.stringify([...records]).includes('legacy-secret'));
+// A committed programme queues one discovery series. It does not dispatch a hop or keep a credential.
+const tasks=[],dispatched=[];context.execution={waitUntil:p=>tasks.push(p),exports:{DiscoveryContinuation:{fetch:async(url,init)=>{dispatched.push({url,init});return new Response('{}');}}}};responseMode='normal';calls=[];
+env.EPG_SITE_SERVICE_TOKEN='legacy-secret';const queued=await vm.runInContext('queueDiscovery(env,"epg_committed")',context);await Promise.all(tasks);delete env.EPG_SITE_SERVICE_TOKEN;
+assert.equal(queued.state,'paused');assert.equal(queued.reason,'epg_committed');assert.equal(queued.remainingChunks,12);assert.equal(queued.nextAction,'continue');
+assert.equal(calls.length,0);assert.deepEqual(dispatched,[]);assert.equal(records.get('epg/resolver-continuation.json').remainingChunks,12);assert(!JSON.stringify([...records]).includes('legacy-secret'));
 assert.equal(vm.runInContext("nonFilmEPGReason('TV series Example')",context),'show_label');assert.equal(vm.runInContext("nonFilmEPGReason('Example episode 4')",context),'episode_label');
-console.log('Discovery pipeline: hot priority, alias/yearless reuse, canonical identity, cold deferral, promotion, leases, restart checkpoints, 429 backoff and invocation continuation passed');
+console.log('Discovery pipeline: hot priority, alias/yearless reuse, canonical identity, cold deferral, promotion, leases, restart checkpoints, 429 backoff and queued continuation passed');

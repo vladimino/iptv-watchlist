@@ -47,7 +47,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `enrichment_queue` | no | `GET /api/enrichment/queue/status` |
 | `enrichment_status` | recovery only | `GET /api/enrichment/status`, including an undelivered stop event |
 | `epg_sync_start` | yes | `POST /api/sync/start`. No arguments. |
-| `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. A completed EPG step schedules the AIR-60 continuation internally. |
+| `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. After `stage` is `complete`, each call runs one discovery chunk or reports why it did not. |
 | `prediction_start` | yes | `POST /api/enrichment/start` with `scope: watchlist_all` and `mode: queued`. `trigger` is `scheduled` or `manual`. |
 | `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
 | `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction. |
@@ -58,7 +58,19 @@ Prerequisite for every tool is [AIR-58](https://trello.com/c/BB01YN2f) (this Acc
 
 Write tools are annotated `readOnlyHint: false`. `enrichment_status` is too, because the HTTP status route can persist a recovered stop event. `epg_sync_start` and `epg_sync_step` are `openWorldHint: true` because they fetch Letterboxd, the configured EPG source, or TMDB. A wrong argument returns a tool result with `isError: true` and does not call the domain function. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.
 
-The caller repeats `epg_sync_step` until `stage` is `complete`, and repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. One MCP call is one existing step. ChatGPT generates the fingerprint and prediction; the Worker only validates and stores them.
+The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `discovery.nextAction`: `continue` means call `epg_sync_step` again now with the same `runId`; `wait` means do not call before `discovery.nextCatchUpAt`; `stop` means discovery is finished until the next EPG commit. `ratingsPending` does not mean retry Letterboxd; that follow-up is [AIR-64](https://trello.com/c/WTnyO8bX). One call is one metadata batch, the EPG commit, or one discovery chunk. A separate request does not guarantee a new isolate. The caller repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. ChatGPT generates the fingerprint and prediction; the Worker only validates and stores them.
+
+### Discovery contract for Scheduled Tasks
+
+`epg_sync_step` returns this object once the programme commit has happened. [AIR-62](https://trello.com/c/CU71gW4c) should branch on `nextAction` and not infer it from `ratingsPending` or from `stage` alone.
+
+| `discovery.nextAction` | When | What the caller does |
+| --- | --- | --- |
+| `continue` | EPG commit (`state: paused`, `reason: epg_committed`, `remainingChunks: 12`), or a chunk finished with candidates and budget left | Call `epg_sync_step` again now with the same `runId` |
+| `wait` | `chunk_budget`, `backoff`, `busy`, or `error` before `nextCatchUpAt` | Do not call before `discovery.nextCatchUpAt` |
+| `stop` | Backlog finished, programme changed, or nothing to resolve | Do not call until the next EPG commit |
+
+`discovery.state` is `paused`, `running`, `complete`, `error`, or `busy`. A finished response is not left `running`. `remainingChunks` counts chunks still allowed in the current series. The field list and the lease rules are in [ENRICHMENT_API.md](../ENRICHMENT_API.md#epg-resolver--hotcold-pipeline-v2).
 
 ## Authorization
 

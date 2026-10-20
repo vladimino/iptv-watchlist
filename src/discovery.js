@@ -46,7 +46,9 @@ async function resolveDiscoveryChunk(env,report,limit){
   const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate);indexFilm(films[key]);touched++;}}
  }
  if(touched||migrated)await saveJSON(env,'epg/discovered-films.json',films);if(screenedOut||knownAliases)await saveJSON(env,'epg/discovery-resolution.json',decisions);
- const now=Date.now(),pending=source.items.filter(c=>discoveryReady(c,decisions[c.key],now)).sort((a,b)=>Number(candidateIsHot(b,now))-Number(candidateIsHot(a,now))||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
+ if(touched||migrated||screenedOut||knownAliases)await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
+ const now=Date.now(),pending=source.items.filter(c=>discoveryReady(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
+ pending.sort((a,b)=>hotRank.get(b)-hotRank.get(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
  let checked=0,added=0,reused=0,tmdbCalls=0,error=null,retryAt=null;
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
  for(const candidate of pending.slice(0,limit)){
@@ -74,24 +76,92 @@ async function resolveDiscoveryChunk(env,report,limit){
    await saveJSON(env,'epg/discovery-resolution.json',decisions);checked++;
   }catch(e){error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
  }
- const currentReport=await loadJSON(env,'programme.json');try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint');}catch(e){error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
+ const currentReport=await loadJSON(env,'programme.json');
+ if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
+  const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,programmeChanged:true};
+  await saveJSON(env,'epg/discovery-status.json',changed);return {...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
+ }
+ try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint');}catch(e){error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
  const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
  await saveJSON(env,'epg/discovery-status.json',summary);return summary;
 }
-// Hops stay on the ctx.exports loopback: a public self-fetch meets Cloudflare Access and same-zone error 1042.
-async function continueDiscovery(env,execution,result,body={}){
- const chunks=Number.isInteger(body.chunks)?Math.min(12,Math.max(0,body.chunks)):12;
- if(!execution?.waitUntil||chunks===0||!result.remaining||result.retryAt||result.stage==='busy'){const reason=result.retryAt?'backoff':chunks===0?'chunk_budget':result.stage==='busy'?'busy':'idle';if(execution?.waitUntil&&result.stage!=='busy')await saveJSON(env,'epg/resolver-continuation.json',{stage:result.remaining?'paused':'complete',at:new Date().toISOString(),reason,remaining:result.remaining,retryAt:result.retryAt||null,nextCatchUpAt:result.remaining?nextCatchUpAt():null});return {scheduled:false,reason};}
- const loopback=execution.exports?.DiscoveryContinuation;
- if(typeof loopback?.fetch!=='function'){await saveJSON(env,'epg/resolver-continuation.json',{stage:'error',at:new Date().toISOString(),reason:'internal_dispatch_unavailable',nextCatchUpAt:nextCatchUpAt()});return {scheduled:false,reason:'internal_dispatch_unavailable'};}
- await saveJSON(env,'epg/resolver-continuation.json',{stage:'scheduled',at:new Date().toISOString(),remainingChunks:chunks-1});
- execution.waitUntil((async()=>{try{const response=await loopback.fetch(DISCOVERY_CONTINUATION_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chunks:chunks-1}),signal:AbortSignal.timeout(29000)});if(!response.ok)throw new Error('continuation HTTP '+response.status);}catch(e){await saveJSON(env,'epg/resolver-continuation.json',{stage:'error',at:new Date().toISOString(),reason:String(e.message).slice(0,120),nextCatchUpAt:nextCatchUpAt()});}})());
- return {scheduled:true,remainingChunks:chunks-1};
+// One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
+const DISCOVERY_CHUNK_BUDGET=12;
+const CONTINUATION_KEY='epg/resolver-continuation.json';
+function discoveryContract(record,override={}){
+ const state=override.state||record?.stage||'idle';
+ const reason=override.reason!==undefined?override.reason:record?.reason??null;
+ const remainingChunks=override.remainingChunks!==undefined?override.remainingChunks:record?.remainingChunks??0;
+ const retryAt=override.retryAt!==undefined?override.retryAt:record?.retryAt??null;
+ const nextCatchUpAt=override.nextCatchUpAt!==undefined?override.nextCatchUpAt:record?.nextCatchUpAt??null;
+ let nextAction=override.nextAction;
+ if(!nextAction){
+  if(state==='busy'||reason==='chunk_budget'||reason==='backoff'||state==='error')nextAction='wait';
+  else if(state==='complete'||['programme_changed','missing_secret','idle'].includes(reason)||remainingChunks<=0)nextAction='stop';
+  else nextAction='continue';
+ }
+ return {state,remainingChunks,nextAction,reason:reason||null,at:override.at||record?.at||null,nextCatchUpAt:nextAction==='wait'?(nextCatchUpAt||nextCatchUpAt()):nextCatchUpAt,retryAt:retryAt||null,programmeRunId:override.programmeRunId!==undefined?override.programmeRunId:record?.programmeRunId??null};
+}
+function continuationDecision(current,now){
+ if(!current)return {run:true,budget:DISCOVERY_CHUNK_BUDGET};
+ const due=Date.parse(current.retryAt||current.nextCatchUpAt||0),chunks=Number.isInteger(current.remainingChunks)?current.remainingChunks:0;
+ if(current.stage==='complete'||['programme_changed','missing_secret','idle'].includes(current.reason))return {run:false,contract:discoveryContract(current,{nextAction:'stop'})};
+ if(current.reason==='chunk_budget'||current.reason==='backoff'||current.stage==='error'||current.retryAt){
+  if(due>now)return {run:false,contract:discoveryContract(current,{nextAction:'wait',reason:current.reason||(current.stage==='error'?'error':'backoff')})};
+  return {run:true,budget:current.reason==='chunk_budget'?DISCOVERY_CHUNK_BUDGET:Math.max(chunks,1)};
+ }
+ if(current.stage==='scheduled'||current.stage==='running')return {run:true,budget:Math.min(DISCOVERY_CHUNK_BUDGET,(Number.isInteger(current.remainingChunks)?current.remainingChunks:DISCOVERY_CHUNK_BUDGET-1)+1)};
+ if(current.stage==='paused'&&chunks>0)return {run:true,budget:chunks};
+ return {run:false,contract:discoveryContract(current,{nextAction:'stop'})};
+}
+async function saveOwnedContinuation(env,hopId,record){
+ const current=await loadJSON(env,CONTINUATION_KEY);
+ if(current&&current.hopId!==hopId)return current;
+ await saveJSON(env,CONTINUATION_KEY,record);return record;
+}
+async function queueDiscovery(env,reason){
+ const record={stage:'paused',reason,at:new Date().toISOString(),hopId:null,remainingChunks:DISCOVERY_CHUNK_BUDGET,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
+ await saveJSON(env,CONTINUATION_KEY,record);return discoveryContract(record,{nextAction:'continue'});
+}
+async function advanceDiscovery(env,body={}){
+ const now=Date.now(),current=await loadJSON(env,CONTINUATION_KEY);
+ if(body.chunks===0)return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current)};
+ const leaseObject=await env.BUCKET.get(DISCOVERY_LEASE_KEY),lease=leaseObject?await leaseObject.json():null;
+ if(lease?.expiresAt>now)return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()})};
+ const decision=continuationDecision(current,now);
+ const hardWait=current&&(['chunk_budget','backoff'].includes(current.reason)||current.stage==='error'||current.retryAt)&&Date.parse(current.retryAt||current.nextCatchUpAt||0)>now;
+ if(!decision.run&&(!body.force||hardWait))return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract};
+ if(!env.TMDB_API_READ_ACCESS_TOKEN){
+  const record={stage:'error',reason:'missing_secret',at:new Date().toISOString(),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null};
+  await saveJSON(env,CONTINUATION_KEY,record);return {stage:'missing_secret',checked:0,remaining:null,discovery:discoveryContract(record,{nextAction:'stop'})};
+ }
+ const acquired=await acquireDiscoveryLease(env);
+ if(!acquired)return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()})};
+ const hopId=acquired.id,budget=decision.run?decision.budget:DISCOVERY_CHUNK_BUDGET;
+ await saveJSON(env,CONTINUATION_KEY,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null});
+ let result;
+ try{
+  const report=await loadJSON(env,'programme.json');
+  result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
+ }catch(e){result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};}
+ finally{await releaseDiscoveryLease(env,acquired);}
+ const at=new Date().toISOString();
+ let record;
+ if(result.stage==='programme_changed')record={stage:'paused',reason:'programme_changed',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId||null};
+ else if(result.stage==='awaiting_epg_discovery')record={stage:'paused',reason:'idle',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
+ else if(result.stage==='error')record={stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:current?.programmeRunId??null};
+ else if(result.stage==='backoff'||result.retryAt&&!result.checked)record={stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??current?.programmeRunId??null};
+ else if(result.retryAt)record={stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
+ else if(!result.remaining)record={stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ else if(budget<=1)record={stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
+ else record={stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ const saved=await saveOwnedContinuation(env,hopId,record);
+ return {...result,discovery:discoveryContract(saved&&saved.hopId===hopId?record:saved)};
 }
 async function resolveDiscoveryRequest(env,execution,body){
  if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24))return json({error:'Invalid limit'},400);
  const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);
- const result=await resolveDiscoveryBatch(env,report,body.limit||24);result.continuation=await continueDiscovery(env,execution,result,body);return json(result);
+ return json(await advanceDiscovery(env,{...body,force:body.chunks!==0}));
 }
 async function discoveryPipelineStatus(env){
  const [source,decisions,catalog,last,queue,continuation,persistedQueue]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),queueStatus(env),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,predictionQueueKey)]);
