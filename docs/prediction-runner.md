@@ -1,6 +1,6 @@
 # Continuous prediction runner v5
 
-The same start/next/submit/complete protocol serves manual and scheduled triggers. Read GET /api/enrichment/runner before every launch. Its contract supersedes the obsolete v3 single-batch/deadline instructions.
+The same start/next/submit/complete protocol serves manual and scheduled triggers. Read GET /api/enrichment/runner before every launch. Its contract supersedes the obsolete v3 single-batch/deadline instructions. ChatGPT reaches this protocol through the MCP tools in [docs/mcp.md](mcp.md): `enrichment_runner`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`. Those tools fix the scope to `watchlist_all`, the mode to `queued`, and each next/submit step to one film. The HTTP routes remain the contract. Enabling the hourly Scheduled Task is a separate decision.
 
 1. POST start with scope watchlist_all, mode queued and trigger scheduled/manual. Supply real known capacity only. Do not impose a total-film or time cap.
 2. already_running is a successful no-op: never adopt another trigger's runId. busy is transient contention; retry with bounded backoff, without starting concurrent generation.

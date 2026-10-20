@@ -48,6 +48,19 @@ async function completeWithRatings(env,run,report){
   try{diary=await repairRecentDiaryRatings(env,report);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
   const repair={removed,diary};run.ratingError=String(e.message).slice(0,200);run.ratingRepair=repair;await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
 }
+async function syncStatus(env){
+ const run=await loadJSON(env,'sync.json');
+ return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,enrichmentQueueError:run.enrichmentQueueError||null}:{stage:'not_started'};
+}
+// Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step.
+async function postSync(env,execution,pathname,body){
+ if(pathname==='/api/sync/start')return json(await beginSync(env));
+ const run=await loadJSON(env,'sync.json');if(!run||body.runId!==run.runId)return json({error:'Run id mismatch'},409);
+ if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata')return json({runId:run.runId,stage:run.stage,remaining:run.remaining});return json(await metadataSync(env,run));}
+ if(pathname!=='/api/sync/epg')return json({error:'Not found'},404);
+ if(run.stage==='complete'){if(run.ratingPending?.length){const report=await loadJSON(env,'programme.json');if(report?.runId===run.runId)return json(await completeWithRatings(env,run,report));}return json({runId:run.runId,stage:run.stage});}if(run.stage!=='epg')return json({error:'Metadata stage is not complete'},409);
+ try{const result=await epgSync(env,run);if(result.stage==='complete')try{await continueDiscovery(env,execution,{remaining:1,stage:'ready'},{chunks:12});}catch(e){run.discoveryError=String(e.message).slice(0,160);try{await saveJSON(env,'sync.json',run);}catch{}}return json(result);}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
+}
 async function epgSync(env,run){
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId)return completeWithRatings(env,run,committed);}
  const titles=await loadJSON(env,'titles.json')||{};
@@ -68,7 +81,7 @@ async function epgSync(env,run){
 export default {async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
- if(url.pathname==='/mcp')return await mcpRoute(request,env);
+ if(url.pathname==='/mcp')return await mcpRoute(request,env,execution);
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(url.pathname.startsWith('/api/migration-export/'))return await migrationExportRoute(request,env,url);
@@ -80,20 +93,15 @@ export default {async fetch(request,env,execution){
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
   if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const merged=programmeWithWatchlist(data,watchlist);for(const f of merged.films){const t=titles[f.id];if(!reviewedTitle(f)&&t?.tmdbId&&t.tmdbId===f.tmdbId&&t.title){f.title=t.title;f.titleRu=t.title;f.titleStatus=t.status;f.titleSources=t.sources;}}return json(reviewedPeople(merged));}
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};for(const f of data.films){const t=titles[f.id];if(!reviewedTitle(f)&&t?.tmdbId&&t.tmdbId===f.tmdbId&&t.title){f.title=t.title;f.titleRu=t.title;f.titleStatus=t.status;f.titleSources=t.sources;}}return json(reviewedPeople(data));}
-  if(url.pathname==='/api/status'&&request.method==='GET'){const run=await loadJSON(env,'sync.json');return json(run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,enrichmentQueueError:run.enrichmentQueueError||null}: {stage:'not_started'});}
+  if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
   if(url.pathname==='/api/integrations/tmdb/status'&&request.method==='GET'){
    if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({connected:false,stage:'missing_secret'},503);
    const response=await fetch('https://api.themoviedb.org/3/movie/11?language=en-US',{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(10000)});
    if(!response.ok)return json({connected:false,stage:'tmdb_http',status:response.status},502);
    const movie=await response.json();return json({connected:movie.id===11,stage:movie.id===11?'ready':'unexpected_response'});
   }
-  if(url.pathname==='/api/sync/start'&&request.method==='POST')return json(await beginSync(env));
-  if(['/api/sync/metadata','/api/sync/epg'].includes(url.pathname)&&request.method==='POST'){
-   const body=await request.json();const run=await loadJSON(env,'sync.json');if(!run||body.runId!==run.runId)return json({error:'Run id mismatch'},409);
-   if(url.pathname.endsWith('metadata')){if(run.stage!=='metadata')return json({runId:run.runId,stage:run.stage,remaining:run.remaining});return json(await metadataSync(env,run));}
-   if(run.stage==='complete'){if(run.ratingPending?.length){const report=await loadJSON(env,'programme.json');if(report?.runId===run.runId)return json(await completeWithRatings(env,run,report));}return json({runId:run.runId,stage:run.stage});}if(run.stage!=='epg')return json({error:'Metadata stage is not complete'},409);
-   try{const result=await epgSync(env,run);if(result.stage==='complete')try{await continueDiscovery(env,execution,{remaining:1,stage:'ready'},{chunks:12});}catch(e){run.discoveryError=String(e.message).slice(0,160);try{await saveJSON(env,'sync.json',run);}catch{}}return json(result);}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
-  }
+  if(url.pathname==='/api/sync/start'&&request.method==='POST')return await postSync(env,execution,'/api/sync/start',{});
+  if(['/api/sync/metadata','/api/sync/epg'].includes(url.pathname)&&request.method==='POST'){const body=await request.json();return await postSync(env,execution,url.pathname,body);}
   return json({error:'Not found'},404);
  }
  const asset=ASSETS[url.pathname];if(asset&&request.method==='GET')return new Response(asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});

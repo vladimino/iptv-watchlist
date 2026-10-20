@@ -1,6 +1,8 @@
 # Experimental MCP endpoint
 
-Worker `iptv` serves a minimal remote MCP server at `https://iptv.vladimino.workers.dev/mcp`. It exists to prove that ChatGPT can reach the Worker through Cloudflare Access Managed OAuth. It exposes two probe tools and nothing else. It does not read or write R2, and it does not start sync, enrichment, prediction, or any other production process.
+Worker `iptv` serves a remote MCP server at `https://iptv.vladimino.workers.dev/mcp`. Cloudflare Access application `IPTV MCP` authenticates every request with Managed OAuth, and the Worker verifies the signed Access JWT. The same endpoint exposes two connection probes and a narrow set of EPG and prediction tools. Those tools call the existing Worker functions. They do not accept a URL, an R2 key, or an API path, and they do not generate fingerprints or predictions: ChatGPT does that and submits the result.
+
+Publishing this Worker does not start sync or prediction and does not enable Scheduled Tasks. A tool writes to R2 only when an authorized caller invokes it. Enabling the two production tasks is [AIR-62](https://trello.com/c/CU71gW4c), after the lease check in [docs/deployment.md](deployment.md). The isolated production write/read/cleanup test is still a separate approved operation; `probe_echo` does not replace it.
 
 The endpoint lives in the existing Worker. There is no second Worker, no new binding, no Durable Object, and no KV namespace.
 
@@ -31,12 +33,32 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 
 ### Tools
 
-| Tool | Input | Output |
-| --- | --- | --- |
-| `probe_read` | none | Fixed report: `status`, server name and version, transport, protocol version, `authorization: cloudflare-access-jwt-verified`, `storage: not_accessed`, `sideEffects: none`, current time. |
-| `probe_echo` | `text`, a string of 1 to 200 characters | The same text, unchanged, plus its length. Nothing is stored or logged. |
+`probe_read` and `probe_echo` do not read or write R2. Every other tool returns `structuredContent.httpStatus` plus the JSON body of the existing HTTP contract. `httpStatus` 409 is a runner result, not a transport failure: `already_running` means stop and do not adopt that `runId`. `400`, `404`, `503`, and `5xx` set `isError`.
 
-Both tools are annotated `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. A wrong argument returns a tool result with `isError: true`. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.
+| Tool | Writes | What it calls |
+| --- | --- | --- |
+| `probe_read` | no | Fixed diagnostic report. `storage: not_accessed`. |
+| `probe_echo` | no | Returns `text`, 1–200 characters. |
+| `epg_status` | no | `GET /api/status` |
+| `epg_pipeline_status` | no | `GET /api/enrichment/pipeline/status` |
+| `enrichment_schema` | no | `GET /api/enrichment/schema` |
+| `enrichment_profile` | no | `GET /api/enrichment/profile` |
+| `enrichment_runner` | no | `GET /api/enrichment/runner` |
+| `enrichment_queue` | no | `GET /api/enrichment/queue/status` |
+| `enrichment_status` | recovery only | `GET /api/enrichment/status`, including an undelivered stop event |
+| `epg_sync_start` | yes | `POST /api/sync/start`. No arguments. |
+| `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. A completed EPG step schedules the AIR-60 continuation internally. |
+| `prediction_start` | yes | `POST /api/enrichment/start` with `scope: watchlist_all` and `mode: queued`. `trigger` is `scheduled` or `manual`. |
+| `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
+| `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction. |
+| `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
+| `prediction_complete` | yes | `POST /api/enrichment/complete` |
+
+Prerequisite for every tool is [AIR-58](https://trello.com/c/BB01YN2f) (this Access check). `epg_sync_step` depends on [AIR-60](https://trello.com/c/UO0YqoWw) for resolver continuation. [AIR-62](https://trello.com/c/CU71gW4c) is the downstream decision to run the scheduled tasks. [AIR-49](https://trello.com/c/YNaLFwtW) (D1) is independent and unused here.
+
+Write tools are annotated `readOnlyHint: false`. `enrichment_status` is too, because the HTTP status route can persist a recovered stop event. `epg_sync_start` and `epg_sync_step` are `openWorldHint: true` because they fetch Letterboxd, the configured EPG source, or TMDB. A wrong argument returns a tool result with `isError: true` and does not call the domain function. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.
+
+The caller repeats `epg_sync_step` until `stage` is `complete`, and repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. One MCP call is one existing step. ChatGPT generates the fingerprint and prediction; the Worker only validates and stores them.
 
 ## Authorization
 
@@ -74,7 +96,7 @@ If `IPTV MCP` is disabled or deleted, `/mcp` falls under `All Workers`. That app
 
 Set both as plain-text variables on Worker `iptv` (Workers & Pages → `iptv` → Settings → Variables and Secrets). They are not committed, following the repository rule that runtime values live in Cloudflare. `wrangler.jsonc` has `keep_vars: true`, so a GitHub deploy keeps dashboard variables. Until both are set, `/mcp` returns `503` behind Access.
 
-Saving a variable publishes a new Worker version. That is a production environment change and needs the owner's explicit approval. No other configuration is involved: the R2 binding `BUCKET` is unchanged and unused by MCP, and no secret is added.
+Saving a variable publishes a new Worker version. That is a production environment change and needs the owner's explicit approval. No other configuration is involved: the R2 binding `BUCKET` is unchanged, and no secret is added. The probe tools ignore `BUCKET`. The EPG and prediction tools use it only when called.
 
 ## Cloudflare Access requirements
 
@@ -94,7 +116,7 @@ Prerequisites: this change is merged and deployed, both variables are set, and e
 2. Server URL: `https://iptv.vladimino.workers.dev/mcp`. Authentication: OAuth. Leave the client ID and secret empty so ChatGPT uses dynamic client registration.
 3. Copy the callback URL shown in the form. The owner adds it to the `IPTV MCP` Allowed redirect URIs (requirement 2) before continuing.
 4. Create the server and sign in through the Cloudflare Access page with the owner identity.
-5. Refresh the tools. Exactly `probe_read` and `probe_echo` must appear.
+5. Refresh the tools. The list must be exactly `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `enrichment_status`, `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`.
 
 ## Safe verification procedure
 
@@ -115,7 +137,7 @@ These checks contact production only through Cloudflare Access and the two probe
 4. Ask it to call `probe_echo` with a marker such as `mcp-probe-2026-10-19`. Expect the identical text back.
 5. Repeat step 1. The unauthenticated request must still get `401` from Access.
 
-Leave Scheduled Tasks out of this initial smoke test. Unattended runs are the next stage, described below. Do not use `/api/*` routes, the dashboard, sync, enrichment, or prediction as MCP checks. Some `GET` routes can write (see `README.md`).
+Leave Scheduled Tasks and the EPG and prediction tools out of this smoke test. Calling `epg_sync_start`, `epg_sync_step`, or any `prediction_*` tool against production writes R2 and may call Letterboxd, the EPG source, or TMDB. That is an AIR-62 operation and needs its own approval. Do not use `/api/*` routes, the dashboard, sync, enrichment, or prediction as MCP checks either. Some `GET` routes can write (see `README.md`).
 
 ## Next stage: unattended Scheduled Tasks
 
@@ -133,7 +155,7 @@ Acceptance criteria, checked after the safe verification procedure passes:
 
 ## Limitations
 
-- Probe-only. Any tool that reads R2, changes settings, or triggers production work needs its own design, review, and approval.
+- Probe tools do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. Enabling Scheduled Tasks is AIR-62.
 - No SSE, sessions, server-to-client requests, `list_changed` notifications, resources, prompts, or batches. Clients that support only `2026-07-28` are not supported.
 - The origin allow-list is fixed in code: the Worker's own origin and `https://chatgpt.com`.
 - Managed OAuth is in open beta. The end-to-end flow between ChatGPT and Access has not been exercised from this repository, because no production requests were made. Treat the safe verification procedure as the acceptance test for the interactive connection, and the next-stage criteria as the acceptance test for unattended runs.
