@@ -142,10 +142,9 @@ function filmsMatching(except){
  else if(except==='mechanics')state.mechanics=new Set();
  else if(except==='moods')state.moods=new Set();
  else if(except==='channels')state.channels=new Set();
- else if(except==='execution')state.execution=emptyExecution();
- const found=films.filter(film=>eligible(film)&&inSelectedScope(film));
- state.genres=backup.genres;state.mechanics=backup.mechanics;state.moods=backup.moods;state.channels=backup.channels;state.execution=backup.execution;
- return found;
+ else if(except.startsWith('execution:'))state.execution={...backup.execution,[except.slice(10)]:new Set()};
+ try{return films.filter(film=>eligible(film)&&inSelectedScope(film));}
+ finally{state.genres=backup.genres;state.mechanics=backup.mechanics;state.moods=backup.moods;state.channels=backup.channels;state.execution=backup.execution;}
 }
 function countedOptions(except,selected,known){
  const counts=new Map();
@@ -158,18 +157,17 @@ function countedOptions(except,selected,known){
 function buildFacetCatalog(){
  const label=(kind,value)=>kind==='mechanics'?MECHANIC_LABELS[value]:kind==='moods'?moodLabel(value):value;
  const flat=(kind,selected,known)=>countedOptions(kind,selected,known).map(item=>({...item,label:label(kind,item.value)})).sort((a,b)=>b.count-a.count||a.label.localeCompare(b.label,'ru'));
- const base=filmsMatching('execution');
- const executionCounts=Object.fromEntries(EXECUTION_FILTERS.map(dimension=>[dimension.id,new Map()]));
- for(const film of base){const stored=storedExecution(film);if(!stored)continue;for(const dimension of EXECUTION_FILTERS){const value=stored[dimension.id];if(EXECUTION_VALUES[dimension.id]?.[value])executionCounts[dimension.id].set(value,(executionCounts[dimension.id].get(value)||0)+1);}}
+ const executionCounts=dimension=>{const counts=new Map();for(const film of filmsMatching('execution:'+dimension.id)){const value=storedExecution(film)?.[dimension.id];if(EXECUTION_VALUES[dimension.id]?.[value])counts.set(value,(counts.get(value)||0)+1);}return counts;};
  return {
   genres:flat('genres',state.genres,value=>typeof value==='string'&&value.length>0),
   mechanics:flat('mechanics',state.mechanics,value=>Object.hasOwn(MECHANIC_LABELS,value)),
   moods:flat('moods',state.moods,value=>Object.hasOwn(MOOD_LABELS,value)),
   channels:flat('channels',state.channels,value=>typeof value==='string'&&value.length>0),
-  execution:EXECUTION_FILTERS.map(dimension=>({id:dimension.id,label:dimension.label,options:dimension.values.map(([value,text])=>({value,label:text,count:executionCounts[dimension.id].get(value)||0})).filter(item=>item.count>0||state.execution[dimension.id].has(item.value))})).filter(group=>group.options.length),
+  execution:EXECUTION_FILTERS.map(dimension=>{const counts=executionCounts(dimension);return {id:dimension.id,label:dimension.label,options:dimension.values.map(([value,text])=>({value,label:text,count:counts.get(value)||0})).filter(item=>item.count>0||state.execution[dimension.id].has(item.value))};}).filter(group=>group.options.length),
  };
 }
-let facetCatalog=buildFacetCatalog(),openFacetName='';
+let facetCatalog=buildFacetCatalog(),openFacetName='',facetTrigger=null;
+function facetInputKey(input){return `${input.dataset?.execution||''}:${input.value}`;}
 function selectedFacetLabels(kind){
  const options=facetCatalog[kind]||[];
  const selected=state[kind];
@@ -177,14 +175,20 @@ function selectedFacetLabels(kind){
 }
 function renderFacetBody(){
  const body=$('#facet-body'),search=$('#facet-search');if(!body||!openFacetName)return;
+ const active=document.activeElement;
+ const before=typeof body.querySelectorAll==='function'?[...body.querySelectorAll('input')]:[];
+ const focused=active&&typeof body.contains==='function'&&body.contains(active)&&active.tagName==='INPUT'?active:null;
+ const key=focused?facetInputKey(focused):'',index=focused?before.indexOf(focused):-1;
  const query=normalizeTitle(search?.value||'');
  const show=label=>!query||normalizeTitle(label).includes(query);
- if(openFacetName==='execution'){
-  body.innerHTML=facetCatalog.execution.map(group=>{const options=group.options.filter(item=>show(item.label)||show(group.label));if(!options.length)return '';return `<section class="execution-facet"><h3 class="execution-name">${escapeHTML(group.label)}</h3>${options.map(item=>`<label class="genre-label"><input type="checkbox" data-execution="${escapeHTML(group.id)}" value="${escapeHTML(item.value)}"${state.execution[group.id].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('')}</section>`;}).join('');
-  return;
- }
- const kind=openFacetName;
- body.innerHTML=(facetCatalog[kind]||[]).filter(item=>show(item.label)).map(item=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(item.value)}"${state[kind].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('');
+ const html=openFacetName==='execution'
+  ?facetCatalog.execution.map(group=>{const options=group.options.filter(item=>show(item.label)||show(group.label));if(!options.length)return '';return `<section class="execution-facet"><h3 class="execution-name">${escapeHTML(group.label)}</h3>${options.map(item=>`<label class="genre-label"><input type="checkbox" data-execution="${escapeHTML(group.id)}" value="${escapeHTML(item.value)}"${state.execution[group.id].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('')}</section>`;}).join('')
+  :(facetCatalog[openFacetName]||[]).filter(item=>show(item.label)).map(item=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(item.value)}"${state[openFacetName].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('');
+ body.innerHTML=html;
+ if(!focused||typeof body.querySelectorAll!=='function')return;
+ const inputs=[...body.querySelectorAll('input')];
+ const next=inputs.find(input=>facetInputKey(input)===key)||inputs[Math.max(0,Math.min(index,inputs.length-1))];
+ if(next)next.focus();
 }
 function syncFacetPickers(){
  facetCatalog=buildFacetCatalog();
@@ -200,9 +204,9 @@ function syncFacetPickers(){
  }
  if(openFacetName)renderFacetBody();
 }
-function closeFacet(){openFacetName='';const pop=$('#facet-popover');if(pop)pop.hidden=true;if(typeof document.querySelectorAll==='function')document.querySelectorAll('.facet-trigger').forEach(button=>button.setAttribute('aria-expanded','false'));}
+function closeFacet(){const trigger=facetTrigger;openFacetName='';facetTrigger=null;const pop=$('#facet-popover');if(pop)pop.hidden=true;if(typeof document.querySelectorAll==='function')document.querySelectorAll('.facet-trigger').forEach(button=>button.setAttribute('aria-expanded','false'));if(trigger)trigger.focus();}
 function openFacet(kind,button){
- openFacetName=kind;syncFacetPickers();
+ openFacetName=kind;facetTrigger=button||facetTrigger;syncFacetPickers();
  const pop=$('#facet-popover'),title=$('#facet-title'),search=$('#facet-search');
  if(!pop)return;
  document.querySelectorAll('.facet-trigger').forEach(item=>item.setAttribute('aria-expanded',String(item===button)));
