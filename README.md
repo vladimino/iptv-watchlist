@@ -58,6 +58,10 @@ Outside that pass, two more GET routes can write. `GET /api/enrichment/status` r
 
 The EPG resolver works in bounded chunks. The EPG commit records a paused discovery series and does not start it. Each later `epg_sync_step`, or `POST /api/enrichment/discovery/resolve`, runs exactly one chunk and returns `discovery.nextAction`: `continue` means call again now, `wait` means do not call before `nextCatchUpAt`, and `stop` means wait for the next EPG commit. A separate request is a memory hypothesis, not a guarantee of a new isolate; that has to be checked in production after deploy. The `DiscoveryContinuation` entrypoint remains internal-only, so internet traffic cannot reach it and a public self-fetch is not a fallback. Statuses and failure reasons are described in [ENRICHMENT_API.md](ENRICHMENT_API.md#epg-resolver--hotcold-pipeline-v2).
 
+## Events
+
+«События» can open across the main column without leaving the page. The address gains `screen=events`; filters, search, and sort stay in the same parameters and are not stored inside a preset. Back and Forward switch between the films and that wider list. «К фильмам» removes only `screen` and returns to the same catalogue position. The list itself is the existing events feed, still updated by the one live refresh.
+
 ## Search
 
 The top search field matches the current broadcast window or the full watchlist. It looks through the loaded title, original title, aliases, cast and directors, genres, synopsis, and the saved mechanics and moods, including their Russian labels. Every word has to match the same film. An exact or initial title outranks a mention in the description. Typing into the default title order switches the sort to relevance; an explicit sort stays put. `sort=relevance` is part of the page address and of a saved preset. The search does not call a model or an outside catalogue.

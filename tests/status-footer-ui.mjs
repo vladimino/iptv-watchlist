@@ -15,7 +15,7 @@ assert.match(footer,/Распознано в текущем EPG/);assert.match(f
 assert.match(footer,/id="status-events-link" href="#activity-title">Смотреть события/);
 assert.doesNotMatch(footer,/Фоновый прогноз заполняется|Серии и передачи исключаются|уникальных нормализованных названий|hash|prompt|token/i,'collapsed footer contains no old prose or debug data');
 assert.match(app,/statusDetails\.addEventListener\('toggle'/,'expand/collapse label follows native details state');
-assert.match(app,/status-events-link[\s\S]*filters\.dataset\.open='true'[\s\S]*activity-title.*scrollIntoView/,'events action reveals and navigates to the Events log');
+assert.match(app,/status-events-link[\s\S]*openEventsScreen\(\$\('#status-events-link'\)\)/,'events action opens the wide events view');
 assert.match(css,/\.status-footer \.footer-status\{[^}]*width:min\(100%,680px\)/,'footer grid has a bounded readable width');
 assert.match(css,/\.status-summary\{[^}]*grid-template-columns:max-content max-content[^}]*column-gap:18px[^}]*width:max-content[^}]*margin-inline:auto/,'desktop compact summary uses a centered content-sized grid');
 assert.match(css,/\.status-row\{display:contents\}/,'compact rows share one label/value grid');
