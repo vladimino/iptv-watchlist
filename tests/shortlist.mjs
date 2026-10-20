@@ -1,8 +1,8 @@
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 const ctx=vm.createContext({Date,Intl,Set,Map,URL});vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
-const now=Date.now(),hour=3600000;
+const now=Date.parse('2026-10-15T12:00:00+02:00'),hour=3600000;
 const f=(id,rating,runtime=110,start=now-hour,extra={})=>({id,tmdbId:id,title:id,original:id,year:2020,runtime,genres:['Драма'],actors:[],directors:[],shows:start===null?[]:[{start,end:start+hour,offset:(start-now)/hour,channel:'Канал'}],availableUntil:start===null?null:new Date(start+72*hour).toISOString(),...extra});
-ctx.now=now;const initialize=(sample,ratings,started=[])=>{ctx.sample=sample;ctx.ratings=ratings;ctx.started=started;vm.runInContext('films=sample;enrichment={films:ratings};startedIds=new Set(started);ratingsLoaded=true;WINDOW_START=now-72*3600000;CUTOFF=now;WINDOW_END=now+24*3600000;MAX_YEAR=2027;Object.assign(state,{period:"all",viewing:"any",sort:"title",query:"",genres:new Set(),mechanics:new Set(),moods:new Set(),maxRuntime:null,from:1900,to:2027,includeUnscheduled:false,startedOnly:false,lastChanceOnly:false,minPrediction:null,minProbability:null,directors:"",actors:"",shortlistMode:"now"})',ctx)};
+ctx.now=now;const initialize=(sample,ratings,started=[])=>{ctx.sample=sample;ctx.ratings=ratings;ctx.started=started;vm.runInContext('films=sample;enrichment={films:ratings};startedIds=new Set(started);ratingsLoaded=true;WINDOW_START=now-72*3600000;CUTOFF=now;viewClock=now;WINDOW_END=now+24*3600000;MAX_YEAR=2027;Object.assign(state,{period:"all",viewing:"any",sort:"title",query:"",genres:new Set(),mechanics:new Set(),moods:new Set(),maxRuntime:null,from:1900,to:2027,includeUnscheduled:false,startedOnly:false,lastChanceOnly:false,minPrediction:null,minProbability:null,directors:"",actors:"",shortlistMode:"now"})',ctx)};
 const result=(mode='now')=>JSON.parse(vm.runInContext('JSON.stringify(buildShortlist(visibleFilms(),'+JSON.stringify(mode)+',now))',ctx));
 const pred=(rating,probability=.7)=>({prediction:{predictedRating:rating,probability4Plus:probability}});
 initialize([f('best',4.5,80),f('urgent',4,90,now-71*hour),f('started',4,130),f('rewatch',4,95),f('rewatch2',3.5,105),f('unknown',null,50)],{best:pred(4.5),urgent:pred(4),started:pred(4),rewatch:{actualRating:4},rewatch2:{actualRating:3.5}},['started']);
@@ -12,6 +12,25 @@ vm.runInContext('state.query="urgent";state.genres=new Set(["Драма"]);state
 initialize([f('a',4.5,75,now-71*hour),f('b',4,80,now-70*hour),f('c',2,200)],{a:pred(4.5),b:pred(4),c:pred(2)},['a','b']);rows=result();assert.equal(rows.filter(x=>x.film.id==='a').length,1);assert(rows.find(x=>x.film.id==='a').reasons.includes('последний шанс'));assert(rows.some(x=>x.film.id==='b'),'fallback preserves distinct appropriate candidate');assert(!rows.some(x=>x.film.id==='c'),'no low-score filler');assert(rows.every(x=>x.reasons.length<=2));
 // Expired cold and tomorrow are never “now”; future today is available only in today mode.
 const tomorrow=now+24*hour;initialize([f('cold',5,80,now-80*hour),f('none',5,80,null),f('live',4,100,now-.1*hour),f('future',4,100,now+.1*hour),f('tomorrow',5,90,tomorrow)],{cold:pred(5),none:pred(5),live:pred(4),future:pred(4),tomorrow:pred(5)});assert.deepEqual(result().map(x=>x.film.id),['live']);vm.runInContext('state.includeUnscheduled=true',ctx);assert(!result().some(x=>x.film.id==='none'));rows=result('today');assert(rows.some(x=>x.film.id==='none'&&!x.availability.available));assert(rows.some(x=>x.film.id==='cold'&&!x.availability.available));assert(!rows.some(x=>x.film.id==='tomorrow'));assert(vm.runInContext('shortlistAvailability(sample[3],"today",now).kind',ctx)==='future');
+// Midnight boundary in Europe/Madrid.
+const late = Date.parse('2026-10-20T23:57:00+02:00');
+ctx.late = late;
+ctx.sameDay = f('today-boundary', 4, 100, late + 2 * 60000);
+ctx.nextDay = f('tomorrow-boundary', 4, 100, late + 6 * 60000);
+
+vm.runInContext(
+  'CUTOFF=late;WINDOW_START=late-72*3600000;WINDOW_END=late+24*3600000',
+  ctx
+);
+
+assert.equal(
+  vm.runInContext('shortlistAvailability(sameDay,"today",late)?.kind', ctx),
+  'future'
+);
+assert.equal(
+  vm.runInContext('shortlistAvailability(nextDay,"today",late)', ctx),
+  null
+);
 // Actual wins over prediction for score, and remains explicitly a rewatch.
 initialize([f('a',null),f('b',null),f('c',null)],{a:{actualRating:3,prediction:{predictedRating:5,probability4Plus:.99}},b:pred(4,.7),c:pred(4,.9)});rows=result();assert.equal(rows[0].film.id,'c','predicted-only tie breaks by probability');assert.equal(vm.runInContext('personal(sample[0]).rating',ctx),3);assert(!rows.some(x=>x.film.id==='a'),'weak actual must not be presented as a strong new prediction');
 initialize([f('actual',null)],{actual:{actualRating:4,prediction:{predictedRating:2,probability4Plus:.1}}});rows=result();assert.equal(rows[0].score.rating,4);assert.deepEqual(rows[0].reasons,['сильный пересмотр','короткий вариант']);
