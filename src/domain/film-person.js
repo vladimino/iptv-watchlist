@@ -35,6 +35,7 @@ function transition(state,status,patch={}){
  if(!(TRANSITIONS[state.dimension][state.status]||[]).includes(status))return {ok:false,reason:'illegal_transition',dimension:state.dimension,from:state.status,to:status,state};
  return {ok:true,state:dimensionState(state.dimension,{...state,...patch,status})};
 }
+// Mints a new local id. Linking an external id onto an existing record goes through linkFilms and keeps that record's id.
 function localFilmId({letterboxdId,tmdbId,conflictingTmdbIds}={}){
  if(letterboxdId)return 'film:'+String(letterboxdId);
  const conflicts=uniqueIds(conflictingTmdbIds);
@@ -43,12 +44,12 @@ function localFilmId({letterboxdId,tmdbId,conflictingTmdbIds}={}){
  return null;
 }
 function localPersonId(roleId){return typeof roleId==='string'&&/^(actor|director|role)\//.test(roleId)?'person:'+roleId:null;}
-function externalIds({letterboxdId,tmdbId,conflictingTmdbIds,provenance}={}){
+function externalIds({letterboxdId,tmdbId,conflictingTmdbIds,tmdbTrusted,provenance}={}){
  const ids=[];
- if(letterboxdId)ids.push({scheme:'letterboxd',value:String(letterboxdId),conflicting:false,provenance:provenance?.letterboxd??null});
+ if(letterboxdId)ids.push({scheme:'letterboxd',value:String(letterboxdId),conflicting:false,trusted:true,provenance:provenance?.letterboxd??null});
  const conflicts=uniqueIds(conflictingTmdbIds);
- if(conflicts.length>1){for(const value of conflicts)ids.push({scheme:'tmdb',value,conflicting:true,provenance:provenance?.tmdb??null});}
- else if(tmdbId)ids.push({scheme:'tmdb',value:String(tmdbId),conflicting:false,provenance:provenance?.tmdb??null});
+ if(conflicts.length>1){for(const value of conflicts)ids.push({scheme:'tmdb',value,conflicting:true,trusted:false,provenance:provenance?.tmdb??null});}
+ else if(tmdbId)ids.push({scheme:'tmdb',value:String(tmdbId),conflicting:false,trusted:!!tmdbTrusted,provenance:provenance?.tmdb??null});
  return ids;
 }
 function dictionaryApplies(dictionary,tmdbId){return !!dictionary&&(!tmdbId||!dictionary.tmdbId||String(dictionary.tmdbId)===String(tmdbId));}
@@ -75,16 +76,21 @@ function identityState(facts){
  if(facts.letterboxdId&&!facts.tmdbId)return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'letterboxd',provenance:{letterboxdId:String(facts.letterboxdId)},nextAction:'keep_letterboxd_id'});
  return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',nextAction:'continue_discovery'});
 }
+function metadataChannel(facts={}){
+ const source=facts.source==='tmdb'||facts.source==='letterboxd'?facts.source:facts.letterboxdId?'letterboxd':'tmdb';
+ const letterboxd=source==='letterboxd';
+ return {source,missing:letterboxd?'fetch_letterboxd_page':'fetch_tmdb_metadata',stale:letterboxd?'full_parse':'refresh_tmdb_metadata',failed:letterboxd?'retry_metadata':'retry_tmdb_metadata',credits:letterboxd?'full_parse':'refresh_tmdb_metadata',synopsis:letterboxd?'refresh_synopsis':'refresh_tmdb_metadata'};
+}
 function metadataState(facts={}){
- const now=facts.now??null,failure=reasonText(facts.failure);
- if(failure)return dimensionState('metadata',{status:'failed',updatedAt:now,source:'letterboxd',lastError:failure,failureReason:failure,retryAt:facts.failure?.retryAt||null,attempts:facts.failure?.attempts??0,nextAction:'retry_metadata'});
- if(!facts.present)return dimensionState('metadata',{status:'missing',updatedAt:now,source:'letterboxd',nextAction:'fetch_letterboxd_page'});
- if(!metadataFresh(facts.metadataAt,now))return dimensionState('metadata',{status:'stale',updatedAt:facts.metadataAt||now,source:'letterboxd',sourceVersion:facts.metadataAt||null,nextAction:'full_parse'});
+ const now=facts.now??null,failure=reasonText(facts.failure),channel=metadataChannel(facts);
+ if(failure)return dimensionState('metadata',{status:'failed',updatedAt:now,source:channel.source,lastError:failure,failureReason:failure,retryAt:facts.failure?.retryAt||null,attempts:facts.failure?.attempts??0,nextAction:channel.failed});
+ if(!facts.present)return dimensionState('metadata',{status:'missing',updatedAt:now,source:channel.source,nextAction:channel.missing});
+ if(!metadataFresh(facts.metadataAt,now))return dimensionState('metadata',{status:'stale',updatedAt:facts.metadataAt||now,source:channel.source,sourceVersion:facts.metadataAt||null,nextAction:channel.stale});
  const namesDone=facts.peopleNamesVersion===2,namesAction=namesDone?'none':'localize_names';
- if(facts.peopleVersion===1&&facts.synopsisPresent&&facts.creditsRetained)return dimensionState('metadata',{status:'partial',updatedAt:facts.metadataAt,source:'letterboxd',sourceVersion:facts.metadataAt,provenance:{peopleVersion:1,peopleNamesVersion:facts.peopleNamesVersion??null,creditsRetained:true,namesAttemptFinished:namesDone},nextAction:namesAction});
- if(facts.peopleVersion===1&&facts.synopsisPresent)return dimensionState('metadata',{status:'fresh',updatedAt:facts.metadataAt,source:'letterboxd',sourceVersion:facts.metadataAt,provenance:{peopleVersion:1,peopleNamesVersion:facts.peopleNamesVersion??null,namesAttemptFinished:namesDone},nextAction:namesAction});
- if(facts.peopleVersion===1)return dimensionState('metadata',{status:'partial',updatedAt:facts.metadataAt,source:'letterboxd',sourceVersion:facts.metadataAt,provenance:{synopsis:false},nextAction:'refresh_synopsis'});
- return dimensionState('metadata',{status:'partial',updatedAt:facts.metadataAt,source:'letterboxd',sourceVersion:facts.metadataAt,provenance:{peopleVersion:facts.peopleVersion??null},nextAction:'full_parse'});
+ if(facts.peopleVersion===1&&facts.synopsisPresent&&facts.creditsRetained)return dimensionState('metadata',{status:'partial',updatedAt:facts.metadataAt,source:channel.source,sourceVersion:facts.metadataAt,provenance:{peopleVersion:1,peopleNamesVersion:facts.peopleNamesVersion??null,creditsRetained:true,namesAttemptFinished:namesDone},nextAction:namesAction});
+ if(facts.peopleVersion===1&&facts.synopsisPresent)return dimensionState('metadata',{status:'fresh',updatedAt:facts.metadataAt,source:channel.source,sourceVersion:facts.metadataAt,provenance:{peopleVersion:1,peopleNamesVersion:facts.peopleNamesVersion??null,namesAttemptFinished:namesDone},nextAction:namesAction});
+ if(facts.peopleVersion===1)return dimensionState('metadata',{status:'partial',updatedAt:facts.metadataAt,source:channel.source,sourceVersion:facts.metadataAt,provenance:{synopsis:false},nextAction:channel.synopsis});
+ return dimensionState('metadata',{status:'partial',updatedAt:facts.metadataAt,source:channel.source,sourceVersion:facts.metadataAt,provenance:{peopleVersion:facts.peopleVersion??null},nextAction:channel.credits});
 }
 function metadataFresh(metadataAt,now){const at=clock(metadataAt);return Number.isFinite(at)&&clock(now)-at<=METADATA_FRESH_MS;}
 function titleLocalization(facts={}){
@@ -120,15 +126,16 @@ function predictionState(facts={}){
 }
 function filmView(facts){
  if(facts.decision?.status==='excluded_nonfilm')return null;
- const id=localFilmId(facts);if(!id)return null;
+ const id=facts.localId||localFilmId(facts);if(!id)return null;
  const identity=identityState(facts);if(!identity)return null;
  const conflicts=uniqueIds(facts.conflictingTmdbIds);
  const tmdbId=conflicts.length>1?null:facts.tmdbId??null;
+ const promote=identity.status==='resolved'&&!!tmdbId;
  const now=facts.now??null;
  const localization=titleLocalization({...facts.title,tmdbId,now});
  const fingerprint=fingerprintState({...facts.fingerprint,now});
  const aliases=mergeAliases([],titleAliases(facts,localization));
- return {contractVersion:DOMAIN_CONTRACT_VERSION,id,canonicalIdentity:tmdbId?'tmdb:'+tmdbId:null,externalIds:externalIds(facts),aliases,originalTitle:facts.title?.original||null,epgTitle:facts.title?.epgTitle||null,localizationConflicts:[],identity,metadata:metadataState({...facts.metadata,now}),localization,fingerprint,prediction:predictionState({...facts.prediction,profile:facts.profile,currentFingerprintHash:facts.currentFingerprintHash,fingerprint,now})};
+ return {contractVersion:DOMAIN_CONTRACT_VERSION,id,canonicalIdentity:promote?'tmdb:'+tmdbId:null,externalIds:externalIds({...facts,tmdbTrusted:promote}),aliases,originalTitle:facts.title?.original||null,epgTitle:facts.title?.epgTitle||null,localizationConflicts:[],identity,metadata:metadataState({...facts.metadata,letterboxdId:facts.letterboxdId,now}),localization,fingerprint,prediction:predictionState({...facts.prediction,profile:facts.profile,currentFingerprintHash:facts.currentFingerprintHash,fingerprint,now}),predictionHistory:Array.isArray(facts.predictionHistory)?facts.predictionHistory:[],redirects:[]};
 }
 function titleAliases(facts,localization){
  const seeds=[];
@@ -154,17 +161,67 @@ function displayReady(film){
 }
 function catalogReady(film){
  if(!film||film.identity?.status==='rejected')return false;
- const stable=(film.externalIds||[]).some(item=>item.scheme==='letterboxd'||(item.scheme==='tmdb'&&!item.conflicting));
+ const stable=(film.externalIds||[]).some(item=>item.scheme==='letterboxd'||(item.scheme==='tmdb'&&item.trusted&&!item.conflicting));
  return stable&&(film.metadata?.status==='fresh'||film.metadata?.status==='partial');
 }
 function predictionReady(film){return !!film&&film.fingerprint?.status==='current'&&film.prediction?.status==='current';}
+function holdLocalization(entity,incoming,at,kind,reason){
+ return {...entity,localization:entity.localization,aliases:mergeAliases(entity.aliases,incoming?.value?[{kind,value:incoming.value,provenance:incoming.provenance??null}]:[]),localizationConflicts:[...(entity.localizationConflicts||[]),{value:incoming?.value??null,source:incoming?.source||null,provenance:incoming?.provenance??null,at:stamp(at),reason}]};
+}
 function applyAutomaticLocalization(entity,incoming,at,kind='title'){
  const current=entity.localization;
- if(current.status==='reviewed'&&incoming.status!=='reviewed')return {...entity,localization:current,aliases:mergeAliases(entity.aliases,[{kind,value:incoming.value,provenance:incoming.provenance??null}]),localizationConflicts:[...(entity.localizationConflicts||[]),{value:incoming.value,source:incoming.source||null,provenance:incoming.provenance??null,at:stamp(at)}]};
- const moved=transition(current,incoming.status,{updatedAt:at,source:incoming.source||null,sourceVersion:incoming.sourceVersion||incoming.status,provenance:incoming.provenance??null,value:incoming.value,nextAction:incoming.status==='reviewed'?'keep_reviewed':'keep_provisional'});
+ if(current.status==='reviewed'||incoming?.status==='reviewed')return holdLocalization(entity,incoming,at,kind,'untrusted_review');
+ const moved=transition(current,incoming.status,{updatedAt:at,source:incoming.source||null,sourceVersion:incoming.sourceVersion||incoming.status,provenance:incoming.provenance??null,value:incoming.value,nextAction:'keep_provisional'});
  if(!moved.ok)return entity;
  const previous=current.value&&current.value!==incoming.value?[{kind,value:current.value,provenance:current.provenance}]:[];
  return {...entity,localization:moved.state,aliases:mergeAliases(entity.aliases,previous)};
+}
+function applyReviewedLocalization(entity,incoming,at,kind='title'){
+ if(incoming?.authority!=='dictionary'&&incoming?.authority!=='owner')return holdLocalization(entity,incoming,at,kind,'untrusted_authority');
+ const moved=transition(entity.localization,'reviewed',{updatedAt:at,source:incoming.source||incoming.authority,sourceVersion:incoming.authority,provenance:{...(incoming.provenance||{}),authority:incoming.authority},value:incoming.value,nextAction:'keep_reviewed'});
+ if(!moved.ok)return entity;
+ const previous=entity.localization.value&&entity.localization.value!==incoming.value?[{kind,value:entity.localization.value,provenance:entity.localization.provenance}]:[];
+ return {...entity,localization:moved.state,aliases:mergeAliases(entity.aliases,previous)};
+}
+function linkedValue(record,scheme,accept){
+ const found=(record?.externalIds||[]).find(item=>item.scheme===scheme&&(!accept||accept(item)));
+ if(found)return found.value;
+ if(scheme==='letterboxd'&&record?.letterboxdId)return String(record.letterboxdId);
+ if(scheme==='tmdb'&&record?.tmdbId&&(!accept||accept({trusted:!!record.trusted,conflicting:false})))return String(record.tmdbId);
+ return null;
+}
+function mergeExternal(existing=[],incoming=[]){
+ const out=[],index=new Map();
+ for(const item of [...existing,...incoming]){
+  if(!item?.scheme||!item.value)continue;
+  const key=item.scheme+'\0'+item.value,prior=index.get(key);
+  if(!prior){const copy={scheme:item.scheme,value:String(item.value),conflicting:!!item.conflicting,trusted:!!item.trusted&&!item.conflicting,provenance:item.provenance??null};index.set(key,copy);out.push(copy);continue;}
+  if(item.conflicting){prior.conflicting=true;prior.trusted=false;}
+  else if(item.trusted)prior.trusted=true;
+ }
+ return out;
+}
+function linkFilms(existing,incoming,at){
+ if(!existing?.id||incoming==null)return {ok:false,reason:'missing_record',survivor:existing||null,incoming:incoming??null};
+ if(existing.identity?.status==='rejected'||incoming.identity?.status==='rejected')return {ok:false,reason:'rejected',survivor:existing,incoming};
+ const leftLetterboxd=linkedValue(existing,'letterboxd'),rightLetterboxd=linkedValue(incoming,'letterboxd');
+ const leftTmdb=linkedValue(existing,'tmdb',item=>!item.conflicting),rightTmdb=linkedValue(incoming,'tmdb',item=>!item.conflicting);
+ const leftTrusted=linkedValue(existing,'tmdb',item=>item.trusted&&!item.conflicting),rightTrusted=linkedValue(incoming,'tmdb',item=>item.trusted&&!item.conflicting);
+ if((leftLetterboxd&&rightLetterboxd&&leftLetterboxd!==rightLetterboxd)||(leftTmdb&&rightTmdb&&leftTmdb!==rightTmdb))return {ok:false,reason:'identity_collision',survivor:existing,incoming};
+ const shared=(leftLetterboxd&&rightLetterboxd&&leftLetterboxd===rightLetterboxd)||(leftTmdb&&rightTmdb&&leftTmdb===rightTmdb);
+ if(!shared&&incoming.id)return {ok:false,reason:'unrelated',survivor:existing,incoming};
+ const trustedTmdb=leftTrusted||rightTrusted,tmdbId=trustedTmdb||leftTmdb||rightTmdb,letterboxdId=leftLetterboxd||rightLetterboxd;
+ let identity=existing.identity;
+ if(trustedTmdb&&identity?.status!=='resolved'){const moved=transition(identity,'resolved',{updatedAt:at,source:'link',sourceVersion:'tmdb:'+trustedTmdb,provenance:{letterboxdId,tmdbId:trustedTmdb},nextAction:'stop'});if(moved.ok)identity=moved.state;}
+ let localization=existing.localization,localizationConflicts=[...(existing.localizationConflicts||[])];
+ if(incoming.localization?.status==='reviewed'&&localization?.status!=='reviewed'){const moved=transition(localization,'reviewed',{updatedAt:at,source:incoming.localization.source,sourceVersion:incoming.localization.sourceVersion,provenance:incoming.localization.provenance,value:incoming.localization.value,nextAction:'keep_reviewed'});if(moved.ok)localization=moved.state;}
+ else if(incoming.localization?.value&&incoming.localization.value!==localization?.value&&localization?.status==='reviewed')localizationConflicts.push({value:incoming.localization.value,source:incoming.localization.source||null,provenance:incoming.localization.provenance??null,at:stamp(at),reason:'link_kept_survivor'});
+ const redirect=incoming.id&&incoming.id!==existing.id?{from:incoming.id,to:existing.id,at:stamp(at)}:null;
+ const predictionHistory=[...(existing.predictionHistory||[])];
+ for(const entry of incoming.predictionHistory||[])if(!predictionHistory.includes(entry))predictionHistory.push(entry);
+ if(incoming.prediction&&incoming.prediction!==existing.prediction)predictionHistory.push({prediction:incoming.prediction,from:incoming.id||null,replacedAt:stamp(at)});
+ const survivor={...existing,externalIds:mergeExternal(existing.externalIds,[letterboxdId&&{scheme:'letterboxd',value:letterboxdId,trusted:true,conflicting:false,provenance:null},tmdbId&&{scheme:'tmdb',value:tmdbId,trusted:!!trustedTmdb,conflicting:false,provenance:null},...(incoming.externalIds||[])].filter(Boolean)),aliases:mergeAliases(existing.aliases,incoming.aliases||[]),canonicalIdentity:trustedTmdb?'tmdb:'+trustedTmdb:existing.canonicalIdentity||null,identity,localization,localizationConflicts,fingerprint:existing.fingerprint,prediction:existing.prediction,metadata:existing.metadata,predictionHistory,redirects:[...(existing.redirects||[]),...(redirect?[redirect]:[])]};
+ return {ok:true,survivor,redirect,preserved:{fingerprint:incoming.fingerprint&&incoming.fingerprint!==existing.fingerprint?incoming.fingerprint:null,prediction:incoming.prediction&&incoming.prediction!==existing.prediction?incoming.prediction:null,predictionHistory:incoming.predictionHistory||[]}};
 }
 function invalidatePredictionForProfile(film,profile,at){
  if(film.prediction.status==='missing')return film;
@@ -172,7 +229,7 @@ function invalidatePredictionForProfile(film,profile,at){
  if(!moved.ok)throw new Error('profile change cannot leave prediction '+film.prediction.status);
  return {...film,prediction:moved.state,fingerprint:film.fingerprint};
 }
-function observeMetadata(film,observation){return {...film,metadata:metadataState(observation),fingerprint:film.fingerprint,prediction:film.prediction};}
+function observeMetadata(film,observation){const letterboxdId=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||null;return {...film,metadata:metadataState({...observation,letterboxdId}),fingerprint:film.fingerprint,prediction:film.prediction};}
 function availabilityProjection({shows,epgLastAiring,now}){
  const starts=(shows||[]).map(show=>Number(show.start)).filter(Number.isFinite);
  const availableUntil=starts.length?new Date(Math.max(...starts)+AVAILABLE_MS).toISOString():null;
