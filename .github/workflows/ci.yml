@@ -118,6 +118,7 @@ jobs:
           echo "Cloudflare release: $message"
 
       - name: Check Cloudflare API access
+        id: cloudflare-access
         if: steps.freshness.outputs.deploy == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -138,17 +139,106 @@ jobs:
             esac
           }
 
-          token_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/tokens/verify")"
-          echo "account token verify: HTTP ${token_status} ($(classify "$token_status"))"
+          curl_class() {
+            case "$1" in
+              6) echo "dns failure" ;;
+              7) echo "connection failed" ;;
+              28) echo "timeout" ;;
+              35) echo "tls error" ;;
+              *) echo "network error" ;;
+            esac
+          }
 
-          settings_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/iptv/settings")"
-          echo "worker settings: HTTP ${settings_status} ($(classify "$settings_status"))"
+          failed=0
 
-          if [ "$token_status" != "200" ] || [ "$settings_status" != "200" ]; then
+          status_check() {
+            local name="$1"
+            local url="$2"
+            local curl_exit=0
+            local status
+            status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              "$url")" || curl_exit=$?
+            if [ "$curl_exit" -ne 0 ]; then
+              echo "${name}: $(curl_class "$curl_exit") (curl exit ${curl_exit})"
+              failed=1
+              return 0
+            fi
+            echo "${name}: HTTP ${status} ($(classify "$status"))"
+            [ "$status" = "200" ] || failed=1
+          }
+
+          probe() {
+            local name="$1"
+            local url="$2"
+            local body curl_exit=0 http_status parsed success codes
+            body="$(mktemp "${RUNNER_TEMP:-/tmp}/cf-probe.XXXXXX")"
+            http_status="$(curl -sS -o "$body" -w '%{http_code}' --max-time 20 \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              "$url")" || curl_exit=$?
+            if [ "$curl_exit" -ne 0 ]; then
+              rm -f "$body"
+              echo "${name}: $(curl_class "$curl_exit") (curl exit ${curl_exit})"
+              failed=1
+              return 0
+            fi
+            parsed="$(python3 -c 'import textwrap,sys; exec(textwrap.dedent("""
+            import json
+            path = sys.argv[1]
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except Exception:
+                print("missing")
+                raise SystemExit(0)
+            if not isinstance(data, dict):
+                print("missing")
+                raise SystemExit(0)
+            success = data.get("success")
+            if success is True:
+                label = "true"
+            elif success is False:
+                label = "false"
+            else:
+                label = "missing"
+            codes = []
+            errors = data.get("errors")
+            if isinstance(errors, list):
+                for item in errors:
+                    if not isinstance(item, dict):
+                        continue
+                    code = item.get("code")
+                    if isinstance(code, bool):
+                        continue
+                    if isinstance(code, int) or (isinstance(code, str) and code.isdigit()):
+                        codes.append(str(code))
+            print(label + (" " + " ".join(codes) if codes else " none"))
+            """))' "$body")" || parsed="missing"
+            rm -f "$body"
+            if [ "$parsed" = "missing" ]; then
+              success="missing"
+              codes="none"
+            else
+              success="${parsed%% *}"
+              codes="${parsed#* }"
+            fi
+            echo "${name}: HTTP ${http_status} success ${success} codes ${codes}"
+            if [ "$http_status" != "200" ] || [ "$success" != "true" ]; then
+              failed=1
+            fi
+          }
+
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}"
+          status_check "account token verify" "${api}/tokens/verify"
+          status_check "worker settings" "${api}/workers/scripts/iptv/settings"
+          probe "service bindings" "${api}/workers/services/iptv/environments/production/bindings"
+          probe "service routes" "${api}/workers/services/iptv/environments/production/routes?show_zonename=true"
+          probe "domain records" "${api}/workers/domains/records?page=0&per_page=5&service=iptv&environment=production"
+          probe "service subdomain" "${api}/workers/services/iptv/environments/production/subdomain"
+          probe "service environment" "${api}/workers/services/iptv/environments/production"
+          probe "script schedules" "${api}/workers/scripts/iptv/schedules"
+
+          if [ "$failed" -ne 0 ]; then
             echo "Cloudflare API diagnostics failed; deployment was not started."
             exit 1
           fi
@@ -156,13 +246,13 @@ jobs:
           echo "Cloudflare API diagnostics succeeded; continuing deployment."
 
       - name: Prepare Wrangler diagnostic log directory
-        if: steps.freshness.outputs.deploy == 'true'
+        if: steps.freshness.outputs.deploy == 'true' && steps.cloudflare-access.outcome == 'success'
         shell: bash
         run: mkdir -p "${{ runner.temp }}/wrangler-diagnostics"
 
       - name: Deploy verified build
         id: deploy
-        if: steps.freshness.outputs.deploy == 'true'
+        if: steps.freshness.outputs.deploy == 'true' && steps.cloudflare-access.outcome == 'success'
         uses: cloudflare/wrangler-action@v4
         env:
           WRANGLER_LOG: debug

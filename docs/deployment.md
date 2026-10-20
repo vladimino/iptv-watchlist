@@ -33,10 +33,11 @@ Source: `.github/workflows/ci.yml`. The former independent Cloudflare Workers Bu
    - Secret: `CLOUDFLARE_API_TOKEN`
    - Variable: `CLOUDFLARE_ACCOUNT_ID`
 5. Deployment concurrency group: `cloudflare-iptv-production`, with `cancel-in-progress: false`. Before publishing, the job verifies that `GITHUB_SHA` still equals the remote `main` HEAD. This prevents common stale deployments, but the freshness check is not atomic with publication.
-6. `cloudflare/wrangler-action@v4` uses Wrangler 4.151.1 and `deploy --message`. Cloudflare release descriptions are:
+6. Before Wrangler starts, the job reads the account token, Worker settings, and the six metadata endpoints Wrangler requests after a dashboard edit. Each request is independent. The log shows the check name, HTTP status, the `success` field, and numeric API error codes. A non-200 response, `success` other than true, or a network error stops the job before deploy. These six reads are temporary and will be removed after the failure is identified.
+7. `cloudflare/wrangler-action@v4` uses Wrangler 4.151.1 and `deploy --message`. Cloudflare release descriptions are:
    - Normal commit: commit subject
    - Merge commit: `PR #N: <PR title>`
-7. `wrangler.jsonc` configures:
+8. `wrangler.jsonc` configures:
    - Worker: `iptv`
    - Entrypoint: `dist/server/index.js`
    - R2 binding: `BUCKET` -> `iptv`
