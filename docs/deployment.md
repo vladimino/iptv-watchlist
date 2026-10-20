@@ -6,6 +6,7 @@ GitHub `main` is the canonical code source. Cloudflare is the production runtime
 
 - Production: https://iptv.vladimino.workers.dev/. Worker `iptv`, deployed by GitHub Actions, private behind Cloudflare Access. R2 bucket `iptv`, binding `BUCKET`, is the authoritative production store.
 - Experimental MCP: `https://iptv.vladimino.workers.dev/mcp`, served by the same Worker. A separate Access application, `IPTV MCP`, protects this path with Managed OAuth and an owner-only policy. Application `All Workers` keeps protecting every other path. The Worker verifies the Access JWT using the runtime variables `MCP_ACCESS_TEAM_DOMAIN` and `MCP_ACCESS_AUD`, which are set in the Cloudflare dashboard and not committed. The two probe tools do not use R2. See [docs/mcp.md](mcp.md).
+- Resolver continuation: hops run inside Worker `iptv` through its own `ctx.exports` loopback to the `DiscoveryContinuation` entrypoint. No service binding, second Worker, or Access exception is configured, and a hop carries no credential. The Sites-era `EPG_SITE_SERVICE_TOKEN` is no longer read. If it still exists as a Worker secret, removing it is a separately approved environment change. See [ENRICHMENT_API.md](../ENRICHMENT_API.md#epg-resolver--hotcold-pipeline-v2).
 - Legacy reserve: https://iptv.vladimino.chatgpt.site/, Site `appgprj_6abfed826e148191903dec4175166ff7`. Its separate R2 store is a temporary reserve and the source of the historical snapshot. It is not the destination for current writes. Do not run sync, prediction, or other mutating processes there. Do not use it for ordinary browsing or diagnosis without separate approval: opening the UI is not guaranteed read-only, because `GET /api/events` can recover events and `GET /api/enrichment/view` can initialize the ratings index. GitHub/Cloudflare deployment does not update this Site.
 
 Scheduled Tasks are off. Automatic data refresh has not resumed. Unattended ChatGPT authorization to Cloudflare remains a separate problem; acceptance criteria for unattended MCP runs are in [docs/mcp.md](mcp.md). Keep Cloudflare Access enabled.
@@ -40,11 +41,12 @@ Source: `.github/workflows/ci.yml`. The former independent Cloudflare Workers Bu
 8. `wrangler.jsonc` configures:
    - Worker: `iptv`
    - Entrypoint: `dist/server/index.js`
+   - Compatibility date `2026-10-18`, which enables `ctx.exports` for the resolver continuation. Do not add `disable_ctx_exports` or move the date before 2025-11-17.
    - R2 binding: `BUCKET` -> `iptv`
    - `keep_vars: true`, so dashboard variables such as `MCP_ACCESS_TEAM_DOMAIN` and `MCP_ACCESS_AUD` survive deploys
    - `preview_urls: false`
 
-A failed test/build, or a failed account-token or Worker-settings check, prevents deployment. A successful workflow confirms publication, not completion of data migration or end-to-end smoke tests. Use authorized read-only checks after deployment. For `/mcp`, use only the safe verification procedure in [docs/mcp.md](mcp.md).
+A failed test/build, or a failed account-token or Worker-settings check, prevents deployment. A successful workflow confirms publication, not completion of data migration or end-to-end smoke tests. Use authorized read-only checks after deployment. For `/mcp`, use only the safe verification procedure in [docs/mcp.md](mcp.md). Exercising the resolver continuation in production writes `epg/*` records and calls TMDB, so it is a separately approved operation, never a deploy smoke test.
 
 ### Cloudflare API token permissions and dashboard deployments
 
