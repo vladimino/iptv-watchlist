@@ -62,12 +62,19 @@ function presetRecord(item){
  return {id:item.id,name,schemaVersion:1,query,createdAt,updatedAt};
 }
 function presetDocument(presets){return {schemaVersion:1,presets};}
+function inspectPresetDocument(data){
+ if(!data||typeof data!=='object'||Array.isArray(data)||!Array.isArray(data.presets)||data.presets.length>MAX_PRESETS)return {error:'Stored filter presets are unreadable'};
+ const presets=[];
+ for(const item of data.presets){const record=presetRecord(item);if(!record)return {error:'Stored filter presets are unreadable'};presets.push(record);}
+ return {presets};
+}
 async function readPresetDocument(env){
  const object=await env.BUCKET.get(PRESET_KEY);
  if(!object)return {etag:EMPTY_PRESET_ETAG,presets:[],missing:true};
  let data;try{data=await object.json();}catch{return {etag:presetHttpEtag(object),error:'Stored filter presets are unreadable'};}
- const presets=Array.isArray(data?.presets)?data.presets.map(presetRecord).filter(Boolean).slice(0,MAX_PRESETS):[];
- return {etag:presetHttpEtag(object),presets,missing:false};
+ const inspected=inspectPresetDocument(data);
+ if(inspected.error)return {etag:presetHttpEtag(object),error:inspected.error};
+ return {etag:presetHttpEtag(object),presets:inspected.presets,missing:false};
 }
 function presetJson(data,status=200,etag){return new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...(etag?{ETag:etag}:{})}});}
 async function writePresetDocument(env,presets,ifMatch){
