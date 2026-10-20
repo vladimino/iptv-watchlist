@@ -4,7 +4,7 @@ Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV progr
 
 ## Project layout
 
-- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal entrypoint for resolver continuation hops. `src/mcp.js` is the experimental MCP probe endpoint.
+- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal entrypoint for resolver continuation hops. `src/mcp.js` is the MCP endpoint: connection probes plus the EPG and prediction tools.
 - `public/` — browser UI.
 - `data/` — reviewed public title/person dictionaries used at build time.
 - `tests/` — self-contained unit and contract tests.
@@ -66,7 +66,7 @@ Deploying this change does not add `execution` to existing `enrichment/view-inde
 
 ## Experimental MCP endpoint
 
-`/mcp` is a minimal remote MCP server (Streamable HTTP, JSON responses, no sessions) for testing ChatGPT access. It has two tools: `probe_read` returns a fixed diagnostic report, and `probe_echo` returns a short text unchanged. Neither touches R2 or starts any production process. A separate Cloudflare Access application, `IPTV MCP`, protects the path with Managed OAuth and handles the whole OAuth flow, including discovery and dynamic client registration. The Worker accepts a request only after verifying the signed `Cf-Access-Jwt-Assertion` against the team signing keys and that application's audience. Architecture, configuration, the required Access settings, ChatGPT setup, limitations, and the safe verification procedure are in [docs/mcp.md](docs/mcp.md).
+`/mcp` is the remote MCP server (Streamable HTTP, JSON responses, no sessions) used by ChatGPT. `probe_read` and `probe_echo` only test the connection. The other tools read EPG and prediction state or advance one existing sync or runner step; ChatGPT still generates fingerprints and predictions. A separate Cloudflare Access application, `IPTV MCP`, protects the path with Managed OAuth and handles the whole OAuth flow, including discovery and dynamic client registration. The Worker accepts a request only after verifying the signed `Cf-Access-Jwt-Assertion` against the team signing keys and that application's audience. Publishing the Worker does not start sync, prediction, or a Scheduled Task. Architecture, the tool allowlist, and the safe verification procedure are in [docs/mcp.md](docs/mcp.md).
 
 ## Operational safety
 

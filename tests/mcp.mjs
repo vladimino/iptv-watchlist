@@ -74,10 +74,11 @@ response=await mcp({jsonrpc:'2.0',method:'notifications/initialized'});
 assert.equal(response.status,202);assert.equal(await response.text(),'');
 assert.deepEqual(await result(rpc(6,'ping')),{});
 
-// Tool discovery exposes exactly the two probes, both read-only.
+// Tool discovery keeps the two probes read-only. Domain tools are covered in tests/mcp-tools.mjs.
 const {tools}=await result(rpc(7,'tools/list'));
-assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo']);
-for(const tool of tools){
+assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','epg_sync_start','epg_sync_step','prediction_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete']);
+const probes=tools.filter(tool=>tool.name.startsWith('probe_'));
+for(const tool of probes){
  assert.equal(tool.inputSchema.type,'object');assert.equal(tool.inputSchema.additionalProperties,false);
  assert.deepEqual(tool.annotations,{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false});
 }

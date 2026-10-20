@@ -1,10 +1,13 @@
-// Experimental MCP probe endpoint (Streamable HTTP, JSON responses, stateless).
+// MCP endpoint (Streamable HTTP, JSON responses, stateless).
 // Cloudflare Access application "IPTV MCP" (Managed OAuth) authenticates every
 // request before it reaches the Worker. This module re-verifies the signed Access
-// JWT and exposes two side-effect-free tools. It never reads env.BUCKET.
+// JWT. probe_read and probe_echo do not touch storage. The EPG and prediction tools
+// call the existing Worker functions; they do not accept a URL, an R2 key, or an API path.
+// AIR-58 is the Access prerequisite, AIR-60 is the internal continuation used by the EPG step,
+// and AIR-62 is the later decision to enable Scheduled Tasks. This module does not enable them.
 const MCP_PROTOCOL_VERSIONS=['2025-11-25','2025-06-18'];
-const MCP_SERVER_INFO={name:'iptv-watchlist-probe',title:'IPTV Watchlist MCP probe',version:'0.1.0'};
-const MCP_INSTRUCTIONS='Experimental connectivity probe for IPTV Watchlist. Only probe_read and probe_echo exist. Neither tool reads or changes watchlist, programme, ratings, settings or any other stored data.';
+const MCP_SERVER_INFO={name:'iptv-watchlist-probe',title:'IPTV Watchlist MCP',version:'0.2.0'};
+const MCP_INSTRUCTIONS='IPTV Watchlist MCP. probe_read and probe_echo only test the connection and do not touch stored data. Read epg_status, epg_pipeline_status, enrichment_schema, enrichment_profile, enrichment_runner, enrichment_queue and enrichment_status before writing. epg_sync_start then epg_sync_step use the returned runId and advance one existing step at a time. prediction_start uses trigger scheduled or manual; already_running means stop and do not adopt that runId. prediction_next returns one film; generate the fingerprint and prediction in ChatGPT, then prediction_submit that one film. prediction_heartbeat renews the lease. prediction_complete only when the runner says mustComplete or a real quota, model, API or storage failure stops the run. Do not pass URLs, R2 keys or API paths. Do not enable Scheduled Tasks; that is AIR-62. Prerequisites: AIR-58 authorization and AIR-60 internal continuation.';
 const MCP_ALLOWED_ORIGINS=['https://chatgpt.com'];
 const MCP_MAX_BODY_BYTES=64*1024;
 const MCP_MAX_JWT_LENGTH=8192;
@@ -13,9 +16,29 @@ const MCP_CLOCK_SKEW_SECONDS=60;
 const MCP_JWKS_TTL_MS=60*60*1000;
 const MCP_JWKS_RETRY_MS=30*1000;
 const mcpJwksCache=new Map();
+const MCP_READ={readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false};
+const MCP_STATUS={readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false};
+const MCP_WRITE={readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:false};
+const MCP_WRITE_WORLD={readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:true};
+const MCP_RUN_ID={type:'string',minLength:1,maxLength:100,pattern:'^[A-Za-z0-9_-]{1,100}$',description:'runId returned by the matching start tool. Not an R2 key.'};
+const MCP_CAPACITY={type:'object',properties:{remainingPercent:{type:'number',minimum:0,maximum:100}},additionalProperties:false,description:'Known remaining model capacity, 0–100. Omit when unknown.'};
 const MCP_TOOLS=[
- {name:'probe_read',title:'Probe: read',description:'Use this to check that the IPTV Watchlist MCP connection and Cloudflare Access authorization work. Returns a fixed diagnostic report. It does not read watchlist, programme or any stored data.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false}},
- {name:'probe_echo',title:'Probe: echo',description:'Use this to test a tool round trip. Returns the given short text unchanged. Nothing is stored.',inputSchema:{type:'object',properties:{text:{type:'string',minLength:1,maxLength:MCP_ECHO_MAX_CHARS,description:`Short test text, 1-${MCP_ECHO_MAX_CHARS} characters.`}},required:['text'],additionalProperties:false},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false}},
+ {name:'probe_read',title:'Probe: read',description:'Use this to check that the IPTV Watchlist MCP connection and Cloudflare Access authorization work. Returns a fixed diagnostic report. It does not read watchlist, programme or any stored data. AIR-58.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'probe_echo',title:'Probe: echo',description:'Use this to test a tool round trip. Returns the given short text unchanged. Nothing is stored. AIR-58.',inputSchema:{type:'object',properties:{text:{type:'string',minLength:1,maxLength:MCP_ECHO_MAX_CHARS,description:`Short test text, 1-${MCP_ECHO_MAX_CHARS} characters.`}},required:['text'],additionalProperties:false},annotations:MCP_READ},
+ {name:'epg_status',title:'EPG sync status',description:'Read the current EPG/watchlist sync stage, runId and remaining count. Same body as GET /api/status. It does not start sync. AIR-58; the following write steps depend on AIR-60, and AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'epg_pipeline_status',title:'EPG pipeline status',description:'Read normalized EPG candidate, resolver and hot/cold queue counts. Same body as GET /api/enrichment/pipeline/status. It does not scan, resolve or write. AIR-58 and AIR-60.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'enrichment_schema',title:'Prediction schema',description:'Read the taste-profile and fingerprint schema the model must follow. Same body as GET /api/enrichment/schema. Nothing is stored. AIR-58.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'enrichment_profile',title:'Taste profile',description:'Read the published taste profile. Same body as GET /api/enrichment/profile. A missing profile means stop; this tool does not publish one. AIR-58.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'enrichment_runner',title:'Prediction runner contract',description:'Read the current prediction runner contract before a run. Same body as GET /api/enrichment/runner. AIR-58. Enabling the hourly task is AIR-62.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'enrichment_queue',title:'Prediction queue',description:'Read prediction queue counts and the last batch. Same body as GET /api/enrichment/queue/status. It does not reconcile or start a run. AIR-58.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'enrichment_status',title:'Prediction status',description:'Read prediction runner state. Same body as GET /api/enrichment/status, including its recovery of an undelivered stop event. It does not start a run. AIR-58; schedule enablement is AIR-62.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_STATUS},
+ {name:'epg_sync_start',title:'Start EPG sync',description:'Start one EPG/watchlist sync, or return the active run when it is still within its freshness window. No arguments: the Worker chooses the Letterboxd and EPG sources. Returns runId, stage and remaining. Then call epg_sync_step. AIR-58. The EPG commit schedules AIR-60 continuation. AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_WRITE_WORLD},
+ {name:'epg_sync_step',title:'Advance EPG sync one step',description:'Advance the runId from epg_sync_start by one existing step: one metadata batch, or the single EPG commit. A completed EPG commit schedules resolver continuation internally (AIR-60). This tool accepts no URL, R2 key, limit or chunk count. Repeat until stage is complete. AIR-58 and AIR-60; AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{runId:MCP_RUN_ID},required:['runId'],additionalProperties:false},annotations:MCP_WRITE_WORLD},
+ {name:'prediction_start',title:'Start prediction run',description:'Start the prediction runner with scope watchlist_all and mode queued. trigger is scheduled or manual. Pass capacity.remainingPercent only when the real value is known. already_running is success: stop and do not adopt that runId. busy means retry later. This does not generate a fingerprint or a prediction. AIR-58. AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{trigger:{type:'string',enum:['scheduled','manual']},capacity:MCP_CAPACITY},required:['trigger'],additionalProperties:false},annotations:MCP_WRITE},
+ {name:'prediction_next',title:'Next prediction film',description:'Return the next film for an owned run, one film only. Generate its fingerprint or prediction in ChatGPT from the returned profile and schema. Do not invent a batch size. already complete or mustComplete means call prediction_complete instead of generating. AIR-58.',inputSchema:{type:'object',properties:{runId:MCP_RUN_ID,capacity:{...MCP_CAPACITY,properties:{...MCP_CAPACITY.properties,quotaAvailable:{type:'boolean'}}}},required:['runId'],additionalProperties:false},annotations:MCP_WRITE},
+ {name:'prediction_submit',title:'Submit one prediction',description:'Submit exactly one film for the owned run. The Worker validates the fingerprint and prediction with the existing schema. For a malformed model response send failure.kind parse_error or validation_error and continue; one bad film does not end the run. AIR-58.',inputSchema:{type:'object',properties:{runId:MCP_RUN_ID,items:{type:'array',minItems:1,maxItems:1,items:{type:'object',properties:{filmId:{type:'string',minLength:1,maxLength:80},fingerprint:{type:'object'},prediction:{type:'object'},failure:{type:'object',properties:{kind:{type:'string',enum:['parse_error','validation_error']}},required:['kind'],additionalProperties:false}},required:['filmId'],additionalProperties:false}}},required:['runId','items'],additionalProperties:false},annotations:MCP_WRITE},
+ {name:'prediction_heartbeat',title:'Renew prediction lease',description:'Renew the 15-minute lease for an owned running prediction run. Call it before a long model generation and about every 10 minutes during one. AIR-58.',inputSchema:{type:'object',properties:{runId:MCP_RUN_ID},required:['runId'],additionalProperties:false},annotations:MCP_WRITE},
+ {name:'prediction_complete',title:'Complete prediction run',description:'Finish the owned run. Omit reason when the queue is empty. Otherwise pass a short reason such as quota, model_unavailable, api_error, storage_error or external_termination. Repeating a finished run does not create a second event. AIR-58. AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{runId:MCP_RUN_ID,reason:{type:'string',minLength:1,maxLength:80}},required:['runId'],additionalProperties:false},annotations:{...MCP_WRITE,idempotentHint:true}},
 ];
 const mcpJson=(value,status=200,headers={})=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers}});
 const mcpError=(id,code,message,status=200,headers)=>mcpJson({jsonrpc:'2.0',id,error:{code,message}},status,headers);
@@ -98,7 +121,46 @@ async function mcpReadBody(request){
  const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}return bytes;
 }
 const mcpToolError=message=>({content:[{type:'text',text:message}],isError:true});
-function mcpCallTool(params,protocolVersion){
+const mcpRunId=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(value);
+function mcpCapacity(value,allowQuota){
+ if(value===undefined)return true;
+ if(!mcpIsObject(value))return false;
+ const allowed=allowQuota?['remainingPercent','quotaAvailable']:['remainingPercent'];
+ if(Object.keys(value).some(key=>!allowed.includes(key)))return false;
+ if('remainingPercent' in value&&(typeof value.remainingPercent!=='number'||!Number.isFinite(value.remainingPercent)||value.remainingPercent<0||value.remainingPercent>100))return false;
+ if('quotaAvailable' in value&&typeof value.quotaAvailable!=='boolean')return false;
+ return true;
+}
+function mcpPayload(httpStatus,body){
+ const payload=mcpIsObject(body)?{httpStatus,...body}:{httpStatus,result:body};
+ const failed=httpStatus>=500||httpStatus===400||httpStatus===404||httpStatus===409||httpStatus===503;
+ return {result:{content:[{type:'text',text:JSON.stringify(payload)}],structuredContent:payload,...(failed?{isError:true}:{})}};
+}
+async function mcpFromResponse(response){
+ let body;try{body=await response.json();}catch{body={error:'Unreadable response'};}
+ return mcpPayload(response.status,body);
+}
+async function mcpDomain(work){
+ try{return await mcpFromResponse(await work());}catch(e){return {result:mcpToolError(String(e.message).slice(0,160))};}
+}
+function mcpEnrichment(env,execution,method,path,body){
+ const url=new URL('https://iptv.internal'+path),init={method};
+ if(body!==undefined){init.body=JSON.stringify(body);init.headers={'Content-Type':'application/json'};}
+ return enrichmentRoute(new Request(url,init),env,url,execution);
+}
+function mcpRejectFields(name,args,allowed){
+ if(Object.keys(args).some(key=>!allowed.includes(key)))return {result:mcpToolError(name+' accepts only'+(allowed.length?' '+allowed.join(', '):' no arguments')+'.')};
+ return null;
+}
+function mcpSubmitItem(item){
+ if(!mcpIsObject(item)||Object.keys(item).some(key=>!['filmId','fingerprint','prediction','failure'].includes(key)))return 'prediction_submit item accepts only filmId, fingerprint, prediction and failure.';
+ if(typeof item.filmId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(item.filmId))return '"filmId" must be 1–80 letters, digits, "_" or "-".';
+ if(item.fingerprint!==undefined&&!mcpIsObject(item.fingerprint))return '"fingerprint" must be an object.';
+ if(item.prediction!==undefined&&!mcpIsObject(item.prediction))return '"prediction" must be an object.';
+ if(item.failure!==undefined&&(!mcpIsObject(item.failure)||Object.keys(item.failure).join()!=='kind'||!['parse_error','validation_error'].includes(item.failure.kind)))return '"failure.kind" must be parse_error or validation_error.';
+ return null;
+}
+async function mcpCallTool(params,protocolVersion,env,execution){
  const args=params.arguments===undefined?{}:params.arguments;
  if(!mcpIsObject(args))return {error:'Invalid params: arguments must be an object'};
  if(params.name==='probe_read'){
@@ -113,9 +175,52 @@ function mcpCallTool(params,protocolVersion){
   if(length<1||length>MCP_ECHO_MAX_CHARS)return {result:mcpToolError(`"text" must contain 1-${MCP_ECHO_MAX_CHARS} characters.`)};
   return {result:{content:[{type:'text',text:args.text}],structuredContent:{echo:args.text,length}}};
  }
+ if(!MCP_TOOLS.some(tool=>tool.name===params.name))return {error:'Unknown tool'};
+ if(!env.BUCKET)return {result:mcpToolError('Storage unavailable')};
+ const fields={epg_status:[],epg_pipeline_status:[],enrichment_schema:[],enrichment_profile:[],enrichment_runner:[],enrichment_queue:[],enrichment_status:[],epg_sync_start:[],epg_sync_step:['runId'],prediction_start:['trigger','capacity'],prediction_next:['runId','capacity'],prediction_submit:['runId','items'],prediction_heartbeat:['runId'],prediction_complete:['runId','reason']};
+ const rejected=mcpRejectFields(params.name,args,fields[params.name]);if(rejected)return rejected;
+ if(params.name==='epg_status')return mcpPayload(200,await syncStatus(env));
+ if(params.name==='epg_pipeline_status')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/pipeline/status'));
+ if(params.name==='enrichment_schema')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/schema'));
+ if(params.name==='enrichment_profile')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/profile'));
+ if(params.name==='enrichment_runner')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/runner'));
+ if(params.name==='enrichment_queue')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/queue/status'));
+ if(params.name==='enrichment_status')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/status'));
+ if(params.name==='epg_sync_start')return mcpDomain(()=>postSync(env,execution,'/api/sync/start',{}));
+ if(params.name==='epg_sync_step'){
+  if(!mcpRunId(args.runId))return {result:mcpToolError('"runId" must be 1–100 letters, digits, "_" or "-".')};
+  const run=await loadJSON(env,'sync.json');
+  return mcpDomain(()=>postSync(env,execution,!run||run.stage==='metadata'?'/api/sync/metadata':'/api/sync/epg',{runId:args.runId}));
+ }
+ if(params.name==='prediction_start'){
+  if(args.trigger!=='scheduled'&&args.trigger!=='manual')return {result:mcpToolError('"trigger" must be scheduled or manual.')};
+  if(!mcpCapacity(args.capacity,false))return {result:mcpToolError('"capacity" accepts only remainingPercent from 0 to 100.')};
+  const body={scope:'watchlist_all',mode:'queued',trigger:args.trigger};if(args.capacity)body.capacity=args.capacity;
+  return mcpDomain(()=>mcpEnrichment(env,execution,'POST','/api/enrichment/start',body));
+ }
+ if(params.name==='prediction_next'||params.name==='prediction_heartbeat'||params.name==='prediction_complete'){
+  if(!mcpRunId(args.runId))return {result:mcpToolError('"runId" must be 1–100 letters, digits, "_" or "-".')};
+ }
+ if(params.name==='prediction_next'){
+  if(!mcpCapacity(args.capacity,true))return {result:mcpToolError('"capacity" accepts only remainingPercent and quotaAvailable.')};
+  const body={runId:args.runId,batchSize:1};if(args.capacity)body.capacity=args.capacity;
+  return mcpDomain(()=>mcpEnrichment(env,execution,'POST','/api/enrichment/next',body));
+ }
+ if(params.name==='prediction_submit'){
+  if(!mcpRunId(args.runId))return {result:mcpToolError('"runId" must be 1–100 letters, digits, "_" or "-".')};
+  if(!Array.isArray(args.items)||args.items.length!==1)return {result:mcpToolError('prediction_submit accepts exactly one item.')};
+  const issue=mcpSubmitItem(args.items[0]);if(issue)return {result:mcpToolError(issue)};
+  return mcpDomain(()=>mcpEnrichment(env,execution,'POST','/api/enrichment/submit',{runId:args.runId,items:args.items}));
+ }
+ if(params.name==='prediction_heartbeat')return mcpDomain(()=>mcpEnrichment(env,execution,'POST','/api/enrichment/heartbeat',{runId:args.runId}));
+ if(params.name==='prediction_complete'){
+  if(args.reason!==undefined&&(typeof args.reason!=='string'||[...args.reason].length<1||[...args.reason].length>80||/[\u0000-\u001f]/.test(args.reason)))return {result:mcpToolError('"reason" must be 1–80 characters without control characters.')};
+  const body={runId:args.runId};if(args.reason!==undefined)body.reason=args.reason;
+  return mcpDomain(()=>mcpEnrichment(env,execution,'POST','/api/enrichment/complete',body));
+ }
  return {error:'Unknown tool'};
 }
-function mcpDispatch(message,protocolVersion){
+async function mcpDispatch(message,protocolVersion,env,execution){
  const {id,method}=message,params=message.params===undefined?{}:message.params;
  const ok=result=>({jsonrpc:'2.0',id,result}),fail=(code,text)=>({jsonrpc:'2.0',id,error:{code,message:text}});
  if(!mcpIsObject(params))return fail(-32602,'Invalid params');
@@ -128,12 +233,12 @@ function mcpDispatch(message,protocolVersion){
  if(method==='tools/list')return ok({tools:MCP_TOOLS});
  if(method==='tools/call'){
   if(typeof params.name!=='string'||!params.name)return fail(-32602,'Invalid params: tool name is required');
-  const outcome=mcpCallTool(params,protocolVersion);
+  const outcome=await mcpCallTool(params,protocolVersion,env,execution);
   return outcome.error?fail(-32602,outcome.error):ok(outcome.result);
  }
  return fail(-32601,'Method not found');
 }
-async function mcpRoute(request,env){
+async function mcpRoute(request,env,execution){
  try{
   // Authorization runs first so that unauthenticated callers learn nothing else.
   const access=await mcpVerifyAccess(request,env);
@@ -158,6 +263,6 @@ async function mcpRoute(request,env){
   const protocolVersion=request.headers.get('MCP-Protocol-Version');
   if(message.method!=='initialize'&&!MCP_PROTOCOL_VERSIONS.includes(protocolVersion))return mcpError(notification?null:message.id,-32600,(protocolVersion===null?'Missing':'Unsupported')+' MCP-Protocol-Version header. Supported: '+MCP_PROTOCOL_VERSIONS.join(', '),400);
   if(notification)return new Response(null,{status:202,headers:{'Cache-Control':'no-store'}});
-  return mcpJson(mcpDispatch(message,protocolVersion));
+  return mcpJson(await mcpDispatch(message,protocolVersion,env,execution));
  }catch{return mcpError(null,-32603,'Internal error',500);}
 }

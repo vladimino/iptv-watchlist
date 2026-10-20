@@ -2,7 +2,7 @@
 
 Data cutover to Cloudflare finished on 19 October 2026. This prompt still targets the legacy Site and must stay disabled. Do not run it against the Site, and do not point it at the Cloudflare Worker until unattended Cloudflare authorization is separately verified. The Sites bypass token is not a Cloudflare credential. Do not relax Cloudflare Access to make the task work.
 
-The historical prompt below is kept so the disabled task can be recognized. It is not permission to resume predictions.
+The historical prompt below is kept so the disabled task can be recognized. It is not permission to resume predictions. The replacement caller, once AIR-62 allows it, is the MCP tool allowlist in [docs/mcp.md](mcp.md). Do not put this prompt or any secret into a Scheduled Task.
 
 Почасовые прогнозы «В эфире»: сохрани существующую Site-aware привязку и почасовое расписание Europe/Madrid.
 
