@@ -4,7 +4,7 @@ Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV progr
 
 ## Project layout
 
-- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal-only entrypoint for one discovery chunk. `src/mcp.js` is the MCP endpoint: connection probes plus the EPG and prediction tools. `src/domain/film-person.js` is the Film and Person lifecycle contract, and `src/domain/film-person-reader.js` builds those views from already loaded records. The Worker bundle does not include either file, and the sync processors do not call them.
+- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal-only entrypoint for one discovery chunk. `src/mcp.js` is the MCP endpoint: connection probes plus the EPG and prediction tools. `src/domain/film-person.js` is the Film and Person lifecycle contract. `src/domain/film-person-reader.js` builds those views from already loaded records, and `src/domain/film-person-backfill.js` compares them with sidecars the caller already has. `scripts/lifecycle-parity.mjs` runs that comparison against a private snapshot. The clock is the snapshot's `finishedAt`, or `--as-of`, and it prints counts only. The Worker bundle does not include the domain files, and the sync processors do not call them.
 - `public/` — browser UI.
 - `data/` — reviewed public title/person dictionaries used at build time. How those records relate to watchlist films, discovered films, and people is audited in [docs/film-person-lifecycle.md](docs/film-person-lifecycle.md).
 - `tests/` — self-contained unit and contract tests.

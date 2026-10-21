@@ -43,7 +43,7 @@ function localFilmId({letterboxdId,tmdbId,conflictingTmdbIds}={}){
  if(tmdbId)return 'film:tmdb:'+String(tmdbId);
  return null;
 }
-function localPersonId(roleId){return typeof roleId==='string'&&/^(actor|director|role)\//.test(roleId)?'person:'+roleId:null;}
+function localPersonId(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
 function externalIds({letterboxdId,tmdbId,conflictingTmdbIds,tmdbTrusted,provenance}={}){
  const ids=[];
  if(letterboxdId)ids.push({scheme:'letterboxd',value:String(letterboxdId),conflicting:false,trusted:true,provenance:provenance?.letterboxd??null});

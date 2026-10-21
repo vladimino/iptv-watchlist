@@ -24,6 +24,8 @@ The owner stopped the scheduled job during the trial. Writers were not quiesced 
 
 The local importer is `scripts/migration-import.mjs`. Its contract, the completed restore, lease handling, and the ban on replaying the snapshot are recorded in [docs/r2-import.md](r2-import.md).
 
+`node scripts/lifecycle-parity.mjs --snapshot /absolute/private/snapshot-directory` reads this same snapshot and prints lifecycle counts. The clock is `manifest.finishedAt`, or an ISO timestamp passed with `--as-of`. It checks schema, provisional status, an empty `changes` list, source identity, and the exporter totals before the comparison. It does not write the snapshot or R2. The output is an aggregate, and it is not committed. The historical snapshot is not a current copy of production. See [docs/film-person-lifecycle.md](film-person-lifecycle.md).
+
 ## Scope and safety
 
 The source was the existing Site `appgprj_6abfed826e148191903dec4175166ff7` at `https://iptv.vladimino.chatgpt.site/`. Its `BUCKET` binding was the pre-cutover source and is now only the temporary reserve. Cloudflare Worker `iptv` uses a different R2 bucket, `iptv`, which is the authoritative production store. The endpoint is disabled by default, including on Cloudflare: it requires the old Site ID, an explicit enable flag, and a dedicated export key in the Sites environment. The Site's access policy must remain owner-only; the extra key is defense in depth, not a replacement for Sites authentication. All exporter routes are GET-only and invoke only `R2.list`, `R2.head`, or conditional `R2.get`. They never create, update, delete, or lease an R2 object.
