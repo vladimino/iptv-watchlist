@@ -24,7 +24,9 @@ result=await vm.runInContext('resolveDiscoveryBatch(env,report,2)',context);asse
 const cached=records.get('epg/discovered-films.json').tmdb_42;cached.epgLastAiring=now-10*86400000;cached.shows=[];
 await vm.runInContext('refreshPredictionQueue(env,report)',context);assert.equal(records.get(queueKey).pending.length,0);assert.equal(records.get(queueKey).coldWithoutPrediction,1);
 // Promotion uses a verified alias and refreshes availability without a TMDB lookup.
-calls=[];await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);assert.equal(records.get(queueKey).pending[0],'tmdb_42');assert.equal(calls.length,2,'only the unresolved cold candidate requires TMDB; known hot aliases do not');
+// A historical showing stays in the ledger. It becomes actionable again only after a current broadcast.
+const revived=records.get('epg/discovery-latest.json').items.find(item=>item.key===cold.key);revived.shows=[{channelId:'test',channel:'Test',start:now,end:now+7200000}];revived.lastAiring=now;revived.seenInLatestSnapshot=true;
+calls=[];await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context);assert.equal(records.get(queueKey).pending[0],'tmdb_42');assert.equal(calls.length,2,'only the unresolved current candidate requires TMDB; known hot aliases do not');
 // A live lease rejects overlapping writers, and an expired lease can be recovered.
 records.set('epg/resolver-lease.json',{id:'running',expiresAt:Date.now()+60000});assert.equal((await vm.runInContext('resolveDiscoveryBatch(env,report,1)',context)).stage,'busy');records.get('epg/resolver-lease.json').expiresAt=0;
 // Interrupted decision persistence recovers the catalog write by using its aliases.

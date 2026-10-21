@@ -26,7 +26,7 @@ records.set('epg/discovered-films.json',{
 records.set('enrichment/view-index.json',{'watch-a':current('a'),'cache-a':current('duplicate-a'),'cache-b':current('b'),'cache-d':current('d')});
 records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:2,coldCount:2,coldWithoutPrediction:1,hotPredicted:2,profileVersion:7,programmeRunId:'programme-1',refreshedAt:'2026-10-13T09:00:00Z',pending:['watch-c'],hotPending:[],coldPending:['watch-c'],priorityCount:0,coldRemaining:1,urgentCount:0,priority:{},retries:{},lastBatch:null,lastCheckAt:null,metrics:{},discovery:null});
 records.set('enrichment/latest-run.json',{runId:'run-1',status:'complete',trigger:'scheduled',createdAt:'2026-10-13T09:00:00Z',completedAt:'2026-10-13T09:08:00Z',stopReason:'queue_empty',selectedIds:['watch-a'],results:{'watch-a':'created'},failures:{},selectionKind:{'watch-a':'hot'},batchCount:1});
-records.set('epg/discovery-latest.json',{items:[{key:'known',title:'Known film'},{key:'pending',title:'Pending film'}]});
+records.set('epg/discovery-latest.json',{programmeRunId:'programme-1',items:[{key:'known',title:'Known film',seenInLatestSnapshot:true,shows:[{channelId:'a',start:now}]},{key:'pending',title:'Pending film',seenInLatestSnapshot:true,shows:[{channelId:'b',start:now}]},{key:'old',title:'Old film',seenInLatestSnapshot:false,lastAiring:now-10*86400000,shows:[]}]});
 records.set('epg/discovery-resolution.json',{known:{status:'verified',tmdbId:'1'}});
 
 const response=await context.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),env);
@@ -42,6 +42,8 @@ assert.equal(data.epgTmdb.cacheOffWindow,2);
 assert.notEqual(data.predictions.pendingOffWindow,data.epgTmdb.cacheOffWindow,'cache outside the window is distinct from its pending prediction subset');
 assert.equal(data.epgTmdb.recognizedFilms,1);
 assert.equal(data.epgTmdb.pendingRecognition,1);
+assert.equal(data.epgTmdb.historicalUnresolved,1);
+assert.equal(data.epgTmdb.ledgerTotal,3);
 assert.equal(data.lastRun.reason,'queue_empty');
 assert.equal(writes.length,0,'footer status GET is read-only');
 console.log('Status footer API: canonical coverage, invariants, duplicate suppression, off-window distinction and read-only behavior passed');

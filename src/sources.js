@@ -45,7 +45,10 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
  };
  for(const raw of previous||[])fold(raw,false);
  for(const raw of latest||[])fold(raw,true);
- if(replaceShows)for(const [key,item] of merged)if(!latestKeys.has(key))merged.set(key,{...item,shows:[]});
+ if(replaceShows)for(const [key,item] of merged){
+  const seen=latestKeys.has(key),starts=(item.shows||[]).map(show=>Number(show.start)).filter(Number.isFinite);
+  merged.set(key,{...item,seenInLatestSnapshot:seen,lastSeenAt:seen&&starts.length?Math.max(...starts):item.lastSeenAt||item.lastAiring||null,lastSeenProgrammeRunId:seen&&options.programmeRunId?options.programmeRunId:item.lastSeenProgrammeRunId||null,shows:seen?item.shows||[]:[]});
+ }
  return [...merged.values()];
 }
 function mergeCatalogIdentity(incoming,live,programmeRunId){
