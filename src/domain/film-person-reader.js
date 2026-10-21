@@ -82,10 +82,19 @@ function legacyLocalization(store,storedId){
  if(provisionalApplies(provisional,evidence.tmdbId))return {status:'provisional',value:provisional.title};
  return {status:'missing',value:null};
 }
-function legacyDisplayedTitle(store,storedId,localization){
- if(localization.status!=='missing'&&localization.value)return localization.value;
- const loaded=loadedSources(store,storedId);
- return originalTitle([loaded.metadata,loaded.programme,loaded.watchlist,loaded.record])||loaded.programme?.title||loaded.watchlist?.title||loaded.record?.title||null;
+function presentedRecord(loaded){
+ if(loaded.programme)return {...(loaded.watchlist||{}),...loaded.programme};
+ return loaded.watchlist||loaded.record||null;
+}
+// GET /api/programme shows film.title. A verified dictionary entry replaces it, as applyReviewedTitle does. A titles.json row replaces it only when that route's TMDB check passes. Original and a provisional titleRu do not.
+function legacyDisplayedTitle(store,storedId){
+ const loaded=loadedSources(store,storedId),film=presentedRecord(loaded);
+ const tmdb=presentTmdb(film?.tmdbId)||presentTmdb(loaded.metadata?.tmdbId);
+ const dictionary=(store.filmTitleIndex||{})[storedId]||null;
+ if(dictionary?.status==='verified'&&dictionary.title&&(!tmdb||!dictionary.tmdbId||String(dictionary.tmdbId)===String(tmdb)))return dictionary.title;
+ const cached=store.titles?.[storedId];
+ if(cached?.title&&cached.tmdbId&&tmdb&&String(cached.tmdbId)===String(tmdb))return cached.title;
+ return film?.title||null;
 }
 function legacyFingerprintStatus(file){
  if(!file)return 'missing';
@@ -100,8 +109,7 @@ function legacyPredictionStatus(store,storedId){
  return aligned?'current':'stale';
 }
 function legacyDisplayReady(store,storedId){
- const localization=legacyLocalization(store,storedId);
- if(!legacyDisplayedTitle(store,storedId,localization))return false;
+ if(!legacyDisplayedTitle(store,storedId))return false;
  if(!String(storedId).startsWith('tmdb_'))return true;
  const decision=decisionForFilm(catalogRecord(store,storedId),store.discoveryResolution||{});
  return !decision||decision.status==='verified';
@@ -122,7 +130,7 @@ function semanticMismatches(store,films,now){
   if(!id)continue;
   const localization=legacyLocalization(context,id);
   const fields={
-   title:[legacyDisplayedTitle(context,id,localization),preferredTitle(film)],
+   title:[legacyDisplayedTitle(context,id),preferredTitle(film)],
    localization:[localization.status,film.localization?.status||'missing'],
    fingerprint:[legacyFingerprintStatus(context.fingerprints?.[id]),film.fingerprint?.status||'missing'],
    prediction:[legacyPredictionStatus(context,id),film.prediction?.status||'missing'],

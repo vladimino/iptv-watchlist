@@ -111,7 +111,7 @@ for(const key of Object.keys(view.sidecars)){
 assert.equal(view.sidecars['programme.lifecycle.json'],undefined);
 assert.equal(view.sidecars['epg/discovery-latest.lifecycle.json'],undefined);
 
-const ambiguousStore={programme:{films:[{id:'28nq',tmdbId:'1656',original:'The Legend of Zorro'}]},metadata:{'28nq':{tmdbId:'1656',metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsis:'Текст',synopsisFetchedAt:FRESH}},discoveredFilms:{tmdb_1656:{id:'tmdb_1656',tmdbId:'1656',original:'The Legend of Zorro',discoveredAt:FRESH,synopsis:'Overview'}},discoveryResolution:{'heat|1995':{status:'ambiguous',tmdbId:'1656',filmId:'tmdb_1656',retryAt:new Date(NOW+DAY).toISOString()}},filmTitles:[],personNames:[],now:NOW};
+const ambiguousStore={programme:{films:[{id:'28nq',tmdbId:'1656',original:'The Legend of Zorro',title:'The Legend of Zorro'}]},metadata:{'28nq':{tmdbId:'1656',metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsis:'Текст',synopsisFetchedAt:FRESH}},discoveredFilms:{tmdb_1656:{id:'tmdb_1656',tmdbId:'1656',original:'The Legend of Zorro',title:'The Legend of Zorro',discoveredAt:FRESH,synopsis:'Overview'}},discoveryResolution:{'heat|1995':{status:'ambiguous',tmdbId:'1656',filmId:'tmdb_1656',retryAt:new Date(NOW+DAY).toISOString()}},filmTitles:[],personNames:[],now:NOW};
 const split=readLifecycle(ambiguousStore,NOW);
 assert.equal(split.parity.ok,false);
 assert.equal(JSON.stringify(split.parity.extra),JSON.stringify(['tmdb_1656']));
@@ -151,12 +151,33 @@ assert.equal(downgrades.some(item=>item.id==='28nq'&&item.field==='prediction'&&
 assert.equal(downgrades.some(item=>item.id==='28nq'&&item.field==='predictionReady'&&item.legacy===true&&item.lifecycle===false),true);
 
 function deepFreeze(value){if(!value||typeof value!=='object'||Object.isFrozen(value))return value;for(const item of Object.values(value))deepFreeze(item);return Object.freeze(value);}
-const catalog=[{id:'tmdb_2',tmdbId:'2',original:'Second',discoveredAt:FRESH,synopsis:'Overview'},{id:'tmdb_1',tmdbId:'1',original:'First',discoveredAt:FRESH,synopsis:'Overview'}];
+const catalog=[{id:'tmdb_2',tmdbId:'2',title:'Second',original:'Second',discoveredAt:FRESH,synopsis:'Overview'},{id:'tmdb_1',tmdbId:'1',title:'First',original:'First',discoveredAt:FRESH,synopsis:'Overview'}];
 const frozen=deepFreeze({discoveredFilms:catalog,programme:{films:[]},filmTitles:[],personNames:[]});
 const frozenOrder=frozen.discoveredFilms.map(item=>item.id).join();
 const frozenView=readLifecycle(frozen,NOW);
 assert.equal(frozen.discoveredFilms.map(item=>item.id).join(),frozenOrder);
 assert.equal(frozenView.parity.ok,true);
 assert.equal(JSON.stringify(frozenView.parity.lifecycle),JSON.stringify(['tmdb_1','tmdb_2']));
+
+function titleMismatch(store,id){return readLifecycle(store,NOW).parity.mismatches.find(item=>item.id===id&&item.field==='title')||null;}
+const epgOnly={programme:{films:[{id:'epg1',original:'English Original',title:'Русское название из EPG'}]},filmTitles:[],personNames:[]};
+const epgGap=titleMismatch(epgOnly,'epg1');
+assert.equal(epgGap.legacy,'Русское название из EPG');
+assert.equal(epgGap.lifecycle,'English Original');
+const draftTitle={programme:{films:[{id:'epg2',original:'English Original',title:'Русское название из EPG',titleRu:'Черновой перевод',titleStatus:'provisional',tmdbId:'42'}]},filmTitles:[],personNames:[]};
+const draftGap=titleMismatch(draftTitle,'epg2');
+assert.equal(draftGap.legacy,'Русское название из EPG');
+assert.equal(draftGap.lifecycle,'English Original');
+assert.notEqual(draftGap.legacy,'Черновой перевод');
+const cached={programme:{films:[{id:'epg3',original:'English Original',title:'Русское название из EPG',tmdbId:'42'}]},titles:{epg3:{tmdbId:'42',title:'Черновой перевод',status:'provisional'}},filmTitles:[],personNames:[]};
+const cachedView=readLifecycle(cached,NOW);
+assert.equal(titleMismatch(cached,'epg3'),null);
+assert.equal(cachedView.films[0].localization.value,'Черновой перевод');
+assert.equal(cachedView.films[0].localization.status,'provisional');
+const reviewed={programme:{films:[{id:'28nq',original:'The Legend of Zorro',title:'Зорро по программе',tmdbId:'1656'}]},filmTitles:[zorro],personNames:[]};
+const reviewedView=readLifecycle(reviewed,NOW);
+assert.equal(titleMismatch(reviewed,'28nq'),null);
+assert.equal(reviewedView.films[0].localization.status,'reviewed');
+assert.equal(reviewedView.films[0].localization.value,'Легенда Зорро');
 
 console.log('Film and Person lifecycle reader passed.');
