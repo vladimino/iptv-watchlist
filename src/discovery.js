@@ -41,9 +41,9 @@ function discoveryCounts(items,decisions,now=Date.now()){
   if(decision?.status==='verified')continue;
   if(activity==='expired'){counts.expiredInactive++;continue;}
   if(activity!=='current'){counts.historicalUnresolved++;continue;}
+  if(decision?.terminalReason&&(!decision.evidenceKey||decision.evidenceKey===candidateEvidence(candidate))){counts.terminalNoMatch++;continue;}
   counts.currentUnresolved++;
-  if(decision?.terminalReason)counts.terminalNoMatch++;
-  else if(decision?.status==='ambiguous')counts.ambiguous++;
+  if(decision?.status==='ambiguous')counts.ambiguous++;
   else if(decision?.retryAt&&Date.parse(decision.retryAt)>now)counts.retryBackoff++;
   else counts.readyNow++;
  }
