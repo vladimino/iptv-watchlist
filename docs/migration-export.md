@@ -24,7 +24,7 @@ The owner stopped the scheduled job during the trial. Writers were not quiesced 
 
 The local importer is `scripts/migration-import.mjs`. Its contract, the completed restore, lease handling, and the ban on replaying the snapshot are recorded in [docs/r2-import.md](r2-import.md).
 
-`node scripts/lifecycle-parity.mjs --snapshot /absolute/private/snapshot-directory` reads this same snapshot, checks the manifest, and prints lifecycle counts. It does not write the snapshot or R2. The output is an aggregate, and it is not committed. The historical snapshot is not a current copy of production. See [docs/film-person-lifecycle.md](film-person-lifecycle.md).
+`node scripts/lifecycle-parity.mjs --snapshot /absolute/private/snapshot-directory` reads this same snapshot and prints lifecycle counts. The clock is `manifest.finishedAt`, or an ISO timestamp passed with `--as-of`. It checks schema, provisional status, an empty `changes` list, source identity, and the exporter totals before the comparison. It does not write the snapshot or R2. The output is an aggregate, and it is not committed. The historical snapshot is not a current copy of production. See [docs/film-person-lifecycle.md](film-person-lifecycle.md).
 
 ## Scope and safety
 
