@@ -10,8 +10,8 @@ assert.doesNotMatch(backfill,/chris-pratt|Крис Прэтт/);
 for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-backfill|backfillLifecycle|personParity/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
-vm.runInContext(domain+'\n'+reader+'\n'+backfill+'\nglobalThis.api={backfillLifecycle};',ctx);
-const {backfillLifecycle}=ctx.api;
+vm.runInContext(domain+'\n'+reader+'\n'+backfill+'\nglobalThis.api={backfillLifecycle,reconcileSidecars};',ctx);
+const {backfillLifecycle,reconcileSidecars}=ctx.api;
 
 const NOW=Date.parse('2026-10-20T12:00:00.000Z');
 const FRESH=new Date(NOW-2*86400000).toISOString();
@@ -45,9 +45,25 @@ const first=backfillLifecycle(frozen,NOW);
 const second=backfillLifecycle(frozen,NOW);
 assert.equal(JSON.stringify(frozen),before);
 assert.equal(frozen.predictions['28nq'].history,history);
-assert.equal(JSON.stringify(first),JSON.stringify(second));
-const restarted=backfillLifecycle({...frozen,previousLifecycle:first.sidecars},NOW);
-assert.equal(JSON.stringify(restarted),JSON.stringify(first));
+assert.equal(JSON.stringify(first.sidecars),JSON.stringify(second.sidecars));
+assert.equal(first.reconciliation.create.length,first.report.sidecarKeys.length);
+assert.equal(first.reconciliation.update.length,0);
+assert.equal(first.reconciliation.unchanged.length,0);
+assert.equal(first.reconciliation.orphan.length,0);
+assert.equal(first.reconciliation.conflict.length,0);
+const restarted=backfillLifecycle({...frozen,persistedSidecars:JSON.parse(JSON.stringify(first.sidecars))},NOW);
+assert.equal(JSON.stringify(restarted.sidecars),JSON.stringify(first.sidecars));
+assert.equal(restarted.reconciliation.unchanged.length,first.report.sidecarKeys.length);
+assert.equal(restarted.reconciliation.create.length,0);
+assert.equal(restarted.reconciliation.conflict.length,0);
+const partial=backfillLifecycle({...frozen,persistedSidecars:{'people.lifecycle.json':first.sidecars['people.lifecycle.json']}},NOW);
+assert.equal(partial.reconciliation.unchanged.includes('people.lifecycle.json'),true);
+assert.equal(partial.reconciliation.create.includes('watchlist.lifecycle.json'),true);
+assert.equal(first.sidecars['people.json'],undefined);
+assert.equal(first.sidecars['programme.json'],undefined);
+assert.equal(first.sidecars['people.lifecycle.json']['actor/delia-enea'].localization.status,'provisional');
+assert.equal(first.sidecars['people.lifecycle.json']['actor/delia-enea'].roleId,'actor/delia-enea');
+assert.equal(first.sidecars['people.lifecycle.json']['actor/same-slug'].id===first.sidecars['people.lifecycle.json']['director/same-slug'].id,false);
 assert.equal(first.contractVersion,1);
 assert.equal(first.report.films.ok,true);
 assert.equal(JSON.stringify(first.report.films.legacy),JSON.stringify(['28nq','part','tmdb_50']));
@@ -79,5 +95,37 @@ for(const key of first.report.sidecarKeys){
  assert.equal(key.includes('programme.json'),false,key);
 }
 assert.equal(first.sidecars['programme.lifecycle.json'],undefined);
+
+const downgraded=JSON.parse(JSON.stringify(first.sidecars));
+downgraded['people.lifecycle.json']['actor/delia-enea']=JSON.parse(JSON.stringify(downgraded['people.lifecycle.json']['actor/delia-enea']));
+downgraded['people.lifecycle.json']['actor/delia-enea'].localization={...downgraded['people.lifecycle.json']['actor/delia-enea'].localization,status:'reviewed',value:'Другое имя'};
+const kept=reconcileSidecars(first.sidecars,downgraded);
+assert.equal(kept.conflict.some(item=>item.key==='people.lifecycle.json'&&item.reason==='reviewed_downgrade'),true);
+const withHistory=JSON.parse(JSON.stringify(first.sidecars));
+withHistory['watchlist.lifecycle.json']['28nq']={...withHistory['watchlist.lifecycle.json']['28nq'],predictionHistory:history};
+assert.equal(reconcileSidecars(first.sidecars,withHistory).conflict.some(item=>item.reason==='history'),true);
+const orphan=reconcileSidecars(first.sidecars,{...first.sidecars,'enrichment/films/gone/fingerprint.lifecycle.json':{id:'film:gone',storedId:'gone',fingerprint:{status:'current'}}});
+assert.equal(orphan.orphan.includes('enrichment/films/gone/fingerprint.lifecycle.json'),true);
+assert.equal(orphan.update.length,0);
+
+const catalogOnly={discoveredFilms:{tmdb_1656:{id:'tmdb_1656',tmdbId:'1656',title:'The Legend of Zorro',original:'The Legend of Zorro',discoveredAt:FRESH,synopsis:'Overview'}},filmTitles:[],personNames:[]};
+const linked={...catalogOnly,watchlist:{films:[{id:'28nq',title:'The Legend of Zorro',original:'The Legend of Zorro'}]},programme:{films:[{id:'28nq',title:'Зорро по программе',original:'The Legend of Zorro',tmdbId:'1656'}]},filmTitles:[zorro]};
+const beforeLink=backfillLifecycle(catalogOnly,NOW);
+const afterLink=backfillLifecycle({...linked,persistedSidecars:beforeLink.sidecars},NOW);
+assert.equal(beforeLink.sidecars['epg/discovered-films.lifecycle.json'].tmdb_1656.id,'film:tmdb:1656');
+assert.equal(afterLink.sidecars['epg/discovered-films.lifecycle.json'].tmdb_1656.id,'film:28nq');
+assert.equal(afterLink.sidecars['epg/discovered-films.lifecycle.json'].tmdb_1656.redirects.some(item=>item.from==='film:tmdb:1656'&&item.to==='film:28nq'),true);
+assert.equal(afterLink.reconciliation.update.includes('epg/discovered-films.lifecycle.json'),true);
+assert.equal(afterLink.reconciliation.conflict.some(item=>item.key==='epg/discovered-films.lifecycle.json'),false);
+const removed={...frozen,persistedSidecars:first.sidecars,watchlist:{films:frozen.watchlist.films.filter(film=>film.id!=='part')},programme:{...frozen.programme,films:frozen.programme.films.filter(film=>film.id!=='part')},fingerprints:{...frozen.fingerprints,part:{fingerprintSchemaVersion:1,fingerprintHash:'print-part',generatedAt:FRESH}}};
+const withoutPartial=backfillLifecycle({...removed,fingerprints:frozen.fingerprints},NOW);
+assert.equal(withoutPartial.reconciliation.update.includes('watchlist.lifecycle.json'),true);
+assert.equal(withoutPartial.reconciliation.conflict.some(item=>item.key==='watchlist.lifecycle.json'),false);
+assert.equal(withoutPartial.sidecars['watchlist.lifecycle.json'].part,undefined);
+assert.equal(withoutPartial.sidecars['watchlist.lifecycle.json']['28nq'].localization.status,'reviewed');
+const credit=backfillLifecycle({discoveredFilms:{tmdb_1:{id:'tmdb_1',tmdbId:'1',title:'Credit',original:'Credit',discoveredAt:FRESH,synopsis:'Overview',actors:[{id:'tmdb_actor/10',name:'Credit Name',original:'Credit Name'}],directors:[]}},filmTitles:[],personNames:[]},NOW);
+assert.equal(credit.sidecars['people.lifecycle.json']['tmdb_actor/10'].id,'person:tmdb_actor/10');
+assert.equal(credit.report.people.legacy.includes('tmdb_actor/10'),true);
+assert.equal(credit.report.people.missing.length,0);
 
 console.log('Film and Person lifecycle backfill passed.');
