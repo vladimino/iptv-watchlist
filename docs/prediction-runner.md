@@ -13,3 +13,18 @@ The same start/next/submit/complete protocol serves manual and scheduled trigger
 Run counters and film outcomes persist after each submission. Current-batch film reads stay bounded; completed batches are counted from saved outcomes rather than loading every completed film on every next request.
 
 Tests: node tests/continuous-drain.mjs; node tests/throughput.mjs; node tests/enrichment.mjs. The multi-batch integration test uses an isolated R2 implementation and deterministic validated model outputs; it is not a production LLM throughput benchmark.
+
+## ChatGPT Scheduled Tasks: timing and troubleshooting
+
+**The hourly schedule is a target, not an exact Worker execution time.** The ChatGPT Scheduled Task is external to Cloudflare Worker `iptv` (there is no hourly Cloudflare Cron driving predictions). A nominal `:00` trigger can begin around the hour rather than precisely at `:00`; delays can vary and there is **no documented guaranteed ±10-minute window**. The footer's `Следующий запуск: около HH:MM` is calculated from `nextScheduledRun` as an **estimate**, not a countdown, SLA, or evidence that a new run has started. Times shown in the app use Europe/Madrid.
+
+**Do not infer scheduler accuracy from /events timestamps.** A `Прогнозы запущены` event records a server-side run start; `Прогнозы восстановлены` or `Прогнозы продолжены` describes a lease recovery/continuation, not necessarily a fresh scheduled trigger. Progress/completion events can appear much later. In the Events history captured on 15–21 October 2026, visible event times included minutes around `:50` through `:07`, plus a `:22` outlier; these mixed event types do **not** establish a reliable scheduler start-time distribution. For exact scheduler triggers, inspect the Scheduled Task execution history separately.
+
+**An unchanged status is not a missed trigger.** The footer can retain a previous `storage_error` until a later run emits updated state, and an invocation with `already_running`, `busy`, or `noop` may not produce a new Events entry. Verify independently:
+
+1. Check the ChatGPT Scheduled Task is enabled and review its last execution time/result; do not treat the next nominal clock hour as a deadline.
+2. Via authorized IPTV Watchlist MCP, inspect `enrichment_runner`, `enrichment_status`, and `enrichment_queue`, including `runId`, `state`, `lastHeartbeatAt`, `hotRemaining`, `coldRemaining`, and retry/backoff.
+3. `pendingCount=0` only means no immediate *hot/watchlist* work. It does **not** mean the full database is complete if `coldRemaining>0` (the queued runner can process off-watchlist cold films). Validate complete coverage using `confirmedFilmsTotal` versus `currentPredictionsTotal`, not the 100% viewing-window counter.
+4. Check /events for the corresponding run's start/resume, progress, and terminal event. If a run is stuck or `storage_error` recurs, inspect authorized Cloudflare logs and stored checkpoints rather than forcibly clearing leases or resetting the queue.
+
+Keep existing Cloudflare Access protections; don't embed auth tokens in links, logs or documentation. Do not trigger extra production sync or prediction runs just to test timestamps. The legacy Sites-specific prompt in [prediction-scheduled-prompt.md](prediction-scheduled-prompt.md) is historical and must remain disabled.
