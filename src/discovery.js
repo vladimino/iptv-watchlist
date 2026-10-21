@@ -40,8 +40,8 @@ async function resolveDiscoveryBatch(env,report,limit=24){
  try{return await resolveDiscoveryChunk(env,report,limit);}finally{await releaseDiscoveryLease(env,lease);}
 }
 async function resolveDiscoveryChunk(env,report,limit){
- const startedAt=new Date().toISOString(),deadline=Date.now()+22000;
- const [source,resolution,catalog,last]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json')]);
+ const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env);
+ const [source,resolution,catalog,last]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json')]);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
  const decisions=resolution||{},films=catalog||{},watchlist=(report.films||[]),knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
@@ -172,7 +172,8 @@ async function resolveDiscoveryRequest(env,execution,body){
  return json(await advanceDiscovery(env,{...body,force:body.chunks!==0}));
 }
 async function discoveryPipelineStatus(env){
- const [source,decisions,catalog,last,queue,continuation,persistedQueue]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),queueStatus(env),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,predictionQueueKey)]);
+ const pinned=await pinEpg(env);
+ const [source,decisions,catalog,last,queue,continuation,persistedQueue]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey)]);
  const items=source?.items||[],statuses={},confirmed=new Set();for(const candidate of items){const state=decisions?.[candidate.key];if(state){statuses[state.status]=(statuses[state.status]||0)+1;if(state.status==='verified')confirmed.add(String(state.tmdbId));}}
  const filteredNonMovies=items.filter(c=>nonFilmEPGReason(c.title)||decisions?.[c.key]?.status==='excluded_nonfilm').length,unresolved=items.filter(c=>!nonFilmEPGReason(c.title)&&decisions?.[c.key]?.status!=='verified'&&decisions?.[c.key]?.status!=='excluded_nonfilm').length;
  return {schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:items.length,rawCandidates:items.length,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:unresolved,unresolved,ready:items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions?.[c.key],Date.now())).length,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,lastBatch:last||null,continuation:continuation||null};

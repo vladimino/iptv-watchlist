@@ -1,9 +1,34 @@
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
 const loadJSON=async(env,key)=>{
  const staged=key==='programme.json'?'programme.json':key==='epg/discovery-latest.json'?'discovery-latest.json':key==='epg/discovered-films.json'?'discovered-films.json':null;
- if(staged){const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return object.json();}}}
+ if(staged){
+  const pinned=env.epgPin?.programmeRunId;
+  if(pinned){const object=await env.BUCKET.get(epgGenerationKey(pinned,staged));if(object)return object.json();}
+  else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return object.json();}}}
+ }
  const o=await env.BUCKET.get(key);return o?o.json():null;
 };
+async function pinEpg(env){
+ if(env.epgPin?.programmeRunId)return env;
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(!pointer)return env;
+ const generation=await pointer.json();
+ return generation?.phase==='published'&&generation.programmeRunId?{...env,epgPin:{programmeRunId:generation.programmeRunId}}:env;
+}
+async function loadEpgSnapshot(env){
+ const pinned=await pinEpg(env);
+ const [programme,discovery,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovered-films.json')]);
+ return {programmeRunId:pinned.epgPin?.programmeRunId||null,programme,discovery,catalog};
+}
+function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
+async function updatePublishedFiles(env,files){
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ if(!generation?.programmeRunId||generation.phase!=='published'){for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);return null;}
+ for(const [name,value] of Object.entries(files))await saveJSON(env,epgGenerationKey(generation.programmeRunId,name),value);
+ const again=await env.BUCKET.get(EPG_GENERATION_KEY),current=again?await again.json():null;
+ if(current?.programmeRunId!==generation.programmeRunId||pointer.etag&&again?.etag!==pointer.etag)throw new Error('EPG generation changed during publish');
+ for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);
+ return generation.programmeRunId;
+}
 const saveJSON=(env,key,value)=>env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});
 const eventFilm=(film,titles=new Map())=>({id:String(film.id),title:reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year});
 const eventTitles=report=>new Map((report?.films||[]).map(f=>[String(f.id),f.title]));
@@ -49,13 +74,18 @@ async function copyEpgGeneration(env,runId){
  for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(staged)await saveJSON(env,name==='programme.json'?name:'epg/'+name,await staged.json());}
 }
 async function publishEpgGeneration(env,runId,files){
- for(const [name,value] of Object.entries(files))await saveJSON(env,epgGenerationKey(runId,name),value);
- const current=await env.BUCKET.get(EPG_GENERATION_KEY),previous=current?await current.json():null;
- if(!(previous?.programmeRunId===runId&&previous.phase==='published')){
-  const saved=await env.BUCKET.put(EPG_GENERATION_KEY,JSON.stringify({programmeRunId:runId,phase:'published'}),{onlyIf:current?.etag?{etagMatches:current.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
-  if(saved===null){const winner=await env.BUCKET.get(EPG_GENERATION_KEY);const body=winner?await winner.json():null;if(body?.programmeRunId!==runId)throw new Error('EPG generation changed during publish');}
- }
- await copyEpgGeneration(env,runId);
+ const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
+ try{
+  const next={...files};
+  if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
+  for(const [name,value] of Object.entries(next))await saveJSON(env,epgGenerationKey(runId,name),value);
+  const current=await env.BUCKET.get(EPG_GENERATION_KEY),previous=current?await current.json():null;
+  if(!(previous?.programmeRunId===runId&&previous.phase==='published')){
+   const saved=await env.BUCKET.put(EPG_GENERATION_KEY,JSON.stringify({programmeRunId:runId,phase:'published'}),{onlyIf:current?.etag?{etagMatches:current.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
+   if(saved===null){const winner=await env.BUCKET.get(EPG_GENERATION_KEY);const body=winner?await winner.json():null;if(body?.programmeRunId!==runId)throw new Error('EPG generation changed during publish');}
+  }
+  await copyEpgGeneration(env,runId);
+ }finally{await releaseDiscoveryLease(env,lease);}
 }
 async function completeWithRatings(env,run,report){
  const result=await finishSync(env,run,report);if(!run.ratingPending?.length)return result;

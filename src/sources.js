@@ -48,6 +48,16 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
  if(replaceShows)for(const [key,item] of merged)if(!latestKeys.has(key))merged.set(key,{...item,shows:[]});
  return [...merged.values()];
 }
+function mergeCatalogIdentity(incoming,live,programmeRunId){
+ const next={...(incoming||{})};
+ for(const [key,film] of Object.entries(live||{})){
+  if(!film||typeof film!=='object')continue;
+  const staged=next[key];
+  if(!staged){next[key]={...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null};continue;}
+  next[key]={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
+ }
+ return next;
+}
 function replaceCatalogAvailability(catalog,discoveryItems,programmeRunId){
  const byTmdb=new Map();
  for(const item of discoveryItems||[]){if(!item?.confirmedTmdbId)continue;const id=String(item.confirmedTmdbId),list=byTmdb.get(id)||[];list.push(...(item.shows||[]));byTmdb.set(id,list);}
