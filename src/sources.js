@@ -31,10 +31,34 @@ function canonicalDiscoveryCandidate(item){
  const parts=epgTitleParts(item.title),year=item.year||parts.year||null;
  return {...item,key:parts.normalizedTitle+'|'+(year||''),title:parts.title,normalizedTitle:parts.normalizedTitle,year,rawTitles:[...new Set(item.rawTitles||[item.title])].slice(0,8),durations:[...new Set(item.durations||[item.duration])].filter(Number.isFinite).slice(0,12)};
 }
-function mergeDiscoveryCandidates(previous,latest){
- const merged=new Map();
- for(const raw of [...(previous||[]),...(latest||[])]){const item=canonicalDiscoveryCandidate(raw),old=merged.get(item.key);merged.set(item.key,old?{...old,...item,rawTitles:[...new Set([...old.rawTitles,...item.rawTitles])].slice(0,8),durations:[...new Set([...old.durations,...item.durations])].slice(0,12),firstAiring:Math.min(old.firstAiring,item.firstAiring),lastAiring:Math.max(old.lastAiring,item.lastAiring),airings:Math.max(old.airings,item.airings),description:item.description||old.description,shows:[...new Map([...(old.shows||[]),...(item.shows||[])].map(s=>[s.channelId+":"+s.start,s])).values()].filter(s=>s.start>=Date.now()-72*3600000)}:item);}
+function dedupeShows(shows){return [...new Map((shows||[]).filter(show=>show&&Number.isFinite(Number(show.start))).map(show=>[`${show.channelId}:${show.start}`,show])).values()];}
+function mergeDiscoveryCandidates(previous,latest,options={}){
+ const replaceShows=options.replaceShows===true,latestKeys=new Set(),merged=new Map();
+ const fold=(raw,fromLatest)=>{
+  const item=canonicalDiscoveryCandidate(raw);if(fromLatest)latestKeys.add(item.key);
+  const old=merged.get(item.key);
+  if(!old){merged.set(item.key,replaceShows&&!fromLatest?{...item,shows:[]}:item);return;}
+  const shows=replaceShows?fromLatest?dedupeShows(item.shows):old.shows||[]:dedupeShows([...(old.shows||[]),...(item.shows||[])]).filter(show=>show.start>=Date.now()-72*3600000);
+  merged.set(item.key,{...old,...item,rawTitles:[...new Set([...old.rawTitles,...item.rawTitles])].slice(0,8),durations:[...new Set([...old.durations,...item.durations])].slice(0,12),firstAiring:Math.min(old.firstAiring,item.firstAiring),lastAiring:Math.max(old.lastAiring,item.lastAiring),airings:Math.max(old.airings,item.airings),description:item.description||old.description,shows});
+ };
+ for(const raw of previous||[])fold(raw,false);
+ for(const raw of latest||[])fold(raw,true);
+ if(replaceShows)for(const [key,item] of merged)if(!latestKeys.has(key))merged.set(key,{...item,shows:[]});
  return [...merged.values()];
+}
+function replaceCatalogAvailability(catalog,discoveryItems){
+ const byTmdb=new Map();
+ for(const item of discoveryItems||[]){if(!item?.confirmedTmdbId)continue;const id=String(item.confirmedTmdbId),list=byTmdb.get(id)||[];list.push(...(item.shows||[]));byTmdb.set(id,list);}
+ const next={};let changed=false;
+ for(const [key,film] of Object.entries(catalog||{})){
+  if(!film?.tmdbId){next[key]=film;continue;}
+  const shows=dedupeShows(byTmdb.get(String(film.tmdbId))||[]);
+  const epgLastAiring=Math.max(Number(film.epgLastAiring)||0,...shows.map(show=>Number(show.start)||0));
+  const same=JSON.stringify(film.shows||[])===JSON.stringify(shows)&&(Number(film.epgLastAiring)||0)===epgLastAiring;
+  if(same){next[key]=film;continue;}
+  changed=true;next[key]={...film,shows,epgLastAiring};
+ }
+ return {catalog:next,changed};
 }
 function canonicalizeDiscoveryLedger(source,decisions){
  const groups=new Map();for(const raw of source.items||[]){const key=canonicalDiscoveryCandidate(raw).key,list=groups.get(key)||[];list.push(raw.key);groups.set(key,list);}

@@ -3,11 +3,11 @@ const DISCOVERY_LEASE_KEY='epg/resolver-lease.json';
 const DISCOVERY_CONTINUATION_URL='https://iptv.internal/discovery/continue';
 function filmIsHot(film,now=Date.now()){
  const from=now-72*3600000,to=now+24*3600000;
- if(Array.isArray(film.shows)&&film.shows.length)return film.shows.some(s=>s.start>=from&&s.start<to);
- // Migration fallback for the older cache, which did not retain actual timeslots.
+ if(Array.isArray(film.shows))return film.shows.some(show=>Number(show.start)>=from&&Number(show.start)<to);
+ // A cache written before shows were stored can still use its last observed airing.
  return Number.isFinite(film.epgLastAiring)&&film.epgLastAiring>=from&&film.epgLastAiring<to;
 }
-function candidateIsHot(candidate,now=Date.now()){return filmIsHot({...candidate,epgLastAiring:candidate.lastAiring},now);}
+function candidateIsHot(candidate,now=Date.now()){return Array.isArray(candidate.shows)?filmIsHot({shows:candidate.shows},now):filmIsHot({epgLastAiring:candidate.lastAiring},now);}
 function discoveryReady(candidate,decision,now){return !decision||!['verified','excluded_nonfilm'].includes(decision.status)&&(!decision.retryAt||Date.parse(decision.retryAt)<=now);}
 async function acquireDiscoveryLease(env){
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY),old=object?await object.json():null;
@@ -22,7 +22,7 @@ async function tmdbRequest(env,path){
  if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return response.json();
 }
 function touchCanonicalFilm(film,candidate){
- const shows=[...new Map([...(film.shows||[]),...(candidate.shows||[])].map(s=>[s.channelId+':'+s.start,s])).values()].filter(s=>s.start>=Date.now()-72*3600000);
+ const shows=Array.isArray(candidate.shows)?dedupeShows(candidate.shows):film.shows||[];
  const hotEnteredAt=candidateIsHot(candidate)&&!filmIsHot(film)?new Date().toISOString():film.hotEnteredAt;
  return {...film,hotEnteredAt,canonicalIdentity:'tmdb:'+film.tmdbId,aliases:[...new Set([...(film.aliases||[]),candidate.title,...(candidate.rawTitles||[])].filter(Boolean))],shows,epgLastAiring:Math.max(film.epgLastAiring||0,candidate.lastAiring||0)};
 }

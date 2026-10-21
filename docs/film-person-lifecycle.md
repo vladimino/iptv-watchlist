@@ -54,7 +54,7 @@ A discovered film is created only after TMDB confirms a movie. Its stored id is 
 
 ## How an EPG candidate becomes a catalog film
 
-`scanEPG` emits a discovery item only when the row is 55–300 minutes, is not a non-film title, and is not exactly one watchlist match. The item key is `normalizedTitle|year`. Fields are `key`, `confirmedTmdbId` (set when the only match is a catalog film), `title`, `rawTitles`, `normalizedTitle`, `year`, `duration`, `description`, `firstAiring`, `lastAiring`, `airings`, and `shows`. `mergeDiscoveryCandidates` keeps the earlier `firstAiring`, the later `lastAiring`, and at most eight raw titles and twelve durations.
+`scanEPG` emits a discovery item only when the row is 55–300 minutes, is not a non-film title, and is not exactly one watchlist match. The item key is `normalizedTitle|year`. Fields are `key`, `confirmedTmdbId` (set when the only match is a catalog film), `title`, `rawTitles`, `normalizedTitle`, `year`, `duration`, `description`, `firstAiring`, `lastAiring`, `airings`, and `shows`. A successful EPG scan replaces `shows` with that scan alone. A candidate missing from the new feed keeps its key, titles, and airing history, and its `shows` become empty. `mergeDiscoveryCandidates` still keeps the earlier `firstAiring`, the later `lastAiring`, and at most eight raw titles and twelve durations. It does not combine show lists from two scans.
 
 `resolveDiscoveryChunk` is a separate lifecycle, owned by [AIR-48](https://trello.com/c/rVf8rRoJ) for candidate retention. For AIR-42 the decision records are only the input to Film identity:
 
@@ -66,7 +66,7 @@ A discovered film is created only after TMDB confirms a movie. Its stored id is 
 | `verified` | Identity resolved to `tmdbId` and `filmId`. `identitySource` is `known_epg_alias`, `known_alias_year_runtime`, `known_alias_unique_runtime`, or absent when this chunk created the TMDB record |
 | `canonicalizeDiscoveryLedger` finds two verified TMDB ids for one key | The reconcile route rejects the catalog. It does not pick a winner |
 
-A verified TMDB movie is written to `epg/discovered-films.json` before its decision. A crash between those writes is repaired by alias reuse on the next chunk. `touchCanonicalFilm` updates aliases, recent shows, `epgLastAiring`, and `hotEnteredAt`. It does not change `tmdbId`.
+A verified TMDB movie is written to `epg/discovered-films.json` before its decision. A crash between those writes is repaired by alias reuse on the next chunk. `touchCanonicalFilm` updates aliases, `epgLastAiring`, and `hotEnteredAt`, and replaces `shows` with the candidate's current list. It does not copy shows left over from an older scan, and it does not change `tmdbId`. `epgLastAiring` is historical metadata. An empty `shows` list is not currently available, even when that airing time is still inside 72 hours. The same replacement is applied to the catalog when an EPG scan commits, before the new programme is published, so a failed scan leaves the previous programme and catalog together.
 
 `uncertain.json` is the watchlist-side ambiguity list (`ambiguous` or `insufficient_year_or_duration`), capped at 100 rows. It is not the discovery resolution ledger.
 
