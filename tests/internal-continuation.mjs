@@ -33,7 +33,7 @@ function seed(count){
  records.clear();etags.clear();hops.length=0;fetches.length=0;puts=[];
  records.set('programme.json',{runId:'run-1',updatedAt:new Date(now).toISOString(),films:[{id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,shows:[]}]});
  records.set(vm.runInContext('profileKey',context),{version:1,profileHash:'p'});
- records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:100,durations:[100],firstAiring:now,lastAiring:now,airings:1}))});
+ records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:100,durations:[100],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]}))});
 }
 const continuation=()=>records.get('epg/resolver-continuation.json');
 

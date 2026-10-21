@@ -56,13 +56,13 @@ A discovered film is created only after TMDB confirms a movie. Its stored id is 
 
 `scanEPG` emits a discovery item only when the row is 55–300 minutes, is not a non-film title, and is not exactly one watchlist match. The item key is `normalizedTitle|year`. Fields are `key`, `confirmedTmdbId` (set when the only match is a catalog film), `title`, `rawTitles`, `normalizedTitle`, `year`, `duration`, `description`, `firstAiring`, `lastAiring`, `airings`, and `shows`. A successful EPG scan replaces `shows` with that scan alone. A candidate missing from the new feed keeps its key, titles, and airing history, and its `shows` become empty. `mergeDiscoveryCandidates` still keeps the earlier `firstAiring`, the later `lastAiring`, and at most eight raw titles and twelve durations. It does not combine show lists from two scans.
 
-`resolveDiscoveryChunk` is a separate lifecycle, owned by [AIR-48](https://trello.com/c/rVf8rRoJ) for candidate retention. For AIR-42 the decision records are only the input to Film identity:
+`resolveDiscoveryChunk` is a separate lifecycle, owned by [AIR-48](https://trello.com/c/rVf8rRoJ) for candidate retention. A replacement scan marks each candidate `seenInLatestSnapshot` and stores `lastSeenAt` and `lastSeenProgrammeRunId`. Only a candidate seen in the latest feed with a show inside the last 72 hours or next 24 hours is actionable. A current candidate whose identical evidence already stopped stays stored and is not pending work. Historical and expired rows stay in the ledger and are not selected. A payload written before those fields is current only when it already stores an in-window show. For AIR-42 the decision records are only the input to Film identity:
 
 | Decision | Meaning for a future Film |
 | --- | --- |
 | No decision, or `retryAt` already due | Identity unresolved. Next action is another discovery chunk, subject to the discovery lease and chunk budget |
 | `excluded_nonfilm` | Not a film. Reason is the EPG label (`show_label`, `series_label`, `episode_label`, `season_episode_suffix`, `broadcast_episode`) |
-| `ambiguous` or `no_confident_match` or `duration_mismatch` | Identity unresolved, with `attempts` and `retryAt`. Delay doubles per attempt and stops growing at seven days |
+| `ambiguous` or `no_confident_match` or `duration_mismatch` | Identity unresolved. Identical evidence retries up to five times, then `terminalReason` is `repeated_uncertain_match` and the candidate stays stored. A changed title, year, duration, or broadcast starts a new series |
 | `verified` | Identity resolved to `tmdbId` and `filmId`. `identitySource` is `known_epg_alias`, `known_alias_year_runtime`, `known_alias_unique_runtime`, or absent when this chunk created the TMDB record |
 | `canonicalizeDiscoveryLedger` finds two verified TMDB ids for one key | The reconcile route rejects the catalog. It does not pick a winner |
 
