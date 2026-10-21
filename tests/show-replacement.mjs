@@ -47,6 +47,9 @@ assert.deepEqual(JSON.parse(JSON.stringify(cleared.shows)),[]);
 assert.equal(cleared.epgLastAiring,now+3600000);
 assert.equal(run(`filmIsHot({shows:[],epgLastAiring:${now}},${now})`),false);
 assert.equal(run(`filmIsHot({epgLastAiring:${now}},${now})`),true,'a cache with no show list can still use its stored airing');
+const both=run(`touchCanonicalFilm(touchCanonicalFilm({tmdbId:'99',shows:[oldShow],showsProgrammeRunId:'run-a',epgLastAiring:1,aliases:[]},{title:'Чужой',shows:[{channelId:'x',channel:'X',start:${now},end:${now}+1}],lastAiring:${now}},'run-b'),{title:'Alien',shows:[{channelId:'y',channel:'Y',start:${now}+10,end:${now}+20}],lastAiring:${now}},'run-b')`);
+assert.deepEqual(JSON.parse(JSON.stringify(both.shows.map(show=>show.channelId))).sort(),['x','y']);
+assert.equal(both.showsProgrammeRunId,'run-b');
 const replaced=run(`replaceCatalogAvailability({
  tmdb_99:{id:'tmdb_99',tmdbId:'99',title:'Alpha',shows:[oldShow],epgLastAiring:${now}-86400000,prediction:{rating:4}},
  tmdb_100:{id:'tmdb_100',tmdbId:'100',title:'Beta',shows:[oldShow],epgLastAiring:${now}-7200000,prediction:{rating:3}}
@@ -59,4 +62,44 @@ assert.equal(replaced.catalog.tmdb_100.prediction.rating,3);
 assert.equal(replaced.catalog.tmdb_100.epgLastAiring,now-7200000);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/previous\?\.films/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/replaceShows:true/);
+
+import {webcrypto} from 'node:crypto';
+const records=new Map(),etags=new Map();let revision=0,failKey='';
+const bucket={
+ async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},
+ async put(key,value,options={}){if(key===failKey)throw new Error('injected put failure');const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}
+};
+const live=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async()=>new Response('{}',{status:500})});
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),live);
+const env={TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:bucket};
+live.env=env;live.records=records;
+const clock=Date.now();
+const show=(channel,start)=>({channelId:channel,channel,start,end:start+1000});
+records.set('programme.json',{runId:'run-b',updatedAt:new Date(clock).toISOString(),films:[]});
+records.set('epg/discovered-films.json',{tmdb_42:{id:'tmdb_42',tmdbId:'42',title:'Alien',original:'Alien',year:1979,runtime:117,aliases:['Alien'],shows:[show('old',clock-86400000)],showsProgrammeRunId:'run-a',epgLastAiring:clock-86400000}});
+records.set('epg/discovery-resolution.json',{'чужой|1979':{status:'verified',tmdbId:'42',filmId:'tmdb_42'},'alien|1979':{status:'verified',tmdbId:'42',filmId:'tmdb_42'}});
+records.set('epg/discovery-latest.json',{programmeRunId:'run-b',items:[
+ {key:'чужой|1979',title:'Чужой',normalizedTitle:'чужой',year:1979,duration:117,durations:[117],lastAiring:clock,airings:1,confirmedTmdbId:'42',shows:[show('x',clock)]},
+ {key:'alien|1979',title:'Alien',normalizedTitle:'alien',year:1979,duration:117,durations:[117],lastAiring:clock,airings:1,confirmedTmdbId:'42',shows:[show('y',clock+10)]}
+]});
+const resolved=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-b",films:[]},2)',live);
+assert.equal(resolved.touched,2);
+assert.deepEqual(records.get('epg/discovered-films.json').tmdb_42.shows.map(item=>item.channelId).sort(),['x','y']);
+env.beforeCatalogWrite=async()=>{await bucket.put('epg/published-generation.json',JSON.stringify({programmeRunId:'run-c',phase:'published'}));records.set('epg/discovered-films.json',{tmdb_42:{id:'tmdb_42',tmdbId:'42',shows:[show('z',clock)],showsProgrammeRunId:'run-c'}});};
+const stale=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-b",films:[]},2)',live);
+assert.equal(stale.stage,'programme_changed');
+assert.deepEqual(records.get('epg/discovered-films.json').tmdb_42.shows.map(item=>item.channelId),['z']);
+failKey='epg/generations/run-d/discovered-films.json';
+const previousProgramme={runId:'run-a',films:[{id:'a',shows:[show('old',clock)]}]};
+records.set('programme.json',previousProgramme);
+await assert.rejects(vm.runInContext(`publishEpgGeneration(env,'run-d',{'discovery-latest.json':{programmeRunId:'run-d',items:[]},'discovered-films.json':{tmdb_42:{tmdbId:'42',shows:[]}},'programme.json':{runId:'run-d',films:[]}})`,live));
+assert.equal(records.has('epg/published-generation.json')&&records.get('epg/published-generation.json').programmeRunId==='run-c',true);
+assert.equal(records.get('programme.json').runId,'run-a');
+failKey='programme.json';
+await vm.runInContext(`publishEpgGeneration(env,'run-e',{'discovery-latest.json':{programmeRunId:'run-e',items:[]},'discovered-films.json':{tmdb_42:{tmdbId:'42',shows:[${JSON.stringify(show('n',clock))}]}},'programme.json':{runId:'run-e',films:[]}})`,live).catch(()=>{});
+assert.equal(records.get('epg/published-generation.json').programmeRunId,'run-e');
+assert.equal((await vm.runInContext("loadJSON(env,'programme.json')",live)).runId,'run-e');
+failKey='';
+await vm.runInContext("copyEpgGeneration(env,'run-e')",live);
+assert.equal(records.get('programme.json').runId,'run-e');
 console.log('Show replacement: new EPG replaces shows and keeps candidate knowledge passed');

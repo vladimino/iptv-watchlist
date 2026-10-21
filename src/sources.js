@@ -32,6 +32,8 @@ function canonicalDiscoveryCandidate(item){
  return {...item,key:parts.normalizedTitle+'|'+(year||''),title:parts.title,normalizedTitle:parts.normalizedTitle,year,rawTitles:[...new Set(item.rawTitles||[item.title])].slice(0,8),durations:[...new Set(item.durations||[item.duration])].filter(Number.isFinite).slice(0,12)};
 }
 function dedupeShows(shows){return [...new Map((shows||[]).filter(show=>show&&Number.isFinite(Number(show.start))).map(show=>[`${show.channelId}:${show.start}`,show])).values()];}
+const EPG_GENERATION_KEY='epg/published-generation.json';
+function epgGenerationKey(runId,name){return `epg/generations/${runId}/${name}`;}
 function mergeDiscoveryCandidates(previous,latest,options={}){
  const replaceShows=options.replaceShows===true,latestKeys=new Set(),merged=new Map();
  const fold=(raw,fromLatest)=>{
@@ -46,7 +48,7 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
  if(replaceShows)for(const [key,item] of merged)if(!latestKeys.has(key))merged.set(key,{...item,shows:[]});
  return [...merged.values()];
 }
-function replaceCatalogAvailability(catalog,discoveryItems){
+function replaceCatalogAvailability(catalog,discoveryItems,programmeRunId){
  const byTmdb=new Map();
  for(const item of discoveryItems||[]){if(!item?.confirmedTmdbId)continue;const id=String(item.confirmedTmdbId),list=byTmdb.get(id)||[];list.push(...(item.shows||[]));byTmdb.set(id,list);}
  const next={};let changed=false;
@@ -54,9 +56,9 @@ function replaceCatalogAvailability(catalog,discoveryItems){
   if(!film?.tmdbId){next[key]=film;continue;}
   const shows=dedupeShows(byTmdb.get(String(film.tmdbId))||[]);
   const epgLastAiring=Math.max(Number(film.epgLastAiring)||0,...shows.map(show=>Number(show.start)||0));
-  const same=JSON.stringify(film.shows||[])===JSON.stringify(shows)&&(Number(film.epgLastAiring)||0)===epgLastAiring;
+  const same=JSON.stringify(film.shows||[])===JSON.stringify(shows)&&(Number(film.epgLastAiring)||0)===epgLastAiring&&film.showsProgrammeRunId===programmeRunId;
   if(same){next[key]=film;continue;}
-  changed=true;next[key]={...film,shows,epgLastAiring};
+  changed=true;next[key]={...film,shows,epgLastAiring,showsProgrammeRunId:programmeRunId||null};
  }
  return {catalog:next,changed};
 }
