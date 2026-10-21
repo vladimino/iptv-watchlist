@@ -35,7 +35,7 @@ context.input={profile:{version:7,updatedAt:'2026-10-12T18:00:00Z'},coverage:{co
 const text=vm.runInContext('footerStatusText(input)',context);
 assert.match(text.local,/75\/100 с актуальным прогнозом · 75%/);
 assert.match(text.windowCoverage,/18\/20 с актуальным прогнозом · 90%/);
-assert.equal(text.runLabel,'Последний run');assert.match(text.runLine,/завершён \/ очередь обработана/);assert.match(text.nextLine,/Следующий запуск:/);
-context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.match(active.nextLine,/Следующий запуск:/);assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
+assert.equal(text.runLabel,'Последний run');assert.match(text.runLine,/завершён \/ очередь обработана/);assert.match(text.nextLine,/Следующий запуск: около /);assert.match(text.nextRun,/^около /);
+context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.match(active.nextLine,/Следующий запуск: около /);assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
 for(const line of [text.profile,text.local,text.windowCoverage,text.runLine,text.nextLine])assert(line.length<100,'collapsed lines stay compact');
 console.log('Status footer UI: four-line default, structured details, expand/collapse, Events navigation and responsive layout passed');
