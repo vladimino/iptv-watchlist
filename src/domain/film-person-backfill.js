@@ -62,8 +62,10 @@ function recordsOf(body){
  if(body.localization||body.roleId||body.fingerprint)return [['.',body]];
  return Object.entries(body).filter(([,value])=>value&&typeof value==='object');
 }
+function reviewedConflict(body){return recordsOf(body).some(([,record])=>Array.isArray(record?.localizationConflicts)&&record.localizationConflicts.length>0);}
 function sidecarConflict(previous,next){
  if(hasHistory(previous)||hasHistory(next))return 'history';
+ if(reviewedConflict(previous)||reviewedConflict(next))return 'reviewed_conflict';
  const after=new Map(recordsOf(next));
  for(const [id,record] of recordsOf(previous)){
   const desired=after.get(id);
@@ -78,7 +80,7 @@ function reconcileSidecars(desired,persisted){
  const plan={create:[],update:[],unchanged:[],orphan:[],conflict:[]};
  for(const key of Object.keys(desired||{}).sort((a,b)=>a.localeCompare(b,'en'))){
   if(!Object.hasOwn(previous,key)||previous[key]==null){plan.create.push(key);continue;}
-  if(stableJson(withoutObservationTime(desired[key]))===stableJson(withoutObservationTime(previous[key]))){plan.unchanged.push(key);continue;}
+  if(stableJson(withoutObservationTime(desired[key]))===stableJson(withoutObservationTime(previous[key]))){if(reviewedConflict(desired[key])||reviewedConflict(previous[key]))plan.conflict.push({key,reason:'reviewed_conflict'});else plan.unchanged.push(key);continue;}
   const reason=sidecarConflict(previous[key],desired[key]);
   if(reason)plan.conflict.push({key,reason});else plan.update.push(key);
  }
@@ -106,8 +108,9 @@ function filmRecords(sidecars){
  return out;
 }
 function adoptedFilmBody(survivor,desired){
- return {...desired,id:survivor.id,canonicalIdentity:survivor.canonicalIdentity??null,externalIds:survivor.externalIds,redirects:survivor.redirects||[],aliases:survivor.aliases||[],localization:survivor.localization,identity:survivor.identity,fingerprint:survivor.fingerprint,prediction:survivor.prediction};
+ return {...desired,id:survivor.id,canonicalIdentity:survivor.canonicalIdentity??null,externalIds:survivor.externalIds,redirects:survivor.redirects||[],aliases:survivor.aliases||[],localization:survivor.localization,localizationConflicts:survivor.localizationConflicts||[],identity:survivor.identity};
 }
+function filmByLocalId(sidecars,id){return filmRecords(sidecars).find(item=>item.body.id===id)?.body||null;}
 function adoptPersistedIdentity(sidecars,persisted,now){
  const prior=filmRecords(persisted);
  if(!prior.length)return sidecars;
@@ -124,7 +127,8 @@ function adoptPersistedIdentity(sidecars,persisted,now){
  for(const [key,body] of Object.entries(sidecars))if(body&&!body.externalIds&&kept.has(body.id))sidecars[key]={...body,id:kept.get(body.id)};
  for(const [key,body] of Object.entries(persisted||{})){
   if(sidecars[key]||!body||!kept.has(body.id)||!String(key).endsWith('/fingerprint.lifecycle.json'))continue;
-  sidecars[key]={...body,id:kept.get(body.id)};
+  const id=kept.get(body.id),film=filmByLocalId(sidecars,id);
+  sidecars[key]={id,storedId:body.storedId??null,fingerprint:film?.fingerprint||{status:'missing'}};
  }
  return sidecars;
 }
