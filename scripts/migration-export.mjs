@@ -6,8 +6,8 @@ import {pipeline} from 'node:stream/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const SOURCE_ORIGIN='https://iptv.vladimino.chatgpt.site';
-const SOURCE_SITE_ID='appgprj_6abfed826e148191903dec4175166ff7';
+export const SOURCE_ORIGIN='https://iptv.vladimino.chatgpt.site';
+export const SOURCE_SITE_ID='appgprj_6abfed826e148191903dec4175166ff7';
 const REPO_ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
 const sha256=value=>createHash('sha256').update(value).digest('hex');
@@ -133,7 +133,7 @@ function differences(before,after){
  for(const key of right.keys())if(!left.has(key))result.push({key,reason:'added_after'});
  return result;
 }
-function manifestFor(entries,pages,startedAt,finishedAt,changes){
+export function manifestFor(entries,pages,startedAt,finishedAt,changes){
  const sorted=[...entries].sort((a,b)=>Buffer.compare(Buffer.from(a.key),Buffer.from(b.key)));
  const prefixes={};let totalBytes=0;const aggregate=createHash('sha256');
  for(const entry of sorted){

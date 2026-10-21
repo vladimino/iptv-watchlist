@@ -307,6 +307,8 @@ assert.equal(actor.identity.provenance.dedupe,'deferred');
 assert.equal(actor.aliases.some(alias=>alias.value==='Крис Пратт'&&alias.provenance.source==='dictionary'),true);
 assert.notEqual(actor.id,director.id);
 assert.equal(localPersonId('role/Chris Pratt'),'person:role/Chris Pratt');
+assert.equal(localPersonId('tmdb_actor/10'),'person:tmdb_actor/10');
+assert.equal(localPersonId('tmdb_director/10'),'person:tmdb_director/10');
 assert.equal(localPersonId('Chris Pratt'),null);
 const kept=applyAutomaticLocalization(actor,{status:'provisional',value:'Крис Пратт',source:'wikidata',provenance:{source:'wikidata'}},NOW,'name');
 assert.equal(kept.localization.value,'Крис Прэтт');
