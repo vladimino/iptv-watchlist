@@ -1,6 +1,6 @@
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {Readable} from 'node:stream';
 const context=vm.createContext({TextDecoder,Date,Map,Set,Number,String,JSON,Math,RegExp,Error,Promise,AbortSignal,fetch});
-vm.runInContext(fs.readFileSync('src/sources.js','utf8')+';globalThis.api={parseWatchlist,parseFilm,scanEPG,xmlTime,norm};',context);const a=context.api;
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+';globalThis.api={parseWatchlist,parseFilm,scanEPG,xmlTime,norm};',context);const a=context.api;
 const list=a.parseWatchlist(fs.readFileSync('../sources/letterboxd.html','utf8'));assert.equal(list.total,413);assert.equal(list.films.length,28);assert.equal(list.next,'/demo-user/watchlist/page/2/');
 const heat=a.parseFilm(fs.readFileSync('../sources/film.html','utf8'),{id:'heat',title:'Heat',original:'Heat',year:1995});assert(heat.aliases.includes('Схватка'));assert.equal(heat.runtime,170);assert.equal(heat.directors[0].original,'Michael Mann');assert.equal(heat.actors.length,10);assert.equal(heat.actors[0].original,'Al Pacino');assert.equal(heat.actors[9].original,'Wes Studi');assert.equal(heat.tmdbId,'949');assert(heat.genres.includes('Криминал'));
 assert.equal(a.xmlTime('20261002170000 +0200'),Date.parse('2026-10-02T15:00:00Z'));assert.equal(a.norm('Ёлки — 2'),'елки 2');
