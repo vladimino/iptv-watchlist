@@ -5,7 +5,14 @@ import assert from 'node:assert/strict';
 const source=fs.readFileSync('src/domain/film-person.js','utf8');
 assert.doesNotMatch(source,/\b(fetch|import|export|BUCKET|wrangler)\b/);
 assert.doesNotMatch(source,/chris-pratt|Крис Прэтт/);
-for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/domain\/film-person|filmView|invalidatePredictionForProfile|availabilityProjection/,file);
+for(const file of ['src/worker.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/domain\/film-person|filmView|invalidatePredictionForProfile|availabilityProjection/,file);
+const sources=fs.readFileSync('src/sources.js','utf8');
+assert.match(sources,/applyReviewedLocalization/);
+assert.match(sources,/applyAutomaticLocalization/);
+assert.doesNotMatch(sources,/filmView|invalidatePredictionForProfile|availabilityProjection|readLifecycle|backfillLifecycle/);
+const bundle=fs.readFileSync('build.mjs','utf8');
+assert.match(bundle,/src\/domain\/film-person\.js/);
+assert.doesNotMatch(bundle,/film-person-reader|film-person-backfill/);
 
 const ctx=vm.createContext({Date,Map,Set,JSON});
 vm.runInContext(source+'\nglobalThis.contract={DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases};',ctx);

@@ -1,8 +1,9 @@
 // Film and Person lifecycle contract, phase 1 of AIR-42.
 // Pure observations and transition guards. This file is not in the Worker bundle.
 const DOMAIN_CONTRACT_VERSION=1;
-const FINGERPRINT_SCHEMA_VERSION=1;
-const PREDICTION_PROMPT_VERSION=1;
+// Prefixed so this file can load beside enrichment.js, which owns the same numbers under the unprefixed names.
+const DOMAIN_FINGERPRINT_SCHEMA_VERSION=1;
+const DOMAIN_PREDICTION_PROMPT_VERSION=1;
 const METADATA_FRESH_MS=30*86400000;
 const HOT_PAST_MS=72*3600000;
 const HOT_FUTURE_MS=24*3600000;
@@ -111,8 +112,8 @@ function personLocalization(facts={}){
 function fingerprintState(facts={}){
  const now=facts.now??null;
  if(!facts.present)return dimensionState('fingerprint',{status:'missing',updatedAt:now,source:'fingerprint',nextAction:'fingerprint_and_prediction'});
- if(facts.schemaVersion!==FINGERPRINT_SCHEMA_VERSION||facts.invalidatedAt)return dimensionState('fingerprint',{status:'stale',updatedAt:facts.invalidatedAt||now,source:'fingerprint',sourceVersion:facts.schemaVersion??null,provenance:{schemaVersion:facts.schemaVersion??null,invalidatedAt:facts.invalidatedAt||null},nextAction:'fingerprint_and_prediction'});
- return dimensionState('fingerprint',{status:'current',updatedAt:facts.generatedAt||now,source:'fingerprint',sourceVersion:FINGERPRINT_SCHEMA_VERSION,nextAction:'none'});
+ if(facts.schemaVersion!==DOMAIN_FINGERPRINT_SCHEMA_VERSION||facts.invalidatedAt)return dimensionState('fingerprint',{status:'stale',updatedAt:facts.invalidatedAt||now,source:'fingerprint',sourceVersion:facts.schemaVersion??null,provenance:{schemaVersion:facts.schemaVersion??null,invalidatedAt:facts.invalidatedAt||null},nextAction:'fingerprint_and_prediction'});
+ return dimensionState('fingerprint',{status:'current',updatedAt:facts.generatedAt||now,source:'fingerprint',sourceVersion:DOMAIN_FINGERPRINT_SCHEMA_VERSION,nextAction:'none'});
 }
 function predictionState(facts={}){
  const now=facts.now??null,failure=reasonText(facts.failure),fingerprintCurrent=facts.fingerprint?.status==='current';
@@ -120,9 +121,9 @@ function predictionState(facts={}){
  if(failure)return dimensionState('prediction',{status:'failed',updatedAt:now,source:'prediction',lastError:failure,failureReason:failure,retryAt:facts.failure?.retryAt||null,attempts:facts.failure?.attempts??0,nextAction:'retry_prediction'});
  if(!facts.present)return dimensionState('prediction',{status:'missing',updatedAt:now,source:'prediction',nextAction:next});
  const stored=facts,profile=facts.profile;
- const aligned=fingerprintCurrent&&profile&&facts.currentFingerprintHash!=null&&stored.tasteProfileVersion===profile.version&&stored.tasteProfileHash===profile.profileHash&&stored.fingerprintHash===facts.currentFingerprintHash&&stored.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&stored.predictionPromptVersion===PREDICTION_PROMPT_VERSION;
+ const aligned=fingerprintCurrent&&profile&&facts.currentFingerprintHash!=null&&stored.tasteProfileVersion===profile.version&&stored.tasteProfileHash===profile.profileHash&&stored.fingerprintHash===facts.currentFingerprintHash&&stored.fingerprintSchemaVersion===DOMAIN_FINGERPRINT_SCHEMA_VERSION&&stored.predictionPromptVersion===DOMAIN_PREDICTION_PROMPT_VERSION;
  if(!aligned)return dimensionState('prediction',{status:'stale',updatedAt:now,source:'prediction',sourceVersion:profile?.version??null,provenance:{profileVersion:stored.tasteProfileVersion??null,profileHash:stored.tasteProfileHash??null,fingerprintHash:stored.fingerprintHash??null,promptVersion:stored.predictionPromptVersion??null},nextAction:next});
- return dimensionState('prediction',{status:'current',updatedAt:now,source:'prediction',sourceVersion:profile.version,provenance:{profileHash:profile.profileHash,fingerprintHash:facts.currentFingerprintHash,promptVersion:PREDICTION_PROMPT_VERSION},nextAction:'leave'});
+ return dimensionState('prediction',{status:'current',updatedAt:now,source:'prediction',sourceVersion:profile.version,provenance:{profileHash:profile.profileHash,fingerprintHash:facts.currentFingerprintHash,promptVersion:DOMAIN_PREDICTION_PROMPT_VERSION},nextAction:'leave'});
 }
 function filmView(facts){
  if(facts.decision?.status==='excluded_nonfilm')return null;

@@ -1,6 +1,6 @@
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 const ctx=vm.createContext({console,Intl,Date,Set,Map});
-vm.runInContext(fs.readFileSync('src/sources.js','utf8'),ctx);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8'),ctx);
 const report=JSON.parse(fs.readFileSync('../sources/cloud-programme.json','utf8')),watchlist=JSON.parse(fs.readFileSync('../sources/cloud-watchlist.json','utf8'));
 const merged=ctx.programmeWithWatchlist(report,watchlist);
 assert.equal(merged.films.length,watchlist.films.length);assert.equal(new Set(merged.films.map(f=>f.id)).size,watchlist.films.length);

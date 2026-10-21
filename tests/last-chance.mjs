@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 
 const now=Date.now(),hour=3600000;
 const source=vm.createContext({Date,Number,Math});
-vm.runInContext(fs.readFileSync('src/sources.js','utf8'),source);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8'),source);
 source.fixture={id:'one',shows:[{start:now-70*hour},{start:now-65*hour}]};
 assert.equal(vm.runInContext('availabilityDeadline(fixture)',source),new Date(now+7*hour).toISOString());
 source.fixture.shows.push({start:now-60*hour});
