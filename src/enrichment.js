@@ -294,7 +294,8 @@ async function predictionWriter(env,work){
  try{return await work();}finally{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
 }
 async function refreshPredictionQueue(env,report,trigger='reconcile'){
- const [profile,index,previous,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,predictionQueueKey),loadJSON(env,'epg/discovered-films.json')]);
+ const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
+ const [profile,index,previous,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,predictionQueueKey),loadJSON(pinned,'epg/discovered-films.json')]);
  if(!profile||!report?.films)return null;
  const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)])),missing=films.filter(f=>!indexedPredictionCurrent(index?.[String(f.id)],profile));
  missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||(Date.parse(b.hotEnteredAt||b.discoveredAt)||0)-(Date.parse(a.hotEnteredAt||a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
@@ -324,14 +325,15 @@ function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now()){
 function coveragePercent(current,total){return total?Math.round(current/total*100):100;}
 function predictionBatchesProcessed(run){return Math.max(0,(run.batchCount||1)-1)+(run.selectedIds?.length&&run.selectedIds.every(id=>run.results?.[id])?1:0);}
 async function predictionEventSnapshot(env,queue,batchSize=null){
- const safe=async key=>{try{return await loadJSON(env,key);}catch{return null;}},[profile,index,report,catalog,persistedQueue]=await Promise.all([safe(profileKey),safe(ENRICHMENT_KEY+'view-index.json'),safe('programme.json'),safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
+ const safe=async key=>{try{return await loadJSON(pinned,key);}catch{return null;}},pinned=await pinEpg(env),[profile,index,report,catalog,persistedQueue]=await Promise.all([safe(profileKey),safe(ENRICHMENT_KEY+'view-index.json'),safe('programme.json'),safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
  const coverage=canonicalCoverageSummary(report,catalog,index,profile);
  return {coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal)},queue:{hotPending:persistedQueue?.priorityCount??null,coldPending:persistedQueue?.coldRemaining??null},...(Number.isInteger(batchSize)&&batchSize>0?{currentBatchSize:batchSize}:{})};
 }
 function predictionEventDelta(run,summary,snapshot){const current=snapshot?.coverage?.currentPredictionsTotal,start=run.coverageStartCurrentPredictions;return {added:summary.added,updated:summary.updated,failed:summary.failed,predictionGain:Number.isInteger(current)&&Number.isInteger(start)?current-start:null};}
 async function footerStatus(env){
+ const pinned=await pinEpg(env);
  const [profile,index,report,catalog,queue,run,lease,source,decisions]=await Promise.all([
-  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,'programme.json'),loadJSON(env,'epg/discovered-films.json'),queueStatus(env),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')
+  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),queueStatus(env),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')
  ]);
  const coverage=canonicalCoverageSummary(report,catalog,index,profile),items=source?.items||[];
  const recognized=new Set();
@@ -489,20 +491,24 @@ async function predictionBenchmarkTrial(env,body){
 }
 async function enrichmentRoute(request,env,url,execution){const path=url.pathname;let body=null;if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!isObject(body))return json({error:'Invalid request'},400);}
  if(path==='/api/enrichment/discovery/reconcile'&&request.method==='POST'){
-  let [source,decisions]=await Promise.all([loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')]);if(!source?.items)return json({error:'No discovery catalog'},409);
+  const pinned=await pinEpg(env);
+  let [source,decisions]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')]);if(!source?.items)return json({error:'No discovery catalog'},409);
   if(source.canonicalizedAt&&source.canonicalizedAt!==decisions?.__canonicalizedAt){[source,decisions]=await Promise.all([loadJSON(env,'epg/discovery-before-canonical.json'),loadJSON(env,'epg/discovery-resolution-before-canonical.json')]);if(!source?.items)return json({error:'Canonicalization backup missing'},409);}
   let result;try{result=canonicalizeDiscoveryLedger(source,decisions||{});}catch(e){return json({error:String(e.message).slice(0,160)},409);}
   const changed=result.duplicatesRemoved>0||result.items.some((item,i)=>item.key!==source.items[i]?.key);
   if(changed){await saveJSON(env,'epg/discovery-before-canonical.json',source);await saveJSON(env,'epg/discovery-resolution-before-canonical.json',decisions||{});
-   const at=new Date().toISOString();await saveJSON(env,'epg/discovery-latest.json',{...source,items:result.items,canonicalizedAt:at});await saveJSON(env,'epg/discovery-resolution.json',{...result.decisions,__canonicalizedAt:at});}
+   const at=new Date().toISOString();await updatePublishedFiles(env,{'discovery-latest.json':{...source,items:result.items,canonicalizedAt:at}});await saveJSON(env,'epg/discovery-resolution.json',{...result.decisions,__canonicalizedAt:at});}
   return json({changed,before:source.items.length,after:result.items.length,duplicatesRemoved:result.duplicatesRemoved,carriedVerified:result.carriedVerified,retried:result.retried});
  }
  if(path==='/api/enrichment/discovery/resolve'&&request.method==='POST')return await resolveDiscoveryRequest(env,execution,body);
  if(path==='/api/enrichment/discovery/scan'&&request.method==='POST'){
-  const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);
+  const pinned=await pinEpg(env);
+  const report=await loadJSON(pinned,'programme.json');if(!report?.films)return json({error:'No programme'},409);
   const now=Date.now(),response=await fetch(sourceConfig(env).epg,{signal:AbortSignal.timeout(110000)});if(!response.ok)return json({error:'EPG HTTP '+response.status},502);
-  const cache=await loadJSON(env,'epg/discovered-films.json')||{},known=new Set(report.films.map(f=>String(f.tmdbId)));const result=await scanEPG(response.body,[...report.films,...Object.values(cache).filter(f=>!known.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now+8*3600000)return json({error:'EPG horizon too short'},502);
-  const old=await loadJSON(env,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery);await saveJSON(env,'epg/discovery-latest.json',{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items});await refreshPredictionQueue(env,report,'epg_scan');const discovery=await queueDiscovery(env,'scan_committed');return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned,discovery});
+  const cache=await loadJSON(pinned,'epg/discovered-films.json')||{},known=new Set(report.films.map(f=>String(f.tmdbId)));const result=await scanEPG(response.body,[...report.films,...Object.values(cache).filter(f=>!known.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now+8*3600000)return json({error:'EPG horizon too short'},502);
+  const old=await loadJSON(pinned,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery,{replaceShows:true});const replaced=replaceCatalogAvailability(cache,result.discovery,report.runId);
+  await updatePublishedFiles(env,{'discovery-latest.json':{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items},'discovered-films.json':replaced.catalog});
+  await refreshPredictionQueue(env,report,'epg_scan');const discovery=await queueDiscovery(env,'scan_committed');return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned,discovery});
  }
  if(['/api/enrichment/discovery/status','/api/enrichment/pipeline/status'].includes(path)&&request.method==='GET')return json(await discoveryPipelineStatus(env));
  // Read-only audit export. No lazy rating initialization, source fetch, or enrichment generation.
