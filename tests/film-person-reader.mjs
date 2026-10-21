@@ -8,8 +8,8 @@ assert.doesNotMatch(reader,/chris-pratt|Крис Прэтт/);
 for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-reader|readLifecycle|shadowParity/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
-vm.runInContext(domain+'\n'+reader+'\nglobalThis.api={readLifecycle,shadowParity,storedFilmId,sidecarKey,FORBIDDEN_LIFECYCLE_KEYS};',ctx);
-const {readLifecycle,shadowParity,FORBIDDEN_LIFECYCLE_KEYS}=ctx.api;
+vm.runInContext(domain+'\n'+reader+'\nglobalThis.api={readLifecycle,shadowParity,semanticMismatches,storedFilmId,sidecarKey,FORBIDDEN_LIFECYCLE_KEYS};',ctx);
+const {readLifecycle,shadowParity,semanticMismatches,FORBIDDEN_LIFECYCLE_KEYS}=ctx.api;
 
 const NOW=Date.parse('2026-10-20T12:00:00.000Z');
 const DAY=86400000;
@@ -47,6 +47,7 @@ assert.equal(view.contractVersion,1);
 assert.equal(JSON.stringify(view.parity.legacy),JSON.stringify(['28nq','abc','tmdb_999']));
 assert.equal(JSON.stringify(view.parity.lifecycle),JSON.stringify(['28nq','abc','tmdb_999']));
 assert.equal(view.parity.ok,true);
+assert.equal(JSON.stringify(view.parity.mismatches),JSON.stringify([]));
 assert.equal(view.parity.excludedCandidates,1);
 assert.equal(view.films.length,3);
 const film=view.films.find(item=>item.id==='film:28nq');
@@ -115,10 +116,47 @@ const split=readLifecycle(ambiguousStore,NOW);
 assert.equal(split.parity.ok,false);
 assert.equal(JSON.stringify(split.parity.extra),JSON.stringify(['tmdb_1656']));
 assert.equal(split.films.find(item=>item.id==='film:tmdb:1656').canonicalIdentity,null);
+assert.equal(split.films.find(item=>item.id==='film:tmdb:1656').identity.status,'ambiguous');
 assert.equal(split.films.find(item=>item.id==='film:28nq').canonicalIdentity,'tmdb:1656');
+assert.equal(JSON.stringify(split.parity.mismatches),JSON.stringify([]));
+const splitSidecar=split.sidecars['epg/discovered-films.lifecycle.json'].tmdb_1656;
+assert.equal(splitSidecar.id,'film:tmdb:1656');
+assert.equal(splitSidecar.identity.status,'ambiguous');
+assert.equal(splitSidecar.canonicalIdentity,null);
 const mismatch=shadowParity(['28nq','tmdb_999'],['28nq']);
 assert.equal(mismatch.ok,false);
 assert.equal(JSON.stringify(mismatch.missing),JSON.stringify(['tmdb_999']));
 assert.equal(JSON.stringify(mismatch.extra),JSON.stringify([]));
+
+const partial={programme:{films:[{id:'28nq',tmdbId:'1656',original:'The Legend of Zorro',title:'Зорро по программе',titleRu:'Легенда Зорро',titleStatus:'verified'}]},metadata:{'28nq':{id:'28nq',tmdbId:null,original:'The Legend of Zorro',metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsis:'Текст',synopsisFetchedAt:FRESH}},filmTitles:[],personNames:[]};
+const recovered=readLifecycle(partial,NOW).films.find(item=>item.id==='film:28nq');
+assert.equal(recovered.identity.status,'resolved');
+assert.equal(recovered.canonicalIdentity,'tmdb:1656');
+assert.equal(recovered.localization.status,'reviewed');
+assert.equal(recovered.localization.value,'Легенда Зорро');
+const clash=readLifecycle({programme:{films:[{id:'28nq',tmdbId:'1656',original:'The Legend of Zorro'}]},metadata:{'28nq':{tmdbId:'111',original:'The Legend of Zorro',metadataAt:FRESH,peopleVersion:1,peopleNamesVersion:2,synopsis:'Текст',synopsisFetchedAt:FRESH}},filmTitles:[],personNames:[]},NOW).films[0];
+assert.equal(clash.canonicalIdentity,null);
+assert.equal(clash.identity.status,'ambiguous');
+assert.equal(clash.identity.nextAction,'surface_conflict');
+
+const downgraded=JSON.parse(JSON.stringify(film));
+downgraded.localization={...downgraded.localization,status:'missing',value:null};
+downgraded.prediction={...downgraded.prediction,status:'stale'};
+downgraded.fingerprint={...downgraded.fingerprint,status:'stale'};
+const downgrades=semanticMismatches(store,[downgraded],NOW);
+assert.equal(downgrades.some(item=>item.id==='28nq'&&item.field==='title'&&item.legacy==='Легенда Зорро'&&item.lifecycle==='The Legend of Zorro'),true);
+assert.equal(downgrades.some(item=>item.id==='28nq'&&item.field==='localization'&&item.legacy==='reviewed'&&item.lifecycle==='missing'),true);
+assert.equal(downgrades.some(item=>item.id==='28nq'&&item.field==='fingerprint'&&item.legacy==='current'&&item.lifecycle==='stale'),true);
+assert.equal(downgrades.some(item=>item.id==='28nq'&&item.field==='prediction'&&item.legacy==='current'&&item.lifecycle==='stale'),true);
+assert.equal(downgrades.some(item=>item.id==='28nq'&&item.field==='predictionReady'&&item.legacy===true&&item.lifecycle===false),true);
+
+function deepFreeze(value){if(!value||typeof value!=='object'||Object.isFrozen(value))return value;for(const item of Object.values(value))deepFreeze(item);return Object.freeze(value);}
+const catalog=[{id:'tmdb_2',tmdbId:'2',original:'Second',discoveredAt:FRESH,synopsis:'Overview'},{id:'tmdb_1',tmdbId:'1',original:'First',discoveredAt:FRESH,synopsis:'Overview'}];
+const frozen=deepFreeze({discoveredFilms:catalog,programme:{films:[]},filmTitles:[],personNames:[]});
+const frozenOrder=frozen.discoveredFilms.map(item=>item.id).join();
+const frozenView=readLifecycle(frozen,NOW);
+assert.equal(frozen.discoveredFilms.map(item=>item.id).join(),frozenOrder);
+assert.equal(frozenView.parity.ok,true);
+assert.equal(JSON.stringify(frozenView.parity.lifecycle),JSON.stringify(['tmdb_1','tmdb_2']));
 
 console.log('Film and Person lifecycle reader passed.');

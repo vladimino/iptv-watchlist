@@ -30,11 +30,33 @@ function decisionForFilm(film,resolution){
 function syncFailure(sync,id){return (sync?.failures||[]).find(failure=>failure&&failure.id===id)||null;}
 function predictionFailure(store,id){return store.predictionRun?.failures?.[id]||store.predictionQueue?.retries?.[id]||null;}
 function peopleOn(record){return [...(record?.directors||[]),...(record?.actors||[]),...(record?.people?.directors||[]),...(record?.people?.actors||[])];}
+function recordById(records,id){return (records||[]).find(record=>record&&String(record.id)===id)||null;}
+function catalogRecord(store,id){return listOf(store.discoveredFilms).find(record=>record&&String(record.id)===id)||null;}
+function presentTmdb(value){return value==null||value===''?null:String(value);}
+// Null does not hide a later id. Programme, metadata, watchlist, then the record itself. Two different ids stay a conflict.
+function identityEvidence(sources){
+ const ids=[];
+ for(const source of sources){const id=presentTmdb(source?.tmdbId);if(id&&!ids.includes(id))ids.push(id);}
+ return ids.length>1?{tmdbId:null,conflictingTmdbIds:ids}:{tmdbId:ids[0]||null,conflictingTmdbIds:null};
+}
+// A reviewed titleRu wins over an earlier empty one. Metadata, then programme, watchlist, and the record.
+function reviewedTranslation(sources){
+ for(const source of sources)if(source?.titleStatus==='verified'&&source.titleRu)return {titleRu:source.titleRu,titleStatus:'verified'};
+ for(const source of sources)if(source?.titleRu)return {titleRu:source.titleRu,titleStatus:source.titleStatus||null};
+ return {titleRu:null,titleStatus:null};
+}
+function originalTitle(sources){for(const source of sources)if(source?.original)return source.original;return null;}
+function loadedSources(store,id,record){
+ const metadata=store.metadata?.[id]||null,programme=recordById(store.programme?.films,id),watchlist=recordById(store.watchlist?.films,id);
+ return {metadata,programme,watchlist,record:record||catalogRecord(store,id)};
+}
 function filmFacts(record,store,resolution,now){
- const id=String(record.id),metadata=store.metadata?.[id]||null,programme=(store.programme?.films||[]).find(film=>String(film.id)===id)||null,source=metadata||record;
+ const id=String(record.id),loaded=loadedSources(store,id,record),metadata=loaded.metadata,programme=loaded.programme,body=metadata||record;
  const letterboxdId=id.startsWith('tmdb_')?null:id;
+ const evidence=identityEvidence([loaded.programme,metadata,loaded.watchlist,record]);
+ const translation=reviewedTranslation([metadata,loaded.programme,loaded.watchlist,record]);
  const decision=decisionForFilm(record,resolution);
- return {letterboxdId,tmdbId:source.tmdbId?String(source.tmdbId):null,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||source.discoveredAt||source.metadataAt||source.synopsis),metadataAt:source.metadataAt||source.discoveredAt||null,peopleVersion:source.peopleVersion??((source.directors||source.actors)?1:null),peopleNamesVersion:source.peopleNamesVersion,synopsisPresent:!!(source.synopsis||source.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:source.original||record.original||null,titleRu:source.titleRu||null,titleStatus:source.titleStatus||null,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==source.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id)),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:programme?.shows||source.shows||[],epgLastAiring:source.epgLastAiring};
+ return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id)),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:programme?.shows||body.shows||[],epgLastAiring:body.epgLastAiring};
 }
 function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
 function lifecycleBody(film){return {contractVersion:film.contractVersion,id:film.id,storedId:storedFilmId(film),canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds,redirects:film.redirects||[],aliases:film.aliases,identity:film.identity,metadata:film.metadata,localization:film.localization,fingerprint:film.fingerprint,prediction:film.prediction,availability:film.availability||null};}
@@ -42,13 +64,81 @@ function legacyEnrichmentIds(store){
  const seen=new Set(),ids=[];
  const add=film=>{if(!film?.id)return;const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))return;seen.add(identity);ids.push(String(film.id));};
  for(const film of store.programme?.films||store.watchlist?.films||[])add(film);
- for(const film of listOf(store.discoveredFilms).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en')))add(film);
+ for(const film of [...listOf(store.discoveredFilms)].sort((a,b)=>String(a.id).localeCompare(String(b.id),'en')))add(film);
  return ids.sort((a,b)=>a.localeCompare(b,'en'));
 }
 function shadowParity(legacyIds,lifecycleIds){
  const legacy=[...legacyIds].sort((a,b)=>a.localeCompare(b,'en')),lifecycle=[...lifecycleIds].sort((a,b)=>a.localeCompare(b,'en'));
  const have=new Set(lifecycle),seen=new Set(legacy);
  return {ok:legacy.length===lifecycle.length&&legacy.every((id,index)=>id===lifecycle[index]),legacy,lifecycle,missing:legacy.filter(id=>!have.has(id)),extra:lifecycle.filter(id=>!seen.has(id))};
+}
+function legacyLocalization(store,storedId){
+ const loaded=loadedSources(store,storedId),sources=[loaded.metadata,loaded.programme,loaded.watchlist,loaded.record];
+ const evidence=identityEvidence([loaded.programme,loaded.metadata,loaded.watchlist,loaded.record]);
+ const dictionary=(store.filmTitleIndex||{})[storedId]||null,translation=reviewedTranslation(sources),provisional=store.titles?.[storedId]||null;
+ if(dictionaryApplies(dictionary,evidence.tmdbId)&&dictionary.status==='verified')return {status:'reviewed',value:dictionary.title};
+ if(translation.titleStatus==='verified'&&translation.titleRu)return {status:'reviewed',value:translation.titleRu};
+ if(dictionaryApplies(dictionary,evidence.tmdbId)&&dictionary.status==='provisional')return {status:'provisional',value:dictionary.title||dictionary.name};
+ if(provisionalApplies(provisional,evidence.tmdbId))return {status:'provisional',value:provisional.title};
+ return {status:'missing',value:null};
+}
+function legacyDisplayedTitle(store,storedId,localization){
+ if(localization.status!=='missing'&&localization.value)return localization.value;
+ const loaded=loadedSources(store,storedId);
+ return originalTitle([loaded.metadata,loaded.programme,loaded.watchlist,loaded.record])||loaded.programme?.title||loaded.watchlist?.title||loaded.record?.title||null;
+}
+function legacyFingerprintStatus(file){
+ if(!file)return 'missing';
+ return file.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION||file.invalidatedAt?'stale':'current';
+}
+function legacyPredictionStatus(store,storedId){
+ if(predictionFailure(store,storedId))return 'failed';
+ const current=store.predictions?.[storedId]?.current;
+ if(!current)return 'missing';
+ const fingerprint=store.fingerprints?.[storedId],profile=store.profile;
+ const aligned=legacyFingerprintStatus(fingerprint)==='current'&&profile&&fingerprint.fingerprintHash!=null&&current.tasteProfileVersion===profile.version&&current.tasteProfileHash===profile.profileHash&&current.fingerprintHash===fingerprint.fingerprintHash&&current.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&current.predictionPromptVersion===PREDICTION_PROMPT_VERSION;
+ return aligned?'current':'stale';
+}
+function legacyDisplayReady(store,storedId){
+ const localization=legacyLocalization(store,storedId);
+ if(!legacyDisplayedTitle(store,storedId,localization))return false;
+ if(!String(storedId).startsWith('tmdb_'))return true;
+ const decision=decisionForFilm(catalogRecord(store,storedId),store.discoveryResolution||{});
+ return !decision||decision.status==='verified';
+}
+function legacyCatalogReady(store,storedId,now){
+ if(syncFailure(store.sync,storedId))return false;
+ const loaded=loadedSources(store,storedId),body=loaded.metadata||loaded.record;
+ if(!body||!metadataFresh(body.metadataAt||body.discoveredAt,now)||!(body.synopsis||body.synopsisFetchedAt))return false;
+ if(!String(storedId).startsWith('tmdb_'))return true;
+ const decision=decisionForFilm(loaded.record,store.discoveryResolution||{});
+ return !!presentTmdb(loaded.record?.tmdbId)&&(!decision||decision.status==='verified');
+}
+function semanticMismatches(store,films,now){
+ const context={...store,filmTitleIndex:store.filmTitleIndex||indexRecords(store.filmTitles,'id')};
+ const mismatches=[];
+ for(const film of films||[]){
+  const id=storedFilmId(film);
+  if(!id)continue;
+  const localization=legacyLocalization(context,id);
+  const fields={
+   title:[legacyDisplayedTitle(context,id,localization),preferredTitle(film)],
+   localization:[localization.status,film.localization?.status||'missing'],
+   fingerprint:[legacyFingerprintStatus(context.fingerprints?.[id]),film.fingerprint?.status||'missing'],
+   prediction:[legacyPredictionStatus(context,id),film.prediction?.status||'missing'],
+   displayReady:[legacyDisplayReady(context,id),displayReady(film)],
+   catalogReady:[legacyCatalogReady(context,id,now),catalogReady(film)],
+   predictionReady:[legacyFingerprintStatus(context.fingerprints?.[id])==='current'&&legacyPredictionStatus(context,id)==='current',predictionReady(film)]
+  };
+  for(const [field,[legacy,lifecycle]] of Object.entries(fields))if(legacy!==lifecycle)mismatches.push({id,field,legacy,lifecycle});
+ }
+ return mismatches.sort((a,b)=>a.id.localeCompare(b.id,'en')||a.field.localeCompare(b.field,'en'));
+}
+function filmForCatalogRecord(filmList,record){
+ const id=String(record.id),own=filmList.find(item=>storedFilmId(item)===id);
+ if(own)return own;
+ const minted=record.tmdbId!=null?'film:tmdb:'+record.tmdbId:null;
+ return filmList.find(item=>(item.redirects||[]).some(redirect=>redirect.from===minted||redirect.from==='film:'+id))||null;
 }
 function personFacts(person,store,now){
  const roleId=person.id,dictionary=store.personOverrides?.[roleId]||store.personNameIndex?.[roleId]||null,cache=store.people?.[roleId]||null;
@@ -88,7 +178,8 @@ function readLifecycle(store,now){
  const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn)];
  for(const person of embedded){if(!person?.id||people.has(person.id))continue;const view=personView(personFacts(person,context,now));if(view)people.set(person.id,view);}
  const filmList=[...films.values()].sort((a,b)=>storedFilmId(a).localeCompare(storedFilmId(b),'en'));
- const legacyIds=legacyEnrichmentIds(store),lifecycleIds=filmList.map(storedFilmId);
+ const legacyIds=legacyEnrichmentIds(store),lifecycleIds=filmList.map(storedFilmId),idParity=shadowParity(legacyIds,lifecycleIds);
+ const shared=new Set(idParity.legacy),mismatches=semanticMismatches(context,filmList.filter(film=>shared.has(storedFilmId(film))),now);
  const sidecars={};
  const watchlistBodies=Object.fromEntries(filmList.filter(film=>!String(storedFilmId(film)).startsWith('tmdb_')).map(film=>[storedFilmId(film),lifecycleBody(film)]));
  if(store.watchlist)sidecars[sidecarKey('watchlist.json')]=watchlistBodies;
@@ -96,7 +187,7 @@ function readLifecycle(store,now){
  if(store.discoveredFilms){
   const discoveredBodies={};
   for(const record of listOf(store.discoveredFilms)){
-   const film=filmList.find(item=>storedFilmId(item)===String(record.id)||(item.redirects||[]).some(redirect=>redirect.from==='film:tmdb:'+record.tmdbId)||(item.externalIds||[]).some(entry=>entry.scheme==='tmdb'&&entry.trusted&&entry.value===String(record.tmdbId)));
+   const film=filmForCatalogRecord(filmList,record);
    if(film)discoveredBodies[String(record.id)]=lifecycleBody(film);
   }
   sidecars[sidecarKey('epg/discovered-films.json')]=discoveredBodies;
@@ -106,5 +197,5 @@ function readLifecycle(store,now){
   if(film)sidecars['enrichment/films/'+encodeURIComponent(String(id))+'/fingerprint'+LIFECYCLE_SIDECAR]={id:film.id,storedId:storedFilmId(film),fingerprint:film.fingerprint};
  }
  for(const key of Object.keys(sidecars))if(FORBIDDEN_LIFECYCLE_KEYS.includes(key)||key.includes('discovery-latest')||key.includes('predictions'))throw new Error('lifecycle sidecar overwrites '+key);
- return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,people:[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en')),candidates,conflicts,sidecars,parity:{...shadowParity(legacyIds,lifecycleIds),excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
+ return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,people:[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en')),candidates,conflicts,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
 }
