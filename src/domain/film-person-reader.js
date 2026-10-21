@@ -98,14 +98,14 @@ function legacyDisplayedTitle(store,storedId){
 }
 function legacyFingerprintStatus(file){
  if(!file)return 'missing';
- return file.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION||file.invalidatedAt?'stale':'current';
+ return file.fingerprintSchemaVersion!==DOMAIN_FINGERPRINT_SCHEMA_VERSION||file.invalidatedAt?'stale':'current';
 }
 function legacyPredictionStatus(store,storedId){
  if(predictionFailure(store,storedId))return 'failed';
  const current=store.predictions?.[storedId]?.current;
  if(!current)return 'missing';
  const fingerprint=store.fingerprints?.[storedId],profile=store.profile;
- const aligned=legacyFingerprintStatus(fingerprint)==='current'&&profile&&fingerprint.fingerprintHash!=null&&current.tasteProfileVersion===profile.version&&current.tasteProfileHash===profile.profileHash&&current.fingerprintHash===fingerprint.fingerprintHash&&current.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&current.predictionPromptVersion===PREDICTION_PROMPT_VERSION;
+ const aligned=legacyFingerprintStatus(fingerprint)==='current'&&profile&&fingerprint.fingerprintHash!=null&&current.tasteProfileVersion===profile.version&&current.tasteProfileHash===profile.profileHash&&current.fingerprintHash===fingerprint.fingerprintHash&&current.fingerprintSchemaVersion===DOMAIN_FINGERPRINT_SCHEMA_VERSION&&current.predictionPromptVersion===DOMAIN_PREDICTION_PROMPT_VERSION;
  return aligned?'current':'stale';
 }
 function legacyDisplayReady(store,storedId){

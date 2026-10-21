@@ -27,7 +27,7 @@ const BUCKET=new Proxy({},{get(_,property){bucketAccess.push(String(property));t
 const env={BUCKET,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
 
 const context=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextEncoder,TextDecoder,AbortSignal,atob,crypto:webcrypto,fetch,console,ASSETS:{}});
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 
 const encode=value=>Buffer.from(typeof value==='string'?value:JSON.stringify(value)).toString('base64url');
 async function accessJwt({header={},claims={},key=signing.privateKey}={}){
