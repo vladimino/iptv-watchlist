@@ -1,4 +1,6 @@
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
+function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,compared:(prior?.compared||0)+(count.compared||0),mismatched:(prior?.mismatched||0)+(count.mismatched||0)}};}
+function localizationResponse(data,mode,count,path){if(mode!=='on'&&mode!=='shadow')return json(data);return new Response(JSON.stringify(data),{status:200,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Lifecycle-Localization':path+';'+mode+';compared='+count.compared+';mismatched='+count.mismatched}});}
 const loadJSON=async(env,key)=>{const o=await env.BUCKET.get(key);return o?o.json():null;};
 const saveJSON=(env,key,value)=>env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});
 const eventFilm=(film,titles=new Map())=>({id:String(film.id),title:reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year});
@@ -31,11 +33,11 @@ async function beginSync(env){
 async function metadataSync(env,run){
  const cache=await loadJSON(env,'metadata.json')||{};const creditsChanged=new Set();const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);
  for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{const film=run.watchlist[idx],fresh=film.peopleVersion===1&&film.metadataAt&&Date.now()-Date.parse(film.metadataAt)<30*86400000;if(fresh&&film.synopsisFetchedAt){if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const html=await getHTML(film.url);if(fresh){film.synopsis=parseSynopsis(html);film.synopsisFetchedAt=new Date().toISOString();cache[id]={...cache[id],synopsis:film.synopsis,synopsisFetchedAt:film.synopsisFetchedAt};if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const result=parseFilm(html,film);cache[id]=result;run.watchlist[idx]=result;creditsChanged.add(id);}catch(e){run.failures.push({id,error:e.message});}}));
- const titles=await loadJSON(env,'titles.json')||{};const titleBatch=run.watchlist.filter(f=>ids.includes(f.id));
- try{await localizeFilmTitles(titleBatch,titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
+ const titles=await loadJSON(env,'titles.json')||{};const titleBatch=run.watchlist.filter(f=>ids.includes(f.id));const localizationMode=lifecycleMode(env,'metadata');
+ try{recordLifecycle(run,'metadata',localizationMode,await localizeFilmTitles(titleBatch,titles,localizationMode));}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  await saveJSON(env,'titles.json',titles);
  const people=await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>creditsChanged.has(f.id)&&f.peopleVersion===1);
- try{if(batch.length)await localizePeople(batch,people);for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  for(const f of batch)cache[f.id]=f;
  await saveJSON(env,'people.json',people);
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await saveJSON(env,'metadata.json',cache);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
@@ -50,7 +52,7 @@ async function completeWithRatings(env,run,report){
 }
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
- return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,enrichmentQueueError:run.enrichmentQueueError||null}:{stage:'not_started'};
+ return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
 }
 // Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step.
 async function postSync(env,execution,pathname,body){
@@ -63,12 +65,11 @@ async function postSync(env,execution,pathname,body){
 }
 async function epgSync(env,run){
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId)return completeWithRatings(env,run,committed);}
- const titles=await loadJSON(env,'titles.json')||{};
- try{await localizeFilmTitles(run.watchlist,titles);await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
+ const titles=await loadJSON(env,'titles.json')||{};const localizationMode=lifecycleMode(env,'epg');
+ try{recordLifecycle(run,'epg',localizationMode,await localizeFilmTitles(run.watchlist,titles,localizationMode));await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  const people=await loadJSON(env,'people.json')||{};
  try{await localizeByLetterboxd(run.watchlist,people);await saveJSON(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
- for(const f of run.watchlist)for(const p of [...(f.directors||[]),...(f.actors||[])]){if(REVIEWED_PEOPLE[p.id])applyReviewedPerson(p);else if(people[p.id])applyCachedPersonName(p,people[p.id]);}
- for(const film of run.watchlist)applyReviewedTitle(film);
+ recordLifecycle(run,'epg',localizationMode,applyEpgLocalization(run.watchlist,people,localizationMode));
  const sources=sourceConfig(env),now=Date.now(),r=await fetch(sources.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
  const previous=await loadJSON(env,'programme.json');assertEPGContinuity(result,previous,run.watchlist.length,now);const fresh=new Map(result.films.map(f=>[f.id,f]));const currentFilms=new Map(run.watchlist.map(f=>[f.id,f]));const channelMin=new Map(result.coverage.map(c=>[c.name,c.min]));
  for(const old of previous?.films||[]){if(!currentFilms.has(old.id))continue;const historical=old.shows.filter(s=>s.start>=now-72*3600000&&s.start<now&&s.start<(channelMin.get(s.channel)??Infinity));if(!historical.length)continue;const target=fresh.get(old.id)||{...currentFilms.get(old.id),title:old.title,shows:[]};const keys=new Set(target.shows.map(s=>`${s.channelId}:${s.start}`));target.shows.push(...historical.filter(s=>!keys.has(`${s.channelId}:${s.start}`)));fresh.set(old.id,target);}
@@ -91,8 +92,8 @@ export default {async fetch(request,env,execution){
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
-  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const merged=programmeWithWatchlist(data,watchlist);for(const f of merged.films){const t=titles[f.id];if(!reviewedTitle(f)&&t)applyCachedTitle(f,t);}return json(reviewedPeople(merged));}
-  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};for(const f of data.films){const t=titles[f.id];if(!reviewedTitle(f)&&t)applyCachedTitle(f,t);}return json(reviewedPeople(data));}
+  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const mode=lifecycleMode(env,'programme');const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,mode);return localizationResponse(presented.data,mode,presented,'programme');}
+  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};const mode=lifecycleMode(env,'watchlist');const presented=presentLocalized(data,titles,mode);return localizationResponse(presented.data,mode,presented,'watchlist');}
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
   if(url.pathname==='/api/integrations/tmdb/status'&&request.method==='GET'){
    if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({connected:false,stage:'missing_secret'},503);
