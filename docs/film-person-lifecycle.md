@@ -164,3 +164,81 @@ Phase 0 was the audit. The sequence on the card is:
 5. **Phase 4.** Read-only diagnostics for one entity and for counts. [AIR-53](https://trello.com/c/gkuy1awG) is the owner UI. [AIR-49](https://trello.com/c/YNaLFwtW) is the later D1 move and is not required to finish AIR-42.
 
 Rollback for the audit is deleting this document. Rollback for phase 1 is deleting `src/domain/film-person.js` and `tests/film-person.mjs`. Rollback for phase 2a is deleting `src/domain/film-person-reader.js` and `tests/film-person-reader.mjs`. Rollback for phase 2b is deleting `src/domain/film-person-backfill.js` and `tests/film-person-backfill.mjs`. Rollback for phase 3 is unsetting `LIFECYCLE_LOCALIZATION`, restoring the previous title and name assignment in `src/sources.js` and `src/worker.js`, and removing `src/domain/film-person.js` from `build.mjs`. No data migration runs.
+
+## Phase 3 rollout log
+
+### 2026-10-21 shadow checkpoint
+
+- Date: 2026-10-21 13:45 (GMT+2). Commit `a908e681cad1f4164d6c069b82c3c39674dbddb6`, the merge of PR #30. GitHub Actions run [39590207857](https://github.com/vladimino/iptv-watchlist/actions/runs/39590207857) deployed it. The Worker deployment was created at 2026-10-21 13:13 (GMT+2).
+- Mode: the deployed localization functions were compared with the current R2 objects. `LIFECYCLE_LOCALIZATION` was absent and is still absent. No path was set to `shadow` or `on`. Cloudflare Access answered an unauthenticated status request with 302, so this session could not read `X-Lifecycle-Localization` from the deployed Worker. The variable stays unset until an authenticated GET can capture that header.
+- Generation: `programme.json` and `watchlist.json` share one `updatedAt`, 2026-10-20 21:08:33 (GMT+2). `epg/published-generation.json` is absent, so the reader uses the public programme object. The read did not change the etags of `programme.json`, `watchlist.json`, `titles.json`, `people.json`, or `sync.json`. `sync.json` is `complete`, updated 2026-10-20 21:08:53 (GMT+2), and has no `lifecycleLocalization`. Worker schedules are empty. No sync was started.
+- Fixture tests: `tests/titles.mjs` and `tests/names.mjs` passed locally against the private 2026-10-02 cloud fixtures. The dictionaries still have 413 titles and 868 names, and that watchlist had no untranslated name. The fixtures are not in this repository, so those two files stay outside `npm test`.
+
+Programme, shadow compared with off on that generation:
+
+- Header the Worker would send: `programme;shadow;films=398/1/0;people=7685/0/0;cache=0/0`.
+- The response JSON is identical to off. The one film mismatch is alias order only: the same alias values, and the displayed title is unchanged. No alias was removed. No reviewed status was lost. There is no owner conflict and no unresolved conflict.
+- People: 0 mismatched and 0 displayed, across 3296 distinct people. The people `compared` count includes each credit on a film and the programme people catalog. Cache is 0/0 because this reader does not compare `titles.json`. The title cache has 7 keys. A second domain pass did not change the domain result.
+
+Watchlist:
+
+- Header: `watchlist;shadow;films=398/0/0;people=4389/0/0;cache=0/0`.
+- The response JSON is identical to off. There is no film, person, alias, reviewed, owner, or unresolved difference. A second domain pass was stable.
+
+Metadata and EPG were not switched. There is no ordinary sync to observe.
+
+An EPG dry replay, not a production sync and not a flag change, ran `applyEpgLocalization` on the current watchlist and `people.json`. It did not call Wikidata and it did not write R2. The counts were films 398/0/0, people 4389/4348/857, and cache 0/0. The 857 displayed differences are 808 distinct people. In every case the legacy EPG assignment copies a Latin cache name and the guard keeps the Cyrillic dictionary name. The current GET reader, applied to both results, leaves 0 displayed name differences. Shadow would keep the legacy write. `on` would persist the dictionary names inside the normal sync write. That category is expected, and it is not a current user-visible change. It still needs acceptance before `on:epg`.
+
+No lifecycle sidecar was written. No film was waiting on a new Wikidata title fetch.
+
+Decision: stop before `on`.
+
+Rollback of this checkpoint is to leave `LIFECYCLE_LOCALIZATION` unset. If a later step sets it, delete that Worker binding. An empty value is also off. Do not commit the variable in `wrangler.jsonc`.
+
+After this checkpoint is accepted, turn one path to `on` at a time and take a new baseline if the programme etag has changed:
+
+1. `on:programme`. Displayed titles should stay. The one alias-order difference becomes part of the response. People should stay equal.
+2. `on:watchlist`. The response should stay equal to off.
+3. `on:metadata` only while observing a real sync. Do not start a sync only for this check.
+4. `on:epg` only after the 808 cache-versus-dictionary names are accepted, and only on a real sync.
+
+On a regression, set that path back to off.
+
+## Phase 3 rollout log
+
+### 2026-10-21 shadow checkpoint
+
+- Date: 2026-10-21 13:45 (GMT+2). Commit `a908e681cad1f4164d6c069b82c3c39674dbddb6`, the merge of PR #30. GitHub Actions run [39590207857](https://github.com/vladimino/iptv-watchlist/actions/runs/39590207857) deployed it. The Worker deployment was created at 2026-10-21 13:13 (GMT+2).
+- Mode: the deployed localization functions were compared with the current R2 objects. `LIFECYCLE_LOCALIZATION` was absent and is still absent. No path was set to `shadow` or `on`. Cloudflare Access answered an unauthenticated status request with 302, so this session could not read `X-Lifecycle-Localization` from the deployed Worker. The variable stays unset until an authenticated GET can capture that header.
+- Generation: `programme.json` and `watchlist.json` share one `updatedAt`, 2026-10-20 21:08:33 (GMT+2). `epg/published-generation.json` is absent, so the reader uses the public programme object. The read did not change the etags of `programme.json`, `watchlist.json`, `titles.json`, `people.json`, or `sync.json`. `sync.json` is `complete`, updated 2026-10-20 21:08:53 (GMT+2), and has no `lifecycleLocalization`. Worker schedules are empty. No sync was started.
+- Fixture tests: `tests/titles.mjs` and `tests/names.mjs` passed locally against the private 2026-10-02 cloud fixtures. The dictionaries still have 413 titles and 868 names, and that watchlist had no untranslated name. The fixtures are not in this repository, so those two files stay outside `npm test`.
+
+Programme, shadow compared with off on that generation:
+
+- Header the Worker would send: `programme;shadow;films=398/1/0;people=7685/0/0;cache=0/0`.
+- The response JSON is identical to off. The one film mismatch is alias order only: the same alias values, and the displayed title is unchanged. No alias was removed. No reviewed status was lost. There is no owner conflict and no unresolved conflict.
+- People: 0 mismatched and 0 displayed, across 3296 distinct people. The people `compared` count includes each credit on a film and the programme people catalog. Cache is 0/0 because this reader does not compare `titles.json`. The title cache has 7 keys. A second domain pass did not change the domain result.
+
+Watchlist:
+
+- Header: `watchlist;shadow;films=398/0/0;people=4389/0/0;cache=0/0`.
+- The response JSON is identical to off. There is no film, person, alias, reviewed, owner, or unresolved difference. A second domain pass was stable.
+
+Metadata and EPG were not switched. There is no ordinary sync to observe.
+
+An EPG dry replay, not a production sync and not a flag change, ran `applyEpgLocalization` on the current watchlist and `people.json`. It did not call Wikidata and it did not write R2. The counts were films 398/0/0, people 4389/4348/857, and cache 0/0. The 857 displayed differences are 808 distinct people. In every case the legacy EPG assignment copies a Latin cache name and the guard keeps the Cyrillic dictionary name. The current GET reader, applied to both results, leaves 0 displayed name differences. Shadow would keep the legacy write. `on` would persist the dictionary names inside the normal sync write. That category is expected, and it is not a current user-visible change. It still needs acceptance before `on:epg`.
+
+No lifecycle sidecar was written. No film was waiting on a new Wikidata title fetch.
+
+Decision: stop before `on`.
+
+Rollback of this checkpoint is to leave `LIFECYCLE_LOCALIZATION` unset. If a later step sets it, delete that Worker binding. An empty value is also off. Do not commit the variable in `wrangler.jsonc`.
+
+After this checkpoint is accepted, turn one path to `on` at a time and take a new baseline if the programme etag has changed:
+
+1. `on:programme`. Displayed titles should stay. The one alias-order difference becomes part of the response. People should stay equal.
+2. `on:watchlist`. The response should stay equal to off.
+3. `on:metadata` only while observing a real sync. Do not start a sync only for this check.
+4. `on:epg` only after the 808 cache-versus-dictionary names are accepted, and only on a real sync.
+
+On a regression, set that path back to off.
