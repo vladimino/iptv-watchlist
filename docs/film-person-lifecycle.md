@@ -191,7 +191,7 @@ An EPG dry replay, not a production sync and not a flag change, ran `applyEpgLoc
 
 No lifecycle sidecar was written. No film was waiting on a new Wikidata title fetch.
 
-Decision: the live shadow rollout is not done. Stop before `shadow` on the Worker and before `on`.
+Decision: the live shadow rollout is not done. Stop before `shadow` on the Worker and before `on`. This section is the only rollout log.
 
 Rollback of this checkpoint is to leave `LIFECYCLE_LOCALIZATION` unset. If a later step sets it, delete that Worker binding. An empty value is also off. Do not commit the variable in `wrangler.jsonc`. Merging this document does not change the Worker.
 
