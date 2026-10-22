@@ -12,10 +12,12 @@ function withoutHistory(film){
  for(const key of Object.keys(film))if(key!=='predictionHistory')entity[key]=film[key];
  return entity;
 }
-function filmMatch(film,id){return film.id===id||storedFilmId(film)===id||film.id==='film:'+id;}
+function catalogId(lifecycleId){return lifecycleId.startsWith('film:tmdb:')?'tmdb_'+lifecycleId.slice('film:tmdb:'.length):lifecycleId.startsWith('film:')?lifecycleId.slice('film:'.length):lifecycleId;}
+function filmMatch(film,id){return film.id===id||storedFilmId(film)===id||film.id==='film:'+id||catalogId(film.id)===id;}
+function redirectMatch(film,id){return (film.redirects||[]).some(redirect=>redirect.from===id||redirect.from==='film:'+id||catalogId(redirect.from)===id);}
 function personMatch(person,id){return person.id===id||person.roleId===id||person.id==='person:'+id;}
 function diagnoseFilm(store,id,now){
- const key=id==null?'':String(id),film=readLifecycle(store,now).films.find(item=>filmMatch(item,key));
+ const key=id==null?'':String(id),films=readLifecycle(store,now).films,film=films.find(item=>filmMatch(item,key))||films.find(item=>redirectMatch(item,key));
  return film?{found:true,kind:'film',id:film.id,entity:withoutHistory(film)}:{found:false,kind:'film',id:key};
 }
 function diagnosePerson(store,id,now){
@@ -40,6 +42,6 @@ function lifecycleCounts(store,now){
   people:{total:people.length,localization:countBy(people,person=>person.localization&&person.localization.status)},
   candidates:{total:view.candidates.length,excluded:view.candidates.filter(candidate=>candidate.excluded).length},
   conflicts:view.conflicts.length,
-  parity:{ok:!!view.parity.ok,mismatches:view.parity.mismatches.length}
+  parity:{ok:!!view.parity.ok,mismatches:view.parity.mismatches.length,missing:view.parity.missing.length,extra:view.parity.extra.length}
  };
 }
