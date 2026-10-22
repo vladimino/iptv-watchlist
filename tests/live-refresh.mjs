@@ -61,6 +61,8 @@ const context=vm.createContext({
 });
 vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
 const run=code=>vm.runInContext(code,context);
+// The fixture archive closes 72 hours after 2026-10-19T12:00:00Z. Later than that, the black zone shows films with no broadcasts, and the search below changes the grid.
+run('viewClock=Date.parse("2026-10-18T12:00:00Z")');
 let paints=0,shortPaints=0;
 const originalRender=context.render;
 context.render=function(...args){paints++;window.scrollY=0;el('.activity-scroll').scrollTop=0;return originalRender.apply(this,args);};
