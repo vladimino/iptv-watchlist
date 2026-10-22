@@ -154,7 +154,7 @@ The smallest safe model, after a separate agreement, is:
 4. Ambiguous, contradicted, and failed runtime rows stay on the AIR-48 uncertain path. They are the manual residue, not the common case. Section 6 is how an owner label on that residue becomes evidence for later matches.
 5. `shadow` must score the same evidence legacy used, including search hits and, when legacy fetched details, the detail runtime. Today's shadow score of an empty alias list cannot answer scenario A.
 
-That is a proposal. It is not implemented here.
+That was the proposal at the time of the audit. The movie-detail check in rule 2 is now implemented behind `SCORED_RESOLUTION=on` and the variable is still unset. The contract, the refusals, and the shadow comparison that has to include the detail payload are in `docs/scored-resolution.md`. Alias reuse without a new fetch, shadow scoring of that payload, and section 6 are not built.
 
 ### Evidence AIR-49 would need
 

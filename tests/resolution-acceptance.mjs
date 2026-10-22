@@ -164,6 +164,43 @@ assert.equal(noneGate.candidateDecision.status,'no_confident_match');
 assert.equal(noneGate.candidateDecision.evidence.status,'no_confident_match');
 assert.equal(noneGate.scoring.observationKey,'missing|1999');
 
+const observation={normalizedTitle:'dune',year:1984,durations:[137]};
+const detailMovie={id:'11',title:'Дюна',original:'Dune',aliases:['Dune'],year:1984,runtime:137};
+const detail={authority:'tmdb_detail',tmdbId:'11',evidence:{movie:detailMovie}};
+const detailPass=bound(scored,{tmdbDetail:detail,observation});
+assert.equal(detailPass.outcome,'detail_verified');
+assert.equal(detailPass.reason,'tmdb_detail');
+assert.equal(detailPass.transition.authority,'tmdb_detail');
+assert.equal(detailPass.transition.detail.movieId,'11');
+assert.equal(detailPass.transition.detail.matchedTitle,'dune');
+assert.equal(detailPass.filmChange,null);
+assert.equal(detailPass.linkEvidence,null);
+for(const supplied of [
+ {authority:'tmdb_detail',confirmed:true,tmdbId:'11'},
+ {authority:'tmdb_search',tmdbId:'11',evidence:{movie:detailMovie}},
+ {authority:'tmdb_detail',tmdbId:'11',evidence:{confirmed:true}}
+]){
+ const rejectedDetail=bound(scored,{tmdbDetail:supplied,observation});
+ assert.equal(rejectedDetail.outcome,'needs_verification',JSON.stringify(supplied));
+ assert.equal(rejectedDetail.transition,null,JSON.stringify(supplied));
+}
+const runtimeMiss=bound(scored,{tmdbDetail:{authority:'tmdb_detail',tmdbId:'11',evidence:{movie:{...detailMovie,runtime:40}}},observation});
+assert.equal(runtimeMiss.outcome,'candidate_decision');
+assert.equal(runtimeMiss.candidateDecision.status,'duration_mismatch');
+assert.equal(runtimeMiss.reason,'detail_runtime_mismatch');
+assert.equal(runtimeMiss.transition,null);
+const yearMiss=bound(scored,{tmdbDetail:{authority:'tmdb_detail',tmdbId:'11',evidence:{movie:{...detailMovie,year:2026}}},observation});
+assert.equal(yearMiss.candidateDecision.status,'no_confident_match');
+assert.equal(yearMiss.reason,'detail_year_mismatch');
+const rival=bound(scored,{tmdbDetail:detail,observation,competitors:[{tmdbId:'438631',title:'Dune',original:'Dune',aliases:[],year:1985}]});
+assert.equal(rival.candidateDecision.status,'ambiguous');
+assert.equal(rival.reason,'detail_competing_version');
+const separatedRemake=bound(scored,{tmdbDetail:detail,observation,competitors:[{tmdbId:'438631',title:'Dune',original:'Dune',aliases:[],year:2021}]});
+assert.equal(separatedRemake.outcome,'detail_verified');
+const staleDetail=accept({score:scored,observationKey:scored.observationKey,pinnedProgrammeRunId:'run-b',observationProgrammeRunId:'run-a',discovery:current,tmdbDetail:detail,observation});
+assert.equal(staleDetail.outcome,'refused');
+assert.equal(staleDetail.reason,'stale_generation');
+assert.equal(staleDetail.transition,null);
 const held={id:'film:28nq',canonicalIdentity:'tmdb:11',externalIds:[{scheme:'tmdb',value:'11',trusted:true,conflicting:false}]};
 const before=JSON.stringify(held);
 bound(scored,{film:held,confirmation:verifiedDecision});
