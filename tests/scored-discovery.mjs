@@ -26,7 +26,7 @@ async function run(mode,item,films,response=empty){
  const live=harness(mode,response);
  seed(live.records,item,films);
  const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',live);
- return {result,records:live.records,calls:live.calls()};
+ return {result,records:live.records,calls:live.calls(),live};
 }
 
 const films={tmdb_11:dune('11',1984,137),tmdb_438631:dune('438631',2021,155)};
@@ -42,6 +42,17 @@ const preview=shadow.records.get('epg/discovery-score-preview.json').items['dune
 assert.equal(preview.legacyStatus,'verified');
 assert.equal(preview.outcome,'needs_verification');
 assert.equal(preview.scoring.acceptedTmdbId,'11');
+const status=await vm.runInContext('discoveryPipelineStatus(env)',shadow.live);
+assert.equal(status.scoringPreview.mode,'shadow');
+assert.equal(status.scoringPreview.needsConfirmation,1);
+assert.equal(status.scoringPreview.cutover,'shadow');
+assert.equal(status.scoringPreview.stale,false);
+assert.equal(status.scoringPreview.currentProgrammeRunId,'run-1');
+assert.equal(status.scoringPreview.outcomes.needs_verification,1);
+const offStatus=await vm.runInContext('discoveryPipelineStatus(env)',off.live);
+assert.equal(offStatus.scoringPreview.cutover,'off');
+assert.equal(offStatus.scoringPreview.stale,false);
+assert.equal(offStatus.scoringPreview.needsConfirmation,0);
 assert.equal(off.calls,0);
 assert.equal(shadow.calls,0);
 
@@ -56,6 +67,22 @@ assert.equal(gated.records.get('epg/discovered-films.json').tmdb_11.title,'Дю�
 assert.deepEqual(gated.records.get('epg/discovered-films.json').tmdb_11.shows,[]);
 assert.equal(gated.records.get('epg/discovery-score-preview.json').items['dune|1984'].outcome,'needs_verification');
 assert.equal(gated.calls,0);
+const gatedStatus=await vm.runInContext('discoveryPipelineStatus(env)',gated.live);
+assert.equal(gatedStatus.scoringPreview.cutover,'on');
+assert.equal(gatedStatus.scoringPreview.stale,false);
+assert.equal(gatedStatus.scoringPreview.needsConfirmation,1);
+
+const stalePreview=harness('on',empty);
+seed(stalePreview.records,candidate('Dune',1984),structuredClone(films),'run-2');
+stalePreview.records.set('epg/published-generation.json',{programmeRunId:'run-2',phase:'published'});
+stalePreview.records.set('epg/discovery-score-preview.json',{schemaVersion:1,mode:'shadow',programmeRunId:'run-1',items:{'dune|1984':{outcome:'needs_verification',reason:'accepted'}}});
+const staleStatus=await vm.runInContext('discoveryPipelineStatus(env)',stalePreview);
+assert.equal(staleStatus.scoringPreview.cutover,'on');
+assert.equal(staleStatus.scoringPreview.stale,true);
+assert.equal(staleStatus.scoringPreview.programmeRunId,'run-1');
+assert.equal(staleStatus.scoringPreview.currentProgrammeRunId,'run-2');
+assert.equal(staleStatus.scoringPreview.needsConfirmation,0);
+assert.equal(staleStatus.scoringPreview.rows,0);
 
 const collision=await run('on',candidate('Dune',null),structuredClone(films));
 assert.equal(collision.records.get('epg/discovery-resolution.json')['dune|'].status,'ambiguous');

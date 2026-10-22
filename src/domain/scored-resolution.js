@@ -90,3 +90,8 @@ function scoreFilmResolution(input){
  else if(top&&score>=AMBIGUOUS_SCORE){status='ambiguous';reason='ambiguous_margin';}
  return {scorerVersion:SCORER_VERSION,observationKey:observation.key??null,status,confidence:score,score,acceptedTmdbId,reason,considered};
 }
+function showMatchBasis(titleYear,observation,candidates){
+ const score=scoreFilmResolution({observation,candidates:candidates||[]});
+ if(score.status==='accepted')return {basis:titleYear?'title_year':'title_unique',hint:false,reason:score.reason};
+ return {basis:'title_duration',hint:true,reason:score.reason};
+}
