@@ -247,6 +247,19 @@ assert.deepEqual(shifted.records.get('programme.json').films[0].shows,[]);
 assert.equal(shifted.records.get('programme.json').films[0].title,'Дюна');
 assert.equal(shifted.records.get('epg/discovered-films.json').tmdb_11,undefined);
 
+const raced=harness('on',url=>url.includes('/movie/')?detailOf(11,'Дюна','Dune',1984,137):new Response(JSON.stringify({total_pages:1,results:[{id:11,title:'Dune',original_title:'Dune',release_date:'1984-01-01'}]})));
+seed(raced.records,candidate('Dune',1984),{});
+raced.listed=structuredClone(listed);
+raced.records.set('programme.json',{runId:'run-1',films:[structuredClone(listed)]});
+raced.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
+const racedPut=raced.env.BUCKET.put.bind(raced.env.BUCKET);
+raced.env.BUCKET.put=async(key,value,options)=>{const saved=await racedPut(key,value,options);if(key==='epg/generations/run-1/programme.json'){raced.records.set('epg/published-generation.json',{programmeRunId:'run-new',phase:'published'});raced.records.set('programme.json',{runId:'run-new',films:[{id:'lb1',title:'Новая программа',titleStatus:'reviewed',shows:[{channelId:'fresh',start:1}]}]});}return saved;};
+const racedResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[listed]},4)',raced);
+assert.equal(racedResult.stage,'programme_changed');
+assert.equal(raced.records.get('epg/discovery-resolution.json')?.['dune|1984'],undefined);
+assert.equal(raced.records.get('programme.json').films[0].title,'Новая программа');
+assert.equal(raced.records.get('programme.json').films[0].shows[0].channelId,'fresh');
+
 const moved=harness('on',url=>url.includes('/movie/')?detailOf(77,'Brand New Film','Brand New Film',1999,137):new Response(JSON.stringify({total_pages:1,results:[{id:77,title:'Brand New Film',original_title:'Brand New Film',release_date:'1999-01-01'}]})));
 seed(moved.records,candidate('Brand New Film',1999),{});
 moved.env.beforeCatalogWrite=async()=>{moved.records.set('epg/published-generation.json',{programmeRunId:'other',phase:'published'});};

@@ -136,8 +136,13 @@ async function attachWatchlistShowing(env,seenRunId,filmId,candidate){
  next.title=current.title;
  if(!Object.hasOwn(current,'canonicalIdentity'))delete next.canonicalIdentity;
  report.films[index]=next;
- if(!await publishedGenerationMatches(env,seenRunId))return false;
- if(pinned.epgPin?.programmeRunId===seenRunId)await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ if(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId)return false;
+ if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){
+  await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+  const again=await env.BUCKET.get(EPG_GENERATION_KEY),current=again?await again.json():null;
+  if(current?.programmeRunId!==seenRunId||pointer?.etag&&again?.etag!==pointer.etag)return false;
+ }
  await saveJSON(env,'programme.json',report);return true;
 }
 async function resolveDiscoveryBatch(env,report,limit=24){
