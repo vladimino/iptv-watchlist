@@ -284,4 +284,4 @@ The accepted value stayed `on:programme,on:watchlist`. Only its type changed, fr
 
 Decision: leave `on:programme` and `on:watchlist` on, now as a text variable. Do not set `on:metadata` or `on:epg` from this entry. The 808 cache-versus-dictionary names remain a separate review before any EPG path.
 
-Rollback of the type change is to set the same text again, or to restore a secret with that same value. Deleting the binding turns every path off. Do not commit the variable. Merging this document does not change the Worker.
+Rollback of the type is one configuration deployment that restores a secret with the same name and the exact value `on:programme,on:watchlist`. The current text binding already keeps both read paths on, so it stays unless that type rollback is required. Do not delete the binding in an intermediate deployment: that turns both paths off. Do not commit the variable. Merging this document does not change the Worker.
