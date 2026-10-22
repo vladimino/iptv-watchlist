@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 
 const domain=fs.readFileSync('src/domain/film-person.js','utf8'),reader=fs.readFileSync('src/domain/film-person-reader.js','utf8');
 assert.doesNotMatch(reader,/\b(fetch|import|export|BUCKET|wrangler)\b/);
+assert.doesNotMatch(reader,/resolutionActionability|candidateActivity|candidateEvidence/);
 assert.doesNotMatch(reader,/chris-pratt|Крис Прэтт/);
 for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-reader|readLifecycle|shadowParity/,file);
 
@@ -179,5 +180,13 @@ const reviewedView=readLifecycle(reviewed,NOW);
 assert.equal(titleMismatch(reviewed,'28nq'),null);
 assert.equal(reviewedView.films[0].localization.status,'reviewed');
 assert.equal(reviewedView.films[0].localization.value,'Легенда Зорро');
+
+function hotOf(store,id){return readLifecycle(store,NOW).films.find(item=>item.id==='film:'+id)?.availability.hot;}
+const windowShow={start:NOW-3600000};
+assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'empty',original:'Empty',title:'Empty',shows:[],epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'empty'),false);
+assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'legacy',original:'Legacy',title:'Legacy',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'legacy'),false);
+assert.equal(hotOf({programme:{films:[{id:'pre',original:'Pre',title:'Pre',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'pre'),true);
+assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'stale',original:'Stale',title:'Stale',shows:[windowShow],showsProgrammeRunId:'run-a',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'stale'),false);
+assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'current',original:'Current',title:'Current',shows:[windowShow],showsProgrammeRunId:'run-b'}]},filmTitles:[],personNames:[]},'current'),true);
 
 console.log('Film and Person lifecycle reader passed.');
