@@ -26,7 +26,7 @@ async function run(mode,item,films,response=empty){
  const live=harness(mode,response);
  seed(live.records,item,films);
  const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',live);
- return {result,records:live.records,calls:live.calls()};
+ return {result,records:live.records,calls:live.calls(),live};
 }
 
 const films={tmdb_11:dune('11',1984,137),tmdb_438631:dune('438631',2021,155)};
@@ -42,6 +42,11 @@ const preview=shadow.records.get('epg/discovery-score-preview.json').items['dune
 assert.equal(preview.legacyStatus,'verified');
 assert.equal(preview.outcome,'needs_verification');
 assert.equal(preview.scoring.acceptedTmdbId,'11');
+const status=await vm.runInContext('discoveryPipelineStatus(env)',shadow.live);
+assert.equal(status.scoringPreview.mode,'shadow');
+assert.equal(status.scoringPreview.needsConfirmation,1);
+assert.equal(status.scoringPreview.cutover,'off');
+assert.equal(status.scoringPreview.outcomes.needs_verification,1);
 assert.equal(off.calls,0);
 assert.equal(shadow.calls,0);
 
