@@ -184,7 +184,8 @@ assert.equal(reviewedView.films[0].localization.value,'Легенда Зорро
 function hotOf(store,id){return readLifecycle(store,NOW).films.find(item=>item.id==='film:'+id)?.availability.hot;}
 const windowShow={start:NOW-3600000};
 assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'empty',original:'Empty',title:'Empty',shows:[],epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'empty'),false);
-assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'legacy',original:'Legacy',title:'Legacy',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'legacy'),true);
+assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'legacy',original:'Legacy',title:'Legacy',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'legacy'),false);
+assert.equal(hotOf({programme:{films:[{id:'pre',original:'Pre',title:'Pre',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'pre'),true);
 assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'stale',original:'Stale',title:'Stale',shows:[windowShow],showsProgrammeRunId:'run-a',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'stale'),false);
 assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'current',original:'Current',title:'Current',shows:[windowShow],showsProgrammeRunId:'run-b'}]},filmTitles:[],personNames:[]},'current'),true);
 

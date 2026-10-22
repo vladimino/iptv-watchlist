@@ -88,7 +88,7 @@ function identityState(facts){
  if(decision&&['no_confident_match','duration_mismatch'].includes(decision.status))return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',provenance:{reason:decision.status},failureReason:decision.status,nextAction:uncertainAction(decision,facts,now),retryAt:decision.retryAt||null,attempts:decision.attempts??0});
  if(facts.tmdbId&&decision?.status==='verified')return dimensionState('identity',{status:'resolved',updatedAt:now,source:'discovery',sourceVersion:'tmdb:'+facts.tmdbId,provenance:{letterboxdId:facts.letterboxdId?String(facts.letterboxdId):null,tmdbId:String(facts.tmdbId)},nextAction:'stop'});
  if(facts.tmdbId&&!decision&&facts.letterboxdId)return dimensionState('identity',{status:'resolved',updatedAt:now,source:'watchlist',sourceVersion:'tmdb:'+facts.tmdbId,provenance:{letterboxdId:String(facts.letterboxdId),tmdbId:String(facts.tmdbId)},nextAction:'stop'});
- if(!facts.tmdbId&&(facts.discoveryPending||decision?.status==='due'||decision?.status==='missing')){const gate=suppliedDiscovery(facts);const queued=facts.discoveryPending===true&&gate?.eligible!==false||gate?.eligible===true&&gate.activity==='current';return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',provenance:{reason:decision?.status||'missing'},nextAction:queued?'continue_discovery':'wait_new_evidence',retryAt:decision?.retryAt||null,attempts:decision?.attempts??0});}
+ if(!facts.tmdbId&&(facts.discoveryPending||decision?.status==='due'||decision?.status==='missing')){const gate=suppliedDiscovery(facts);const queued=gate?.eligible===true&&gate.activity==='current';return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',provenance:{reason:decision?.status||'missing'},nextAction:queued?'continue_discovery':'wait_new_evidence',retryAt:decision?.retryAt||null,attempts:decision?.attempts??0});}
  if(facts.letterboxdId&&!facts.tmdbId)return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'letterboxd',provenance:{letterboxdId:String(facts.letterboxdId)},nextAction:'keep_letterboxd_id'});
  return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',nextAction:'wait_new_evidence'});
 }
@@ -260,8 +260,9 @@ function availabilityProjection({shows,epgLastAiring,showsProgrammeRunId,publish
  const known=Array.isArray(shows),starts=known?shows.map(show=>Number(show.start)).filter(Number.isFinite):[];
  const from=clock(now)-HOT_PAST_MS,until=clock(now)+HOT_FUTURE_MS,open=start=>start>=from&&start<until;
  const storedRun=showsProgrammeRunId||null,published=publishedProgrammeRunId||null;
- if(storedRun&&published&&storedRun!==published)return {availableUntil:null,hot:false};
- if(known)return {availableUntil:starts.length?new Date(Math.max(...starts)+AVAILABLE_MS).toISOString():null,hot:starts.some(open)};
+ const listed={availableUntil:starts.length?new Date(Math.max(...starts)+AVAILABLE_MS).toISOString():null,hot:starts.some(open)};
+ if(published)return !known||(storedRun&&storedRun!==published)?{availableUntil:null,hot:false}:listed;
+ if(known)return listed;
  if(storedRun)return {availableUntil:null,hot:false};
  return {availableUntil:null,hot:Number.isFinite(epgLastAiring)&&open(epgLastAiring)};
 }
