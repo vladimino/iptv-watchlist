@@ -155,7 +155,7 @@ Metadata actions follow the source. A record with a Letterboxd id uses `fetch_le
 
 ## Scoring result to identity gate
 
-[AIR-43](https://trello.com/c/7NY6n1Az) owns match quality. [AIR-42](https://trello.com/c/drLBuWjl) owns canonical Film identity. `src/domain/resolution-acceptance.js` is the pure gate between them. The Worker bundle loads the gate and the scorer. Discovery calls them only when `SCORED_RESOLUTION` is `shadow` or `on`. The repository leaves that variable unset. `shadow` keeps the previous decision and catalog and does not request movie details. `on` verifies an accepted id only after the Worker fetches that movie and the gate returns `detail_verified`. The score is not that confirmation. `on` does not call `linkFilms`. Unset the variable to roll back.
+[AIR-43](https://trello.com/c/7NY6n1Az) owns match quality. [AIR-42](https://trello.com/c/drLBuWjl) owns canonical Film identity. `src/domain/resolution-acceptance.js` is the pure gate between them. The Worker bundle loads the gate and the scorer. Discovery calls them only when `SCORED_RESOLUTION` is `shadow` or `on`. The repository leaves that variable unset. `shadow` keeps the legacy decision and catalog. It scores the same search hits and, when the score is accepted, the movie card, and it writes neither from that comparison. `on` verifies an accepted id only after the Worker fetches that movie and the gate returns `detail_verified`. The score is not that confirmation. `on` does not call `linkFilms`. Unset the variable to roll back.
 
 The caller passes these separate inputs:
 
