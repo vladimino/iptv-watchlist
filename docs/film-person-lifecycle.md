@@ -272,3 +272,16 @@ Authenticated Cloudflare Access reads. No sync was started. `metadata` and `epg`
 Decision: accept `on:watchlist` together with the already accepted `on:programme`. Leave both on. Do not set `on:metadata` or `on:epg` from this entry. The 808 cache-versus-dictionary names remain a separate review before any EPG path, and they are not Film or TMDB identity collisions.
 
 Rollback of watchlist alone is to set the secret back to `on:programme`. Deleting the binding turns every path off. Do not commit the variable. Merging this document does not change the Worker.
+
+### 2026-10-22 plain text binding
+
+The accepted value stayed `on:programme,on:watchlist`. Only its type changed, from a secret to text. No other binding was edited. No sync was started. `metadata` and `epg` stayed off. This entry follows the read-path rollout above; it does not rewrite that entry.
+
+- GitHub Actions run [39743931492](https://github.com/vladimino/iptv-watchlist/actions/runs/39743931492) finished successfully, including the Cloudflare deploy of `3f3721fbfbdaf6586a4c140f87224e97fadcf2c7` (PR #38) as deployment `412bf4bf-7623-4f75-a1f4-9f5ee336deae` at 2026-10-22 09:56:30 (GMT+2). The type change waited until that deploy finished.
+- The text binding deployed as `ee014d41-3b2f-4a51-bb7a-15b4c36fbc68` at 2026-10-22 10:01:23 (GMT+2), source `dash`. Settings read-back: type `plain_text`, text exactly `on:programme,on:watchlist`. The other six bindings kept their names and types: the R2 bucket, the existing plain-text variables, and the TMDB secret. `keep_vars` remains true, and the variable stays out of `wrangler.jsonc`.
+- Generation unchanged: `b8d147fd-d8ce-4fc2-ae08-5f1d2d468964`, programme and watchlist `updatedAt` 2026-10-21 17:05:51 (GMT+2), 398 films. Two authenticated reads of each path matched. Programme header `programme;on;films=398/0/0;people=7685/0/0;cache=7/0`, SHA-256 `dc469c2488e26b1e5e0b60f6904185f4fce1da5b6601478f74e81b47d08cb567`. Watchlist header `watchlist;on;films=398/0/0;people=4389/0/0;cache=7/0`, SHA-256 `648da957636430ef4732ddc02e50162d6cd9183b19bc7d59b675a54b248abb3d`.
+- The GETs did not change the etags of `programme.json` (`a51413331b706515c757a92da9064ee5`), `watchlist.json` (`f1c50695d8bba9f467f2d59e2b7b3f97`), `sync.json` (`be025a257b59b951e153c78b3fc2470a`), `titles.json` (`60062e5fc0d022384324b742aeadfbe9`), `people.json` (`9b8491e23e6e4914eac7ce23c6515b05`), or `epg/published-generation.json` (`be3d3a3e7519016a58ca95b108cb6d04`). The unchanged `sync.json` etag is the check that sync did not start.
+
+Decision: leave `on:programme` and `on:watchlist` on, now as a text variable. Do not set `on:metadata` or `on:epg` from this entry. The 808 cache-versus-dictionary names remain a separate review before any EPG path.
+
+Rollback of the type change is to set the same text again, or to restore a secret with that same value. Deleting the binding turns every path off. Do not commit the variable. Merging this document does not change the Worker.
