@@ -300,6 +300,7 @@ assert.equal(agreedPreview.legacyStatus,'verified');
 assert.equal(agreedPreview.outcome,'detail_verified');
 assert.equal(agreedPreview.comparison,'agree_verified');
 assert.equal(agreedPreview.scoring.acceptedTmdbId,'77');
+assert.equal(agreedPreview.knownBefore,false);
 
 const nearFilms={tmdb_11:{...dune('11',1984,200),aliases:['Dune']},tmdb_12:{...dune('12',1985,200),aliases:['Dune']}};
 const lost=await run('shadow',candidate('Dune',1984),nearFilms,url=>url.includes('/movie/')?detailOf(11,'Дюна','Dune',1984,137):new Response(JSON.stringify({total_pages:1,results:[{id:11,title:'Dune',original_title:'Dune',release_date:'1984-01-01'}]})));
@@ -316,4 +317,19 @@ assert.equal(riskPreview.comparison,'scored_only');
 assert.equal(riskPreview.outcome,'detail_verified');
 assert.equal(riskPreview.legacyStatus,'no_confident_match');
 assert.equal(risk.calls,2);
+
+const aaa={...candidate('Aaa',1984),key:'aaa|1984',title:'Aaa',normalizedTitle:'aaa'};
+const brand=candidate('Brand New Film',1999);
+const queued=harness('shadow',url=>{queued.urls.push(String(url));if(String(url).includes('/movie/'))return new Response('{}',{status:429,headers:{'Retry-After':'30'}});return new Response(JSON.stringify({total_pages:1,results:[]}));});
+queued.urls=[];
+seed(queued.records,aaa,{tmdb_11:{id:'tmdb_11',tmdbId:'11',title:'Aaa',original:'Aaa',year:1984,runtime:137,canonicalIdentity:'tmdb:11',aliases:['Aaa'],shows:[]}});
+queued.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[aaa,brand]});
+const queuedResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',queued);
+assert.equal(queuedResult.error,null);
+assert.equal(queuedResult.tmdbCalls,2);
+assert.equal(queued.records.get('epg/discovery-resolution.json')['aaa|1984'].status,'verified');
+assert.equal(queued.records.get('epg/discovery-resolution.json')['brand new film|1999'].status,'no_confident_match');
+assert.equal(queued.records.get('epg/discovery-score-preview.json').items['aaa|1984'].comparison,'detail_not_compared');
+assert.ok(queued.urls[0].includes('search/movie'));
+assert.ok(queued.urls.some(url=>url.includes('/movie/11')));
 console.log('Scored discovery: default path, shadow comparison, detail verification, history and stale generation passed');
