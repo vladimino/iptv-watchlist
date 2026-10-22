@@ -2,9 +2,9 @@
 
 Audit of how an EPG observation becomes `verified` and then a catalog film. This document does not change the resolver, the scorer, the acceptance gate, retry, or localization. `SCORED_RESOLUTION` stays unset. No production EPG, TMDB, resolver, enrichment, or migration was run.
 
-Facts below are what `main` at `88ecd2d` does. Problems are gaps between those facts. Proposals are not implemented.
+Facts below are what the resolver on `main` at `9436801` does. [PR 40](https://github.com/vladimino/iptv-watchlist/pull/40), merged there, changes the programme mark and the preview summary only. A year hides `≈` only when the score is `accepted`. `scoringPreview.cutover` reports the Worker mode, and a preview from another generation is `stale`. That merge does not verify a film and does not add owner review. Problems are gaps between those facts. Proposals are not implemented.
 
-Related work: [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-42](https://trello.com/c/drLBuWjl), [AIR-48](https://trello.com/c/rVf8rRoJ), [AIR-49](https://trello.com/c/YNaLFwtW), [PR 35](https://github.com/vladimino/iptv-watchlist/pull/35), [PR 36](https://github.com/vladimino/iptv-watchlist/pull/36), [PR 37](https://github.com/vladimino/iptv-watchlist/pull/37).
+Related work: [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-42](https://trello.com/c/drLBuWjl), [AIR-48](https://trello.com/c/rVf8rRoJ), [AIR-49](https://trello.com/c/YNaLFwtW), [AIR-53](https://trello.com/c/gkuy1awG), [PR 35](https://github.com/vladimino/iptv-watchlist/pull/35), [PR 36](https://github.com/vladimino/iptv-watchlist/pull/36), [PR 37](https://github.com/vladimino/iptv-watchlist/pull/37).
 
 ## 1. Legacy verification, as implemented
 
@@ -151,7 +151,7 @@ The smallest safe model, after a separate agreement, is:
 1. Keep same-key verified decisions and owner review as confirmations. They do not create the first verification.
 2. For a first id, the Worker fetches `/movie/{id}` itself. The gate accepts `tmdb_detail` only when the fetched id matches, a title or alias matches exactly, the year is within one when the EPG row has a year, the runtime is inside the legacy tolerance, and no other indexed film with that exact title has a compatible year. Persist those fetched fields. Do not accept a caller-supplied flag.
 3. Alias reuse without a new fetch is allowed only when the stored film's id was previously verified by that detail check or by an owner review. A Letterboxd `data-tmdb-id` alone stays a candidate for the detail check, not a confirmation. This is stricter than today's alias shortcut and should be explicit if adopted.
-4. Ambiguous, contradicted, and failed runtime rows stay on the AIR-48 uncertain path. They are the manual residue, not the common case.
+4. Ambiguous, contradicted, and failed runtime rows stay on the AIR-48 uncertain path. They are the manual residue, not the common case. Section 6 is how an owner label on that residue becomes evidence for later matches.
 5. `shadow` must score the same evidence legacy used, including search hits and, when legacy fetched details, the detail runtime. Today's shadow score of an empty alias list cannot answer scenario A.
 
 That is a proposal. It is not implemented here.
@@ -175,9 +175,49 @@ Do not run this against production as part of this pull request. On a non-produc
 
 This audit is accepted when the answers below are agreed, not when `on` is enabled and not when an admin is built. Rollback of this pull request is deleting this document. No data moves.
 
-## 6. Human review, proposed and not built
+## 6. Owner-labeled identity, proposed and not built
 
-[AIR-53](https://trello.com/c/gkuy1awG) is the title and alias admin. Its card says that workflow must not change canonical Film identity. Identity confirm, reject, and revoke are a separate admin capability. This section specifies that capability. It does not add a screen, an API, or a write.
+An owner says which TMDB film one EPG showing was. That label is ground truth for that showing, and it is the sample from which an explainable match rule can be proposed. The earlier draft of this section stopped the label at that one showing. This section replaces that stop.
+
+The invariant is: one label does not become a global title-to-TMDB map. The same label does inform other observations, after the engine shows which evidence actually distinguishes the edition, the owner sees the impact, and only the approved current-generation rows change.
+
+[AIR-53](https://trello.com/c/gkuy1awG) remains the title and alias admin. Its card says that workflow must not change canonical Film identity. This cycle is a separate later task. It does not add a screen, an API, or a write, and it does not belong in the scored-resolver pull requests.
+
+### Cycle
+
+| Step | Who moves it | What is stored | What may change on the current generation |
+| --- | --- | --- | --- |
+| 1. Label | Owner | One ground-truth assertion for one showing | That showing's attachment, and only when the owner also chooses "Apply to this showing" |
+| 2. Profile | Engine | A proposed rule: the predicates that distinguish the named film, with an explanation | Nothing |
+| 3. Compare | Engine | A dry-run in three piles: same discriminating evidence, title overlap only, conflict | Nothing. This step does not write |
+| 4. Apply matching evidence | Owner confirms an enumerated list | One application record citing the rule version, the assertion ids, and the observation keys | Decisions and current show attachments for those keys only |
+| 5. Save a future rule | Owner | The rule version becomes active, as a confidence hint or as trusted linking | Nothing yet. A later current observation is the first thing it can resolve |
+| 6. Recognize later | Worker, from the stored rule | A new per-key decision citing the rule version | A current observation whose stored fields match the active predicates and do not also match another film |
+| 7. Revoke | Owner | A new history row pointing at the assertion or the rule | Current links that cite the revoked id return to the previous answer. Archived observations stay as stored |
+
+"Apply to this showing", "Apply to matching evidence", and "Save as a future recognition rule" are three different owner actions. The first corrects one link. The second corrects the listed current links. The third teaches the next observation. Doing the first does not imply the second or the third.
+
+### Ground truth and a learned rule
+
+| | Ground-truth assertion | Learned rule |
+| --- | --- | --- |
+| What the owner claimed | This showing was this TMDB film | Nothing directly. The rule is derived |
+| Provenance | Reviewer, time, reason, published generation run id, observation key, `channelId`, start | Rule version, the assertion ids that support it, the predicates, the explanation |
+| Scope | That showing. The observation key is recorded so the queue can find its siblings | Inferred from the predicates that separate this film from the other candidates. A channel may be one predicate. It is not required. A missing year is a recorded feature, not a hole to fill |
+| Strength | Enough to attach that showing and to support a candidate rule | `proposed` until the owner saves it. Saved rules are either `confidence` or `trusted`. `confidence` only explains and sorts the queue. `trusted` may link a later observation |
+| Counterexamples | A second assertion that names another TMDB id for the same showing | Stored on the rule when another indexed film satisfies the same predicates |
+
+A single assertion is enough to build a proposed rule and a dry-run. It is not enough to link every other row that shares the title. The enumerated preview, once the owner confirms it, links those current keys and stops there. Trusted linking of a later observation starts only when the owner saves the rule in that mode. The preview lists keys. It does not authorize every current and future row with this title.
+
+### What the profile is allowed to use
+
+The profile reads stored fields. It does not invent a year, a description, or a supplier id.
+
+Today a discovery item stores the candidate key, raw titles, normalized title, year, durations, one description, and shows with channel, start, end, and EPG title. A programme showing also stores `basis` and `matchReason`. A supplier or programme id is used when a snapshot has stored one. Current show records do not have that id, so a missing id is unseen. The description is one string on the candidate, shared by its shows. A rule that needs a per-showing description waits until the snapshot keeps one. Until then, synopsis agreement means agreement of that stored candidate description.
+
+The profile also sees the indexed films that share the normalized title: TMDB id, year, runtime, aliases, and the provenance already recorded for each id. Airings already on the candidate tell it whether the same description and duration recur on more than one channel.
+
+Predicates come from the overlap that one film has and the others lack. Same title plus the same description plus a duration in the labeled band can be the rule, across channels. Title alone is shown in the dry-run as overlap and is not an eligible predicate set. A year token that points at another edition is a contrast, recorded on the rule as a counterexample condition.
 
 ### Resident Evil / Обитель зла
 
@@ -185,73 +225,108 @@ No production copy was read for this audit. Dashboard GETs are not a safe read: 
 
 On a non-production copy of the published generation, and only that copy, record the following and label anything missing as unseen:
 
-1. Every discovery item whose normalized title is the normalized form of `Обитель зла`, `Resident Evil`, or another alias already stored on a candidate. Fields: `key`, raw titles, year, durations, `seenInLatestSnapshot`, `lastSeenAt`, `lastSeenProgrammeRunId`, and each show's channel id, channel name, start, and end.
-2. The decision on each of those keys: status, `tmdbId`, `identitySource`, attempts, `retryAt`, `terminalReason`, evidence key. Do not treat a verified row for a different key as this row's decision.
+1. Every discovery item whose normalized title is the normalized form of `Обитель зла`, `Resident Evil`, or another alias already stored on a candidate. Fields: `key`, raw titles, year, durations, description, `seenInLatestSnapshot`, `lastSeenAt`, `lastSeenProgrammeRunId`, and each show's channel id, channel name, start, and end.
+2. The decision on each of those keys: status, `tmdbId`, `identitySource`, attempts, `retryAt`, `terminalReason`, evidence key. A verified row for a different key is not this row's decision.
 3. Catalog and watchlist rows whose title, original title, or alias normalizes to the same string. Fields: local id, `tmdbId`, `canonicalIdentity`, year, runtime, and whether `catalogOnly` was set when the row was passed into `scanEPG`.
-4. Programme showings already attached to a watchlist film for those titles, including `basis` (`title_year` or `title_duration`). That basis is the legacy label, not a scored reason.
+4. Programme showings already attached to a watchlist film for those titles, including `basis` and `matchReason`. After PR 40, `title_year` and `title_unique` mean the score was `accepted`. Any other attached showing stays `title_duration` and keeps the scored reason. A year in the title is not, by itself, an unmarked showing.
 5. Which legacy branch would apply to each key if the resolver ran again with the flag unset: alias shortcut, movie-detail path, or uncertain. Do this on paper from the rules in section 1. Do not run the resolver.
-6. If both a 2002-year row and a later-year row appear, keep them separate keys. A missing year is a third key, not proof of either film. Do not fill a missing year from a catalogue.
+6. If both a 2002-year row and a later-year row appear, keep them separate keys. A missing year is a third key. Do not fill a missing year from a catalogue.
 
-Confirmed evidence is only what those stored fields say. A hypothesis is any claim about which film aired, which channel carried it, or that a 2026 feature exists on this schedule. Hypotheses stay out of the decision.
+Confirmed evidence is only what those stored fields say. A hypothesis is any claim about which film aired, which channel carried it, or that a 2026 feature exists on this schedule. Hypotheses stay out of the assertion and out of the rule.
 
-### Review queue
+That checklist is also the acceptance scenario for the cycle, still without a production read and still without assuming a 2026 film aired:
 
-The queue is a list of observations, not a list of Films. One row is one candidate key plus the published generation's shows. A Film is linked beside it only when a catalog or watchlist row is already addressed by that key's own decision.
+1. The owner selects one stored showing and names TMDB film X, the 2002 film. The assertion copies that showing's stored year token, duration, description, channel, and raw title. An empty year stays empty.
+2. The profile says which of those stored fields pick out X among the indexed films that share the title. A different year token, a duration outside the labeled band, or a different stored description is a contrast. An absent supplier id stays unseen.
+3. The dry-run sorts the other observations into the three piles. The conflict pile is not offered for relink. The title-only pile is visible and is not eligible. The discriminating pile is an enumerated list of current-generation keys.
+4. The owner may apply that enumerated list, save the predicates as a future rule, or both. Archived observations can appear as support or as counterexamples. Their stored facts stay.
+5. A later observation that repeats the discriminating evidence can be resolved by the active rule. An observation that the same predicates would also assign to another indexed film stays in review, with the rule's confidence lowered and the conflict named.
+6. If the label was wrong, revoke reverses the current links that cite it. The revoked assertion cannot remain as a silent rule over later showings.
 
-Rows worth review, in order:
+### Propagation
 
-1. `on` or shadow preview says `needs_verification` while legacy status is `verified` or would be. Coverage risk.
-2. Scorer `contradicted` or `ambiguous`, or legacy `ambiguous` / `duration_mismatch` / `no_confident_match`, and more than one indexed film shares the title.
-3. A showing whose `basis` is `title_duration`.
-4. An owner flag that a verified film was the wrong version.
+The compare step uses this table. "Eligible" means the row may appear in the enumerated preview. It does not mean the engine writes before the owner confirms that preview.
 
-Group by normalized title, then by year, then by generation. Do not merge two years into one queue card. Inside a card, show the EPG raw title, channel, start, end, duration, the score, the considered TMDB ids with year and runtime distance, and the provenance of each id (search, movie detail, Letterboxd page, alias, owner). Priority is current shows first, then hot candidates, then the rest. Historical rows stay listed and are not a reason to call TMDB.
-
-### Scoped owner decisions
-
-Each decision names a scope. A wider scope never inherits a narrower one in reverse, and a title alone is never a global TMDB map.
-
-| Decision | Scope | Effect |
+| Stored situation | Preview outcome | Why |
 | --- | --- | --- |
-| Confirm this showing | One `channelId` and start, on one generation | That showing may attach to the named Film. Other showings of the same title do not |
-| Confirm this observation | One candidate key | That key may become `verified` for the named TMDB id. Other keys do not |
-| Confirm this fingerprint | One stored fingerprint id | Later prediction may treat that fingerprint as reviewed. It does not verify EPG identity |
-| Narrow rule | One channel, plus normalized title, plus year or an explicit year-absent flag, plus a runtime band | Applies only to showings that match every part. Requires an expiry |
-| Canonical alias | One Film id and one alias string | Adds the alias on that Film. It does not verify every future EPG row that uses the words |
-| Reject this candidate | One candidate key and one TMDB id | That pair stays unresolved. It does not delete the Film or block a different id |
-| None of these | The queue card | No write |
-| Defer | The queue card | Hide until a date. No identity write |
-| Revoke or correct | The id of an earlier owner decision | See below |
+| Same supplier or programme id as the labeled showing, when the snapshot stored that id | Eligible for the current generation | The id is stronger than the title. It is still listed before any write |
+| Same normalized title, same stored description, duration inside the labeled band, on any channel | Eligible. Channel is not required | This is the combination that separates the edition |
+| Same normalized title only | Shown as overlap. Not eligible | A title map would attach remakes and yearless rows together |
+| Year token that names another edition, or a second indexed film inside one year of that token | Conflict. Not eligible. The rule records it as a counterexample | The 2002 label and a later-year row stay different films |
+| Duration outside the labeled band | Not eligible. If the proposed predicates had ignored duration, the profile adds the band or refuses the predicate set | A matching title with a different cut is a different claim |
+| Row in an older generation, or a historical or expired candidate | Cited in the explanation. Not eligible for a write | Archived facts stay. AIR-48 still decides what is current |
+| A new published generation | The active rule is evaluated again against the new observations. Previous show attachments are not copied forward | The generation pin is the same guard as `saveDiscoveredFilms` |
+| The predicates also fit another indexed film | No eligible rows. The queue reopens with both films named | One label must not promote both editions |
 
-Precedence is the narrowest matching scope. A showing confirmation beats an observation confirmation, which beats a narrow rule. A narrow rule beats an automatic movie-detail result only inside its scope. Alias reuse and Letterboxd ids do not beat an owner reject for that same key and id. Two owner decisions that name different TMDB ids for the same showing are a collision: apply neither, and keep both in the history.
+A `proposed` rule never writes. A `confidence` rule never writes identity. A `trusted` rule writes only for a current observation, only when the predicates match, only when the conflict row above does not fire, and only when the generation it read is still the published one. An approved preview writes only the keys named in that preview.
 
-Expiry: a showing decision is void when that start is no longer in the published generation's shows. An observation decision stays until revoked. A narrow rule stores `expiresAt` and the generation run id it was written against. It does not apply on a later generation unless it is still unexpired and every scope field still matches. There is no default of "forever for this title".
+### Contradiction and a wrong label
 
-### Correction and replay
+When the profile can explain both the 2002 film and another indexed film with the same predicates, it does not pick the owner's film by default. The dry-run has no eligible pile. The queue shows both candidates. Saving the rule in `trusted` mode is refused until the predicates gain a contrast that one film fails.
 
-An owner decision is an append-only record: reviewer, time, scope, chosen TMDB id or reject, evidence ids, and a reason string. Revoke appends a new record that points at the earlier id. It does not edit the old one.
+Revoke appends a record. It does not edit the assertion. Replay walks the history to the latest non-revoked answer. Current show attachments and the availability derived from the published generation follow that answer. Fingerprints, prediction history, aliases, reviewed titles, and archived observations stay. A replay that sees a different published generation run id writes nothing.
 
-Replay builds the current answer by walking that history to the latest non-revoked decision whose scope still matches. Current shows and the availability derived from the published generation may be rewritten to match that answer. Fingerprint files, prediction history, and the revoked decision stay. A replay refuses to write when the generation run id it read is no longer the published one, the same guard as `saveDiscoveredFilms`.
+Two assertions that name different TMDB ids for the same showing are both kept. Neither is applied, and neither can support a trusted rule, until one is revoked.
 
-### How the gate would learn about an owner
+### Queue and the three actions
 
-The automatic authorities stay distinct:
+The queue is a list of observations, not a list of Films. One card is one candidate key in one generation, with that generation's shows. A Film is shown beside it when this key's own decision, or a catalog row already addressed by that decision, has an id.
 
-| Authority | Evidence that is real | What it must not be |
+Order inside the queue:
+
+1. An owner mark that a verified film was the wrong edition.
+2. `needs_verification` in the preview while the legacy status is `verified` or would be.
+3. `contradicted` or `ambiguous`, or a legacy `ambiguous`, `duration_mismatch`, or `no_confident_match`, when more than one indexed film shares the title.
+4. A showing whose `basis` is `title_duration`.
+
+Group by normalized title, then by year token, then by generation. Two year tokens stay two cards. A missing year stays its own card. On the card: raw title, channel, start, end, duration, stored description, score, considered TMDB ids with year and runtime distance, and the provenance of each id. Current shows come before hot candidates. Historical rows stay visible and are not a reason to call TMDB.
+
+The card offers:
+
+- Apply to this showing. Writes the assertion and that showing's current attachment.
+- Apply to matching evidence, with the count from the dry-run. Opens the three piles first. Confirm writes only the eligible keys.
+- Save as a future recognition rule. Asks for `confidence` or `trusted`, and shows the predicates and the counterexamples.
+- Reject this TMDB id for this observation. That pair stays unresolved. The Film is kept. A different id can still be labeled.
+- Defer. Hides the card until a date. No identity write.
+- Revoke. Available on an assertion or a rule that already exists.
+
+### Authorities
+
+`verifiedConfirmation` stays on the same observation key. Applying a preview to a second key writes a new decision on that second key. It does not teach the gate to treat a sibling key's `verified` row as confirmation.
+
+| Authority | Evidence the Worker loads | What a request body cannot substitute |
 | --- | --- | --- |
-| `tmdb_detail` | A movie payload this Worker fetched | A score, or titles copied from the search response |
+| `tmdb_detail` | The movie payload this Worker fetched | A score, or titles copied from search |
 | Letterboxd mapping | `data-tmdb-id` on a watchlist page | A `verified` decision |
-| Verified alias | This candidate key's own `verified` decision, or a Film id that decision already created | Any other key with the same TMDB id |
-| Owner scope | The append-only record above, loaded by id from storage | An object the caller assembled in the request |
+| Verified alias | This candidate key's own `verified` decision | Another key with the same TMDB id |
+| Owner assertion | The stored assertion id, not revoked, for this showing | `authority: 'owner'` assembled by the caller |
+| Active rule | The stored rule version, its predicates, and its support assertion ids | A predicate list sent in the request |
 
-The gate checks the owner record's scope against the observation and the showing, and checks that the record is not revoked. A request body that says `authority: 'owner'` without that stored id does not pass. AIR-48 still decides whether the candidate is current and whether attempts are exhausted. AIR-49 would store the owner log, the score, and the Film as separate rows.
+The gate accepts the owner assertion for the labeled observation. Collision checks still run per target film. AIR-48 still decides whether a candidate is current, historical, or terminal, and whether attempts are exhausted. A propagated decision on a current key is that key's own decision and cites the application record. AIR-49 stores the assertion log, the rule versions, the application records, and the score evidence as separate rows from the Film.
 
-### What AIR-53 does not absorb
+### Later task
 
-AIR-53 reviews the preferred Russian title and aliases. It must keep that boundary. Identity review is a later task: queue, scoped decisions, revoke, and replay as specified here. It should not be added to the scored resolver pull requests. Persistence is D1-shaped only as a sketch: one table for owner decisions, one for score evidence, the Film table unchanged. Tests for that future task are the scope table, a collision of two owner ids, a revoke that restores the previous show, and a stale generation that does not write. None of those tests exist yet, and this pull request does not add them.
+Identity review is not added to AIR-53 and not added to the scored resolver. The D1-shaped sketch is four stores: assertions, versioned rules, application records, and score evidence. The Film table stays as it is.
+
+Tests for that task, none of which this pull request adds:
+
+- One assertion does not verify every key that shares the title.
+- Title-only overlap is visible and not eligible.
+- The same title, stored description, and duration band are eligible across channels.
+- A conflicting year token is a counterexample and is not eligible.
+- A stored supplier id, when present, is eligible and is still previewed before a write.
+- A duration outside the band is not eligible.
+- The dry-run writes nothing.
+- Confirming the preview writes only the enumerated current-generation keys.
+- A new generation does not copy the previous show attachments.
+- A changed published generation refuses the write.
+- Predicates that also fit another indexed film create no eligible rows and cannot be saved as `trusted`.
+- Revoke reverses current links that cite the assertion and leaves archived observations stored as they were.
+- A caller-shaped `authority: 'owner'` without a stored assertion id does not pass.
+- The AIR-53 title path does not write `canonicalIdentity`.
 
 ## Answers
 
 1. A new film becomes `verified` only if some step other than the score writes that decision. Today the legacy movie-detail check is that step, and the scored `on` path never runs it. An automatic scored path needs the Worker to perform that detail fetch and a local collision check, then write `verified` and `tmdb_<id>` under a new gate authority. Same-key reuse and owner review do not create the first verification.
 2. The minimum change that preserves legacy coverage is to keep that detail fetch and the catalog insert on the success path, and to make `shadow` record those same inputs. Leaving `on` as it is will score some new titles as `accepted` and then never verify them. Alias reuse must be classified as either a prior verification or a fresh claim, or `on` will also drop new titles for films the catalog already knows.
-3. What the automatic path still cannot decide is a scoped owner review, specified in section 6 and not built. It confirms one showing, one observation, or one narrow rule. It does not turn one ambiguous title into a global TMDB map. [AIR-53](https://trello.com/c/gkuy1awG) stays the title admin and does not take this identity queue.
+3. The residue that the automatic path cannot decide follows the cycle in section 6, which is not built. An owner label is ground truth for one showing and the sample for a proposed rule. Other observations change only after a dry-run and an enumerated confirmation. A title alone does not become a TMDB map. [AIR-53](https://trello.com/c/gkuy1awG) stays the title admin and does not take this queue.
