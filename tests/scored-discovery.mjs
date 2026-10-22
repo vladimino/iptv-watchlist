@@ -260,6 +260,23 @@ assert.equal(raced.records.get('epg/discovery-resolution.json')?.['dune|1984'],u
 assert.equal(raced.records.get('programme.json').films[0].title,'Новая программа');
 assert.equal(raced.records.get('programme.json').films[0].shows[0].channelId,'fresh');
 
+const afterCheck=harness('on',url=>url.includes('/movie/')?detailOf(11,'Дюна','Dune',1984,137):new Response(JSON.stringify({total_pages:1,results:[{id:11,title:'Dune',original_title:'Dune',release_date:'1984-01-01'}]})));
+seed(afterCheck.records,candidate('Dune',1984),{});
+afterCheck.listed=structuredClone(listed);
+afterCheck.records.set('programme.json',{runId:'run-1',films:[structuredClone(listed)]});
+afterCheck.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
+let stagedProgramme=false,publicWrites=0;
+const afterGet=afterCheck.env.BUCKET.get.bind(afterCheck.env.BUCKET),afterPut=afterCheck.env.BUCKET.put.bind(afterCheck.env.BUCKET);
+afterCheck.env.BUCKET.put=async(key,value,options)=>{if(key==='programme.json')publicWrites++;if(key==='epg/generations/run-1/programme.json')stagedProgramme=true;return afterPut(key,value,options);};
+afterCheck.env.BUCKET.get=async key=>{const object=await afterGet(key);if(key==='epg/published-generation.json'&&stagedProgramme){const seen=await object.json();afterCheck.records.set('epg/published-generation.json',{programmeRunId:'run-new',phase:'published'});afterCheck.records.set('programme.json',{runId:'run-new',films:[{id:'lb1',title:'Новая программа',titleStatus:'reviewed',shows:[{channelId:'fresh',start:1}]}]});return {etag:object.etag,json:async()=>seen};}return object;};
+const afterResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[listed]},4)',afterCheck);
+assert.equal(afterResult.stage,'programme_changed');
+assert.equal(publicWrites,0);
+assert.equal(afterCheck.records.get('epg/discovery-resolution.json')?.['dune|1984'],undefined);
+assert.equal(afterCheck.records.get('programme.json').films[0].title,'Новая программа');
+assert.equal(afterCheck.records.get('programme.json').films[0].shows[0].channelId,'fresh');
+assert.equal(afterCheck.records.get('epg/generations/run-1/programme.json').films[0].shows[0].channelId,'n');
+
 const moved=harness('on',url=>url.includes('/movie/')?detailOf(77,'Brand New Film','Brand New Film',1999,137):new Response(JSON.stringify({total_pages:1,results:[{id:77,title:'Brand New Film',original_title:'Brand New Film',release_date:'1999-01-01'}]})));
 seed(moved.records,candidate('Brand New Film',1999),{});
 moved.env.beforeCatalogWrite=async()=>{moved.records.set('epg/published-generation.json',{programmeRunId:'other',phase:'published'});};

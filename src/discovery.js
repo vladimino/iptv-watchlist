@@ -142,6 +142,7 @@ async function attachWatchlistShowing(env,seenRunId,filmId,candidate){
   await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
   const again=await env.BUCKET.get(EPG_GENERATION_KEY),current=again?await again.json():null;
   if(current?.programmeRunId!==seenRunId||pointer?.etag&&again?.etag!==pointer.etag)return false;
+  return true;
  }
  await saveJSON(env,'programme.json',report);return true;
 }
