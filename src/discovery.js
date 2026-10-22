@@ -53,11 +53,15 @@ function scoredResolutionMode(env){const value=typeof env?.SCORED_RESOLUTION==='
 const DISCOVERY_SCORE_PREVIEW_KEY='epg/discovery-score-preview.json';
 function filmScorerCandidate(film){return {tmdbId:String(film.tmdbId),title:film.title||'',original:film.original||'',aliases:film.aliases||[],year:film.year??null,runtime:film.runtime??null,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId};}
 function knownScorerCandidates(aliasIndex,candidate){return [...(aliasIndex.get(candidate.normalizedTitle)?.values()||[])].filter(film=>film?.tmdbId).map(filmScorerCandidate);}
-function verifiedConfirmation(decisions,tmdbId){const id=String(tmdbId);return Object.values(decisions).some(decision=>decision?.status==='verified'&&String(decision.tmdbId)===id)?{authority:'verified_decision',tmdbId:id,evidence:{decision:{status:'verified',tmdbId:id}}}:null;}
+function verifiedConfirmation(decision,tmdbId){const id=String(tmdbId);return decision?.status==='verified'&&String(decision.tmdbId)===id?{authority:'verified_decision',tmdbId:id,evidence:{decision:{status:'verified',tmdbId:id,observationKey:decision.observationKey??null}}}:null;}
 function discoveryGateFacts(candidate,decision,now){const evidenceKey=candidateEvidence(candidate),same=!decision?.evidenceKey||decision.evidenceKey===evidenceKey;return {eligible:resolutionActionability(candidate,decision,now),activity:candidateActivity(candidate,now),evidenceChanged:!!decision&&!same,terminal:!!(decision?.terminalReason&&same)};}
 function gateScoredCandidate(env,source,candidate,score,decisions,films,now){
  const tmdbId=score.acceptedTmdbId==null?null:String(score.acceptedTmdbId),film=tmdbId?films['tmdb_'+tmdbId]||null:null,decision=decisions[candidate.key];
- return acceptScoredIdentity({score,observationKey:candidate.key,pinnedProgrammeRunId:env.epgPin?.programmeRunId||source.programmeRunId||null,observationProgrammeRunId:source.programmeRunId||null,discovery:discoveryGateFacts(candidate,decision,now),film,confirmation:tmdbId?verifiedConfirmation(decisions,tmdbId):null,appliedObservationKeys:decision?.status==='verified'&&String(decision.tmdbId)===tmdbId?[candidate.key]:[]});
+ return acceptScoredIdentity({score,observationKey:candidate.key,pinnedProgrammeRunId:env.epgPin?.programmeRunId||source.programmeRunId||null,observationProgrammeRunId:source.programmeRunId||null,discovery:discoveryGateFacts(candidate,decision,now),film,confirmation:tmdbId?verifiedConfirmation(decision,tmdbId):null,appliedObservationKeys:decision?.status==='verified'&&String(decision.tmdbId)===tmdbId?[candidate.key]:[]});
+}
+function recordNeedsVerification(decisions,candidate,score,now=Date.now()){
+ const evidenceKey=candidateEvidence(candidate),previous=decisions[candidate.key],same=previous?.status==='needs_verification'&&previous.evidenceKey===evidenceKey,attempts=same?(previous.attempts||0)+1:1,terminal=attempts>=DISCOVERY_ATTEMPT_LIMIT;
+ decisions[candidate.key]={status:'needs_verification',attempts,evidenceKey,lastAttemptAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),retryAt:terminal?null:new Date(now+Math.min(7,2**(attempts-1))*86400000).toISOString(),terminalReason:terminal?'awaiting_confirmation':null,scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null}};
 }
 function scorePreview(candidate,score,gate,legacyStatus){return {observationKey:candidate.key,outcome:gate.outcome,reason:gate.reason,legacyStatus:legacyStatus??null,scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,confidence:score.confidence,score:score.score,acceptedTmdbId:score.acceptedTmdbId}};}
 async function scoredSearchCandidates(query,candidate){
@@ -131,6 +135,7 @@ async function resolveDiscoveryChunk(env,report,limit){
     const gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now);
     preview[candidate.key]=scorePreview(candidate,score,gate,null);
     if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now);
+    else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now);
    }else{
    let shadowScore=null,shadowGate=null;
    if(mode==='shadow'){shadowScore=scoreFilmResolution({observation:{key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:candidate.durations},candidates:knownScorerCandidates(aliasIndex,candidate)});shadowGate=gateScoredCandidate(pinned,source,candidate,shadowScore,decisions,films,now);}
