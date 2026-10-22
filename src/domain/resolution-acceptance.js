@@ -1,4 +1,4 @@
-// Scoring result to identity gate. Pure and storage-neutral. The Worker does not load or call this file.
+// Scoring result to identity gate. Pure and storage-neutral. Discovery loads it when SCORED_RESOLUTION is shadow or on.
 function scoringEvidence(score){
  return {scorerVersion:score.scorerVersion??null,status:score.status??null,reason:score.reason??null,confidence:score.confidence??null,score:score.score??null,acceptedTmdbId:score.acceptedTmdbId??null,considered:score.considered||[]};
 }
@@ -37,6 +37,25 @@ function trustedConfirmation(confirmation,tmdbId){
  if(confirmation.authority==='owner')return evidence.authority==='owner'&&evidence.reviewed===true&&String(evidence.tmdbId)===tmdbId;
  return false;
 }
+function detailNorm(value){return String(value??'').normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();}
+function detailNumber(value){if(value==null||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null;}
+function detailTitles(movie){return [movie?.title,movie?.original,...(movie?.aliases||[])].filter(Boolean);}
+function detailYearCompatible(observationYear,candidateYear){return observationYear==null||candidateYear==null||Math.abs(observationYear-candidateYear)<=1;}
+function verifyTmdbDetail(detail,tmdbId,observation,competitors){
+ const movie=detail?.evidence?.movie;
+ if(detail?.authority!=='tmdb_detail'||!movie||typeof movie!=='object')return {ok:false,hold:'needs',reason:'detail_incomplete'};
+ if(String(movie.id)!==tmdbId)return {ok:false,hold:'needs',reason:'detail_id_mismatch'};
+ const normalized=detailNorm(observation?.normalizedTitle),matched=detailTitles(movie).find(title=>detailNorm(title)===normalized);
+ if(!matched)return {ok:false,hold:'candidate',status:'no_confident_match',reason:'detail_title_mismatch'};
+ const observationYear=detailNumber(observation?.year),releaseYear=detailNumber(movie.year),runtime=detailNumber(movie.runtime);
+ if(observationYear!=null&&(releaseYear==null||Math.abs(observationYear-releaseYear)>1))return {ok:false,hold:'candidate',status:'no_confident_match',reason:'detail_year_mismatch'};
+ const durations=[...(observation?.durations||[])].map(detailNumber).filter(value=>value!=null);
+ const tolerance=observationYear==null?Math.max(10,runtime*0.12):Math.max(25,runtime*0.2);
+ if(runtime==null||runtime<=0||!durations.some(duration=>Math.abs(runtime-duration)<=tolerance))return {ok:false,hold:'candidate',status:'duration_mismatch',reason:'detail_runtime_mismatch'};
+ const rival=(competitors||[]).find(film=>String(film?.tmdbId)!==tmdbId&&detailTitles(film).some(title=>detailNorm(title)===normalized)&&detailYearCompatible(observationYear,detailNumber(film?.year)));
+ if(rival)return {ok:false,hold:'candidate',status:'ambiguous',reason:'detail_competing_version'};
+ return {ok:true,runtime,releaseYear,matchedTitle:detailNorm(matched)};
+}
 function acceptScoredIdentity(input={}){
  const score=input.score||{},observationKey=input.observationKey??null,scoredKey=score.observationKey??null;
  const pinned=input.pinnedProgrammeRunId??null,observed=input.observationProgrammeRunId??null;
@@ -59,6 +78,12 @@ function acceptScoredIdentity(input={}){
  const confirmed=trustedConfirmation(input.confirmation,tmdbId);
  if(confirmed&&film?.canonicalIdentity==='tmdb:'+tmdbId&&(input.appliedObservationKeys||[]).includes(observationKey))return {...result,outcome:'already_applied',reason:'already_applied'};
  if(!discoveryAuthorizes(discovery))return {...result,outcome:'refused',reason:'not_actionable'};
+ if(input.tmdbDetail){
+  const detail=verifyTmdbDetail(input.tmdbDetail,tmdbId,input.observation,input.competitors);
+  if(!detail.ok&&detail.hold==='candidate')return {...result,outcome:'candidate_decision',reason:detail.reason,candidateDecision:{status:detail.status,observationKey,reason:detail.reason,evidence:scoringEvidence(score),provenance:{...provenance,authority:'tmdb_detail'}}};
+  if(!detail.ok)return {...result,outcome:'needs_verification',reason:detail.reason};
+  return {...result,outcome:'detail_verified',reason:'tmdb_detail',transition:{kind:'identity_transition',observationKey,tmdbId,programmeRunId:pinned,provenance,authority:'tmdb_detail',detail:{movieId:tmdbId,runtime:detail.runtime,releaseYear:detail.releaseYear,matchedTitle:detail.matchedTitle}}};
+ }
  if(!confirmed)return {...result,outcome:'needs_verification',reason:'needs_verification'};
  return {...result,outcome:'trusted_acceptance',reason:'confirmed_identity',transition:{kind:'identity_transition',observationKey,tmdbId,programmeRunId:pinned,provenance,authority:input.confirmation.authority}};
 }
