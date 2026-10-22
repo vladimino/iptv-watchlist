@@ -66,16 +66,31 @@ function mergeAliases(existing=[],incoming=[]){
  }
  return out;
 }
+function suppliedDiscovery(facts){
+ const gate=facts?.discovery;
+ if(!gate||typeof gate!=='object')return null;
+ const activity=gate.activity==='current'||gate.activity==='historical'||gate.activity==='expired'?gate.activity:null;
+ return {eligible:gate.eligible===true?true:gate.eligible===false?false:null,activity,evidenceChanged:gate.evidenceChanged===true?true:gate.evidenceChanged===false?false:null};
+}
+function uncertainAction(decision,facts,now){
+ const gate=suppliedDiscovery(facts);
+ if(gate?.activity==='historical'||gate?.activity==='expired')return 'wait_new_evidence';
+ if(decision?.terminalReason&&gate?.evidenceChanged!==true)return 'wait_new_evidence';
+ if(inFuture(decision?.retryAt,now)&&gate?.evidenceChanged!==true)return 'wait_retry';
+ if(gate?.eligible===true&&gate.activity==='current')return 'continue_discovery';
+ return 'wait_new_evidence';
+}
 function identityState(facts){
  const now=facts.now??null,conflicts=uniqueIds(facts.conflictingTmdbIds),decision=facts.decision||null;
  if(decision?.status==='excluded_nonfilm')return null;
  if(conflicts.length>1)return dimensionState('identity',{status:'ambiguous',updatedAt:now,source:'discovery',provenance:{conflictingTmdbIds:conflicts,error:'two verified TMDB ids'},nextAction:'surface_conflict',attempts:decision?.attempts??0});
- if(decision?.status==='ambiguous'){const wait=inFuture(decision.retryAt,now);return dimensionState('identity',{status:'ambiguous',updatedAt:now,source:'discovery',provenance:{reason:decision.reason||'ambiguous'},nextAction:wait?'wait_retry':'continue_discovery',retryAt:decision.retryAt||null,attempts:decision.attempts??0});}
- if(decision&&['no_confident_match','duration_mismatch'].includes(decision.status)){const wait=inFuture(decision.retryAt,now);return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',provenance:{reason:decision.status},failureReason:decision.status,nextAction:wait?'wait_retry':'continue_discovery',retryAt:decision.retryAt||null,attempts:decision.attempts??0});}
- if(facts.tmdbId&&(!decision||decision.status==='verified'))return dimensionState('identity',{status:'resolved',updatedAt:now,source:decision?'discovery':facts.letterboxdId?'watchlist':'catalog',sourceVersion:'tmdb:'+facts.tmdbId,provenance:{letterboxdId:facts.letterboxdId?String(facts.letterboxdId):null,tmdbId:String(facts.tmdbId)},nextAction:'stop'});
- if(!facts.tmdbId&&(facts.discoveryPending||decision?.status==='due'||decision?.status==='missing'))return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',provenance:{reason:decision?.status||'missing'},nextAction:'continue_discovery',retryAt:decision?.retryAt||null,attempts:decision?.attempts??0});
+ if(decision?.status==='ambiguous')return dimensionState('identity',{status:'ambiguous',updatedAt:now,source:'discovery',provenance:{reason:decision.reason||'ambiguous'},nextAction:uncertainAction(decision,facts,now),retryAt:decision.retryAt||null,attempts:decision.attempts??0});
+ if(decision&&['no_confident_match','duration_mismatch'].includes(decision.status))return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',provenance:{reason:decision.status},failureReason:decision.status,nextAction:uncertainAction(decision,facts,now),retryAt:decision.retryAt||null,attempts:decision.attempts??0});
+ if(facts.tmdbId&&decision?.status==='verified')return dimensionState('identity',{status:'resolved',updatedAt:now,source:'discovery',sourceVersion:'tmdb:'+facts.tmdbId,provenance:{letterboxdId:facts.letterboxdId?String(facts.letterboxdId):null,tmdbId:String(facts.tmdbId)},nextAction:'stop'});
+ if(facts.tmdbId&&!decision&&facts.letterboxdId)return dimensionState('identity',{status:'resolved',updatedAt:now,source:'watchlist',sourceVersion:'tmdb:'+facts.tmdbId,provenance:{letterboxdId:String(facts.letterboxdId),tmdbId:String(facts.tmdbId)},nextAction:'stop'});
+ if(!facts.tmdbId&&(facts.discoveryPending||decision?.status==='due'||decision?.status==='missing')){const gate=suppliedDiscovery(facts);const queued=facts.discoveryPending===true&&gate?.eligible!==false||gate?.eligible===true&&gate.activity==='current';return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',provenance:{reason:decision?.status||'missing'},nextAction:queued?'continue_discovery':'wait_new_evidence',retryAt:decision?.retryAt||null,attempts:decision?.attempts??0});}
  if(facts.letterboxdId&&!facts.tmdbId)return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'letterboxd',provenance:{letterboxdId:String(facts.letterboxdId)},nextAction:'keep_letterboxd_id'});
- return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',nextAction:'continue_discovery'});
+ return dimensionState('identity',{status:'unresolved',updatedAt:now,source:'discovery',nextAction:'wait_new_evidence'});
 }
 function metadataChannel(facts={}){
  const source=facts.source==='tmdb'||facts.source==='letterboxd'?facts.source:facts.letterboxdId?'letterboxd':'tmdb';
@@ -241,10 +256,13 @@ function invalidatePredictionForProfile(film,profile,at){
  return {...film,prediction:moved.state,fingerprint:film.fingerprint};
 }
 function observeMetadata(film,observation){const letterboxdId=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||null;return {...film,metadata:metadataState({...observation,letterboxdId}),fingerprint:film.fingerprint,prediction:film.prediction};}
-function availabilityProjection({shows,epgLastAiring,now}){
- const starts=(shows||[]).map(show=>Number(show.start)).filter(Number.isFinite);
- const availableUntil=starts.length?new Date(Math.max(...starts)+AVAILABLE_MS).toISOString():null;
+function availabilityProjection({shows,epgLastAiring,showsProgrammeRunId,publishedProgrammeRunId,now}={}){
+ const known=Array.isArray(shows),starts=known?shows.map(show=>Number(show.start)).filter(Number.isFinite):[];
  const from=clock(now)-HOT_PAST_MS,until=clock(now)+HOT_FUTURE_MS,open=start=>start>=from&&start<until;
- return {availableUntil,hot:starts.length?starts.some(open):Number.isFinite(epgLastAiring)&&open(epgLastAiring)};
+ const storedRun=showsProgrammeRunId||null,published=publishedProgrammeRunId||null;
+ if(storedRun&&published&&storedRun!==published)return {availableUntil:null,hot:false};
+ if(known)return {availableUntil:starts.length?new Date(Math.max(...starts)+AVAILABLE_MS).toISOString():null,hot:starts.some(open)};
+ if(storedRun)return {availableUntil:null,hot:false};
+ return {availableUntil:null,hot:Number.isFinite(epgLastAiring)&&open(epgLastAiring)};
 }
 function attachAvailability(film,observation){return {...film,availability:availabilityProjection(observation),fingerprint:film.fingerprint,prediction:film.prediction};}

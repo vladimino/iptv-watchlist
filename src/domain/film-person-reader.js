@@ -50,15 +50,18 @@ function loadedSources(store,id,record){
  const metadata=store.metadata?.[id]||null,programme=recordById(store.programme?.films,id),watchlist=recordById(store.watchlist?.films,id);
  return {metadata,programme,watchlist,record:record||catalogRecord(store,id)};
 }
+function knownShows(record){return record&&Object.hasOwn(record,'shows')?record.shows:undefined;}
+function observedShows(programme,body){const programmeShows=knownShows(programme);return programmeShows!==undefined?programmeShows:knownShows(body);}
+function observedProgrammeRun(programme,body){if(programme&&Object.hasOwn(programme,'showsProgrammeRunId'))return programme.showsProgrammeRunId||null;if(body&&Object.hasOwn(body,'showsProgrammeRunId'))return body.showsProgrammeRunId||null;return null;}
 function filmFacts(record,store,resolution,now){
  const id=String(record.id),loaded=loadedSources(store,id,record),metadata=loaded.metadata,programme=loaded.programme,body=metadata||record;
  const letterboxdId=id.startsWith('tmdb_')?null:id;
  const evidence=identityEvidence([loaded.programme,metadata,loaded.watchlist,record]);
  const translation=reviewedTranslation([metadata,loaded.programme,loaded.watchlist,record]);
  const decision=decisionForFilm(record,resolution);
- return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id)),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:programme?.shows||body.shows||[],epgLastAiring:body.epgLastAiring};
+ return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id)),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
 }
-function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
+function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,showsProgrammeRunId:facts.showsProgrammeRunId,publishedProgrammeRunId:facts.publishedProgrammeRunId,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
 function lifecycleBody(film){return {contractVersion:film.contractVersion,id:film.id,storedId:storedFilmId(film),canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds,redirects:film.redirects||[],aliases:film.aliases,identity:film.identity,metadata:film.metadata,localization:film.localization,fingerprint:film.fingerprint,prediction:film.prediction,availability:film.availability||null};}
 function legacyEnrichmentIds(store){
  const seen=new Set(),ids=[];
@@ -180,7 +183,7 @@ function readLifecycle(store,now){
   const matched=[...films.values()].some(film=>decision.filmId&&(storedFilmId(film)===decision.filmId||film.id==='film:'+decision.filmId));
   if(decision.status==='excluded_nonfilm'){candidates.push({key,film:null,identity:null,excluded:true});continue;}
   if(matched)continue;
-  candidates.push({key,film:null,identity:identityState({now,decision,discoveryPending:!decision,tmdbId:decision.tmdbId?String(decision.tmdbId):null}),excluded:false,missingCatalog:decision.status==='verified'});
+  candidates.push({key,film:null,identity:identityState({now,decision,discovery:decision.discovery||null,tmdbId:decision.tmdbId?String(decision.tmdbId):null}),excluded:false,missingCatalog:decision.status==='verified'});
  }
  const people=new Map();
  const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn)];
