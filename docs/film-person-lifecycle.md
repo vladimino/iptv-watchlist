@@ -187,7 +187,7 @@ Every existing TMDB claim is a collision check: an untrusted id, a `conflicting`
 
 [AIR-49](https://trello.com/c/YNaLFwtW) later has to store these separately: canonical Film and Person identities with trusted external ids; the historical EPG candidate ledger and observations; scored results with `scorerVersion`, evidence, acceptance, provenance, and decision history; `attempts`, `retryAt`, `terminalReason`, and `evidenceKey`; current shows bound to the published EPG generation, including an explicit `[]`; historical `epgLastAiring`; reviewed localization, fingerprints, predictions, and immutable history. The lifecycle sidecars and the dry-run reader are not that repository. This document does not add a D1 schema.
 
-The AIR-43 PR 2 gate is this contract plus the regression tests, accepted by both sides. Opening the compatibility pull request does not close the gate. Phase 4, a D1 move, and the remaining localization paths are not part of the gate. `on:programme` is a separate rollout. `on:watchlist`, `metadata`, and `epg` stay off until their own decisions, and the EPG path still waits on the 808 name review.
+The AIR-43 PR 2 gate is this contract plus the regression tests, accepted by both sides. Opening the compatibility pull request does not close the gate. Phase 4, a D1 move, and the remaining localization paths are not part of the gate. `programme` and `watchlist` are on for the generation recorded in the rollout log. `metadata` and `epg` stay off until their own decisions, and the EPG path still waits on the 808 name review.
 
 ## What the next PRs are, and what they are not
 
@@ -257,3 +257,18 @@ Authenticated Cloudflare Access reads of production. No path is `on`. No sync wa
 Decision: leave production at `shadow:watchlist` only. Programme, metadata, and EPG stay off. Do not set `on` from this entry. The 808 cache-versus-dictionary names in the checkpoint stay a separate review before `shadow:metadata`, `shadow:epg`, or any `on` path. On this generation, `on:programme` is not expected to change the JSON body either: the live shadow found no alias-order mismatch.
 
 Rollback: delete the `LIFECYCLE_LOCALIZATION` secret. An empty value is also off. Do not commit the variable. Merging this document does not change the Worker.
+
+### 2026-10-22 read paths on
+
+Authenticated Cloudflare Access reads. No sync was started. `metadata` and `epg` were not set. This entry follows the live shadow above; it does not rewrite that entry.
+
+- `on:programme` was set on 2026-10-21 23:45:34 (GMT+2), deployment `c7016c92-4b3d-411a-a5bb-0ceac868d59f`, source `dash`. Before adding watchlist it was read again on 2026-10-22: `programme;on;films=398/0/0;people=7685/0/0;cache=7/0`. Watchlist had no `X-Lifecycle-Localization` header.
+- Watchlist was added on 2026-10-22 09:48:28 (GMT+2), deployment `ec8a28c1-9349-4d8f-9d4c-353d0b944399`, source `dash`. The value keeps `on:programme` and adds `on:watchlist`. Worker code stayed `f14badfb172e6d314cff53583609e515c30ec749`, the merge of PR #36, already deployed that morning as `91e2163a-cd24-457b-92b2-f8922f1e9a90`. `keep_vars` remains true, and the variable stays out of `wrangler.jsonc`.
+- Generation: `b8d147fd-d8ce-4fc2-ae08-5f1d2d468964`, phase `published`. Programme and watchlist `updatedAt` 2026-10-21 17:05:51 (GMT+2), 398 films. This is the same generation as the live shadow. `sync.json` is `complete`, updated 2026-10-21 17:07:17 (GMT+2), and has no `lifecycleLocalization`. The resolver continuation is paused.
+- Baseline and result SHA-256, both reads: programme `dc469c2488e26b1e5e0b60f6904185f4fce1da5b6601478f74e81b47d08cb567`, watchlist `648da957636430ef4732ddc02e50162d6cd9183b19bc7d59b675a54b248abb3d`. A second pair of reads matched the first.
+- After the switch the headers were `programme;on;films=398/0/0;people=7685/0/0;cache=7/0` and `watchlist;on;films=398/0/0;people=4389/0/0;cache=7/0`. Mismatched and displayed are 0 on both paths. All 398 films kept an id and their aliases, 14144 alias values in total. Title status stayed 393 verified and 5 provisional. Embedded name status stayed 877 verified, 4 provisional, and 3508 without a status field. The cache compared count is 7 because `on` counts keys in `titles.json`; mismatched stays 0, and the JSON body is unchanged.
+- The GETs did not change the etags of `programme.json` (`a51413331b706515c757a92da9064ee5`), `watchlist.json` (`f1c50695d8bba9f467f2d59e2b7b3f97`), `sync.json` (`be025a257b59b951e153c78b3fc2470a`), `titles.json` (`60062e5fc0d022384324b742aeadfbe9`), `people.json` (`9b8491e23e6e4914eac7ce23c6515b05`), or `epg/published-generation.json` (`be3d3a3e7519016a58ca95b108cb6d04`).
+
+Decision: accept `on:watchlist` together with the already accepted `on:programme`. Leave both on. Do not set `on:metadata` or `on:epg` from this entry. The 808 cache-versus-dictionary names remain a separate review before any EPG path, and they are not Film or TMDB identity collisions.
+
+Rollback of watchlist alone is to set the secret back to `on:programme`. Deleting the binding turns every path off. Do not commit the variable. Merging this document does not change the Worker.
