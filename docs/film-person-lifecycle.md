@@ -326,3 +326,13 @@ This entry follows the write-path review above. It does not rewrite that review.
 Decision: leave `shadow:epg` on and wait for the next ordinary sync. Do not start a special sync. Do not call this rollout accepted until that sync records `lifecycleLocalization.epg` with mode `shadow` for the generation it actually processed, and the stored watchlist still matches the legacy path. Do not set `on:metadata` or `on:epg` from this entry. Before `on:epg`, add a regression test for a stored `nameStatus` of `reviewed` with `nameAuthority` `owner`; if that status is overwritten, fix it separately. Do not commit the variable. Merging this document does not change the Worker.
 
 Rollback of `shadow:epg` is to set the text back to `on:programme,on:watchlist`. Do not delete the binding, and do not turn the two accepted read paths off. A flag rollback does not undo ordinary writes of a sync that has already finished. Do not restore an older EPG generation from this entry.
+
+### 2026-10-22 owner-reviewed protection
+
+This entry follows the EPG shadow above. It does not rewrite that entry, and it does not change the production binding. Live `shadow:epg` is still waiting for the next ordinary sync. This code change is not acceptance of that shadow.
+
+`personProvenance` and `titleProvenance` treated only a stored status of `verified` as an existing reviewed value. `legacyLocalizationStatus` already maps `verified` and `reviewed` to one trust level. A stored name or title with status `reviewed` and authority `owner` was replaced by the dictionary, while the same value stored as `verified` was kept.
+
+Both checks now use that shared status. The rest of the provenance rules stay: owner keeps the stored value, dictionary authority applies the dictionary, matching verification basis or title sources apply the dictionary, and any other stored provenance is unknown. An owner-reviewed name or title stays, the dictionary alternative is added to aliases, and one `owner_kept` conflict is recorded. A second pass does not add another alias or conflict. Unknown provenance still keeps the stored value and records one unresolved conflict. A provisional value, or a value with no status, still takes the ordinary dictionary correction.
+
+Do not set `on:metadata` or `on:epg` from this entry. Merging this document does not change the Worker.
