@@ -56,11 +56,17 @@ Until the write cutover, the R2 column is what production reads and writes. The 
 
 One publish, decision, or score is one database transaction. A failed statement leaves the earlier commit in place and does not leave the failed call half-written.
 
-## Later repositories
+## Canonical repository
 
-AIR-70 and AIR-72 are not implemented. AIR-73 is not implemented. None of them run in production.
+[AIR-70](https://trello.com/c/8PRWRx2C) is `src/canonical-repository.js`. The Worker bundle does not include it, and it does not open R2 or a production D1 database. The caller passes a database and the Film or Person view already produced by the lifecycle contract. [AIR-42](https://trello.com/c/drLBuWjl) still decides a link, a reviewed value, and an identity collision. This module stores that result.
 
-| Later card | Reads and writes | Does not |
+`saveFilm` and `savePerson` replace the external ids, aliases, credits, and dimension rows for that record in one transaction. A repeated payload does not add another alias, credit, external id, conflict, or redirect. A stored `reviewed` localization stays in place unless the incoming localization is itself `reviewed` from `dictionary` or `owner`. A weaker value is kept as one alias and one conflict. Two records cannot both hold the same trusted external id. The second write is rejected and does not insert that record.
+
+`applyLink` stores the survivor and, in that same transaction, retires the other id: its external ids are released, its row and canonical children are removed, and `film_redirect` points at the survivor. A read of the retired id follows the redirect. Watchlist membership moves to the survivor. A film that already belongs to a generation, or that has an EPG last-airing row, is not retired. Replaying the same link does nothing extra. A failed statement, including a credit whose person is absent, leaves the previous commit unchanged.
+
+The module does not insert a candidate, a score, a programme generation, or prediction history. AIR-72 and AIR-73 are not implemented. None of these repositories run in production.
+
+| Card | Reads and writes | Does not |
 | --- | --- | --- |
 | AIR-70 | `film`, `person`, credits, `film_metadata`, external ids, redirects, aliases, dimensions, conflicts, `watchlist_film` | score a candidate or choose shows |
 | AIR-71 | the current generation pointer, shows, candidates, decisions, scores | mint a Film id from an observation key |
@@ -69,4 +75,4 @@ AIR-70 and AIR-72 are not implemented. AIR-73 is not implemented. None of them r
 
 ## Rollback
 
-Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. No database is created and no production row moves.
+Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. Deleting `src/canonical-repository.js` and `tests/canonical-repository.mjs` removes the local Film and Person adapter. No database is created and no production row moves.
