@@ -91,13 +91,16 @@ function variantAliasRank(candidate,movies){
   return {movie,yearDistance:year!=null&&release!=null?Math.abs(release-year):1,runtimeDistance,shared};
  }).filter(Boolean).sort((a,b)=>a.yearDistance-b.yearDistance||a.runtimeDistance-b.runtimeDistance||b.shared-a.shared||String(a.movie.id).localeCompare(String(b.movie.id)));
 }
-function emptyVariantStats(){return {calls:0,errors:0,throttled:0,skipped:0};}
+function emptyVariantStats(){return {calls:0,errors:0,throttled:0,skipped:0,halted:false};}
 function variantDiagnostic(stats){return {variantCalls:stats.calls,variantErrors:stats.errors,variantThrottled:stats.throttled,variantSkipped:stats.skipped};}
+function noteVariantFailure(stats,error){stats.calls++;if(error?.retryAt||String(error?.message||'').includes('429')){stats.throttled++;stats.halted=true;return;}stats.errors++;}
+function variantBlocked(stats,deadline){return stats.halted||stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline;}
 async function collectVariantProposals(env,candidate,deadline,stats){
  const proposed=[],hits=[],pool=new Map(),planned=candidateSearchVariants(candidate).slice(0,CANDIDATE_VARIANT_CAP),language=/[іїєґ]/i.test(candidate.title)?'uk-UA':'ru-RU';
+ if(stats.halted){stats.skipped+=planned.length;return {proposed,hits};}
  for(const variant of planned){
-  if(stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline){stats.skipped++;continue;}
-  let search=null;try{search=await tmdbRequest(env,'search/movie?'+new URLSearchParams({query:variant.query,language,include_adult:'false',...(variant.year!=null?{year:String(variant.year)}:{})}));}catch(e){stats.calls++;if(e.retryAt||String(e.message).includes('429'))stats.throttled++;else stats.errors++;continue;}
+  if(variantBlocked(stats,deadline)){stats.skipped++;continue;}
+  let search=null;try{search=await tmdbRequest(env,'search/movie?'+new URLSearchParams({query:variant.query,language,include_adult:'false',...(variant.year!=null?{year:String(variant.year)}:{})}));}catch(e){noteVariantFailure(stats,e);continue;}
   stats.calls++;
   for(const movie of search?.results||[]){
    if(!variantHit(candidate,movie,variant)){if(movie?.id!=null&&!pool.has(String(movie.id)))pool.set(String(movie.id),movie);continue;}
@@ -109,8 +112,8 @@ async function collectVariantProposals(env,candidate,deadline,stats){
  }
  for(const row of variantAliasRank(candidate,[...pool.values()]).slice(0,3)){
   if(proposed.some(item=>item.tmdbId===String(row.movie.id)))continue;
-  if(stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline){stats.skipped++;continue;}
-  let movie=null;try{movie=await tmdbRequest(env,'movie/'+row.movie.id+'?language=ru-RU&append_to_response=translations,alternative_titles');}catch(e){stats.calls++;if(e.retryAt||String(e.message).includes('429'))stats.throttled++;else stats.errors++;continue;}
+  if(variantBlocked(stats,deadline)){stats.skipped++;continue;}
+  let movie=null;try{movie=await tmdbRequest(env,'movie/'+row.movie.id+'?language=ru-RU&append_to_response=translations,alternative_titles');}catch(e){noteVariantFailure(stats,e);continue;}
   stats.calls++;
   const aliases=[...(movie?.alternative_titles?.titles||[]).map(item=>item?.title),...(movie?.translations?.translations||[]).map(item=>item?.data?.title)].filter(Boolean),matched=aliases.find(title=>norm(title)===candidate.normalizedTitle);
   if(matched)proposed.push({tmdbId:String(movie.id),query:candidate.title,year:candidateReleaseYear(candidate.year),reason:'tmdb_alias',matchedTitle:matched});
@@ -336,8 +339,8 @@ async function resolveDiscoveryChunk(env,report,limit){
   const observation={key:job.candidate.key,title:job.candidate.title,normalizedTitle:job.candidate.normalizedTitle,year:job.candidate.year??null,duration:job.candidate.duration??null,durations:job.candidate.durations};
   const score=scoreFilmResolution({observation,candidates:[...job.priorCandidates,...found.hits]});
   let gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now),detailChecked=false;
-  if(score.status==='accepted'&&score.acceptedTmdbId&&variantMeter.calls<CANDIDATE_VARIANT_CHUNK_CAP&&Date.now()+12000<=deadline&&await publishedGenerationMatches(env,source.programmeRunId)){
-   let movie=null;try{movie=await tmdbRequest(env,'movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');}catch(e){variantMeter.calls++;if(e.retryAt||String(e.message).includes('429'))variantMeter.throttled++;else variantMeter.errors++;movie=null;}
+  if(score.status==='accepted'&&score.acceptedTmdbId&&!variantBlocked(variantMeter,deadline)&&await publishedGenerationMatches(env,source.programmeRunId)){
+   let movie=null;try{movie=await tmdbRequest(env,'movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');}catch(e){noteVariantFailure(variantMeter,e);movie=null;}
    if(movie){variantMeter.calls++;if(String(movie.id)===String(score.acceptedTmdbId)){gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(score.acceptedTmdbId))});detailChecked=true;}}
   }
   preview[job.key]=scorePreview(job.candidate,score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked,differentId:false}),job.knownBefore,found.proposed);

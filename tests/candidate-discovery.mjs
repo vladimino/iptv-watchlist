@@ -105,8 +105,9 @@ const limited=await resolve({scored:'shadow',discovery:'shadow'},blade,url=>{if(
 assert.equal(limited.result.error,null);
 assert.equal(limited.decision.status,'no_confident_match');
 assert.equal(limited.catalog['tmdb_36647'],undefined);
-assert.ok(limited.result.variantCalls>=1);
-assert.ok(limited.result.variantThrottled>=1);
+assert.equal(limited.result.variantThrottled,1);
+assert.equal(limited.urls.filter(url=>url.includes('search/movie')&&!url.includes('year=1998')).length,1);
+assert.ok(limited.result.variantSkipped>=1);
 assert.equal(limited.result.tmdbCalls,2);
 assert.equal(limited.records.get('epg/discovery-status.json').variantThrottled,limited.result.variantThrottled);
 const skipped=await vm.runInContext("(async()=>{const stats={calls:0,errors:0,throttled:0,skipped:0};await collectVariantProposals(env,{title:'Блейд 1',normalizedTitle:'блейд 1',year:1998,duration:120,durations:[120]},Date.now(),stats);return stats;})()",bladeOn.ctx);
