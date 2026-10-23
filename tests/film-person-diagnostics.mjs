@@ -11,8 +11,8 @@ assert.doesNotMatch(diagnostics,/chris-pratt|Крис Прэтт/);
 for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-diagnostics|diagnoseFilm|diagnosePerson|lifecycleCounts/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
-vm.runInContext(domain+'\n'+reader+'\n'+diagnostics+'\nglobalThis.api={diagnoseFilm,diagnosePerson,lifecycleCounts,readLifecycle};',ctx);
-const {diagnoseFilm,diagnosePerson,lifecycleCounts,readLifecycle}=ctx.api;
+vm.runInContext(domain+'\n'+reader+'\n'+diagnostics+'\nglobalThis.api={diagnoseFilm,diagnosePerson,lifecycleCounts,presentDiagnosis,readLifecycle};',ctx);
+const {diagnoseFilm,diagnosePerson,lifecycleCounts,presentDiagnosis,readLifecycle}=ctx.api;
 
 const NOW=Date.parse('2026-10-20T12:00:00.000Z');
 const DAY=86400000;
@@ -109,7 +109,23 @@ assert.equal(ambiguousCounts.parity.missing,ambiguousView.parity.missing.length)
 assert.equal(ambiguousCounts.parity.extra,1);
 assert.equal(JSON.stringify(ambiguousCounts).includes('tmdb_1656'),false);
 assert.equal(JSON.stringify(ambiguousCounts).includes('28nq'),false);
+assert.equal(counts.films.nextAction.retry_metadata,1);
+assert.equal(counts.people.nextAction.keep_reviewed>=1,true);
 assert.equal(JSON.stringify(counts).includes('predictedRating'),false);
 assert.equal(JSON.stringify(counts).includes(provisional.name),false);
-assert.equal(JSON.stringify(empty),JSON.stringify({films:{total:0,displayReady:0,catalogReady:0,predictionReady:0,hot:0,identity:{},metadata:{},localization:{},fingerprint:{},prediction:{}},people:{total:0,localization:{}},candidates:{total:0,excluded:0},conflicts:0,parity:{ok:true,mismatches:0,missing:0,extra:0}}));
+const presented=presentDiagnosis(film);
+assert.equal(presented.id,'film:28nq');
+assert.equal(presented.canonicalIdentity,'tmdb:1656');
+assert.equal(presented.dimensions.identity.nextAction,'stop');
+assert.equal(presented.dimensions.localization.status,'reviewed');
+assert.equal(presented.externalIds.some(item=>item.scheme==='tmdb'&&item.value==='1656'),true);
+assert.equal(presented.blockers.some(item=>item.dimension==='metadata'),false);
+assert.equal(Object.hasOwn(presented,'predictionHistory'),false);
+assert.equal(JSON.stringify(presented).includes('predictedRating'),false);
+const blocked=presentDiagnosis(diagnoseFilm(store,'abc',NOW));
+assert.equal(blocked.blockers.some(item=>item.dimension==='metadata'&&item.nextAction==='retry_metadata'&&item.failureReason==='Letterboxd HTTP 503'),true);
+const unknown=presentDiagnosis(missingFilm);
+assert.equal(unknown.found,false);
+assert.equal(unknown.id,'missing');
+assert.equal(JSON.stringify(empty),JSON.stringify({films:{total:0,displayReady:0,catalogReady:0,predictionReady:0,hot:0,nextAction:{},identity:{},metadata:{},localization:{},fingerprint:{},prediction:{}},people:{total:0,localization:{},nextAction:{}},candidates:{total:0,excluded:0},conflicts:0,parity:{ok:true,mismatches:0,missing:0,extra:0}}));
 console.log('Film and Person lifecycle diagnostics passed.');
