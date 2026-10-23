@@ -6,7 +6,7 @@
 
 Schema v1 is `migrations/0001_schema_v1.sql`. The number is the version. Once this file is merged it is not edited. A later shape is a new numbered file.
 
-`wrangler.jsonc` does not name a D1 database. Deploying Worker `iptv` does not create or migrate a database. The test applies the file to a local SQLite database and discards it.
+`wrangler.jsonc` does not name a D1 database. Deploying Worker `iptv` does not create or migrate a database. The test applies the file to a local SQLite database and discards it. `src/epg-repository.js` uses that schema only when a caller supplies a database. It is not in the Worker bundle and it does not apply this migration.
 
 The current EPG generation is the single `published_generation` row. Replacing that pointer does not delete the previous generation. `candidate_generation` keeps the observation and evidence key scored for that generation; `candidate` is only the latest projection. A replaced prediction is a new immutable object plus `prediction_history.payload_json`, not an edit of the mutable `predictions.json` key. Film credits and the watchlist metadata body live in `film_person_credit` and `film_metadata`, not only inside `metadata.json`.
 

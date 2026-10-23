@@ -46,17 +46,27 @@ Until the write cutover, the R2 column is what production reads and writes. The 
 | `enrichment/profile/current.json` and `profile/versions/<n>.json` | `profile_version` | R2 keeps the body |
 | Raw EPG XML and export archives | no table | R2 archive only |
 
+## EPG repository
+
+[AIR-71](https://trello.com/c/UAUUQ2jh) is `src/epg-repository.js`. The Worker bundle does not include it, and it does not open R2 or a production D1 database. The caller passes a database. [AIR-43](https://trello.com/c/7NY6n1Az) still decides whether a score is accepted. [AIR-48](https://trello.com/c/rVf8rRoJ) still decides which observation is current. This module stores the result.
+
+`publishGeneration` replaces that generation's film shows and candidate shows, including an explicit empty list, and writes the observation snapshot for that generation. It moves `published_generation` only when the phase is `published`. A withheld generation is stored and stays out of `published_film_show`. Another generation's rows, and any candidate missing from the new payload, stay. An empty show list does not clear `film_epg_last_airing`.
+
+`recordDecision` keeps the previous decision in `candidate_decision_history` when the decision changes. A terminal decision is replaced only when the evidence key changes. `recordScore` writes the score, the considered rows, and the optional detail. An accepted score does not become a verified decision and does not insert a Film. An observation key that starts with `film:` or `person:` is rejected.
+
+One publish, decision, or score is one database transaction. A failed statement leaves the earlier commit in place and does not leave the failed call half-written. Publishing the same generation again replaces that generation's shows and snapshot without duplicating them.
+
 ## Later repositories
 
-These names are the boundary. This pull request does not implement them and does not call them.
+AIR-70 and AIR-72 are not implemented. AIR-73 is not implemented. None of them run in production.
 
 | Later card | Reads and writes | Does not |
 | --- | --- | --- |
 | AIR-70 | `film`, `person`, credits, `film_metadata`, external ids, redirects, aliases, dimensions, conflicts, `watchlist_film` | score a candidate or choose shows |
-| AIR-71 | the current generation pointer, shows, candidates, decisions | mint a Film id from an observation key |
+| AIR-71 | the current generation pointer, shows, candidates, decisions, scores | mint a Film id from an observation key |
 | AIR-72 | fingerprint pointer, profile, prediction current and history, actual rating | change identity |
 | AIR-73 | `import_receipt` from a snapshot checksum | write production R2 or production D1 |
 
 ## Rollback
 
-Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. No database is created and no production row moves.
+Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. No database is created and no production row moves.
