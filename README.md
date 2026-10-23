@@ -39,6 +39,7 @@ Configure the deployment environment rather than committing values:
 - `BUCKET` — R2 binding declared by the hosting platform.
 - `MCP_ACCESS_TEAM_DOMAIN` — Cloudflare Zero Trust team domain, `https://<team>.cloudflareaccess.com`, used to verify Access JWTs on `/mcp`.
 - `MCP_ACCESS_AUD` — AUD tag of Access application `IPTV MCP`. Without it and the team domain, `/mcp` fails closed with `503`.
+- `RATINGS_REFRESH` — set to `on` to allow `POST /api/enrichment/ratings/refresh`. Unset, the route does not call Letterboxd. The EPG commit still attempts ratings on its own and does not read this variable.
 
 Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 bucket `iptv`, the authoritative production store since the 19 October 2026 cutover. The legacy Site keeps a separate R2 store as a temporary reserve and as the source of the historical snapshot. Do not run sync, prediction, or other writers there, and do not browse it for diagnosis: some of its GET routes can write. The tracked hosting manifest records only that legacy Site identity and binding.
 
