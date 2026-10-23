@@ -34,6 +34,7 @@ async function applyLink(db,input){
  const watchlist=input.watchlist===true?true:input.watchlist===false?false:(survivorListed||retiredListed?true:null);
  const plan=await planFilm(db,{...input,film:survivor,watchlist,releasing:redirect?.from??null});
  const retirement=redirect?await planRetirement(db,redirect):null;
+ if(retirement&&!retirement.release)plan.keepHistory=true;
  await db.transaction(async()=>{
   if(retirement?.release)await db.run('DELETE FROM film_external_id WHERE film_id=?',[retirement.from]);
   await writeFilm(db,plan);
@@ -79,17 +80,16 @@ async function writeFilm(db,plan){
  const film=plan.film;
  await db.run('INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET contract_version=excluded.contract_version,canonical_identity=excluded.canonical_identity,original_title=excluded.original_title,updated_at=excluded.updated_at',[film.id,film.contractVersion,film.canonicalIdentity??null,film.originalTitle??null,plan.updatedAt]);
  await db.run('DELETE FROM film_external_id WHERE film_id=?',[film.id]);
- await db.run('DELETE FROM film_alias WHERE film_id=?',[film.id]);
- if(plan.credits!==undefined)await db.run('DELETE FROM film_person_credit WHERE film_id=?',[film.id]);
+ if(plan.credits!==undefined&&!plan.keepHistory)await db.run('DELETE FROM film_person_credit WHERE film_id=?',[film.id]);
  for(const item of film.externalIds||[])await db.run('INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?)',[film.id,required(item.scheme,'scheme'),String(item.value),item.trusted&&!item.conflicting?1:0,item.conflicting?1:0,json(item.provenance)]);
- for(const item of film.aliases||[])await db.run('INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,?,?,?)',[film.id,item.kind||'title',required(item.value,'alias'),json(item.provenance)]);
+ for(const item of film.aliases||[])await db.run('INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,?,?,?) ON CONFLICT(film_id,kind,value) DO NOTHING',[film.id,item.kind||'title',required(item.value,'alias'),json(item.provenance)]);
  await noteHeldLocalization(db,{table:'film_dimension',column:'film_id',id:film.id,kind:'title',entityKind:'film',incoming:film.localization});
  await db.run("DELETE FROM film_dimension WHERE film_id=? AND dimension<>'localization'",[film.id]);
  for(const dimension of ['identity','metadata','fingerprint','prediction'])await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(film.id,film[dimension]));
  await db.run(localizationUpsert('film_dimension','film_id'),dimensionParams(film.id,film.localization));
  if(plan.credits!==undefined)for(const credit of plan.credits){
   if(credit.role!=='director'&&credit.role!=='actor')throw new Error('Credit role is invalid');
-  await db.run('INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES (?,?,?,?)',[film.id,requiredPerson(credit.personId),credit.role,credit.ordinal]);
+  await db.run('INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES (?,?,?,?)'+(plan.keepHistory?' ON CONFLICT(film_id,person_id,role) DO NOTHING':''),[film.id,requiredPerson(credit.personId),credit.role,credit.ordinal]);
  }
  if(plan.metadata===null)await db.run('DELETE FROM film_metadata WHERE film_id=?',[film.id]);
  if(plan.metadata)await db.run('INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,r2_key,content_sha256,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET schema_version=excluded.schema_version,year=excluded.year,runtime=excluded.runtime,synopsis=excluded.synopsis,poster=excluded.poster,url=excluded.url,genres_json=excluded.genres_json,people_version=excluded.people_version,payload_json=excluded.payload_json,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,updated_at=excluded.updated_at',metadataParams(film.id,plan.metadata));
@@ -102,9 +102,8 @@ async function writePerson(db,plan){
  const person=plan.person;
  await db.run('INSERT INTO person (id,role_id,contract_version,updated_at) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET role_id=excluded.role_id,contract_version=excluded.contract_version,updated_at=excluded.updated_at',[person.id,required(person.roleId,'roleId'),person.contractVersion,plan.updatedAt]);
  await db.run('DELETE FROM person_external_id WHERE person_id=?',[person.id]);
- await db.run('DELETE FROM person_alias WHERE person_id=?',[person.id]);
  for(const item of person.externalIds||[])await db.run('INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?)',[person.id,required(item.scheme,'scheme'),String(item.value),item.trusted&&!item.conflicting?1:0,item.conflicting?1:0,json(item.provenance)]);
- for(const item of person.aliases||[])await db.run('INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES (?,?,?,?)',[person.id,item.kind||'name',required(item.value,'alias'),json(item.provenance)]);
+ for(const item of person.aliases||[])await db.run('INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES (?,?,?,?) ON CONFLICT(person_id,kind,value) DO NOTHING',[person.id,item.kind||'name',required(item.value,'alias'),json(item.provenance)]);
  await noteHeldLocalization(db,{table:'person_dimension',column:'person_id',id:person.id,kind:'name',entityKind:'person',incoming:person.localization});
  await db.run("DELETE FROM person_dimension WHERE person_id=? AND dimension<>'localization'",[person.id]);
  await db.run('INSERT INTO person_dimension (person_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(person.id,person.identity));
