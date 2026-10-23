@@ -1,8 +1,10 @@
-# AIR-43 shadow rollout
+# AIR-66 shadow evidence
 
-Controlled comparison of the legacy resolver and the scored resolver on production. The preflight below was written before the flag existed. The twelve-chunk run is a successful smoke test of `shadow`. It is not a cutover sample. `SCORED_RESOLUTION` stays `shadow`. `on` stays unset. Another twelve production chunks will not be run to enlarge this same hot-first slice.
+This file is the AIR-66 record. [AIR-43](https://trello.com/c/7NY6n1Az) is the closed code delivery. [AIR-67](https://trello.com/c/R4RuNVNw) is the later parity and GO/NO-GO review. The twelve-chunk run below is production shadow evidence. Section 16 is a separate offline scorer diagnostic. Those two sets of counts are not one sample.
 
-Related: [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-42](https://trello.com/c/drLBuWjl), [AIR-48](https://trello.com/c/rVf8rRoJ), [AIR-49](https://trello.com/c/YNaLFwtW), [AIR-65](https://trello.com/c/MKb4JMXi). Prerequisites: [PR 45](https://github.com/vladimino/iptv-watchlist/pull/45), [PR 47](https://github.com/vladimino/iptv-watchlist/pull/47). Code deploy: [CI/CD 39870651210](https://github.com/vladimino/iptv-watchlist/actions/runs/39870651210).
+`SCORED_RESOLUTION` stays `shadow`. `on` stays unset. No further production resolver chunks were run for the backtest.
+
+Related: [AIR-66](https://trello.com/c/z5Ndcll9), [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-67](https://trello.com/c/R4RuNVNw), [AIR-42](https://trello.com/c/drLBuWjl), [AIR-48](https://trello.com/c/rVf8rRoJ). Prerequisites: [PR 45](https://github.com/vladimino/iptv-watchlist/pull/45), [PR 47](https://github.com/vladimino/iptv-watchlist/pull/47). Code deploy: [CI/CD 39870651210](https://github.com/vladimino/iptv-watchlist/actions/runs/39870651210).
 
 ## 1. What is deployed
 
@@ -275,9 +277,9 @@ These misses are shared. They are not a scored-versus-legacy regression. They ar
 
 ## 11. What the smoke test did not measure
 
-Another twelve production chunks would keep the hot-first order and would still skip aliases that the cheap pass verifies before scoring. That run is not the next experiment.
+Another twelve production chunks would keep the hot-first order and would still skip aliases that the cheap pass verifies before scoring. That run was not used.
 
-The next experiment is a local read of three existing objects: `epg/discovery-latest.json`, `epg/discovery-resolution.json`, and `epg/discovered-films.json`. The script scores with `scoreFilmResolution` and the acceptance gate. It does not call the Worker, does not write R2, and does not change a decision. Caps, not the whole ledger:
+The backtest that was then run is section 16. The plan was a local read of three existing objects: `epg/discovery-latest.json`, `epg/discovery-resolution.json`, and `epg/discovered-films.json`. The script scores with `scoreFilmResolution` and the acceptance gate. It does not call the Worker, does not write R2, and does not change a decision. Caps, not the whole ledger:
 
 | Category | What to score | Cap | Cached evidence |
 | --- | --- | --- | --- |
@@ -301,9 +303,9 @@ Whether the retries succeed is still open. A separate task can persist the exist
 
 Confirmed: `shadow` is the live binding and `cutover` reads `shadow`; the code is `203727b`; twelve chunks finished on generation `2e63530d-27f6-43cc-85dd-f5a2c9c97e16` with no chunk error; the deduped preview is 50 `agree_verified` and 29 `agree_unresolved`; legacy inserted 50 films; the exact-title rule missed Blade, Ocean's Eleven, Irony of Fate, and Wonder Woman 1984 on both resolvers; `Казнь` 650030 is the 2021/2022 film; `on` is not set.
 
-Not confirmed: yearless rows, known aliases inside the scorer, a runtime contradiction, a shadow-only detail fetch, which of the two histories explains the eight-row histogram gap, and whether the seven prediction retries succeed.
+Not confirmed by the smoke test alone: yearless rows, known aliases inside the scorer, a runtime contradiction, and a shadow-only detail fetch. Section 16 scores the first two, and one runtime contradiction, from the local catalog only. It still cannot replay `duration_mismatch` or a shadow-only detail. The eight-row histogram gap and the prediction retries stay open.
 
-Product result of this run: the hot slice did not disagree, and legacy kept writing. That is the smoke test. It is not evidence that `on` would match legacy on the categories in section 11.
+Product result of the twelve chunks: the hot slice did not disagree, and legacy kept writing. That is the smoke test. Section 16 is a separate scorer diagnostic. Neither one is the AIR-67 parity decision.
 
 ## 14. Rollback
 
@@ -311,6 +313,90 @@ The binding stays `shadow`. To return to the legacy-only branch, delete `SCORED_
 
 ## 15. Recommendation
 
-**Smoke test passed. Cutover data: INSUFFICIENT.**
+**Smoke test passed.** Cutover is not decided here. That decision is [AIR-67](https://trello.com/c/R4RuNVNw).
 
-Keep `shadow`. Do not set `on`. Do not spend the next production budget on twelve more chunks of the same queue. The minimal next experiment is the local fixture backtest in section 11. A GO or NO-GO waits on that result, not on a larger copy of this slice.
+Keep `shadow`. Do not set `on`. The local backtest in section 16 is the rest of this card. It does not authorize `on`.
+
+## 16. Local read-only backtest
+
+Offline diagnostic of `scoreFilmResolution` from `src/domain/scored-resolution.js`. That file is unchanged between `203727b` and `origin/main` `1be464f`. Three rows were scored again in a local `vm` with the repository file and matched this run: `72 часа|`, `бегущий человек|1987`, `чудо женщина|2020`. No Worker call, no TMDB call, no R2 write, no prediction, no EPG sync. `accepted` here is a scorer status. It is not `verified`, and it is not `detail_verified`. No stored movie-detail payload was available, so the acceptance gate cannot reach `detail_verified` on these rows. Where the observation is already `verified`, the gate refuses it as not actionable. Where it is still actionable and the score is `accepted`, the gate stops at `needs_verification`.
+
+### Snapshot
+
+Published generation `2e63530d-27f6-43cc-85dd-f5a2c9c97e16`, phase `published`, read with the pointer checked before and after. Generation object etags were the same before the read and after the scoring pass:
+
+| Object | ETag | Bytes |
+| --- | --- | ---: |
+| `epg/generations/2e63530d-27f6-43cc-85dd-f5a2c9c97e16/discovery-latest.json` | `ed22b806d15b669c6a462a0102b62516` | 57875067 |
+| `epg/generations/2e63530d-27f6-43cc-85dd-f5a2c9c97e16/discovered-films.json` | `c6d4855e3c32972a9c7ea4cca6d3aacd` | 5544466 |
+| `epg/generations/2e63530d-27f6-43cc-85dd-f5a2c9c97e16/programme.json` | `840e8482164fab6f61dc6daa942788eb` | 1652843 |
+| `epg/discovery-resolution.json` | `98fe2716f35bd851f23f6ed35dc8ab25` | 1320611 |
+
+`current` uses `2026-10-23T01:04:00.000Z`. The alias index is `epgTitleParts` over the generation catalog and the pinned programme watchlist, as discovery builds it. That catalog already contains the 50 films the smoke test inserted. It is not a pre-run catalog. A stored decision id is the current decision, not an independent historical truth.
+
+The 75 cheap-pass keys from chunk 1 are recoverable: `identitySource` `known_epg_alias` and `checkedAt` `2026-10-22T23:44:20.389Z`. The count is exactly 75. Their `confirmedTmdbId` is the id the EPG scan stored on the candidate. The other 25 known-alias rows are a key-sorted fill of current observations and are not claimed to have been known before the smoke test.
+
+| Pool | Rows |
+| --- | ---: |
+| Chunk 1 cheap pass | 75 |
+| Current legacy runtime shortcut, key order | 10 |
+| Current `confirmedTmdbId`, key order | 5 |
+| Current yearless title with a local film, key order | 5 |
+| Current exact title whose runtime misses the legacy band, key order | 5 |
+
+Yearless, 40 current rows, key order, using the scorer's short-title rule: 7 short with no local film, 7 short with one, 7 short with two or more, 7 long with none, 6 long with one, 6 long with two or more. Collisions: the first 30 current observations, in key order, whose normalized title has two or more TMDB ids in the index. 182 such titles exist. 21 `duration_mismatch` decisions were counted. None stores a TMDB id.
+
+A row is scoreable when the alias index has at least one film for that normalized title. Zero films is missing evidence, `search_not_in_fixture`. The scorer then returns `no_exact_title`. That does not mean a TMDB search would be empty.
+
+### Aggregates
+
+| Metric | Known aliases | Yearless | Remakes / collisions |
+| --- | ---: | ---: | ---: |
+| Selected | 100 | 40 | 30 |
+| Scoreable | 100 | 26 | 30 |
+| Accepted | 76 | 6 | 17 |
+| Ambiguous | 22 | 20 | 12 |
+| Contradicted | 2 | 0 | 1 |
+| No confident match | 0 | 0 | 0 |
+| Missing evidence | 0 | 14 | 0 |
+| Comparable to a stored id | 96 | 19 | 24 |
+| Identity disagreements | 21 | 13 | 7 |
+
+Known-alias reasons: `accepted_unique_evidence` 76, `ambiguous_short_title_without_year` 22, `contradicted_runtime` 1, `contradicted_year` 1. Gate: 96 already verified and therefore not actionable, 3 `candidate_decision`, 1 `needs_verification` because the score was `accepted` and no detail payload exists.
+
+Yearless reasons: `no_exact_title` 14, all of them the missing-evidence rows; `ambiguous_short_title_without_year` 14; `ambiguous_collision` 6; `accepted_unique_evidence` 6. All 6 acceptances are long unique titles with a near runtime (`year_absent_unique`). A short yearless title is not accepted even when one local film matches and the score is 0.83.
+
+Collision reasons: `accepted_year_separates_remakes` 17, `ambiguous_collision` 9, `ambiguous_short_title_without_year` 3, `contradicted_year` 1. With a year, the scorer picks the matching edition. Without a year, it does not pick between editions.
+
+### Examples
+
+`transformers|2007` accepts 1858, the stored cheap-pass id, score 1. `аленький цветочек|1977` accepts 14489, catalog year 1978, one year away, score 0.97. `007 координаты скайфолл|` has no observation year, one local film, runtime near, and accepts 37724. That is the yearless case the scorer can accept.
+
+`72 часа|` is short and yearless. One local film, 949838, score 0.83, `year_required`, so `ambiguous_short_title_without_year`. The cheap pass had already stored 949838. The same shape is `вечные|` (524434) and `7500|` (82657). The scorer does not treat that stored id as acceptance.
+
+`the island|` has no year and two films, 3764 (1960) and 1635 (2005). Both stay under the collision rule. The stored cheap-pass id is 3764. The scorer does not choose it. `бегущий человек|` without a year ties 865 and 798645 at 0.755. `бегущий человек|1987` accepts 865 and `бегущий человек|2025` accepts 798645, each the stored id. `война|1994` contradicts both local years and accepts neither.
+
+`double trouble|` is a long yearless unique title, so the missing year does not by itself block it. Runtime 143 against a 90-minute film is `contradicted_runtime`. `72 часа|2015` against catalog year 2026 is `contradicted_year`.
+
+### Named misses
+
+Scored against the same local index. No new search.
+
+| Observation | Local result | Where the match is lost |
+| --- | --- | --- |
+| `блейд 1\|1998` | no local film, `no_exact_title` | Title preparation. The catalog film is TMDB 36647, title `Блэйд`, year 1998. The observation key is `блейд 1`. The extra token `1` prevents an alias hit. `ё` folds to `е`; `э` does not, so `блэйд` and `блейд` also differ. The production chunk already returned `no_exact_title` after search. Stripping the digit was not re-searched. |
+| `11 друзей оушена\|2001` | no local film, `no_exact_title` | Candidate discovery. TMDB 161 is not in this catalog. The public Russian title is «Одиннадцать друзей Оушена». The observation says `11`. The production search returned no exact title. Spelling the number was not re-searched. |
+| `ирония судьбы или с легким паром\|1975` | no local film, `no_exact_title` | TMDB search, from the production chunk and the code. The search is sent with `year=1975`. TMDB 43430 is dated 1 January 1976 and is not in this catalog. Acceptance would allow one year. The search parameter does not. Not re-searched here. |
+| `мортал комбат\|1995` | no local film, `no_exact_title` | Candidate discovery. TMDB 9312 is not in this catalog. The production search returned no exact title. The official Russian title was not read from this snapshot. |
+| `чудо женщина\|2020` | one local film, TMDB 297762, year 2017, `contradicted_year`, score 0.65 | Title preparation, then the scorer. The observation dropped `1984`, so the exact title is the 2017 film. The year rejects it. TMDB 464052 is not in this catalog, so this pass cannot score that film. |
+| `гол 2\|2008`, `чужой против хищника 1\|2004` | no local film, `no_exact_title` | Same sequel-suffix shape as Blade. The production search returned no exact title. Not re-searched. |
+
+### Not replayed
+
+21 `duration_mismatch` decisions. `recordUncertain` does not store the candidate TMDB id or the movie card. A replay would be a guess. Shadow-only detail is the same: the smoke-test preview had zero `detail_not_compared` rows, and search hits are not stored. Both belong to a later fixture, not to more production instrumentation. [AIR-67](https://trello.com/c/R4RuNVNw) can use that fixture if one is kept. This card does not add it.
+
+### What this does not decide
+
+The cheap pass verifies a short yearless alias before the scorer runs. On those 22 rows the scorer says `ambiguous_short_title_without_year` while the stored decision is already `verified`. That is a diagnostic difference, not proof that `on` would reject them: `on` still has the cheap pass in front of scoring. Yearless collisions are the same kind of difference. Remakes with a year agree with the stored id. None of these counts add to the 79 production shadow rows.
+
+Possible later cards, not opened here: fold or strip a trailing sequel index and a leading numeral; decide whether search `year` should use the same one-year window as acceptance; decide whether the cheap pass should keep verifying short yearless titles the scorer will not accept; keep a search-hit and movie-card fixture for `duration_mismatch` and shadow-only detail. Prediction `parse_error` stays outside this card.
