@@ -133,11 +133,11 @@ async function recordScore(db,input){
    WHERE NOT EXISTS (SELECT 1 FROM score_result WHERE id=? OR (observation_key=? AND programme_run_id=? AND scorer_version=?))`,
    [...scoreValues,id,observationKey,programmeRunId,input.scorerVersion]);
   for(const row of input.considered||[])await db.run(`INSERT INTO score_considered (score_id,ordinal,tmdb_id,trusted,year,runtime)
-   SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM score_result WHERE id=?) AND NOT EXISTS (SELECT 1 FROM score_considered WHERE score_id=? AND ordinal=?)`,
-   [id,row.ordinal,row.tmdbId,row.trusted?1:0,row.year??null,row.runtime??null,id,id,row.ordinal]);
+   SELECT ?,?,?,?,?,? WHERE changes()=1`,
+   [id,row.ordinal,row.tmdbId,row.trusted?1:0,row.year??null,row.runtime??null]);
   if(input.detail)await db.run(`INSERT INTO score_detail (score_id,movie_id,runtime,release_year,matched_title,fetched_at,r2_key,content_sha256)
-   SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM score_result WHERE id=?) AND NOT EXISTS (SELECT 1 FROM score_detail WHERE score_id=?)`,
-   [id,input.detail.movieId,input.detail.runtime??null,input.detail.releaseYear??null,input.detail.matchedTitle??null,input.detail.fetchedAt,input.detail.r2Key??null,input.detail.contentSha256??null,id,id]);
+   SELECT ?,?,?,?,?,?,?,? WHERE changes()=1`,
+   [id,input.detail.movieId,input.detail.runtime??null,input.detail.releaseYear??null,input.detail.matchedTitle??null,input.detail.fetchedAt,input.detail.r2Key??null,input.detail.contentSha256??null]);
  });
  const stored=await readScoreRecord(db,id);
  const triple=await db.get('SELECT id FROM score_result WHERE observation_key=? AND programme_run_id=? AND scorer_version=?',[observationKey,programmeRunId,input.scorerVersion]);
