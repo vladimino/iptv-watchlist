@@ -218,4 +218,71 @@ assert.equal(dropped.urls.slice(marked).some(url=>url.includes('year=1997')||url
 assert.equal(droppedRun.variantCalls,0);
 assert.equal(dropped.records.get('epg/discovery-variant-pending.json').jobs.length,0);
 assert.equal(dropped.records.get('epg/discovery-resolution.json')[lateMiss.key].retryAt,keptRetry);
+
+function phasedHarness(flags,advance,response){
+ let now=1700000000000;
+ const Real=Date;
+ function Clock(...args){if(!new.target)return Real(...args);return args.length?new Real(...args):new Real(now);}
+ Clock.now=()=>now;Clock.parse=Real.parse;Clock.UTC=Real.UTC;Clock.prototype=Real.prototype;
+ const records=new Map(),etags=new Map();let revision=0;const urls=[];
+ const env={SCORED_RESOLUTION:flags.scored,CANDIDATE_DISCOVERY:flags.discovery,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
+ const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:Clock,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{const url=String(input);urls.push(url);now+=advance(url);return response(url);}});
+ for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+ ctx.env=env;
+ return {ctx,records,urls};
+}
+function seedPhased(box,row){box.records.set('programme.json',{runId:'run-1',films:[]});box.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[row]});box.records.set('epg/discovered-films.json',{});box.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});}
+const ironyRow=clockRow('Ирония судьбы, или С легким паром','1975',192);ironyRow.year=1975;ironyRow.key='ирония судьбы или с легким паром|1975';ironyRow.normalizedTitle='ирония судьбы или с легким паром';
+const ironyBody=url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/43430'))return json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184));if(text.includes('year=1976')||text.includes('year=1974'))return json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]});return empty();};
+let ironyJump=true;
+const ironyLate=phasedHarness({scored:'shadow',discovery:'shadow'},url=>ironyJump&&url.includes('year=1975')?20000:0,ironyBody);
+seedPhased(ironyLate,ironyRow);
+const ironyFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',ironyLate.ctx);
+const ironyStored=ironyLate.records.get('epg/discovery-resolution.json')[ironyRow.key];
+assert.equal(ironyFirst.variantCalls,0);
+assert.equal(ironyStored.status,'no_confident_match');
+assert.equal(ironyLate.records.get('epg/discovery-variant-pending.json').jobs[0].hadPriorDecision,false);
+assert.equal(ironyLate.records.get('epg/discovery-variant-pending.json').jobs[0].evidenceKey,vm.runInContext('candidateEvidence('+JSON.stringify(ironyRow)+')',ironyLate.ctx));
+ironyJump=false;
+const ironySecond=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',ironyLate.ctx);
+const ironyPreview=ironyLate.records.get('epg/discovery-score-preview.json').items[ironyRow.key];
+assert.ok(ironySecond.variantCalls>0);
+assert.equal(ironyPreview.outcome,'detail_verified');
+assert.equal(ironyPreview.comparison,'scored_only');
+assert.equal(ironyLate.records.get('epg/discovery-resolution.json')[ironyRow.key].retryAt,ironyStored.retryAt);
+assert.equal(ironyLate.records.get('epg/discovery-resolution.json')[ironyRow.key].status,'no_confident_match');
+assert.equal(ironyLate.records.get('epg/discovered-films.json')['tmdb_43430'],undefined);
+
+let writerJump=true;
+const writerLate=phasedHarness({scored:'on',discovery:'on'},url=>writerJump&&url.includes('year=1975')?20000:0,ironyBody);
+seedPhased(writerLate,ironyRow);
+const writerFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',writerLate.ctx);
+assert.equal(writerFirst.variantCalls,0);
+assert.equal(writerLate.records.get('epg/discovery-resolution.json')[ironyRow.key],undefined);
+assert.equal(writerLate.records.get('epg/discovery-variant-pending.json').jobs.length,0);
+writerJump=false;
+const writerSecond=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',writerLate.ctx);
+assert.equal(writerLate.records.get('epg/discovery-resolution.json')[ironyRow.key].status,'verified');
+assert.equal(writerLate.records.get('epg/discovery-resolution.json')[ironyRow.key].identitySource,'tmdb_detail');
+assert.equal(writerLate.records.get('epg/discovery-resolution.json')[ironyRow.key].tmdbId,'43430');
+assert.ok(writerLate.records.get('epg/discovered-films.json')['tmdb_43430']);
+assert.ok(writerSecond.variantCalls>0);
+
+let partialJump=true;
+const partialRow=clockRow('яяя 1',1998,120);
+const partialBody=url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(/query=яяя(&|$)/.test(text))return empty();if(text.includes('year=1997')||text.includes('year=1999'))return json({total_pages:1,results:[movie(36647,'яяя 1','Late',1997)]});return empty();};
+const partial=phasedHarness({scored:'shadow',discovery:'shadow'},url=>partialJump&&/query=%D1%8F%D1%8F%D1%8F(&|$)/.test(url)?20000:0,partialBody);
+seedPhased(partial,partialRow);
+const partialFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',partial.ctx);
+const partialJob=partial.records.get('epg/discovery-variant-pending.json').jobs[0];
+const partialRetry=partial.records.get('epg/discovery-resolution.json')[partialRow.key].retryAt;
+assert.ok(partialFirst.variantCalls>=1);
+assert.equal(partialJob.offset,1);
+assert.equal(partial.urls.some(url=>url.includes('year=1997')),false);
+partialJump=false;
+await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',partial.ctx);
+assert.equal(partial.records.get('epg/discovery-resolution.json')[partialRow.key].retryAt,partialRetry);
+assert.equal(partial.records.get('epg/discovery-resolution.json')[partialRow.key].status,'no_confident_match');
+assert.ok(partial.records.get('epg/discovery-score-preview.json').items[partialRow.key].proposedCandidates.some(row=>row.tmdbId==='36647'));
+assert.equal(partial.records.get('epg/discovery-variant-pending.json').jobs.length,0);
 console.log('Candidate discovery: title and year variants stay off the legacy decision.');

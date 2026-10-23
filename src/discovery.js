@@ -96,12 +96,31 @@ function variantDiagnostic(stats){return {variantCalls:stats.calls,variantErrors
 const VARIANT_PENDING_KEY='epg/discovery-variant-pending.json';
 function noteVariantFailure(stats,error){stats.calls++;if(error?.retryAt||String(error?.message||'').includes('429')){stats.throttled++;stats.halted=true;return;}stats.errors++;}
 function variantBlocked(stats,deadline){return stats.halted||stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline;}
-async function collectVariantProposals(env,candidate,deadline,stats){
+async function collectVariantProposals(env,candidate,deadline,stats,resumeFrom){
  const proposed=[],hits=[],pool=new Map(),planned=candidateSearchVariants(candidate).slice(0,CANDIDATE_VARIANT_CAP),language=/[іїєґ]/i.test(candidate.title)?'uk-UA':'ru-RU';
- if(stats.halted){stats.skipped+=planned.length;return {proposed,hits};}
- for(const variant of planned){
-  if(variantBlocked(stats,deadline)){stats.skipped++;continue;}
-  let search=null;try{search=await tmdbRequest(env,'search/movie?'+new URLSearchParams({query:variant.query,language,include_adult:'false',...(variant.year!=null?{year:String(variant.year)}:{})}));}catch(e){noteVariantFailure(stats,e);continue;}
+ const start=Math.max(0,Math.min(planned.length,Number(resumeFrom?.offset)||0)),savedAliases=[...(resumeFrom?.pendingAliasIds||[])].map(String).filter(Boolean).slice(0,3);
+ let resume=null;
+ const unfinished=from=>Math.max(0,planned.length-from);
+ if(stats.halted){stats.skipped+=unfinished(start)+savedAliases.length;return {proposed,hits,resume:null};}
+ const takeAlias=async ids=>{
+  const pending=[];
+  for(const id of ids){
+   if(proposed.some(item=>item.tmdbId===id))continue;
+   if(stats.halted)return null;
+   if(variantBlocked(stats,deadline)){stats.skipped++;pending.push(id);continue;}
+   let movie=null;try{movie=await tmdbRequest(env,'movie/'+id+'?language=ru-RU&append_to_response=translations,alternative_titles');}catch(e){noteVariantFailure(stats,e);if(stats.halted)return null;continue;}
+   stats.calls++;
+   const aliases=[...(movie?.alternative_titles?.titles||[]).map(item=>item?.title),...(movie?.translations?.translations||[]).map(item=>item?.data?.title)].filter(Boolean),matched=aliases.find(title=>norm(title)===candidate.normalizedTitle);
+   if(matched)proposed.push({tmdbId:String(movie.id),query:candidate.title,year:candidateReleaseYear(candidate.year),reason:'tmdb_alias',matchedTitle:matched});
+  }
+  return stats.halted?null:pending.length?{offset:planned.length,pendingAliasIds:pending}:null;
+ };
+ if(savedAliases.length){const alias=await takeAlias(savedAliases);if(stats.halted||alias)return {proposed,hits,resume:alias};}
+ for(let index=start;index<planned.length;index++){
+  if(stats.halted){resume=null;break;}
+  if(variantBlocked(stats,deadline)){stats.skipped+=unfinished(index);resume={offset:index,pendingAliasIds:variantAliasRank(candidate,[...pool.values()]).slice(0,3).map(row=>String(row.movie.id)).filter(id=>!proposed.some(item=>item.tmdbId===id))};break;}
+  const variant=planned[index];
+  let search=null;try{search=await tmdbRequest(env,'search/movie?'+new URLSearchParams({query:variant.query,language,include_adult:'false',...(variant.year!=null?{year:String(variant.year)}:{})}));}catch(e){noteVariantFailure(stats,e);if(stats.halted){stats.skipped+=unfinished(index+1);resume=null;break;}continue;}
   stats.calls++;
   for(const movie of search?.results||[]){
    if(!variantHit(candidate,movie,variant)){if(movie?.id!=null&&!pool.has(String(movie.id)))pool.set(String(movie.id),movie);continue;}
@@ -111,15 +130,8 @@ async function collectVariantProposals(env,candidate,deadline,stats){
   }
   if(hits.some(hit=>norm(hit.title)===candidate.normalizedTitle||norm(hit.original)===candidate.normalizedTitle))break;
  }
- for(const row of variantAliasRank(candidate,[...pool.values()]).slice(0,3)){
-  if(proposed.some(item=>item.tmdbId===String(row.movie.id)))continue;
-  if(variantBlocked(stats,deadline)){stats.skipped++;continue;}
-  let movie=null;try{movie=await tmdbRequest(env,'movie/'+row.movie.id+'?language=ru-RU&append_to_response=translations,alternative_titles');}catch(e){noteVariantFailure(stats,e);continue;}
-  stats.calls++;
-  const aliases=[...(movie?.alternative_titles?.titles||[]).map(item=>item?.title),...(movie?.translations?.translations||[]).map(item=>item?.data?.title)].filter(Boolean),matched=aliases.find(title=>norm(title)===candidate.normalizedTitle);
-  if(matched)proposed.push({tmdbId:String(movie.id),query:candidate.title,year:candidateReleaseYear(candidate.year),reason:'tmdb_alias',matchedTitle:matched});
- }
- return {proposed,hits};
+ if(!resume&&!stats.halted){const ranked=variantAliasRank(candidate,[...pool.values()]).slice(0,3).map(row=>String(row.movie.id)).filter(id=>!proposed.some(item=>item.tmdbId===id));resume=await takeAlias(ranked);}
+ return {proposed,hits,resume:stats.halted?null:resume};
 }
 const DISCOVERY_SCORE_PREVIEW_KEY='epg/discovery-score-preview.json';
 function filmScorerCandidate(film){return {tmdbId:String(film.tmdbId),title:film.title||'',original:film.original||'',aliases:film.aliases||[],year:film.year??null,runtime:film.runtime??null,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId};}
@@ -253,22 +265,35 @@ async function resolveDiscoveryChunk(env,report,limit){
  let checked=0,added=0,reused=0,tmdbCalls=0,error=null,retryAt=null,variantMeter=emptyVariantStats();
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
  const paired=mode!=='off'&&candidateDiscoveryMode(env)===mode,deferred=[];
- // A stored no_confident_match hides the observation behind retryAt, so a plan that missed this deadline has to outlive the chunk.
- const rememberVariant=(candidate)=>{if(!candidate?.key||deferred.some(row=>row.key===candidate.key))return;deferred.push({key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:[...(candidate.durations||[])]});variantMeter.deferred++;variantMeter.skipped+=Math.min(CANDIDATE_VARIANT_CAP,candidateSearchVariants(candidate).length);};
+ // Shadow keeps the plan, including the decision from before the legacy write. retryAt on the stored row stays put.
+ const rememberVariant=(candidate,extra,countSkip)=>{
+  if(mode!=='shadow'||!candidate?.key)return;
+  const offset=extra?.offset||0,pendingAliasIds=[...(extra?.pendingAliasIds||[])].map(String).filter(Boolean).slice(0,3);
+  const row={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:[...(candidate.durations||[])],evidenceKey:extra?.evidenceKey||candidateEvidence(candidate),priorDecision:extra?.hadPriorDecision?extra.priorDecision??null:null,hadPriorDecision:extra?.hadPriorDecision===true,legacyStatus:extra?.legacyStatus??null,offset,pendingAliasIds};
+  const at=deferred.findIndex(item=>item.key===row.key);
+  if(at<0){deferred.push(row);variantMeter.deferred++;}else deferred[at]=row;
+  if(countSkip)variantMeter.skipped+=Math.max(0,Math.min(CANDIDATE_VARIANT_CAP,candidateSearchVariants(candidate).length)-offset)+pendingAliasIds.length;
+ };
  const settleVariant=async job=>{
   if(!paired||variantMeter.halted||!job?.candidate)return;
   if(!await publishedGenerationMatches(env,source.programmeRunId)){deferred.length=0;return;}
-  if(variantMeter.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline){rememberVariant(job.candidate);return;}
-  const found=await collectVariantProposals(env,job.candidate,deadline,variantMeter);
-  if(!found.proposed.length)return;
-  const observation={key:job.candidate.key,title:job.candidate.title,normalizedTitle:job.candidate.normalizedTitle,year:job.candidate.year??null,duration:job.candidate.duration??null,durations:job.candidate.durations};
+  const candidate=job.candidate,evidence=candidateEvidence(candidate),live=decisions[candidate.key];
+  if((job.evidenceKey&&job.evidenceKey!==evidence)||candidateActivity(candidate)!=='current'||live?.terminalReason&&(!live.evidenceKey||live.evidenceKey===evidence))return;
+  if(variantMeter.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline){rememberVariant(candidate,job,true);return;}
+  const found=await collectVariantProposals(env,candidate,deadline,variantMeter,{offset:job.offset||0,pendingAliasIds:job.pendingAliasIds||[]});
+  if(variantMeter.halted||!found.proposed.length&&!found.resume)return;
+  if(!found.proposed.length){if(found.resume)rememberVariant(candidate,{...job,offset:found.resume.offset,pendingAliasIds:found.resume.pendingAliasIds||[]},false);return;}
+  const observation={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:candidate.durations};
   const score=scoreFilmResolution({observation,candidates:[...job.priorCandidates,...found.hits]});
-  let gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now),detailChecked=false;
-  if(resolutionActionability(job.candidate,job.shadowDecisions[job.candidate.key],now)&&score.status==='accepted'&&score.acceptedTmdbId&&!variantBlocked(variantMeter,deadline)&&await publishedGenerationMatches(env,source.programmeRunId)){
+  let gate=gateScoredCandidate(pinned,source,candidate,score,job.shadowDecisions,job.filmsBefore,now),detailChecked=false;
+  if(resolutionActionability(candidate,job.shadowDecisions[candidate.key],now)&&score.status==='accepted'&&score.acceptedTmdbId&&!variantBlocked(variantMeter,deadline)&&await publishedGenerationMatches(env,source.programmeRunId)){
    let movie=null;try{movie=await tmdbRequest(env,'movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');}catch(e){noteVariantFailure(variantMeter,e);movie=null;}
-   if(movie){variantMeter.calls++;if(String(movie.id)===String(score.acceptedTmdbId)){gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(score.acceptedTmdbId))});detailChecked=true;}}
+   if(movie&&!variantMeter.halted){variantMeter.calls++;if(String(movie.id)===String(score.acceptedTmdbId)){gate=gateScoredCandidate(pinned,source,candidate,score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(score.acceptedTmdbId))});detailChecked=true;}}
   }
-  preview[job.candidate.key]=scorePreview(job.candidate,score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked,differentId:false}),job.knownBefore,found.proposed);
+  if(variantMeter.halted)return;
+  if(found.resume)rememberVariant(candidate,{...job,offset:found.resume.offset,pendingAliasIds:found.resume.pendingAliasIds||[]},false);
+  const knownBefore=!!score.acceptedTmdbId&&job.priorCandidates.some(row=>String(row.tmdbId)===String(score.acceptedTmdbId));
+  preview[candidate.key]=scorePreview(candidate,score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked,differentId:false}),knownBefore,found.proposed);
  };
  try{
  if(paired){
@@ -277,7 +302,10 @@ async function resolveDiscoveryChunk(env,report,limit){
    for(const row of stored.jobs){
     if(variantMeter.halted)break;
     const candidate=source.items.find(item=>item.key===row.key);if(!candidate)continue;
-    await settleVariant({candidate,priorCandidates:knownScorerCandidates(aliasIndex,candidate),shadowDecisions:{...decisions},filmsBefore:{...films},competitors:detailCompetitors(aliasIndex,candidate,''),legacyStatus:decisions[candidate.key]?.status||null,knownBefore:false});
+    const evidence=candidateEvidence(candidate),live=decisions[candidate.key];
+    if((row.evidenceKey&&row.evidenceKey!==evidence)||candidateActivity(candidate)!=='current'||live?.terminalReason&&(!live.evidenceKey||live.evidenceKey===evidence))continue;
+    const shadowDecisions={...decisions};if(row.hadPriorDecision)shadowDecisions[candidate.key]=row.priorDecision;else delete shadowDecisions[candidate.key];
+    await settleVariant({candidate,priorCandidates:knownScorerCandidates(aliasIndex,candidate),shadowDecisions,filmsBefore:{...films},competitors:detailCompetitors(aliasIndex,candidate,''),legacyStatus:live?.status??row.legacyStatus??null,priorDecision:row.priorDecision??null,hadPriorDecision:row.hadPriorDecision===true,evidenceKey:row.evidenceKey||evidence,offset:row.offset||0,pendingAliasIds:row.pendingAliasIds||[]});
    }
   }
  }
@@ -291,13 +319,13 @@ async function resolveDiscoveryChunk(env,report,limit){
     let score=scoreFilmResolution({observation,candidates});
     let searched=!score.considered.some(row=>row.title.quality===1);
     if(searched)candidates=[...candidates,...await scoredSearchCandidates(query,candidate)],score=scoreFilmResolution({observation,candidates});
-    let proposed=[];
+    let proposed=[],variantHeld=false;
     if(candidateDiscoveryMode(env)==='on'&&!score.considered.some(row=>row.title.quality===1)){
-     if(!variantMeter.halted&&(variantMeter.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline))rememberVariant(candidate);
+     if(!variantMeter.halted&&(variantMeter.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline)){variantMeter.skipped+=Math.min(CANDIDATE_VARIANT_CAP,candidateSearchVariants(candidate).length);variantHeld=true;}
      else if(!variantMeter.halted){
       const found=await collectVariantProposals(env,candidate,deadline,variantMeter);
-      proposed=found.proposed;
-      if(found.hits.length)candidates=[...candidates,...found.hits],score=scoreFilmResolution({observation,candidates}),searched=true;
+      if(!variantMeter.halted&&found.resume)variantHeld=true;
+      else if(!variantMeter.halted){proposed=found.proposed;if(found.hits.length)candidates=[...candidates,...found.hits],score=scoreFilmResolution({observation,candidates}),searched=true;}
      }
     }
     let gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now);
@@ -307,7 +335,8 @@ async function resolveDiscoveryChunk(env,report,limit){
      gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:detailCompetitors(aliasIndex,candidate,score.acceptedTmdbId)});
     }
     preview[candidate.key]=scorePreview(candidate,score,gate,null,null,null,proposed);
-    if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now);
+    if(variantHeld){/* The optional search did not finish, so this observation stays on the normal queue. */}
+    else if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now);
     else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now);
     else if(gate.outcome==='detail_verified'){
      const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
@@ -352,7 +381,7 @@ async function resolveDiscoveryChunk(env,report,limit){
     }
     preview[candidate.key]=scorePreview(candidate,score,gate,decisions[candidate.key]?.status||null,needsDetail&&!differentId?'detail_not_compared':shadowComparison({legacyStatus:decisions[candidate.key]?.status||null,gate,detailChecked,differentId}),knownBefore);
     if(needsDetail)shadowDetails.push({key:candidate.key,candidate,score,shadowDecisions,filmsBefore:priorFilms,competitors:priorCompetitors,legacyStatus:decisions[candidate.key]?.status||null,differentId,knownBefore});
-    if(candidateDiscoveryMode(env)==='shadow'&&!score.considered.some(row=>row.title.quality===1))variantJob={candidate,priorCandidates,shadowDecisions,filmsBefore:priorFilms,competitors:priorCompetitors,legacyStatus:decisions[candidate.key]?.status||null,knownBefore};
+    if(candidateDiscoveryMode(env)==='shadow'&&!score.considered.some(row=>row.title.quality===1))variantJob={candidate,priorCandidates,shadowDecisions,filmsBefore:priorFilms,competitors:priorCompetitors,legacyStatus:decisions[candidate.key]?.status||null,priorDecision:beforeDecision===undefined?null:beforeDecision,hadPriorDecision:beforeDecision!==undefined,evidenceKey:candidateEvidence(candidate),offset:0,pendingAliasIds:[]};
    }
    }
    // A film is committed before its decision. A crash between writes is repaired by alias reuse.
