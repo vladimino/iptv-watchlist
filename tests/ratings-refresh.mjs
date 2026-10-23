@@ -12,11 +12,12 @@ const bucket={
   if(key==='enrichment/view-index.json'&&bucket.stealIndex){bucket.stealIndex=false;const current=structuredClone(records.get(key)||{});current.rated={...(current.rated||{}),fingerprintHash:'keep'};records.set(key,current);etags.set(key,String(++revision));return null;}
   if(key==='enrichment/ratings/published.json'&&bucket.failPointer)throw new Error('pointer failed');
   if(key==='enrichment/diagnostics/rating-observations.json'&&bucket.failObservations)throw new Error('observations failed');
+  if(key.startsWith('events/items/')&&bucket.failEvents)throw new Error('events unavailable');
   const condition=options.onlyIf;
   if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;
   records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};
  },
- async list(){return {objects:[],truncated:false};}
+ async list({prefix=''}={}){if(!bucket.listEvents)return {objects:[],truncated:false};const keys=[...records.keys()].filter(key=>key.startsWith(prefix)).sort();return {objects:keys.map(key=>({key})),truncated:false};}
 };
 const page=(films,next)=>`<h1 title="${films.length}&nbsp;films"></h1>`+films.map(film=>`<li class="griditem"><div data-postered-identifier='{&quot;lid&quot;:&quot;${film.id}&quot;}'></div>${film.stars?`<span class="rating rated-${film.stars}"></span>`:''}</li>`).join('')+(next?`<a class="next" href="${next}"></a>`:'');
 const review=(slug,rating)=>`<script type="application/ld+json">{"@type":"Review","author":[{"sameAs":"https://letterboxd.com/demo-user/"}],"itemReviewed":{"sameAs":"https://letterboxd.com/film/${slug}/"},"reviewRating":{"ratingValue":${rating}}}</script>`;
@@ -93,4 +94,13 @@ records.delete('enrichment/films/rated/actual.json');records.delete('enrichment/
 await ctx.updateViewIndex(env,'rated',{fingerprintHash:'late',prediction:{predictedRating:2}});
 const late=records.get('enrichment/view-index.json').rated;assert.equal(late.actualRating,4);assert.equal(late.fingerprintHash,'late');assert.equal(late.prediction.predictedRating,2);
 assert.deepEqual(snapshot(),before);assert.equal(fetches.some(url=>url.includes('epg.test')),false);
+const decorateAt='2026-10-23T18:00:00.000Z',decorateKey='events/items/'+String(9999999999999-Date.parse(decorateAt)).padStart(13,'0')+'-run-decorate-watchlist.json';
+records.set(decorateKey,{id:'run-decorate-watchlist',type:'watchlist',at:decorateAt,total:0,added:[],removed:[{id:'rated',title:'Rated',year:2020},{id:'plain',title:'Plain',year:2019}]});etags.set(decorateKey,'event-1');
+bucket.listEvents=true;bucket.failEvents=true;records.delete('enrichment/ratings/status.json');filmsHtml=()=>page([{id:'rated',stars:8},{id:'other',stars:8}],null);fetches.length=0;
+let eventFailed=await post({});assert.equal(eventFailed.data.state,'healthy');assert.equal(eventFailed.data.attempt.outcome,'succeeded');assert.equal(eventFailed.data.attempt.cause,null);assert.equal(records.get('enrichment/ratings/published.json').projected,true);assert.equal(records.get(decorateKey).removed.every(film=>film.rating==null),true);assert.equal(fetches.filter(url=>url.includes('/films/')).length,1);assert.equal(fetches.some(url=>url.includes('/film/')&&!url.includes('/films/')),false);assert.equal(fetches.some(url=>url.includes('epg.test')),false);
+bucket.failEvents=false;fetches.length=0;
+await ctx.enrichRecentRemovalRatings(env,{rated:4},'2026-10-23T18:05:00.000Z');
+const decorated=records.get(decorateKey);assert.equal(decorated.removed.find(film=>film.id==='rated').rating,4);assert.equal(decorated.removed.find(film=>film.id==='rated').ratingObservedAt,'2026-10-23T18:05:00.000Z');assert.equal(decorated.removed.find(film=>film.id==='plain').rating,undefined);
+await ctx.enrichRecentRemovalRatings(env,{rated:2},'2026-10-23T19:00:00.000Z');
+assert.equal(records.get(decorateKey).removed.find(film=>film.id==='rated').rating,4);assert.equal(records.get(decorateKey).removed.find(film=>film.id==='rated').ratingObservedAt,'2026-10-23T18:05:00.000Z');assert.equal([...records.keys()].filter(key=>key.includes('run-decorate-watchlist')).length,1);assert.equal(fetches.length,0);bucket.listEvents=false;
 console.log('Ratings refresh: blocked films list, preserved snapshot, separate diary, and no EPG writes passed');

@@ -3,10 +3,16 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 
-const records=new Map(),fetches=[];
+const records=new Map(),etags=new Map(),fetches=[];let revision=0;
 const bucket={
- async get(key){return records.has(key)?{json:async()=>structuredClone(records.get(key))}:null;},
- async put(key,value){records.set(key,JSON.parse(value));},
+ async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},
+ async put(key,value,options={}){
+  if(bucket.failRatedEvent&&String(key).startsWith('events/items/')&&JSON.parse(value).removed?.some(film=>film.rating!=null))throw new Error('events unavailable');
+  if(bucket.interleave?.key===key&&!bucket.interleave.started){bucket.interleave.started=true;await bucket.interleave.run();}
+  const condition=options.onlyIf;
+  if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;
+  records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};
+ },
  async list({prefix='',cursor,limit=20}={}){const keys=[...records.keys()].filter(key=>key.startsWith(prefix)).sort();const offset=Number(cursor||0),slice=keys.slice(offset,offset+limit);return {objects:slice.map(key=>({key})),truncated:offset+limit<keys.length,cursor:String(offset+limit)};}
 };
 const page=(films)=>`<h1 title="${films.length}&nbsp;films"></h1>`+films.map(film=>`<li class="griditem"><div data-postered-identifier='{&quot;lid&quot;:&quot;${film.id}&quot;}'></div>${film.stars?`<span class="rating rated-${film.stars}"></span>`:''}</li>`).join('');
@@ -97,4 +103,36 @@ const soloStored=records.get([...records.keys()].find(key=>key.endsWith('run-4-w
 assert.equal(soloStored.removed[0].rating,3);
 assert.equal(soloStored.removed[0].ratingObservedAt,records.get('enrichment/films/solo/actual.json').updatedAt);
 assert.equal([...records.keys()].filter(key=>key.startsWith('events/items/')&&key.includes('run-4-watchlist')).length,1);
+const decorateAt='2026-10-23T17:00:00.000Z',decorate={id:'run-5-watchlist',type:'watchlist',at:decorateAt,total:1,added,removed:[{id:'gone',title:'Gone',year:2019}]};
+filmsHtml=()=>page([{id:'gone',stars:9},{id:'stay'}]);blockFilms=false;bucket.failRatedEvent=true;
+const beforeDecorate=fetches.length;
+const decorateRun={runId:'run-5',stage:'epg',events:[decorate],ratingPending:['public-films-list'],watchlist:report.films,pending:[]};
+ctx.decorateRun=decorateRun;ctx.decorateReport={...report,runId:'run-5'};
+const decorated=await ctx.completeWithRatings(env,decorateRun,ctx.decorateReport);
+assert.equal(decorated.stage,'complete');
+assert.equal(decorated.personalRatingError,undefined);
+assert.equal(fetches.slice(beforeDecorate).filter(url=>url.includes('/films/')).length,1);
+assert.equal(fetches.slice(beforeDecorate).some(url=>url.includes('/diary/')||url.includes('/film/')),false);
+const undecorated=records.get([...records.keys()].find(key=>key.endsWith('run-5-watchlist.json')));
+assert.equal(undecorated.removed[0].rating,undefined);
+assert.equal([...records.keys()].filter(key=>key.endsWith('run-5-watchlist.json')).length,1);
+bucket.failRatedEvent=false;
+await ctx.enrichKnownRemovalEvent(env,decorateRun,{gone:4.5},'2026-10-23T17:05:00.000Z');
+const decoratedStored=records.get([...records.keys()].find(key=>key.endsWith('run-5-watchlist.json')));
+assert.equal(decoratedStored.removed[0].rating,4.5);
+assert.equal(decoratedStored.removed[0].ratingObservedAt,'2026-10-23T17:05:00.000Z');
+assert.equal([...records.keys()].filter(key=>key.endsWith('run-5-watchlist.json')).length,1);
+const raceAt='2026-10-23T18:00:00.000Z';
+const raceEvent={id:'run-race-watchlist',type:'watchlist',at:raceAt,total:0,added:[],removed:[{id:'alpha',title:'Alpha',year:2011},{id:'beta',title:'Beta',year:2012}]};
+ctx.raceEvent=raceEvent;await ctx.writeEvent(env,raceEvent);
+const raceKey=ctx.removalEventKey(raceEvent);
+const alphaStamp='2026-10-23T18:01:00.000Z',betaStamp='2026-10-23T18:02:00.000Z';
+ctx.alphaEvent=ctx.withRemovalRatings(raceEvent,{alpha:4},alphaStamp);
+ctx.betaEvent=ctx.withRemovalRatings(raceEvent,{beta:3.5},betaStamp);
+bucket.interleave={key:raceKey,started:false,run:()=>ctx.writeEvent(env,ctx.betaEvent)};
+await ctx.writeEvent(env,ctx.alphaEvent);
+const raced=records.get(raceKey),racedAlpha=raced.removed.find(film=>film.id==='alpha'),racedBeta=raced.removed.find(film=>film.id==='beta');
+assert.equal(racedAlpha.rating,4);assert.equal(racedAlpha.ratingObservedAt,alphaStamp);
+assert.equal(racedBeta.rating,3.5);assert.equal(racedBeta.ratingObservedAt,betaStamp);
+assert.equal([...records.keys()].filter(key=>key.endsWith('run-race-watchlist.json')).length,1);
 console.log('Removal ratings: same event, mixed and missing ratings, stale replay, serializer, ratings refresh, and repair passed');
