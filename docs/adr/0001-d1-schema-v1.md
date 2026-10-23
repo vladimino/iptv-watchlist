@@ -6,7 +6,7 @@
 
 Schema v1 is `migrations/0001_schema_v1.sql`. The number is the version. Once this file is merged it is not edited. A later shape is a new numbered file.
 
-`wrangler.jsonc` does not name a D1 database. Deploying Worker `iptv` does not create or migrate a database. The test applies the file to a local SQLite database and discards it. `src/epg-repository.js` and `src/canonical-repository.js` use that schema only when a caller supplies a database. Neither file is in the Worker bundle, and neither applies this migration.
+`wrangler.jsonc` does not name a D1 database. Deploying Worker `iptv` does not create or migrate a database. The test applies the file to a local SQLite database and discards it. `src/epg-repository.js`, `src/canonical-repository.js`, and `src/prediction-repository.js` use that schema only when a caller supplies a database. None of those files is in the Worker bundle, and none applies this migration.
 
 The current EPG generation is the single `published_generation` row. Replacing that pointer does not delete the previous generation. `candidate_generation` keeps the observation and evidence key scored for that generation; `candidate` is only the latest projection. A replaced prediction is a new immutable object plus `prediction_history.payload_json`, not an edit of the mutable `predictions.json` key. Film credits and the watchlist metadata body live in `film_person_credit` and `film_metadata`, not only inside `metadata.json`.
 
@@ -18,4 +18,4 @@ This pull request has nothing to roll back in production. After a later card app
 
 ## Consequences
 
-[AIR-70](https://trello.com/c/8PRWRx2C) and [AIR-71](https://trello.com/c/UAUUQ2jh) have local repositories against these tables. [AIR-72](https://trello.com/c/MfAGc1Dd) can still implement one. None of them apply the migration to production. [AIR-74](https://trello.com/c/5AdAmKPe) is the first card that may write a production database, and only after [AIR-69](https://trello.com/c/FlcWZX7W).
+[AIR-70](https://trello.com/c/8PRWRx2C), [AIR-71](https://trello.com/c/UAUUQ2jh), and [AIR-72](https://trello.com/c/MfAGc1Dd) have local repositories against these tables. None of them apply the migration to production. [AIR-74](https://trello.com/c/5AdAmKPe) is the first card that may write a production database, and only after [AIR-69](https://trello.com/c/FlcWZX7W).
