@@ -64,7 +64,15 @@ One publish, decision, or score is one database transaction. A failed statement 
 
 `applyLink` stores the survivor and, in that same transaction, retires the other id: its external ids are released, its aliases, credits, and localization conflicts move to the survivor, its row is removed, and `film_redirect` points at the survivor. Redirects that already pointed at the retired id are retargeted in that same write. A read of either earlier id follows to the surviving film. Watchlist membership moves to the survivor. A film that already belongs to a generation, or that has an EPG last-airing row, is not retired. Replaying the same link leaves the survivor record as it was, including adopted aliases, credits, conflicts, and external ids. A failed statement, including a credit whose person is absent, leaves the previous commit unchanged.
 
-The module does not insert a candidate, a score, a programme generation, or prediction history. AIR-72 and AIR-73 are not implemented. None of these repositories run in production.
+The module does not insert a candidate, a score, a programme generation, or prediction history.
+
+## Prediction repository
+
+[AIR-72](https://trello.com/c/MfAGc1Dd) is `src/prediction-repository.js`. The Worker bundle does not include it, and it does not open R2 or a production D1 database. The caller passes a database and the records already produced. This module does not generate a fingerprint or a prediction, and it does not write a Film, a candidate, or an identity assertion.
+
+The fingerprint body, the taste-profile body, and the current prediction body stay immutable R2 objects. The repository stores `r2_key` and `content_sha256`. `prediction_history.payload_json` is the former prediction record, and its `r2_key` is that version's object. A new profile version does not set `invalidated_at` on the fingerprint. Saving a different current prediction appends the previous row once in the same transaction. Saving that same prediction again does not append another row. A failed statement leaves the previous current prediction, its history, the fingerprint, and the actual rating in place. The view and queue values are derived from those rows. They are not copies of `view-index.json` or the prediction queue, and producing them does not call a model.
+
+AIR-73 is not implemented. None of these repositories run in production.
 
 | Card | Reads and writes | Does not |
 | --- | --- | --- |
@@ -75,4 +83,4 @@ The module does not insert a candidate, a score, a programme generation, or pred
 
 ## Rollback
 
-Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. Deleting `src/canonical-repository.js` and `tests/canonical-repository.mjs` removes the local Film and Person adapter. No database is created and no production row moves.
+Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. Deleting `src/canonical-repository.js` and `tests/canonical-repository.mjs` removes the local Film and Person adapter. Deleting `src/prediction-repository.js` and `tests/prediction-repository.mjs` removes the local prediction adapter. No database is created and no production row moves.

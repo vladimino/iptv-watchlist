@@ -1,0 +1,125 @@
+import {spawnSync} from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {createPredictionRepository} from '../src/prediction-repository.js';
+
+const source=fs.readFileSync('src/prediction-repository.js','utf8');
+assert.doesNotMatch(source,/d1_databases|\bBUCKET\b|\bfetch\b|\bwrangler\b|INSERT INTO film\s|INSERT INTO candidate|INSERT INTO score_result|INSERT INTO programme_generation|INSERT INTO film_dimension|INSERT INTO identity_assertion/);
+assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/prediction-repository/);
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/prediction-repository/);
+
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-prediction-repo-'));
+const database=path.join(root,'prediction.sqlite');
+exec(database,'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+const db=openSqlite(database);
+await db.run("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:zz-film',1,'Original Title','2026-10-19T01:00:00.000Z')");
+const repo=createPredictionRepository(db);
+const profile={version:1,profileHash:'profile-1',createdAt:'2026-10-19T01:00:00.000Z',r2Key:'r2/profile/1',contentSha256:'sha-profile-1'};
+const fingerprint={filmId:'film:zz-film',schemaVersion:1,fingerprintHash:'print-1',generatedAt:'2026-10-19T02:00:00.000Z',invalidatedAt:null,r2Key:'r2/fingerprint/print-1',contentSha256:'sha-print-1'};
+const rating={filmId:'film:zz-film',rating:4.5,source:'letterboxd',recordedAt:'2026-10-19T03:00:00.000Z'};
+const predictionA={filmId:'film:zz-film',tasteProfileVersion:1,tasteProfileHash:'profile-1',fingerprintHash:'print-1',fingerprintSchemaVersion:1,predictionPromptVersion:1,predictedRating:3.5,r2Key:'r2/prediction/a',contentSha256:'sha-prediction-a',updatedAt:'2026-10-20T01:00:00.000Z'};
+const predictionB={...predictionA,tasteProfileVersion:2,tasteProfileHash:'profile-2',predictedRating:4,r2Key:'r2/prediction/b',contentSha256:'sha-prediction-b',updatedAt:'2026-10-21T01:00:00.000Z'};
+const predictionC={...predictionB,predictedRating:4.5,r2Key:'r2/prediction/c',contentSha256:'sha-prediction-c',updatedAt:'2026-10-22T01:00:00.000Z'};
+
+await repo.saveProfile(profile);
+await repo.saveProfile(profile);
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM profile_version'),1);
+await assert.rejects(()=>repo.saveProfile({...profile,profileHash:'profile-other'}),/Profile version conflicts/);
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM profile_version'),1);
+const storedFingerprint=await repo.saveFingerprint(fingerprint);
+await repo.saveFingerprint(fingerprint);
+assert.equal(storedFingerprint.invalidatedAt,null);
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM fingerprint_payload'),1);
+await repo.saveActualRating(rating);
+const first=await repo.savePrediction(predictionA);
+assert.equal(first.history.length,0);
+assert.equal(first.prediction.stale,false);
+assert.equal(first.queue,null);
+assert.equal(first.view.predictedRating,3.5);
+assert.equal(first.view.actualRating,4.5);
+assert.equal(first.actualRating.recordedAt,rating.recordedAt);
+
+await assert.rejects(()=>repo.savePrediction(predictionB));
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM prediction_history'),0);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM prediction_current WHERE taste_profile_version=1"),1);
+assert.equal((await repo.readFilm('film:zz-film')).actualRating.rating,4.5);
+assert.equal((await repo.readFilm('film:zz-film')).fingerprint.invalidatedAt,null);
+
+await repo.saveProfile({version:2,profileHash:'profile-2',createdAt:'2026-10-21T00:00:00.000Z',r2Key:'r2/profile/2',contentSha256:'sha-profile-2'});
+const stale=await repo.readFilm('film:zz-film');
+assert.equal(stale.fingerprint.invalidatedAt,null);
+assert.equal(stale.fingerprint.fingerprintHash,'print-1');
+assert.equal(stale.prediction.predictedRating,3.5);
+assert.equal(stale.prediction.stale,true);
+assert.equal(stale.view.stale,true);
+assert.equal(stale.queue.requiredWork,'prediction_only');
+assert.equal(stale.history.length,0);
+assert.equal(stale.actualRating.rating,4.5);
+
+const replaced=await repo.savePrediction(predictionB);
+assert.equal(replaced.history.length,1);
+assert.equal(replaced.history[0].replacedAt,predictionB.updatedAt);
+assert.equal(replaced.history[0].payload.predictedRating,3.5);
+assert.equal(replaced.history[0].r2Key,'r2/prediction/a');
+assert.equal(replaced.prediction.predictedRating,4);
+assert.equal(replaced.prediction.stale,false);
+assert.equal(replaced.queue,null);
+assert.equal(replaced.fingerprint.invalidatedAt,null);
+assert.equal(replaced.actualRating.recordedAt,rating.recordedAt);
+const repeated=await repo.savePrediction(predictionB);
+assert.equal(JSON.stringify(repeated),JSON.stringify(replaced));
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM prediction_history'),1);
+const next=await repo.savePrediction(predictionC);
+assert.equal(next.history.length,2);
+assert.equal(next.history[0].payload.predictedRating,3.5);
+assert.equal(next.history[1].payload.predictedRating,4);
+assert.equal(next.prediction.predictedRating,4.5);
+assert.equal(next.actualRating.rating,4.5);
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM fingerprint_payload'),1);
+
+const reopened=createPredictionRepository(openSqlite(database));
+assert.equal(JSON.stringify(await reopened.readFilm('film:zz-film')),JSON.stringify(next));
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM film'),1);
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM candidate'),0);
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM film_dimension'),0);
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM identity_assertion'),0);
+
+async function count(databaseHandle,sql){return (await databaseHandle.get(sql)).n;}
+function openSqlite(file){
+ const state={buffer:null};
+ return {
+  run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},
+  get(sql,params=[]){if(state.buffer)throw new Error('Read inside the prediction transaction');return Promise.resolve(query(file,sql,params)[0]??null);},
+  all(sql,params=[]){if(state.buffer)throw new Error('Read inside the prediction transaction');return Promise.resolve(query(file,sql,params));},
+  async transaction(fn){
+   if(state.buffer)return fn();
+   state.buffer=[];
+   try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}
+   finally{state.buffer=null;}
+  },
+ };
+}
+function exec(file,sql){
+ const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
+ if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
+}
+function query(file,sql,params){
+ const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});
+ if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
+ const text=result.stdout.trim();
+ return text?JSON.parse(text):[];
+}
+function render(sql,params=[]){
+ let index=0;
+ const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('Missing SQL parameter');return literal(params[index++]);});
+ if(index!==params.length)throw new Error('Unused SQL parameter');
+ return text;
+}
+function literal(value){
+ if(value==null)return 'NULL';
+ if(typeof value==='number'){if(!Number.isFinite(value))throw new Error('Bad SQL number');return String(value);}
+ if(typeof value==='boolean')return value?'1':'0';
+ return "'"+String(value).replaceAll("'","''")+"'";
+}
