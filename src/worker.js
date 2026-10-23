@@ -98,13 +98,15 @@ async function setStarted(env,body){
 }
 async function beginSync(env){
  const current=await loadJSON(env,'sync.json');if(current&&['metadata','epg'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
+ try{
  const sources=sourceConfig(env);let url=sources.watchlist,pages=0,total=null;const films=new Map();
  while(url){const p=parseWatchlist(await getHTML(url));pages++;if(pages>100)throw new Error('Watchlist pagination limit exceeded');if(!Number.isInteger(p.total))throw new Error('Watchlist total not found');if(total===null)total=p.total;if(total!==p.total)throw new Error('Watchlist changed during synchronization; retry');if(p.films.length===0&&total>0)throw new Error('Watchlist page has no films');for(const f of p.films){if(films.has(f.id))throw new Error('Duplicate film across pages; retry');films.set(f.id,f);}if(p.next&&!new RegExp('^/'+sources.letterboxdUsername+'/watchlist/page/\\d+/$').test(p.next))throw new Error('Unexpected pagination URL');url=p.next?'https://letterboxd.com'+p.next:null;}
  if(films.size!==total)throw new Error(`Incomplete watchlist: ${films.size}/${total}`);
  const verify=parseWatchlist(await getHTML(sources.watchlist));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
  const cache=await loadJSON(env,'metadata.json')||{};const all=[...films.values()].map(f=>cache[f.id]?{...cache[f.id],...f,aliases:cache[f.id].aliases}:f);const pending=all.filter(f=>!f.metadataAt||f.peopleVersion!==1||f.peopleNamesVersion!==2||!f.synopsisFetchedAt||Date.now()-Date.parse(f.metadataAt)>30*86400000).map(f=>f.id);
  const ratingPending=['public-films-list'];
- const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,ratingPending,cursor:0,remaining:pending.length,pages,failures:[]};await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
+ const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,ratingPending,cursor:0,remaining:pending.length,pages,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
+ }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
 async function metadataSync(env,run){
  const cache=await loadJSON(env,'metadata.json')||{};const creditsChanged=new Set();const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);
@@ -138,7 +140,7 @@ async function publishEpgGeneration(env,runId,files){
 }
 async function completeWithRatings(env,run,report){
  const result=await finishSync(env,run,report);if(!run.ratingPending?.length)return result;
- try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
+ try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;run.ratingObservedAt=ratings.observedAt||new Date().toISOString();await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
  catch(e){let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
   try{diary=await repairRecentDiaryRatings(env,report);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
   const repair={removed,diary};run.ratingError=String(e.message).slice(0,200);run.ratingRepair=repair;await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}

@@ -350,46 +350,62 @@ function predictionEventDelta(run,summary,snapshot){const current=snapshot?.cove
 const INTEGRATION_STALE_MS=48*3600000;
 function integrationTime(value){const ms=Date.parse(value);return Number.isFinite(ms)?new Date(ms).toISOString():null;}
 function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return {id,role,state,code,lastSuccessAt:lastSuccessAt||null,lastFailureAt:lastFailureAt||null};}
-function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now}){
- const successAge=value=>integrationTime(value)?now-Date.parse(value):null;
- const watchlistSuccess=sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):integrationTime(report?.watchlistUpdatedAt);
+function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
+function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
+function resolverMatches(programmeRunId,reportRunId){if(!programmeRunId||!reportRunId)return true;return programmeRunId===reportRunId;}
+function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest}){
+ const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
+ const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
+ const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
+ const watchlistFailure=integrationTime(watchlistIngest?.failedAt);
  const watchlist=(()=>{
-  if(sync?.error&&/watchlist/i.test(sync.error))return integrationEntry('letterboxd_watchlist','source','failed','watchlist_failed',integrationTime(report?.watchlistUpdatedAt),integrationTime(sync.updatedAt));
-  if(sync?.stage==='complete'&&!sync.error)return integrationEntry('letterboxd_watchlist','source',successAge(sync.updatedAt)>INTEGRATION_STALE_MS?'stale':'healthy',successAge(sync.updatedAt)>INTEGRATION_STALE_MS?'stale':'ok',integrationTime(sync.updatedAt),null);
-  if(sync&&['metadata','epg'].includes(sync.stage)&&!sync.error){const age=successAge(sync.updatedAt);return age!=null&&age<15*60000?integrationEntry('letterboxd_watchlist','source','running','running',watchlistSuccess,null):integrationEntry('letterboxd_watchlist','source','degraded','watchlist_stuck',watchlistSuccess,integrationTime(sync.updatedAt));}
-  if(sync?.error){const prior=integrationTime(report?.watchlistUpdatedAt);if(!prior)return integrationEntry('letterboxd_watchlist','source','unknown','no_data',null,null);return integrationEntry('letterboxd_watchlist','source',successAge(prior)>INTEGRATION_STALE_MS?'stale':'healthy',successAge(prior)>INTEGRATION_STALE_MS?'stale':'ok',prior,null);}
+  if(watchlistFailure&&(!watchlistSuccess||Date.parse(watchlistFailure)>Date.parse(watchlistSuccess)))return integrationEntry('letterboxd_watchlist','source','failed','watchlist_failed',watchlistSuccess,watchlistFailure);
+  if(sync?.error&&/watchlist/i.test(sync.error))return integrationEntry('letterboxd_watchlist','source','failed','watchlist_failed',integrationTime(report?.watchlistUpdatedAt)||watchlistSuccess,integrationTime(sync.updatedAt));
+  if(sync?.stage==='complete'&&!sync.error)return integrationEntry('letterboxd_watchlist','source',fresh(sync.updatedAt),freshCode(sync.updatedAt),integrationTime(sync.updatedAt),null);
+  if(sync&&['metadata','epg'].includes(sync.stage)&&!sync.error){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('letterboxd_watchlist','source','running','running',watchlistSuccess,null):integrationEntry('letterboxd_watchlist','source','degraded','watchlist_stuck',watchlistSuccess,integrationTime(sync.updatedAt));}
+  if(sync?.error){const prior=integrationTime(report?.watchlistUpdatedAt);if(!prior)return integrationEntry('letterboxd_watchlist','source','unknown','no_data',null,null);return integrationEntry('letterboxd_watchlist','source',fresh(prior),freshCode(prior),prior,null);}
   return integrationEntry('letterboxd_watchlist','source','unknown','no_data',null,null);
  })();
- const ratingSuccess=integrationTime(ratings?.lastSuccessAt),ratingFailure=integrationTime(ratings?.lastFailureAt),ratingError=typeof sync?.ratingError==='string'?sync.ratingError:'',ratingCause=ratings?.attempt?.cause||null,ratingSyncCurrent=ratingError&&(!ratingSuccess||!sync?.updatedAt||Date.parse(sync.updatedAt)>=Date.parse(ratingSuccess));
+ const ratingEvents=[];
+ const statusFailure=ratingsFailureCode(ratings?.state)||ratingsFailureCode(ratings?.attempt?.cause);
+ if(integrationTime(ratings?.lastSuccessAt))ratingEvents.push({at:integrationTime(ratings.lastSuccessAt),ok:true});
+ if(statusFailure&&integrationTime(ratings?.lastFailureAt))ratingEvents.push({at:integrationTime(ratings.lastFailureAt),ok:false,code:statusFailure});
+ if(integrationTime(sync?.ratingObservedAt))ratingEvents.push({at:integrationTime(sync.ratingObservedAt),ok:true});
+ if(typeof sync?.ratingError==='string'&&sync.ratingError&&integrationTime(sync.updatedAt))ratingEvents.push({at:integrationTime(sync.updatedAt),ok:false,code:ratingsMessageCode(sync.ratingError)});
+ ratingEvents.sort((a,b)=>Date.parse(a.at)-Date.parse(b.at)||(a.ok===b.ok?0:a.ok?-1:1));
+ const latestRating=ratingEvents.at(-1),ratingSuccess=ratingEvents.filter(item=>item.ok).at(-1)?.at||null,ratingFailureAt=ratingEvents.filter(item=>!item.ok).at(-1)?.at||null;
  const ratingsSource=(()=>{
-  if(ratings?.state==='blocked'||ratingCause==='anti_bot'||ratingSyncCurrent&&/403|anti-bot/i.test(ratingError))return integrationEntry('letterboxd_ratings','source','degraded','ratings_blocked',ratingSuccess,ratingFailure||integrationTime(sync?.updatedAt));
-  if(ratingCause==='http_429'||ratingSyncCurrent&&/429/.test(ratingError))return integrationEntry('letterboxd_ratings','source','degraded','ratings_rate_limit',ratingSuccess,ratingFailure||integrationTime(sync?.updatedAt));
-  if(ratings?.state==='degraded'||ratingCause==='incomplete')return integrationEntry('letterboxd_ratings','source','degraded','ratings_incomplete',ratingSuccess,ratingFailure);
-  if(ratingSyncCurrent||ratingCause==='lookup_failed'||ratingCause==='publish_failed')return integrationEntry('letterboxd_ratings','source','failed','ratings_failed',ratingSuccess,ratingFailure||integrationTime(sync?.updatedAt));
-  if(ratings?.state==='healthy')return integrationEntry('letterboxd_ratings','source',successAge(ratingSuccess)>INTEGRATION_STALE_MS?'stale':'healthy',successAge(ratingSuccess)>INTEGRATION_STALE_MS?'stale':'ok',ratingSuccess,ratingFailure);
-  if(Array.isArray(sync?.ratingPending)&&sync.ratingPending.length)return integrationEntry('letterboxd_ratings','source','degraded','ratings_pending',ratingSuccess,null);
-  if(!enabled)return integrationEntry('letterboxd_ratings','source','off','off',ratingSuccess,ratingFailure);
-  return integrationEntry('letterboxd_ratings','source','unknown','no_data',null,null);
+  const entry=(state,code,success,failure)=>({...integrationEntry('letterboxd_ratings','source',state,code,success,failure),manualRefreshEnabled:!!enabled});
+  if(!latestRating)return entry(sync?.stage==='complete'&&Array.isArray(sync.ratingPending)&&sync.ratingPending.length?'degraded':'unknown',sync?.stage==='complete'&&Array.isArray(sync.ratingPending)&&sync.ratingPending.length?'ratings_pending':'no_data',null,null);
+  if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
+  return entry(fresh(ratingSuccess),freshCode(ratingSuccess),ratingSuccess,ratingFailureAt);
  })();
  const epgFailure=sync?.error?integrationTime(sync.updatedAt):null,epgPrevious=integrationTime(report?.updatedAt),epgSuccess=sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):epgFailure&&epgPrevious&&Date.parse(epgPrevious)<Date.parse(epgFailure)?epgPrevious:null;
  const epg=(()=>{
   if(sync?.error){const code=/HTTP/i.test(sync.error)?'epg_http':/cover the current window/i.test(sync.error)?'epg_window':/parse|xml|unexpected/i.test(sync.error)?'epg_parse':'epg_failed';return integrationEntry('epg','source','failed',code,epgSuccess,epgFailure);}
-  if(sync?.stage==='complete')return integrationEntry('epg','source',successAge(sync.updatedAt)>INTEGRATION_STALE_MS?'stale':'healthy',successAge(sync.updatedAt)>INTEGRATION_STALE_MS?'stale':'ok',integrationTime(sync.updatedAt),null);
-  if(sync&&['metadata','epg'].includes(sync.stage)){const age=successAge(sync.updatedAt);return age!=null&&age<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
+  if(sync?.stage==='complete')return integrationEntry('epg','source',fresh(sync.updatedAt),freshCode(sync.updatedAt),integrationTime(sync.updatedAt),null);
+  if(sync&&['metadata','epg'].includes(sync.stage)){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
   return integrationEntry('epg','source','unknown','no_data',null,null);
  })();
- const resolverSuccess=discoveryStatus?.stage==='complete'&&!discoveryStatus.error?integrationTime(discoveryStatus.finishedAt||discoveryStatus.at):null;
- const resolverWaiting=continuation?.reason==='backoff'||continuation?.retryAt&&Date.parse(continuation.retryAt)>now;
+ const reportRunId=report?.runId||null,resolverConfirmed=[];
+ if(discoveryStatus?.stage==='complete'&&!discoveryStatus.error){const at=integrationTime(discoveryStatus.finishedAt||discoveryStatus.at);if(at)resolverConfirmed.push({at,current:resolverMatches(discoveryStatus.programmeRunId,reportRunId)});}
+ if(continuation?.stage==='complete'){const at=integrationTime(continuation.at);if(at)resolverConfirmed.push({at,current:resolverMatches(continuation.programmeRunId,reportRunId)});}
+ const byTime=(a,b)=>Date.parse(a)-Date.parse(b),priorResolverSuccess=resolverConfirmed.map(item=>item.at).sort(byTime).at(-1)||null,currentResolverSuccess=resolverConfirmed.filter(item=>item.current).map(item=>item.at).sort(byTime).at(-1)||null;
+ const resolverProgress=()=>{const elapsed=age(continuation?.at);return integrationEntry('resolver','source',elapsed>INTEGRATION_STALE_MS?'stale':'running',elapsed>INTEGRATION_STALE_MS?'stale':'running',priorResolverSuccess,null);};
  const resolver=(()=>{
-  if(resolverWaiting)return integrationEntry('resolver','source','degraded','resolver_backoff',resolverSuccess,integrationTime(continuation.at));
-  if(continuation?.reason==='missing_secret')return integrationEntry('resolver','source','degraded','resolver_unconfigured',resolverSuccess,null);
-  if(continuation?.stage==='error'||discoveryStatus?.error)return integrationEntry('resolver','source','failed','resolver_failed',resolverSuccess,integrationTime(continuation?.at||discoveryStatus?.finishedAt));
-  if(resolverSuccess||continuation?.stage==='complete'){const at=resolverSuccess||integrationTime(continuation.at);return integrationEntry('resolver','source',successAge(at)>INTEGRATION_STALE_MS?'stale':'healthy',successAge(at)>INTEGRATION_STALE_MS?'stale':'ok',at,null);}
+  if(continuation?.reason==='missing_secret')return integrationEntry('resolver','source','degraded','resolver_unconfigured',priorResolverSuccess,null);
+  if(['epg_committed','chunk_budget','busy'].includes(continuation?.reason)||continuation?.stage==='running')return resolverProgress();
+  if(continuation?.reason==='backoff'||continuation?.retryAt&&Date.parse(continuation.retryAt)>now)return integrationEntry('resolver','source','degraded','resolver_backoff',priorResolverSuccess,integrationTime(continuation.at));
+  if(continuation?.stage==='error')return integrationEntry('resolver','source','failed','resolver_failed',priorResolverSuccess,integrationTime(continuation.at));
+  if(discoveryStatus?.error&&resolverMatches(discoveryStatus.programmeRunId,reportRunId))return integrationEntry('resolver','source','failed','resolver_failed',priorResolverSuccess,integrationTime(discoveryStatus.finishedAt||discoveryStatus.at));
+  if(discoveryStatus?.stage==='partial'&&resolverMatches(discoveryStatus.programmeRunId,reportRunId))return resolverProgress();
+  if(continuation?.stage==='paused'&&continuation.reason==null&&continuation.remainingChunks>0)return resolverProgress();
+  if(currentResolverSuccess)return integrationEntry('resolver','source',fresh(currentResolverSuccess),freshCode(currentResolverSuccess),currentResolverSuccess,null);
   return integrationEntry('resolver','source','unknown','no_data',null,null);
  })();
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const predictionSuccess=['completed'].includes(runStatus)?integrationTime(run.completedAt):null,predictionFailure=['blocked','interrupted'].includes(runStatus)?integrationTime(run.completedAt||run.createdAt):null;
- const predictions=runStatus==='idle'?integrationEntry('predictions','capability','unknown','no_data',null,null):runStatus==='running'?integrationEntry('predictions','capability','running','running',null,null):runStatus==='interrupted'?integrationEntry('predictions','capability','degraded','prediction_interrupted',null,predictionFailure):runStatus==='blocked'?integrationEntry('predictions','capability','degraded','prediction_blocked',null,predictionFailure):run?.failures&&Object.keys(run.failures).length?integrationEntry('predictions','capability','degraded','prediction_partial',predictionSuccess,predictionFailure):integrationEntry('predictions','capability',successAge(predictionSuccess)>INTEGRATION_STALE_MS?'stale':'healthy',successAge(predictionSuccess)>INTEGRATION_STALE_MS?'stale':'ok',predictionSuccess,null);
+ const predictions=runStatus==='idle'?integrationEntry('predictions','capability','unknown','no_data',null,null):runStatus==='running'?integrationEntry('predictions','capability','running','running',null,null):runStatus==='interrupted'?integrationEntry('predictions','capability','degraded','prediction_interrupted',null,predictionFailure):runStatus==='blocked'?integrationEntry('predictions','capability','degraded','prediction_blocked',null,predictionFailure):run?.failures&&Object.keys(run.failures).length?integrationEntry('predictions','capability','degraded','prediction_partial',predictionSuccess,predictionFailure):integrationEntry('predictions','capability',fresh(predictionSuccess),freshCode(predictionSuccess),predictionSuccess,null);
  const films=report?.watchlistCount||report?.films?.length||0,missing=(report?.stats?.metadataMissing||0)+(report?.stats?.titleMissing||0)+(report?.stats?.titleProvisional||0);
  const sources=[watchlist,ratingsSource,epg,resolver,predictions];
  if(films>=10&&missing/films>=.2)sources.push(integrationEntry('metadata','source','degraded','metadata_attention',null,null));
@@ -398,8 +414,8 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
 }
 async function footerStatus(env){
  const pinned=await pinEpg(env);
- const [profile,index,report,catalog,queue,run,lease,source,decisions,sync,ratings,discoveryStatus,continuation]=await Promise.all([
-  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),queueStatus(env),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json')
+ const [profile,index,report,catalog,queue,run,lease,source,decisions,sync,ratings,discoveryStatus,continuation,watchlistIngest]=await Promise.all([
+  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),queueStatus(env),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json')
  ]);
  const coverage=canonicalCoverageSummary(report,catalog,index,profile),items=source?.items||[];
  const recognized=new Set();
@@ -409,7 +425,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:queue?.nextCatchUpAt||nextCatchUpAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:ratingsEnabled(env),report,continuation,discoveryStatus,run,live,now:Date.now()})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:queue?.nextCatchUpAt||nextCatchUpAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:ratingsEnabled(env),report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest})};
 }
 function queueReadyIds(queue){const ids=queue.priorityCount?queue.hotPending:queue.coldPending;return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>Date.now()));}
 const RUN_DIAGNOSTICS_PREFIX=ENRICHMENT_KEY+'run-diagnostics/';
