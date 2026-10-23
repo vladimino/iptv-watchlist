@@ -37,8 +37,9 @@ function item(title,normalizedTitle,year,duration){return {key:normalizedTitle+'
 function movie(id,title,original,year){return {id,title,original_title:original||title,release_date:year+'-01-01'};}
 function detail(id,title,original,year,runtime,aliases=[]){return {id:Number(id),title,original_title:original,release_date:year+'-01-01',runtime,overview:'A synopsis',genres:[{name:'Drama'}],poster_path:null,credits:{crew:[],cast:[]},translations:{translations:[]},alternative_titles:{titles:aliases.map(name=>({iso_3166_1:'RU',title:name}))}};}
 function seed(records,row){records.set('programme.json',{runId:'run-1',films:[]});records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[row]});records.set('epg/discovered-films.json',{});records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});}
-async function resolve(flags,row,response){
+async function resolve(flags,row,response,extra){
  const box=harness(flags,response);seed(box.records,row);
+ if(extra)for(const [key,value] of Object.entries(extra))box.records.set(key,value);
  const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',box.ctx);
  return {...box,result,decision:box.records.get('epg/discovery-resolution.json')[row.key],preview:box.records.get('epg/discovery-score-preview.json')?.items[row.key],catalog:box.records.get('epg/discovered-films.json')};
 }
@@ -80,6 +81,18 @@ assert.equal(oceanRun.preview.scoring.reason,'accepted_numeral');
 assert.equal(oceanRun.preview.outcome,'detail_verified');
 assert.ok(oceanRun.preview.proposedCandidates.some(row=>row.tmdbId==='161'&&row.reason==='numeral'));
 assert.equal(oceanRun.catalog['tmdb_161'],undefined);
+const matrixRival=item('Матрица 1','матрица 1',1999,136);
+const matrixRivalRun=await resolve({scored:'shadow',discovery:'shadow'},matrixRival,url=>url.includes('/movie/603')?json(detail(603,'Матрица','The Matrix',1999,136)):decodeURIComponent(url).includes('Матрица')?json({total_pages:1,results:[movie(603,'Матрица','The Matrix',1999)]}):empty(),{'epg/discovered-films.json':{tmdb_604:{id:'tmdb_604',tmdbId:'604',title:'Матрица',original:'The Matrix Reloaded',year:1999,runtime:138,canonicalIdentity:'tmdb:604',aliases:[],shows:[]}}});
+assert.equal(matrixRivalRun.preview.scoring.acceptedTmdbId,'603');
+assert.equal(matrixRivalRun.preview.outcome,'candidate_decision');
+assert.equal(matrixRivalRun.preview.reason,'detail_competing_version');
+assert.equal(matrixRivalRun.decision.status,'no_confident_match');
+assert.equal(matrixRivalRun.catalog['tmdb_603'],undefined);
+const bladeLater=await resolve({scored:'shadow',discovery:'shadow'},blade,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/36647'))return json(detail(36647,'Блэйд','Blade',1998,120));if(text.includes('Блэйд'))return json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]});if(text.includes('Блейд'))return json({total_pages:1,results:[movie(36647,'Блейд: начало','Blade',1998)]});return empty();});
+assert.equal(bladeLater.preview.scoring.reason,'accepted_spelling_e');
+assert.equal(bladeLater.preview.outcome,'detail_verified');
+assert.equal(bladeLater.decision.status,'no_confident_match');
+assert.equal(bladeLater.catalog['tmdb_36647'],undefined);
 
 const kombat=item('Мортал Комбат','мортал комбат',1995,101);
 const kombatRun=await resolve({scored:'shadow',discovery:'shadow'},kombat,url=>url.includes('/movie/9312')?json(detail(9312,'Смертельная битва','Mortal Kombat',1995,101,['Мортал Комбат'])):url.includes('/movie/1?')?json(detail(1,'Совсем другое','Other Film',1995,40,['Другое'])):json({total_pages:1,results:[movie(1,'Совсем другое','Other Film',1995),movie(9312,'Смертельная битва','Mortal Kombat',1995)]}));

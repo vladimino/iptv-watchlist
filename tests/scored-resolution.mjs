@@ -128,4 +128,8 @@ result=run({observation:observe('убежище|2022','Убежище',2022,88),
 assert.equal(result.acceptedTmdbId,'801970');
 assert.equal(result.reason,'accepted_year_separates_remakes');
 assert.equal(run({observation:ocean,candidates:[oceanHit,film('999','Одиннадцать друзей Оушена',2001,116,claim('numeral','одиннадцать друзей Оушена'))]}).reason,'ambiguous_collision');
+const matrixObservation=observe('матрица 1|1999','Матрица 1',1999,136),matrixFilm=(extra)=>film('603','Матрица',1999,136,extra);
+const matrixInvalid={structural:{reason:'numeral',query:'Матрица',matched:'Матрица'}},matrixValid=claim('part_suffix','Матрица');
+assert.equal(run({observation:matrixObservation,candidates:[matrixFilm(matrixInvalid),matrixFilm(matrixValid)]}).reason,'accepted_part_suffix');
+assert.equal(run({observation:matrixObservation,candidates:[matrixFilm(matrixValid),matrixFilm(matrixInvalid)]}).reason,'accepted_part_suffix');
 console.log('Scored resolution: version-1 evidence, remakes, short titles and stable order passed');

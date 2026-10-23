@@ -43,31 +43,43 @@ function titleEvidence(observation,fields){
  for(const [source,value] of fields)if(wanted&&scoreNorm(value)===wanted&&(!found||rank[source]<rank[found.source]))found={quality:1,source,matched:scoreNorm(value)};
  return found||{quality:0,source:null,matched:null};
 }
-function structuralTitleEvidence(observation,group){
- const claim=group.structural;
- if(!claim)return null;
- const titles=[...group.titles,...group.originals];
- let found=null;
- for(const title of titles){
-  const form=reversibleStructuralForm(observation.normalizedTitle||observation.title,title);
-  if(form&&form.reason===claim.reason&&form.form===claim.form)found=form;
+function structuralClaimsOf(candidate){
+ const raw=[...(Array.isArray(candidate?.structuralClaims)?candidate.structuralClaims:[]),...(candidate?.structural?[candidate.structural]:[])];
+ const out=[],seen=new Set();
+ for(const claim of raw){
+  const parsed=structuralClaim({structural:claim});
+  if(!parsed)continue;
+  const key=parsed.reason+'|'+parsed.form;
+  if(seen.has(key))continue;
+  seen.add(key);out.push(parsed);
  }
- return found?{quality:1,source:'structural',matched:found.form,structural:found}:null;
+ return out;
+}
+function structuralTitleEvidence(observation,group){
+ const rank={part_suffix:0,spelling_e:1,numeral:2},found=[];
+ for(const claim of group.structuralClaims||[])for(const title of [...group.titles,...group.originals]){
+  const form=reversibleStructuralForm(observation.normalizedTitle||observation.title,title);
+  if(form&&form.reason===claim.reason&&form.form===claim.form)found.push(form);
+ }
+ found.sort((a,b)=>(rank[a.reason]??9)-(rank[b.reason]??9)||a.form.localeCompare(b.form));
+ const match=found[0];
+ return match?{quality:1,source:'structural',matched:match.form,structural:match}:null;
 }
 function aggregateCandidates(candidates){
  const groups=new Map();
  for(const candidate of candidates||[]){
   const tmdbId=candidate?.tmdbId==null?'':String(candidate.tmdbId);
   if(!tmdbId)continue;
-  const group=groups.get(tmdbId)||{tmdbId,titles:[],originals:[],aliases:[],years:[],runtimes:[],trusted:false,sources:0,structural:null};
+  const group=groups.get(tmdbId)||{tmdbId,titles:[],originals:[],aliases:[],years:[],runtimes:[],trusted:false,sources:0,structuralClaims:[]};
   group.sources++;
   if(candidate.title)group.titles.push(candidate.title);
   if(candidate.original)group.originals.push(candidate.original);
+  for(const extra of candidate.extraTitles||[])if(extra)group.titles.push(extra);
   for(const alias of candidate.aliases||[])if(alias)group.aliases.push(alias);
   const year=finiteNumber(candidate.year);if(year!=null)group.years.push(year);
   const runtime=finiteNumber(candidate.runtime);if(runtime!=null)group.runtimes.push(runtime);
   if(candidate.trusted===true)group.trusted=true;
-  const claim=structuralClaim(candidate);if(claim&&!group.structural)group.structural=claim;
+  for(const claim of structuralClaimsOf(candidate))if(!group.structuralClaims.some(item=>item.reason===claim.reason&&item.form===claim.form))group.structuralClaims.push(claim);
   groups.set(tmdbId,group);
  }
  return [...groups.values()];
