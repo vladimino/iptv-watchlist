@@ -1,6 +1,6 @@
 # AIR-43 shadow rollout
 
-Controlled comparison of the legacy resolver and the scored resolver on production. The preflight below was written before the flag existed. The sample after it is the limited run that followed. Verdict: **INSUFFICIENT DATA**. `on` was not enabled. The live binding is still `shadow`.
+Controlled comparison of the legacy resolver and the scored resolver on production. The preflight below was written before the flag existed. The twelve-chunk run is a successful smoke test of `shadow`. It is not a cutover sample. `SCORED_RESOLUTION` stays `shadow`. `on` stays unset. Another twelve production chunks will not be run to enlarge this same hot-first slice.
 
 Related: [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-42](https://trello.com/c/drLBuWjl), [AIR-48](https://trello.com/c/rVf8rRoJ), [AIR-49](https://trello.com/c/YNaLFwtW), [AIR-65](https://trello.com/c/MKb4JMXi). Prerequisites: [PR 45](https://github.com/vladimino/iptv-watchlist/pull/45), [PR 47](https://github.com/vladimino/iptv-watchlist/pull/47). Code deploy: [CI/CD 39870651210](https://github.com/vladimino/iptv-watchlist/actions/runs/39870651210).
 
@@ -230,26 +230,87 @@ The generation id and its `updatedAt` did not change. No EPG sync ran.
 
 Legacy inserted 50 catalog films. Confirmed films 1802 → 1852. Verified catalog films 1792 → 1842. That matches the 50 `agree_verified` rows. Decision rows in status `verified` rose by 125, which is those 50 plus the 75 cheap-pass reuses in chunk 1. The 75 keys were not snapshotted.
 
-`no_confident_match` rose by 19. The preview has 27 legacy refusals that are `no_confident_match` or, for the one year contradiction, the same legacy status. This note does not reconcile that gap row by row. `ambiguous` and `duration_mismatch` did not change.
+`no_confident_match` rose by 19. The preview recorded 27 writes that ended in that status, and 2 that ended `ambiguous`. Read back from `epg/discovery-resolution.json`, all 29 have `attempts` 1 and `checkedAt` inside the run. `recordUncertain` increments `attempts` only when the previous evidence key is unchanged, so none of these 29 was a same-evidence retry. The status histogram is a stock of current keys, not a count of writes. Keys with a decision rose by 144, which is exactly `verified` +125 and `no_confident_match` +19. `ambiguous`, `duration_mismatch`, and `excluded_nonfilm` did not change. The two `ambiguous` writes were therefore already `ambiguous`: a conversion of some other `ambiguous` row into `verified` would have left the new-key total short of 144. The eight-row `no_confident_match` gap has two histories that produce the same totals, and the pre-run resolution object was not copied, so they stay unseparated. Either eight of the 27 writes were already `no_confident_match` and the evidence key was missing or different, which restarts `attempts` at 1, or eight older `no_confident_match` rows became `verified` inside the 50 detail writes while all 27 preview writes were new keys. Same-evidence retries, and any change to `ambiguous` or `duration_mismatch`, are ruled out.
 
 Ready now 16116 → 15940. Current unresolved 16146 → 15997. Retry backoff 0 → 27. No chunk response carried `retryAt`. Terminal no-match stayed 0.
 
-The prediction queue's pending count went from 0 to 50, the same 50 new films. The status field for hot films that already have a prediction moved from 1769 to 1782 when the queue was rebuilt. This session did not call the prediction runner.
+The prediction queue's pending count went from 0 to 50, the same 50 new films. The status field for hot films that already have a prediction moved from 1769 to 1782 when the queue was rebuilt. This review did not call the prediction runner. A later scheduled run did, and it is recorded in section 12, outside AIR-43.
 
 Shadow wrote no second decision and no second catalog row. The films that are now available are the ones legacy verified.
 
-## 10. Facts and hypotheses
+## 10. Identity spot check
 
-Facts: the binding is `shadow`; the code is `203727b`; the generation is `2e63530d-27f6-43cc-85dd-f5a2c9c97e16`; the twelve snapshots sum to 50 agreements and 29 shared refusals; the live status comparison is only chunk 12; legacy inserted 50 films; `on` is not set.
+A small public TMDB check, separate from the shadow comparison. The catalog title is the ru-RU card legacy stored. The public page is the independent check. This is not a review of all 50 agreements.
 
-Hypothesis, not a finding: a wider or stratified sample would stay this quiet. This slice cannot support that. Hypothesis, not a finding: a shared `agree_verified` id is the right film. That needs an identity review this run did not do.
+Agreements whose stored card is the film the title names:
 
-## 11. Rollback
+| Observation | TMDB | Stored card | Public page |
+| --- | ---: | --- | --- |
+| `мементо\|2000` | 77 | Мементо / Memento, 2000 | Memento |
+| `особое мнение\|2002` | 180 | Особое мнение / Minority Report, 2002 | Minority Report |
+| `индиана джонс в поисках утраченного ковчега\|1981` | 85 | Индиана Джонс: В поисках утраченного ковчега / Raiders of the Lost Ark, 1981 | Raiders of the Lost Ark |
+| `хоббит битва пяти воинств\|2014` | 122917 | Хоббит: Битва пяти воинств, 2014 | The Battle of the Five Armies |
+| `достать ножи стеклянная луковица\|2022` | 661374 | Достать ножи: Стеклянная луковица / Glass Onion, 2022 | Glass Onion |
+| `идеальный голос\|2012` | 114150 | Идеальный голос / Pitch Perfect, 2012 | Pitch Perfect |
+| `хэллоуин хьюби\|2020` | 617505 | Хэллоуин Хьюби / Hubie Halloween, 2020 | Hubie Halloween |
+| `смурфики\|2011` | 41513 | Смурфики / The Smurfs, 2011 | The Smurfs |
+| `мой наставник\|1983` | 2193 | Мой наставник / My Tutor, 1983 | TMDB 2193 is My Tutor, and Russian listings use that same title |
+| `казнь\|2021` | 650030 | Казнь / Казнь, card year 2022, 137 min | The Execution, premiere September 2021, Russian release 21 April 2022. The observation year is the premiere year. The gate allows one year. This is that film |
+| `рождественская история\|2009` | 17979 | Рождественская История / A Christmas Carol, 2009 | A Christmas Carol (2009). The Russian title matches. Other films share the words |
+| `сезон охоты\|2025` | 1387382 | Сезон охоты / Hunting Season, 2025 | Hunting Season, 2025, not the animated Open Season |
+| `бугония\|2025` | 701387 | Бугония / Bugonia, 2025 | Bugonia |
 
-The binding is still `shadow`. To return to the legacy-only branch, delete `SCORED_RESOLUTION` or set it to `off`. Leave `LIFECYCLE_LOCALIZATION`, the TMDB secret, schedules, and `wrangler.jsonc` as they are. The continuation is paused until 2026-10-23 00:00 UTC. A later call to the resolve route after that time would take another budget and would keep writing legacy decisions while the binding stays `shadow`.
+Shared refusals a person would still recognize. Both resolvers returned `no_exact_title`, except `чудо женщина|2020`, which the scorer called `contradicted_year` and legacy stored as `no_confident_match`.
 
-## 12. Recommendation
+| Observation | Public film | Why the exact title missed |
+| --- | --- | --- |
+| `блейд 1\|1998` | Blade (1998), TMDB 36647 | The extra token `1` is not in the title |
+| `11 друзей оушена\|2001` | Ocean's Eleven, TMDB 161, Russian title «Одиннадцать друзей Оушена» | `11` is not `одиннадцать` |
+| `ирония судьбы или с легким паром\|1975` | Ирония судьбы, или С лёгким паром!, TMDB 43430, released 1 January 1976 | The search is sent with `year=1975`. The TMDB year is 1976, so the record is outside that search |
+| `чудо женщина\|2020` | Чудо-женщина 1984, TMDB 464052 | The EPG title has no `1984`. The scorer contradicted the year instead of accepting the 2017 film |
+| `мортал комбат\|1995` | Mortal Kombat (1995), TMDB 9312 | No exact title in the search hits. The official Russian title was not re-fetched here |
+| `гол 2\|2008`, `чужой против хищника 1\|2004` | Goal II and Alien vs. Predator | Same numeral or sequel-suffix pattern as Blade. The exact TMDB title string was not re-fetched |
 
-**INSUFFICIENT DATA.**
+These misses are shared. They are not a scored-versus-legacy regression. They are the exact-title rule, plus a search year that is exact while the acceptance year allows a difference of one.
 
-The sample is large enough to show that this hot slice did not produce a disagreement, a shadow-only fetch, or a chunk failure. It is not large enough, and not varied enough, to authorize a cutover proposal. `on` stays off. A later proposal needs a sample that actually contains the rows section 8 lists. Until then the safe production mode is the current one: legacy remains the writer, and shadow only records the comparison.
+## 11. What the smoke test did not measure
+
+Another twelve production chunks would keep the hot-first order and would still skip aliases that the cheap pass verifies before scoring. That run is not the next experiment.
+
+The next experiment is a local read of three existing objects: `epg/discovery-latest.json`, `epg/discovery-resolution.json`, and `epg/discovered-films.json`. The script scores with `scoreFilmResolution` and the acceptance gate. It does not call the Worker, does not write R2, and does not change a decision. Caps, not the whole ledger:
+
+| Category | What to score | Cap | Cached evidence |
+| --- | --- | --- | --- |
+| Known aliases | Current candidates the cheap pass would verify from `confirmedTmdbId` or one alias-index hit, including the 75 reused in chunk 1 | 100, the 75 first | Catalog films already stored |
+| Yearless | Current, not `verified`, no year | 40 | Alias index only. A row with no exact alias is `search_not_in_fixture`, not a TMDB call |
+| Remakes and collisions | A normalized title shared by two or more catalog films, then current observations of that title | 30 | Catalog years and runtimes |
+| Runtime contradictions | The 21 `duration_mismatch` decisions | 21 | Not scoreable. `recordUncertain` does not store the TMDB id or the card |
+| Shadow-only detail | An accepted id whose card legacy did not fetch | 0 in this fixture | Search hits are not stored. Do not invent them with a production search |
+
+No Worker change is required for the first three rows. A commit of that script would be one diagnostic pull request: local files in, a count out, no network and no production write. It should not be mixed with the prediction generator. The runtime and shadow-only rows wait for a fixture that actually contains the card. Collecting that fixture is a later decision, not another production resolver budget.
+
+## 12. Prediction queue
+
+Out of scope for AIR-43. After the 50 catalog inserts, a prediction run started on its own. Worker cron was empty at the settings deploy. The run object says `trigger` `scheduled`.
+
+Read at 2026-10-23 00:19 UTC, run `47b4efd1-53b5-4875-964e-0c517bcfa809`, status still `running`, started 2026-10-22 23:59:36 UTC. Results then: 13 `created`, 7 item `parse_error`. An earlier look saw 5 successes and 4 parse errors; the same run had continued. All 7 failures are `attempts` 1. Retry times are 01:01–01:16 UTC. Those retries had not run at the read. The failed films have no `fingerprint.json`. A created film from the same run does. The failure object stores `kind`, `scope`, `attempts`, `failedAt`, and `retryAt`. It does not store the validator string. `enrichmentSubmit` turns an explicit `failure.kind`, a rejected fingerprint, and a rejected prediction into the same `parse_error` and drops `Error.message`. The format-failure streak was 0, so the failures were not five in a row and did not stop the run.
+
+Whether the retries succeed is still open. A separate task can persist the existing safe validator string (`Invalid moodLabels`, `Invalid predictedRating`, and the other strings already returned by `validateFingerprint` and `validatePrediction`) and leave model text out. That task is not this pull request, and this pull request does not change the generator.
+
+## 13. Facts and hypotheses
+
+Confirmed: `shadow` is the live binding and `cutover` reads `shadow`; the code is `203727b`; twelve chunks finished on generation `2e63530d-27f6-43cc-85dd-f5a2c9c97e16` with no chunk error; the deduped preview is 50 `agree_verified` and 29 `agree_unresolved`; legacy inserted 50 films; the exact-title rule missed Blade, Ocean's Eleven, Irony of Fate, and Wonder Woman 1984 on both resolvers; `Казнь` 650030 is the 2021/2022 film; `on` is not set.
+
+Not confirmed: yearless rows, known aliases inside the scorer, a runtime contradiction, a shadow-only detail fetch, which of the two histories explains the eight-row histogram gap, and whether the seven prediction retries succeed.
+
+Product result of this run: the hot slice did not disagree, and legacy kept writing. That is the smoke test. It is not evidence that `on` would match legacy on the categories in section 11.
+
+## 14. Rollback
+
+The binding stays `shadow`. To return to the legacy-only branch, delete `SCORED_RESOLUTION` or set it to `off`. Leave `LIFECYCLE_LOCALIZATION`, the TMDB secret, schedules, and `wrangler.jsonc` as they are. `nextCatchUpAt` was 2026-10-23 00:00 UTC and has passed. The continuation is still `paused` with `remainingChunks` 0. A later call to the resolve route would take a new budget of 12 and would keep writing legacy decisions. This review did not make that call.
+
+## 15. Recommendation
+
+**Smoke test passed. Cutover data: INSUFFICIENT.**
+
+Keep `shadow`. Do not set `on`. Do not spend the next production budget on twelve more chunks of the same queue. The minimal next experiment is the local fixture backtest in section 11. A GO or NO-GO waits on that result, not on a larger copy of this slice.
