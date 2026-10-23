@@ -23,15 +23,45 @@ const KNOWN_CONFLICTS=new Set([
  'Score record conflicts with the stored score',
 ]);
 
+export function classifyObject(key){
+ if(typeof key!=='string')return 'unmapped';
+ if(/\.xml($|\.)/.test(key)||key.startsWith('epg/raw/')||key.startsWith('archive/'))return 'excluded';
+ if(isMappedKey(key))return 'mapped';
+ return 'unmapped';
+}
+
 export function inventory({finishedAt=null,aggregateSha256=null,keys=[]}={}){
- const present=new Set(keys);
  const families={};
  for(const [id,matches] of FAMILIES){
   const found=keys.filter(matches).sort();
   families[id]={status:found.length?'present':'absent',keys:found};
  }
  const absent=Object.entries(families).filter(([,family])=>family.status==='absent').map(([id])=>id);
- return {scope:'historical-snapshot',production:false,finishedAt,aggregateSha256,objectCount:present.size,families,absent,complete:absent.length===0};
+ const coverage={denominator:keys.length,mapped:[],excluded:[],unmapped:[]};
+ for(const key of [...keys].sort())coverage[classifyObject(key)].push(key);
+ return {scope:'historical-snapshot',production:false,finishedAt,aggregateSha256,objectCount:keys.length,families,absent,complete:absent.length===0,coverage};
+}
+
+export function creditRoster(records){
+ const credits=[],unmatched=[];
+ const seen=new Set();
+ const add=(people,role)=>{
+  for(const person of people||[]){
+   const personId=personIdFor(person?.id);
+   if(!personId){unmatched.push(String(person?.id??''));continue;}
+   const key=personId+'/'+role;
+   if(seen.has(key))continue;
+   seen.add(key);
+   credits.push({personId,role,ordinal:credits.filter(item=>item.role===role).length});
+  }
+ };
+ for(const record of records||[]){
+  add(record?.directors,'director');
+  add(record?.people?.directors,'director');
+  add(record?.actors,'actor');
+  add(record?.people?.actors,'actor');
+ }
+ return {credits,unmatched};
 }
 
 export async function importBatch(db,repositories,batch){
@@ -40,7 +70,7 @@ export async function importBatch(db,repositories,batch){
  const units=batch.units||[];
  const limit=batch.limit??null;
  const ledger=[];
- const counts={applied:0,resumed:0,explained:0,conflicts:0,unportable:0,pending:0};
+ const counts={applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,partial:0,uncheckpointed:0,pending:0};
  let started=0;
  for(const unit of units){
   if(limit!=null&&started>=limit){counts.pending++;continue;}
@@ -51,11 +81,25 @@ export async function importBatch(db,repositories,batch){
    ledger.push(entry(unit,'unportable',unit.reason||'unportable'));
    continue;
   }
+  if(await storedMatches(db,repositories,unit)){
+   const receipt=await checkpoint(db,unit,importedAt);
+   if(receipt.ok)counts.reconciled++;
+   else{counts.uncheckpointed++;ledger.push(entry(unit,'uncheckpointed','receipt_failed'));}
+   continue;
+  }
+  const gate=unit.kind==='film'?await creditGate(db,unit):{ready:true,unmatched:0};
+  const working=gate.ready?withCredits(unit):{...unit,input:{...unit.input}};
+  if(!gate.ready)delete working.input.credits;
   let outcome;
-  try{outcome=await applyUnit(repositories,unit);}
+  try{outcome=await applyUnit(repositories,working);}
   catch(error){
    counts.conflicts++;
    ledger.push(entry(unit,'conflict',knownReason(error)));
+   continue;
+  }
+  if(!gate.ready){
+   counts.partial++;
+   ledger.push({...entry(unit,'partial','credits_unmatched'),unmatched:gate.unmatched});
    continue;
   }
   if(outcome.outcome==='explained'){
@@ -63,13 +107,56 @@ export async function importBatch(db,repositories,batch){
    ledger.push(entry(unit,'explained',outcome.reason));
    continue;
   }
-  await db.transaction(async()=>{
-   await db.run('INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES (?,?,?,?,?) ON CONFLICT(source_key,source_sha256,target_table,target_id) DO NOTHING',[unit.sourceKey,unit.sourceSha256,unit.targetTable,unit.targetId,importedAt]);
-  });
+  const receipt=await checkpoint(db,unit,importedAt);
+  if(!receipt.ok){counts.uncheckpointed++;ledger.push(entry(unit,'uncheckpointed','receipt_failed'));continue;}
   counts.applied++;
  }
- const report=batch.inventory||inventory();
- return {...counts,ledger,claimsFullParity:report.complete&&counts.pending===0&&counts.unportable===0&&counts.conflicts===0&&counts.explained===0&&ledger.length===0};
+ const parity=batch.expected?await verifyParity(db,batch.expected):{ok:false,missing:[],extra:[],mismatched:[],reason:'no_source_projection'};
+ const coverage=batch.inventory?.coverage||{denominator:0,mapped:[],excluded:[],unmapped:[]};
+ return {...counts,ledger,coverage,parity,claimsFullParity:parityClaim({coverage,parity,counts,ledger})};
+}
+
+export async function verifyParity(db,spec){
+ const missing=[],extra=[],mismatched=[];
+ const films=await db.all('SELECT id FROM film ORDER BY id');
+ const expectedFilms=new Map((spec.films||[]).map(film=>[film.id,film]));
+ for(const film of spec.films||[])if(!films.some(row=>row.id===film.id))missing.push({table:'film',id:film.id});
+ for(const row of films)if(!expectedFilms.has(row.id))extra.push({table:'film',id:row.id});
+ for(const film of spec.films||[]){
+  const localization=await db.get("SELECT value FROM film_dimension WHERE film_id=? AND dimension='localization'",[film.id]);
+  if((localization?.value??null)!==(film.localization??null))mismatched.push({table:'film_dimension',id:film.id,field:'localization'});
+  const credits=await db.all('SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id=? ORDER BY role,ordinal,person_id',[film.id]);
+  const got=credits.map(row=>row.person_id+'/'+row.role+'/'+row.ordinal);
+  const want=[...(film.credits||[])].sort((a,b)=>a.role.localeCompare(b.role)||a.ordinal-b.ordinal||a.personId.localeCompare(b.personId)).map(row=>row.personId+'/'+row.role+'/'+row.ordinal);
+  if(got.join(',')!==want.join(','))mismatched.push({table:'film_person_credit',id:film.id,field:'credits'});
+ }
+ await compareRows(db,spec.redirects||[],'film_redirect','from_id',extra,missing);
+ await compareRows(db,spec.fingerprints||[],'fingerprint_payload','film_id',extra,missing);
+ await compareRows(db,spec.ratings||[],'actual_rating','film_id',extra,missing);
+ await compareRows(db,spec.predictions||[],'prediction_current','film_id',extra,missing);
+ for(const row of spec.predictions||[]){
+  const stored=await db.get('SELECT predicted_rating,updated_at FROM prediction_current WHERE film_id=?',[row.id]);
+  if(stored&&(stored.predicted_rating!==row.predictedRating||stored.updated_at!==row.updatedAt))mismatched.push({table:'prediction_current',id:row.id,field:'prediction'});
+  const history=await db.get('SELECT COUNT(*) AS n FROM prediction_history WHERE film_id=?',[row.id]);
+  if((history?.n??0)!==(row.history??0))mismatched.push({table:'prediction_history',id:row.id,field:'history'});
+ }
+ for(const row of spec.decisions||[]){
+  const stored=await db.get('SELECT status,evidence_key,terminal_reason FROM candidate_decision WHERE observation_key=?',[row.id]);
+  if(!stored)missing.push({table:'candidate_decision',id:row.id});
+  else if(stored.status!==row.status||stored.evidence_key!==row.evidenceKey||(stored.terminal_reason??null)!==(row.terminalReason??null))mismatched.push({table:'candidate_decision',id:row.id,field:'decision'});
+ }
+ for(const row of spec.candidates||[]){
+  const stored=await db.get('SELECT evidence_key FROM candidate_generation WHERE programme_run_id=? AND observation_key=?',[row.programmeRunId,row.id]);
+  if(!stored)missing.push({table:'candidate_generation',id:row.id});
+  else if(stored.evidence_key!==row.evidenceKey)mismatched.push({table:'candidate_generation',id:row.id,field:'evidence'});
+ }
+ return {ok:missing.length+extra.length+mismatched.length===0,missing,extra,mismatched};
+}
+
+export function parityClaim({coverage,parity,counts,ledger}){
+ const uncovered=(coverage?.unmapped||[]).length>0;
+ const open=(counts?.pending||0)+(counts?.unportable||0)+(counts?.conflicts||0)+(counts?.explained||0)+(counts?.partial||0)+(counts?.uncheckpointed||0);
+ return !uncovered&&!!parity?.ok&&open===0&&(ledger||[]).length===0;
 }
 
 export function fingerprintUnit(entry,body){
@@ -160,7 +247,13 @@ async function applyUnit(repositories,unit){
  }
  if(unit.kind==='link')return applied(await repositories.canonical.applyLink(unit.input));
  if(unit.kind==='generation')return applied(await repositories.epg.publishGeneration(unit.input));
- if(unit.kind==='decision')return applied(await repositories.epg.recordDecision(unit.input));
+ if(unit.kind==='decision'){
+  const saved=await repositories.epg.recordDecision(unit.input);
+  const current=saved?.decision?.current;
+  const same=!!current&&current.status===unit.input.status&&current.evidenceKey===unit.input.evidenceKey&&current.checkedAt===unit.input.checkedAt&&(current.terminalReason??null)===(unit.input.terminalReason??null);
+  if(!saved?.applied||!same)return {outcome:'explained',reason:saved?.reason||'decision_rejected'};
+  return applied(saved);
+ }
  if(unit.kind==='score')return applied(await repositories.epg.recordScore(unit.input));
  if(unit.kind==='profile')return applied(await repositories.prediction.saveProfile(unit.input));
  if(unit.kind==='fingerprint'){
@@ -198,4 +291,53 @@ function filmIdFromEnrichmentKey(key){
  if(!match)return null;
  const id=decodeURIComponent(match[1]);
  return id.startsWith('film:')?id:'film:'+id;
+}
+function isMappedKey(key){
+ if(['watchlist.json','programme.json','metadata.json','titles.json','people.json','sync.json','epg/published-generation.json','epg/discovery-latest.json','epg/discovery-resolution.json','epg/discovered-films.json','enrichment/profile/current.json'].includes(key))return true;
+ return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key);
+}
+function personIdFor(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
+function withCredits(unit){
+ if(unit.kind!=='film'||!Array.isArray(unit.desiredCredits))return unit;
+ return {...unit,input:{...unit.input,credits:unit.desiredCredits}};
+}
+async function creditGate(db,unit){
+ if(!Array.isArray(unit.desiredCredits))return {ready:true,unmatched:0};
+ const missing=[];
+ for(const credit of unit.desiredCredits)if(!(await db.get('SELECT 1 AS ok FROM person WHERE id=?',[credit.personId])))missing.push(credit.personId);
+ return {ready:missing.length+(unit.unmatchedCredits||0)===0,unmatched:missing.length+(unit.unmatchedCredits||0)};
+}
+async function checkpoint(db,unit,importedAt){
+ try{
+  if(typeof db.beforeReceipt==='function'){const hook=db.beforeReceipt;db.beforeReceipt=null;await hook();}
+  await db.transaction(async()=>{await db.run('INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES (?,?,?,?,?) ON CONFLICT(source_key,source_sha256,target_table,target_id) DO NOTHING',[unit.sourceKey,unit.sourceSha256,unit.targetTable,unit.targetId,importedAt]);});
+  return {ok:true};
+ }catch(error){if(error?.message==='receipt_failed')return {ok:false};throw error;}
+}
+async function storedMatches(db,repositories,unit){
+ if(unit.kind==='film'){
+  if((unit.unmatchedCredits||0)>0)return false;
+  const saved=await repositories.canonical.readFilm(unit.targetId);
+  if(!saved)return false;
+  const wanted=unit.input.film?.localization?.value??null;
+  if(wanted!=null&&(saved.dimensions?.localization?.value??null)!==wanted)return false;
+  if(Array.isArray(unit.desiredCredits)){
+   const got=saved.credits.map(row=>row.personId+'/'+row.role+'/'+row.ordinal).sort().join(',');
+   const want=unit.desiredCredits.map(row=>row.personId+'/'+row.role+'/'+row.ordinal).sort().join(',');
+   if(got!==want)return false;
+  }
+  return true;
+ }
+ if(unit.kind==='person')return !!(await repositories.canonical.readPerson(unit.targetId));
+ if(unit.kind==='fingerprint'){const row=await db.get('SELECT fingerprint_hash,generated_at FROM fingerprint_payload WHERE film_id=?',[unit.targetId]);return !!row&&row.fingerprint_hash===unit.input.fingerprintHash&&(row.generated_at??null)===(unit.input.generatedAt??null);}
+ if(unit.kind==='prediction'){const row=await db.get('SELECT updated_at,r2_key FROM prediction_current WHERE film_id=?',[unit.input.filmId]);return !!row&&row.updated_at===unit.input.updatedAt&&row.r2_key===unit.input.r2Key;}
+ if(unit.kind==='rating'){const row=await db.get('SELECT rating,recorded_at FROM actual_rating WHERE film_id=?',[unit.targetId]);return !!row&&row.rating===unit.input.rating&&row.recorded_at===unit.input.recordedAt;}
+ if(unit.kind==='decision'){const row=await db.get('SELECT status,evidence_key,checked_at,terminal_reason FROM candidate_decision WHERE observation_key=?',[unit.targetId]);return !!row&&row.status===unit.input.status&&row.evidence_key===unit.input.evidenceKey&&row.checked_at===unit.input.checkedAt&&(row.terminal_reason??null)===(unit.input.terminalReason??null);}
+ return false;
+}
+async function compareRows(db,expected,table,column,extra,missing){
+ const rows=await db.all('SELECT '+column+' AS id FROM '+table+' ORDER BY '+column);
+ const wanted=new Set(expected.map(row=>row.id));
+ for(const row of expected)if(!rows.some(stored=>stored.id===row.id))missing.push({table,id:row.id});
+ for(const row of rows)if(!wanted.has(row.id))extra.push({table,id:row.id});
 }

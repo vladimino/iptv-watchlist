@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {actualUnit,fingerprintUnit,generationUnit,importBatch,inventory,predictionUnits,profileUnit,readDiscovery} from '../src/offline-importer.js';
+import {actualUnit,classifyObject,creditRoster,fingerprintUnit,generationUnit,importBatch,inventory,predictionUnits,profileUnit,readDiscovery} from '../src/offline-importer.js';
 import {ExportError} from './migration-export.mjs';
 import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
 
@@ -22,12 +22,16 @@ export async function prepareImport(directory){
  const manifest=JSON.parse(await readFile(path.join(absolute,'manifest.json'),'utf8'));
  const byKey=new Map(manifest.objects.map(entry=>[entry.key,entry]));
  const bodies=new Map();
- for(const entry of manifest.objects)bodies.set(entry.key,JSON.parse(await readFile(path.join(absolute,entry.file),'utf8')));
+ const units=[];
+ for(const entry of manifest.objects){
+  if(classifyObject(entry.key)!=='mapped')continue;
+  try{bodies.set(entry.key,JSON.parse(await readFile(path.join(absolute,entry.file),'utf8')));}
+  catch{units.push(unportable(entry.key,entry.sha256,'object',entry.key,'json_invalid','watchlist'));}
+ }
  const keys=[...byKey.keys()];
  const snapshotInventory=inventory({finishedAt:manifest.finishedAt||null,aggregateSha256:manifest.totals?.aggregateSha256||null,keys});
  const store=scopedStore(loaded.store,byKey);
  const view=readLifecycle(store,Date.parse(manifest.finishedAt));
- const units=[];
  const sha=key=>byKey.get(key)?.sha256||'';
  const peopleKey=byKey.has('people.json')?'people.json':byKey.has('programme.json')?'programme.json':'watchlist.json';
  for(const person of view.people)units.push(record('watchlist','person',peopleKey,sha(peopleKey),'person',person.id,{person}));
@@ -35,8 +39,11 @@ export async function prepareImport(directory){
   const sourceKey=byKey.has('watchlist.json')?'watchlist.json':byKey.has('epg/discovered-films.json')?'epg/discovered-films.json':'programme.json';
   const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||null;
   const listed=!!letterboxd&&(store.watchlist?.films||[]).some(item=>String(item.id)===letterboxd);
-  units.push(record('watchlist','film',sourceKey,sha(sourceKey),'film',film.id,{film,watchlist:listed}));
-  if(embeddedPeople(store,film))units.push(unportable(sourceKey,sha(sourceKey),'film_person_credit',film.id,'credits_not_carried','watchlist'));
+  const filmUnit=record('watchlist','film',sourceKey,sha(sourceKey),'film',film.id,{film,watchlist:listed});
+  const roster=creditRoster(recordsFor(store,film));
+  filmUnit.desiredCredits=roster.credits;
+  filmUnit.unmatchedCredits=roster.unmatched.length;
+  units.push(filmUnit);
   for(const redirect of film.redirects||[]){
    if(!redirect?.from||!redirect?.to||!redirect?.at)units.push(unportable(sourceKey,sha(sourceKey),'film_redirect',redirect?.from||film.id,'redirect_fields_missing','watchlist'));
    else units.push(record('watchlist','link',sourceKey,sha(sourceKey),'film_redirect',redirect.from,{survivor:film,redirect}));
@@ -62,7 +69,7 @@ export async function prepareImport(directory){
    if(generation.unportable&&byKey.has('epg/discovery-resolution.json'))units.push(unportable('epg/discovery-resolution.json',sha('epg/discovery-resolution.json'),'candidate_decision','epg/discovery-resolution.json','generation_not_imported','discovery'));
   }
  }
- return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units};
+ return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected:expectedProjection(units)};
 }
 
 function decisionUnits(entry,body,programmeRunId){
@@ -88,12 +95,24 @@ function scopedStore(store,byKey){
  }
  return next;
 }
-function embeddedPeople(store,film){
+function recordsFor(store,film){
  const ids=new Set([film.id.replace(/^film:/,'')]);
  const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value;
  if(letterboxd)ids.add(letterboxd);
- const records=[...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})];
- return records.some(record=>record&&ids.has(String(record.id))&&((record.actors||[]).length||(record.directors||[]).length));
+ return [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})].filter(record=>record&&ids.has(String(record.id)));
+}
+function expectedProjection(units){
+ const expected={films:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[]};
+ for(const unit of units){
+  if(unit.unportable)continue;
+  if(unit.kind==='film')expected.films.push({id:unit.targetId,localization:unit.input.film?.localization?.value??null,credits:unit.desiredCredits||[]});
+  if(unit.kind==='fingerprint')expected.fingerprints.push({id:unit.targetId});
+  if(unit.kind==='rating')expected.ratings.push({id:unit.targetId});
+  if(unit.kind==='link')expected.redirects.push({id:unit.targetId});
+  if(unit.kind==='prediction'&&unit.targetTable==='prediction_current')expected.predictions.push({id:unit.input.filmId,predictedRating:unit.input.predictedRating,updatedAt:unit.input.updatedAt,history:units.filter(item=>item.kind==='prediction'&&item.targetTable==='prediction_history'&&item.input?.filmId===unit.input.filmId&&!item.unportable).length});
+  if(unit.kind==='decision')expected.decisions.push({id:unit.targetId,status:unit.input.status,evidenceKey:unit.input.evidenceKey,terminalReason:unit.input.terminalReason??null});
+ }
+ return expected;
 }
 function readLifecycle(store,now){
  const domain=fs.readFileSync(path.join(root,'src/domain/film-person.js'),'utf8');

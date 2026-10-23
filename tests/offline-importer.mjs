@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {importBatch,inventory} from '../src/offline-importer.js';
+import {importBatch,inventory,parityClaim,verifyParity} from '../src/offline-importer.js';
 import {manifestFor} from '../scripts/migration-export.mjs';
 
 const source=fs.readFileSync('src/offline-importer.js','utf8');
@@ -94,18 +94,68 @@ const repeated=await importBatch(db,repositories,{inventory:partial,importedAt:a
 assert.equal(repeated.ledger.filter(item=>item.reason==='prediction_kept').length,1);
 assert.equal((await repositories.prediction.readFilm('film:zz-null')).history.length,0);
 assert.equal((await repositories.prediction.readFilm('film:zz-null')).actualRating.rating,4.5);
+assert.equal(parityClaim({coverage:{unmapped:['epg/generations/run-old/programme.json'],excluded:['epg/raw/guide.xml'],mapped:['watchlist.json']},parity:{ok:true},counts:{},ledger:[]}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:['epg/raw/guide.xml'],mapped:['watchlist.json']},parity:{ok:false},counts:{},ledger:[]}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true},counts:{},ledger:[]}),true);
+
+const receiptFilm=film('film:zz-receipt','Receipt Title',at);
+db.beforeReceipt=async()=>{throw new Error('receipt_failed');};
+const crashed=await importBatch(db,repositories,{importedAt:at,units:[{family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-receipt',targetTable:'film',targetId:'film:zz-receipt',unportable:false,input:{film:receiptFilm,watchlist:false}}]});
+assert.equal(crashed.uncheckpointed,1);
+assert.equal(crashed.applied,0);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='film:zz-receipt'"),0);
+assert.equal((await repositories.canonical.readFilm('film:zz-receipt')).originalTitle,'Receipt Title');
+const reconciled=await importBatch(db,repositories,{importedAt:at,units:[{family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-receipt',targetTable:'film',targetId:'film:zz-receipt',unportable:false,input:{film:receiptFilm,watchlist:false}}]});
+assert.equal(reconciled.reconciled,1);
+assert.equal(reconciled.applied,0);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM film WHERE id='film:zz-receipt'"),1);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='film:zz-receipt'"),1);
+
+const castCredits=[{personId:'person:director/zz-role',role:'director',ordinal:0},{personId:'person:actor/zz-a',role:'actor',ordinal:0},{personId:'person:actor/zz-b',role:'actor',ordinal:1}];
+const castUnits=[
+ {family:'watchlist',kind:'person',sourceKey:'programme.json',sourceSha256:'sha-cast-people',targetTable:'person',targetId:'person:director/zz-role',unportable:false,input:{person:person('person:director/zz-role','director/zz-role',at)}},
+ {family:'watchlist',kind:'person',sourceKey:'programme.json',sourceSha256:'sha-cast-people',targetTable:'person',targetId:'person:actor/zz-a',unportable:false,input:{person:person('person:actor/zz-a','actor/zz-a',at)}},
+ {family:'watchlist',kind:'person',sourceKey:'programme.json',sourceSha256:'sha-cast-people',targetTable:'person',targetId:'person:actor/zz-b',unportable:false,input:{person:person('person:actor/zz-b','actor/zz-b',at)}},
+];
+const castFilm={family:'watchlist',kind:'film',sourceKey:'programme.json',sourceSha256:'sha-cast',targetTable:'film',targetId:'film:zz-cast',unportable:false,desiredCredits:castCredits,unmatchedCredits:0,input:{film:film('film:zz-cast','Cast Title',at),watchlist:false}};
+const gapFilm={family:'watchlist',kind:'film',sourceKey:'programme.json',sourceSha256:'sha-gap',targetTable:'film',targetId:'film:zz-gap',unportable:false,desiredCredits:[{personId:'person:actor/zz-gap',role:'actor',ordinal:0}],unmatchedCredits:1,input:{film:film('film:zz-gap','Gap Title',at),watchlist:false}};
+await importBatch(db,repositories,{importedAt:at,units:[...castUnits,castFilm,gapFilm]});
+const storedCast=await db.all("SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id='film:zz-cast' ORDER BY role,ordinal");
+assert.equal(JSON.stringify(storedCast),JSON.stringify([{person_id:'person:actor/zz-a',role:'actor',ordinal:0},{person_id:'person:actor/zz-b',role:'actor',ordinal:1},{person_id:'person:director/zz-role',role:'director',ordinal:0}]));
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='film:zz-cast'"),1);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='film:zz-gap'"),0);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM film_person_credit WHERE film_id='film:zz-gap'"),0);
+await importBatch(db,repositories,{importedAt:at,units:[...castUnits,{family:'watchlist',kind:'person',sourceKey:'programme.json',sourceSha256:'sha-cast-people',targetTable:'person',targetId:'person:actor/zz-gap',unportable:false,input:{person:person('person:actor/zz-gap','actor/zz-gap',at)}},{...gapFilm,unmatchedCredits:0}]});
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM film_person_credit WHERE film_id='film:zz-gap'"),1);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='film:zz-gap'"),1);
+await db.run("DELETE FROM film_person_credit WHERE film_id='film:zz-cast' AND person_id='person:actor/zz-b'");
+const dropped=await verifyParity(db,{films:[{id:'film:zz-cast',localization:null,credits:castCredits}]});
+assert.equal(dropped.ok,false);
+assert.equal(dropped.mismatched.some(item=>item.id==='film:zz-cast'&&item.field==='credits'),true);
+
+await repositories.epg.publishGeneration({programmeRunId:'run-b',phase:'published',expectedProgrammeRunId:'run-a',publishedAt:later,films:[{filmId:'film:zz-film',shows:[]}],candidates:[{observationKey:'heat|1995',title:'Title ZZ',normalizedTitle:'heat',year:1995,rawTitles:['Title ZZ'],durations:[170],evidenceKey:'evidence-a',activity:'current',seenInLatest:true,shows:[]}]});
+await repositories.epg.recordDecision({observationKey:'heat|1995',programmeRunId:'run-b',status:'ambiguous',reason:'ambiguous',checkedAt:later,evidenceKey:'evidence-a',attempts:5,lastAttemptAt:later,retryAt:'2026-10-28T00:00:00.000Z',terminalReason:'repeated_uncertain_match'});
+const rejectedDecision=await importBatch(db,repositories,{importedAt:at,units:[{family:'discovery',kind:'decision',sourceKey:'epg/discovery-resolution.json',sourceSha256:'sha-decision',targetTable:'candidate_decision',targetId:'heat|1995',unportable:false,input:{observationKey:'heat|1995',programmeRunId:'run-b',status:'verified',reason:'verified',checkedAt:'2026-10-22T01:00:00.000Z',evidenceKey:'evidence-a',filmId:'film:zz-film',tmdbId:'1656'}}]});
+assert.equal(rejectedDecision.explained,1);
+assert.equal(rejectedDecision.ledger[0].reason,'terminal_evidence_unchanged');
+assert.equal(rejectedDecision.applied,0);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='heat|1995'"),0);
+assert.equal((await repositories.epg.readDecision('heat|1995')).current.status,'ambiguous');
 
 const snapshot=path.join(root,'snapshot');
 const canary='CANARY-TITLE';
 const secret='history-secret';
+const cast={directors:[{id:'director/zz-role',name:'Director',original:'Director'}],actors:[{id:'actor/zz-a',name:'Actor A',original:'Actor A'},{id:'actor/zz-b',name:'Actor B',original:'Actor B'}]};
 writeSnapshot(snapshot,{
  'watchlist.json':{films:[{id:'zz-film',title:canary,original:'Original Title'}]},
- 'programme.json':{films:[{id:'zz-film',title:canary,original:'Original Title',actors:[{id:'actor/zz-role',name:'Stored Name',original:'Stored Name'}],directors:[]}]},
- 'metadata.json':{'zz-film':{id:'zz-film',original:'Original Title',metadataAt:at,peopleVersion:1,peopleNamesVersion:2,synopsis:'Text',synopsisFetchedAt:at,directors:[],actors:[{id:'actor/zz-role',name:'Stored Name',original:'Stored Name'}]}},
+ 'programme.json':{films:[{id:'zz-film',title:canary,original:'Original Title',...cast}]},
+ 'metadata.json':{'zz-film':{id:'zz-film',original:'Original Title',metadataAt:at,peopleVersion:1,peopleNamesVersion:2,synopsis:'Text',synopsisFetchedAt:at,...cast}},
  'enrichment/profile/current.json':{version:1,profileHash:'profile-a',updatedAt:at},
  ['enrichment/films/zz-film/fingerprint.json']:{fingerprintSchemaVersion:1,fingerprintHash:'print-a',generatedAt:at,invalidatedAt:null},
  ['enrichment/films/zz-film/predictions.json']:{current:{tasteProfileVersion:1,tasteProfileHash:'profile-a',fingerprintHash:'print-a',fingerprintSchemaVersion:1,predictionPromptVersion:1,predictedRating:4},history:[{note:secret}]},
  ['enrichment/films/zz-film/actual.json']:{rating:4,source:'letterboxd',updatedAt:at},
+ 'epg/raw/guide.xml':Buffer.from('<guide></guide>'),
+ 'epg/generations/run-old/programme.json':{films:[]},
 });
 const first=runImport(snapshot,path.join(root,'cli.sqlite'));
 assert.equal(first.production,false);
@@ -116,7 +166,12 @@ assert.equal(first.claimsFullParity,false);
 assert.equal(first.families.discovery.status,'absent');
 assert.equal(first.families.profile.status,'present');
 assert.equal(first.unportable>0,true);
-assert.equal(first.ledger.some(item=>item.reason==='credits_not_carried'),true);
+assert.equal(first.coverage.excluded.includes('epg/raw/guide.xml'),true);
+assert.equal(first.coverage.unmapped.includes('epg/generations/run-old/programme.json'),true);
+assert.equal(first.claimsFullParity,false);
+assert.equal(first.parity.ok,true);
+assert.equal(first.ledger.some(item=>item.reason==='credits_not_carried'),false);
+assert.equal(first.ledger.some(item=>item.reason==='credits_unmatched'),false);
 assert.equal(first.ledger.some(item=>item.reason==='profile_version_object_missing'),true);
 assert.equal(first.ledger.some(item=>item.reason==='mutable_bundle_is_not_a_version_object'||item.reason==='prediction_version_object_missing'||item.reason==='prediction_fields_missing'),true);
 assert.equal(JSON.stringify(first).includes(canary),false);
@@ -134,7 +189,7 @@ function writeSnapshot(directory,bodies){
  fs.rmSync(directory,{recursive:true,force:true});
  fs.mkdirSync(path.join(directory,'objects'),{recursive:true});
  const entries=Object.entries(bodies).map(([key,value])=>{
-  const bytes=Buffer.from(JSON.stringify(value),'utf8');
+  const bytes=Buffer.isBuffer(value)?value:Buffer.from(JSON.stringify(value),'utf8');
   const name=createHash('sha256').update(Buffer.from(key,'utf8')).digest('hex')+'.bin';
   fs.writeFileSync(path.join(directory,'objects',name),bytes);
   return {key,file:'objects/'+name,size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),metadata:{size:bytes.length}};
