@@ -72,15 +72,23 @@ The module does not insert a candidate, a score, a programme generation, or pred
 
 The fingerprint body, the taste-profile body, and the current prediction body stay immutable R2 objects. The repository stores `r2_key` and `content_sha256`. `prediction_history.payload_json` is the former prediction record, and its `r2_key` is that version's object. A new profile version does not set `invalidated_at` on the fingerprint. A prediction replaces the current row only when its `updated_at` is later than the stored row, and that write archives the row that is current at commit time. A null stored field still differs from a filled value, so that predecessor is archived once. An older or repeated prediction leaves the newer row and its history unchanged. The same `updated_at` with a different prediction is rejected. A fingerprint pointer is replaced only by a later `generated_at`. A pointer with no `generated_at` stays until a dated pointer replaces it. Another undated pointer with a different hash is rejected. The same hash, including one with no `generated_at`, can still be invalidated, and an earlier or undated pointer does not restore itself. An actual rating is replaced only by a later `recorded_at`. The same timestamp leaves the stored rating in place. A failed statement leaves the previous current prediction, its history, the fingerprint, and the actual rating in place. The view and queue values are derived from those rows. They are not copies of `view-index.json` or the prediction queue, and producing them does not call a model.
 
-AIR-73 is not implemented. None of these repositories run in production.
+None of these repositories run in production.
+
+## Offline importer
+
+[AIR-73](https://trello.com/c/gX2xdQAz) is `scripts/offline-import.mjs` and `src/offline-importer.js`. The Worker bundle does not include them. The command reads one owner-provided snapshot directory, the same manifest and checksum check as `scripts/lifecycle-parity.mjs`, and writes a local SQLite file outside this repository. It does not read production R2, call a model, or apply the schema to a production database.
+
+The report names the snapshot `finishedAt` and aggregate checksum, then lists each family as present or absent. An absent family stays absent. A present object that lacks a required field, a per-version prediction object, or an explicit credit list is `unportable` and is not replaced with an empty match. A fingerprint, prediction, or rating that loses to a newer stored row is `explained` and is not given a receipt, so the next run reports that fence again. A failed unit rolls back with its repository transaction and does not receive `import_receipt`. A receipt is written only after a unit is stored as given. Running the command again skips those receipts and does not add rows.
+
+`claimsFullParity` is true only when every family is present and that run has nothing pending, unportable, conflicting, or explained. A partial archive does not receive that flag. Live backfill remains [AIR-74](https://trello.com/c/5AdAmKPe), after [AIR-69](https://trello.com/c/FlcWZX7W).
 
 | Card | Reads and writes | Does not |
 | --- | --- | --- |
 | AIR-70 | `film`, `person`, credits, `film_metadata`, external ids, redirects, aliases, dimensions, conflicts, `watchlist_film` | score a candidate or choose shows |
 | AIR-71 | the current generation pointer, shows, candidates, decisions, scores | mint a Film id from an observation key |
 | AIR-72 | fingerprint pointer, profile, prediction current and history, actual rating | change identity |
-| AIR-73 | `import_receipt` from a snapshot checksum | write production R2 or production D1 |
+| AIR-73 | local SQLite import and `import_receipt` for units stored as given | write production R2 or production D1, or treat a partial archive as full parity |
 
 ## Rollback
 
-Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. Deleting `src/canonical-repository.js` and `tests/canonical-repository.mjs` removes the local Film and Person adapter. Deleting `src/prediction-repository.js` and `tests/prediction-repository.mjs` removes the local prediction adapter. No database is created and no production row moves.
+Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. Deleting `src/canonical-repository.js` and `tests/canonical-repository.mjs` removes the local Film and Person adapter. Deleting `src/prediction-repository.js` and `tests/prediction-repository.mjs` removes the local prediction adapter. Deleting `src/offline-importer.js`, `scripts/offline-import.mjs`, and `tests/offline-importer.mjs` removes the local snapshot importer. No database is created and no production row moves.
