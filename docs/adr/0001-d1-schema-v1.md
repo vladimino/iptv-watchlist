@@ -8,6 +8,8 @@ Schema v1 is `migrations/0001_schema_v1.sql`. The number is the version. Once th
 
 `wrangler.jsonc` does not name a D1 database. Deploying Worker `iptv` does not create or migrate a database. The test applies the file to a local SQLite database and discards it.
 
+The current EPG generation is the single `published_generation` row. Replacing that pointer does not delete the previous generation. A replaced prediction is a new immutable object plus `prediction_history.payload_json`, not an edit of the mutable `predictions.json` key.
+
 R2 bucket `iptv` stays the production store. D1 and R2 are not one transaction. A future importer may fail after writing D1 and before `import_receipt`. The retry is the same source key and checksum. That failure does not roll back R2, and an R2 failure does not roll back a receipt that was not written.
 
 ## Recovery

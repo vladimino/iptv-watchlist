@@ -75,6 +75,9 @@ CREATE TABLE localization_conflict (
  entity_kind TEXT NOT NULL CHECK (entity_kind IN ('film','person')),
  entity_id TEXT NOT NULL,
  value TEXT,
+ source TEXT,
+ provenance_json TEXT,
+ authority TEXT,
  reason TEXT NOT NULL,
  at TEXT NOT NULL
 ) STRICT;
@@ -121,13 +124,19 @@ CREATE TABLE watchlist_film (
  updated_at TEXT NOT NULL
 ) STRICT;
 
--- Published generation and shows. Membership with no film_show rows is an explicit empty list.
+-- One generation is current. Older rows stay, including rows whose phase is still published.
 CREATE TABLE programme_generation (
  programme_run_id TEXT PRIMARY KEY,
  phase TEXT NOT NULL CHECK (phase IN ('published','withheld')),
  published_at TEXT
 ) STRICT;
 
+CREATE TABLE published_generation (
+ id INTEGER PRIMARY KEY CHECK (id=1),
+ programme_run_id TEXT NOT NULL REFERENCES programme_generation(programme_run_id)
+) STRICT;
+
+-- Membership with no film_show rows is an explicit empty list.
 CREATE TABLE film_generation (
  programme_run_id TEXT NOT NULL REFERENCES programme_generation(programme_run_id),
  film_id TEXT NOT NULL REFERENCES film(id),
@@ -138,8 +147,12 @@ CREATE TABLE film_show (
  programme_run_id TEXT NOT NULL,
  film_id TEXT NOT NULL,
  channel_id TEXT NOT NULL,
+ channel TEXT,
  start_ms INTEGER NOT NULL,
  end_ms INTEGER,
+ epg_title TEXT,
+ basis TEXT,
+ match_reason TEXT,
  PRIMARY KEY (programme_run_id,film_id,channel_id,start_ms),
  FOREIGN KEY (programme_run_id,film_id) REFERENCES film_generation(programme_run_id,film_id)
 ) STRICT;
@@ -153,14 +166,27 @@ CREATE TABLE film_epg_last_airing (
 ) STRICT;
 
 CREATE VIEW published_film_show AS
-SELECT s.programme_run_id,s.film_id,s.channel_id,s.start_ms,s.end_ms
+SELECT s.programme_run_id,s.film_id,s.channel_id,s.channel,s.start_ms,s.end_ms,s.epg_title,s.basis,s.match_reason
 FROM film_show s
-JOIN programme_generation g ON g.programme_run_id=s.programme_run_id
-WHERE g.phase='published';
+JOIN published_generation p ON p.id=1 AND p.programme_run_id=s.programme_run_id
+JOIN programme_generation g ON g.programme_run_id=s.programme_run_id AND g.phase='published';
 
 -- Candidate ledger. The key is an observation, never a Film id.
+-- observation_json is schemaVersion 1 and keeps every observation field the scorer reads.
 CREATE TABLE candidate (
  observation_key TEXT PRIMARY KEY CHECK (observation_key NOT LIKE 'film:%' AND observation_key NOT LIKE 'person:%'),
+ title TEXT NOT NULL,
+ normalized_title TEXT NOT NULL,
+ year INTEGER,
+ raw_titles_json TEXT NOT NULL,
+ durations_json TEXT NOT NULL,
+ description TEXT,
+ first_airing_ms INTEGER,
+ last_airing_ms INTEGER,
+ airings INTEGER,
+ confirmed_tmdb_id TEXT,
+ observation_schema_version INTEGER NOT NULL,
+ observation_json TEXT NOT NULL,
  activity TEXT,
  last_seen_at TEXT,
  last_seen_programme_run_id TEXT,
@@ -183,10 +209,51 @@ CREATE TABLE candidate_show (
  programme_run_id TEXT NOT NULL,
  observation_key TEXT NOT NULL,
  channel_id TEXT NOT NULL,
+ channel TEXT,
  start_ms INTEGER NOT NULL,
  end_ms INTEGER,
+ epg_title TEXT,
  PRIMARY KEY (programme_run_id,observation_key,channel_id,start_ms),
  FOREIGN KEY (programme_run_id,observation_key) REFERENCES candidate_generation(programme_run_id,observation_key)
+) STRICT;
+
+-- AIR-48 decision. A score_result row is not this record, and this record does not require one.
+CREATE TABLE candidate_decision (
+ observation_key TEXT PRIMARY KEY REFERENCES candidate(observation_key),
+ status TEXT NOT NULL,
+ reason TEXT,
+ catalog_film_id TEXT,
+ film_id TEXT REFERENCES film(id),
+ tmdb_id TEXT,
+ canonical_identity TEXT,
+ identity_source TEXT,
+ checked_at TEXT NOT NULL,
+ evidence_key TEXT,
+ attempts INTEGER NOT NULL DEFAULT 0,
+ last_attempt_at TEXT,
+ retry_at TEXT,
+ terminal_reason TEXT,
+ provenance_json TEXT
+) STRICT;
+
+CREATE TABLE candidate_decision_history (
+ observation_key TEXT NOT NULL REFERENCES candidate(observation_key),
+ checked_at TEXT NOT NULL,
+ status TEXT NOT NULL,
+ reason TEXT,
+ catalog_film_id TEXT,
+ film_id TEXT REFERENCES film(id),
+ tmdb_id TEXT,
+ canonical_identity TEXT,
+ identity_source TEXT,
+ evidence_key TEXT,
+ attempts INTEGER NOT NULL DEFAULT 0,
+ last_attempt_at TEXT,
+ retry_at TEXT,
+ terminal_reason TEXT,
+ provenance_json TEXT,
+ replaced_at TEXT NOT NULL,
+ PRIMARY KEY (observation_key,checked_at)
 ) STRICT;
 
 -- Score, detail card, and gate outcome. accepted_tmdb_id does not reference film.
@@ -261,12 +328,17 @@ CREATE TABLE prediction_current (
  updated_at TEXT NOT NULL
 ) STRICT;
 
+-- payload_json is the full former prediction. r2_key addresses that immutable body, not predictions.json.
 CREATE TABLE prediction_history (
  film_id TEXT NOT NULL REFERENCES film(id),
  replaced_at TEXT NOT NULL,
  predicted_rating REAL,
  taste_profile_version INTEGER,
  fingerprint_hash TEXT,
+ payload_json TEXT NOT NULL,
+ r2_key TEXT NOT NULL,
+ content_sha256 TEXT NOT NULL,
+ source TEXT,
  PRIMARY KEY (film_id,replaced_at)
 ) STRICT;
 
