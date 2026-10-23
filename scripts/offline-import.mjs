@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {actualUnit,classifyObject,creditRoster,fingerprintUnit,generationUnit,importBatch,inventory,predictionUnits,profileUnit,readDiscovery} from '../src/offline-importer.js';
+import {actualUnit,catalogMetadata,classifyObject,creditRoster,fingerprintUnit,generationUnit,importBatch,inventory,predictionUnits,profileUnit,projectSource,readDiscovery} from '../src/offline-importer.js';
 import {ExportError} from './migration-export.mjs';
 import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
 
@@ -33,6 +33,7 @@ export async function prepareImport(directory){
  const store=scopedStore(loaded.store,byKey);
  const view=readLifecycle(store,Date.parse(manifest.finishedAt));
  const sha=key=>byKey.get(key)?.sha256||'';
+ const rosters={},listedIds={};
  const peopleKey=byKey.has('people.json')?'people.json':byKey.has('programme.json')?'programme.json':'watchlist.json';
  for(const person of view.people)units.push(record('watchlist','person',peopleKey,sha(peopleKey),'person',person.id,{person}));
  for(const film of view.films){
@@ -43,6 +44,10 @@ export async function prepareImport(directory){
   const roster=creditRoster(recordsFor(store,film));
   filmUnit.desiredCredits=roster.credits;
   filmUnit.unmatchedCredits=roster.unmatched.length;
+  const metadata=catalogMetadata(metadataRecord(bodies.get('metadata.json'),film),'metadata.json',sha('metadata.json'));
+  if(metadata)filmUnit.input.metadata=metadata;
+  rosters[film.id]={credits:roster.credits,unmatched:roster.unmatched.length};
+  listedIds[film.id]=listed;
   units.push(filmUnit);
   for(const redirect of film.redirects||[]){
    if(!redirect?.from||!redirect?.to||!redirect?.at)units.push(unportable(sourceKey,sha(sourceKey),'film_redirect',redirect?.from||film.id,'redirect_fields_missing','watchlist'));
@@ -69,7 +74,8 @@ export async function prepareImport(directory){
    if(generation.unportable&&byKey.has('epg/discovery-resolution.json'))units.push(unportable('epg/discovery-resolution.json',sha('epg/discovery-resolution.json'),'candidate_decision','epg/discovery-resolution.json','generation_not_imported','discovery'));
   }
  }
- return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected:expectedProjection(units)};
+ const expected=projectSource({keys,bodies:Object.fromEntries(bodies),films:view.films,people:view.people,rosters,listed:listedIds,shas:Object.fromEntries([...byKey].map(([key,entry])=>[key,entry.sha256]))});
+ return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected};
 }
 
 function decisionUnits(entry,body,programmeRunId){
@@ -101,18 +107,13 @@ function recordsFor(store,film){
  if(letterboxd)ids.add(letterboxd);
  return [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})].filter(record=>record&&ids.has(String(record.id)));
 }
-function expectedProjection(units){
- const expected={films:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[]};
- for(const unit of units){
-  if(unit.unportable)continue;
-  if(unit.kind==='film')expected.films.push({id:unit.targetId,localization:unit.input.film?.localization?.value??null,credits:unit.desiredCredits||[]});
-  if(unit.kind==='fingerprint')expected.fingerprints.push({id:unit.targetId});
-  if(unit.kind==='rating')expected.ratings.push({id:unit.targetId});
-  if(unit.kind==='link')expected.redirects.push({id:unit.targetId});
-  if(unit.kind==='prediction'&&unit.targetTable==='prediction_current')expected.predictions.push({id:unit.input.filmId,predictedRating:unit.input.predictedRating,updatedAt:unit.input.updatedAt,history:units.filter(item=>item.kind==='prediction'&&item.targetTable==='prediction_history'&&item.input?.filmId===unit.input.filmId&&!item.unportable).length});
-  if(unit.kind==='decision')expected.decisions.push({id:unit.targetId,status:unit.input.status,evidenceKey:unit.input.evidenceKey,terminalReason:unit.input.terminalReason??null});
- }
- return expected;
+function metadataRecord(body,film){
+ if(!body||typeof body!=='object')return null;
+ const ids=new Set([film.id.replace(/^film:/,'')]);
+ const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value;
+ if(letterboxd)ids.add(String(letterboxd));
+ for(const [key,value] of Object.entries(body))if(ids.has(key)||ids.has(String(value?.id)))return value;
+ return null;
 }
 function readLifecycle(store,now){
  const domain=fs.readFileSync(path.join(root,'src/domain/film-person.js'),'utf8');

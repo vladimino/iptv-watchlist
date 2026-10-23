@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {importBatch,inventory,parityClaim,verifyParity} from '../src/offline-importer.js';
+import {importBatch,inventory,parityClaim,projectSource,verifyParity} from '../src/offline-importer.js';
 import {manifestFor} from '../scripts/migration-export.mjs';
 
 const source=fs.readFileSync('src/offline-importer.js','utf8');
@@ -94,9 +94,11 @@ const repeated=await importBatch(db,repositories,{inventory:partial,importedAt:a
 assert.equal(repeated.ledger.filter(item=>item.reason==='prediction_kept').length,1);
 assert.equal((await repositories.prediction.readFilm('film:zz-null')).history.length,0);
 assert.equal((await repositories.prediction.readFilm('film:zz-null')).actualRating.rating,4.5);
-assert.equal(parityClaim({coverage:{unmapped:['epg/generations/run-old/programme.json'],excluded:['epg/raw/guide.xml'],mapped:['watchlist.json']},parity:{ok:true},counts:{},ledger:[]}),false);
-assert.equal(parityClaim({coverage:{unmapped:[],excluded:['epg/raw/guide.xml'],mapped:['watchlist.json']},parity:{ok:false},counts:{},ledger:[]}),false);
-assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true},counts:{},ledger:[]}),true);
+assert.equal(parityClaim({coverage:{unmapped:['epg/generations/run-old/programme.json'],excluded:['epg/raw/guide.xml'],mapped:['watchlist.json']},parity:{ok:true,denominator:1},counts:{},ledger:[],inventory:{complete:true}}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:['epg/raw/guide.xml'],mapped:['watchlist.json']},parity:{ok:false,denominator:1},counts:{},ledger:[],inventory:{complete:true}}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[]},counts:{},ledger:[],inventory:{complete:false}}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:0},counts:{},ledger:[],inventory:{complete:true}}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[{disposition:'mapped'}]},counts:{},ledger:[],inventory:{complete:true}}),true);
 
 const receiptFilm=film('film:zz-receipt','Receipt Title',at);
 db.beforeReceipt=async()=>{throw new Error('receipt_failed');};
@@ -110,6 +112,25 @@ assert.equal(reconciled.reconciled,1);
 assert.equal(reconciled.applied,0);
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM film WHERE id='film:zz-receipt'"),1);
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='film:zz-receipt'"),1);
+const provisionalName=person('person:actor/zz-rename','actor/zz-rename',at,dim('localization','provisional',at,{value:'Name A',source:'dictionary'}));
+await repositories.canonical.savePerson({person:provisionalName});
+const reviewedName=person('person:actor/zz-rename','actor/zz-rename',later,dim('localization','reviewed',later,{value:'Name B',source:'owner',provenance:{authority:'owner'}}));
+const renamed=await importBatch(db,repositories,{importedAt:later,units:[{family:'watchlist',kind:'person',sourceKey:'people.json',sourceSha256:'sha-rename-b',targetTable:'person',targetId:provisionalName.id,unportable:false,input:{person:reviewedName}}]});
+assert.equal(renamed.applied,1);
+assert.equal(renamed.reconciled,0);
+assert.equal((await repositories.canonical.readPerson(provisionalName.id)).dimensions.localization.value,'Name B');
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE source_sha256='sha-rename-b'"),1);
+const corruptTitle=film('film:zz-corrupt','Kept Title',at);
+db.beforeReceipt=async()=>{throw new Error('receipt_failed');};
+const corruptCrash=await importBatch(db,repositories,{importedAt:at,units:[{family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-corrupt',targetTable:'film',targetId:'film:zz-corrupt',unportable:false,input:{film:corruptTitle,watchlist:false}}]});
+assert.equal(corruptCrash.uncheckpointed,1);
+await db.run("UPDATE film SET original_title='CORRUPTED' WHERE id='film:zz-corrupt'");
+db.beforeReceipt=null;
+const repaired=await importBatch(db,repositories,{importedAt:at,units:[{family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-corrupt',targetTable:'film',targetId:'film:zz-corrupt',unportable:false,input:{film:corruptTitle,watchlist:false}}]});
+assert.equal(repaired.reconciled,0);
+assert.equal(repaired.applied,1);
+assert.equal((await repositories.canonical.readFilm('film:zz-corrupt')).originalTitle,'Kept Title');
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='film:zz-corrupt'"),1);
 
 const castCredits=[{personId:'person:director/zz-role',role:'director',ordinal:0},{personId:'person:actor/zz-a',role:'actor',ordinal:0},{personId:'person:actor/zz-b',role:'actor',ordinal:1}];
 const castUnits=[
@@ -142,6 +163,92 @@ assert.equal(rejectedDecision.applied,0);
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='heat|1995'"),0);
 assert.equal((await repositories.epg.readDecision('heat|1995')).current.status,'ambiguous');
 
+const partFile=path.join(root,'partial.sqlite');
+exec(partFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+const partDb=openSqlite(partFile);
+const partRepos={canonical:createCanonicalRepository(partDb),epg:createEpgRepository(partDb),prediction:createPredictionRepository(partDb)};
+const partPerson=person('person:actor/zz-part','actor/zz-part',at);
+const partFilm=film('film:zz-part','Partial Title',at);
+const partRun=await importBatch(partDb,partRepos,{inventory:partial,importedAt:at,units:[
+ {family:'watchlist',kind:'person',sourceKey:'people.json',sourceSha256:'sha-part-person',targetTable:'person',targetId:partPerson.id,unportable:false,input:{person:partPerson}},
+ {family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-part-film',targetTable:'film',targetId:partFilm.id,unportable:false,input:{film:partFilm,watchlist:true}},
+],expected:{films:[{id:partFilm.id,originalTitle:'Partial Title',canonicalIdentity:null,contractVersion:1,watchlist:true,localization:null,localizationStatus:'missing',credits:[],externalIds:partFilm.externalIds,aliases:[]}],persons:[{id:partPerson.id,roleId:partPerson.roleId,contractVersion:1,localization:null,localizationStatus:'missing',externalIds:partPerson.externalIds,aliases:[]}]}});
+assert.equal(partRun.parity.ok,true);
+assert.equal(partRun.applied,2);
+assert.equal(partRun.claimsFullParity,false);
+
+const sourceKeys=['watchlist.json','programme.json','people.json','epg/discovery-latest.json','epg/generations/run-old/programme.json','enrichment/films/zz-omit/fingerprint.json','enrichment/films/zz-omit/predictions.json','enrichment/films/zz-omit/actual.json','enrichment/profile/versions/1.json'];
+const omitFilm=film('film:zz-omit','Omit Title',at);
+const omitPerson=person('person:actor/zz-omit','actor/zz-omit',at);
+const projected=projectSource({keys:sourceKeys,bodies:{
+ 'watchlist.json':{films:[{id:'zz-omit'}]},
+ 'programme.json':{runId:'run-p',films:[{id:'zz-omit',shows:[{channelId:'channel-a',start:1000,title:'Show Title'}]}]},
+ 'people.json':[{id:'actor/zz-omit'}],
+ 'epg/discovery-latest.json':{items:[{observationKey:'heat|1995',evidenceKey:'evidence-a',title:'Title ZZ',normalizedTitle:'heat'}]},
+ 'epg/generations/run-old/programme.json':{films:[]},
+ 'enrichment/films/zz-omit/fingerprint.json':{fingerprintSchemaVersion:1,fingerprintHash:'print-a',generatedAt:at},
+ 'enrichment/films/zz-omit/predictions.json':{current:{tasteProfileVersion:1},history:[]},
+ 'enrichment/films/zz-omit/actual.json':{rating:4,source:'letterboxd',updatedAt:at},
+ 'enrichment/profile/versions/1.json':{version:1,profileHash:'profile-a',createdAt:at},
+},films:[omitFilm],people:[omitPerson],listed:{'film:zz-omit':true},shas:{'enrichment/films/zz-omit/fingerprint.json':'sha-print'}});
+assert.equal(projected.candidates.length,1);
+assert.equal(projected.generations.length,1);
+assert.equal(projected.generations[0].shows[0].epgTitle,'Show Title');
+assert.equal(projected.unprojected.includes('epg/generations/run-old/programme.json'),true);
+assert.equal(projected.records.some(record=>record.key==='enrichment/films/zz-omit/predictions.json'&&record.disposition==='unportable'),true);
+const omitFile=path.join(root,'omit.sqlite');
+exec(omitFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+const omitDb=openSqlite(omitFile);
+const omitRepos={canonical:createCanonicalRepository(omitDb),epg:createEpgRepository(omitDb),prediction:createPredictionRepository(omitDb)};
+const omitted=await importBatch(omitDb,omitRepos,{inventory:inventory({finishedAt:at,aggregateSha256:'sha-omit',keys:sourceKeys}),importedAt:at,units:[
+ {family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-omit-film',targetTable:'film',targetId:omitFilm.id,unportable:false,input:{film:omitFilm,watchlist:true}},
+],expected:projected});
+assert.equal(omitted.parity.missing.some(item=>item.table==='person'&&item.id==='person:actor/zz-omit'),true);
+assert.equal(omitted.parity.missing.some(item=>item.table==='programme_generation'&&item.id==='run-p'),true);
+assert.equal(omitted.claimsFullParity,false);
+
+const fullFile=path.join(root,'full.sqlite');
+exec(fullFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+const fullDb=openSqlite(fullFile);
+const fullRepos={canonical:createCanonicalRepository(fullDb),epg:createEpgRepository(fullDb),prediction:createPredictionRepository(fullDb)};
+const fullPerson=person('person:actor/zz-full','actor/zz-full',at);
+const fullFilm=film('film:zz-full','Full Title',at);
+const fullMetadata={schemaVersion:1,year:null,runtime:null,synopsis:'Text',poster:null,url:null,genres:[],peopleVersion:1,payload:{},r2Key:'metadata.json',contentSha256:'sha-meta',updatedAt:at};
+await importBatch(fullDb,fullRepos,{importedAt:at,units:[
+ {family:'watchlist',kind:'person',sourceKey:'people.json',sourceSha256:'sha-full-person',targetTable:'person',targetId:fullPerson.id,unportable:false,input:{person:fullPerson}},
+ {family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-full-film',targetTable:'film',targetId:fullFilm.id,unportable:false,input:{film:fullFilm,watchlist:false,metadata:fullMetadata}},
+ {family:'fingerprint',kind:'fingerprint',sourceKey:'enrichment/films/zz-full/fingerprint.json',sourceSha256:'sha-full-print',targetTable:'fingerprint_payload',targetId:fullFilm.id,unportable:false,input:{filmId:fullFilm.id,schemaVersion:1,fingerprintHash:'print-full',generatedAt:at,invalidatedAt:null,r2Key:'enrichment/films/zz-full/fingerprint.json',contentSha256:'sha-full-print'}},
+ {family:'actual',kind:'rating',sourceKey:'enrichment/films/zz-full/actual.json',sourceSha256:'sha-full-rate',targetTable:'actual_rating',targetId:fullFilm.id,unportable:false,input:{filmId:fullFilm.id,rating:4,source:'letterboxd',recordedAt:at}},
+ {family:'programme',kind:'generation',sourceKey:'programme.json',sourceSha256:'sha-full-run',targetTable:'programme_generation',targetId:'run-full',unportable:false,input:{programmeRunId:'run-full',phase:'published',expectedProgrammeRunId:null,publishedAt:at,films:[{filmId:fullFilm.id,shows:[{channelId:'channel-a',channel:'Channel A',startMs:1000,endMs:2000,epgTitle:'Visible Title',basis:null,matchReason:null}]}],candidates:[{observationKey:'heat|1995',title:'Title ZZ',normalizedTitle:'heat',year:1995,rawTitles:['Title ZZ'],durations:[],evidenceKey:'evidence-full',activity:'current',seenInLatest:true,shows:[]}]}},
+]});
+const fullSpec={films:[{id:fullFilm.id,originalTitle:'Full Title',localization:null,credits:[],metadata:{synopsis:'Text',year:null,runtime:null,peopleVersion:1}}],persons:[{id:fullPerson.id,roleId:fullPerson.roleId,localization:null}],fingerprints:[{id:fullFilm.id,fingerprintHash:'print-full',generatedAt:at,invalidatedAt:null,r2Key:'enrichment/films/zz-full/fingerprint.json'}],ratings:[{id:fullFilm.id,rating:4,source:'letterboxd',recordedAt:at}],generations:[{id:'run-full',phase:'published',shows:[{filmId:fullFilm.id,channelId:'channel-a',startMs:1000,epgTitle:'Visible Title'}]}],candidates:[{id:'heat|1995',programmeRunId:'run-full',evidenceKey:'evidence-full',title:'Title ZZ',normalizedTitle:'heat'}],predictions:[],profiles:[],redirects:[]};
+const clean=await verifyParity(fullDb,fullSpec);
+assert.equal(clean.ok,true,JSON.stringify({missing:clean.missing,extra:clean.extra,mismatched:clean.mismatched}));
+await fullDb.run("UPDATE film SET original_title='CORRUPTED' WHERE id='film:zz-full'");
+assert.equal((await verifyParity(fullDb,fullSpec)).mismatched.some(item=>item.id==='film:zz-full'&&item.field==='original_title'),true);
+await fullDb.run("UPDATE film SET original_title='Full Title' WHERE id='film:zz-full'");
+await fullDb.run("UPDATE actual_rating SET rating=1.0 WHERE film_id='film:zz-full'");
+assert.equal((await verifyParity(fullDb,fullSpec)).mismatched.some(item=>item.field==='rating'),true);
+await fullDb.run("UPDATE actual_rating SET rating=4 WHERE film_id='film:zz-full'");
+await fullDb.run("UPDATE fingerprint_payload SET fingerprint_hash='changed' WHERE film_id='film:zz-full'");
+assert.equal((await verifyParity(fullDb,fullSpec)).mismatched.some(item=>item.field==='fingerprint'),true);
+await fullDb.run("UPDATE fingerprint_payload SET fingerprint_hash='print-full' WHERE film_id='film:zz-full'");
+await fullDb.run("DELETE FROM film_person_credit WHERE film_id='film:zz-full'");
+await fullDb.run("DELETE FROM person_external_id WHERE person_id='person:actor/zz-full'");
+await fullDb.run("DELETE FROM person_alias WHERE person_id='person:actor/zz-full'");
+await fullDb.run("DELETE FROM person_dimension WHERE person_id='person:actor/zz-full'");
+await fullDb.run("DELETE FROM person WHERE id='person:actor/zz-full'");
+assert.equal((await verifyParity(fullDb,fullSpec)).missing.some(item=>item.table==='person'),true);
+await fullRepos.canonical.savePerson({person:fullPerson});
+await fullDb.run("DELETE FROM film_show WHERE programme_run_id='run-full'");
+assert.equal((await verifyParity(fullDb,fullSpec)).mismatched.some(item=>item.field==='shows'),true);
+await fullDb.run("INSERT INTO film_show (programme_run_id,film_id,channel_id,channel,start_ms,end_ms,epg_title,basis,match_reason) VALUES ('run-full','film:zz-full','channel-a','Channel A',1000,2000,'Visible Title',NULL,NULL)");
+await fullDb.run("UPDATE film_metadata SET synopsis='Other' WHERE film_id='film:zz-full'");
+assert.equal((await verifyParity(fullDb,fullSpec)).mismatched.some(item=>item.field==='metadata'),true);
+await fullDb.run("UPDATE film_metadata SET synopsis='Text' WHERE film_id='film:zz-full'");
+await fullDb.run("INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:zz-extra',1,NULL,'Extra',?) ",[at]);
+assert.equal((await verifyParity(fullDb,fullSpec)).extra.some(item=>item.table==='film'&&item.id==='film:zz-extra'),true);
+
 const snapshot=path.join(root,'snapshot');
 const canary='CANARY-TITLE';
 const secret='history-secret';
@@ -168,6 +275,7 @@ assert.equal(first.families.profile.status,'present');
 assert.equal(first.unportable>0,true);
 assert.equal(first.coverage.excluded.includes('epg/raw/guide.xml'),true);
 assert.equal(first.coverage.unmapped.includes('epg/generations/run-old/programme.json'),true);
+assert.equal(first.parity.unprojected.includes('epg/generations/run-old/programme.json'),true);
 assert.equal(first.claimsFullParity,false);
 assert.equal(first.parity.ok,true);
 assert.equal(first.ledger.some(item=>item.reason==='credits_not_carried'),false);
@@ -184,7 +292,7 @@ assert.equal(second.unportable,first.unportable);
 
 function dim(dimension,status,updatedAt,extra={}){return {dimension,status,updatedAt,source:extra.source||'letterboxd',sourceVersion:null,provenance:extra.provenance||null,value:extra.value??null,nextAction:'none',attempts:0};}
 function film(id,title,updatedAt,localization){return {contractVersion:1,id,canonicalIdentity:null,originalTitle:title,externalIds:[{scheme:'letterboxd',value:id.slice('film:'.length),trusted:true,conflicting:false}],aliases:[],identity:dim('identity','resolved',updatedAt),metadata:dim('metadata','fresh',updatedAt),localization:localization||dim('localization','missing',updatedAt),fingerprint:dim('fingerprint','missing',updatedAt),prediction:dim('prediction','missing',updatedAt)};}
-function person(id,roleId,updatedAt){return {contractVersion:1,id,roleId,externalIds:[{scheme:'letterboxd-role',value:roleId,trusted:true,conflicting:false}],aliases:[],identity:dim('identity','resolved',updatedAt),localization:dim('localization','missing',updatedAt)};}
+function person(id,roleId,updatedAt,localization){return {contractVersion:1,id,roleId,externalIds:[{scheme:'letterboxd-role',value:roleId,trusted:true,conflicting:false}],aliases:[],identity:dim('identity','resolved',updatedAt),localization:localization||dim('localization','missing',updatedAt)};}
 function writeSnapshot(directory,bodies){
  fs.rmSync(directory,{recursive:true,force:true});
  fs.mkdirSync(path.join(directory,'objects'),{recursive:true});
