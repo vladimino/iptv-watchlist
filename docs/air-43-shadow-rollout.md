@@ -1,6 +1,6 @@
 # AIR-66 shadow evidence
 
-This file is the AIR-66 record. [AIR-43](https://trello.com/c/7NY6n1Az) is the closed code delivery. [AIR-67](https://trello.com/c/R4RuNVNw) is the later parity and GO/NO-GO review. The twelve-chunk run below is production shadow evidence. Section 16 is a separate offline scorer diagnostic. Those two sets of counts are not one sample.
+This file is the AIR-66 record. [AIR-43](https://trello.com/c/7NY6n1Az) is the closed code delivery. The parity decision is NO-GO in `docs/air-67-parity.md` ([AIR-67](https://trello.com/c/R4RuNVNw)). The twelve-chunk run below is production shadow evidence. Section 16 is a separate offline scorer diagnostic. Those two sets of counts are not one sample.
 
 `SCORED_RESOLUTION` stays `shadow`. `on` stays unset. No further production resolver chunks were run for the backtest.
 
