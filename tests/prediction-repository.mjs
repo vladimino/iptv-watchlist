@@ -86,6 +86,54 @@ assert.equal(await count(db,'SELECT COUNT(*) AS n FROM candidate'),0);
 assert.equal(await count(db,'SELECT COUNT(*) AS n FROM film_dimension'),0);
 assert.equal(await count(db,'SELECT COUNT(*) AS n FROM identity_assertion'),0);
 
+await db.run("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:zz-race',1,'Race Title','2026-10-19T01:00:00.000Z')");
+const raceA={...predictionA,filmId:'film:zz-race'};
+const raceB={...predictionB,filmId:'film:zz-race'};
+const raceC={...predictionC,filmId:'film:zz-race'};
+await repo.savePrediction(raceA);
+db.beforeTransaction(async()=>{await repo.savePrediction(raceC);});
+const raced=await repo.savePrediction(raceB);
+assert.equal(raced.prediction.predictedRating,4.5);
+assert.equal(raced.prediction.r2Key,'r2/prediction/c');
+assert.equal(raced.history.length,1);
+assert.equal(raced.history[0].payload.predictedRating,3.5);
+assert.equal(raced.history[0].replacedAt,raceC.updatedAt);
+assert.equal(raced.history.some(item=>item.replacedAt===raceB.updatedAt),false);
+const delayed=await repo.savePrediction(raceB);
+assert.equal(JSON.stringify(delayed),JSON.stringify(raced));
+
+await db.run("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:zz-print',1,'Print Title','2026-10-19T01:00:00.000Z')");
+const newerPrint={filmId:'film:zz-print',schemaVersion:1,fingerprintHash:'print-2',generatedAt:'2026-10-23T02:00:00.000Z',invalidatedAt:null,r2Key:'r2/fingerprint/print-2',contentSha256:'sha-print-2'};
+await repo.saveFingerprint(newerPrint);
+await repo.savePrediction({...predictionC,filmId:'film:zz-print',fingerprintHash:'print-2',r2Key:'r2/prediction/print-2',contentSha256:'sha-prediction-print-2',updatedAt:'2026-10-23T03:00:00.000Z'});
+const latePrint=await repo.saveFingerprint({...fingerprint,filmId:'film:zz-print'});
+assert.equal(latePrint.fingerprintHash,'print-2');
+assert.equal(latePrint.generatedAt,newerPrint.generatedAt);
+assert.equal(latePrint.invalidatedAt,null);
+const ready=await repo.readFilm('film:zz-print');
+assert.equal(ready.fingerprint.fingerprintHash,'print-2');
+assert.equal(ready.prediction.stale,false);
+assert.equal(ready.queue,null);
+const invalidated=await repo.saveFingerprint({...newerPrint,invalidatedAt:'2026-10-23T04:00:00.000Z'});
+assert.equal(invalidated.fingerprintHash,'print-2');
+assert.equal(invalidated.invalidatedAt,'2026-10-23T04:00:00.000Z');
+const olderInvalid=await repo.saveFingerprint({...fingerprint,filmId:'film:zz-print',invalidatedAt:'2026-10-19T05:00:00.000Z'});
+assert.equal(olderInvalid.fingerprintHash,'print-2');
+assert.equal(olderInvalid.invalidatedAt,'2026-10-23T04:00:00.000Z');
+
+await db.run("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:zz-rate',1,'Rate Title','2026-10-19T01:00:00.000Z')");
+await repo.saveActualRating({filmId:'film:zz-rate',rating:3.5,source:'letterboxd',recordedAt:'2026-10-19T11:00:00.000Z'});
+await repo.saveActualRating({filmId:'film:zz-rate',rating:4.5,source:'letterboxd',recordedAt:'2026-10-19T12:00:00.000Z'});
+const keptRating=await repo.saveActualRating({filmId:'film:zz-rate',rating:3.5,source:'letterboxd',recordedAt:'2026-10-19T11:00:00.000Z'});
+assert.equal(keptRating.rating,4.5);
+assert.equal(keptRating.recordedAt,'2026-10-19T12:00:00.000Z');
+const reopenedRating=createPredictionRepository(openSqlite(database));
+assert.equal((await reopenedRating.readFilm('film:zz-rate')).actualRating.rating,4.5);
+assert.equal((await reopenedRating.readFilm('film:zz-rate')).actualRating.recordedAt,'2026-10-19T12:00:00.000Z');
+const newerRating=await repo.saveActualRating({filmId:'film:zz-rate',rating:5,source:'letterboxd',recordedAt:'2026-10-19T13:00:00.000Z'});
+assert.equal(newerRating.rating,5);
+assert.equal(newerRating.recordedAt,'2026-10-19T13:00:00.000Z');
+
 async function count(databaseHandle,sql){return (await databaseHandle.get(sql)).n;}
 function openSqlite(file){
  const state={buffer:null};
@@ -93,8 +141,10 @@ function openSqlite(file){
   run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},
   get(sql,params=[]){if(state.buffer)throw new Error('Read inside the prediction transaction');return Promise.resolve(query(file,sql,params)[0]??null);},
   all(sql,params=[]){if(state.buffer)throw new Error('Read inside the prediction transaction');return Promise.resolve(query(file,sql,params));},
+  beforeTransaction(fn){state.beforeTransaction=fn;},
   async transaction(fn){
    if(state.buffer)return fn();
+   if(state.beforeTransaction){const hook=state.beforeTransaction;state.beforeTransaction=null;await hook();}
    state.buffer=[];
    try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}
    finally{state.buffer=null;}
