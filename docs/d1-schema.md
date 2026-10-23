@@ -46,17 +46,27 @@ Until the write cutover, the R2 column is what production reads and writes. The 
 | `enrichment/profile/current.json` and `profile/versions/<n>.json` | `profile_version` | R2 keeps the body |
 | Raw EPG XML and export archives | no table | R2 archive only |
 
+## EPG repository
+
+[AIR-71](https://trello.com/c/UAUUQ2jh) is `src/epg-repository.js`. The Worker bundle does not include it, and it does not open R2 or a production D1 database. The caller passes a database. [AIR-43](https://trello.com/c/7NY6n1Az) still decides whether a score is accepted. [AIR-48](https://trello.com/c/rVf8rRoJ) still decides which observation is current. This module stores the result.
+
+`publishGeneration` writes a new generation's film shows and candidate shows, including an explicit empty list, and the observation snapshot for that generation. A new `published` run must name the generation it succeeds (`expectedProgrammeRunId`, null only when nothing is published). That check is a statement in the same write: a delayed run that still names an older pointer is rejected and writes nothing. Replaying a committed run with the same payload does nothing, and a different payload for that run is rejected. A withheld generation stores its snapshot and shows without changing the latest candidate projection or the pointer. A candidate omitted from a new published generation keeps its observation and decision, loses `seen_in_latest`, and is no longer `current`. An empty show list does not clear `film_epg_last_airing`. When the published evidence key changes, the projection clears its terminal reason, retry time, attempt count, and last attempt time. The decision row stays until a decision for the new evidence is accepted.
+
+`recordDecision` writes only when the published pointer, the generation membership, and the evidence key match, and that predicate is part of the same write. `applied` is true only when that fence still matches and the stored decision equals the input. An identical earlier decision for a candidate omitted from the current generation is rejected. A terminal decision is replaced only when the published generation carries a new evidence key. This is not a historical import. `recordScore` inserts a score in that same write only when both its id and its observation, generation, and scorer version are absent. Considered rows and the detail are inserted only when that statement inserted the parent, so a rejected repeat cannot append them. The call accepts the result only when this id is the stored row and the body matches. `score_result` already has that triple as a table unique key, so a second id cannot commit. An accepted score does not become a verified decision and does not insert a Film. An observation key that starts with `film:` or `person:` is rejected.
+
+One publish, decision, or score is one database transaction. A failed statement leaves the earlier commit in place and does not leave the failed call half-written.
+
 ## Later repositories
 
-These names are the boundary. This pull request does not implement them and does not call them.
+AIR-70 and AIR-72 are not implemented. AIR-73 is not implemented. None of them run in production.
 
 | Later card | Reads and writes | Does not |
 | --- | --- | --- |
 | AIR-70 | `film`, `person`, credits, `film_metadata`, external ids, redirects, aliases, dimensions, conflicts, `watchlist_film` | score a candidate or choose shows |
-| AIR-71 | the current generation pointer, shows, candidates, decisions | mint a Film id from an observation key |
+| AIR-71 | the current generation pointer, shows, candidates, decisions, scores | mint a Film id from an observation key |
 | AIR-72 | fingerprint pointer, profile, prediction current and history, actual rating | change identity |
 | AIR-73 | `import_receipt` from a snapshot checksum | write production R2 or production D1 |
 
 ## Rollback
 
-Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. No database is created and no production row moves.
+Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures/d1-schema-v1.sql`, this document, and the ADR removes the schema. Deleting `src/epg-repository.js` removes the local EPG adapter. No database is created and no production row moves.
