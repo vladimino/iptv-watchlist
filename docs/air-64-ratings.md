@@ -6,7 +6,7 @@
 
 `GET /api/enrichment/ratings/status` only reads. `state` is `idle`, `healthy`, `degraded`, or `blocked`. `lastSuccessAt` is the last complete films list. `attempt` is the latest call and can be a repair; a repair does not move `lastSuccessAt` or turn `blocked` into `healthy`. `diary.cause: incomplete_page` is the empty diary table and is not the films 403. Diary history stays with [AIR-51](https://trello.com/c/33d4hKJ3).
 
-A complete list is stored at `enrichment/ratings/generations/<id>.json` and named by `enrichment/ratings/published.json`. The view index is updated only after that pointer is stored. A later 403 does not replace either. A newer per-film `actual.json` written during the attempt is left in place.
+A complete list is stored at `enrichment/ratings/generations/<id>.json`. `enrichment/ratings/published.json` names it only after the view index has been projected for that generation. Until then `enrichment/ratings/pending.json` holds the unfinished id, and the previous projected generation stays the one status reports. The next refresh finishes that pending generation without calling Letterboxd. The index write retries when its ETag changed, so a rating or fingerprint written in between is kept. The lease lasts 120 seconds and is renewed before each films page and before the index, pointer, and status writes. A request that no longer owns the lease does not write. A repair whose lookups all fail is `attempt.outcome: failed` and does not change the full-scan state. A later 403 does not replace a projected generation. A newer per-film `actual.json` written during the attempt is left in place.
 
 The route does not write `programme.json`, `watchlist.json`, `sync.json`, events, or the prediction queue.
 
