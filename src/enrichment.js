@@ -106,10 +106,11 @@ async function refreshPersonalRating(env,film){
  if(response.status===404)return {filmId:id,status:'not_found'};if(!response.ok)throw new Error('Rating source HTTP '+response.status);
  const rating=parsePersonalRating(await response.text(),film.url,username);if(rating===null)return {filmId:id,status:'not_rated'};
  const [previous,index]=await Promise.all([loadJSON(env,filmKey(id)+'actual.json'),ensureInitialRatings(env)]),before=index[id]?.actualRating??null;
- if(previous?.rating===rating&&before===rating)return {filmId:id,status:'unchanged',rating};
- if(before!==rating)await recordRatingObservation(env,{filmId:id,before,after:rating,observedAt:new Date().toISOString(),source:'letterboxd_member_film',sourceUrl});
- if(previous?.rating!==rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:new Date().toISOString()});
- await updateViewIndex(env,id,{actualRating:rating});return {filmId:id,status:'saved',rating};
+ if(previous?.rating===rating&&before===rating){await enrichRecentRemovalRatings(env,{[id]:rating},previous.updatedAt||null);return {filmId:id,status:'unchanged',rating};}
+ const observedAt=new Date().toISOString();
+ if(before!==rating)await recordRatingObservation(env,{filmId:id,before,after:rating,observedAt,source:'letterboxd_member_film',sourceUrl});
+ if(previous?.rating!==rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:observedAt});
+ await updateViewIndex(env,id,{actualRating:rating});await enrichRecentRemovalRatings(env,{[id]:rating},observedAt);return {filmId:id,status:'saved',rating};
 }
 async function recordRatingObservation(env,observation){if(!await loadJSON(env,diagnosticSnapshotKey))return;await appendRatingObservations(env,[observation]);}
 function parsePublicFilmsPage(html,username){
@@ -123,7 +124,7 @@ function parsePublicFilmsPage(html,username){
  if(!Number.isInteger(total)||!entries.length)throw new Error('Incomplete Letterboxd films page');
  return {total,entries,next};
 }
-async function refreshRatingsFromFilms(env,report){
+async function refreshRatingsFromFilms(env,report,extraIds=[]){
  const username=sourceConfig(env).letterboxdUsername;let url=`https://letterboxd.com/${username}/films/`,total=null,pages=0;const seen=new Map();
  while(url){
   let response;for(let attempt=0;attempt<3;attempt++){response=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});if(response.status!==403||attempt===2)break;await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));}
@@ -136,9 +137,11 @@ async function refreshRatingsFromFilms(env,report){
  }
  if(seen.size!==total)throw new Error('Incomplete Letterboxd films: '+seen.size+'/'+total);
  const baseline=await loadJSON(env,diagnosticSnapshotKey);
- const watchlistIds=new Set((report.films||[]).map(f=>String(f.id))),ids=[...new Set([...watchlistIds,...(baseline?.films||[]).map(f=>String(f.filmId))])];
+ const watchlistIds=new Set((report.films||[]).map(f=>String(f.id))),extra=new Set((extraIds||[]).map(id=>String(id)).filter(id=>/^[a-zA-Z0-9_-]{1,80}$/.test(id))),ids=[...new Set([...watchlistIds,...(baseline?.films||[]).map(f=>String(f.filmId)),...extra])];
  let rated=0;const assignments=[];
  for(const id of ids){const rating=seen.get(id)??null,inWatchlist=watchlistIds.has(id);if(rating!==null&&inWatchlist)rated++;if(!inWatchlist&&rating===null)continue;assignments.push({id,rating});}
+ const observedAt=new Date().toISOString(),removedRatings={};
+ for(const id of extra){if(!seen.has(id))continue;const rating=confirmedHalfStar(seen.get(id));if(rating!=null)removedRatings[id]=rating;}
  const observations=[];let changed=0;
  await mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},index=>{
   observations.length=0;const seeded=applyRatingsSeed(index);changed=0;
@@ -146,7 +149,7 @@ async function refreshRatingsFromFilms(env,report){
   return seeded||changed?index:null;
  });
  if(observations.length)await appendRatingObservations(env,observations);
- return {pages,watched:total,watchlistRated:rated,changed};
+ return {pages,watched:total,watchlistRated:rated,changed,removedRatings,observedAt};
 }
 async function repairRemovedBaselineRatings(env,report){
  const baseline=await loadJSON(env,diagnosticSnapshotKey);if(!baseline)return {attempted:0,saved:0,errors:[]};
@@ -642,6 +645,8 @@ async function stageRatingsGeneration(env,lease,scan,startedAt){
  return {snapshot,startedAt,reused:false};
 }
 async function healthyRatingsStatus(env,lease,stored,snapshot,preserved,diary,startedAt){
+ await requireRatingsLease(env,lease);
+ await enrichRecentRemovalRatings(env,snapshot.ratings,snapshot.publishedAt);
  const finishedAt=new Date().toISOString();
  return writeRatingsStatus(env,lease,{schemaVersion:1,state:'healthy',lastSuccessAt:finishedAt,lastFailureAt:stored?.lastFailureAt||null,nextRetryAt:null,generationId:snapshot.generationId,pages:snapshot.pages,watched:snapshot.watched,attempt:{id:crypto.randomUUID(),kind:'full',startedAt,finishedAt,outcome:'succeeded',cause:null,error:null,page:null,pages:snapshot.pages,watched:snapshot.watched,preservedFilmIds:preserved},diary});
 }
