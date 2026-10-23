@@ -113,9 +113,9 @@ async function recordDecision(db,input){
  });
  const decision=await readDecision(db,observationKey);
  const current=decision?.current;
- const applied=!!current&&current.status===input.status&&current.evidenceKey===evidenceKey&&current.checkedAt===checkedAt&&(current.terminalReason??null)===(input.terminalReason??null);
- if(applied)return {applied:true,reason:null,decision};
  const member=await db.get(`SELECT 1 AS ok FROM published_generation p JOIN candidate_generation g ON g.programme_run_id=p.programme_run_id WHERE p.id=1 AND p.programme_run_id=? AND g.observation_key=? AND g.evidence_key=?`,fenceParams);
+ const matches=!!current&&current.status===input.status&&current.evidenceKey===evidenceKey&&current.checkedAt===checkedAt&&(current.terminalReason??null)===(input.terminalReason??null);
+ if(member&&matches)return {applied:true,reason:null,decision};
  if(member&&current?.terminalReason&&current.evidenceKey===evidenceKey)return {applied:false,reason:'terminal_evidence_unchanged',decision};
  throw new Error('Decision is not in the published generation');
 }
@@ -125,20 +125,24 @@ async function recordScore(db,input){
  const programmeRunId=required(input.programmeRunId,'programmeRunId');
  const id=required(input.id,'id');
  const incoming=scorePayload(input);
+ const provenance=input.provenance==null?null:JSON.stringify(input.provenance);
+ const scoreValues=[id,observationKey,programmeRunId,input.scorerVersion,input.status,input.reason??null,input.confidence??null,input.score??null,input.acceptedTmdbId??null,input.gateOutcome??null,input.gateReason??null,provenance,input.createdAt];
+ await db.transaction(async()=>{
+  await db.run(`INSERT INTO score_result (id,observation_key,programme_run_id,scorer_version,status,reason,confidence,score,accepted_tmdb_id,gate_outcome,gate_reason,provenance_json,created_at)
+   SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?
+   WHERE NOT EXISTS (SELECT 1 FROM score_result WHERE id=? OR (observation_key=? AND programme_run_id=? AND scorer_version=?))`,
+   [...scoreValues,id,observationKey,programmeRunId,input.scorerVersion]);
+  for(const row of input.considered||[])await db.run(`INSERT INTO score_considered (score_id,ordinal,tmdb_id,trusted,year,runtime)
+   SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM score_result WHERE id=?) AND NOT EXISTS (SELECT 1 FROM score_considered WHERE score_id=? AND ordinal=?)`,
+   [id,row.ordinal,row.tmdbId,row.trusted?1:0,row.year??null,row.runtime??null,id,id,row.ordinal]);
+  if(input.detail)await db.run(`INSERT INTO score_detail (score_id,movie_id,runtime,release_year,matched_title,fetched_at,r2_key,content_sha256)
+   SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM score_result WHERE id=?) AND NOT EXISTS (SELECT 1 FROM score_detail WHERE score_id=?)`,
+   [id,input.detail.movieId,input.detail.runtime??null,input.detail.releaseYear??null,input.detail.matchedTitle??null,input.detail.fetchedAt,input.detail.r2Key??null,input.detail.contentSha256??null,id,id]);
+ });
  const stored=await readScoreRecord(db,id);
  const triple=await db.get('SELECT id FROM score_result WHERE observation_key=? AND programme_run_id=? AND scorer_version=?',[observationKey,programmeRunId,input.scorerVersion]);
- if(stored||triple){
-  if(stored&&stable(scorePayload(stored))===stable(incoming)&&(!triple||triple.id===id))return readScores(db,observationKey);
-  throw new Error('Score record conflicts with the stored score');
- }
- const provenance=input.provenance==null?null:JSON.stringify(input.provenance);
- await db.transaction(async()=>{
-  await db.run('INSERT INTO score_result (id,observation_key,programme_run_id,scorer_version,status,reason,confidence,score,accepted_tmdb_id,gate_outcome,gate_reason,provenance_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-   [id,observationKey,programmeRunId,input.scorerVersion,input.status,input.reason??null,input.confidence??null,input.score??null,input.acceptedTmdbId??null,input.gateOutcome??null,input.gateReason??null,provenance,input.createdAt]);
-  for(const row of input.considered||[])await db.run('INSERT INTO score_considered (score_id,ordinal,tmdb_id,trusted,year,runtime) VALUES (?,?,?,?,?,?)',[id,row.ordinal,row.tmdbId,row.trusted?1:0,row.year??null,row.runtime??null]);
-  if(input.detail)await db.run('INSERT INTO score_detail (score_id,movie_id,runtime,release_year,matched_title,fetched_at,r2_key,content_sha256) VALUES (?,?,?,?,?,?,?,?)',[id,input.detail.movieId,input.detail.runtime??null,input.detail.releaseYear??null,input.detail.matchedTitle??null,input.detail.fetchedAt,input.detail.r2Key??null,input.detail.contentSha256??null]);
- });
- return readScores(db,observationKey);
+ if(stored&&stable(scorePayload(stored))===stable(incoming)&&triple&&triple.id===id)return readScores(db,observationKey);
+ throw new Error('Score record conflicts with the stored score');
 }
 
 async function readPublished(db){
