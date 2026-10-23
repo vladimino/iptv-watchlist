@@ -55,7 +55,9 @@ const bladeOn=await resolve({scored:'shadow',discovery:'shadow'},blade,url=>url.
 assert.equal(bladeOn.decision.status,'no_confident_match');
 assert.equal(bladeOn.decision.identitySource,undefined);
 assert.equal(bladeOn.catalog['tmdb_36647'],undefined);
-assert.equal(bladeOn.preview.scoring.status,'no_confident_match');
+assert.equal(bladeOn.preview.scoring.status,'accepted');
+assert.equal(bladeOn.preview.scoring.reason,'accepted_spelling_e');
+assert.equal(bladeOn.preview.outcome,'needs_verification');
 assert.ok(bladeOn.preview.proposedCandidates.some(row=>row.tmdbId==='36647'&&row.reason==='spelling_e'));
 assert.equal(bladeOn.result.tmdbCalls,2);
 assert.ok(bladeOn.calls()>bladeOn.result.tmdbCalls);
@@ -71,9 +73,11 @@ assert.equal(ironyRun.preview.outcome,'detail_verified');
 assert.equal(ironyRun.preview.comparison,'scored_only');
 
 const ocean=item('11 друзей Оушена','11 друзей оушена',2001,116);
-const oceanRun=await resolve({scored:'shadow',discovery:'shadow'},ocean,url=>decodeURIComponent(url).includes('одиннадцать')?json({total_pages:1,results:[movie(161,'Одиннадцать друзей Оушена',"Ocean's Eleven",2001)]}):empty());
+const oceanRun=await resolve({scored:'shadow',discovery:'shadow'},ocean,url=>url.includes('/movie/161')?json(detail(161,'Одиннадцать друзей Оушена',"Ocean's Eleven",2001,116)):decodeURIComponent(url).includes('одиннадцать')?json({total_pages:1,results:[movie(161,'Одиннадцать друзей Оушена',"Ocean's Eleven",2001)]}):empty());
 assert.equal(oceanRun.decision.status,'no_confident_match');
-assert.equal(oceanRun.preview.scoring.acceptedTmdbId,null);
+assert.equal(oceanRun.preview.scoring.acceptedTmdbId,'161');
+assert.equal(oceanRun.preview.scoring.reason,'accepted_numeral');
+assert.equal(oceanRun.preview.outcome,'detail_verified');
 assert.ok(oceanRun.preview.proposedCandidates.some(row=>row.tmdbId==='161'&&row.reason==='numeral'));
 assert.equal(oceanRun.catalog['tmdb_161'],undefined);
 

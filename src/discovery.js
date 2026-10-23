@@ -125,8 +125,9 @@ async function collectVariantProposals(env,candidate,deadline,stats,resumeFrom){
   for(const movie of search?.results||[]){
    if(!variantHit(candidate,movie,variant)){if(movie?.id!=null&&!pool.has(String(movie.id)))pool.set(String(movie.id),movie);continue;}
    if(proposed.some(row=>row.tmdbId===String(movie.id)))continue;
+   const claim=['part_suffix','spelling_e','numeral'].includes(variant.reason)?[movie.title,movie.original_title].find(title=>title&&norm(title)===norm(variant.query)):null;
    proposed.push({tmdbId:String(movie.id),query:variant.query,year:variant.year,reason:variant.reason,matchedTitle:movie.title||movie.original_title||''});
-   hits.push(searchHitCandidate(movie));
+   const hit=searchHitCandidate(movie);if(claim)hit.structural={reason:variant.reason,query:variant.query,matched:claim};hits.push(hit);
   }
   if(hits.some(hit=>norm(hit.title)===candidate.normalizedTitle||norm(hit.original)===candidate.normalizedTitle))break;
  }
@@ -271,7 +272,7 @@ async function resolveDiscoveryChunk(env,report,limit){
   if(!shadowPlans||!candidate?.key)return;
   const offset=extra?.offset||0,pendingAliasIds=[...(extra?.pendingAliasIds||[])].map(String).filter(Boolean).slice(0,3);
   const proposals=boundVariantRows(extra?.proposals,(row,id)=>({tmdbId:id,query:row.query||'',year:row.year??null,reason:row.reason||'',matchedTitle:row.matchedTitle||''}));
-  const hits=boundVariantRows(extra?.hits,(row,id)=>({tmdbId:id,title:row.title||'',original:row.original||'',year:row.year??null,runtime:row.runtime??null,trusted:false}));
+  const hits=boundVariantRows(extra?.hits,(row,id)=>({tmdbId:id,title:row.title||'',original:row.original||'',year:row.year??null,runtime:row.runtime??null,trusted:false,...(row.structural&&['part_suffix','spelling_e','numeral'].includes(row.structural.reason)&&row.structural.query&&row.structural.matched?{structural:{reason:row.structural.reason,query:row.structural.query,matched:row.structural.matched}}:{})}));
   const row={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:[...(candidate.durations||[])],evidenceKey:extra?.evidenceKey||candidateEvidence(candidate),priorDecision:extra?.hadPriorDecision?extra.priorDecision??null:null,hadPriorDecision:extra?.hadPriorDecision===true,legacyStatus:extra?.legacyStatus??null,offset,pendingAliasIds,proposals,hits};
   const at=deferred.findIndex(item=>item.key===row.key);
   if(at<0){deferred.push(row);variantMeter.deferred++;}else deferred[at]=row;
@@ -286,7 +287,7 @@ async function resolveDiscoveryChunk(env,report,limit){
   const found=await collectVariantProposals(env,candidate,deadline,variantMeter,{offset:job.offset||0,pendingAliasIds:job.pendingAliasIds||[]});
   if(variantMeter.halted)return;
   const proposals=boundVariantRows([...(job.proposals||[]),...(found.proposed||[])],(row,id)=>({tmdbId:id,query:row.query||'',year:row.year??null,reason:row.reason||'',matchedTitle:row.matchedTitle||''}));
-  const hits=boundVariantRows([...(job.hits||[]),...(found.hits||[])],(row,id)=>({tmdbId:id,title:row.title||'',original:row.original||'',year:row.year??null,runtime:row.runtime??null,trusted:false}));
+  const hits=boundVariantRows([...(job.hits||[]),...(found.hits||[])],(row,id)=>({tmdbId:id,title:row.title||'',original:row.original||'',year:row.year??null,runtime:row.runtime??null,trusted:false,...(row.structural&&['part_suffix','spelling_e','numeral'].includes(row.structural.reason)&&row.structural.query&&row.structural.matched?{structural:{reason:row.structural.reason,query:row.structural.query,matched:row.structural.matched}}:{})}));
   if(!proposals.length&&!found.resume)return;
   if(!proposals.length){rememberVariant(candidate,{...job,offset:found.resume.offset,pendingAliasIds:found.resume.pendingAliasIds||[],proposals,hits},false);return;}
   const observation={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:candidate.durations};
