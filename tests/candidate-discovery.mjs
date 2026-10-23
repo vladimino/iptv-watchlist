@@ -21,12 +21,12 @@ assert.ok(reasons('Чужой против Хищника 1',2004).some(row=>row
 assert.ok(!reasons('Бегущий человек',1987).some(row=>row.startsWith('part_suffix')||row.startsWith('numeral')));
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/CANDIDATE_DISCOVERY/);
 
-function harness(flags,response){
+function harness(flags,response,date=Date){
  const records=new Map(),etags=new Map();let revision=0,calls=0;const urls=[];
  const env={TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
  if(flags.scored)env.SCORED_RESOLUTION=flags.scored;
  if(flags.discovery)env.CANDIDATE_DISCOVERY=flags.discovery;
- const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{calls++;urls.push(String(input));return response(String(input),records);}});
+ const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{calls++;urls.push(String(input));return response(String(input),records);}});
  for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
  ctx.env=env;ctx.records=records;
  return {ctx,records,calls:()=>calls,urls};
@@ -109,6 +109,7 @@ assert.equal(limited.result.variantThrottled,1);
 assert.equal(limited.urls.filter(url=>url.includes('search/movie')&&!url.includes('year=1998')).length,1);
 assert.ok(limited.result.variantSkipped>=1);
 assert.equal(limited.result.tmdbCalls,2);
+assert.equal(limited.records.get('epg/discovery-variant-pending.json').jobs.length,0);
 assert.equal(limited.records.get('epg/discovery-status.json').variantThrottled,limited.result.variantThrottled);
 const skipped=await vm.runInContext("(async()=>{const stats={calls:0,errors:0,throttled:0,skipped:0};await collectVariantProposals(env,{title:'Блейд 1',normalizedTitle:'блейд 1',year:1998,duration:120,durations:[120]},Date.now(),stats);return stats;})()",bladeOn.ctx);
 assert.equal(skipped.calls,0);
@@ -151,4 +152,70 @@ const bladeWriter=await resolve({scored:'on',discovery:'on'},blade,url=>url.incl
 assert.notEqual(bladeWriter.decision.status,'verified');
 assert.equal(bladeWriter.catalog['tmdb_36647'],undefined);
 assert.ok(bladeWriter.preview.proposedCandidates.some(row=>row.tmdbId==='36647'));
+
+function clockedHarness(response){
+ let now=1700000000000;
+ const Real=Date;
+ function Clock(...args){if(!new.target)return Real(...args);return args.length?new Real(...args):new Real(now);}
+ Clock.now=()=>now;Clock.parse=Real.parse;Clock.UTC=Real.UTC;Clock.prototype=Real.prototype;
+ const records=new Map(),etags=new Map();let revision=0;const urls=[];
+ const env={SCORED_RESOLUTION:'shadow',CANDIDATE_DISCOVERY:'shadow',TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
+ const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:Clock,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{urls.push(String(input));now+=1700;return response(String(input));}});
+ for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+ ctx.env=env;
+ return {ctx,records,urls};
+}
+const clockStart=1700000000000,clockShow={channelId:'n',channel:'N',start:clockStart,end:clockStart+3600000};
+const clockRow=(title,year,duration)=>{const normalized=title.toLowerCase();return {key:normalized+'|'+year,title,normalizedTitle:normalized,year,duration,durations:[duration],seenInLatestSnapshot:true,shows:[clockShow],lastAiring:clockStart,airings:1};};
+const fillers=[1,2,3,4,5,6].map(n=>clockRow('аа 0'+n,2001,100));
+const lateMiss=clockRow('яяя 1',1998,120);
+const lateResponse=url=>{
+ const text=decodeURIComponent(url).replace(/\+/g,' ');
+ if(text.includes('year=1997')||text.includes('year=1999'))return json({total_pages:1,results:[movie(36647,'яяя 1','Late',1997)]});
+ if(text.includes('/movie/')){const id=Number(text.match(/movie\/(\d+)/)[1]);return json(detail(id,'аа','аа',2001,40));}
+ if(text.includes('яяя'))return empty();
+ const query=text.match(/query=([^&]+)/)[1];
+ return json({total_pages:1,results:[movie(501,query,query,2001)]});
+};
+const lateBox=clockedHarness(lateResponse);
+lateBox.records.set('programme.json',{runId:'run-1',films:[]});
+lateBox.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[...fillers,lateMiss]});
+lateBox.records.set('epg/discovered-films.json',{});
+lateBox.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
+const lateFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',lateBox.ctx);
+const lateDecision=lateBox.records.get('epg/discovery-resolution.json')[lateMiss.key];
+assert.ok(lateFirst.tmdbCalls>=13&&lateFirst.tmdbCalls<=14);
+assert.equal(lateFirst.variantCalls,0);
+assert.ok(lateFirst.variantDeferred>=1);
+assert.equal(lateDecision.status,'no_confident_match');
+assert.ok(Date.parse(lateDecision.retryAt)>clockStart);
+assert.ok(lateBox.records.get('epg/discovery-variant-pending.json').jobs.some(job=>job.key===lateMiss.key));
+assert.equal(lateBox.urls.some(url=>url.includes('year=1997')),false);
+const seen=lateBox.urls.length;
+const lateSecond=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',lateBox.ctx);
+const lateAgain=lateBox.records.get('epg/discovery-resolution.json')[lateMiss.key];
+assert.ok(lateSecond.variantCalls>0);
+assert.equal(lateSecond.tmdbCalls,0);
+assert.equal(lateAgain.status,'no_confident_match');
+assert.equal(lateAgain.retryAt,lateDecision.retryAt);
+assert.equal(lateAgain.attempts,lateDecision.attempts);
+assert.equal(lateBox.records.get('epg/discovered-films.json')['tmdb_36647'],undefined);
+assert.ok(lateBox.urls.slice(seen).some(url=>url.includes('year=1997')));
+assert.ok(lateBox.records.get('epg/discovery-score-preview.json').items[lateMiss.key].proposedCandidates.some(row=>row.tmdbId==='36647'));
+assert.equal(lateBox.records.get('epg/discovery-variant-pending.json').jobs.length,0);
+
+const dropped=clockedHarness(lateResponse);
+dropped.records.set('programme.json',{runId:'run-1',films:[]});
+dropped.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[...fillers,lateMiss]});
+dropped.records.set('epg/discovered-films.json',{});
+dropped.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
+await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',dropped.ctx);
+const keptRetry=dropped.records.get('epg/discovery-resolution.json')[lateMiss.key].retryAt;
+dropped.records.set('epg/published-generation.json',{programmeRunId:'run-2',phase:'published'});
+const marked=dropped.urls.length;
+const droppedRun=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',dropped.ctx);
+assert.equal(dropped.urls.slice(marked).some(url=>url.includes('year=1997')||url.includes('year=1999')),false);
+assert.equal(droppedRun.variantCalls,0);
+assert.equal(dropped.records.get('epg/discovery-variant-pending.json').jobs.length,0);
+assert.equal(dropped.records.get('epg/discovery-resolution.json')[lateMiss.key].retryAt,keptRetry);
 console.log('Candidate discovery: title and year variants stay off the legacy decision.');

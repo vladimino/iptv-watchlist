@@ -91,8 +91,9 @@ function variantAliasRank(candidate,movies){
   return {movie,yearDistance:year!=null&&release!=null?Math.abs(release-year):1,runtimeDistance,shared};
  }).filter(Boolean).sort((a,b)=>a.yearDistance-b.yearDistance||a.runtimeDistance-b.runtimeDistance||b.shared-a.shared||String(a.movie.id).localeCompare(String(b.movie.id)));
 }
-function emptyVariantStats(){return {calls:0,errors:0,throttled:0,skipped:0,halted:false};}
-function variantDiagnostic(stats){return {variantCalls:stats.calls,variantErrors:stats.errors,variantThrottled:stats.throttled,variantSkipped:stats.skipped};}
+function emptyVariantStats(){return {calls:0,errors:0,throttled:0,skipped:0,deferred:0,halted:false};}
+function variantDiagnostic(stats){return {variantCalls:stats.calls,variantErrors:stats.errors,variantThrottled:stats.throttled,variantSkipped:stats.skipped,variantDeferred:stats.deferred};}
+const VARIANT_PENDING_KEY='epg/discovery-variant-pending.json';
 function noteVariantFailure(stats,error){stats.calls++;if(error?.retryAt||String(error?.message||'').includes('429')){stats.throttled++;stats.halted=true;return;}stats.errors++;}
 function variantBlocked(stats,deadline){return stats.halted||stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline;}
 async function collectVariantProposals(env,candidate,deadline,stats){
@@ -247,12 +248,42 @@ async function resolveDiscoveryChunk(env,report,limit){
  }
  if(touched||migrated){if(!await saveDiscoveredFilms(env,films,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,currentProgrammeRunId:null};}if(screenedOut||knownAliases)await saveJSON(env,'epg/discovery-resolution.json',decisions);
  await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
- const mode=scoredResolutionMode(env),preview={},shadowDetails=[],variantJobs=[],now=Date.now(),pending=source.items.filter(c=>resolutionActionability(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
+ const mode=scoredResolutionMode(env),preview={},shadowDetails=[],now=Date.now(),pending=source.items.filter(c=>resolutionActionability(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
  pending.sort((a,b)=>hotRank.get(b)-hotRank.get(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
  let checked=0,added=0,reused=0,tmdbCalls=0,error=null,retryAt=null,variantMeter=emptyVariantStats();
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
+ const paired=mode!=='off'&&candidateDiscoveryMode(env)===mode,deferred=[];
+ // A stored no_confident_match hides the observation behind retryAt, so a plan that missed this deadline has to outlive the chunk.
+ const rememberVariant=(candidate)=>{if(!candidate?.key||deferred.some(row=>row.key===candidate.key))return;deferred.push({key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:[...(candidate.durations||[])]});variantMeter.deferred++;variantMeter.skipped+=Math.min(CANDIDATE_VARIANT_CAP,candidateSearchVariants(candidate).length);};
+ const settleVariant=async job=>{
+  if(!paired||variantMeter.halted||!job?.candidate)return;
+  if(!await publishedGenerationMatches(env,source.programmeRunId)){deferred.length=0;return;}
+  if(variantMeter.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline){rememberVariant(job.candidate);return;}
+  const found=await collectVariantProposals(env,job.candidate,deadline,variantMeter);
+  if(!found.proposed.length)return;
+  const observation={key:job.candidate.key,title:job.candidate.title,normalizedTitle:job.candidate.normalizedTitle,year:job.candidate.year??null,duration:job.candidate.duration??null,durations:job.candidate.durations};
+  const score=scoreFilmResolution({observation,candidates:[...job.priorCandidates,...found.hits]});
+  let gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now),detailChecked=false;
+  if(resolutionActionability(job.candidate,job.shadowDecisions[job.candidate.key],now)&&score.status==='accepted'&&score.acceptedTmdbId&&!variantBlocked(variantMeter,deadline)&&await publishedGenerationMatches(env,source.programmeRunId)){
+   let movie=null;try{movie=await tmdbRequest(env,'movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');}catch(e){noteVariantFailure(variantMeter,e);movie=null;}
+   if(movie){variantMeter.calls++;if(String(movie.id)===String(score.acceptedTmdbId)){gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(score.acceptedTmdbId))});detailChecked=true;}}
+  }
+  preview[job.candidate.key]=scorePreview(job.candidate,score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked,differentId:false}),job.knownBefore,found.proposed);
+ };
+ try{
+ if(paired){
+  const stored=await loadJSON(env,VARIANT_PENDING_KEY);
+  if(stored?.programmeRunId===source.programmeRunId&&Array.isArray(stored.jobs)){
+   for(const row of stored.jobs){
+    if(variantMeter.halted)break;
+    const candidate=source.items.find(item=>item.key===row.key);if(!candidate)continue;
+    await settleVariant({candidate,priorCandidates:knownScorerCandidates(aliasIndex,candidate),shadowDecisions:{...decisions},filmsBefore:{...films},competitors:detailCompetitors(aliasIndex,candidate,''),legacyStatus:decisions[candidate.key]?.status||null,knownBefore:false});
+   }
+  }
+ }
  for(const candidate of pending.slice(0,limit)){
   if(Date.now()>deadline||tmdbCalls>=16)break;
+  let variantJob=null;
   try{
    if(mode==='on'){
     let candidates=knownScorerCandidates(aliasIndex,candidate);
@@ -262,9 +293,12 @@ async function resolveDiscoveryChunk(env,report,limit){
     if(searched)candidates=[...candidates,...await scoredSearchCandidates(query,candidate)],score=scoreFilmResolution({observation,candidates});
     let proposed=[];
     if(candidateDiscoveryMode(env)==='on'&&!score.considered.some(row=>row.title.quality===1)){
-     const found=await collectVariantProposals(env,candidate,deadline,variantMeter);
-     proposed=found.proposed;
-     if(found.hits.length)candidates=[...candidates,...found.hits],score=scoreFilmResolution({observation,candidates}),searched=true;
+     if(!variantMeter.halted&&(variantMeter.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline))rememberVariant(candidate);
+     else if(!variantMeter.halted){
+      const found=await collectVariantProposals(env,candidate,deadline,variantMeter);
+      proposed=found.proposed;
+      if(found.hits.length)candidates=[...candidates,...found.hits],score=scoreFilmResolution({observation,candidates}),searched=true;
+     }
     }
     let gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now);
     let movie=null;
@@ -318,11 +352,12 @@ async function resolveDiscoveryChunk(env,report,limit){
     }
     preview[candidate.key]=scorePreview(candidate,score,gate,decisions[candidate.key]?.status||null,needsDetail&&!differentId?'detail_not_compared':shadowComparison({legacyStatus:decisions[candidate.key]?.status||null,gate,detailChecked,differentId}),knownBefore);
     if(needsDetail)shadowDetails.push({key:candidate.key,candidate,score,shadowDecisions,filmsBefore:priorFilms,competitors:priorCompetitors,legacyStatus:decisions[candidate.key]?.status||null,differentId,knownBefore});
-    if(candidateDiscoveryMode(env)==='shadow'&&!score.considered.some(row=>row.title.quality===1))variantJobs.push({key:candidate.key,candidate,priorCandidates,shadowDecisions,filmsBefore:priorFilms,competitors:priorCompetitors,legacyStatus:decisions[candidate.key]?.status||null,knownBefore});
+    if(candidateDiscoveryMode(env)==='shadow'&&!score.considered.some(row=>row.title.quality===1))variantJob={candidate,priorCandidates,shadowDecisions,filmsBefore:priorFilms,competitors:priorCompetitors,legacyStatus:decisions[candidate.key]?.status||null,knownBefore};
    }
    }
    // A film is committed before its decision. A crash between writes is repaired by alias reuse.
    await saveJSON(env,'epg/discovery-resolution.json',decisions);checked++;
+   if(variantJob)await settleVariant(variantJob);
   }catch(e){error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
  }
  for(const job of shadowDetails){
@@ -332,19 +367,6 @@ async function resolveDiscoveryChunk(env,report,limit){
   const gate=gateScoredCandidate(pinned,source,job.candidate,job.score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(job.score.acceptedTmdbId))});
   preview[job.key]=scorePreview(job.candidate,job.score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked:true,differentId:job.differentId}),job.knownBefore);
  }
- for(const job of variantJobs){
-  if(!await publishedGenerationMatches(env,source.programmeRunId))break;
-  const found=await collectVariantProposals(env,job.candidate,deadline,variantMeter);
-  if(!found.proposed.length)continue;
-  const observation={key:job.candidate.key,title:job.candidate.title,normalizedTitle:job.candidate.normalizedTitle,year:job.candidate.year??null,duration:job.candidate.duration??null,durations:job.candidate.durations};
-  const score=scoreFilmResolution({observation,candidates:[...job.priorCandidates,...found.hits]});
-  let gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now),detailChecked=false;
-  if(score.status==='accepted'&&score.acceptedTmdbId&&!variantBlocked(variantMeter,deadline)&&await publishedGenerationMatches(env,source.programmeRunId)){
-   let movie=null;try{movie=await tmdbRequest(env,'movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');}catch(e){noteVariantFailure(variantMeter,e);movie=null;}
-   if(movie){variantMeter.calls++;if(String(movie.id)===String(score.acceptedTmdbId)){gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(score.acceptedTmdbId))});detailChecked=true;}}
-  }
-  preview[job.key]=scorePreview(job.candidate,score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked,differentId:false}),job.knownBefore,found.proposed);
- }
  const currentReport=await loadJSON(env,'programme.json');
  if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
   const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,programmeChanged:true,...variantDiagnostic(variantMeter)};
@@ -353,6 +375,7 @@ async function resolveDiscoveryChunk(env,report,limit){
  try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint');}catch(e){error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
  const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,...variantDiagnostic(variantMeter)};
  await saveJSON(env,'epg/discovery-status.json',summary);await saveScorePreview(env,mode,source,preview);return summary;
+ }finally{if(paired)await saveJSON(env,VARIANT_PENDING_KEY,{schemaVersion:1,programmeRunId:source.programmeRunId||null,jobs:deferred});}
 }
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
 const DISCOVERY_CHUNK_BUDGET=12;
