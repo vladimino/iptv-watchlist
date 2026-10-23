@@ -28,7 +28,13 @@ async function publishGeneration(db,input){
   return {programmeRunId,phase:existing.phase,pointed:published?.programmeRunId===programmeRunId,replay:true};
  }
  const observedAt=input.publishedAt||null,current=input.phase==='published';
+ if(current&&!Object.prototype.hasOwnProperty.call(input,'expectedProgrammeRunId'))throw new Error('expectedProgrammeRunId is required');
+ const expected=current?input.expectedProgrammeRunId??null:null;
  return db.transaction(async()=>{
+  if(current)await db.run(`INSERT INTO programme_generation (programme_run_id,phase,published_at)
+   SELECT ?,'stale',NULL
+   WHERE NOT ((? IS NULL AND NOT EXISTS (SELECT 1 FROM published_generation WHERE id=1)) OR EXISTS (SELECT 1 FROM published_generation WHERE id=1 AND programme_run_id IS ?))`,
+   [programmeRunId,expected,expected]);
   await db.run('INSERT INTO programme_generation (programme_run_id,phase,published_at) VALUES (?,?,?)',[programmeRunId,input.phase,observedAt]);
   if(current)await db.run(`INSERT INTO published_generation (id,programme_run_id) VALUES (1,?)
    ON CONFLICT(id) DO UPDATE SET programme_run_id=excluded.programme_run_id`,[programmeRunId]);
@@ -53,7 +59,9 @@ async function publishGeneration(db,input){
     ON CONFLICT(observation_key) DO UPDATE SET
      title=excluded.title,normalized_title=excluded.normalized_title,year=excluded.year,raw_titles_json=excluded.raw_titles_json,durations_json=excluded.durations_json,description=excluded.description,first_airing_ms=excluded.first_airing_ms,last_airing_ms=excluded.last_airing_ms,airings=excluded.airings,confirmed_tmdb_id=excluded.confirmed_tmdb_id,observation_schema_version=excluded.observation_schema_version,observation_json=excluded.observation_json,activity=excluded.activity,last_seen_at=excluded.last_seen_at,last_seen_programme_run_id=excluded.last_seen_programme_run_id,seen_in_latest=excluded.seen_in_latest,evidence_key=excluded.evidence_key,
      terminal_reason=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.terminal_reason ELSE NULL END,
-     retry_at=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.retry_at ELSE NULL END`,
+     retry_at=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.retry_at ELSE NULL END,
+     attempts=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.attempts ELSE 0 END,
+     last_attempt_at=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.last_attempt_at ELSE NULL END`,
     candidateParams(candidate,observation));
    else await db.run(`INSERT INTO candidate (observation_key,title,normalized_title,year,raw_titles_json,durations_json,description,first_airing_ms,last_airing_ms,airings,confirmed_tmdb_id,observation_schema_version,observation_json,activity,last_seen_at,last_seen_programme_run_id,seen_in_latest,attempts,evidence_key)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)
@@ -77,35 +85,39 @@ async function recordDecision(db,input){
  const evidenceKey=required(input.evidenceKey,'evidenceKey');
  const checkedAt=required(input.checkedAt,'checkedAt');
  const programmeRunId=required(input.programmeRunId,'programmeRunId');
- const published=await readPublished(db);
- if(!published||published.phase!=='published'||published.programmeRunId!==programmeRunId)throw new Error('Decision generation is not published');
- const candidate=await readCandidate(db,observationKey);
- if(!candidate)throw new Error('Decision candidate is missing');
- if(candidate.evidenceKey!==evidenceKey)throw new Error('Decision evidence is not current');
  const provenance=input.provenance==null?null:JSON.stringify(input.provenance);
+ const fence=`EXISTS (SELECT 1 FROM published_generation p JOIN candidate_generation g ON g.programme_run_id=p.programme_run_id JOIN programme_generation gen ON gen.programme_run_id=p.programme_run_id AND gen.phase='published' WHERE p.id=1 AND p.programme_run_id=? AND g.observation_key=? AND g.evidence_key=?)`;
+ const fenceParams=[programmeRunId,observationKey,evidenceKey];
+ const decisionValues=[observationKey,input.status,input.reason??null,input.catalogFilmId??null,input.filmId??null,input.tmdbId??null,input.canonicalIdentity??null,input.identitySource??null,checkedAt,evidenceKey,input.attempts??0,input.lastAttemptAt??null,input.retryAt??null,input.terminalReason??null,provenance];
  await db.transaction(async()=>{
   await db.run(`INSERT INTO candidate_decision_history (observation_key,checked_at,status,reason,catalog_film_id,film_id,tmdb_id,canonical_identity,identity_source,evidence_key,attempts,last_attempt_at,retry_at,terminal_reason,provenance_json,replaced_at)
    SELECT observation_key,checked_at,status,reason,catalog_film_id,film_id,tmdb_id,canonical_identity,identity_source,evidence_key,attempts,last_attempt_at,retry_at,terminal_reason,provenance_json,?
    FROM candidate_decision
    WHERE observation_key=?
+    AND ${fence}
     AND NOT (terminal_reason IS NOT NULL AND evidence_key=?)
     AND (evidence_key IS NOT ? OR status IS NOT ? OR IFNULL(catalog_film_id,'') IS NOT IFNULL(?,'') OR IFNULL(film_id,'') IS NOT IFNULL(?,'') OR IFNULL(tmdb_id,'') IS NOT IFNULL(?,'') OR IFNULL(canonical_identity,'') IS NOT IFNULL(?,'') OR IFNULL(identity_source,'') IS NOT IFNULL(?,'') OR IFNULL(reason,'') IS NOT IFNULL(?,'') OR IFNULL(terminal_reason,'') IS NOT IFNULL(?,'') OR IFNULL(provenance_json,'') IS NOT IFNULL(?,''))`,
-   [checkedAt,observationKey,evidenceKey,evidenceKey,input.status,input.catalogFilmId??null,input.filmId??null,input.tmdbId??null,input.canonicalIdentity??null,input.identitySource??null,input.reason??null,input.terminalReason??null,provenance]);
+   [checkedAt,observationKey,...fenceParams,evidenceKey,evidenceKey,input.status,input.catalogFilmId??null,input.filmId??null,input.tmdbId??null,input.canonicalIdentity??null,input.identitySource??null,input.reason??null,input.terminalReason??null,provenance]);
   await db.run(`INSERT INTO candidate_decision (observation_key,status,reason,catalog_film_id,film_id,tmdb_id,canonical_identity,identity_source,checked_at,evidence_key,attempts,last_attempt_at,retry_at,terminal_reason,provenance_json)
-   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+   SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+   WHERE ${fence}
    ON CONFLICT(observation_key) DO UPDATE SET
     status=excluded.status,reason=excluded.reason,catalog_film_id=excluded.catalog_film_id,film_id=excluded.film_id,tmdb_id=excluded.tmdb_id,canonical_identity=excluded.canonical_identity,identity_source=excluded.identity_source,checked_at=excluded.checked_at,evidence_key=excluded.evidence_key,attempts=excluded.attempts,last_attempt_at=excluded.last_attempt_at,retry_at=excluded.retry_at,terminal_reason=excluded.terminal_reason,provenance_json=excluded.provenance_json
-   WHERE NOT (candidate_decision.terminal_reason IS NOT NULL AND candidate_decision.evidence_key=excluded.evidence_key)`,
-   [observationKey,input.status,input.reason??null,input.catalogFilmId??null,input.filmId??null,input.tmdbId??null,input.canonicalIdentity??null,input.identitySource??null,checkedAt,evidenceKey,input.attempts??0,input.lastAttemptAt??null,input.retryAt??null,input.terminalReason??null,provenance]);
+   WHERE ${fence}
+    AND NOT (candidate_decision.terminal_reason IS NOT NULL AND candidate_decision.evidence_key=excluded.evidence_key)`,
+   [...decisionValues,...fenceParams,...fenceParams]);
   await db.run(`UPDATE candidate SET attempts=?,last_attempt_at=?,retry_at=?,terminal_reason=?
-   WHERE observation_key=? AND evidence_key=?
+   WHERE observation_key=? AND evidence_key=? AND ${fence}
    AND EXISTS (SELECT 1 FROM candidate_decision WHERE observation_key=? AND status=? AND evidence_key=? AND checked_at=? AND IFNULL(terminal_reason,'')=IFNULL(?,''))`,
-   [input.attempts??0,input.lastAttemptAt??null,input.retryAt??null,input.terminalReason??null,observationKey,evidenceKey,observationKey,input.status,evidenceKey,checkedAt,input.terminalReason??null]);
+   [input.attempts??0,input.lastAttemptAt??null,input.retryAt??null,input.terminalReason??null,observationKey,evidenceKey,...fenceParams,observationKey,input.status,evidenceKey,checkedAt,input.terminalReason??null]);
  });
  const decision=await readDecision(db,observationKey);
  const current=decision?.current;
  const applied=!!current&&current.status===input.status&&current.evidenceKey===evidenceKey&&current.checkedAt===checkedAt&&(current.terminalReason??null)===(input.terminalReason??null);
- return {applied,reason:applied?null:'terminal_evidence_unchanged',decision};
+ if(applied)return {applied:true,reason:null,decision};
+ const member=await db.get(`SELECT 1 AS ok FROM published_generation p JOIN candidate_generation g ON g.programme_run_id=p.programme_run_id WHERE p.id=1 AND p.programme_run_id=? AND g.observation_key=? AND g.evidence_key=?`,fenceParams);
+ if(member&&current?.terminalReason&&current.evidenceKey===evidenceKey)return {applied:false,reason:'terminal_evidence_unchanged',decision};
+ throw new Error('Decision is not in the published generation');
 }
 
 async function recordScore(db,input){
@@ -156,9 +168,9 @@ async function readGeneration(db,programmeRunId){
 }
 
 async function readCandidate(db,observationKey){
- const row=await db.get('SELECT observation_key,title,normalized_title,year,raw_titles_json,durations_json,description,first_airing_ms,last_airing_ms,airings,confirmed_tmdb_id,observation_schema_version,observation_json,activity,last_seen_at,last_seen_programme_run_id,seen_in_latest,attempts,retry_at,terminal_reason,evidence_key FROM candidate WHERE observation_key=?',[observationKey]);
+ const row=await db.get('SELECT observation_key,title,normalized_title,year,raw_titles_json,durations_json,description,first_airing_ms,last_airing_ms,airings,confirmed_tmdb_id,observation_schema_version,observation_json,activity,last_seen_at,last_seen_programme_run_id,seen_in_latest,attempts,last_attempt_at,retry_at,terminal_reason,evidence_key FROM candidate WHERE observation_key=?',[observationKey]);
  if(!row)return null;
- return {observationKey:row.observation_key,title:row.title,normalizedTitle:row.normalized_title,year:row.year,rawTitles:JSON.parse(row.raw_titles_json),durations:JSON.parse(row.durations_json),description:row.description,firstAiringMs:row.first_airing_ms,lastAiringMs:row.last_airing_ms,airings:row.airings,confirmedTmdbId:row.confirmed_tmdb_id,schemaVersion:row.observation_schema_version,observation:JSON.parse(row.observation_json),activity:row.activity,lastSeenAt:row.last_seen_at,lastSeenProgrammeRunId:row.last_seen_programme_run_id,seenInLatest:row.seen_in_latest===1,attempts:row.attempts,retryAt:row.retry_at,terminalReason:row.terminal_reason,evidenceKey:row.evidence_key};
+ return {observationKey:row.observation_key,title:row.title,normalizedTitle:row.normalized_title,year:row.year,rawTitles:JSON.parse(row.raw_titles_json),durations:JSON.parse(row.durations_json),description:row.description,firstAiringMs:row.first_airing_ms,lastAiringMs:row.last_airing_ms,airings:row.airings,confirmedTmdbId:row.confirmed_tmdb_id,schemaVersion:row.observation_schema_version,observation:JSON.parse(row.observation_json),activity:row.activity,lastSeenAt:row.last_seen_at,lastSeenProgrammeRunId:row.last_seen_programme_run_id,seenInLatest:row.seen_in_latest===1,attempts:row.attempts,lastAttemptAt:row.last_attempt_at,retryAt:row.retry_at,terminalReason:row.terminal_reason,evidenceKey:row.evidence_key};
 }
 
 async function readDecision(db,observationKey){

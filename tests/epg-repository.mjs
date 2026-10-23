@@ -16,17 +16,17 @@ assert.doesNotMatch(source,/INSERT INTO film\s|INSERT INTO film_metadata|INSERT 
 assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/epg-repository/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/epg-repository/);
 
-await assert.rejects(()=>repo.publishGeneration({programmeRunId:'run-bad',phase:'published',publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:missing',shows:[]}],candidates:[candidate({observationKey:'lost|1999',evidenceKey:'evidence-lost'})]}));
+await assert.rejects(()=>repo.publishGeneration({programmeRunId:'run-bad',phase:'published',expectedProgrammeRunId:null,publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:missing',shows:[]}],candidates:[candidate({observationKey:'lost|1999',evidenceKey:'evidence-lost'})]}));
 assert.equal(await repo.readPublished(),null);
 assert.equal(await repo.readCandidate('lost|1999'),null);
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM programme_generation WHERE programme_run_id='run-bad'"),0);
 
-await repo.publishGeneration({programmeRunId:'run-a',phase:'published',publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(1000,'title_duration','duration_conflict')]}],candidates:[candidate({observationKey:'heat|1995',evidenceKey:'evidence-a',durations:[170],confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a'}),candidate({observationKey:'other|1990',title:'Other ZZ',normalizedTitle:'other',year:1990,rawTitles:['Other ZZ'],durations:[100],evidenceKey:'evidence-other',activity:'current',lastSeenProgrammeRunId:'run-a',shows:[show(1100,'title_year',null)]})]});
-await repo.publishGeneration({programmeRunId:'run-a',phase:'published',publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(1000,'title_duration','duration_conflict')]}],candidates:[candidate({observationKey:'heat|1995',evidenceKey:'evidence-a',durations:[170],confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a'}),candidate({observationKey:'other|1990',title:'Other ZZ',normalizedTitle:'other',year:1990,rawTitles:['Other ZZ'],durations:[100],evidenceKey:'evidence-other',activity:'current',lastSeenProgrammeRunId:'run-a',shows:[show(1100,'title_year',null)]})]});
+await repo.publishGeneration({programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(1000,'title_duration','duration_conflict')]}],candidates:[candidate({observationKey:'heat|1995',evidenceKey:'evidence-a',durations:[170],confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a'}),candidate({observationKey:'other|1990',title:'Other ZZ',normalizedTitle:'other',year:1990,rawTitles:['Other ZZ'],durations:[100],evidenceKey:'evidence-other',activity:'current',lastSeenProgrammeRunId:'run-a',shows:[show(1100,'title_year',null)]})]});
+await repo.publishGeneration({programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(1000,'title_duration','duration_conflict')]}],candidates:[candidate({observationKey:'heat|1995',evidenceKey:'evidence-a',durations:[170],confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a'}),candidate({observationKey:'other|1990',title:'Other ZZ',normalizedTitle:'other',year:1990,rawTitles:['Other ZZ'],durations:[100],evidenceKey:'evidence-other',activity:'current',lastSeenProgrammeRunId:'run-a',shows:[show(1100,'title_year',null)]})]});
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM film_show WHERE programme_run_id='run-a'"),1);
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM candidate_generation WHERE programme_run_id='run-a'"),2);
 
-await repo.publishGeneration({programmeRunId:'run-b',phase:'published',publishedAt:'2026-10-20T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[]}],candidates:[candidate({observationKey:'heat|1995',title:'Title ZZ Late',rawTitles:['Title ZZ','Title ZZ Late'],durations:[180],lastAiringMs:8000,airings:2,confirmedTmdbId:null,evidenceKey:'evidence-b',lastSeenProgrammeRunId:'run-b',shows:[show(8000,'title_unique',null)]})]});
+await repo.publishGeneration({programmeRunId:'run-b',phase:'published',expectedProgrammeRunId:'run-a',publishedAt:'2026-10-20T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[]}],candidates:[candidate({observationKey:'heat|1995',title:'Title ZZ Late',rawTitles:['Title ZZ','Title ZZ Late'],durations:[180],lastAiringMs:8000,airings:2,confirmedTmdbId:null,evidenceKey:'evidence-b',lastSeenProgrammeRunId:'run-b',shows:[show(8000,'title_unique',null)]})]});
 const publishedB=await repo.readPublished();
 assert.equal(publishedB.programmeRunId,'run-b');
 const generationA=await repo.readGeneration('run-a');
@@ -41,14 +41,18 @@ assert.equal(generationA.candidates.find(item=>item.observationKey==='other|1990
 assert.equal((await repo.readCandidate('other|1990')).activity,'historical');
 assert.equal((await repo.readCandidate('other|1990')).seenInLatest,false);
 assert.equal(await count(db,"SELECT airing_ms AS n FROM film_epg_last_airing WHERE film_id='film:zz-film'"),1000);
-await repo.publishGeneration({programmeRunId:'run-a',phase:'published',publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(1000,'title_duration','duration_conflict')]}],candidates:[candidate({observationKey:'heat|1995',evidenceKey:'evidence-a',durations:[170],confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a'}),candidate({observationKey:'other|1990',title:'Other ZZ',normalizedTitle:'other',year:1990,rawTitles:['Other ZZ'],durations:[100],evidenceKey:'evidence-other',activity:'current',lastSeenProgrammeRunId:'run-a',shows:[show(1100,'title_year',null)]})]});
+await repo.publishGeneration({programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(1000,'title_duration','duration_conflict')]}],candidates:[candidate({observationKey:'heat|1995',evidenceKey:'evidence-a',durations:[170],confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a'}),candidate({observationKey:'other|1990',title:'Other ZZ',normalizedTitle:'other',year:1990,rawTitles:['Other ZZ'],durations:[100],evidenceKey:'evidence-other',activity:'current',lastSeenProgrammeRunId:'run-a',shows:[show(1100,'title_year',null)]})]});
 assert.equal((await repo.readPublished()).programmeRunId,'run-b');
 assert.equal((await repo.readCandidate('heat|1995')).evidenceKey,'evidence-b');
 await assert.rejects(async()=>{await repo.publishGeneration({programmeRunId:'run-a',phase:'published',publishedAt:'2026-10-19T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(1111,'title_duration','duration_conflict')]}],candidates:[]});});
 assert.equal((await repo.readGeneration('run-a')).films[0].shows[0].startMs,1000);
 assert.equal((await repo.readPublished()).programmeRunId,'run-b');
+await assert.rejects(async()=>{await repo.publishGeneration({programmeRunId:'run-old',phase:'published',expectedProgrammeRunId:'run-a',publishedAt:'2026-10-18T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(500,'title_year',null)]}],candidates:[candidate({observationKey:'heat|1995',evidenceKey:'evidence-old',durations:[160],lastSeenProgrammeRunId:'run-old'})]});});
+assert.equal((await repo.readPublished()).programmeRunId,'run-b');
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM programme_generation WHERE programme_run_id='run-old'"),0);
+assert.equal((await repo.readCandidate('heat|1995')).evidenceKey,'evidence-b');
 
-await repo.publishGeneration({programmeRunId:'run-a2',phase:'published',publishedAt:'2026-10-21T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(9000,'title_year',null)]}],candidates:[candidate({observationKey:'heat|1995',durations:[175],evidenceKey:'evidence-c',lastAiringMs:9000,lastSeenProgrammeRunId:'run-a2',shows:[show(9000,'title_year',null)]}),candidate({observationKey:'title-zz|1994',title:'Title ZZ',normalizedTitle:'title-zz',year:1994,rawTitles:['Title ZZ'],durations:[90],evidenceKey:'evidence-remake',activity:'current',lastSeenProgrammeRunId:'run-a2',shows:[show(9100,'title_duration','duration_conflict')]}),candidate({observationKey:'title-zz|1995',title:'Title ZZ',normalizedTitle:'title-zz',year:1995,rawTitles:['Title ZZ'],durations:[170],evidenceKey:'evidence-original',activity:'current',confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a2',shows:[show(9200,'title_year',null)]})]});
+await repo.publishGeneration({programmeRunId:'run-a2',phase:'published',expectedProgrammeRunId:'run-b',publishedAt:'2026-10-21T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[show(9000,'title_year',null)]}],candidates:[candidate({observationKey:'heat|1995',durations:[175],evidenceKey:'evidence-c',lastAiringMs:9000,lastSeenProgrammeRunId:'run-a2',shows:[show(9000,'title_year',null)]}),candidate({observationKey:'title-zz|1994',title:'Title ZZ',normalizedTitle:'title-zz',year:1994,rawTitles:['Title ZZ'],durations:[90],evidenceKey:'evidence-remake',activity:'current',lastSeenProgrammeRunId:'run-a2',shows:[show(9100,'title_duration','duration_conflict')]}),candidate({observationKey:'title-zz|1995',title:'Title ZZ',normalizedTitle:'title-zz',year:1995,rawTitles:['Title ZZ'],durations:[170],evidenceKey:'evidence-original',activity:'current',confirmedTmdbId:'9001',lastSeenProgrammeRunId:'run-a2',shows:[show(9200,'title_year',null)]})]});
 assert.equal((await repo.readPublished()).programmeRunId,'run-a2');
 assert.equal((await repo.readGeneration('run-a')).candidates.length,2);
 assert.equal((await repo.readGeneration('run-b')).films[0].shows.length,0);
@@ -61,16 +65,17 @@ assert.equal((await repo.readPublished()).programmeRunId,'run-a2');
 assert.equal((await repo.readPublishedShows()).some(show=>show.programmeRunId==='run-w'),false);
 assert.equal((await repo.readGeneration('run-w')).films[0].shows.length,1);
 
-const terminal=await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-a2',status:'ambiguous',reason:'ambiguous',checkedAt:'2026-10-21T02:00:00.000Z',evidenceKey:'evidence-remake',attempts:5,retryAt:'2026-10-28T00:00:00.000Z',terminalReason:'repeated_uncertain_match',provenance:{reason:'ambiguous'}});
+const terminal=await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-a2',status:'ambiguous',reason:'ambiguous',checkedAt:'2026-10-21T02:00:00.000Z',evidenceKey:'evidence-remake',attempts:5,lastAttemptAt:'2026-10-21T02:00:00.000Z',retryAt:'2026-10-28T00:00:00.000Z',terminalReason:'repeated_uncertain_match',provenance:{reason:'ambiguous'}});
 assert.equal(terminal.applied,true);
 assert.equal((await repo.readCandidate('title-zz|1994')).attempts,5);
+assert.equal((await repo.readCandidate('title-zz|1994')).lastAttemptAt,'2026-10-21T02:00:00.000Z');
 assert.equal((await repo.readCandidate('title-zz|1994')).terminalReason,'repeated_uncertain_match');
 const blocked=await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-a2',status:'verified',filmId:'film:zz-film',tmdbId:'9001',checkedAt:'2026-10-21T03:00:00.000Z',evidenceKey:'evidence-remake',identitySource:'tmdb_detail'});
 assert.equal(blocked.applied,false);
 assert.equal(blocked.reason,'terminal_evidence_unchanged');
 assert.equal(blocked.decision.current.status,'ambiguous');
 assert.equal(blocked.decision.history.length,0);
-const replay=await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-a2',status:'ambiguous',reason:'ambiguous',checkedAt:'2026-10-21T02:00:00.000Z',evidenceKey:'evidence-remake',attempts:5,retryAt:'2026-10-28T00:00:00.000Z',terminalReason:'repeated_uncertain_match',provenance:{reason:'ambiguous'}});
+const replay=await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-a2',status:'ambiguous',reason:'ambiguous',checkedAt:'2026-10-21T02:00:00.000Z',evidenceKey:'evidence-remake',attempts:5,lastAttemptAt:'2026-10-21T02:00:00.000Z',retryAt:'2026-10-28T00:00:00.000Z',terminalReason:'repeated_uncertain_match',provenance:{reason:'ambiguous'}});
 assert.equal(replay.applied,true);
 assert.equal(replay.decision.history.length,0);
 await assert.rejects(async()=>{await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-a2',status:'unresolved',checkedAt:'2026-10-22T01:00:00.000Z',evidenceKey:'evidence-remake-changed',attempts:1,terminalReason:null});});
@@ -79,12 +84,15 @@ assert.equal((await repo.readDecision('title-zz|1994')).history.length,0);
 await repo.publishGeneration({programmeRunId:'run-w2',phase:'withheld',films:[],candidates:[candidate({observationKey:'title-zz|1994',title:'Title ZZ',normalizedTitle:'title-zz',year:1994,rawTitles:['Title ZZ'],durations:[95],evidenceKey:'evidence-w',attempts:1,terminalReason:null,activity:'current'})]});
 assert.equal((await repo.readCandidate('title-zz|1994')).evidenceKey,'evidence-remake');
 assert.equal((await repo.readCandidate('title-zz|1994')).attempts,5);
+assert.equal((await repo.readCandidate('title-zz|1994')).lastAttemptAt,'2026-10-21T02:00:00.000Z');
 assert.equal((await repo.readCandidate('title-zz|1994')).terminalReason,'repeated_uncertain_match');
 assert.equal((await repo.readGeneration('run-w2')).candidates[0].observation.durations[0],95);
 assert.equal((await repo.readPublished()).programmeRunId,'run-a2');
-await repo.publishGeneration({programmeRunId:'run-c',phase:'published',publishedAt:'2026-10-22T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[]}],candidates:[candidate({observationKey:'title-zz|1994',title:'Title ZZ',normalizedTitle:'title-zz',year:1994,rawTitles:['Title ZZ'],durations:[90],evidenceKey:'evidence-remake-changed',activity:'current',lastSeenProgrammeRunId:'run-c'})]});
+await repo.publishGeneration({programmeRunId:'run-c',phase:'published',expectedProgrammeRunId:'run-a2',publishedAt:'2026-10-22T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[]}],candidates:[candidate({observationKey:'title-zz|1994',title:'Title ZZ',normalizedTitle:'title-zz',year:1994,rawTitles:['Title ZZ'],durations:[90],evidenceKey:'evidence-remake-changed',activity:'current',lastSeenProgrammeRunId:'run-c'})]});
 assert.equal((await repo.readCandidate('title-zz|1994')).evidenceKey,'evidence-remake-changed');
 assert.equal((await repo.readCandidate('title-zz|1994')).terminalReason,null);
+assert.equal((await repo.readCandidate('title-zz|1994')).attempts,0);
+assert.equal((await repo.readCandidate('title-zz|1994')).lastAttemptAt,null);
 assert.equal((await repo.readDecision('title-zz|1994')).current.status,'ambiguous');
 await assert.rejects(async()=>{await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-a2',status:'verified',checkedAt:'2026-10-22T02:00:00.000Z',evidenceKey:'evidence-remake',filmId:'film:zz-film',tmdbId:'9001'});});
 assert.equal((await repo.readDecision('title-zz|1994')).current.status,'ambiguous');
@@ -93,9 +101,9 @@ assert.equal(reopened.applied,true);
 assert.equal(reopened.decision.current.status,'unresolved');
 assert.equal(reopened.decision.history[0].status,'ambiguous');
 assert.equal(reopened.decision.history[0].terminalReason,'repeated_uncertain_match');
-
-const verified=await repo.recordDecision({observationKey:'title-zz|1995',programmeRunId:'run-c',status:'verified',catalogFilmId:'tmdb_9001',filmId:'film:zz-film',tmdbId:'9001',canonicalIdentity:'tmdb:9001',identitySource:'known_epg_alias',checkedAt:'2026-10-21T02:00:00.000Z',evidenceKey:'evidence-original',provenance:{authority:'known_epg_alias'}});
-assert.equal(verified.applied,true);
+assert.equal((await repo.readCandidate('title-zz|1994')).attempts,1);
+await assert.rejects(async()=>{await repo.recordDecision({observationKey:'title-zz|1995',programmeRunId:'run-c',status:'verified',catalogFilmId:'tmdb_9001',filmId:'film:zz-film',tmdbId:'9001',canonicalIdentity:'tmdb:9001',identitySource:'known_epg_alias',checkedAt:'2026-10-21T02:00:00.000Z',evidenceKey:'evidence-original',provenance:{authority:'known_epg_alias'}});});
+assert.equal(await repo.readDecision('title-zz|1995'),null);
 const scores=await repo.recordScore({id:'score-remake',observationKey:'title-zz|1994',programmeRunId:'run-a2',scorerVersion:'1',status:'accepted',reason:'accepted',confidence:0.9,score:0.9,acceptedTmdbId:'9001',gateOutcome:'needs_verification',gateReason:'needs_verification',createdAt:'2026-10-21T04:00:00.000Z',considered:[{ordinal:1,tmdbId:'9001',trusted:false,year:1994,runtime:90}],detail:{movieId:'9001',runtime:90,releaseYear:1994,matchedTitle:'Title ZZ',fetchedAt:'2026-10-21T04:00:00.000Z',r2Key:'archive/tmdb/9001',contentSha256:'abc123'}});
 assert.equal(scores[0].status,'accepted');
 assert.equal(scores[0].acceptedTmdbId,'9001');
@@ -114,8 +122,12 @@ assert.equal(await count(db,'SELECT COUNT(*) AS n FROM film'),1);
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM candidate_decision WHERE observation_key='heat|1995'"),0);
 await assert.rejects(async()=>{await repo.publishGeneration({programmeRunId:'run-key',phase:'published',films:[],candidates:[candidate({observationKey:'film:zz-film'})]});});
 await assert.rejects(async()=>{await repo.recordDecision({observationKey:'title-zz|1995',status:'verified',filmId:'film:missing',tmdbId:'9002',checkedAt:'2026-10-22T02:00:00.000Z',evidenceKey:'evidence-missing'});});
-assert.equal((await repo.readDecision('title-zz|1995')).current.filmId,'film:zz-film');
+assert.equal(await repo.readDecision('title-zz|1995'),null);
 assert.equal(await count(db,'SELECT COUNT(*) AS n FROM film'),1);
+db.beforeTransaction(()=>repo.publishGeneration({programmeRunId:'run-d',phase:'published',expectedProgrammeRunId:'run-c',publishedAt:'2026-10-23T01:00:00.000Z',films:[{filmId:'film:zz-film',shows:[]}],candidates:[]}));
+await assert.rejects(async()=>{await repo.recordDecision({observationKey:'title-zz|1994',programmeRunId:'run-c',status:'verified',filmId:'film:zz-film',tmdbId:'9001',checkedAt:'2026-10-23T02:00:00.000Z',evidenceKey:'evidence-remake-changed',identitySource:'tmdb_detail'});});
+assert.equal((await repo.readDecision('title-zz|1994')).current.status,'unresolved');
+assert.equal((await repo.readPublished()).programmeRunId,'run-d');
 
 fs.rmSync(root,{recursive:true});
 console.log('EPG repository passed.');
@@ -136,8 +148,10 @@ function openSqlite(file){
   run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},
   get(sql,params=[]){if(state.buffer)throw new Error('Read inside the EPG transaction');return Promise.resolve(query(file,sql,params)[0]??null);},
   all(sql,params=[]){if(state.buffer)throw new Error('Read inside the EPG transaction');return Promise.resolve(query(file,sql,params));},
+  beforeTransaction(fn){state.beforeTransaction=fn;},
   async transaction(fn){
    if(state.buffer)return fn();
+   if(state.beforeTransaction){const hook=state.beforeTransaction;state.beforeTransaction=null;await hook();}
    state.buffer=[];
    try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}
    finally{state.buffer=null;}
