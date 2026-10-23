@@ -2,9 +2,13 @@
 
 [AIR-80](https://trello.com/c/hQPjVTXv) adds search variants for an EPG title. The acceptance gate is unchanged. A search hit is not a verified decision.
 
-`CANDIDATE_DISCOVERY=shadow` is the only value that runs the extra search. Unset, empty, and `on` are off. The repository does not commit the variable. Production `SCORED_RESOLUTION` stays `shadow`. This gate stays off until [AIR-81](https://trello.com/c/ywuOtfo0).
+`CANDIDATE_DISCOVERY` accepts only `shadow` or `on`. Unset and any other text are off. The repository does not commit the variable. Production leaves it unset, so the extra search does not run.
 
-The extra search runs only beside an existing shadow comparison, and only when the first score has no exact title. It uses `tmdbRequest`, so it does not spend the legacy 16-call counter and a 429 does not fail the chunk. A candidate stops after 4 variant queries. A chunk stops after 8. Each query waits for 12 seconds of chunk time. The legacy decision and the catalog are written before this search and are not rewritten from it. `SCORED_RESOLUTION=on` does not call it.
+`shadow` pairs with `SCORED_RESOLUTION=shadow`. The extra hits update the preview only. The legacy decision and the catalog stay as the legacy branch wrote them. `on` pairs with `SCORED_RESOLUTION=on`. The same search then feeds the existing scored writer, which still verifies only after `detail_verified`. A spelling proposal or a `tmdb_alias` proposal is not title evidence for that gate, so it cannot become `verified` by itself. An exact title found at the neighbouring year can. Setting only one of the two variables does not activate the search, and the legacy `else` branch never calls it. [AIR-81](https://trello.com/c/ywuOtfo0) is the approval to turn the pair on in production. [AIR-68](https://trello.com/c/qbLDc6Ql) is the later cutover.
+
+The extra search uses `tmdbRequest`. It does not increment `tmdbCalls`. The chunk result and `epg/discovery-status.json` record `variantCalls`, `variantErrors`, `variantThrottled`, and `variantSkipped` separately. A 429 increments `variantThrottled` and does not fail the chunk. A candidate plans at most 4 variant queries. A chunk stops after 8 attempts. A query that would start with fewer than 12 seconds left is `variantSkipped`. A missing year (`null`, absent, or `''`) does not become year 0.
+
+When several search rows fail the title check, up to three are ordered by year distance, then runtime distance, then shared title tokens, and each is read for translations and alternative titles while the attempt cap remains. The matching id is recorded as `tmdb_alias`. It is not passed to the scorer as an alias, so it stays a proposal.
 
 Variants, in order:
 

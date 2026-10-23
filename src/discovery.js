@@ -50,7 +50,8 @@ function discoveryCounts(items,decisions,now=Date.now()){
  return counts;
 }
 function scoredResolutionMode(env){const value=typeof env?.SCORED_RESOLUTION==='string'?env.SCORED_RESOLUTION.trim():'';return value==='shadow'||value==='on'?value:'off';}
-function candidateDiscoveryMode(env){const value=typeof env?.CANDIDATE_DISCOVERY==='string'?env.CANDIDATE_DISCOVERY.trim():'';return value==='shadow'?'shadow':'off';}
+function candidateDiscoveryMode(env){const value=typeof env?.CANDIDATE_DISCOVERY==='string'?env.CANDIDATE_DISCOVERY.trim():'';return value==='shadow'||value==='on'?value:'off';}
+function candidateReleaseYear(value){if(value==null||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null;}
 const CANDIDATE_VARIANT_CAP=4,CANDIDATE_VARIANT_CHUNK_CAP=8;
 const CANDIDATE_NUMBER_WORDS={1:'один',2:'два',3:'три',4:'четыре',5:'пять',6:'шесть',7:'семь',8:'восемь',9:'девять',10:'десять',11:'одиннадцать',12:'двенадцать'};
 function candidateSpellToken(text){
@@ -61,7 +62,7 @@ function candidateSpellToken(text){
  return null;
 }
 function candidateSearchVariants(candidate){
- const title=String(candidate?.title||'').trim(),year=Number.isFinite(Number(candidate?.year))?Number(candidate.year):null,out=[],seen=new Set();
+ const title=String(candidate?.title||'').trim(),year=candidateReleaseYear(candidate?.year),out=[],seen=new Set();
  const push=(query,yearValue,reason)=>{const text=String(query||'').replace(/\s+/g,' ').trim();if(norm(text).length<3)return;const key=norm(text)+'|'+(yearValue??'');if(seen.has(key))return;seen.add(key);out.push({query:text,year:yearValue,reason});};
  const stem=title.match(/^(.*\p{L}.*)\s+([12])$/u),stemText=stem&&norm(stem[1]).length>=3?stem[1].trim():null;
  if(stemText)push(stemText,year,'part_suffix');
@@ -79,6 +80,42 @@ function variantHit(candidate,movie,variant){
  if(titles.some(title=>wanted.includes(title)))return true;
  const observed=candidate?.normalizedTitle||'';
  return !!observed&&titles.some(title=>title.startsWith(observed+' ')||observed.startsWith(title+' '));
+}
+function variantAliasRank(candidate,movies){
+ const observed=new Set(norm(candidate?.normalizedTitle||candidate?.title||'').split(' ').filter(Boolean)),durations=[...(candidate?.durations||[]),candidate?.duration].filter(value=>Number.isFinite(value)),year=candidateReleaseYear(candidate?.year);
+ return movies.filter(movie=>movie?.id!=null).map(movie=>{
+  const release=candidateReleaseYear(String(movie.release_date||'').slice(0,4));
+  if(year!=null&&release!=null&&Math.abs(release-year)>1)return null;
+  const runtime=Number(movie.runtime),runtimeDistance=Number.isFinite(runtime)&&durations.length?Math.min(...durations.map(value=>Math.abs(runtime-value))):1000;
+  const shared=norm((movie.title||'')+' '+(movie.original_title||'')).split(' ').filter(Boolean).filter(token=>observed.has(token)).length;
+  return {movie,yearDistance:year!=null&&release!=null?Math.abs(release-year):1,runtimeDistance,shared};
+ }).filter(Boolean).sort((a,b)=>a.yearDistance-b.yearDistance||a.runtimeDistance-b.runtimeDistance||b.shared-a.shared||String(a.movie.id).localeCompare(String(b.movie.id)));
+}
+function emptyVariantStats(){return {calls:0,errors:0,throttled:0,skipped:0};}
+function variantDiagnostic(stats){return {variantCalls:stats.calls,variantErrors:stats.errors,variantThrottled:stats.throttled,variantSkipped:stats.skipped};}
+async function collectVariantProposals(env,candidate,deadline,stats){
+ const proposed=[],hits=[],pool=new Map(),planned=candidateSearchVariants(candidate).slice(0,CANDIDATE_VARIANT_CAP),language=/[іїєґ]/i.test(candidate.title)?'uk-UA':'ru-RU';
+ for(const variant of planned){
+  if(stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline){stats.skipped++;continue;}
+  let search=null;try{search=await tmdbRequest(env,'search/movie?'+new URLSearchParams({query:variant.query,language,include_adult:'false',...(variant.year!=null?{year:String(variant.year)}:{})}));}catch(e){stats.calls++;if(e.retryAt||String(e.message).includes('429'))stats.throttled++;else stats.errors++;continue;}
+  stats.calls++;
+  for(const movie of search?.results||[]){
+   if(!variantHit(candidate,movie,variant)){if(movie?.id!=null&&!pool.has(String(movie.id)))pool.set(String(movie.id),movie);continue;}
+   if(proposed.some(row=>row.tmdbId===String(movie.id)))continue;
+   proposed.push({tmdbId:String(movie.id),query:variant.query,year:variant.year,reason:variant.reason,matchedTitle:movie.title||movie.original_title||''});
+   hits.push(searchHitCandidate(movie));
+  }
+  if(hits.some(hit=>norm(hit.title)===candidate.normalizedTitle||norm(hit.original)===candidate.normalizedTitle))break;
+ }
+ for(const row of variantAliasRank(candidate,[...pool.values()]).slice(0,3)){
+  if(proposed.some(item=>item.tmdbId===String(row.movie.id)))continue;
+  if(stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline){stats.skipped++;continue;}
+  let movie=null;try{movie=await tmdbRequest(env,'movie/'+row.movie.id+'?language=ru-RU&append_to_response=translations,alternative_titles');}catch(e){stats.calls++;if(e.retryAt||String(e.message).includes('429'))stats.throttled++;else stats.errors++;continue;}
+  stats.calls++;
+  const aliases=[...(movie?.alternative_titles?.titles||[]).map(item=>item?.title),...(movie?.translations?.translations||[]).map(item=>item?.data?.title)].filter(Boolean),matched=aliases.find(title=>norm(title)===candidate.normalizedTitle);
+  if(matched)proposed.push({tmdbId:String(movie.id),query:candidate.title,year:candidateReleaseYear(candidate.year),reason:'tmdb_alias',matchedTitle:matched});
+ }
+ return {proposed,hits};
 }
 const DISCOVERY_SCORE_PREVIEW_KEY='epg/discovery-score-preview.json';
 function filmScorerCandidate(film){return {tmdbId:String(film.tmdbId),title:film.title||'',original:film.original||'',aliases:film.aliases||[],year:film.year??null,runtime:film.runtime??null,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId};}
@@ -209,7 +246,7 @@ async function resolveDiscoveryChunk(env,report,limit){
  await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
  const mode=scoredResolutionMode(env),preview={},shadowDetails=[],variantJobs=[],now=Date.now(),pending=source.items.filter(c=>resolutionActionability(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
  pending.sort((a,b)=>hotRank.get(b)-hotRank.get(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
- let checked=0,added=0,reused=0,tmdbCalls=0,error=null,retryAt=null;
+ let checked=0,added=0,reused=0,tmdbCalls=0,error=null,retryAt=null,variantMeter=emptyVariantStats();
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
  for(const candidate of pending.slice(0,limit)){
   if(Date.now()>deadline||tmdbCalls>=16)break;
@@ -218,15 +255,21 @@ async function resolveDiscoveryChunk(env,report,limit){
     let candidates=knownScorerCandidates(aliasIndex,candidate);
     const observation={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:candidate.durations};
     let score=scoreFilmResolution({observation,candidates});
-    const searched=!score.considered.some(row=>row.title.quality===1);
+    let searched=!score.considered.some(row=>row.title.quality===1);
     if(searched)candidates=[...candidates,...await scoredSearchCandidates(query,candidate)],score=scoreFilmResolution({observation,candidates});
+    let proposed=[];
+    if(candidateDiscoveryMode(env)==='on'&&!score.considered.some(row=>row.title.quality===1)){
+     const found=await collectVariantProposals(env,candidate,deadline,variantMeter);
+     proposed=found.proposed;
+     if(found.hits.length)candidates=[...candidates,...found.hits],score=scoreFilmResolution({observation,candidates}),searched=true;
+    }
     let gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now);
     let movie=null;
     if(gate.outcome==='needs_verification'&&score.status==='accepted'&&score.acceptedTmdbId){
      movie=await query('movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
      gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:detailCompetitors(aliasIndex,candidate,score.acceptedTmdbId)});
     }
-    preview[candidate.key]=scorePreview(candidate,score,gate,null);
+    preview[candidate.key]=scorePreview(candidate,score,gate,null,null,null,proposed);
     if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now);
     else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now);
     else if(gate.outcome==='detail_verified'){
@@ -286,48 +329,26 @@ async function resolveDiscoveryChunk(env,report,limit){
   const gate=gateScoredCandidate(pinned,source,job.candidate,job.score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(job.score.acceptedTmdbId))});
   preview[job.key]=scorePreview(job.candidate,job.score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked:true,differentId:job.differentId}),job.knownBefore);
  }
- let variantCalls=0;
  for(const job of variantJobs){
-  if(variantCalls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline)break;
   if(!await publishedGenerationMatches(env,source.programmeRunId))break;
-  const proposed=[],hits=[];let aliasMovie=null,language=/[іїєґ]/i.test(job.candidate.title)?'uk-UA':'ru-RU';
-  for(const variant of candidateSearchVariants(job.candidate).slice(0,CANDIDATE_VARIANT_CAP)){
-   if(variantCalls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline)break;
-   let search=null;try{search=await tmdbRequest(env,'search/movie?'+new URLSearchParams({query:variant.query,language,include_adult:'false',...(variant.year!=null?{year:String(variant.year)}:{})}));}catch(e){variantCalls++;continue;}
-   variantCalls++;
-   for(const movie of search?.results||[]){
-    if(!variantHit(job.candidate,movie,variant)){const release=Number(String(movie.release_date||'').slice(0,4));if(!aliasMovie&&job.candidate.year&&release&&Math.abs(release-Number(job.candidate.year))<=1)aliasMovie=movie;continue;}
-    if(proposed.some(row=>row.tmdbId===String(movie.id)))continue;
-    proposed.push({tmdbId:String(movie.id),query:variant.query,year:variant.year,reason:variant.reason,matchedTitle:movie.title||movie.original_title||''});
-    hits.push(searchHitCandidate(movie));
-   }
-   if(hits.some(hit=>norm(hit.title)===job.candidate.normalizedTitle||norm(hit.original)===job.candidate.normalizedTitle))break;
-  }
-  if(!hits.length&&aliasMovie&&variantCalls<CANDIDATE_VARIANT_CHUNK_CAP&&Date.now()+12000<=deadline){
-   let movie=null;try{movie=await tmdbRequest(env,'movie/'+aliasMovie.id+'?language=ru-RU&append_to_response=translations,alternative_titles');}catch(e){movie=null;}
-   variantCalls++;
-   const aliases=[...(movie?.alternative_titles?.titles||[]).map(item=>item?.title),...(movie?.translations?.translations||[]).map(item=>item?.data?.title)].filter(Boolean);
-   const matched=aliases.find(title=>norm(title)===job.candidate.normalizedTitle);
-   if(matched)proposed.push({tmdbId:String(movie.id),query:job.candidate.title,year:job.candidate.year??null,reason:'tmdb_alias',matchedTitle:matched});
-  }
-  if(!proposed.length)continue;
+  const found=await collectVariantProposals(env,job.candidate,deadline,variantMeter);
+  if(!found.proposed.length)continue;
   const observation={key:job.candidate.key,title:job.candidate.title,normalizedTitle:job.candidate.normalizedTitle,year:job.candidate.year??null,duration:job.candidate.duration??null,durations:job.candidate.durations};
-  const score=scoreFilmResolution({observation,candidates:[...job.priorCandidates,...hits]});
+  const score=scoreFilmResolution({observation,candidates:[...job.priorCandidates,...found.hits]});
   let gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now),detailChecked=false;
-  if(score.status==='accepted'&&score.acceptedTmdbId&&variantCalls<CANDIDATE_VARIANT_CHUNK_CAP&&Date.now()+12000<=deadline&&await publishedGenerationMatches(env,source.programmeRunId)){
-   let movie=null;try{movie=await tmdbRequest(env,'movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');}catch(e){movie=null;}
-   variantCalls++;
-   if(movie&&String(movie.id)===String(score.acceptedTmdbId)){gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(score.acceptedTmdbId))});detailChecked=true;}
+  if(score.status==='accepted'&&score.acceptedTmdbId&&variantMeter.calls<CANDIDATE_VARIANT_CHUNK_CAP&&Date.now()+12000<=deadline&&await publishedGenerationMatches(env,source.programmeRunId)){
+   let movie=null;try{movie=await tmdbRequest(env,'movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');}catch(e){variantMeter.calls++;if(e.retryAt||String(e.message).includes('429'))variantMeter.throttled++;else variantMeter.errors++;movie=null;}
+   if(movie){variantMeter.calls++;if(String(movie.id)===String(score.acceptedTmdbId)){gate=gateScoredCandidate(pinned,source,job.candidate,score,job.shadowDecisions,job.filmsBefore,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:job.competitors.filter(row=>String(row.tmdbId)!==String(score.acceptedTmdbId))});detailChecked=true;}}
   }
-  preview[job.key]=scorePreview(job.candidate,score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked,differentId:false}),job.knownBefore,proposed);
+  preview[job.key]=scorePreview(job.candidate,score,gate,job.legacyStatus,shadowComparison({legacyStatus:job.legacyStatus,gate,detailChecked,differentId:false}),job.knownBefore,found.proposed);
  }
  const currentReport=await loadJSON(env,'programme.json');
  if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
-  const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,programmeChanged:true};
+  const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,programmeChanged:true,...variantDiagnostic(variantMeter)};
   await saveJSON(env,'epg/discovery-status.json',changed);await saveScorePreview(env,mode,source,preview);return {...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
  }
  try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint');}catch(e){error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
- const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
+ const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,...variantDiagnostic(variantMeter)};
  await saveJSON(env,'epg/discovery-status.json',summary);await saveScorePreview(env,mode,source,preview);return summary;
 }
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
