@@ -5,7 +5,15 @@ INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenanc
  ('film:zz-film','letterboxd','zz-film',1,0,NULL),
  ('film:zz-film','tmdb','9001',1,0,NULL);
 INSERT INTO person (id,role_id,contract_version,updated_at) VALUES
- ('person:actor/zz-role','actor/zz-role',1,'2026-10-19T01:00:00.000Z');
+ ('person:actor/zz-role','actor/zz-role',1,'2026-10-19T01:00:00.000Z'),
+ ('person:actor/zz-cast','actor/zz-cast',1,'2026-10-19T01:00:00.000Z'),
+ ('person:director/zz-role','director/zz-role',1,'2026-10-19T01:00:00.000Z');
+INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,updated_at) VALUES
+ ('film:zz-film',1,1995,170,'A synopsis','https://images.invalid/zz-film.jpg','https://catalog.invalid/film/zz-film','["Genre ZZ"]',1,'{"schemaVersion":1,"year":1995,"runtime":170,"genres":["Genre ZZ"],"synopsis":"A synopsis","poster":"https://images.invalid/zz-film.jpg","url":"https://catalog.invalid/film/zz-film","peopleVersion":1}','2026-10-19T01:00:00.000Z');
+INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES
+ ('film:zz-film','person:director/zz-role','director',0),
+ ('film:zz-film','person:actor/zz-role','actor',0),
+ ('film:zz-film','person:actor/zz-cast','actor',1);
 INSERT INTO film_redirect (from_id,to_film_id,at) VALUES
  ('film:tmdb:9001','film:zz-film','2026-10-19T01:00:00.000Z');
 INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES
@@ -35,10 +43,10 @@ INSERT INTO candidate (observation_key,title,normalized_title,year,raw_titles_js
  ('heat|1995','Title ZZ','heat',1995,'["Title ZZ"]','[170]','A description',1000,2000,2,'9001',1,'{"schemaVersion":1,"title":"Title ZZ","normalizedTitle":"heat","year":1995,"rawTitles":["Title ZZ"],"durations":[170],"description":"A description","firstAiring":1000,"lastAiring":2000,"airings":2,"confirmedTmdbId":"9001"}','current','2026-10-19T01:00:00.000Z','run-published',1,2,'2026-10-20T01:00:00.000Z',NULL,'evidence-a'),
  ('alias|1990','Alias ZZ','alias',1990,'["Alias ZZ"]','[100]',NULL,1000,1000,1,NULL,1,'{"schemaVersion":1,"title":"Alias ZZ","normalizedTitle":"alias","year":1990,"rawTitles":["Alias ZZ"],"durations":[100],"description":null,"firstAiring":1000,"lastAiring":1000,"airings":1,"confirmedTmdbId":null}','current','2026-10-19T01:00:00.000Z','run-published',1,1,NULL,NULL,'evidence-alias'),
  ('remake|1991','Remake ZZ','remake',1991,'["Remake ZZ"]','[90]',NULL,1000,1000,1,NULL,1,'{"schemaVersion":1,"title":"Remake ZZ","normalizedTitle":"remake","year":1991,"rawTitles":["Remake ZZ"],"durations":[90],"description":null,"firstAiring":1000,"lastAiring":1000,"airings":1,"confirmedTmdbId":null}','historical','2026-10-19T01:00:00.000Z','run-published',0,5,NULL,'repeated_uncertain_match','evidence-remake');
-INSERT INTO candidate_generation (programme_run_id,observation_key) VALUES
- ('run-published','heat|1995'),
- ('run-published','alias|1990'),
- ('run-published','remake|1991');
+INSERT INTO candidate_generation (programme_run_id,observation_key,observation_schema_version,observation_json,evidence_key) VALUES
+ ('run-published','heat|1995',1,'{"schemaVersion":1,"title":"Title ZZ","normalizedTitle":"heat","year":1995,"rawTitles":["Title ZZ"],"durations":[170],"description":"A description","firstAiring":1000,"lastAiring":2000,"airings":2,"confirmedTmdbId":"9001"}','evidence-a'),
+ ('run-published','alias|1990',1,'{"schemaVersion":1,"title":"Alias ZZ","normalizedTitle":"alias","year":1990,"rawTitles":["Alias ZZ"],"durations":[100],"description":null,"firstAiring":1000,"lastAiring":1000,"airings":1,"confirmedTmdbId":null}','evidence-alias'),
+ ('run-published','remake|1991',1,'{"schemaVersion":1,"title":"Remake ZZ","normalizedTitle":"remake","year":1991,"rawTitles":["Remake ZZ"],"durations":[90],"description":null,"firstAiring":1000,"lastAiring":1000,"airings":1,"confirmedTmdbId":null}','evidence-remake');
 INSERT INTO candidate_show (programme_run_id,observation_key,channel_id,channel,start_ms,end_ms,epg_title) VALUES
  ('run-published','heat|1995','channel-a','Channel A',1000,2000,'Title ZZ');
 INSERT INTO candidate_decision (observation_key,status,catalog_film_id,film_id,tmdb_id,canonical_identity,identity_source,checked_at,evidence_key,attempts,provenance_json) VALUES

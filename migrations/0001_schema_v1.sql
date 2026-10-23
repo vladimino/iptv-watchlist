@@ -26,6 +26,33 @@ CREATE TABLE person (
  updated_at TEXT NOT NULL
 ) STRICT;
 
+-- Catalog fields from the watchlist film and parseFilm. film_dimension stays the lifecycle status.
+CREATE TABLE film_metadata (
+ film_id TEXT PRIMARY KEY REFERENCES film(id),
+ schema_version INTEGER NOT NULL,
+ year INTEGER,
+ runtime INTEGER,
+ synopsis TEXT,
+ poster TEXT,
+ url TEXT,
+ genres_json TEXT NOT NULL,
+ people_version INTEGER,
+ payload_json TEXT NOT NULL,
+ r2_key TEXT,
+ content_sha256 TEXT,
+ updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE film_person_credit (
+ film_id TEXT NOT NULL REFERENCES film(id),
+ person_id TEXT NOT NULL REFERENCES person(id),
+ role TEXT NOT NULL CHECK (role IN ('director','actor')),
+ ordinal INTEGER NOT NULL,
+ PRIMARY KEY (film_id,person_id,role)
+) STRICT;
+CREATE UNIQUE INDEX film_person_credit_order ON film_person_credit(film_id,role,ordinal);
+CREATE INDEX film_person_credit_by_person ON film_person_credit(person_id,role,film_id);
+
 CREATE TABLE film_external_id (
  film_id TEXT NOT NULL REFERENCES film(id),
  scheme TEXT NOT NULL,
@@ -172,7 +199,7 @@ JOIN published_generation p ON p.id=1 AND p.programme_run_id=s.programme_run_id
 JOIN programme_generation g ON g.programme_run_id=s.programme_run_id AND g.phase='published';
 
 -- Candidate ledger. The key is an observation, never a Film id.
--- observation_json is schemaVersion 1 and keeps every observation field the scorer reads.
+-- observation_json on this row is the latest projection. A generation keeps its own copy.
 CREATE TABLE candidate (
  observation_key TEXT PRIMARY KEY CHECK (observation_key NOT LIKE 'film:%' AND observation_key NOT LIKE 'person:%'),
  title TEXT NOT NULL,
@@ -199,9 +226,13 @@ CREATE TABLE candidate (
 ) STRICT;
 CREATE INDEX candidate_retry ON candidate(retry_at) WHERE terminal_reason IS NULL;
 
+-- Immutable observation for this generation. Updating candidate does not change this row.
 CREATE TABLE candidate_generation (
  programme_run_id TEXT NOT NULL REFERENCES programme_generation(programme_run_id),
  observation_key TEXT NOT NULL REFERENCES candidate(observation_key),
+ observation_schema_version INTEGER NOT NULL,
+ observation_json TEXT NOT NULL,
+ evidence_key TEXT NOT NULL,
  PRIMARY KEY (programme_run_id,observation_key)
 ) STRICT;
 
