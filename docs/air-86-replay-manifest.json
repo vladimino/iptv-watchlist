@@ -10,7 +10,7 @@
   "observations": 38,
   "plannedSearches": 87,
   "proposedHttpCap": 130,
-  "capApproved": false,
+  "capApproved": true,
   "items": [
     {
       "group": "blocked_structural",

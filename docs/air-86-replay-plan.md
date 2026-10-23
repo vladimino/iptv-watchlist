@@ -1,6 +1,8 @@
 # AIR-86 stage 2 plan
 
-Dry run only. No TMDB request has been sent. The proposed cap of 130 HTTP calls is not approved.
+Dry run published as `7034d71`. The owner then approved the 130-call cap. `scripts/air-86-replay.mjs` follows the production early stop: a search page that already contains the observation's normalized title does not send the later variants. Those saved calls stay in the 130 budget for detail verification. Alias reads run only after that, and their matches are not passed to `scoreFilmResolution`.
+
+No TMDB request has been sent by the dry run itself.
 
 The cohort is the one named on the card: the 30 rows that were blocked at the census instant, plus the 8 structural rows that were not blocked. `блейд 1|1998` and `гол 2|2008` stay inside the 30. Membership was not recomputed from `retryAt` values that might have expired later.
 
