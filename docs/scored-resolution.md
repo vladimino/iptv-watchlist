@@ -49,4 +49,4 @@ The programme marks `≈` only when the attached showing is `title_duration`. Ev
 
 `GET /api/enrichment/pipeline/status` reads `epg/discovery-score-preview.json` when shadow or on has written it. `scoringPreview.needsConfirmation` counts accepted scores that are not verified. `scoringPreview.cutover` is the normalized Worker mode, `off`, `shadow`, or `on`. A preview whose `programmeRunId` is not the pinned generation is `stale`, and its rows are not counted as the current generation. Reading the status does not enable `on` and does not write.
 
-Do not commit `SCORED_RESOLUTION`. `on` can verify a new film after the movie-detail check above. The first live `shadow` sample did not authorize `on`; its limits are in `docs/air-43-shadow-rollout.md`. Unset the variable, or set it to `off`, to roll back.
+Do not commit `SCORED_RESOLUTION`. `on` can verify a new film after the movie-detail check above. The first live `shadow` sample did not authorize `on`. [AIR-67](https://trello.com/c/R4RuNVNw) is NO-GO for cutover in `docs/air-67-parity.md`. The sample limits are in `docs/air-43-shadow-rollout.md`. Unset the variable, or set it to `off`, to roll back.
