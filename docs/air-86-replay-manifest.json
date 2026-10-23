@@ -1,0 +1,1179 @@
+{
+  "schemaVersion": 1,
+  "stage": "dry-run",
+  "tmdbCalls": 0,
+  "censusAt": "2026-10-23T17:19:42.476Z",
+  "capturedAt": "2026-10-23T17:52:50.645Z",
+  "programmeRunId": "cf3ba3ac-f962-4475-b9cd-3de1b07bd1eb",
+  "resolutionKey": "epg/discovery-resolution.json",
+  "resolutionCount": 8797,
+  "observations": 38,
+  "plannedSearches": 87,
+  "proposedHttpCap": 130,
+  "capApproved": false,
+  "items": [
+    {
+      "group": "blocked_structural",
+      "key": "блейд 1|1998",
+      "title": "Блейд 1",
+      "year": 1998,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:47:33.597Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        120
+      ],
+      "searches": 4,
+      "variants": [
+        {
+          "query": "Блейд",
+          "year": 1998,
+          "reason": "part_suffix"
+        },
+        {
+          "query": "Блэйд",
+          "year": 1998,
+          "reason": "spelling_e"
+        },
+        {
+          "query": "Блейд 1",
+          "year": 1997,
+          "reason": "year_before"
+        },
+        {
+          "query": "Блейд 1",
+          "year": 1999,
+          "reason": "year_after"
+        }
+      ],
+      "order": 1
+    },
+    {
+      "group": "blocked_structural",
+      "key": "гол 2|2008",
+      "title": "Гол 2",
+      "year": 2008,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:54:15.260Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        113
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "Гол",
+          "year": 2008,
+          "reason": "part_suffix"
+        },
+        {
+          "query": "Гол 2",
+          "year": 2007,
+          "reason": "year_before"
+        },
+        {
+          "query": "Гол 2",
+          "year": 2009,
+          "reason": "year_after"
+        }
+      ],
+      "order": 2
+    },
+    {
+      "group": "eligible_structural",
+      "key": "11 друзей оушена|2001",
+      "title": "11 друзей Оушена",
+      "year": 2001,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:48:25.162Z",
+      "evidenceState": "changed",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        117
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "одиннадцать друзей Оушена",
+          "year": 2001,
+          "reason": "numeral"
+        },
+        {
+          "query": "11 друзей Оушена",
+          "year": 2000,
+          "reason": "year_before"
+        },
+        {
+          "query": "11 друзей Оушена",
+          "year": 2002,
+          "reason": "year_after"
+        }
+      ],
+      "order": 3
+    },
+    {
+      "group": "eligible_structural",
+      "key": "чужой против хищника 1|2004",
+      "title": "Чужой против Хищника 1",
+      "year": 2004,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:56:01.046Z",
+      "evidenceState": "changed",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        101
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "Чужой против Хищника",
+          "year": 2004,
+          "reason": "part_suffix"
+        },
+        {
+          "query": "Чужой против Хищника 1",
+          "year": 2003,
+          "reason": "year_before"
+        },
+        {
+          "query": "Чужой против Хищника 1",
+          "year": 2005,
+          "reason": "year_after"
+        }
+      ],
+      "order": 4
+    },
+    {
+      "group": "eligible_structural",
+      "key": "12 друзей оушена|2004",
+      "title": "12 друзей Оушена",
+      "year": 2004,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-21T20:33:29.728Z",
+      "evidenceState": "missing",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        125
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "двенадцать друзей Оушена",
+          "year": 2004,
+          "reason": "numeral"
+        },
+        {
+          "query": "12 друзей Оушена",
+          "year": 2003,
+          "reason": "year_before"
+        },
+        {
+          "query": "12 друзей Оушена",
+          "year": 2005,
+          "reason": "year_after"
+        }
+      ],
+      "order": 5
+    },
+    {
+      "group": "eligible_structural",
+      "key": "код 8 часть 2|2024",
+      "title": "Код 8 Часть 2",
+      "year": 2024,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-12T13:08:51.600Z",
+      "evidenceState": "missing",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        100
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "Код 8 Часть",
+          "year": 2024,
+          "reason": "part_suffix"
+        },
+        {
+          "query": "Код 8 Часть 2",
+          "year": 2023,
+          "reason": "year_before"
+        },
+        {
+          "query": "Код 8 Часть 2",
+          "year": 2025,
+          "reason": "year_after"
+        }
+      ],
+      "order": 6
+    },
+    {
+      "group": "eligible_structural",
+      "key": "матрица 1|1999",
+      "title": "Матрица 1",
+      "year": 1999,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-12T16:26:41.956Z",
+      "evidenceState": "missing",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        136,
+        137
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "Матрица",
+          "year": 1999,
+          "reason": "part_suffix"
+        },
+        {
+          "query": "Матрица 1",
+          "year": 1998,
+          "reason": "year_before"
+        },
+        {
+          "query": "Матрица 1",
+          "year": 2000,
+          "reason": "year_after"
+        }
+      ],
+      "order": 7
+    },
+    {
+      "group": "eligible_structural",
+      "key": "чебурашка 2|2025",
+      "title": "Чебурашка 2",
+      "year": 2025,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-21T20:32:35.621Z",
+      "evidenceState": "missing",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        102,
+        103
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "Чебурашка",
+          "year": 2025,
+          "reason": "part_suffix"
+        },
+        {
+          "query": "Чебурашка 2",
+          "year": 2024,
+          "reason": "year_before"
+        },
+        {
+          "query": "Чебурашка 2",
+          "year": 2026,
+          "reason": "year_after"
+        }
+      ],
+      "order": 8
+    },
+    {
+      "group": "eligible_structural",
+      "key": "черный телефон 2|2025",
+      "title": "Черный телефон 2",
+      "year": 2025,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-12T13:13:01.755Z",
+      "evidenceState": "missing",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        113,
+        114
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "Черный телефон",
+          "year": 2025,
+          "reason": "part_suffix"
+        },
+        {
+          "query": "Черный телефон 2",
+          "year": 2024,
+          "reason": "year_before"
+        },
+        {
+          "query": "Черный телефон 2",
+          "year": 2026,
+          "reason": "year_after"
+        }
+      ],
+      "order": 9
+    },
+    {
+      "group": "eligible_structural",
+      "key": "убежище|2022",
+      "title": "Убежище",
+      "year": 2022,
+      "legacyStatus": "ambiguous",
+      "attempts": 1,
+      "retryAt": "2026-10-21T20:35:54.366Z",
+      "evidenceState": "missing",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        87,
+        88
+      ],
+      "searches": 3,
+      "variants": [
+        {
+          "query": "Убэжищэ",
+          "year": 2022,
+          "reason": "spelling_e"
+        },
+        {
+          "query": "Убежище",
+          "year": 2021,
+          "reason": "year_before"
+        },
+        {
+          "query": "Убежище",
+          "year": 2023,
+          "reason": "year_after"
+        }
+      ],
+      "order": 10
+    },
+    {
+      "group": "blocked_year",
+      "key": "apocalyptica w o a|2025",
+      "title": "APOCALYPTICA：W：O：A",
+      "year": 2025,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:51:56.168Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        73
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "APOCALYPTICA：W：O：A",
+          "year": 2024,
+          "reason": "year_before"
+        },
+        {
+          "query": "APOCALYPTICA：W：O：A",
+          "year": 2026,
+          "reason": "year_after"
+        }
+      ],
+      "order": 11
+    },
+    {
+      "group": "blocked_year",
+      "key": "dirkschneider and the old gang live in studio|2025",
+      "title": "Dirkschneider And The Old Gang Live @ In Studio",
+      "year": 2025,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:46:46.041Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        99
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Dirkschneider And The Old Gang Live @ In Studio",
+          "year": 2024,
+          "reason": "year_before"
+        },
+        {
+          "query": "Dirkschneider And The Old Gang Live @ In Studio",
+          "year": 2026,
+          "reason": "year_after"
+        }
+      ],
+      "order": 12
+    },
+    {
+      "group": "blocked_year",
+      "key": "maroon 5 live the town|2023",
+      "title": "Maroon 5 Live @ The Town",
+      "year": 2023,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T15:54:50.155Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        93
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Maroon 5 Live @ The Town",
+          "year": 2022,
+          "reason": "year_before"
+        },
+        {
+          "query": "Maroon 5 Live @ The Town",
+          "year": 2024,
+          "reason": "year_after"
+        }
+      ],
+      "order": 13
+    },
+    {
+      "group": "blocked_year",
+      "key": "mary gu качала пресс разбила нос пошла на пилон опасная поездка на blablacar е музloft 53|2023",
+      "title": "Mary Gu | Качала пресс, разбила нос, пошла на пилон. Опасная поездка на BlaBlaCar-е. МУЗLOFT #53",
+      "year": 2023,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:44:35.633Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        76
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Mary Gu | Качала пресс, разбила нос, пошла на пилон. Опасная поездка на BlaBlaCar-е. МУЗLOFT #53",
+          "year": 2022,
+          "reason": "year_before"
+        },
+        {
+          "query": "Mary Gu | Качала пресс, разбила нос, пошла на пилон. Опасная поездка на BlaBlaCar-е. МУЗLOFT #53",
+          "year": 2024,
+          "reason": "year_after"
+        }
+      ],
+      "order": 14
+    },
+    {
+      "group": "blocked_year",
+      "key": "midnight oil armistice day live sydney|2018",
+      "title": "Midnight Oil Armistice Day Live @ Sydney",
+      "year": 2018,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T09:50:17.033Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        109
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Midnight Oil Armistice Day Live @ Sydney",
+          "year": 2017,
+          "reason": "year_before"
+        },
+        {
+          "query": "Midnight Oil Armistice Day Live @ Sydney",
+          "year": 2019,
+          "reason": "year_after"
+        }
+      ],
+      "order": 15
+    },
+    {
+      "group": "blocked_year",
+      "key": "sevak от строителя до евровидения музloft 32|2022",
+      "title": "SEVAK | От строителя до Евровидения. МузLOFT #32",
+      "year": 2022,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T09:50:18.467Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        80
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "SEVAK | От строителя до Евровидения. МузLOFT #32",
+          "year": 2021,
+          "reason": "year_before"
+        },
+        {
+          "query": "SEVAK | От строителя до Евровидения. МузLOFT #32",
+          "year": 2023,
+          "reason": "year_after"
+        }
+      ],
+      "order": 16
+    },
+    {
+      "group": "blocked_year",
+      "key": "skid row live london|2022",
+      "title": "Skid Row Live @ London",
+      "year": 2022,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T09:50:15.706Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        73
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Skid Row Live @ London",
+          "year": 2021,
+          "reason": "year_before"
+        },
+        {
+          "query": "Skid Row Live @ London",
+          "year": 2023,
+          "reason": "year_after"
+        }
+      ],
+      "order": 17
+    },
+    {
+      "group": "blocked_year",
+      "key": "айдар гараев о шоу плохие песни проблемах квн и современных артистах музloft 3|2021",
+      "title": "Айдар Гараев о шоу плохие песни, проблемах КВН и современных артистах | МузLoft #3",
+      "year": 2021,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T15:55:41.525Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        105
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Айдар Гараев о шоу плохие песни, проблемах КВН и современных артистах | МузLoft #3",
+          "year": 2020,
+          "reason": "year_before"
+        },
+        {
+          "query": "Айдар Гараев о шоу плохие песни, проблемах КВН и современных артистах | МузLoft #3",
+          "year": 2022,
+          "reason": "year_after"
+        }
+      ],
+      "order": 18
+    },
+    {
+      "group": "blocked_year",
+      "key": "академик пивоваров 10 поворотных моментов российской истории скажи гордеевой|2024",
+      "title": "Академик Пивоваров: 10 поворотных моментов российской истории // «Скажи Гордеевой»",
+      "year": 2024,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:52:34.574Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        124
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Академик Пивоваров: 10 поворотных моментов российской истории // «Скажи Гордеевой»",
+          "year": 2023,
+          "reason": "year_before"
+        },
+        {
+          "query": "Академик Пивоваров: 10 поворотных моментов российской истории // «Скажи Гордеевой»",
+          "year": 2025,
+          "reason": "year_after"
+        }
+      ],
+      "order": 19
+    },
+    {
+      "group": "blocked_year",
+      "key": "дракула история любви|2025",
+      "title": "Дракула - История любви",
+      "year": 2025,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:47:34.975Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        128
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Дракула - История любви",
+          "year": 2024,
+          "reason": "year_before"
+        },
+        {
+          "query": "Дракула - История любви",
+          "year": 2026,
+          "reason": "year_after"
+        }
+      ],
+      "order": 20
+    },
+    {
+      "group": "blocked_year",
+      "key": "дунцову боятся власти почему кандидата от народа не допускают к выборам|2023",
+      "title": "Дунцову боятся власти? Почему кандидата от народа не допускают к выборам",
+      "year": 2023,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:51:40.778Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        106
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Дунцову боятся власти? Почему кандидата от народа не допускают к выборам",
+          "year": 2022,
+          "reason": "year_before"
+        },
+        {
+          "query": "Дунцову боятся власти? Почему кандидата от народа не допускают к выборам",
+          "year": 2024,
+          "reason": "year_after"
+        }
+      ],
+      "order": 21
+    },
+    {
+      "group": "blocked_year",
+      "key": "звездные собаки белка и стрелка|2010",
+      "title": "Звёздные собаки: Белка и Стрелка",
+      "year": 2010,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T09:49:01.551Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        81,
+        88
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Звёздные собаки: Белка и Стрелка",
+          "year": 2009,
+          "reason": "year_before"
+        },
+        {
+          "query": "Звёздные собаки: Белка и Стрелка",
+          "year": 2011,
+          "reason": "year_after"
+        }
+      ],
+      "order": 22
+    },
+    {
+      "group": "blocked_year",
+      "key": "из нее сделали пельмени или мать сама ее продала тайна исчезновения алены имамовой тюменский маньяк|2024",
+      "title": "ИЗ НЕЕ СДЕЛАЛИ ПЕЛЬМЕНИ ИЛИ МАТЬ САМА ЕЕ ПРОДАЛА. Тайна исчезновения Алены Имамовой/Тюменский маньяк",
+      "year": 2024,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T15:55:51.362Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        63
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "ИЗ НЕЕ СДЕЛАЛИ ПЕЛЬМЕНИ ИЛИ МАТЬ САМА ЕЕ ПРОДАЛА. Тайна исчезновения Алены Имамовой/Тюменский маньяк",
+          "year": 2023,
+          "reason": "year_before"
+        },
+        {
+          "query": "ИЗ НЕЕ СДЕЛАЛИ ПЕЛЬМЕНИ ИЛИ МАТЬ САМА ЕЕ ПРОДАЛА. Тайна исчезновения Алены Имамовой/Тюменский маньяк",
+          "year": 2025,
+          "reason": "year_after"
+        }
+      ],
+      "order": 23
+    },
+    {
+      "group": "blocked_year",
+      "key": "м ф том и джерри гигантское приключение|2013",
+      "title": "м/ф Том и Джерри Гигантское приключение",
+      "year": 2013,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:55:03.367Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        57
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "м/ф Том и Джерри Гигантское приключение",
+          "year": 2012,
+          "reason": "year_before"
+        },
+        {
+          "query": "м/ф Том и Джерри Гигантское приключение",
+          "year": 2014,
+          "reason": "year_after"
+        }
+      ],
+      "order": 24
+    },
+    {
+      "group": "blocked_year",
+      "key": "м ф фабрика иллюзий алисы и терезы|2023",
+      "title": "м/ф Фабрика иллюзий Алисы и Терезы",
+      "year": 2023,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:48:26.738Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        112
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "м/ф Фабрика иллюзий Алисы и Терезы",
+          "year": 2022,
+          "reason": "year_before"
+        },
+        {
+          "query": "м/ф Фабрика иллюзий Алисы и Терезы",
+          "year": 2024,
+          "reason": "year_after"
+        }
+      ],
+      "order": 25
+    },
+    {
+      "group": "blocked_year",
+      "key": "мой друг кот и пушкин|2025",
+      "title": "Мой друг, кот и Пушкин",
+      "year": 2025,
+      "legacyStatus": "ambiguous",
+      "attempts": 1,
+      "retryAt": "2026-10-24T15:54:48.772Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        76
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Мой друг, кот и Пушкин",
+          "year": 2024,
+          "reason": "year_before"
+        },
+        {
+          "query": "Мой друг, кот и Пушкин",
+          "year": 2026,
+          "reason": "year_after"
+        }
+      ],
+      "order": 26
+    },
+    {
+      "group": "blocked_year",
+      "key": "мортал комбат|1995",
+      "title": "Мортал Комбат",
+      "year": 1995,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:47:32.064Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        101
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Мортал Комбат",
+          "year": 1994,
+          "reason": "year_before"
+        },
+        {
+          "query": "Мортал Комбат",
+          "year": 1996,
+          "reason": "year_after"
+        }
+      ],
+      "order": 27
+    },
+    {
+      "group": "blocked_year",
+      "key": "нежный travel бали|2026",
+      "title": "Нежный Travel: БАЛИ",
+      "year": 2026,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:55:50.787Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        74
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Нежный Travel: БАЛИ",
+          "year": 2025,
+          "reason": "year_before"
+        },
+        {
+          "query": "Нежный Travel: БАЛИ",
+          "year": 2027,
+          "reason": "year_after"
+        }
+      ],
+      "order": 28
+    },
+    {
+      "group": "blocked_year",
+      "key": "он охотится на меня мой преследователь полицейский это твой последний день рождения тебя зарежу|2024",
+      "title": "ОН ОХОТИТСЯ НА МЕНЯ. Мой преследователь- полицейский. ЭТО ТВОЙ ПОСЛЕДНИЙ ДЕНЬ РОЖДЕНИЯ, ТЕБЯ ЗАРЕЖУ",
+      "year": 2024,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:54:10.313Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        76
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "ОН ОХОТИТСЯ НА МЕНЯ. Мой преследователь- полицейский. ЭТО ТВОЙ ПОСЛЕДНИЙ ДЕНЬ РОЖДЕНИЯ, ТЕБЯ ЗАРЕЖУ",
+          "year": 2023,
+          "reason": "year_before"
+        },
+        {
+          "query": "ОН ОХОТИТСЯ НА МЕНЯ. Мой преследователь- полицейский. ЭТО ТВОЙ ПОСЛЕДНИЙ ДЕНЬ РОЖДЕНИЯ, ТЕБЯ ЗАРЕЖУ",
+          "year": 2025,
+          "reason": "year_after"
+        }
+      ],
+      "order": 29
+    },
+    {
+      "group": "blocked_year",
+      "key": "отт бь ч|2006",
+      "title": "}{отт@бь)ч",
+      "year": 2006,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-24T15:55:46.313Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        92
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "}{отт@бь)ч",
+          "year": 2005,
+          "reason": "year_before"
+        },
+        {
+          "query": "}{отт@бь)ч",
+          "year": 2007,
+          "reason": "year_after"
+        }
+      ],
+      "order": 30
+    },
+    {
+      "group": "blocked_year",
+      "key": "пиноккио раскрепощенный|2026",
+      "title": "Пиноккио - Раскрепощенный",
+      "year": 2026,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:54:16.613Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        82
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Пиноккио - Раскрепощенный",
+          "year": 2025,
+          "reason": "year_before"
+        },
+        {
+          "query": "Пиноккио - Раскрепощенный",
+          "year": 2027,
+          "reason": "year_after"
+        }
+      ],
+      "order": 31
+    },
+    {
+      "group": "blocked_year",
+      "key": "самый далекий регион чукотка на край земли на собаках как люди живут|2021",
+      "title": "Самый далёкий регион / Чукотка / на край Земли на собаках / Как Люди живут",
+      "year": 2021,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:55:49.384Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        78
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Самый далёкий регион / Чукотка / на край Земли на собаках / Как Люди живут",
+          "year": 2020,
+          "reason": "year_before"
+        },
+        {
+          "query": "Самый далёкий регион / Чукотка / на край Земли на собаках / Как Люди живут",
+          "year": 2022,
+          "reason": "year_after"
+        }
+      ],
+      "order": 32
+    },
+    {
+      "group": "blocked_year",
+      "key": "солженицын который все про нас понял|2024",
+      "title": "Солженицын, который всё про нас понял",
+      "year": 2024,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:53:35.761Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        103
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Солженицын, который всё про нас понял",
+          "year": 2023,
+          "reason": "year_before"
+        },
+        {
+          "query": "Солженицын, который всё про нас понял",
+          "year": 2025,
+          "reason": "year_after"
+        }
+      ],
+      "order": 33
+    },
+    {
+      "group": "blocked_year",
+      "key": "то что внутри|2024",
+      "title": "То, что внутри",
+      "year": 2024,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:55:56.057Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        105
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "То, что внутри",
+          "year": 2023,
+          "reason": "year_before"
+        },
+        {
+          "query": "То, что внутри",
+          "year": 2025,
+          "reason": "year_after"
+        }
+      ],
+      "order": 34
+    },
+    {
+      "group": "blocked_year",
+      "key": "уральские пельмени серьги на ветер|2009",
+      "title": "Уральские пельмени: Серьги на ветер",
+      "year": 2009,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:56:57.872Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        73
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Уральские пельмени: Серьги на ветер",
+          "year": 2008,
+          "reason": "year_before"
+        },
+        {
+          "query": "Уральские пельмени: Серьги на ветер",
+          "year": 2010,
+          "reason": "year_after"
+        }
+      ],
+      "order": 35
+    },
+    {
+      "group": "blocked_year",
+      "key": "циркафрика эфиопия|2025",
+      "title": "Циркафрика. Эфиопия",
+      "year": 2025,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:46:47.452Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        56
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Циркафрика. Эфиопия",
+          "year": 2024,
+          "reason": "year_before"
+        },
+        {
+          "query": "Циркафрика. Эфиопия",
+          "year": 2026,
+          "reason": "year_after"
+        }
+      ],
+      "order": 36
+    },
+    {
+      "group": "blocked_year",
+      "key": "чудо женщина|2020",
+      "title": "Чудо-женщина",
+      "year": 2020,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:53:37.130Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        86,
+        151
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Чудо-женщина",
+          "year": 2019,
+          "reason": "year_before"
+        },
+        {
+          "query": "Чудо-женщина",
+          "year": 2021,
+          "reason": "year_after"
+        }
+      ],
+      "order": 37
+    },
+    {
+      "group": "blocked_year",
+      "key": "я себя знаю алексей смирнов х азамат мусагалиев|2022",
+      "title": "Я себя знаю! Алексей Смирнов х Азамат Мусагалиев",
+      "year": 2022,
+      "legacyStatus": "no_confident_match",
+      "attempts": 1,
+      "retryAt": "2026-10-23T23:47:46.723Z",
+      "evidenceState": "same",
+      "terminalReason": null,
+      "tmdbId": null,
+      "durations": [
+        87
+      ],
+      "searches": 2,
+      "variants": [
+        {
+          "query": "Я себя знаю! Алексей Смирнов х Азамат Мусагалиев",
+          "year": 2021,
+          "reason": "year_before"
+        },
+        {
+          "query": "Я себя знаю! Алексей Смирнов х Азамат Мусагалиев",
+          "year": 2023,
+          "reason": "year_after"
+        }
+      ],
+      "order": 38
+    }
+  ]
+}
