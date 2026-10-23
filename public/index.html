@@ -66,6 +66,7 @@
           <div class="status-row status-row-coverage"><span>Локальная база</span><strong id="status-local-coverage">загрузка…</strong></div>
           <div class="status-row status-row-coverage"><span>Окно просмотра</span><strong id="status-window-coverage">загрузка…</strong></div>
           <div class="status-row status-run-row"><span id="status-run-label">Последний run</span><div class="status-run-value"><strong id="status-last-run">загрузка…</strong><small id="status-next-run">Следующий запуск: —</small></div></div>
+          <div class="status-row"><span>Интеграции</span><strong id="status-integrations">загрузка…</strong></div>
         </div>
         <details class="footer-details" id="status-details">
           <summary><span id="status-details-label">Показать детали</span></summary>
@@ -96,6 +97,14 @@
               <div><dt>Без метаданных</dt><dd id="detail-watchlist-metadata">—</dd></div>
               <div><dt>Названия требуют проверки</dt><dd id="detail-watchlist-titles">—</dd></div>
             </dl></section>
+            <section aria-labelledby="status-integrations-title"><h3 id="status-integrations-title">Интеграции</h3><p class="status-section-help" id="status-integrations-help">Состояние заданий. Окно программы показано сверху.</p><dl id="status-integration-list">
+              <div data-integration="letterboxd_watchlist"><dt>Watchlist</dt><dd id="integration-watchlist">—</dd></div>
+              <div data-integration="letterboxd_ratings"><dt>Оценки</dt><dd id="integration-ratings">—</dd></div>
+              <div data-integration="epg"><dt>Загрузка EPG</dt><dd id="integration-epg">—</dd></div>
+              <div data-integration="resolver"><dt>Распознавание</dt><dd id="integration-resolver">—</dd></div>
+              <div data-integration="predictions"><dt>Прогнозы</dt><dd id="integration-predictions">—</dd></div>
+              <div data-integration="metadata" hidden><dt>Метаданные</dt><dd id="integration-metadata">—</dd></div>
+            </dl><a class="status-events-link" id="status-integrations-events" href="#activity-title">История в событиях</a></section>
             <section aria-labelledby="status-run-title"><h3 id="status-run-title">Последний запуск</h3><dl>
               <div><dt>Начат</dt><dd id="detail-run-started">—</dd></div>
               <div><dt>Добавлено</dt><dd id="detail-run-added">—</dd></div>

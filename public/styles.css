@@ -68,7 +68,7 @@
 .footer-details-body dl>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:4px 0;border-bottom:1px solid #242b24;min-width:0}
 .footer-details-body dt{min-width:0;overflow-wrap:anywhere}
 .footer-details-body dd{margin:0;color:#dce8d2;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
-.status-events-link{display:inline-block;margin-top:11px;color:var(--lime);text-underline-offset:3px}
+.status-events-link{display:inline-block;margin-top:11px;color:var(--lime);text-underline-offset:3px}#status-integration-list>div{grid-template-columns:minmax(0,1fr);gap:2px}#status-integration-list [hidden]{display:none}#status-integration-list dd{text-align:left}#status-integration-list dd.is-failed{color:#f0c2b4}#status-integration-list dd.is-attention{color:#f3dd9a}
 @media(max-width:760px){.search-box{margin-bottom:20px}.movie-card.has-score .film-head{padding-right:118px;min-height:158px}.started-action{right:16px;bottom:14px;padding:0}.status-footer .footer-status{width:100%;margin:0}.status-summary{width:100%;grid-template-columns:144px minmax(0,1fr);column-gap:16px}}
 .snapshot{display:flex;flex-direction:column;align-items:flex-end;gap:2px;min-width:0;text-align:right}
 .snapshot-coverage{color:var(--muted);font-size:13px;line-height:1.35;max-width:34rem}

@@ -72,7 +72,7 @@ Use `rating:null` to clear one. The film's actual rating never enters the `/next
 
 ## Failure behavior
 
-`GET /api/enrichment/status` returns the latest run with trigger, start/finish, checked/added/updated/failed, and queue status with remaining count, last batch stage/reason, and next catch-up time. The programme API does not read enrichment storage. A failed recompute keeps the previously committed prediction and its history, and the UI continues to show the programme. Ordinary successful checks need no ChatGPT notification; the Site's Events panel and footer expose progress.
+`GET /api/enrichment/status` returns the latest run with trigger, start/finish, checked/added/updated/failed, and queue status with remaining count, last batch stage/reason, and next catch-up time. The programme API does not read enrichment storage. A failed recompute keeps the previously committed prediction and its history, and the UI continues to show the programme. Ordinary successful checks need no ChatGPT notification; the Site's Events panel and footer expose progress. `GET /api/enrichment/footer/status` also returns `integrations` for that footer: watchlist, ratings, EPG ingestion, film recognition and predictions. The states come from the stored job results. The route still does not start a sync, a ratings refresh, or recognition. A missing ratings status while `RATINGS_REFRESH` is unset is `off`. A stored ratings failure does not change the EPG or prediction state.
 
 ## Letterboxd personal ratings and runtime
 
