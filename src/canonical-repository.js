@@ -37,7 +37,7 @@ async function applyLink(db,input){
  await db.transaction(async()=>{
   if(retirement?.release)await db.run('DELETE FROM film_external_id WHERE film_id=?',[retirement.from]);
   await writeFilm(db,plan);
-  if(retirement?.release)await retireFilm(db,retirement);
+  if(retirement?.release){await adoptRetired(db,retirement);await retireFilm(db,retirement);}
  });
  return readFilm(db,plan.film.id);
 }
@@ -54,7 +54,7 @@ async function planFilm(db,input){
   if(owner&&owner.film_id!==id&&owner.film_id!==input.releasing)throw new Error('identity_collision');
  }
  const watchlist=input.watchlist===true?true:input.watchlist===false?false:null;
- return {film:guarded,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits||[],watchlist,updatedAt:updatedAtOf(guarded)};
+ return {film:guarded,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits,watchlist,updatedAt:updatedAtOf(guarded)};
 }
 
 async function planPerson(db,input){
@@ -80,12 +80,14 @@ async function writeFilm(db,plan){
  await db.run('INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET contract_version=excluded.contract_version,canonical_identity=excluded.canonical_identity,original_title=excluded.original_title,updated_at=excluded.updated_at',[film.id,film.contractVersion,film.canonicalIdentity??null,film.originalTitle??null,plan.updatedAt]);
  await db.run('DELETE FROM film_external_id WHERE film_id=?',[film.id]);
  await db.run('DELETE FROM film_alias WHERE film_id=?',[film.id]);
- await db.run('DELETE FROM film_dimension WHERE film_id=?',[film.id]);
- await db.run('DELETE FROM film_person_credit WHERE film_id=?',[film.id]);
+ if(plan.credits!==undefined)await db.run('DELETE FROM film_person_credit WHERE film_id=?',[film.id]);
  for(const item of film.externalIds||[])await db.run('INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?)',[film.id,required(item.scheme,'scheme'),String(item.value),item.trusted&&!item.conflicting?1:0,item.conflicting?1:0,json(item.provenance)]);
  for(const item of film.aliases||[])await db.run('INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,?,?,?)',[film.id,item.kind||'title',required(item.value,'alias'),json(item.provenance)]);
- for(const dimension of ['identity','metadata','localization','fingerprint','prediction'])await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(film.id,film[dimension]));
- for(const credit of plan.credits){
+ await noteHeldLocalization(db,{table:'film_dimension',column:'film_id',id:film.id,kind:'title',entityKind:'film',incoming:film.localization});
+ await db.run("DELETE FROM film_dimension WHERE film_id=? AND dimension<>'localization'",[film.id]);
+ for(const dimension of ['identity','metadata','fingerprint','prediction'])await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(film.id,film[dimension]));
+ await db.run(localizationUpsert('film_dimension','film_id'),dimensionParams(film.id,film.localization));
+ if(plan.credits!==undefined)for(const credit of plan.credits){
   if(credit.role!=='director'&&credit.role!=='actor')throw new Error('Credit role is invalid');
   await db.run('INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES (?,?,?,?)',[film.id,requiredPerson(credit.personId),credit.role,credit.ordinal]);
  }
@@ -101,11 +103,21 @@ async function writePerson(db,plan){
  await db.run('INSERT INTO person (id,role_id,contract_version,updated_at) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET role_id=excluded.role_id,contract_version=excluded.contract_version,updated_at=excluded.updated_at',[person.id,required(person.roleId,'roleId'),person.contractVersion,plan.updatedAt]);
  await db.run('DELETE FROM person_external_id WHERE person_id=?',[person.id]);
  await db.run('DELETE FROM person_alias WHERE person_id=?',[person.id]);
- await db.run('DELETE FROM person_dimension WHERE person_id=?',[person.id]);
  for(const item of person.externalIds||[])await db.run('INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?)',[person.id,required(item.scheme,'scheme'),String(item.value),item.trusted&&!item.conflicting?1:0,item.conflicting?1:0,json(item.provenance)]);
  for(const item of person.aliases||[])await db.run('INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES (?,?,?,?)',[person.id,item.kind||'name',required(item.value,'alias'),json(item.provenance)]);
- for(const dimension of ['identity','localization'])await db.run('INSERT INTO person_dimension (person_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(person.id,person[dimension]));
+ await noteHeldLocalization(db,{table:'person_dimension',column:'person_id',id:person.id,kind:'name',entityKind:'person',incoming:person.localization});
+ await db.run("DELETE FROM person_dimension WHERE person_id=? AND dimension<>'localization'",[person.id]);
+ await db.run('INSERT INTO person_dimension (person_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(person.id,person.identity));
+ await db.run(localizationUpsert('person_dimension','person_id'),dimensionParams(person.id,person.localization));
  for(const conflict of person.localizationConflicts||[])await db.run('INSERT INTO localization_conflict (id,entity_kind,entity_id,value,source,provenance_json,authority,reason,at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',conflictParams('person',person.id,conflict));
+}
+
+async function adoptRetired(db,retirement){
+ const from=retirement.from,to=retirement.to;
+ await db.run('INSERT INTO film_alias (film_id,kind,value,provenance_json) SELECT ?,kind,value,provenance_json FROM film_alias WHERE film_id=? ON CONFLICT(film_id,kind,value) DO NOTHING',[to,from]);
+ await db.run('INSERT INTO film_person_credit (film_id,person_id,role,ordinal) SELECT ?,c.person_id,c.role,CASE WHEN EXISTS (SELECT 1 FROM film_person_credit s WHERE s.film_id=? AND s.role=c.role AND s.ordinal=c.ordinal AND s.person_id<>c.person_id) THEN c.ordinal+(SELECT COALESCE(MAX(s.ordinal),-1)+1 FROM film_person_credit s WHERE s.film_id=? AND s.role=c.role) ELSE c.ordinal END FROM film_person_credit c WHERE c.film_id=? AND NOT EXISTS (SELECT 1 FROM film_person_credit s WHERE s.film_id=? AND s.person_id=c.person_id AND s.role=c.role)',[to,to,to,from,to]);
+ await db.run("INSERT INTO localization_conflict (id,entity_kind,entity_id,value,source,provenance_json,authority,reason,at) SELECT 'film:'||?||':'||json_object('reason',reason,'value',value,'source',source),'film',?,value,source,provenance_json,authority,reason,at FROM localization_conflict WHERE entity_kind='film' AND entity_id=? ON CONFLICT(id) DO NOTHING",[to,to,from]);
+ await db.run('UPDATE film_redirect SET to_film_id=? WHERE to_film_id=? AND from_id<>?',[to,from,to]);
 }
 
 async function retireFilm(db,retirement){
@@ -114,6 +126,7 @@ async function retireFilm(db,retirement){
  await db.run('DELETE FROM film_alias WHERE film_id=?',[retirement.from]);
  await db.run('DELETE FROM film_dimension WHERE film_id=?',[retirement.from]);
  await db.run('DELETE FROM watchlist_film WHERE film_id=?',[retirement.from]);
+ await db.run("DELETE FROM localization_conflict WHERE entity_kind='film' AND entity_id=?",[retirement.from]);
  await db.run('DELETE FROM film WHERE id=?',[retirement.from]);
  await db.run('INSERT INTO film_redirect (from_id,to_film_id,at) VALUES (?,?,?)',[retirement.from,retirement.to,retirement.at]);
 }
@@ -159,15 +172,21 @@ async function resolveFilm(db,requested){
 }
 
 function guardReviewed(entity,stored,kind){
- if(!stored||stored.status!=='reviewed'||reviewedWrite(entity.localization))return entity;
+ if(!stored||stored.status!=='reviewed'||replacesStored(stored,entity.localization))return entity;
  const incoming=entity.localization||{};
  const conflicts=[...(entity.localizationConflicts||[])];
  const aliases=[...(entity.aliases||[])];
+ const reason=stored.authority==='owner'?'owner_kept':'reviewed_kept';
  if(incoming.value&&incoming.value!==stored.value){
-  conflicts.push({value:incoming.value,source:incoming.source||null,provenance:incoming.provenance??null,at:incoming.updatedAt||stored.updated_at,reason:'reviewed_kept'});
+  conflicts.push({value:incoming.value,source:incoming.source||null,provenance:incoming.provenance??null,at:incoming.updatedAt||stored.updated_at,reason});
   aliases.push({kind,value:incoming.value,provenance:incoming.provenance??null});
  }
  return {...entity,localization:dimensionView(stored),localizationConflicts:conflicts,aliases};
+}
+
+function replacesStored(stored,incoming){
+ if(stored?.authority==='owner')return incoming?.status==='reviewed'&&incoming?.provenance?.authority==='owner';
+ return reviewedWrite(incoming);
 }
 
 function reviewedWrite(state){
@@ -191,9 +210,22 @@ function conflictParams(kind,id,conflict){
 }
 
 function dimensionView(row){
- const state={dimension:row.dimension,status:row.status,updatedAt:row.updated_at,source:row.source,sourceVersion:row.source_version,provenance:parseJson(row.provenance_json),lastError:row.last_error,failureReason:row.failure_reason,retryAt:row.retry_at,attempts:row.attempts,nextAction:row.next_action};
+ const provenance=parseJson(row.provenance_json);
+ const state={dimension:row.dimension,status:row.status,updatedAt:row.updated_at,source:row.source,sourceVersion:row.source_version,provenance:provenance?.authority||!row.authority?provenance:{...(provenance||{}),authority:row.authority},lastError:row.last_error,failureReason:row.failure_reason,retryAt:row.retry_at,attempts:row.attempts,nextAction:row.next_action};
  if(row.dimension==='localization')state.value=row.value;
  return state;
+}
+
+async function noteHeldLocalization(db,{table,column,id,kind,entityKind,incoming}){
+ const value=incoming?.value??null,source=incoming?.source??null,status=incoming?.status??null,authority=incoming?.provenance?.authority??null,at=incoming?.updatedAt??null,provenance=json(incoming?.provenance);
+ const aliasTable=kind==='title'?'film_alias':'person_alias';
+ const hold="status='reviewed' AND NOT (value IS ?) AND NOT ((authority='owner' AND ?='reviewed' AND ?='owner') OR (COALESCE(authority,'')<>'owner' AND ?='reviewed' AND (? IN ('dictionary','owner') OR ?='dictionary')))";
+ await db.run(`INSERT INTO ${aliasTable} (${column},kind,value,provenance_json) SELECT ${column},?,?,? FROM ${table} WHERE ${column}=? AND dimension='localization' AND ${hold} AND ? IS NOT NULL ON CONFLICT(${column},kind,value) DO NOTHING`,[kind,value,provenance,id,value,status,authority,status,authority,source,value]);
+ await db.run(`INSERT INTO localization_conflict (id,entity_kind,entity_id,value,source,provenance_json,authority,reason,at) SELECT ?||':'||?||':'||json_object('reason',CASE WHEN authority='owner' THEN 'owner_kept' ELSE 'reviewed_kept' END,'value',?,'source',?),?,?,?,?,?,authority,CASE WHEN authority='owner' THEN 'owner_kept' ELSE 'reviewed_kept' END,? FROM ${table} WHERE ${column}=? AND dimension='localization' AND ${hold} ON CONFLICT(id) DO NOTHING`,[entityKind,id,value,source,entityKind,id,value,source,provenance,at,id,value,status,authority,status,authority,source]);
+}
+
+function localizationUpsert(table,column){
+ return `INSERT INTO ${table} (${column},dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(${column},dimension) DO UPDATE SET status=excluded.status,source=excluded.source,source_version=excluded.source_version,provenance_json=excluded.provenance_json,value=excluded.value,authority=excluded.authority,last_error=excluded.last_error,failure_reason=excluded.failure_reason,retry_at=excluded.retry_at,attempts=excluded.attempts,next_action=excluded.next_action,updated_at=excluded.updated_at WHERE ${table}.status<>'reviewed' OR (${table}.authority='owner' AND excluded.status='reviewed' AND excluded.authority='owner') OR (COALESCE(${table}.authority,'')<>'owner' AND excluded.status='reviewed' AND (excluded.authority IN ('dictionary','owner') OR excluded.source='dictionary'))`;
 }
 
 function external(row){return {scheme:row.scheme,value:row.value,trusted:row.trusted===1,conflicting:row.conflicting===1,provenance:parseJson(row.provenance_json)};}

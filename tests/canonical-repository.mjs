@@ -102,6 +102,81 @@ assert.equal(await count(db,'SELECT COUNT(*) AS n FROM score_result'),0);
 assert.equal(await count(db,'SELECT COUNT(*) AS n FROM programme_generation'),0);
 assert.equal(await count(db,'SELECT COUNT(*) AS n FROM prediction_history'),0);
 
+const creditFilm=filmView(facts({letterboxdId:'credit-check'}));
+await repo.saveFilm({film:creditFilm,credits:[director]});
+const preservedCredits=await repo.saveFilm({film:creditFilm});
+assert.equal(JSON.stringify(preservedCredits.credits),JSON.stringify([director]));
+const clearedCredits=await repo.saveFilm({film:creditFilm,credits:[]});
+assert.equal(clearedCredits.credits.length,0);
+
+const hopDictionary={title:'Первый',status:'verified',tmdbId:'301',sources:['dictionary']};
+const hopA=filmView(facts({localId:'film:hop-a',tmdbId:'301',decision:{status:'verified'},title:{original:'First',dictionary:hopDictionary}}));
+const hopB=filmView(facts({localId:'film:hop-b',tmdbId:'302'}));
+const hopC=filmView(facts({localId:'film:hop-c',tmdbId:'303'}));
+const hopActor=personView({roleId:'actor/hop',original:'Hop Actor',now:NOW});
+await repo.savePerson({person:hopActor});
+await repo.saveFilm({film:hopA,credits:[director]});
+const hopWeak={...hopA,localization:{...hopA.localization,status:'provisional',source:'wikidata',sourceVersion:'provisional',value:'Черновик',provenance:{value:'Черновик'},nextAction:'keep_provisional',updatedAt:LATER}};
+const hopStored=await repo.saveFilm({film:hopWeak,credits:[director]});
+assert.equal(hopStored.conflicts.some(item=>item.value==='Черновик'),true);
+await repo.saveFilm({film:hopB,credits:[{personId:hopActor.id,role:'actor',ordinal:0}]});
+await repo.saveFilm({film:hopC});
+await repo.applyLink({survivor:hopB,redirect:{from:hopA.id,to:hopB.id,at:LATER}});
+await repo.applyLink({survivor:hopC,redirect:{from:hopB.id,to:hopC.id,at:LATER}});
+const reopenedHops=createCanonicalRepository(openSqlite(database));
+const viaA=await reopenedHops.readFilm(hopA.id);
+const viaB=await reopenedHops.readFilm(hopB.id);
+assert.equal(viaA.id,'film:hop-c');
+assert.equal(viaB.id,'film:hop-c');
+assert.equal(viaA.redirectedFrom,hopA.id);
+assert.equal(viaB.redirectedFrom,hopB.id);
+assert.equal(viaA.conflicts.some(item=>item.value==='Черновик'),true);
+assert.equal(viaB.conflicts.some(item=>item.value==='Черновик'),true);
+assert.equal(viaA.aliases.some(item=>item.value==='Черновик'),true);
+assert.equal(viaA.credits.some(item=>item.personId===director.personId&&item.role==='director'),true);
+assert.equal(viaA.credits.some(item=>item.personId===hopActor.id&&item.role==='actor'),true);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM film WHERE id IN ('film:hop-a','film:hop-b')"),0);
+const hopRedirects=await count(db,'SELECT COUNT(*) AS n FROM film_redirect');
+await repo.applyLink({survivor:hopC,redirect:{from:hopB.id,to:hopC.id,at:LATER}});
+assert.equal(await count(db,'SELECT COUNT(*) AS n FROM film_redirect'),hopRedirects);
+assert.equal(await count(db,"SELECT COUNT(*) AS n FROM film WHERE id='film:hop-c'"),1);
+
+const raceFilm=filmView(facts({letterboxdId:'race-film',title:{original:'Race',provisional:{title:'Предварительное'}}}));
+await repo.saveFilm({film:raceFilm,credits:[director]});
+const ownerValue='Название владельца';
+const ownerFilm={...raceFilm,localization:{...raceFilm.localization,status:'reviewed',source:'owner',sourceVersion:'owner',value:ownerValue,provenance:{authority:'owner',value:ownerValue},nextAction:'keep_reviewed',updatedAt:LATER}};
+const staleFilm={...raceFilm,localization:{...raceFilm.localization,status:'provisional',source:'wikidata',sourceVersion:'provisional',value:'Устаревшее',provenance:{value:'Устаревшее'},nextAction:'keep_provisional',updatedAt:LATER}};
+db.beforeTransaction(async()=>{await repo.saveFilm({film:ownerFilm,credits:[director]});});
+const raced=await repo.saveFilm({film:staleFilm});
+assert.equal(raced.dimensions.localization.value,ownerValue);
+assert.equal(raced.dimensions.localization.provenance.authority,'owner');
+assert.equal(JSON.stringify(raced.credits),JSON.stringify([director]));
+assert.equal(raced.aliases.some(item=>item.value==='Устаревшее'),true);
+assert.equal(raced.conflicts.filter(item=>item.reason==='owner_kept'&&item.value==='Устаревшее').length,1);
+const dictionaryFilm={...ownerFilm,localization:{...ownerFilm.localization,source:'dictionary',sourceVersion:'verified',value:'Словарное название',provenance:{authority:'dictionary',value:'Словарное название',sources:['dictionary']},updatedAt:LATER}};
+const afterDictionary=await repo.saveFilm({film:dictionaryFilm,credits:[director]});
+assert.equal(afterDictionary.dimensions.localization.value,ownerValue);
+assert.equal(afterDictionary.dimensions.localization.provenance.authority,'owner');
+assert.equal(afterDictionary.aliases.some(item=>item.value==='Словарное название'),true);
+assert.equal(afterDictionary.conflicts.filter(item=>item.reason==='owner_kept'&&item.value==='Словарное название').length,1);
+
+const racePerson=personView({roleId:'actor/race',original:'Race Person',now:NOW});
+await repo.savePerson({person:racePerson});
+const ownerPerson={...racePerson,localization:{...racePerson.localization,status:'reviewed',source:'owner',sourceVersion:'owner',value:'Имя владельца',provenance:{authority:'owner',value:'Имя владельца'},nextAction:'keep_reviewed',updatedAt:LATER}};
+const stalePerson={...racePerson,localization:{...racePerson.localization,status:'provisional',source:'wikidata',sourceVersion:'provisional',value:'Старое имя',provenance:{value:'Старое имя'},nextAction:'keep_provisional',updatedAt:LATER}};
+db.beforeTransaction(async()=>{await repo.savePerson({person:ownerPerson});});
+const racedPerson=await repo.savePerson({person:stalePerson});
+assert.equal(racedPerson.dimensions.localization.value,'Имя владельца');
+assert.equal(racedPerson.dimensions.localization.provenance.authority,'owner');
+assert.equal(racedPerson.aliases.some(item=>item.value==='Старое имя'),true);
+assert.equal(racedPerson.conflicts.filter(item=>item.reason==='owner_kept'&&item.value==='Старое имя').length,1);
+const dictionaryPerson={...ownerPerson,localization:{...ownerPerson.localization,source:'dictionary',sourceVersion:'verified',value:'Словарное имя',provenance:{authority:'dictionary',value:'Словарное имя'},updatedAt:LATER}};
+const heldPerson=await repo.savePerson({person:dictionaryPerson});
+assert.equal(heldPerson.dimensions.localization.value,'Имя владельца');
+assert.equal(heldPerson.dimensions.localization.provenance.authority,'owner');
+assert.equal(heldPerson.aliases.some(item=>item.value==='Словарное имя'),true);
+assert.equal(heldPerson.conflicts.filter(item=>item.reason==='owner_kept'&&item.value==='Словарное имя').length,1);
+
 async function counts(){
  const names=['film','film_redirect','film_alias','film_external_id','localization_conflict','film_person_credit','film_dimension','watchlist_film','person','person_alias'];
  const rows=await Promise.all(names.map(name=>count(db,'SELECT COUNT(*) AS n FROM '+name)));
@@ -114,8 +189,10 @@ function openSqlite(file){
   run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},
   get(sql,params=[]){if(state.buffer)throw new Error('Read inside the canonical transaction');return Promise.resolve(query(file,sql,params)[0]??null);},
   all(sql,params=[]){if(state.buffer)throw new Error('Read inside the canonical transaction');return Promise.resolve(query(file,sql,params));},
+  beforeTransaction(fn){state.beforeTransaction=fn;},
   async transaction(fn){
    if(state.buffer)return fn();
+   if(state.beforeTransaction){const hook=state.beforeTransaction;state.beforeTransaction=null;await hook();}
    state.buffer=[];
    try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}
    finally{state.buffer=null;}
