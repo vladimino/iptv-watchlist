@@ -134,6 +134,48 @@ const newerRating=await repo.saveActualRating({filmId:'film:zz-rate',rating:5,so
 assert.equal(newerRating.rating,5);
 assert.equal(newerRating.recordedAt,'2026-10-19T13:00:00.000Z');
 
+await db.run("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:zz-null',1,'Null Title','2026-10-19T01:00:00.000Z')");
+const undated={filmId:'film:zz-null',schemaVersion:1,fingerprintHash:'new-hash',generatedAt:null,invalidatedAt:null,r2Key:'r2/fingerprint/new-hash',contentSha256:'sha-new-hash'};
+const staleUndated={...undated,fingerprintHash:'stale-hash',r2Key:'r2/fingerprint/stale-hash',contentSha256:'sha-stale-hash'};
+const keptUndated=await repo.saveFingerprint(undated);
+assert.equal(keptUndated.fingerprintHash,'new-hash');
+assert.equal(keptUndated.generatedAt,null);
+const repeatedUndated=await repo.saveFingerprint(undated);
+assert.equal(repeatedUndated.fingerprintHash,'new-hash');
+assert.equal(repeatedUndated.invalidatedAt,null);
+await assert.rejects(()=>repo.saveFingerprint(staleUndated),/Fingerprint conflicts/);
+assert.equal((await repo.readFilm('film:zz-null')).fingerprint.fingerprintHash,'new-hash');
+const datedPrint=await repo.saveFingerprint({...undated,fingerprintHash:'dated-hash',generatedAt:'2026-10-23T02:00:00.000Z',r2Key:'r2/fingerprint/dated-hash',contentSha256:'sha-dated-hash'});
+assert.equal(datedPrint.fingerprintHash,'dated-hash');
+assert.equal(datedPrint.generatedAt,'2026-10-23T02:00:00.000Z');
+const undatedAfterDated=await repo.saveFingerprint(staleUndated);
+assert.equal(undatedAfterDated.fingerprintHash,'dated-hash');
+assert.equal(undatedAfterDated.generatedAt,'2026-10-23T02:00:00.000Z');
+const delayedUndated=await repo.saveFingerprint(staleUndated);
+assert.equal(JSON.stringify(delayedUndated),JSON.stringify(undatedAfterDated));
+await db.run("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:zz-void',1,'Void Title','2026-10-19T01:00:00.000Z')");
+const voidPrint={filmId:'film:zz-void',schemaVersion:1,fingerprintHash:'void-hash',generatedAt:null,invalidatedAt:null,r2Key:'r2/fingerprint/void-hash',contentSha256:'sha-void-hash'};
+await repo.saveFingerprint(voidPrint);
+const voidInvalid=await repo.saveFingerprint({...voidPrint,invalidatedAt:'2026-10-23T04:00:00.000Z'});
+assert.equal(voidInvalid.fingerprintHash,'void-hash');
+assert.equal(voidInvalid.generatedAt,null);
+assert.equal(voidInvalid.invalidatedAt,'2026-10-23T04:00:00.000Z');
+
+await db.run("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:zz-part',1,'Partial Title','2026-10-19T01:00:00.000Z')");
+await db.run("INSERT INTO prediction_current (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at) VALUES ('film:zz-part',1,NULL,'print-1',1,1,3.5,'r2/prediction/partial','sha-prediction-partial','2026-10-20T01:00:00.000Z')");
+const partialNext={filmId:'film:zz-part',tasteProfileVersion:1,tasteProfileHash:'profile-1',fingerprintHash:'print-1',fingerprintSchemaVersion:1,predictionPromptVersion:1,predictedRating:3.5,r2Key:'r2/prediction/partial',contentSha256:'sha-prediction-partial',updatedAt:'2026-10-21T01:00:00.000Z'};
+const archivedPartial=await repo.savePrediction(partialNext);
+assert.equal(archivedPartial.history.length,1);
+assert.equal(archivedPartial.history[0].payload.tasteProfileHash,null);
+assert.equal(archivedPartial.history[0].payload.predictedRating,3.5);
+assert.equal(archivedPartial.history[0].r2Key,'r2/prediction/partial');
+assert.equal(archivedPartial.prediction.tasteProfileHash,'profile-1');
+assert.equal(archivedPartial.prediction.updatedAt,partialNext.updatedAt);
+const repeatedPartial=await repo.savePrediction(partialNext);
+assert.equal(repeatedPartial.history.length,1);
+const reopenedPartial=createPredictionRepository(openSqlite(database));
+assert.equal(JSON.stringify(await reopenedPartial.readFilm('film:zz-part')),JSON.stringify(repeatedPartial));
+
 async function count(databaseHandle,sql){return (await databaseHandle.get(sql)).n;}
 function openSqlite(file){
  const state={buffer:null};
