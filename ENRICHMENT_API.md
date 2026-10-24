@@ -1,10 +1,10 @@
 # Enrichment API for «В эфире»
 
-The production API is Cloudflare Worker `iptv` at `https://iptv.vladimino.workers.dev/`, private behind Cloudflare Access. Scheduled Tasks are off. Unattended authorization to Cloudflare is not configured, and this document does not define one.
+The production API is Cloudflare Worker `iptv` at `https://iptv.vladimino.workers.dev/`, private behind Cloudflare Access. External ChatGPT Scheduled Tasks for EPG/watchlist and predictions were restored under [AIR-62](https://trello.com/c/CU71gW4c) and observed enabled with recent executions on 24 October 2026. These use owner-only IPTV MCP, not Worker Cron; check live task state separately from the repository or Worker `schedules=0`.
 
 `get_site`, `siwc_bypass_bearer_token`, and `OAI-Sites-Authorization` belong only to the legacy Site. They are not credentials for the Cloudflare Worker. Do not send them to `workers.dev`.
 
-The prediction launch steps later in this file are historical. The current runner contract is [docs/prediction-runner.md](docs/prediction-runner.md). Do not start predictions from the historical steps while Scheduled Tasks remain disabled.
+The prediction launch steps later in this file are historical. The current runner contract is [docs/prediction-runner.md](docs/prediction-runner.md). Do not execute the historical launch steps: the current runner/MCP contract supersedes them, and any additional manual production run needs explicit owner approval.
 
 This subsystem uses a separate `enrichment/` R2 namespace. It does not write programme, watchlist, metadata, sync, or started records. It is safe for programme sync to work without it.
 
@@ -41,7 +41,7 @@ Each text field must be nonempty. `anchorFilms` can be empty if no anchored actu
 
 ## Run a bounded batch (manual and scheduled) — historical
 
-This section is the older bounded-batch caller. It is not the current operating procedure. Follow [docs/prediction-runner.md](docs/prediction-runner.md) instead, and do not run either procedure until Scheduled Tasks are separately restored.
+This section is the older bounded-batch caller. It is not the current operating procedure. Follow [docs/prediction-runner.md](docs/prediction-runner.md) and [MCP](docs/mcp.md) instead. AIR-62 restored scheduled tasks; that does not authorize an extra manual writer run.
 
 After a successful programme commit or taste profile update, the Site reconciles a persistent `enrichment/prediction-queue.json` from every watchlist film whose prediction is missing or stale. Broadcast times never make a prediction stale. Films available in the current archive or next 24 hours come first, then the rest. A valid fingerprint is reused even when its prediction is stale. Programme sync succeeds even if queue reconciliation fails; the next batch reconciles again.
 
@@ -110,7 +110,7 @@ Every EPG commit and discovery response includes `discovery`:
 
 `ratingsPending` on a completed sync is not a discovery signal. A later `epg_sync_step` does not retry Letterboxd. The rating attempt that belongs to the EPG commit still runs once inside that commit. [AIR-64](https://trello.com/c/WTnyO8bX) is a separate request, `POST /api/enrichment/ratings/refresh`, and it runs only when `RATINGS_REFRESH` is `on`. That variable is unset. A films-page HTTP 403 keeps the last complete ratings snapshot and is reported as `blocked`; it is not retried inside the request. `GET /api/enrichment/ratings/status` only reads. A successful refresh can fill a half-star rating on an existing watchlist removal event. It does not create a second event. A failed event write leaves the published ratings result successful. An incomplete diary page is `diary.cause: incomplete_page` and does not change the films result. See `docs/air-64-ratings.md`.
 
-`POST /api/sync/epg` queues discovery after committing the programme. `POST /api/enrichment/discovery/scan` queues it after scanning `EPG_XML_URL`. Neither request runs the chunk. The prediction runner never waits for TMDB. No schedule change, new LLM invocation or recalibration is required. Scheduled Tasks stay off until [AIR-62](https://trello.com/c/CU71gW4c).
+`POST /api/sync/epg` queues discovery after committing the programme. `POST /api/enrichment/discovery/scan` queues it after scanning `EPG_XML_URL`. Neither request runs the chunk. The prediction runner never waits for TMDB. No schedule change, new LLM invocation or recalibration is required. [AIR-62](https://trello.com/c/CU71gW4c) subsequently restored external ChatGPT Scheduled Tasks, without installing Worker Cron triggers.
 
 `GET /api/enrichment/pipeline/status` separates normalized EPG candidate titles, excluded non-movies, unresolved candidates, unique confirmed TMDB films, hot/cold cached films, queued predictions, hot predictions and cold deferred work. These populations differ; candidate counts must never be presented as film counts. `GET /api/enrichment/queue/status` additionally exposes `hotCount`, `hotPredicted`, `coldCount`, `coldWithoutPrediction`, and hot `priorityCount`.
 

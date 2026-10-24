@@ -2,7 +2,7 @@
 
 Worker `iptv` serves a remote MCP server at `https://iptv.vladimino.workers.dev/mcp`. Cloudflare Access application `IPTV MCP` authenticates every request with Managed OAuth, and the Worker verifies the signed Access JWT. The same endpoint exposes two connection probes and a narrow set of EPG and prediction tools. Those tools call the existing Worker functions. They do not accept a URL, an R2 key, or an API path, and they do not generate fingerprints or predictions: ChatGPT does that and submits the result.
 
-Publishing this Worker does not start sync or prediction and does not enable Scheduled Tasks. A tool writes to R2 only when an authorized caller invokes it. Enabling the two production tasks is [AIR-62](https://trello.com/c/CU71gW4c), after the lease check in [docs/deployment.md](deployment.md). The isolated production write/read/cleanup test is still a separate approved operation; `probe_echo` does not replace it.
+Publishing this Worker does not start sync or prediction and does not enable Scheduled Tasks. A tool writes to R2 only when an authorized caller invokes it. [AIR-62](https://trello.com/c/CU71gW4c) separately restored the two external ChatGPT Scheduled Tasks on 21 October 2026. A deploy does not control their enablement, and additional writer runs or task changes require separate approval. See [deployment.md](deployment.md) and check live task state. The isolated production write/read/cleanup test is still a separate approved operation; `probe_echo` does not replace it.
 
 The endpoint lives in the existing Worker. There is no second Worker, no new binding, no Durable Object, and no KV namespace.
 
@@ -57,7 +57,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
 | `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. [AIR-88](air-88-run-diagnostics.md). |
 
-Prerequisite for every tool is [AIR-58](https://trello.com/c/BB01YN2f) (this Access check). `epg_sync_step` depends on [AIR-60](https://trello.com/c/UO0YqoWw) for resolver continuation. [AIR-62](https://trello.com/c/CU71gW4c) is the downstream decision to run the scheduled tasks. [AIR-49](https://trello.com/c/YNaLFwtW) (D1) is independent and unused here.
+Prerequisite for every tool is [AIR-58](https://trello.com/c/BB01YN2f) (this Access check). `epg_sync_step` depends on [AIR-60](https://trello.com/c/UO0YqoWw) for resolver continuation. [AIR-62](https://trello.com/c/CU71gW4c) completed the separate unattended scheduled-task rollout. [AIR-49](https://trello.com/c/YNaLFwtW) (D1) is independent and unused here.
 
 Write tools are annotated `readOnlyHint: false`. `enrichment_status` is too, because the HTTP status route can persist a recovered stop event. `epg_sync_start` and `epg_sync_step` are `openWorldHint: true` because they fetch Letterboxd, the configured EPG source, or TMDB. A wrong argument returns a tool result with `isError: true` and does not call the domain function. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.
 
@@ -65,7 +65,7 @@ The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `d
 
 ### Discovery contract for Scheduled Tasks
 
-`epg_sync_step` returns this object once the programme commit has happened. [AIR-62](https://trello.com/c/CU71gW4c) should branch on `nextAction` and not infer it from `ratingsPending` or from `stage` alone.
+`epg_sync_step` returns this object once the programme commit has happened. The external EPG caller should branch on `nextAction` and not infer it from `ratingsPending` or from `stage` alone.
 
 | `discovery.nextAction` | When | What the caller does |
 | --- | --- | --- |
@@ -125,9 +125,9 @@ This repository change does not modify Cloudflare Access. Each item below must b
 
 ## Connecting ChatGPT
 
-The connector is already connected. On 19–20 October 2026 ChatGPT on the web called `probe_read` and `probe_echo` through `https://iptv.vladimino.workers.dev/mcp` with Managed OAuth. That confirms interactive sign-in. It does not confirm unattended token refresh, and it does not confirm an EPG or prediction run.
+The connector is connected. The 19–20 October 2026 `probe_read` and `probe_echo` calls confirmed only interactive Managed OAuth, not unattended refresh or successful production work. [AIR-62](https://trello.com/c/CU71gW4c) subsequently accepted scheduled EPG and prediction operations on 21 October. On 24 October both external recurring tasks were observed enabled with recent execution timestamps. These dated observations do not guarantee today's authorization or job success.
 
-After this change is deployed, refresh the tools on that server. The list must be exactly `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `enrichment_status`, `prediction_queue_overview`, `prediction_film_diagnostics`, `prediction_pending`, `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`. Do not call the write tools against production until AIR-62. The three prediction diagnostic tools are read-only; the production check for them is the procedure in [AIR-98](air-98-prediction-diagnostics.md), after this deploy.
+After a new MCP tool deployment, refresh the connected ChatGPT tools if their cached schema is stale. The list must be exactly `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `enrichment_status`, `prediction_queue_overview`, `prediction_film_diagnostics`, `prediction_pending`, `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`. Do not call writer tools against production without action-specific owner approval, even though AIR-62 has been completed. The three prediction diagnostic tools are read-only; the production check for them is the procedure in [AIR-98](air-98-prediction-diagnostics.md), after this deploy.
 
 To connect a replacement server, use the same URL and OAuth with an empty client ID and secret, and sign in as the owner. The current allow-list already permits a ChatGPT connector callback under `https://chatgpt.com/connector/oauth/*` (requirement 2).
 
@@ -150,13 +150,13 @@ These checks contact production only through Cloudflare Access and the two probe
 4. Ask it to call `probe_echo` with a marker such as `mcp-probe-2026-10-19`. Expect the identical text back.
 5. Repeat step 1. The unauthenticated request must still get `401` from Access.
 
-Leave Scheduled Tasks and the EPG and prediction tools out of this smoke test. Calling `epg_sync_start`, `epg_sync_step`, or any `prediction_*` tool against production writes R2 and may call Letterboxd, the EPG source, or TMDB. That is an AIR-62 operation and needs its own approval. Do not use `/api/*` routes, the dashboard, sync, enrichment, or prediction as MCP checks either. Some `GET` routes can write (see `README.md`).
+Leave Scheduled Tasks and writer MCP tools out of this connectivity smoke test. `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete` may write R2 or advance a run; AIR-62 completion is not permission for extra production calls. In contrast, `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` are read-only tools, suitable for separately authorized diagnostic checks. Do not use `/api/*`, the dashboard or synchronization as connectivity probes; some `GET` routes have side effects (see [README](../README.md)).
 
-## Next stage: unattended Scheduled Tasks
+## Historical AIR-62 unattended authorization checklist
 
-The goal of this integration is unattended ChatGPT Scheduled Tasks that call the Worker. This change proves only the interactive connection. Scheduled Tasks stay disabled. Creating or enabling any task, even a probe-only one, is a separate change that needs approval. A probe-only task does not resume sync or prediction. Before any writer resumes, the lease check in [docs/deployment.md](deployment.md) still applies.
+The checklist below was originally drafted when only interactive MCP sign-in was proven. **It is historical acceptance material, not instructions to enable or rerun production Tasks.** [AIR-62](https://trello.com/c/CU71gW4c) was accepted on 21 October after actual scheduled EPG and prediction work. Consult the card's evidence before claiming that any specific revocation, lease or refresh test passed; this document update does not repeat those tests. Creating or modifying Tasks, calling writers, and revoking credentials still require owner approval.
 
-Acceptance criteria, checked after the safe verification procedure passes:
+Original verification requirements:
 
 1. A dedicated probe-only Scheduled Task calls `probe_read`, then `probe_echo` with a per-run marker such as the run timestamp. Several consecutive real scheduled runs return matching results, with no confirmation prompt and no sign-in.
 2. The runs span longer than the Access token lifetime. ChatGPT must then renew the access token with its refresh token, unattended. Access re-evaluates the `IPTV MCP` policy on every refresh.
@@ -164,14 +164,14 @@ Acceptance criteria, checked after the safe verification procedure passes:
 4. Revocation, with separate approval: remove the owner from the `IPTV MCP` policy or revoke the owner's Access sessions. Once the current access token expires, the next scheduled run must fail to authorize. Restoring access must require a new interactive sign-in. Also record what happens when the grant session expires.
 5. Disable or delete the probe tasks afterwards unless their continued schedule is approved.
 
-`probe_echo` proves an authenticated MCP HTTP POST round trip. It does not prove a write to storage followed by a read back. To close the unattended-authorization task, a separate write, read, and cleanup test is needed. It must target an isolated temporary key, for example under a dedicated prefix, clean up explicitly, and leave production state untouched. That test needs its own design and approval. A key in bucket `iptv` is still a production R2 write, and this change adds no such tool.
+`probe_echo` proves an authenticated MCP HTTP POST round trip. It does not prove a write to storage followed by a read back. At that time, an isolated write/read/cleanup test was an independent owner approval gate. It must target an isolated temporary key, for example under a dedicated prefix, clean up explicitly, and leave production state untouched. That test needs its own design and approval. A key in bucket `iptv` is still a production R2 write, and this change adds no such tool.
 
 ## Limitations
 
-- Probe tools do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. Enabling Scheduled Tasks is AIR-62.
+- Probe tools do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. Scheduled task rollout was AIR-62; new invocations or modifications need separate approval.
 - No SSE, sessions, server-to-client requests, `list_changed` notifications, resources, prompts, or batches. Clients that support only `2026-07-28` are not supported.
 - The origin allow-list is fixed in code: the Worker's own origin and `https://chatgpt.com`.
-- Managed OAuth interactive access is confirmed: ChatGPT called `probe_read` and `probe_echo` through the connected server. Unattended refresh after the access token expires, and any real EPG or prediction run, have not passed. Those remain the next-stage criteria, and enabling the tasks is AIR-62.
+- Initial October 19–20 interactive MCP probes did not establish unattended access. [AIR-62](https://trello.com/c/CU71gW4c) subsequently accepted scheduled EPG/prediction runs on October 21; on October 24 both external recurring tasks remained enabled with recent executions. These dated checks do not prove current OAuth health or unspecified security/revocation test results.
 - The first request after a cold start fetches Access signing keys from the team domain. If they are unreachable, the endpoint returns `503`.
 
 ## Rollback
