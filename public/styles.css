@@ -118,7 +118,7 @@
 .film-progress[hidden]{display:none}
 .film-score{margin-top:20px}
 .film-score-row{display:flex;flex-wrap:wrap;align-items:stretch;gap:10px}
-.film-why{max-width:420px;margin:8px 0 0;padding:8px 12px;border:1px solid var(--line);border-left:3px solid var(--lime);border-radius:12px;background:var(--surface)}
+.film-why{width:100%;max-width:none;margin:8px 0 0;padding:8px 12px;border:1px solid var(--line);border-left:3px solid var(--lime);border-radius:12px;background:var(--surface)}
 .film-why p{margin:0;color:#d5dece;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
 .film-why p+p{margin-top:6px}
 .film-why span{display:block;margin-bottom:2px;color:var(--muted);font-size:11px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}

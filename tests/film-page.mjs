@@ -239,7 +239,8 @@ assert.match(css,/\.movie-card \.started-action|\.started-action\{position:absol
 assert.match(css,/\.film-screen \.started-action\{position:static/);
 assert.match(css,/\.film-screen\{max-width:760px/);
 assert.match(css,/\.film-score-card\{[^}]*max-width:240px/);
-assert.match(css,/\.film-why\{[^}]*max-width:420px/);
+assert.match(css,/\.film-why\{[^}]*width:100%/);
+assert.doesNotMatch(css,/\.film-why\{[^}]*max-width:420px/);
 assert.match(css,/#film-screen-identity\{display:none\}/);
 assert.match(css,/html\.film-screen \.workspace\{display:none!important\}/);
 assert.match(css,/html\.film-screen \.search-panel\{display:none!important\}/);
