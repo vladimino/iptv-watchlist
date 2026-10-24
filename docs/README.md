@@ -7,10 +7,12 @@
 - [Agent guide](../AGENTS.md): essential repository/safety instructions. [Agent workflow](agent-workflow.md) and [Trello conventions](trello-card-conventions.md): collaboration policy until [AIR-111](https://trello.com/c/WXVqNJ25) relocates them.
 - [Deployment](deployment.md), [MCP](mcp.md), [Local setup](local-setup.md): operations. [AIR-110](https://trello.com/c/HIMB8pfv) must correct stale claims about schedules and scored rollout **before** they are treated as current operational directions.
 - [Film/Person](film-person-lifecycle.md), [Scored resolution](scored-resolution.md), [Prediction runner](prediction-runner.md), [D1 schema](d1-schema.md): technical contracts, some mixed with historical notes.
-- [Architecture decisions](adr/index.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
+- [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
 - Root [ENRICHMENT_API.md](../ENRICHMENT_API.md), [CONTRIBUTING.md](../CONTRIBUTING.md), [README.md](../README.md) remain outside `docs/` and are also in scope for AIR-110/113/119.
 
 **Authoritative information:** current Trello cards/linked checklists give delivery status; GitHub main gives versioned source; authorized production reads establish current runtime settings/data; current reference defines the contract; runbooks define safe procedures; ADRs explain adopted choices; evidence proves only the specific dated sample. Historic reports and past handoffs are not proof of live flags/schedules.
+
+**GitHub directory landing pages:** every navigable documentation directory must use a `README.md` (rather than `index.md`) so GitHub automatically renders its contents when the folder is opened. This applies to [`adr/`](adr/README.md) and the planned `architecture/README.md` in [AIR-120](https://trello.com/c/olwWKaXU). Do not link to pages that have not been created.
 
 ## Intended folders
 
@@ -34,7 +36,7 @@ Do **not** confuse these independent axes:
 
 [AIR-114](https://trello.com/c/ia9tnXbc) creates `evidence/index.md`. Each record must state **capturedAt (UTC), environment/generation/code SHA or limitations, measured scope, source, verdict, lifecycle, operational authority (historical or maintained), Used by (direct ADR/PR/Trello decision URLs, or explicitly not yet consumed), Superseded by (if any), and unresolved caveats**. Do not retroactively rewrite measurements or claim an uncertain sample was accepted. A subsequent result is a new record; the index documents how it changed the decision.
 
-Major design choices are documented as [ADRs](adr/index.md). Accepted ADR text is stable; reverse a decision by writing a successor and recording the link in the index. A PR merge is not the same as activation, runtime parity, or user authorization.
+Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text is stable; reverse a decision by writing a successor and recording the link in the index. A PR merge is not the same as activation, runtime parity, or user authorization.
 
 ## All existing `docs/` files and proposed disposition
 
