@@ -1,6 +1,6 @@
 # Architecture overview and diagram plan
 
-This is a **navigation and planning index**, created by [AIR-120](https://trello.com/c/olwWKaXU) on 24 October 2026. **None of the thirteen child pages or Mermaid diagrams listed below has been authored yet.** Names below are proposed file names, not links to existing files. Each page requires its own scoped task, source verification and review.
+This is a **navigation and planning index**, created by [AIR-120](https://trello.com/c/olwWKaXU) on 24 October 2026. **Four runtime/security pages are drafted in AIR-140 and await owner visual review.** The other nine pages remain planned. Drafts are not production authorization. Each page requires its own scoped task, source verification and review.
 
 For decisions read the [ADR register](../adr/README.md); for maintained implementation contracts see [reference](../reference/README.md); for operations see [runbooks](../runbooks/README.md); for bounded historical measurements see [evidence](../evidence/README.md).
 
@@ -11,14 +11,14 @@ For decisions read the [ADR register](../adr/README.md); for maintained implemen
 - **Operational independence:** GitHub deployment, external ChatGPT Scheduled Tasks, MCP invocation, and R2 writes are separate actions. No diagram grants approval for live operations.
 - **Plans versus facts:** proposed diagrams must show observed/current paths distinctly from future migration paths, citing supporting reference/ADR documents. No guessed alternatives or invented topology.
 
-## Proposed pages
+## Architecture pages — draft and planned
 
-| Planned page (not yet created) | Goal | Mermaid type | Starting evidence | Current vs future boundary |
+| Page and review status | Goal | Mermaid type | Starting evidence | Current vs future boundary |
 | --- | --- | --- | --- | --- |
-| `system-context.md` | Worker, external actors, Letterboxd, EPG, TMDB and storage boundaries | `flowchart` | [Deployment](../runbooks/deployment.md), [MCP ADR](../adr/0004-mcp-access-boundary.md) | current runtime and external dependencies; no assumption D1 active |
-| `runtime-topology.md` | Worker entrypoints, R2, internal continuation and HTTP/MCP trust boundaries | `flowchart` | [Deployment](../runbooks/deployment.md), [Worker/R2 ADR](../adr/0002-cloudflare-worker-r2-authority.md) | current Worker/R2; D1 is not a runtime dependency |
-| `deployment-and-rollback.md` | Tested artifact delivery, deploy gates and code rollback limit | `flowchart` | [Deployment runbook](../runbooks/deployment.md), [CI/CD ADR](../adr/0003-github-ci-deployment.md) | deployed CI/CD; data rollback is separate |
-| `authentication-and-mcp.md` | OAuth/Access challenge, verified JWT, MCP tools and caller boundary | `sequenceDiagram` | [MCP reference](../reference/api/mcp.md), [Security ADR](../adr/0004-mcp-access-boundary.md) | current owner-only Access; tools are not automatically invoked |
+| [`system-context.md`](system-context.md) — **draft, owner review pending** | Worker, external actors, Letterboxd, EPG, TMDB and storage boundaries | `flowchart` | [Deployment](../runbooks/deployment.md), [MCP ADR](../adr/0004-mcp-access-boundary.md) | current runtime and external dependencies; no assumption D1 active |
+| [`runtime-topology.md`](runtime-topology.md) — **draft, owner review pending** | Worker entrypoints, R2, internal continuation and HTTP/MCP trust boundaries | `flowchart` | [Deployment](../runbooks/deployment.md), [Worker/R2 ADR](../adr/0002-cloudflare-worker-r2-authority.md) | current Worker/R2; D1 is not a runtime dependency |
+| [`deployment-and-rollback.md`](deployment-and-rollback.md) — **draft, owner review pending** | Tested artifact delivery, deploy gates and code rollback limit | `flowchart` | [Deployment runbook](../runbooks/deployment.md), [CI/CD ADR](../adr/0003-github-ci-deployment.md) | deployed CI/CD; data rollback is separate |
+| [`authentication-and-mcp.md`](authentication-and-mcp.md) — **draft, owner review pending** | OAuth/Access challenge, verified JWT, MCP tools and caller boundary | `sequenceDiagram` | [MCP reference](../reference/api/mcp.md), [Security ADR](../adr/0004-mcp-access-boundary.md) | current owner-only Access; tools are not automatically invoked |
 | `letterboxd-ingestion.md` | Watchlist/ratings input, anti-bot failure and last-good snapshot | `sequenceDiagram` | [Letterboxd ratings](../reference/integrations/letterboxd-ratings.md), [Ratings ADR](../adr/0018-letterboxd-last-good-ratings.md) | current bounded ingestion; no bypass or automatic repair implied |
 | `epg-and-availability.md` | Generation creation, publication pointer, transient shows and current window | `flowchart` | [Film/Person reference](../reference/domain/film-person.md), [EPG ADR](../adr/0008-atomic-epg-publication.md) | current published R2 generation; no D1 cutover |
 | `discovery-and-resolution.md` | Persistent observations, candidate scoring, detail gate and retries | `flowchart` | [Scored resolution](../reference/domain/scored-resolution.md), [Detail gate ADR](../adr/0010-scored-detail-verification.md) | deployed mechanism versus separately gated search variants |
