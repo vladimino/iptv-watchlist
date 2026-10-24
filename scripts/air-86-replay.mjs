@@ -161,7 +161,7 @@ export async function runReplay({manifest,context,request,now,cap=CAP,rowCap=ROW
 async function main(){
  const token = process.env.TMDB_API_READ_ACCESS_TOKEN;
  if(!token){console.error('TMDB_API_READ_ACCESS_TOKEN is unset');process.exit(2);}
- const manifest = JSON.parse(fs.readFileSync('docs/air-86-replay-manifest.json','utf8'));
+ const manifest = JSON.parse(fs.readFileSync('docs/evidence/scored-resolver/air-86-replay-manifest.json','utf8'));
  const context = JSON.parse(fs.readFileSync(process.env.AIR86_CONTEXT||'.air86-context.json','utf8'));
  const found = Object.values(context.candidates||{}).filter(row=>row.found).length;
  if(found!==38){console.error('ledger context is incomplete');process.exit(2);}
@@ -171,7 +171,7 @@ async function main(){
   const json = response.status===204?null:await response.json().catch(()=>null);
   return {status:response.status,json};
  }});
- fs.writeFileSync(process.argv[2]||'docs/air-86-replay-results.json',JSON.stringify(result,null,2)+'\n');
+ fs.writeFileSync(process.argv[2]||'docs/evidence/scored-resolver/air-86-replay-results.json',JSON.stringify(result,null,2)+'\n');
  console.log(JSON.stringify({total:result.http.total,search:result.http.search,detail:result.http.detail,alias:result.http.alias,errors:result.http.errors,halted:result.http.halted,budgetStop:result.http.budgetStop}));
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main();

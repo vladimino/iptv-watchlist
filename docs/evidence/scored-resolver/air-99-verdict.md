@@ -8,7 +8,7 @@ Read-only snapshot at `2026-10-24T08:43:16.398Z`. Published generation `cf3ba3ac
 
 ## Detail HTTP
 
-Five calls, all `200`, none halted. The saved cards are `docs/air-99-detail.json`. The script requested only `movie/{id}` for `36647`, `161`, `395`, `163`, and `603`. Cap 5. No search, no alias read, and no retry. A second local pass of `gateFetched` on those cards matches the stored score and gate. Catalog rivals passed into that gate are the empty list from the catalog read: each structural form had either no film or only the fetched id.
+Five calls, all `200`, none halted. The saved cards are `docs/evidence/scored-resolver/air-99-detail.json`. The script requested only `movie/{id}` for `36647`, `161`, `395`, `163`, and `603`. Cap 5. No search, no alias read, and no retry. A second local pass of `gateFetched` on those cards matches the stored score and gate. Catalog rivals passed into that gate are the empty list from the catalog read: each structural form had either no film or only the fetched id.
 
 ## Population
 

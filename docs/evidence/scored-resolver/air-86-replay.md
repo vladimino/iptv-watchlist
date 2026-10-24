@@ -4,7 +4,7 @@
 
 Isolated replay of the 38-row cohort from `docs/air-86-replay-plan.md`. No production write: no Worker flag, R2 object, legacy decision, `retryAt`, EPG sync, prediction run, or `POST /api/enrichment/discovery/resolve`. [AIR-68](https://trello.com/c/qbLDc6Ql) stays blocked. Two verified rows are not a cutover.
 
-The machine-readable calls and scores are `docs/air-86-replay-results.json`. The runner is `scripts/air-86-replay.mjs`. It calls the unchanged `candidateSearchVariants`, `variantHit`, `scoreFilmResolution`, and `gateScoredCandidate`.
+The machine-readable calls and scores are `docs/evidence/scored-resolver/air-86-replay-results.json`. The runner is `scripts/air-86-replay.mjs`. It calls the unchanged `candidateSearchVariants`, `variantHit`, `scoreFilmResolution`, and `gateScoredCandidate`.
 
 ## Spend
 

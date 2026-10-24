@@ -68,7 +68,7 @@ async function main(){
   const gated=row.movie&&observation?gateFetched(live,observation,row.movie,[]):{};
   return {...row,...gated,movie:row.movie?safeMovie(row.movie):null};
  });
- fs.writeFileSync(process.argv[2]||'docs/air-99-detail.json',JSON.stringify(result,null,2)+'\n');
+ fs.writeFileSync(process.argv[2]||'docs/evidence/scored-resolver/air-99-detail.json',JSON.stringify(result,null,2)+'\n');
  console.log(JSON.stringify({http:result.http,halted:result.halted,ids:result.calls.map(call=>call.id)}));
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main();

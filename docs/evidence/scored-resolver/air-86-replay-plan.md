@@ -21,7 +21,7 @@ Variants below are `candidateSearchVariants` from the current source, capped at 
 | Eligible structural | 8 | 24 |
 | All 38 | 38 | 87 |
 
-87 is 63 + 31 − 7. The overlap is Blade (4) and Goal (3). The machine-readable copy is `docs/air-86-replay-manifest.json`. `capApproved` is false.
+87 is 63 + 31 − 7. The overlap is Blade (4) and Goal (3). The machine-readable copy is `docs/evidence/scored-resolver/air-86-replay-manifest.json`. `capApproved` is false.
 
 ## Drift since the census
 

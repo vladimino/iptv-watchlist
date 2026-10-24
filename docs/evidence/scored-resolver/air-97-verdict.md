@@ -4,7 +4,7 @@
 
 **NO-GO.** Do not set `SCORED_RESOLUTION=on` or `CANDIDATE_DISCOVERY=on`. Do not start [AIR-68](https://trello.com/c/qbLDc6Ql). A positive GO still needs its own owner approval after this verdict changes. [AIR-69](https://trello.com/c/FlcWZX7W) stays behind that approval.
 
-This rescores the frozen [AIR-86](https://trello.com/c/INQy9Hca) cohort on the current scorer and gate. It does not call TMDB, write R2, start an EPG sync or a prediction run, or change a Worker variable. The stored calls remain `docs/air-86-replay-results.json`. The runner is `scripts/air-97-rescore.mjs`. [AIR-95](https://trello.com/c/kD8xjvVu) and [AIR-96](https://trello.com/c/prY7T5iE) are on `main` and in the deployed Worker. They remove two known defects. They do not make this sample a cutover measurement.
+This rescores the frozen [AIR-86](https://trello.com/c/INQy9Hca) cohort on the current scorer and gate. It does not call TMDB, write R2, start an EPG sync or a prediction run, or change a Worker variable. The stored calls remain `docs/evidence/scored-resolver/air-86-replay-results.json`. The runner is `scripts/air-97-rescore.mjs`. [AIR-95](https://trello.com/c/kD8xjvVu) and [AIR-96](https://trello.com/c/prY7T5iE) are on `main` and in the deployed Worker. They remove two known defects. They do not make this sample a cutover measurement.
 
 ## Preflight
 
@@ -19,7 +19,7 @@ Read on 2026-10-24, after the PR #67 deploy. No setting was changed.
 | Schedules | 0 |
 | Published generation | `cf3ba3ac-f962-4475-b9cd-3de1b07bd1eb`, phase `published` |
 
-The deploy annotation names PR #67. It does not carry a git SHA. `281d3d5` is the `main` commit that contains that PR. Lifecycle localization was read and left as it was. The resolution ledger was not read again. Live-gate actionability below is the frozen clock `2026-10-23T17:52:50.645Z` from the replay file, together with `retryAt` and `evidenceState` from `docs/air-86-replay-manifest.json`.
+The deploy annotation names PR #67. It does not carry a git SHA. `281d3d5` is the `main` commit that contains that PR. Lifecycle localization was read and left as it was. The resolution ledger was not read again. Live-gate actionability below is the frozen clock `2026-10-23T17:52:50.645Z` from the replay file, together with `retryAt` and `evidenceState` from `docs/evidence/scored-resolver/air-86-replay-manifest.json`.
 
 ## What was re-run
 
