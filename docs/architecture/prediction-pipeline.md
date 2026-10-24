@@ -10,16 +10,19 @@ sequenceDiagram
     participant R2 as Authoritative R2
     Client->>MCP: Read schema, published profile, runner status
     MCP->>R2: Read current profile version and hash
-    R2-->>Client: Versioned profile via MCP
+    R2-->>MCP: Versioned profile data
+    MCP-->>Client: Published profile version and hash
     Client->>MCP: prediction_start (queued)
     MCP->>Queue: Acquire or check lease
     alt Already running
-        Queue-->>Client: already_running or busy
+        Queue-->>MCP: already_running or busy
+        MCP-->>Client: Run already active
     else New run
         loop While eligible items remain
             Client->>MCP: prediction_next (one film)
-            MCP->>Queue: Select hot first; cold only after hot drained
-            Queue-->>Client: Film and current artifact facts
+            MCP->>Queue: Select hot first and cold only after hot drained
+            Queue-->>MCP: Film and current artifact facts
+            MCP-->>Client: One eligible film
             Client->>Client: Reuse valid fingerprint or generate new one
             Client->>Client: Predict using published taste profile
             Client->>MCP: prediction_submit (one result or item failure)
