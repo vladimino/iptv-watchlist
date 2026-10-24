@@ -1,9 +1,7 @@
-# Film and Person — historical evidence
+# Film/Person lifecycle evidence
 
-This folder contains preserved, dated Film/Person lifecycle audit and rollout evidence, not current operating instructions.
+| Report | Captured | Finding | Used by | Authority |
+| --- | --- | --- | --- | --- |
+| [AIR-42 Phase 0–3 audit and rollout](lifecycle-audit-and-rollout.md) | 21–23 Oct 2026, source implementation, offline parity and historical localization rollout | **PHASE AUDIT / ACCEPTED PHASE EVIDENCE** — not a canonical D1 writer cutover | [AIR-42](https://trello.com/c/drLBuWjl), [maintained Film/Person contract](../../reference/domain/film-person.md) | Historical only, live flags must be checked separately |
 
-- [AIR-42 Phase 0–3 lifecycle audit and rollout log](lifecycle-audit-and-rollout.md): original R2 record inventory, identity and localization decisions, offline parity and dated shadow/on rollout observations.
-- [Current Film/Person contract](../../reference/domain/film-person.md): maintained, source-verified summary.
-- [Future evidence registry](../README.md): [AIR-114](https://trello.com/c/ia9tnXbc) will classify historical experiments and link them to accepted decisions.
-
-No live flags, storage mutations or prediction jobs are authorized by this archive.
+This audit is a preserved dated source; do not rewrite historic measurements. [Evidence registry](../README.md).
