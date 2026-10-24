@@ -55,7 +55,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
 | `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction. |
 | `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
-| `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported (`origin`, `failedStep`, `providerErrorCode`, `httpStatus`, `receivedRequestId`). Omit it when the cause is unknown. [AIR-88](air-88-run-diagnostics.md). |
+| `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. [AIR-88](air-88-run-diagnostics.md). |
 
 Prerequisite for every tool is [AIR-58](https://trello.com/c/BB01YN2f) (this Access check). `epg_sync_step` depends on [AIR-60](https://trello.com/c/UO0YqoWw) for resolver continuation. [AIR-62](https://trello.com/c/CU71gW4c) is the downstream decision to run the scheduled tasks. [AIR-49](https://trello.com/c/YNaLFwtW) (D1) is independent and unused here.
 

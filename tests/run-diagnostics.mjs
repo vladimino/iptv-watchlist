@@ -71,6 +71,33 @@ assert.doesNotMatch(JSON.stringify(row),secret);assert.equal(JSON.stringify(row)
 const duplicate=await api('complete',{runId:start.data.runId,fault:{origin:'orchestrator',failedStep:'complete',providerErrorCode:'late',httpStatus:500}});
 assert.equal(duplicate.data.status,'complete');assert.equal(diagnostic(start.data.runId).callerFault,null);
 
+boot(['tmdb_8817']);
+start=await api('start',{scope:'watchlist_all',mode:'queued'});
+next=await api('next',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-clean'});
+await api('submit',{runId:start.data.runId,items:[{filmId:next.data.items[0].filmId,fingerprint,prediction}]});
+const beforeClean=events().length;
+const falseFault=await api('complete',{runId:start.data.runId,fault:{origin:'model_provider',failedStep:'next',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:'client-step-clean'}});
+assert.equal(falseFault.status,400);assert.equal(records.get('enrichment/runs/'+start.data.runId+'.json').status,'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(diagnostic(start.data.runId).stopReason,null);assert.equal(events().length,beforeClean);
+const falseQueue=await api('complete',{runId:start.data.runId,reason:'queue_empty',fault:{origin:'model_provider',failedStep:'complete',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:'client-step-clean'}});
+assert.equal(falseQueue.status,400);assert.equal(records.get('enrichment/runs/'+start.data.runId+'.json').status,'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(events().length,beforeClean);
+done=await api('complete',{runId:start.data.runId});
+assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'queue_empty');
+const cleanStatus=await api('status',undefined,'GET');
+assert.equal(cleanStatus.data.diagnostics.callerFault,null);assert.equal(cleanStatus.data.diagnostics.attribution,null);assert.equal(cleanStatus.data.diagnostics.steps.every(step=>step.callerAcknowledged===false),true);
+
+boot(['tmdb_8818']);
+start=await api('start',{scope:'watchlist_all',mode:'queued'});
+next=await api('next',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-real'});
+done=await api('complete',{runId:start.data.runId,reason:'api_error',fault:{origin:'transport',failedStep:'next',providerErrorCode:'dropped',httpStatus:504,receivedRequestId:'never-issued'}});
+assert.equal(done.data.stopReason,'api_error');
+row=diagnostic(start.data.runId);
+assert.equal(row.callerFault.attribution,'caller_reported');assert.equal(row.callerFault.receivedRequestId,'never-issued');
+assert.equal(row.steps.every(step=>step.delivery==='unconfirmed'),true);
+const unknownStatus=await api('status',undefined,'GET');
+assert.equal(unknownStatus.data.diagnostics.delivery,'unconfirmed');
+assert.equal(unknownStatus.data.diagnostics.steps.every(step=>step.callerAcknowledged===false),true);
+assert.equal(unknownStatus.data.diagnostics.steps.some(step=>step.requestId==='client-step-real'),true);
+
 boot(['tmdb_8807']);
 start=await api('start',{scope:'watchlist_all',mode:'queued'});
 records.get('enrichment/runner-lease.json').runId='another-owner';
