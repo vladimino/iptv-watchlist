@@ -9,6 +9,7 @@ import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {importBatch,inventory,parityClaim,projectSource,verifyParity} from '../src/offline-importer.js';
 import {manifestFor} from '../scripts/migration-export.mjs';
+import {openSqlite as snapshotSqlite} from '../scripts/offline-import.mjs';
 
 const source=fs.readFileSync('src/offline-importer.js','utf8');
 assert.doesNotMatch(source,/d1_databases|\bBUCKET\b|\bfetch\b|\bwrangler\b|INSERT INTO film\s|INSERT INTO prediction_current|INSERT INTO fingerprint_payload/);
@@ -346,6 +347,28 @@ assert.equal(second.applied,0);
 assert.equal(second.resumed,first.applied);
 assert.equal(second.claimsFullParity,false);
 assert.equal(second.unportable,first.unportable);
+
+const volumeCount=8000;
+const volumePad='n'.repeat(160);
+const volumeIds=[];
+const volumeSql=['BEGIN'];
+for(let index=0;index<volumeCount;index++){
+ const slug='actor/zz-read-'+String(index).padStart(5,'0')+'-'+volumePad;
+ volumeIds.push('person:'+slug);
+ volumeSql.push("INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('"+volumeIds[index]+"','"+slug+"',1,'2026-10-19T01:00:00.000Z')");
+}
+volumeSql.push('COMMIT');
+const volumeDatabase=path.join(root,'volume.sqlite');
+exec(volumeDatabase,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+exec(volumeDatabase,volumeSql.join(';\n'));
+const volumeRows=await snapshotSqlite(volumeDatabase).all('SELECT id,role_id,contract_version FROM person ORDER BY id');
+assert.equal(volumeRows.length,volumeCount);
+assert.equal(Buffer.byteLength(JSON.stringify(volumeRows))>1024*1024,true);
+const volumeHash=createHash('sha256');
+for(const id of volumeIds)volumeHash.update(id);
+const readHash=createHash('sha256');
+for(const row of volumeRows)readHash.update(row.id);
+assert.equal(readHash.digest('hex'),volumeHash.digest('hex'));
 
 function dim(dimension,status,updatedAt,extra={}){return {dimension,status,updatedAt,source:extra.source||'letterboxd',sourceVersion:null,provenance:extra.provenance||null,value:extra.value??null,nextAction:'none',attempts:0};}
 function film(id,title,updatedAt,localization){return {contractVersion:1,id,canonicalIdentity:null,originalTitle:title,externalIds:[{scheme:'letterboxd',value:id.slice('film:'.length),trusted:true,conflicting:false}],aliases:[],identity:dim('identity','resolved',updatedAt),metadata:dim('metadata','fresh',updatedAt),localization:localization||dim('localization','missing',updatedAt),fingerprint:dim('fingerprint','missing',updatedAt),prediction:dim('prediction','missing',updatedAt)};}
