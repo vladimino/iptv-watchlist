@@ -290,12 +290,21 @@ async function resolveDiscoveryChunk(env,report,limit){
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
  const shadowPlans=mode==='shadow'&&candidateDiscoveryMode(env)==='shadow',deferred=[];
  const boundVariantRows=(rows,map,limit=4)=>{const seen=new Set(),out=[];for(const row of rows||[]){const id=row?.tmdbId==null?'':String(row.tmdbId);if(!id||seen.has(id))continue;seen.add(id);out.push(map(row,id));if(out.length>=limit)break;}return out;};
+ const mergeVariantHit=(prior,next)=>{
+  const claims=[...(prior.structuralClaims||[]),...(next.structuralClaims||[])],seenClaims=new Set();
+  prior.structuralClaims=claims.filter(claim=>{const key=claim.reason+'|'+norm(claim.matched);if(seenClaims.has(key))return false;seenClaims.add(key);return true;});
+  if(!prior.structuralClaims.length)delete prior.structuralClaims;
+  const extras=new Set(prior.extraTitles||[]);
+  for(const title of [next.title,next.original,...(next.extraTitles||[])])if(title&&title!==prior.title&&title!==prior.original)extras.add(title);
+  if(extras.size)prior.extraTitles=[...extras];
+ };
+ const boundVariantHits=(rows,limit=4)=>{const byId=new Map(),out=[];for(const row of rows||[]){const id=row?.tmdbId==null?'':String(row.tmdbId);if(!id)continue;const mapped=variantScoreHit(row,id),prior=byId.get(id);if(prior){mergeVariantHit(prior,mapped);continue;}if(out.length>=limit)continue;byId.set(id,mapped);out.push(mapped);}return out;};
  // Shadow keeps the plan, including hits already found and the decision from before the legacy write. retryAt stays put.
  const rememberVariant=(candidate,extra,countSkip)=>{
   if(!shadowPlans||!candidate?.key)return;
   const offset=extra?.offset||0,pendingAliasIds=[...(extra?.pendingAliasIds||[])].map(String).filter(Boolean).slice(0,3);
   const proposals=boundVariantRows(extra?.proposals,(row,id)=>({tmdbId:id,query:row.query||'',year:row.year??null,reason:row.reason||'',matchedTitle:row.matchedTitle||''}));
-  const hits=boundVariantRows(extra?.hits,variantScoreHit);
+  const hits=boundVariantHits(extra?.hits);
   const row={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:[...(candidate.durations||[])],evidenceKey:extra?.evidenceKey||candidateEvidence(candidate),priorDecision:extra?.hadPriorDecision?extra.priorDecision??null:null,hadPriorDecision:extra?.hadPriorDecision===true,legacyStatus:extra?.legacyStatus??null,offset,pendingAliasIds,proposals,hits};
   const at=deferred.findIndex(item=>item.key===row.key);
   if(at<0){deferred.push(row);variantMeter.deferred++;}else deferred[at]=row;
@@ -310,7 +319,7 @@ async function resolveDiscoveryChunk(env,report,limit){
   const found=await collectVariantProposals(env,candidate,deadline,variantMeter,{offset:job.offset||0,pendingAliasIds:job.pendingAliasIds||[]});
   if(variantMeter.halted)return;
   const proposals=boundVariantRows([...(job.proposals||[]),...(found.proposed||[])],(row,id)=>({tmdbId:id,query:row.query||'',year:row.year??null,reason:row.reason||'',matchedTitle:row.matchedTitle||''}));
-  const hits=boundVariantRows([...(job.hits||[]),...(found.hits||[])],variantScoreHit);
+  const hits=boundVariantHits([...(job.hits||[]),...(found.hits||[])]);
   if(!proposals.length&&!found.resume)return;
   if(!proposals.length){rememberVariant(candidate,{...job,offset:found.resume.offset,pendingAliasIds:found.resume.pendingAliasIds||[],proposals,hits},false);return;}
   const observation={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:candidate.durations};
