@@ -1,6 +1,6 @@
 # IPTV Watchlist documentation
 
-**Inventory baseline:** 24 October 2026 — [AIR-109](https://trello.com/c/whae9vKn), covering 35 original `docs/` files. [AIR-111](https://trello.com/c/WXVqNJ25) has now moved maintained process/runbooks and three historical procedures; the original locations contain link-only compatibility stubs. AIR-112 created `reference/domain/` and `evidence/film-person/`; AIR-113 organized maintained API, domain, data and integration references and added operator runbooks plus superseded procedure archives. AIR-114 has classified the historical reports in the [evidence registry](evidence/README.md); machine-readable fixtures and their executable dependencies move only in AIR-115. Architecture diagrams are still future work. Use the canonical links below, not the old stubs.
+**Documentation reorganization baseline:** 24 October 2026. [AIR-109](https://trello.com/c/whae9vKn) inventoried the original files; [AIR-111](https://trello.com/c/WXVqNJ25)–[AIR-115](https://trello.com/c/TRp1oXpA) organized references, runbooks and evidence. [AIR-116](https://trello.com/c/6MHbRFZR)–[AIR-118](https://trello.com/c/5qf3Zn3p) reconstructed the ADR register; [AIR-120](https://trello.com/c/olwWKaXU) adds the architecture index, not actual diagrams. Use the canonical links below rather than link-only compatibility stubs.
 
 ## Entrypoints and sources of truth
 
@@ -8,24 +8,28 @@
 - [Deployment](runbooks/deployment.md), [Recovery](runbooks/recovery/README.md), [MCP protocol](reference/api/mcp.md), [MCP runbook](runbooks/mcp-connectivity.md), [Local setup](runbooks/local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
 - [Film/Person](reference/domain/film-person.md), [Admin read contract](reference/domain/admin-read-contract.md), [Scored resolution](reference/domain/scored-resolution.md), [Prediction runner](reference/api/prediction-runner.md), [D1 schema](reference/data/d1-schema.md): technical contracts, some mixed with historical notes.
 - [Evidence registry](evidence/README.md): captured scope, original verdict, downstream decision and historical authority.
-- [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
+- [Architecture index](architecture/README.md): planned diagrams and navigation only. [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
 - The canonical [Enrichment API](reference/api/enrichment.md) now lives under `docs/`; the root `ENRICHMENT_API.md` remains a link-only compatibility stub. Root [CONTRIBUTING.md](../CONTRIBUTING.md) and [README.md](../README.md) remain in the scope of later AIR-119/121 refresh.
 
 **Authoritative information:** current Trello cards/linked checklists give delivery status; GitHub main gives versioned source; authorized production reads establish current runtime settings/data; current reference defines the contract; runbooks define safe procedures; ADRs explain adopted choices; evidence proves only the specific dated sample. Historic reports and past handoffs are not proof of live flags/schedules.
 
 **GitHub directory landing pages:** every navigable documentation directory must use a `README.md` (rather than `index.md`) so GitHub automatically renders its contents when the folder is opened. This applies to [`adr/`](adr/README.md), [`process/`](process/README.md), [`runbooks/`](runbooks/README.md), [`archive/`](archive/README.md) and [`evidence/`](evidence/README.md) plus the planned `architecture/README.md` in [AIR-120](https://trello.com/c/olwWKaXU). Do not link to pages that have not been created.
 
-## Intended folders
+## Documentation structure
 
-| Folder | Responsibility | Implementation |
+The following directories exist and have GitHub-rendered landing pages. The status describes the **documentation role**, not the Trello task that first created the directory.
+
+| Folder | Purpose | Status |
 | --- | --- | --- |
-| `architecture/` | current topology and flows with planned vs deployed clearly separated; index and 13 page plans, **no diagrams yet** | [AIR-120](https://trello.com/c/olwWKaXU) |
-| `adr/` | numbered, stable architectural decisions and register | [AIR-109](https://trello.com/c/whae9vKn), [AIR-116](https://trello.com/c/6MHbRFZR)–[118](https://trello.com/c/5qf3Zn3p) |
-| [`reference/`](reference/README.md) (API, domain, data, integrations) | maintained interfaces, invariants and schemas | [AIR-112](https://trello.com/c/uzsaLuye), [AIR-113](https://trello.com/c/svVrqavq) |
-| [`runbooks/`](runbooks/README.md) with [`recovery/`](runbooks/recovery/README.md) | currently maintained operational procedures | [AIR-110](https://trello.com/c/HIMB8pfv), [AIR-111](https://trello.com/c/WXVqNJ25) |
-| [`process/`](process/README.md) | delivery workflow and Trello formatting | [AIR-111](https://trello.com/c/WXVqNJ25) |
-| [`evidence/`](evidence/README.md) (scored-resolver, prediction, D1, taxonomy, Film/Person, legacy-R2) | frozen audits, outcomes, aggregate machine-readable results and a usage registry | [AIR-114](https://trello.com/c/ia9tnXbc), [AIR-115](https://trello.com/c/TRp1oXpA) |
-| [`archive/`](archive/README.md) (legacy-sites, legacy-r2, superseded) | superseded instructions retained with references to successors; never an operational runbook | [AIR-111](https://trello.com/c/WXVqNJ25), [AIR-114](https://trello.com/c/ia9tnXbc) |
+| [`architecture/`](architecture/README.md) | System architecture navigation and plans for future diagrams | Index available; 13 pages planned |
+| [`adr/`](adr/README.md) | Accepted architectural choices and their evidence | Maintained decision register |
+| [`reference/`](reference/README.md) | Current API, domain, data and integration contracts | Maintained reference |
+| [`runbooks/`](runbooks/README.md), [`recovery/`](runbooks/recovery/README.md) | Approved operating and recovery procedures | Maintained runbooks |
+| [`process/`](process/README.md) | Engineering collaboration and Trello conventions | Maintained process |
+| [`evidence/`](evidence/README.md) | Dated reports, bounded measurements and preserved JSON samples | Historical evidence registry |
+| [`archive/`](archive/README.md) | Superseded or legacy procedures retained for traceability | Historical archive |
+
+The [architecture plan](architecture/README.md) is an index **only**. Its proposed child pages and Mermaid diagrams do not exist yet; do not link to them as implemented documentation.
 
 ## Document lifecycle and evidence governance
 
