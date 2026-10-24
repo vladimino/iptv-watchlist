@@ -68,7 +68,7 @@ Production authority is Cloudflare R2 for Worker `iptv`, as [ADR 0002](../../adr
 | `programme.json` | Published programme the public UI reads | Replaced at EPG commit together with the generation copies of `discovery-latest.json` and `discovered-films.json` |
 | `epg/published-generation.json` | Pointer to that generation | A new pointer does not prove the scored resolver finished that generation |
 | `watchlist.json` | Watchlist films without shows | `GET /api/watchlist` may **return** programme films when `updatedAt` differs; it does not write that substitution back |
-| `titles.json`, `people.json` | Localization caches updated during metadata and EPG steps | Not inside the EPG generation object. Their `updatedAt` can disagree with `programme.json` |
+| `titles.json`, `people.json` | Localization caches updated during metadata and EPG steps | Outside the EPG generation. The objects have no document-level `updatedAt`. The version a pin must carry is the R2 etag, or a hash of the loaded bytes when the etag is empty |
 | `metadata.json` | Letterboxd metadata cache | Separate from the programme pin |
 | `epg/discovery-latest.json`, `epg/discovery-resolution.json` | Observation ledger and decisions | Hot path of the resolver AIR-69 is watching. Not an admin catalog |
 | `epg/discovered-films.json` | Verified discovered catalog | Generation-pinned shows. Still not a search index |
@@ -78,7 +78,7 @@ Production authority is Cloudflare R2 for Worker `iptv`, as [ADR 0002](../../adr
 | Lifecycle `*.lifecycle.json` sidecars | Computed by `readLifecycle` | Forbidden from replacing `discovery-latest` or predictions. Nothing in the Worker writes them on a GET |
 | D1 `film` / `person` tables | Offline and future migration | Empty of production authority until a separate cutover |
 
-One admin response must name its pin. [ADR 0008](../../adr/0008-atomic-epg-publication.md) makes the published generation the coherent EPG snapshot: programme, discovery-latest, and discovered-films for that generation. Titles and people are a second clock, outside that object. A response that mixes them must set `skew: true` rather than imply one snapshot. [ADR 0007](../../adr/0007-persistent-discovery-evidence.md) keeps the resolution ledger as candidate evidence, not canonical Film. An unresolved observation is not a Film row. Those rows are a third set and are not part of `programme.json`.
+One admin response must name its pin, and that pin must cover every object the page was built from. [ADR 0008](../../adr/0008-atomic-epg-publication.md) makes the published generation the coherent EPG snapshot for programme, discovery-latest, and discovered-films. `titles.json` and `people.json` stay outside that object and change on their own, so the same `programmeRunId` does not mean the same search page. The AIR-124 pin is the generation id plus the version of the generation programme object and of both dictionaries. `skew` only reports that those clocks disagree. It still returns the page. `stale_pin` means the caller asked to continue against a version tuple that is no longer the tuple just read, so the handler returns no items. The read order and the negative cases are in the AIR-124 section. [ADR 0007](../../adr/0007-persistent-discovery-evidence.md) keeps the resolution ledger as candidate evidence, not canonical Film. An unresolved observation is not a Film row. Those rows are a third set and are not part of `programme.json`.
 
 ## GET side effects and safe reads
 
@@ -120,7 +120,7 @@ The bounded design is:
 
 1. **AIR-123** searches and classifies arrays the caller already holds. No I/O.
 2. **AIR-52** feeds those functions from a fixture module. No I/O.
-3. **AIR-124**, only after AIR-69, may load the pinned `programme.json`, `titles.json`, and `people.json` (three known keys, plus the published-generation pointer) once per snapshot, project the programme films and embedded people, and run the AIR-123 functions in memory. Repeat page requests reuse that pin. They do not list the bucket.
+3. **AIR-124**, only after AIR-69, may load one immutable snapshot: the published-generation pointer, `epg/generations/<programmeRunId>/programme.json`, `titles.json`, and `people.json`. It projects that snapshot and runs the AIR-123 functions in memory. A later page is served only when every version in the pin still matches. A warm isolate may keep that projection, keyed by the full version tuple, and must drop it when any version changes. It does not list the bucket, and a matching `programmeRunId` is not proof that the dictionaries are unchanged.
 4. Quality rows that exist only on the discovery ledger (an unresolved observation with no programme film) need a **generation-scoped index object written at EPG publish**, not a GET. That writer is a separate change. It is not part of AIR-123, AIR-52, or the first AIR-124 slice, and it must not land while AIR-69 is watching the publish path.
 
 ## Offline now, live later
@@ -150,8 +150,8 @@ getFilm(records, id) -> record | null
 getPerson(records, id) -> record | null
 ```
 
-- `pin` is always `null` offline. AIR-124 fills it.
-- `limit` is an integer 1–25. Missing `limit` is an error the caller can surface as 400. Default inside the UI adapter may be 25, but the function does not silently substitute a default that hides a bad call.
+- `pin` is always `null` offline. AIR-124 fills it. The offline cursor is still bound to the records array the caller passed: a different array is `stale_cursor` even when ids match.
+- `limit` is required and must be an integer from 1 to 25. The function does not substitute a default. A missing, non-integer, or out-of-range value returns `{ error: 'invalid_limit' }` and no `items`. The AIR-52 adapter and the AIR-124 HTTP adapter are the only places that choose 25, and they pass that integer in. The library never sees an omitted limit.
 - `cursor` is opaque. It is valid only for the same records array, the same query or queue, and the same limit. A mismatched cursor returns an error result `{ error: 'stale_cursor' }`, not an empty page.
 - Sort a search by rank, then `id` ascending with `en` comparison. Ranks: `0` exact external id, `1` exact preferred, `2` exact original or alias, `3` prefix of any of those, `4` substring. Tokens of a multi-word query are AND. Fold Latin diacritics, map `ё`/`Ё` to `е`, and compare case-insensitively. Do not score synopsis.
 - Two records with the same folded preferred title are both returned. Each item includes `collision: true` when another item on the full result, not only the page, shares that folded title. Do not merge them. This flag is a search result, not the identity collision in [ADR 0009](../../adr/0009-canonical-film-person-identity.md). It does not authorize linking films or unifying two Person role ids.
@@ -159,7 +159,7 @@ getPerson(records, id) -> record | null
 - `getFilm` / `getPerson` follow no redirects. Redirects are data on the record, not a hidden hop.
 - Items are the supplied records plus `rank` and `collision` on searches. Do not drop fields and do not add a model score.
 
-Tests must cover empty query (error, not "all records"), empty records, the rank order, Cyrillic `ё`, a collision, every queue code, a stale cursor, and a limit outside 1–25. No network.
+Tests must cover empty query (error, not "all records"), empty records, the rank order, Cyrillic `ё`, a collision, every queue code, a stale cursor, a missing `limit`, and `limit` values `0`, `26`, and `1.5`. `limit` 1 and `limit` 25 succeed. No network. The library tests must not accept a call that omits `limit`.
 
 ## AIR-52 fixture boundary
 
@@ -177,6 +177,8 @@ The fixture is synthetic. Do not paste a production watchlist, a private snapsho
 
 The page shows search, an entity summary (id, preferred title or name, identity status, localization status, external ids, alias provenance), the quality queues, and deep links of the form `/admin?q=&kind=film&id=&queue=`. Empty, loading, and error states are visible. Loading is local only: the fixture returns on the same turn, or the page may show the loading state in a test harness. There is no background refresh.
 
+The adapter always calls AIR-123 with an explicit `limit`. With no page-size control it passes 25. It never omits `limit`. A test that calls the adapter's library wrapper with `limit` omitted or `limit: 0` shows the `invalid_limit` error state and does not render a result page. A test that loads the page with no size selected asserts the library call received `limit: 25`.
+
 Keyboard: the search field, queue controls, and results are reachable in order; Escape clears the query. Desktop width about 1280 px and a 390 px mobile width are both required screenshots, attached to the AIR-52 PR and not committed. The public movie UI is unchanged.
 
 Deploying the static page is allowed only while the data module stays the fixture. Adding a live client in that PR is a failure of this boundary even if the route is unused.
@@ -190,48 +192,102 @@ Do not implement this section in AIR-123 or AIR-52. When it is implemented, it i
 - `/api/admin/people?q=&queue=&limit=&cursor=&pin=`
 - `/api/admin/people/:id?pin=`
 
-The handler loads only `epg/published-generation.json`, `programme.json`, `titles.json`, and `people.json`. It builds AIR-123 records from that programme and those dictionaries, then calls the AIR-123 functions. It does not import a write path, does not call `recoverStopEvents`, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
+The handler loads only `epg/published-generation.json`, the generation programme object, `titles.json`, and `people.json`. It builds AIR-123 records from that programme and those dictionaries, then calls the AIR-123 functions with an explicit `limit`. It does not import a write path, does not call `recoverStopEvents`, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
+
+The catalogue body is `epg/generations/<programmeRunId>/programme.json`, not the live root `programme.json`. `loadJSON` already prefers the generation object after reading the published pointer. Root `programme.json` can still hold the previous generation until `copyEpgGeneration` finishes, so reading the new pointer together with the root file would join two generations. AIR-124 does not fall back to the root key.
+
+Read order for one snapshot:
+
+1. GET `epg/published-generation.json`. Require `phase === 'published'` and a `programmeRunId`. Keep the object etag.
+2. GET `epg/generations/<programmeRunId>/programme.json`. Require `body.runId` to equal that `programmeRunId`. Keep the object etag. If the object is missing, or `runId` differs, stop. Do not read root `programme.json` instead.
+3. GET the pointer again. If its etag or `programmeRunId` differs from step 1, discard the programme body. One full retry is allowed. A second mismatch returns 503 `programme_unavailable` when the client sent no pin, and 409 `stale_pin` when it did. Do not pair the first programme body with the second pointer.
+4. GET root `titles.json` and `people.json` and keep each etag. A missing dictionary is an empty map and an empty version, not a 503. These keys stay outside the generation.
+
+Each version is the raw R2 etag. If the object exists and the etag is empty, hash the loaded bytes and use that hash. A missing etag is not "unchanged". `updatedAt` is not the match key: the dictionaries have no document clock today, and two different bodies can share a timestamp.
+
+The handler may keep one immutable in-memory projection, replaced as a whole and keyed by the version tuple. Reuse it only after every version in the tuple has been checked again. A matching `programmeRunId` is not that check. The cache is not a new R2 object and is not written from EPG publish.
+
+Page size follows one rule. AIR-123 requires an integer `limit` from 1 to 25 and does not default. AIR-124 applies the default at the HTTP boundary of the collection routes: a missing `limit` query parameter becomes 25 before AIR-123 is called. A present value that is not an integer from 1 to 25 is 400 `invalid_limit`, and AIR-123 is not called. Detail routes do not take `limit`. The AIR-52 adapter uses the same split: it passes 25 when the page has no size, and it never calls the library without a limit.
 
 Performance:
 
-- At most those four R2 gets for a cold snapshot. A warm isolate may reuse the snapshot while `programme.runId` is unchanged.
-- No `BUCKET.list`. No per-result R2 get. No TMDB and no model call.
-- `limit` 1–25, default 25. A larger limit is 400.
+- A cold snapshot is the pointer, the generation programme object, the pointer again, and the two dictionaries. No `BUCKET.list`. No per-result R2 get. No TMDB and no model call.
+- A warm isolate adds only the version checks for a tuple it already holds.
 - The response body for a page stays a projection, not the raw programme object.
 
-Snapshot pin, returned on every success:
+Snapshot pin, returned on every success. It is an opaque server value. Clients send it back as `pin` and do not assemble it from `programmeRunId`.
 
 ```text
-pin: { programmeRunId, programmeUpdatedAt, titlesUpdatedAt, peopleUpdatedAt, skew }
+pin: {
+  programmeRunId,
+  generationEtag,
+  programmeEtag,
+  titlesVersion,
+  peopleVersion,
+  programmeUpdatedAt,
+  titlesUpdatedAt,
+  peopleUpdatedAt,
+  skew,
+  skewReasons
+}
 ```
 
-`skew` is true when the titles or people object time is newer than `programmeUpdatedAt`. The client sends `pin` back as the `pin` query parameter. If the stored programme run id differs, respond **409** `{ error: 'stale_pin' }` and do not return a mixed page.
+`titlesVersion` and `peopleVersion` are the etag, the content hash, or null when that dictionary object is absent. `*UpdatedAt` is the JSON clock when the body has one, otherwise the R2 `uploaded` time, otherwise null. A pin matches only when `programmeRunId`, `generationEtag`, `programmeEtag`, `titlesVersion`, and `peopleVersion` all match the tuple just read. The timestamp fields are not a match key.
+
+`skew` is diagnostic. A true value still returns the page, and a cursor minted for that pin stays valid while the versions match. `skewReasons` may contain:
+
+| Reason | When |
+| --- | --- |
+| `titles_newer` | Both clocks exist and the titles clock is later than `programmeUpdatedAt` |
+| `people_newer` | Both clocks exist and the people clock is later than `programmeUpdatedAt` |
+| `dictionary_older` | Both clocks exist and either dictionary clock is earlier than `programmeUpdatedAt` |
+| `dictionary_missing` | `titles.json` or `people.json` is absent |
+| `timestamp_missing` | A loaded object has neither a JSON `updatedAt` nor an R2 `uploaded` time |
+
+Newer and older are not guessed when a clock is missing. That case is `timestamp_missing` only.
+
+`stale_pin` means the request cannot be continued safely. The client sent a pin whose versions are not the tuple just read, including a change of only `titles.json` or only `people.json`. The handler returns 409 `{ error: 'stale_pin' }` and no `items`. It does not fill the page from the new tuple under the old pin. The client starts again without a pin.
 
 Errors:
 
 | Status | `error` | When |
 | --- | --- | --- |
-| 400 | `invalid_limit` | `limit` is missing or not an integer 1–25 |
+| 400 | `invalid_limit` | `limit` is present and is not an integer 1–25. An omitted `limit` becomes 25 and is not an error |
 | 400 | `invalid_query` | `q` is present and blank, or longer than 200 characters |
+| 400 | `invalid_pin` | `pin` is present and cannot be parsed. A pin that parses but does not match the loaded versions is 409, not 400 |
 | 400 | `unknown_queue` | `queue` is not in the table above |
-| 400 | `stale_cursor` | Cursor was not minted for this pin, query, queue, and limit |
-| 404 | `not_found` | Id is absent from the pinned programme snapshot |
-| 409 | `stale_pin` | `pin` does not match the current programme run |
-| 503 | `programme_unavailable` | `programme.json` is missing. Same idea as the public programme 503, without starting sync |
+| 400 | `stale_cursor` | The request pin matches the loaded tuple, but the cursor was not minted for that pin, query, queue, and limit |
+| 404 | `not_found` | Id is absent from the programme object in the matched pin |
+| 409 | `stale_pin` | The supplied pin differs in `programmeRunId` or in any of `generationEtag`, `programmeEtag`, `titlesVersion`, `peopleVersion` |
+| 503 | `programme_unavailable` | The pointer is missing, not `published`, or the generation programme object is missing or has a different `runId`. No sync is started, and root `programme.json` is not used as a substitute |
 
 A 5xx from R2 is a failure of this read. The handler does not retry into a writer. The page shows the error state and does not fall back to the fixture.
 
-`nextCursor` is null on the last page. The cursor encodes the pin id, the query or queue, the limit, and the last item id. It is not an R2 list cursor.
+`nextCursor` is null on the last page. The cursor encodes the full pin tuple, the query or queue, the limit, and the last item id. It is not an R2 list cursor. A cursor minted for an older titles or people version is `stale_pin` while the request still carries that old pin, and `stale_cursor` when the request pin already matches the new tuple. Either response omits `items`.
+
+Negative cases the AIR-124 tests must cover. This PR does not add those tests or the route.
+
+| After the pin was minted | Request | Response |
+| --- | --- | --- |
+| Only the `titles.json` version changes | The same pin, or a cursor minted for it | 409 `stale_pin`, no `items` |
+| Only the `people.json` version changes | The same pin, or a cursor minted for it | 409 `stale_pin`, no `items` |
+| The published generation or the programme etag changes | The same pin, or a cursor minted for it | 409 `stale_pin`, no `items`. Page 2 of generation A is not filled with films from generation B |
+| A dictionary clock is older than `programmeUpdatedAt`, and every version is unchanged | No pin, then the pin from that response | 200 with `skew` and `dictionary_older`. The next page sent with that pin is 200 |
+| A loaded object has neither JSON `updatedAt` nor R2 `uploaded`, and its etag is present | No pin | 200 with `skew` and `timestamp_missing`. The next page is stable because the pin matches on etags |
+| The generation programme object is missing, or its `runId` disagrees with the pointer | Any | 503 `programme_unavailable`. Root `programme.json` is not read |
+| `limit` is omitted | A search | 200, and AIR-123 is called with `limit` 25 |
+| `limit` is `0`, `26`, `1.5`, or `abc` | A search | 400 `invalid_limit`, and AIR-123 is not called |
 
 ## Risks and checks before a live route is enabled
 
 | Risk | What would go wrong | Check before enablement |
 | --- | --- | --- |
 | Writing GET | An admin poll repairs events or seeds a rating | The route is not one of the four writing GETs. A test fails if the handler calls `recoverStopEvents` or `enrichmentView` |
-| Bucket scan | Opening `/admin` lists the bucket or `enrichment/films/` | The handler's R2 calls are the four known keys only. Assert no `list` |
+| Bucket scan | Opening `/admin` lists the bucket or `enrichment/films/` | The handler reads only `epg/published-generation.json`, `epg/generations/<runId>/programme.json`, `titles.json`, and `people.json`. Assert no `list` and no fallback to root `programme.json` |
 | Resolver interference | A search reads the lease, continuation, or resolution ledger and is mistaken for AIR-69 activity | Those keys are absent from the handler. AIR-69 is closed or explicitly still excluded |
-| Skew presented as one snapshot | Titles from a later sync appear as if they belonged to the pinned programme | Response has `skew`. A test uses a newer `titles.json` and expects `skew: true` |
-| Stale page | Cursor from generation A is applied to generation B | 409 `stale_pin` or 400 `stale_cursor`, empty `items` |
+| `skew` treated as a failed read | A dictionary clock hides a valid page, or a page claims the clocks match | `skew: true` still returns `items`. A newer titles clock expects 200 and `titles_newer`. A missing clock expects `timestamp_missing` |
+| Stale continuation | Page 2 keeps generation A after only `titles.json`, only `people.json`, or the generation changes | 409 `stale_pin` and no `items` for each of those three changes. A dictionary that is only older stays 200 |
+| `programmeRunId` used as the whole pin | The same run id with a new titles etag returns the next page | The match key includes `titlesVersion` and `peopleVersion`. The titles-only case expects 409 |
 | Anonymous admin | A new route is excluded from Access | No Access bypass. The route stays on the existing Worker hostname. No token in the client |
 | Fixture leak | AIR-52 ships a `fetch('/api/admin/...')` | Bundle test: admin script contains neither `fetch` nor `/api/` |
 | D1 mistaken for production | Admin reads an empty or stale SQLite | AIR-124 does not open D1. The contract says R2 programme snapshot |
