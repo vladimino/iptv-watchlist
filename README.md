@@ -23,7 +23,7 @@ npm test
 npm run build
 ```
 
-Local browsing uses dummy films from the repository and a gitignored local R2 store. `npm run dev` builds the Worker when the bundle is missing or older than the sources. See [docs/local-setup.md](docs/local-setup.md).
+Local browsing uses dummy films from the repository and a gitignored local R2 store. `npm run dev` builds the Worker when the bundle is missing or older than the sources. See [docs/local-setup.md](docs/runbooks/local-setup.md).
 
 ```bash
 npm run dev
@@ -109,6 +109,6 @@ Branch and pull-request CI runs only the self-contained test/build commands abov
 
 Production is Cloudflare Worker `iptv` at `https://iptv.vladimino.workers.dev/`, private behind Cloudflare Access. The Worker deploy does not configure hourly predictions: those run via a separate ChatGPT Scheduled Task using the authorized IPTV MCP connector, and the task's enablement is managed outside this repository. Do not infer the current task state from this README or relax Cloudflare Access. See [Scheduled Task timing and troubleshooting](docs/prediction-runner.md#chatgpt-scheduled-tasks-timing-and-troubleshooting) for nominal trigger times, /events limitations, and queue checks. The historical Sites snapshot must not be imported over production R2 again. Publishing the legacy Site still requires a separate authorized Sites release, and that release must not resume writers there.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/deployment.md) for deployment, backup, and rollback.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/runbooks/deployment.md) for deployment, backup, and rollback.
 
-The historical Sites export is documented in [docs/migration-export.md](docs/migration-export.md). The completed Cloudflare restore and the ban on replaying it are documented in [docs/r2-import.md](docs/r2-import.md).
+The historical Sites export is documented in [docs/migration-export.md](docs/archive/legacy-sites/migration-export.md). The completed Cloudflare restore and the ban on replaying it are documented in [docs/r2-import.md](docs/archive/legacy-r2/r2-import.md).
