@@ -18,8 +18,14 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0010 — Separate candidate scoring from verified TMDB identity](0010-scored-detail-verification.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
 | [0011 — Constrain title variants and preserve ambiguity gates](0011-bounded-title-variants.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
 | [0012 — Require measured shadow and explicit GO before scored cutover](0012-scored-resolution-rollout.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
+| [0013 — Publish immutable versioned taste profiles](0013-versioned-taste-profile.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
+| [0014 — Keep fingerprint and prediction freshness independent](0014-fingerprint-prediction-lifecycle.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
+| [0015 — Use a leased queue with per-film retry and hot priority](0015-queued-prediction-recovery.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
+| [0016 — Separate server-formed responses from caller-confirmed delivery](0016-run-diagnostic-provenance.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
+| [0017 — Migrate R2 to D1 through separate evidence-gated stages](0017-staged-d1-migration.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
+| [0018 — Preserve last-good ratings when Letterboxd returns HTTP 403](0018-letterboxd-last-good-ratings.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
 
-[Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are the next documentation scope. Never infer an original approval date from a later deployment test.
+[Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
 ## Lifecycle
 
