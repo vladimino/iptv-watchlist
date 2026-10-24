@@ -33,7 +33,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 
 ### Tools
 
-`probe_read` and `probe_echo` do not read or write R2. Every other tool returns `structuredContent.httpStatus` plus the JSON body of the existing HTTP contract. `400`, `404`, `409`, `503`, and `5xx` set `isError`, and the body stays in `structuredContent` so the caller can still read `Run id mismatch`, `lease_lost`, `busy`, or `Queue not empty`. `already_running` is HTTP 200: stop and do not adopt that `runId`.
+`probe_read` and `probe_echo` do not read or write R2. `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` read a fixed set of stored objects and return that diagnostic with `httpStatus: 200`. They do not call an HTTP route, list storage, or write. Every other tool returns `structuredContent.httpStatus` plus the JSON body of the existing HTTP contract. `400`, `404`, `409`, `503`, and `5xx` set `isError`, and the body stays in `structuredContent` so the caller can still read `Run id mismatch`, `lease_lost`, `busy`, or `Queue not empty`. `already_running` is HTTP 200: stop and do not adopt that `runId`.
 
 | Tool | Writes | What it calls |
 | --- | --- | --- |
@@ -46,6 +46,9 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `enrichment_runner` | no | `GET /api/enrichment/runner` |
 | `enrichment_queue` | no | `GET /api/enrichment/queue/status` |
 | `enrichment_status` | recovery only | `GET /api/enrichment/status`, including an undelivered stop event |
+| `prediction_queue_overview` | no | Existing queue, profile, view index, programme, discovered films, and published generation. No HTTP route. [AIR-98](air-98-prediction-diagnostics.md). |
+| `prediction_film_diagnostics` | no | The same snapshot plus that film's fingerprint and prediction. No HTTP route. [AIR-98](air-98-prediction-diagnostics.md). |
+| `prediction_pending` | no | One page of the same queue snapshot. No HTTP route. [AIR-98](air-98-prediction-diagnostics.md). |
 | `epg_sync_start` | yes | `POST /api/sync/start`. No arguments. |
 | `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. After `stage` is `complete`, each call runs one discovery chunk or reports why it did not. |
 | `prediction_start` | yes | `POST /api/enrichment/start` with `scope: watchlist_all` and `mode: queued`. `trigger` is `scheduled` or `manual`. |
@@ -124,7 +127,7 @@ This repository change does not modify Cloudflare Access. Each item below must b
 
 The connector is already connected. On 19–20 October 2026 ChatGPT on the web called `probe_read` and `probe_echo` through `https://iptv.vladimino.workers.dev/mcp` with Managed OAuth. That confirms interactive sign-in. It does not confirm unattended token refresh, and it does not confirm an EPG or prediction run.
 
-After this change is deployed, refresh the tools on that server. The list must be exactly `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `enrichment_status`, `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`. Do not call the write tools against production until AIR-62.
+After this change is deployed, refresh the tools on that server. The list must be exactly `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `enrichment_status`, `prediction_queue_overview`, `prediction_film_diagnostics`, `prediction_pending`, `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`. Do not call the write tools against production until AIR-62. The three prediction diagnostic tools are read-only; the production check for them is the procedure in [AIR-98](air-98-prediction-diagnostics.md), after this deploy.
 
 To connect a replacement server, use the same URL and OAuth with an empty client ID and secret, and sign in as the owner. The current allow-list already permits a ChatGPT connector callback under `https://chatgpt.com/connector/oauth/*` (requirement 2).
 
