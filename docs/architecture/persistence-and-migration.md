@@ -1,0 +1,30 @@
+# Persistence authority and staged migration
+
+**Production today:** R2 bucket `iptv` is authoritative. D1 is a target design with an unapplied schema and offline adapters; neither the local importer nor an ADR changes live authority. See [D1 contract](../reference/data/d1-schema.md), [ADR-0001](../adr/0001-d1-schema-v1.md), [migration ADR](../adr/0017-staged-d1-migration.md) and [offline evidence](../evidence/d1-migration/air-73-offline-run.md).
+
+```mermaid
+flowchart TD
+    worker["Production Worker"]
+    r2[("R2: authoritative objects")]
+    archive["Historical snapshot (offline)"]
+    importer["Offline importer and parity"]
+    local[("Local SQLite / D1-compatible schema")]
+    gate["Owner approval and live evidence gates"]
+    backfill["Future live backfill"]
+    shadowWrite["Future shadow writes"]
+    shadowRead["Future shadow reads"]
+    cutRead["Future read cutover"]
+    cutWrite["Future write authority cutover"]
+    retire["Future legacy retirement"]
+    worker <--> r2
+    archive --> importer --> local
+    local -.-> gate
+    r2 -.->|separately approved| backfill
+    gate -.-> backfill --> shadowWrite --> shadowRead --> cutRead --> cutWrite --> retire
+    classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
+    class gate,backfill,shadowWrite,shadowRead,cutRead,cutWrite,retire future
+```
+
+The historical archive is not live production. Offline import receipts, schema compatibility and replay parity are evidence, not authorization. An incomplete or conflicting import must report gaps; it must not invent Film identities or silently omit unportable data. No R2/D1 shared transaction exists, so read/write migration must be staged with separate acceptance and recovery boundaries.
+
+**Not deployed:** D1 production binding, shadow writers/readers and authoritative D1 cutover. Each orange node is a planned step, not a claim that its Trello task is completed or an instruction to perform it.
