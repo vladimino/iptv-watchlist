@@ -8,25 +8,78 @@ function scoreTokens(value){return scoreNorm(value).split(' ').filter(Boolean);}
 function shortTitle(value){const text=scoreNorm(value);return scoreTokens(text).length<=1||text.length<=8;}
 function finiteNumber(value){if(value==null||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null;}
 function observationDurations(observation){return [...new Set([...(observation.durations||[]),observation.duration].map(finiteNumber).filter(value=>value!=null))];}
+const STRUCTURAL_NUMBER_WORDS={1:'один',2:'два',3:'три',4:'четыре',5:'пять',6:'шесть',7:'семь',8:'восемь',9:'девять',10:'десять',11:'одиннадцать',12:'двенадцать'};
+function spellSwap(token){
+ if(!token||/[\s-]/u.test(token)||[...token].length>8)return null;
+ if(token.includes('э'))return token.replace(/э/g,'е');
+ if(token.includes('е'))return token.replace(/е/g,'э');
+ return null;
+}
+function reversibleStructuralForm(observationTitle,candidateTitle){
+ const observation=scoreNorm(observationTitle),candidate=scoreNorm(candidateTitle);
+ if(!observation||!candidate||observation===candidate)return null;
+ const lead=observation.match(/^(\d{1,2}) (\p{L}.*)$/u);
+ if(lead&&/\p{Script=Cyrillic}/u.test(lead[2])&&STRUCTURAL_NUMBER_WORDS[Number(lead[1])]){
+  const form=scoreNorm(STRUCTURAL_NUMBER_WORDS[Number(lead[1])]+' '+lead[2]);
+  if(candidate===form)return {reason:'numeral',form};
+ }
+ const part=observation.match(/^(.*\p{L}.*) 1$/u),stem=part&&scoreNorm(part[1]).length>=3?scoreNorm(part[1]):null;
+ if(stem&&candidate===stem)return {reason:'part_suffix',form:stem,part:1};
+ const whole=spellSwap(observation);
+ if(whole&&candidate===whole)return {reason:'spelling_e',form:whole};
+ if(stem){const spelled=spellSwap(stem);if(spelled&&candidate===spelled)return {reason:'spelling_e',form:spelled,part:1};}
+ return null;
+}
+function structuralClaim(candidate){
+ const claim=candidate?.structural;
+ if(!claim||!['part_suffix','spelling_e','numeral'].includes(claim.reason))return null;
+ const query=scoreNorm(claim.query),matched=scoreNorm(claim.matched);
+ if(!query||!matched||query!==matched)return null;
+ return {reason:claim.reason,form:matched};
+}
 function titleEvidence(observation,fields){
  const wanted=scoreNorm(observation.normalizedTitle||observation.title),rank={title:0,original:1,alias:2};
  let found=null;
  for(const [source,value] of fields)if(wanted&&scoreNorm(value)===wanted&&(!found||rank[source]<rank[found.source]))found={quality:1,source,matched:scoreNorm(value)};
  return found||{quality:0,source:null,matched:null};
 }
+function structuralClaimsOf(candidate){
+ const raw=[...(Array.isArray(candidate?.structuralClaims)?candidate.structuralClaims:[]),...(candidate?.structural?[candidate.structural]:[])];
+ const out=[],seen=new Set();
+ for(const claim of raw){
+  const parsed=structuralClaim({structural:claim});
+  if(!parsed)continue;
+  const key=parsed.reason+'|'+parsed.form;
+  if(seen.has(key))continue;
+  seen.add(key);out.push(parsed);
+ }
+ return out;
+}
+function structuralTitleEvidence(observation,group){
+ const rank={part_suffix:0,spelling_e:1,numeral:2},found=[];
+ for(const claim of group.structuralClaims||[])for(const title of [...group.titles,...group.originals]){
+  const form=reversibleStructuralForm(observation.normalizedTitle||observation.title,title);
+  if(form&&form.reason===claim.reason&&form.form===claim.form)found.push(form);
+ }
+ found.sort((a,b)=>(rank[a.reason]??9)-(rank[b.reason]??9)||a.form.localeCompare(b.form));
+ const match=found[0];
+ return match?{quality:1,source:'structural',matched:match.form,structural:match}:null;
+}
 function aggregateCandidates(candidates){
  const groups=new Map();
  for(const candidate of candidates||[]){
   const tmdbId=candidate?.tmdbId==null?'':String(candidate.tmdbId);
   if(!tmdbId)continue;
-  const group=groups.get(tmdbId)||{tmdbId,titles:[],originals:[],aliases:[],years:[],runtimes:[],trusted:false,sources:0};
+  const group=groups.get(tmdbId)||{tmdbId,titles:[],originals:[],aliases:[],years:[],runtimes:[],trusted:false,sources:0,structuralClaims:[]};
   group.sources++;
   if(candidate.title)group.titles.push(candidate.title);
   if(candidate.original)group.originals.push(candidate.original);
+  for(const extra of candidate.extraTitles||[])if(extra)group.titles.push(extra);
   for(const alias of candidate.aliases||[])if(alias)group.aliases.push(alias);
   const year=finiteNumber(candidate.year);if(year!=null)group.years.push(year);
   const runtime=finiteNumber(candidate.runtime);if(runtime!=null)group.runtimes.push(runtime);
   if(candidate.trusted===true)group.trusted=true;
+  for(const claim of structuralClaimsOf(candidate))if(!group.structuralClaims.some(item=>item.reason===claim.reason&&item.form===claim.form))group.structuralClaims.push(claim);
   groups.set(tmdbId,group);
  }
  return [...groups.values()];
@@ -65,6 +118,8 @@ function scoreFilmResolution(input){
  const exact=[],prepared=[];
  for(const group of aggregateCandidates(input?.candidates)){
   const title=titleEvidence(observation,[...group.titles.map(value=>['title',value]),...group.originals.map(value=>['original',value]),...group.aliases.map(value=>['alias',value])]);
+  const structural=title.quality===1?null:structuralTitleEvidence(observation,group);
+  if(structural)Object.assign(title,structural);
   const row={tmdbId:group.tmdbId,title,year:chosenYear(group.years,observationYear),runtime:chosenRuntime(group.runtimes,durations),trusted:group.trusted,sources:group.sources};
   prepared.push(row);
   if(title.quality===1)exact.push(row);
@@ -83,12 +138,13 @@ function scoreFilmResolution(input){
  considered.sort((a,b)=>b.score-a.score||a.tmdbId.localeCompare(b.tmdbId));
  const top=considered[0]||null,second=considered.find(row=>row.tmdbId!==top?.tmdbId)||null,score=top?.score||0;
  const remake=exact.some(row=>Math.abs((observationYear??NaN)-row.year)>=2);
+ const titleBasis=top?.title?.quality===1?{source:top.title.source,form:top.title.matched,structural:top.title.structural||null}:null;
  let status='no_confident_match',reason=exact.length?'no_confident_score':'no_exact_title',acceptedTmdbId=null;
  if(top&&top.contradictions.length){status='contradicted';reason=top.contradictions.includes('year_conflict')?'contradicted_year':'contradicted_runtime';}
  else if(top&&top.title.quality===1&&(top.year.relation==='year_required'||top.uniqueness.value<1)){status='ambiguous';reason=short&&observationYear==null?'ambiguous_short_title_without_year':'ambiguous_collision';}
- else if(top&&score>=ACCEPT_SCORE&&(!second||score-second.score>ACCEPT_MARGIN)){status='accepted';acceptedTmdbId=top.tmdbId;reason=remake?'accepted_year_separates_remakes':'accepted_unique_evidence';}
+ else if(top&&score>=ACCEPT_SCORE&&(!second||score-second.score>ACCEPT_MARGIN)){status='accepted';acceptedTmdbId=top.tmdbId;reason=titleBasis?.structural?remake?'accepted_'+titleBasis.structural.reason+'_remake':'accepted_'+titleBasis.structural.reason:remake?'accepted_year_separates_remakes':'accepted_unique_evidence';}
  else if(top&&score>=AMBIGUOUS_SCORE){status='ambiguous';reason='ambiguous_margin';}
- return {scorerVersion:SCORER_VERSION,observationKey:observation.key??null,status,confidence:score,score,acceptedTmdbId,reason,considered};
+ return {scorerVersion:SCORER_VERSION,observationKey:observation.key??null,status,confidence:score,score,acceptedTmdbId,reason,titleBasis,considered};
 }
 function showMatchBasis(titleYear,observation,candidates){
  const score=scoreFilmResolution({observation,candidates:candidates||[]});

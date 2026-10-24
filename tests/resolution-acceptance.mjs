@@ -205,5 +205,15 @@ const held={id:'film:28nq',canonicalIdentity:'tmdb:11',externalIds:[{scheme:'tmd
 const before=JSON.stringify(held);
 bound(scored,{film:held,confirmation:verifiedDecision});
 assert.equal(JSON.stringify(held),before);
+const structuralScore=score(observe('11 друзей оушена|2001','11 друзей Оушена',2001,116),[film('161','Одиннадцать друзей Оушена',2001,116,{structural:{reason:'numeral',query:'одиннадцать друзей Оушена',matched:'Одиннадцать друзей Оушена'}})]);
+const structuralObservation={normalizedTitle:'11 друзей оушена',year:2001,durations:[116]};
+const structuralDetail={authority:'tmdb_detail',tmdbId:'161',evidence:{movie:{id:'161',title:'Одиннадцать друзей Оушена',original:"Ocean's Eleven",aliases:[],year:2001,runtime:116}}};
+assert.equal(bound(structuralScore,{observation:structuralObservation,tmdbDetail:structuralDetail}).outcome,'detail_verified');
+assert.equal(bound(structuralScore,{observation:structuralObservation,tmdbDetail:{authority:'tmdb_detail',tmdbId:'161',evidence:{movie:{id:'161',title:'Другой',original:'Other',aliases:[],year:2001,runtime:116}}}}).reason,'detail_title_mismatch');
+assert.equal(bound(structuralScore,{observation:structuralObservation,tmdbDetail:{authority:'tmdb_detail',tmdbId:'161',evidence:{movie:{id:'161',title:'Одиннадцать друзей Оушена',original:"Ocean's Eleven",aliases:[],year:2001,runtime:40}}}}).reason,'detail_runtime_mismatch');
+assert.equal(bound(structuralScore,{observation:structuralObservation,tmdbDetail:structuralDetail,competitors:[{tmdbId:'162',title:'Одиннадцать друзей Оушена',original:"Ocean's Eleven",aliases:[],year:2001}]}).reason,'detail_competing_version');
+const matrixScore=score(observe('матрица 1|1999','Матрица 1',1999,136),[film('603','Матрица',1999,136,{structural:{reason:'part_suffix',query:'Матрица',matched:'Матрица'}})]);
+assert.equal(bound(matrixScore,{observation:{normalizedTitle:'матрица 1',year:1999,durations:[136]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'603',evidence:{movie:{id:'603',title:'Матрица',original:'The Matrix',aliases:[],year:1999,runtime:136}}}}).outcome,'detail_verified');
+assert.equal(bound(matrixScore,{observation:{normalizedTitle:'матрица 1',year:1999,durations:[136]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'603',evidence:{movie:{id:'604',title:'Матрица',original:'The Matrix',aliases:[],year:1999,runtime:136}}}}).reason,'detail_id_mismatch');
 
 console.log('Scored identity acceptance passed.');
