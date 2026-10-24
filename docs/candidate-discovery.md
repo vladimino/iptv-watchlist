@@ -35,7 +35,7 @@ A hit is kept when its year is within one of the observation, and its title equa
 | `гол 2\|2008` | Гол 2: Жизнь как мечта, and a bare «Гол» | `no_exact_title` | still `no_exact_title`; dropping `2` does not prove which Goal it is |
 | `чудо женщина\|2020` | Кровные узы, 1984, and the 2017 catalog film | `contradicted_year` | unchanged; a longer title is not the form |
 | `чебурашка 2\|2025` | Чебурашка 2, 1228477 | `detail_verified` | unchanged literal neighbouring year |
-| `убежище\|2022` | Убежище / Refuge, 801970 | `detail_verified` | unchanged; the short-title hold is a separate card |
+| `убежище\|2022` | Убежище / Refuge, 801970, beside Shelter 1290821 | `detail_verified` | `needs_verification` / `short_title_adjacent_year`; the id stays a proposal |
 | `код 8 часть 2\|2024`, `мортал комбат\|1995` | alias text only | not scored | still not scored |
 
 If no hit matches, up to three year-compatible rows are ordered by year distance, then runtime distance, then shared title tokens. Each is read for translations and alternative titles while the chunk cap remains. A matching title is recorded as `tmdb_alias` and is not given to the scorer. The id is a proposal. `Мортал Комбат` stays `no_confident_match` even when it is not the first search row. A longer title such as `Чудо-женщина: 1984` is a proposal for `Чудо-женщина`, not an acceptance.
