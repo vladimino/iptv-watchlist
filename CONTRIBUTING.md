@@ -17,4 +17,4 @@ Production data lives in Cloudflare R2 bucket `iptv`. The legacy Site is a tempo
 
 Never run EPG sync, prediction, scheduled jobs, or mutation endpoints as part of CI or deployment verification. Emergency fixes follow the same Git-first rule: commit the fix first, let CI validate it, and deploy that commit.
 
-See [docs/deployment.md](docs/deployment.md) for deployment and rollback.
+See [docs/deployment.md](docs/runbooks/deployment.md) for deployment and rollback.

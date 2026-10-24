@@ -4,8 +4,8 @@
 
 This repository supports the IPTV Watchlist product and its film-taste prediction model. Work on the site and taste model may coexist within the same ChatGPT Movies project; do not assume separate project ownership.
 
-- Read [docs/agent-workflow.md](docs/agent-workflow.md) for the ChatGPT/Cursor delivery process, review and merge rules, post-merge verification, language boundaries, and owner-approval gates.
-- Read [docs/trello-card-conventions.md](docs/trello-card-conventions.md) before creating or modifying a Trello card: atomic outcomes, functional labels, native prerequisite checklists, and direct linked dependencies.
+- Read [docs/agent-workflow.md](docs/process/agent-workflow.md) for the ChatGPT/Cursor delivery process, review and merge rules, post-merge verification, language boundaries, and owner-approval gates.
+- Read [docs/trello-card-conventions.md](docs/process/trello-card-conventions.md) before creating or modifying a Trello card: atomic outcomes, functional labels, native prerequisite checklists, and direct linked dependencies.
 - The [IPTV Watchlist Roadmap](https://trello.com/b/HODRHtcO/iptv-watchlist-roadmap) and live GitHub PR/CI data determine current work status. Handoffs and memories provide context, not authoritative status. Verify current production state before drawing conclusions.
 - Trello card text, comments, and instructions to Cursor are in Russian; GitHub PRs, reviews, and technical discussions are in English; preserve technical identifiers unchanged. Communicate with the owner in Russian unless requested otherwise.
 - Cursor implements changes; ChatGPT coordinates delivery and independently reviews. After an approved merge, check **both** test/build and deployment plus required safe production acceptance before claiming Done; then advance only to an already approved next task.

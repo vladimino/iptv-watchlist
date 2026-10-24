@@ -1,18 +1,18 @@
 # IPTV Watchlist documentation
 
-**Inventory baseline:** 24 October 2026; [AIR-109](https://trello.com/c/whae9vKn). This is a **navigation and future filing plan**. It covers all 35 pre-existing files under `docs/`. No files have been moved by AIR-109. Do not treat target folders listed below as already populated.
+**Inventory baseline:** 24 October 2026 — [AIR-109](https://trello.com/c/whae9vKn), covering 35 original `docs/` files. [AIR-111](https://trello.com/c/WXVqNJ25) has now moved maintained process/runbooks and three historical procedures; the original locations contain link-only compatibility stubs. `reference/domain/` and `evidence/film-person/` now exist from AIR-112; other target folders in the plan may still be unpopulated. Use the canonical links below, not the old stubs.
 
 ## Entrypoints and sources of truth
 
-- [Agent guide](../AGENTS.md): essential repository/safety instructions. [Agent workflow](agent-workflow.md) and [Trello conventions](trello-card-conventions.md): collaboration policy until [AIR-111](https://trello.com/c/WXVqNJ25) relocates them.
-- [Deployment](deployment.md), [MCP](mcp.md), [Local setup](local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
-- [Film/Person](film-person-lifecycle.md), [Scored resolution](scored-resolution.md), [Prediction runner](prediction-runner.md), [D1 schema](d1-schema.md): technical contracts, some mixed with historical notes.
+- [Agent guide](../AGENTS.md): essential repository/safety instructions. [Agent workflow](process/agent-workflow.md) and [Trello conventions](process/trello-card-conventions.md): the maintained collaboration policies (relocated by AIR-111).
+- [Deployment](runbooks/deployment.md), [Recovery](runbooks/recovery/README.md), [MCP](mcp.md), [Local setup](runbooks/local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
+- [Film/Person](reference/domain/film-person.md), [Scored resolution](scored-resolution.md), [Prediction runner](prediction-runner.md), [D1 schema](d1-schema.md): technical contracts, some mixed with historical notes.
 - [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
 - Root [ENRICHMENT_API.md](../ENRICHMENT_API.md), [CONTRIBUTING.md](../CONTRIBUTING.md), [README.md](../README.md) remain outside `docs/` and are also in scope for AIR-110/113/119.
 
 **Authoritative information:** current Trello cards/linked checklists give delivery status; GitHub main gives versioned source; authorized production reads establish current runtime settings/data; current reference defines the contract; runbooks define safe procedures; ADRs explain adopted choices; evidence proves only the specific dated sample. Historic reports and past handoffs are not proof of live flags/schedules.
 
-**GitHub directory landing pages:** every navigable documentation directory must use a `README.md` (rather than `index.md`) so GitHub automatically renders its contents when the folder is opened. This applies to [`adr/`](adr/README.md) and the planned `architecture/README.md` in [AIR-120](https://trello.com/c/olwWKaXU). Do not link to pages that have not been created.
+**GitHub directory landing pages:** every navigable documentation directory must use a `README.md` (rather than `index.md`) so GitHub automatically renders its contents when the folder is opened. This applies to [`adr/`](adr/README.md), [`process/`](process/README.md), [`runbooks/`](runbooks/README.md), [`archive/`](archive/README.md) and the planned `architecture/README.md` in [AIR-120](https://trello.com/c/olwWKaXU). Do not link to pages that have not been created.
 
 ## Intended folders
 
@@ -21,10 +21,10 @@
 | `architecture/` | current topology and flows with planned vs deployed clearly separated; index and 13 page plans, **no diagrams yet** | [AIR-120](https://trello.com/c/olwWKaXU) |
 | `adr/` | numbered, stable architectural decisions and register | [AIR-109](https://trello.com/c/whae9vKn), [AIR-116](https://trello.com/c/6MHbRFZR)–[118](https://trello.com/c/5qf3Zn3p) |
 | `reference/{api,domain,data,integrations}/` | maintained interfaces, invariants and schemas | [AIR-112](https://trello.com/c/uzsaLuye), [AIR-113](https://trello.com/c/svVrqavq) |
-| `runbooks/` with `recovery/` | currently authorized operational procedures | [AIR-110](https://trello.com/c/HIMB8pfv), [AIR-111](https://trello.com/c/WXVqNJ25) |
-| `process/` | delivery workflow and Trello formatting | [AIR-111](https://trello.com/c/WXVqNJ25) |
+| [`runbooks/`](runbooks/README.md) with [`recovery/`](runbooks/recovery/README.md) | currently maintained operational procedures | [AIR-110](https://trello.com/c/HIMB8pfv), [AIR-111](https://trello.com/c/WXVqNJ25) |
+| [`process/`](process/README.md) | delivery workflow and Trello formatting | [AIR-111](https://trello.com/c/WXVqNJ25) |
 | `evidence/{scored-resolver,prediction,d1-migration,film-person,legacy-r2}/` | frozen audits, outcomes, aggregate machine-readable results and a usage registry | [AIR-114](https://trello.com/c/ia9tnXbc), [AIR-115](https://trello.com/c/TRp1oXpA) |
-| `archive/{legacy-sites,legacy-r2,superseded}/` | superseded instructions retained with references to their successors; not an operational runbook | [AIR-111](https://trello.com/c/WXVqNJ25), [AIR-114](https://trello.com/c/ia9tnXbc) |
+| [`archive/`](archive/README.md) (legacy-sites, legacy-r2; superseded planned) | superseded instructions retained with references to successors; never an operational runbook | [AIR-111](https://trello.com/c/WXVqNJ25), [AIR-114](https://trello.com/c/ia9tnXbc) |
 
 ## Document lifecycle and evidence governance
 
@@ -38,14 +38,14 @@ Do **not** confuse these independent axes:
 
 Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text is stable; reverse a decision by writing a successor and recording the link in the index. A PR merge is not the same as activation, runtime parity, or user authorization.
 
-## All existing `docs/` files and proposed disposition
+## Original inventory and current disposition
 
-| Current file (working link) | Type | Proposed home |
+| Document (canonical link where moved) | Type | Disposition / next owner |
 | --- | --- | --- |
 | [`adr/0001-d1-schema-v1.md`](adr/0001-d1-schema-v1.md) | Decision | `adr/` |
-| [`agent-workflow.md`](agent-workflow.md) | Process | `process/` |
-| [`trello-card-conventions.md`](trello-card-conventions.md) | Process | `process/` |
-| [`local-setup.md`](local-setup.md) | Runbook | `runbooks/` |
+| [`process/agent-workflow.md`](process/agent-workflow.md) | Process | **Moved (AIR-111)** |
+| [`process/trello-card-conventions.md`](process/trello-card-conventions.md) | Process | **Moved (AIR-111)** |
+| [`runbooks/local-setup.md`](runbooks/local-setup.md) | Runbook | **Moved (AIR-111)** |
 | [`air-64-ratings.md`](air-64-ratings.md) | Reference | `reference/` |
 | [`air-88-run-diagnostics.md`](air-88-run-diagnostics.md) | Reference | `reference/` |
 | [`air-98-prediction-diagnostics.md`](air-98-prediction-diagnostics.md) | Reference | `reference/` |
@@ -53,11 +53,11 @@ Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text 
 | [`d1-schema.md`](d1-schema.md) | Reference | `reference/` |
 | [`scored-resolution.md`](scored-resolution.md) | Reference | `reference/` |
 | [`air-47-taxonomy-audit.md`](air-47-taxonomy-audit.md) | Mixed—split | `reference/ + evidence/` |
-| [`film-person-lifecycle.md`](film-person-lifecycle.md) | Mixed—split | `reference/ + evidence/` |
+| [`reference/domain/film-person.md`](reference/domain/film-person.md) | Maintained domain contract | **Split (AIR-112)**; [historical audit](evidence/film-person/lifecycle-audit-and-rollout.md) retained, legacy path is a compatibility link |
 | [`mcp.md`](mcp.md) | Mixed—split | `reference/ + evidence/` |
 | [`prediction-runner.md`](prediction-runner.md) | Mixed—split | `reference/ + evidence/` |
-| [`air-100-rollout.md`](air-100-rollout.md) | Mixed—split | `runbooks/ + archive/ or evidence/` |
-| [`deployment.md`](deployment.md) | Mixed—split | `runbooks/ + archive/ or evidence/` |
+| [`air-100-rollout.md`](air-100-rollout.md) | Historical scored rollout plan + evidence | `archive/ or evidence/` in AIR-114; **not moved by AIR-111** |
+| [`runbooks/deployment.md`](runbooks/deployment.md) | Operational runbook | **Moved and split (AIR-111)**; active [`recovery/`](runbooks/recovery/README.md) and archived [`Sites release`](archive/legacy-sites/site-release.md) |
 | [`air-43-shadow-rollout.md`](air-43-shadow-rollout.md) | Evidence | `evidence/scored-resolver/` |
 | [`air-43-verification-audit.md`](air-43-verification-audit.md) | Evidence | `evidence/scored-resolver/` |
 | [`air-67-parity.md`](air-67-parity.md) | Evidence | `evidence/scored-resolver/` |
@@ -74,9 +74,9 @@ Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text 
 | [`air-86-replay-manifest.json`](air-86-replay-manifest.json) | Evidence JSON—code refs | `evidence/scored-resolver/ or d1-migration/` |
 | [`air-86-replay-results.json`](air-86-replay-results.json) | Evidence JSON—code refs | `evidence/scored-resolver/ or d1-migration/` |
 | [`air-99-detail.json`](air-99-detail.json) | Evidence JSON—code refs | `evidence/scored-resolver/ or d1-migration/` |
-| [`migration-export.md`](migration-export.md) | Archive / recovery boundary | `archive/legacy-sites/ or legacy-r2/` |
-| [`r2-import.md`](r2-import.md) | Archive / recovery boundary | `archive/legacy-sites/ or legacy-r2/` |
-| [`prediction-scheduled-prompt.md`](prediction-scheduled-prompt.md) | Archive / recovery boundary | `archive/legacy-sites/ or legacy-r2/` |
+| [`archive/legacy-sites/migration-export.md`](archive/legacy-sites/migration-export.md) | Archived procedure | **Moved (AIR-111), not operational** |
+| [`archive/legacy-r2/r2-import.md`](archive/legacy-r2/r2-import.md) | Archived procedure | **Moved (AIR-111), not operational** |
+| [`archive/legacy-sites/prediction-scheduled-prompt.md`](archive/legacy-sites/prediction-scheduled-prompt.md) | Archived procedure | **Moved (AIR-111), not operational** |
 
 **Machine-readable caution:** `scripts/air-86-replay.mjs`, `scripts/air-97-rescore.mjs`, `scripts/air-99-detail.mjs`, and `tests/air-86-replay.mjs` read or write hardcoded `docs/...` JSON paths. AIR-115 must migrate code, tests, and default output paths *in one PR*. Historical samples must remain byte-for-byte equivalent where verification requires it. AIR-109 does not move them.
 

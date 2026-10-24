@@ -32,7 +32,15 @@
       <p id="film-screen-identity"></p>
     </section>
     <section class="page-heading"><div><p class="eyebrow">ЛИЧНАЯ КИНОПРОГРАММА</p><h1>Что посмотреть</h1><p class="intro">Твои фильмы. Все показы в одном месте.</p></div><div class="snapshot" id="snapshot"><span id="snapshot-updated">Загрузка программы…</span><span class="snapshot-coverage" id="snapshot-coverage"></span></div></section>
-    <label class="search-box"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" type="search" placeholder="Название, люди, сюжет или жанр" aria-label="Поиск по названию, людям, сюжету или жанру" autocomplete="off"><span>Название, люди, сюжет</span></label>
+    <div class="search-panel">
+      <label class="search-box"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" type="search" placeholder="Найти фильм" aria-label="Найти фильм" autocomplete="off"></label>
+      <div class="search-scopes" role="group" aria-label="Область поиска">
+        <button type="button" class="search-scope" data-search-scope="titles" aria-pressed="true" aria-disabled="true" aria-label="Названия: русское, оригинальное и альтернативные">Названия</button>
+        <button type="button" class="search-scope" data-search-scope="people" aria-pressed="false" aria-label="Люди: режиссёры и актёры">Люди</button>
+        <button type="button" class="search-scope" data-search-scope="plot" aria-pressed="false" aria-label="Сюжет: описание, жанры, механика и настроение">Сюжет</button>
+      </div>
+      <p class="search-scope-note">По умолчанию ищутся только названия. Люди и сюжет включаются отдельно и сочетаются между собой.</p>
+    </div>
     <div class="workspace">
       <button class="filter-toggle" id="filter-toggle" aria-expanded="false" aria-controls="filters">Фильтры <span id="filter-summary">Все фильмы</span></button>
       <aside class="filters" id="filters" aria-label="Фильтры фильмов">

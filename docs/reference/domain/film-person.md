@@ -1,0 +1,73 @@
+# Film and Person — domain lifecycle contract
+
+**Role:** active technical reference for the **implemented, storage-neutral contract**, not a claim that Film/Person entities have replaced production R2 records. Verified against `src/domain/film-person.js`, `src/domain/film-person-reader.js`, `src/domain/film-person-backfill.js`, and the current Worker/sources on **2026-10-24**. GitHub main and authorized runtime diagnostics are still required for current implementation/flag claims.
+
+- **Historical source and original rollout observations:** [AIR-42 audit and rollout log](../../evidence/film-person/lifecycle-audit-and-rollout.md).
+- **Work and decisions:** [AIR-42](https://trello.com/c/drLBuWjl), [AIR-48](https://trello.com/c/rVf8rRoJ), [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-49](https://trello.com/c/YNaLFwtW), [ADR-0001](../../adr/0001-d1-schema-v1.md).
+- **Implementation:** [pure domain model](../../../src/domain/film-person.js), [storage-neutral reader](../../../src/domain/film-person-reader.js), [dry-run backfill](../../../src/domain/film-person-backfill.js), [diagnostics](../../../src/domain/film-person-diagnostics.js), [runtime read/write paths](../../../src/worker.js), [localization helpers](../../../src/sources.js).
+- **Related maintained contracts:** [scored resolution](../../scored-resolution.md), [candidate discovery](../../candidate-discovery.md), [prediction runner](../../prediction-runner.md), [D1 schema (not production-authoritative)](../../d1-schema.md).
+
+## Where the model runs (do not confuse with source of truth)
+
+`DOMAIN_CONTRACT_VERSION=1` describes pure lifecycle projections and guarded transitions. `film-person.js` has no HTTP/R2 effects and is not the deployed authoritative Film/Person storage adapter. `film-person-reader.js` constructs views from records already loaded by a caller; `film-person-backfill.js` computes desired lifecycle sidecars and a **dry-run** reconciliation; it does not write production storage. Diagnostics and offline parity are views/measurements, not cutover evidence.
+
+Production content continues to use existing watchlist, metadata, programme, published EPG generation, discovery ledger/catalog and enrichment objects in **Cloudflare R2**. The D1 schema and repository adapters support a separately approved migration path; a schema and offline importer do not make D1 authoritative. The `LIFECYCLE_LOCALIZATION` runtime flag applies to separate localization paths (`metadata`, `epg`, `programme`, `watchlist`), defaulting to off in source. The original [rollout log](../../evidence/film-person/lifecycle-audit-and-rollout.md) describes the 22–23 October switch; verify **live** binding before claiming a particular mode is currently active. This setting is not equivalent to deploying the full lifecycle entity repository.
+
+## Identity and canonical records
+
+- Letterboxd watchlist films retain their `lid` as the existing stored ID. A discovered, verified TMDB movie is usually stored as `tmdb_<tmdbId>`; if the TMDB id is already owned by a watchlist entry, that entry is reused. Neither storage ID nor discovery observation key (`normalizedTitle|year`) should be confused with the canonical TMDB identity (`tmdb:<id>`).
+- `localFilmId()` mints `film:<letterboxd lid>`, `film:tmdb:<id>`, or a sorted `film:conflict:<ids>` for conflicting TMDB claims without Letterboxd. A previously assigned `localId` is preserved; it is not recomputed merely because new evidence appears.
+- `externalIds` carry scheme, value, trusted/conflicting flags and provenance. Two different verified TMDB identities or distinct Letterboxd identities are collisions, **not** automatic merges. `canonicalIdentity` becomes `tmdb:<id>` only after identity is resolved against trusted evidence; an accepted score or search hit alone does not promote it.
+- `linkFilms(existing, incoming, at, evidence)` preserves the existing entity ID, payloads and reviewed localization. Linking separate entities requires matching Letterboxd evidence, the same *trusted* TMDB identity on both sides, or `evidence.verified === true`. Shared **proposed/untrusted** TMDB IDs are insufficient. Conflicts yield `identity_collision` or `unverified`/`unrelated` without changing entities.
+- A successful link adds aliases and an old→surviving ID redirect, preserving existing fingerprint, prediction and metadata; incoming prediction and history are retained as history/preserved results, without repeat duplicates. A reviewed value must not be silently replaced with an automatic or conflicting incoming value.
+- `localPersonId()` prefixes the **role-specific** ID: `person:actor/<slug>`, `person:director/<slug>`, `person:role/<name>`, `person:tmdb_actor/<id>`, or `person:tmdb_director/<id>`. Same real human appearing under different roles/authorities is **not** automatically merged. Embedded credits and localized names are not by themselves a canonical Person repository.
+
+## Lifecycle dimensions and transition rules
+
+`FILM_DIMENSIONS` defines **five independent state dimensions**; availability is a time-bound projection, **not** a sixth status. Every dimension state may hold `status`, `updatedAt`, `source`, `sourceVersion`, `provenance`, `lastError`, `failureReason`, `retryAt`, `attempts` and `nextAction`; localization alone also has `value`. These status envelopes do **not** contain entire fingerprint, metadata, or prediction payloads.
+
+| Dimension | Status vocabulary | Conditions and consequences |
+| --- | --- | --- |
+| Identity | `unresolved / resolving / resolved / ambiguous / rejected` | Keep Letterboxd ID without inventing TMDB; `excluded_nonfilm` creates no Film. Historical/expired or unchanged terminal discovery is `wait_new_evidence`; future retry is `wait_retry`; only **eligible current** discovery can `continue_discovery`. Distinct verified IDs surface conflict. |
+| Metadata | `missing / fetching / partial / fresh / stale / failed` | 30-day freshness threshold. Letterboxd metadata and TMDB-only metadata choose different next actions. A synopsis-only update that retains older credits is `partial`; `peopleNamesVersion: 2` means the name attempt finished, not that all names are reviewed. |
+| Localization | `missing / provisional / reviewed` | Verified dictionary/owner choice cannot be downgraded by Wikidata/cache; provisional transcription is **provisional** even when stored in a reviewed dictionary. Conflicting inputs remain aliases/provenance or `localizationConflicts`. |
+| Fingerprint | `missing / generating / current / stale / failed` | Schema v1 and no `invalidatedAt` make the fingerprint current. Profile changes alone do **not** invalidate/recreate fingerprints. |
+| Prediction | `missing / generating / current / stale / failed` | Current means fingerprint current **and** matching profile version/hash, fingerprint hash, schema and prompt version 1. Failures retain retries/backoff; profile changes make prediction stale, with `prediction_only` when fingerprint is still current. |
+
+`transition()` rejects edges not permitted by the domain graph (for example, `resolved` identity cannot regress to `unresolved`, and reviewed localization cannot become provisional). `applyAutomaticLocalization()` cannot set `reviewed` and records attempted overrides; only `applyReviewedLocalization()` with `authority: dictionary` or `owner` can promote reviewed content. `observeMetadata()` does not rewrite fingerprint or prediction. `invalidatePredictionForProfile()` preserves fingerprint and chooses the appropriate next action.
+
+## Readiness is derived, not a new entity status
+
+- `displayReady`: non-rejected identity, a resolved identity or a Letterboxd external ID, and a usable preferred title (reviewed/provisional, original or EPG). Missing translation, fingerprint or prediction must **not** hide a film.
+- `catalogReady`: stable Letterboxd ID or trusted, non-conflicting TMDB ID **and** fresh or partial metadata.
+- `predictionReady`: both fingerprint and prediction are `current`. Neither a valid catalog id nor a fresh profile alone suffices.
+- `preferredTitle()` uses reviewed/localized value first, otherwise original, otherwise EPG. UI parity must still compare the **actual displayed title** in existing programme/watchlist read paths, not assume it equals the domain projection.
+
+## Availability and published generations
+
+`availabilityProjection()` computes `availableUntil` as the latest known show start plus **72 hours**; `hot` evaluates shows from **72 hours back** through **24 hours ahead** (upper bound exclusive). Shows and `epgLastAiring` are not stable Film attributes and never invalidate fingerprint.
+
+An explicit `shows: []` is known **no availability**. When a published programme run is known, missing `shows` or a mismatched `showsProgrammeRunId` must not produce hot. `epgLastAiring` is a fallback only when no explicit shows, no shows programme run and no published run are known. A new published EPG generation atomically replaces the current show set; it does not append old availability. See [candidate discovery](../../candidate-discovery.md).
+
+## Existing storage and projections
+
+| Existing store | Role (not a new canonical D1 entity) |
+| --- | --- |
+| `metadata.json`, `watchlist.json`, `programme.json` | Letterboxd/watchlist metadata and published programme snapshots; current user-facing read models |
+| `epg/discovery-latest.json`, `epg/discovery-resolution.json` | EPG observation ledger and separately evaluated identity decisions; unresolved observation is **not** a Film |
+| `epg/discovered-films.json` | Verified discovered catalog records; current show lists tied to the published generation |
+| `data/film-titles.json`, `data/person-names.json`, plus `REVIEWED_PEOPLE` override | Reviewed/manual localization; always stronger than automatic cache |
+| `titles.json`, `people.json` | Provisional/derived localization caches, **not** canonical Person identity |
+| `enrichment/films/<id>/fingerprint.json`, `predictions.json`, `actual.json` | Current fingerprint, current prediction with history, independent actual rating |
+| `enrichment/view-index.json`, `enrichment/prediction-queue.json` | Derived dashboard/queue projections. Neither defines Film identity or personal truth |
+| `enrichment/profile/current.json` and `profile/versions/<n>.json` | Taste-profile version/hash that controls prediction freshness |
+
+The reader's `*.lifecycle.json` sidecars are **computed views**, not permission to overwrite current `programme.json`, `people.json`, `epg/discovery-latest.json` or `enrichment/prediction-queue.json`. The offline backfill compares `create/update/unchanged/orphan/conflict` without deleting orphaned data. Reviewed downgrades, unapproved identity replacement and prediction-history loss are explicit conflict types; `updatedAt` and redirect observation times alone do not constitute a changed entity. Tests for this scope include `tests/film-person.mjs`, `tests/film-person-reader.mjs`, `tests/film-person-backfill.mjs`, `tests/lifecycle-parity.mjs`, `tests/film-person-localize.mjs`.
+
+## Architecture and operational boundaries
+
+- Match scoring and canonical identity have separate owners: scoring cannot silently verify a TMDB identity. `src/domain/resolution-acceptance.js` requires trusted existing decision/owner evidence or valid TMDB movie-detail confirmation and a matching actionable programme generation.
+- Phase 3 localization flag rollout is **not** Film/Person persistent-entity cutover. Do not change `LIFECYCLE_LOCALIZATION`, `SCORED_RESOLUTION` or any production writer while maintaining this reference.
+- D1 repositories `src/canonical-repository.js`, `src/epg-repository.js` and `src/prediction-repository.js` were developed for migration work but must not be portrayed as authoritative until a separately approved live migration. Historical parity observations remain in [the original audit and rollout record](../../evidence/film-person/lifecycle-audit-and-rollout.md); follow Trello for current rollout completion and flags.
+- **Do not rewrite historical evidence.** Material new architecture choices need future ADRs; current reference and historical audit have different jobs.
+

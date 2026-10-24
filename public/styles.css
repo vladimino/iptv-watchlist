@@ -2,7 +2,7 @@
 
 .filter-toggle{display:none}@media(max-width:760px){.filter-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;padding:12px 14px;background:var(--surface);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px}.filter-toggle span{font-size:12px;color:var(--lime)}.filters{display:none}.filters[data-open=true]{display:grid}.workspace{gap:18px}.period-tabs{gap:10px}.page-heading .intro{display:none}}
 
-.search-box{display:flex;align-items:center;gap:13px;margin-top:26px;border:1px solid #495440;background:#1a2019;border-radius:9px;padding:13px 16px;color:var(--muted)}.search-box:focus-within{border-color:var(--lime)}.search-box input{width:100%;min-width:0;background:none;border:0;color:var(--text);outline:none;font-size:16px}.search-box input::placeholder{color:#a3afa0}.search-box>span{font-size:12px;white-space:nowrap;color:#99a491}.search-box+ .demo-note{margin-top:13px}.search-box svg{flex:none}@media(max-width:760px){.search-box{padding:12px;margin-top:20px}.search-box input{font-size:16px}.search-box>span{display:none}}
+.search-panel{margin-top:26px;min-width:0}.search-box{display:flex;align-items:center;gap:13px;margin:0;border:1px solid #495440;background:#1a2019;border-radius:9px;padding:13px 16px;color:var(--muted)}.search-box:focus-within{border-color:var(--lime)}.search-box input{width:100%;min-width:0;background:none;border:0;color:var(--text);outline:none;font-size:16px}.search-box input::placeholder{color:#a3afa0}.search-box svg{flex:none}.search-scopes{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.search-scope{border:1px solid #3d4839;background:transparent;color:#d5dcd2;border-radius:999px;padding:5px 12px;font-size:13px;line-height:1.2;white-space:nowrap}.search-scope[aria-pressed=true]{background:#293821;border-color:#748e47;color:var(--lime)}.search-scope[aria-disabled=true]{cursor:default}.search-scope-note{margin:8px 0 0;color:var(--muted);font-size:12px;line-height:1.4}@media(max-width:760px){.search-panel{margin-top:20px}.search-box{padding:12px}.search-box input{font-size:16px}.search-scopes{gap:6px}}
 
 .no-poster{display:grid;place-items:center;color:var(--muted);font-size:14px}
 
@@ -26,7 +26,7 @@
 .prediction-stale{font-size:11px;color:var(--muted);font-weight:400}
 
 /* Card actions and scores */
-.search-box{margin-bottom:32px}
+.search-panel{margin-bottom:32px}
 .movie-card{position:relative;padding-bottom:58px}
 .movie-card.has-score .film-head{padding-right:126px;min-height:158px}
 .film-score-badges{position:absolute;right:0;top:0;z-index:1;display:flex;flex-direction:column;align-items:flex-end;gap:3px}
@@ -69,7 +69,7 @@
 .footer-details-body dt{min-width:0;overflow-wrap:anywhere}
 .footer-details-body dd{margin:0;color:#dce8d2;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .status-events-link{display:inline-block;margin-top:11px;color:var(--lime);text-underline-offset:3px}#status-integration-list>div{grid-template-columns:minmax(0,1fr);gap:2px}#status-integration-list [hidden]{display:none}#status-integration-list dd{text-align:left}#status-integration-list dd.is-failed{color:#f0c2b4}#status-integration-list dd.is-attention{color:#f3dd9a}
-@media(max-width:760px){.search-box{margin-bottom:20px}.movie-card.has-score .film-head{padding-right:118px;min-height:158px}.started-action{right:16px;bottom:14px;padding:0}.status-footer .footer-status{width:100%;margin:0}.status-summary{width:100%;grid-template-columns:144px minmax(0,1fr);column-gap:16px}}
+@media(max-width:760px){.search-panel{margin-bottom:20px}.movie-card.has-score .film-head{padding-right:118px;min-height:158px}.started-action{right:16px;bottom:14px;padding:0}.status-footer .footer-status{width:100%;margin:0}.status-summary{width:100%;grid-template-columns:144px minmax(0,1fr);column-gap:16px}}
 .snapshot{display:flex;flex-direction:column;align-items:flex-end;gap:2px;min-width:0;text-align:right}
 .snapshot-coverage{color:var(--muted);font-size:13px;line-height:1.35;max-width:34rem}
 .demo-badge.is-ok{background:#243024;color:#d7e7c4}
