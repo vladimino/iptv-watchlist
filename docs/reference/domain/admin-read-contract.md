@@ -161,6 +161,19 @@ getPerson(records, id) -> record | null
 
 Tests must cover empty query (error, not "all records"), empty records, the rank order, Cyrillic `ё`, a collision, every queue code, a stale cursor, a missing `limit`, and `limit` values `0`, `26`, and `1.5`. `limit` 1 and `limit` 25 succeed. No network. The library tests must not accept a call that omits `limit`.
 
+The library is `src/domain/admin-query.js`. `build.mjs` does not concatenate it, and `public/app.js` does not import it. [AIR-52](https://trello.com/c/siWtiRcm) is the first caller.
+
+These choices fix points the signature alone leaves open:
+
+- An error result is `{ error, pin: null }` and has no `items`. Check `invalid_records` when `records` is not an array, then `invalid_limit`, then `invalid_query` or `unknown_queue`, then `stale_cursor`. Non-object entries inside the array are skipped.
+- `invalid_query` is a missing, non-string, or blank query, including a query that folds to no tokens. The library does not apply the 200-character HTTP cap and does not coerce `"25"` into a limit. AIR-124 parses the query string before the call.
+- Exact ranks 0–2 compare the whole folded query. Otherwise every token must match, and the record rank is the worst token rank. `epgTitle` and a person's `original` rank with original and alias. External ids match `value` only. `roleId` and synopsis are not search fields.
+- Folding strips Latin diacritics, maps `ё` to `е`, folds case, and turns other punctuation into spaces.
+- Queue rows are ordered by `id` with `en` comparison. They are copies without `rank` or `collision`. `fingerprint-not-current` and `prediction-not-current` include a missing status because the rule is `!== 'current'`. The other queues require the listed status. `resolving` is in none of them.
+- `collision` is true only for a non-empty folded `preferred` shared by two or more rows of the full result. An empty preferred is not a collision.
+- The cursor is opaque. It binds the operation, the folded query or queue code, the limit, and a SHA-256 of `JSON.stringify(records)` in caller order. The same ids with a different field, a different key order, or a different array are `stale_cursor`. An unreadable cursor is `stale_cursor` as well.
+- `getFilm` and `getPerson` return the first caller record with that `id`, or `null`. They do not copy it and do not read `redirects`.
+
 ## AIR-52 fixture boundary
 
 The shell is a local `/admin` page. Its only data import is a fixture module that calls the AIR-123 functions. The production bundle of that page must not call `fetch`, must not reference `/api/`, and must not read `programme.json`.
