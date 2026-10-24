@@ -38,10 +38,22 @@ assert.match(css,/@media\(max-width:520px\)[\s\S]*\.status-row>span[^}]*text-ali
 
 const context=vm.createContext({Date,Intl,URL,Set,Map});
 vm.runInContext(app.replace(/init\(\);\s*$/,''),context);
-context.input={profile:{version:7,updatedAt:'2026-10-12T18:00:00Z'},coverage:{confirmedFilmsTotal:100,currentPredictionsTotal:75,windowFilmsTotal:20,windowCurrentPredictions:18,cacheOffWindowTotal:80},predictions:{pendingHot:2,pendingCold:25,pendingOffWindow:23,nextBatchSize:12,nextScheduledRun:'2026-10-13T10:00:00Z'},epgTmdb:{},watchlist:{},lastRun:{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0}};
+context.input={profile:{version:7,updatedAt:'2026-10-12T18:00:00Z'},coverage:{confirmedFilmsTotal:100,currentPredictionsTotal:75,windowFilmsTotal:20,windowCurrentPredictions:18,cacheOffWindowTotal:80,localPercent:75,windowPercent:90},predictions:{pendingHot:2,pendingCold:25,pendingOffWindow:23,nextBatchSize:12,nextScheduledRun:'2026-10-13T10:00:00Z'},epgTmdb:{},watchlist:{},lastRun:{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0}};
 const text=vm.runInContext('footerStatusText(input)',context);
 assert.match(text.local,/75\/100 с актуальным прогнозом · 75%/);
 assert.match(text.windowCoverage,/18\/20 с актуальным прогнозом · 90%/);
+context.tenths={...context.input,coverage:{...context.input.coverage,confirmedFilmsTotal:2260,currentPredictionsTotal:2257,windowFilmsTotal:1832,windowCurrentPredictions:1829,localPercent:99.9,windowPercent:99.8}};
+const tenths=vm.runInContext('footerStatusText(tenths)',context);
+assert.match(tenths.local,/2[\s\u00a0\u202f]?260/);
+assert.match(tenths.local,/99,9%/);
+assert.doesNotMatch(tenths.local,/100%/);
+assert.match(tenths.windowCoverage,/99,8%/);
+assert.doesNotMatch(tenths.windowCoverage,/100%/);
+context.exact={...context.input,coverage:{...context.input.coverage,confirmedFilmsTotal:2260,currentPredictionsTotal:2260,windowFilmsTotal:1812,windowCurrentPredictions:1812,localPercent:100,windowPercent:100}};
+const exact=vm.runInContext('footerStatusText(exact)',context);
+assert.match(exact.local,/ · 100%/);
+assert.doesNotMatch(exact.local,/100,0%/);
+assert.match(exact.windowCoverage,/ · 100%/);
 assert.equal(text.runLabel,'Последний run');assert.match(text.runLine,/завершён \/ очередь обработана/);assert.match(text.nextLine,/Следующий запуск: около /);assert.match(text.nextRun,/^около /);
 context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.match(active.nextLine,/Следующий запуск: около /);assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
 for(const line of [text.profile,text.local,text.windowCoverage,text.runLine,text.nextLine,text.integrationAggregate])assert(line.length<100,'collapsed lines stay compact');

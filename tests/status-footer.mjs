@@ -32,7 +32,7 @@ records.set('epg/discovery-resolution.json',{known:{status:'verified',tmdbId:'1'
 const response=await context.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),env);
 assert.equal(response.status,200);
 const data=await response.json(),coverage=data.coverage;
-assert.deepEqual(coverage,{confirmedFilmsTotal:4,currentPredictionsTotal:3,windowFilmsTotal:2,windowCurrentPredictions:2,cacheOffWindowTotal:2,pendingOffWindowTotal:1,windowPendingTotal:0});
+assert.deepEqual(coverage,{confirmedFilmsTotal:4,currentPredictionsTotal:3,windowFilmsTotal:2,windowCurrentPredictions:2,cacheOffWindowTotal:2,pendingOffWindowTotal:1,windowPendingTotal:0,localPercent:75,windowPercent:100});
 assert(coverage.currentPredictionsTotal<=coverage.confirmedFilmsTotal);
 assert(coverage.windowFilmsTotal<=coverage.confirmedFilmsTotal);
 assert(coverage.windowCurrentPredictions<=coverage.windowFilmsTotal);
