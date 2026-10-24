@@ -4,10 +4,15 @@ import assert from 'node:assert/strict';
 
 const source=fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const nodes=new Map();
-function element(){
- return {innerHTML:'',textContent:'',hidden:false,value:'',checked:false,disabled:false,open:false,dataset:{},style:{},classList:{toggle(){},add(){},remove(){},contains(){return false;}},setAttribute(){},getAttribute(){return null;},removeAttribute(){},focus(){},scrollIntoView(){},closest(){return null;},contains(){return false;},querySelector(){return null;},querySelectorAll(){return [];},addEventListener(){}};
+const focused=[];
+function element(selector){
+ return {selector,innerHTML:'',textContent:'',hidden:false,value:'',checked:false,disabled:false,open:false,dataset:{},style:{},classList:{toggle(){},add(){},remove(){},contains(){return false;}},setAttribute(){},getAttribute(){return null;},removeAttribute(){},focus(){focused.push(selector);},scrollIntoView(){},closest(){return null;},contains(){return false;},querySelector(){return null;},querySelectorAll(){return [];},addEventListener(){}};
 }
-function query(selector){if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector);}
+function query(selector){
+ if(typeof selector==='string'&&selector.startsWith('a.film-open[data-film-id=')&&!selector.includes('heat-1995')&&!selector.includes('tmdb_42'))return null;
+ if(!nodes.has(selector))nodes.set(selector,element(selector));
+ return nodes.get(selector);
+}
 const classes=new Set();
 const session=new Map(),local=new Map();
 const stack=[];
@@ -78,6 +83,8 @@ assert.equal(run('state.query'),'жара');
 window.history.back();
 assert.equal(window.location.href,listHref);
 assert.equal(window.scrollY,720);
+assert.equal(focused.at(-1),'a.film-open[data-film-id="heat-1995"]');
+assert.notEqual(focused.at(-1),'#activity-expand');
 assert.equal(classes.has('film-screen'),false);
 assert.equal(run('state.period'),'archive');
 assert.equal(run("state.genres.has('Драма')"),true);
@@ -156,6 +163,70 @@ run(`filmScreen='heat-1995';closeFilm()`);
 assert.equal(new URL(window.location.href).pathname,'/');
 assert.equal(new URL(window.location.href).search,'');
 
+const cardHtml=run('card(film)');
+const openAt=cardHtml.indexOf('class="film-open"');
+const openEnd=cardHtml.indexOf('</a>',openAt);
+assert.ok(openAt>=0&&openEnd>openAt);
+assert.match(cardHtml,/href="\/film\/heat-1995"/);
+assert.match(cardHtml,/data-film-id="heat-1995"/);
+assert.equal(cardHtml.slice(openAt,openEnd).includes('<a'),false,'the film link does not contain another link');
+assert.ok(cardHtml.indexOf('letterboxd-link')===-1||cardHtml.indexOf('letterboxd-link')>openEnd);
+assert.ok(cardHtml.indexOf('data-channel')===-1||cardHtml.indexOf('data-channel')>openEnd);
+assert.ok(cardHtml.indexOf('data-credit-id')>openEnd);
+assert.ok(cardHtml.indexOf('data-started-id')>openEnd);
+live.film.url='https://letterboxd.com/film/heat-1995/';
+const linked=run('card(film)');
+assert.ok(linked.indexOf('letterboxd-link')>linked.indexOf('</a>'));
+assert.equal((linked.match(/<a /g)||[]).length,2);
+
+function activate(extra,resolver){
+ fetches.length=0;
+ const event={button:0,metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,defaultPrevented:false,prevented:false,preventDefault(){this.prevented=true;},stopPropagation(){},target:{closest(selector){return resolver(selector);}},...extra};
+ live.activation=event;
+ run('onMovieClick(activation)');
+ return event;
+}
+window.history.replaceState(null,'',listHref);
+run(`filmScreen=null`);
+const entered=activate({},selector=>selector==='a.film-open'?{dataset:{filmId:'heat-1995'},href:'/film/heat-1995'}:null);
+assert.equal(entered.prevented,true,'Enter on the film link stays in the page');
+assert.equal(new URL(window.location.href).pathname,'/film/heat-1995');
+assert.equal(fetches.length,0);
+window.history.back();
+assert.equal(focused.at(-1),'a.film-open[data-film-id="heat-1995"]');
+const modified=activate({metaKey:true},selector=>selector==='a.film-open'?{dataset:{filmId:'tmdb_42'},href:'/film/tmdb_42'}:selector==='article.movie-card'?{dataset:{filmId:'tmdb_42'}}:null);
+assert.equal(modified.prevented,false,'a modified click follows the real link');
+assert.equal(new URL(window.location.href).pathname,'/','a new-tab click does not replace the list');
+const nested=activate({},selector=>selector==='a.film-open'?null:selector==='a,button,summary,input,select,label,textarea'?{tag:'a'}:selector==='article.movie-card'?{dataset:{filmId:'heat-1995'}}:null);
+assert.equal(nested.prevented,false);
+assert.equal(new URL(window.location.href).pathname,'/');
+
+focused.length=0;
+run(`filmReturnId='missing-id';filmScreen='missing-id'`);
+window.history.replaceState(null,'','https://iptv.example/film/missing-id');
+run('closeFilm()');
+assert.equal(focused.at(-1),'#search','a missing card falls back to search');
+assert.equal(new URL(window.location.href).pathname,'/');
+
+const prior='https://iptv.example/before';
+stack.splice(0,stack.length,{href:prior,state:null},{href:'https://iptv.example/film/heat-1995',state:null});
+index=1;
+window.location.href=stack[1].href;
+session.set('iptv-film-list-query',listSearch);
+run(`filmScreen='heat-1995';filmReturnId='heat-1995'`);
+const lengthBeforeClose=stack.length;
+run('closeFilm()');
+assert.equal(stack.length,lengthBeforeClose,'a direct open replaces the film entry instead of pushing another one');
+assert.equal(index,1);
+assert.equal(new URL(window.location.href).pathname,'/');
+assert.equal(new URL(window.location.href).search,listSearch);
+window.history.back();
+assert.equal(window.location.href,prior);
+assert.notEqual(new URL(window.location.href).pathname,'/film/heat-1995');
+window.history.forward();
+assert.equal(new URL(window.location.href).pathname,'/');
+assert.equal(stack.filter(entry=>entry.href.includes('/film/')).length,0,'Back and Forward do not restore the replaced film address');
+
 const worker=fs.readFileSync('src/worker.js','utf8');
 assert.match(worker,/pathname==='\/events'\?'\/'/);
 assert.equal(worker.includes('/^\\/film\\/[A-Za-z0-9_-]{1,80}$/'),true);
@@ -167,6 +238,8 @@ assert.match(html,/id="film-screen"/);
 assert.match(html,/id="film-back">К списку/);
 assert.match(css,/html\.film-screen \.workspace\{display:none!important\}/);
 assert.match(css,/\.movie-card\{[^}]*cursor:pointer/);
+assert.match(css,/\.film-open::after\{content:"";position:absolute;inset:0\}/);
+assert.match(css,/\.movie-card \.letterboxd-link,\.movie-card \.channel-filter,\.movie-card \.credit-link,\.movie-card \.started-button,\.movie-card summary,\.movie-card \.match-hint\{position:relative;z-index:1\}/);
 const shell=fs.readFileSync('public/app.js','utf8').match(/function renderFilmShell\(\)\{[\s\S]*?\n\}/)[0];
 assert.doesNotMatch(shell,/synopsis|prediction|screenings|shows/);
 console.log('Film route: card click, inner controls, reload, history, scroll, catalog id and unknown id passed');
