@@ -15,8 +15,15 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 
 **Registry metadata contract:** each report entry must state capturedAt UTC/date, pinned source SHA/generation, exact scope/denominator, original verdict, evidence lifecycle, Used by (decision/Trello/PR or unconsumed), Superseded by (real successor gate only), uncertainty and operational authority. Details and direct links appear in each area's README and the underlying original report.
 
-## Machine-readable files (AIR-115 only)
+## Machine-readable files
 
-The four JSON assets remain in `docs/`: [AIR-73 results](../air-73-offline-run.json), [AIR-86 manifest](../air-86-replay-manifest.json), [AIR-86 replay](../air-86-replay-results.json) and [AIR-99 detail](../air-99-detail.json). They have hardcoded script/test consumers; no move or rewrite is permitted under AIR-114.
+[AIR-115](https://trello.com/c/TRp1oXpA) moved the four JSON samples next to their reports. The bytes are unchanged historical evidence. `scripts/air-97-rescore.mjs` and `tests/air-86-replay.mjs` only read them. `scripts/air-86-replay.mjs` and `scripts/air-99-detail.mjs` require an explicit output path and refuse any path that resolves to one of these four files, before calling TMDB. Ordinary tests do not call TMDB.
+
+| Sample | Path |
+| --- | --- |
+| AIR-73 offline counts | [d1-migration/air-73-offline-run.json](d1-migration/air-73-offline-run.json) |
+| AIR-86 replay manifest | [scored-resolver/air-86-replay-manifest.json](scored-resolver/air-86-replay-manifest.json) |
+| AIR-86 replay results | [scored-resolver/air-86-replay-results.json](scored-resolver/air-86-replay-results.json) |
+| AIR-99 detail cards | [scored-resolver/air-99-detail.json](scored-resolver/air-99-detail.json) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.

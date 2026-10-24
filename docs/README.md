@@ -71,15 +71,15 @@ Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text 
 | [`evidence/scored-resolver/air-99-verdict.md`](evidence/scored-resolver/air-99-verdict.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
 | [`evidence/prediction/air-82-prediction-rca.md`](evidence/prediction/air-82-prediction-rca.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
 | [`evidence/d1-migration/air-73-offline-run.md`](evidence/d1-migration/air-73-offline-run.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`air-73-offline-run.json`](air-73-offline-run.json) | Machine-readable evidence | **Stay in docs/ until AIR-115**, scripts/tests require coordinated path changes |
-| [`air-86-replay-manifest.json`](air-86-replay-manifest.json) | Machine-readable evidence | **Stay in docs/ until AIR-115**, scripts/tests require coordinated path changes |
-| [`air-86-replay-results.json`](air-86-replay-results.json) | Machine-readable evidence | **Stay in docs/ until AIR-115**, scripts/tests require coordinated path changes |
-| [`air-99-detail.json`](air-99-detail.json) | Machine-readable evidence | **Stay in docs/ until AIR-115**, scripts/tests require coordinated path changes |
+| [`evidence/d1-migration/air-73-offline-run.json`](evidence/d1-migration/air-73-offline-run.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-73 report; bytes unchanged |
+| [`evidence/scored-resolver/air-86-replay-manifest.json`](evidence/scored-resolver/air-86-replay-manifest.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-86 plan; bytes unchanged |
+| [`evidence/scored-resolver/air-86-replay-results.json`](evidence/scored-resolver/air-86-replay-results.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-86 replay; bytes unchanged |
+| [`evidence/scored-resolver/air-99-detail.json`](evidence/scored-resolver/air-99-detail.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-99 verdict; bytes unchanged |
 | [`archive/legacy-sites/migration-export.md`](archive/legacy-sites/migration-export.md) | Archived procedure | **Moved (AIR-111), not operational** |
 | [`archive/legacy-r2/r2-import.md`](archive/legacy-r2/r2-import.md) | Archived procedure | **Moved (AIR-111), not operational** |
 | [`archive/legacy-sites/prediction-scheduled-prompt.md`](archive/legacy-sites/prediction-scheduled-prompt.md) | Archived procedure | **Moved (AIR-111), not operational** |
 
-**Machine-readable caution:** `scripts/air-86-replay.mjs`, `scripts/air-97-rescore.mjs`, `scripts/air-99-detail.mjs`, and `tests/air-86-replay.mjs` read or write hardcoded `docs/...` JSON paths. AIR-115 must migrate code, tests, and default output paths *in one PR*. Historical samples must remain byte-for-byte equivalent where verification requires it. AIR-114 did not move them; AIR-115 owns the coupled script/test changes.
+**Machine-readable evidence:** [AIR-115](https://trello.com/c/TRp1oXpA) moved the four JSON samples into `evidence/`. `scripts/air-97-rescore.mjs` and `tests/air-86-replay.mjs` read those paths. `scripts/air-86-replay.mjs` and `scripts/air-99-detail.mjs` require an explicit output path and refuse to overwrite the four historical files. Ordinary tests do not call TMDB or rewrite the samples.
 
 ## Modification policy
 

@@ -8,7 +8,7 @@ function plan(title,year){
  box.__args=[{title,year}];
  return vm.runInContext('candidateSearchVariants(...__args)',box);
 }
-const real=JSON.parse(fs.readFileSync('docs/air-86-replay-manifest.json','utf8'));
+const real=JSON.parse(fs.readFileSync('docs/evidence/scored-resolver/air-86-replay-manifest.json','utf8'));
 assert.equal(real.items.length,38);
 assert.equal(real.plannedSearches,87);
 assert.equal(real.tmdbCalls,0);

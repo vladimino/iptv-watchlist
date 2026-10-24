@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {pathToFileURL} from 'node:url';
-import {loadProduction} from './air-86-replay.mjs';
+import {historicalEvidenceOutput,loadProduction} from './air-86-replay.mjs';
 
 const CAP = 5;
 const IDS = ['36647','161','395','163','603'];
@@ -56,6 +56,8 @@ export function gateFetched(live,observation,movie,competitors=[]){
 async function main(){
  const token=process.env.TMDB_API_READ_ACCESS_TOKEN;
  if(!token){console.error('TMDB_API_READ_ACCESS_TOKEN is unset');process.exit(2);}
+ const output=historicalEvidenceOutput(process.argv[2]);
+ if(!output.ok){console.error(output.reason);process.exit(2);}
  const live=loadProduction();
  const result=await fetchDetailCards(async path=>{
   const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+token,Accept:'application/json'},signal:AbortSignal.timeout(12000)});
@@ -68,7 +70,7 @@ async function main(){
   const gated=row.movie&&observation?gateFetched(live,observation,row.movie,[]):{};
   return {...row,...gated,movie:row.movie?safeMovie(row.movie):null};
  });
- fs.writeFileSync(process.argv[2]||'docs/air-99-detail.json',JSON.stringify(result,null,2)+'\n');
+ fs.writeFileSync(output.path,JSON.stringify(result,null,2)+'\n');
  console.log(JSON.stringify({http:result.http,halted:result.halted,ids:result.calls.map(call=>call.id)}));
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main();

@@ -4,7 +4,7 @@
 
 [AIR-73](https://trello.com/c/gX2xdQAz) imported one verified historical snapshot into a local SQLite file. The snapshot directory, the database, and the raw report stay outside this repository. This note records the aggregate result. It does not authorize a production write. Live backfill remains [AIR-74](https://trello.com/c/5AdAmKPe), after [AIR-69](https://trello.com/c/FlcWZX7W).
 
-The machine-readable counts are [air-73-offline-run.json](../../air-73-offline-run.json).
+The machine-readable counts are [air-73-offline-run.json](air-73-offline-run.json).
 
 ## Archive
 

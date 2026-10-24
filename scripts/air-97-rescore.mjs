@@ -19,8 +19,8 @@ function read(path){return JSON.parse(fs.readFileSync(path,'utf8'));}
 
 export function rescoreFrozen(){
  const live = loadProduction();
- const results = read('docs/air-86-replay-results.json');
- const manifest = read('docs/air-86-replay-manifest.json');
+ const results = read('docs/evidence/scored-resolver/air-86-replay-results.json');
+ const manifest = read('docs/evidence/scored-resolver/air-86-replay-manifest.json');
  if(results.rows.length!==38||manifest.items.length!==38||results.programmeRunId!==RUN_ID)throw new Error('frozen cohort changed');
  const items = new Map(manifest.items.map(item=>[item.key,item]));
  const now = Date.parse(results.now);
