@@ -4,14 +4,19 @@ Read-only audit of genre, mood, plot-mechanic, and execution labels, plus a spec
 
 Related work: [AIR-47](https://trello.com/c/wkM9WSZB), [AIR-69](https://trello.com/c/FlcWZX7W), [AIR-108](https://trello.com/c/QIke4H2N).
 
-Code under review is `origin/main` at `5f9b92c44c2bade51416a917148e82c02739bc1c`.
+Mood-mapping behavior was checked against `5f9b92c44c2bade51416a917148e82c02739bc1c`. `origin/main` later moved to `98273ef3b48089fe4e9770b20a478717a6116094` (film route, pull request 76). That commit does not change `mapRawMood`, `MOOD_LABELS`, or the generation contract. The production census below is a read of R2 objects, not a claim about that route change.
+
+Conclusion of the 24 October freshness check: **LIVE EVIDENCE AVAILABLE**. Aggregates were read from the current R2 bucket. This audit is not closed: section 10 is still an owner decision, and the catalog-only identity overlap was not computed.
 
 ## How to read this document
 
-- **Fact** — observed in the repository or recomputed locally from the source named in section 2.
-- **Proposal** — a recommended rule for AIR-108. It is not implemented and is not a product decision until the owner accepts it.
-- **Hypothesis** — a reading of the evidence that was not proven film by film.
-- **Open question** — a choice this audit does not make.
+Three levels. A number from one level is not evidence for another.
+
+- **Code-proven.** Observed in the repository. It does not depend on which films are in the bucket, or on the age of a snapshot. The romantic/historical substring bug, the other substring collisions, the closed mechanic and execution lists, the URL id rules, and the fact that derived ids are outside `fingerprintHash` are this level.
+- **Corpus-dependent.** A count, with an explicit source, date, coverage, and limit. Section 3 is the 18–19 October Site export. Section 2.4 is the 24 October R2 read. Neither number is a substitute for the other. A blank cell was not measured. It is not an estimate.
+- **Product proposal.** A rule for AIR-108. It is not implemented and is not a product decision until the owner accepts it. Section 10 lists the choices this audit does not make.
+
+**Hypothesis** means a reading that was not proven film by film. **Open question** means a choice left to the owner.
 
 ## 1. What is in force today
 
@@ -36,17 +41,172 @@ The fingerprint hash is `contentHash` of the model payload plus `filmId` (`src/e
 
 Filter composition is OR inside genres, mechanics, moods, channels, and execution values, and AND across those groups (`public/app.js`). Presets persist the query string in `ui/filter-presets.json`. `normalizePresetQuery` keeps a `mood` value only when it matches `^[a-z0-9_]{1,80}$`. It does not check that the id still exists. `readUrlState` drops a `mood` value that is not a current id and is not an exact normalized Russian label. `moodVocabulary.aliases` is consulted, and the view payload does not set `aliases`.
 
-## 2. Frequency source and limits
+## 2. Evidence sources
 
-**Fact.** Counts below were recomputed on this machine from the local export at `/Users/vladimino/.local/share/iptv-watchlist/snapshots/2026-10-19-trial-01`. `run.json` records `startedAt` `2026-10-18T23:31:38.829Z` and `sourceOrigin` `https://iptv.vladimino.chatgpt.site`. `manifest.json` records `finishedAt` `2026-10-19T00:32:22.364Z` and says the listing is not an atomic bucket snapshot. The export is the pre-cutover Site reserve, not the post-cutover R2 bucket `iptv`. No production HTTP call, sync, resolver chunk, prediction, TMDB call, or backfill was made. No film title, film id, or raw model sentence is copied here.
+No sync, resolver chunk, prediction, TMDB call, R2 write, migration, or production-configuration change was made. No film title, film id, profile text, or raw model sentence is copied here. `GET /api/enrichment/view` and `GET /api/events` were not called.
 
-**Fact.** The same export contains `enrichment/diagnostics/moods.json` with `completedAt` `2026-10-11T20:33:45.003Z`, `films` 484, and `mappingVersion` 1. That file is an older sidecar. It is not the inventory. The inventory reruns `mapRawMood` from `5f9b92c` over each fingerprint file and the current prediction.
+### 2.1 What can be read, and what was read
 
-**Fact.** The export has 1,986 fingerprint files and 1,986 prediction files. All 399 watchlist films are in that set. The other 1,587 are outside the watchlist. Genre counts use the watchlist only. Mood counts are given for both populations. `ui/filter-presets.json` is not in the export, so stored preset frequencies are unknown.
+**Fact.** The Worker MCP tools that already exist cannot supply this census. `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` are read-only and do not list the bucket or return `moodLabels` (`docs/mcp.md`, `docs/air-98-prediction-diagnostics.md`). `enrichment_status` can write and was not called. There is no mood-aggregate MCP tool.
 
-**Limit.** These frequencies can be stale relative to production R2 after 19 October 2026. They are evidence of how mapping v1 behaves on a large saved corpus, not a live census.
+**Fact.** The local snapshot directory has one export, `2026-10-19-trial-01`. A `view-index` backup from 20 October 2026 is also pre-cutover. Neither is current production.
 
-## 3. Inventory
+**Fact.** The census used the account R2 HTTP API: `GET` list and `GET` object on bucket `iptv`. That path does not enter a Worker GET handler, so it does not run the view or event recovery writes. Only `GET` was issued. Aggregates were computed in the request and the response kept counts. A separate MCP contract is not required for this audit.
+
+**Fact.** The objects are not one atomic snapshot. Object upload times:
+
+| Object | Uploaded | Role in the census |
+| --- | --- | --- |
+| `watchlist.json` | 2026-10-23T15:04:17.788Z | Watchlist membership and genres |
+| `programme.json` | 2026-10-23T15:04:10.588Z | Programme membership. `updatedAt` inside the body is 2026-10-23T15:02:58.050Z |
+| `epg/published-generation.json` | 2026-10-23T15:03:35.507Z | `programmeRunId` `cf3ba3ac-f962-4475-b9cd-3de1b07bd1eb`, phase `published` |
+| `enrichment/view-index.json` | 2026-10-24T11:06:19.755Z | Fingerprint facets, prediction facets, hashes |
+| `enrichment/profile/current.json` | 2026-10-19T12:56:28.332Z | Profile version 1, schema version 1, body `updatedAt` 2026-10-04T18:41:55.630Z |
+| `enrichment/diagnostics/moods.json` | 2026-10-19T11:58:46.379Z | Stale sidecar. Not the inventory |
+| `ui/filter-presets.json` | absent | Preset frequencies remain unknown |
+
+The identity compare in section 2.3 read `watchlist.json` and `enrichment/view-index.json` again, after the 11:06Z index upload. Each of the four compare calls saw 398 watchlist films.
+
+### 2.2 Why the October export is not a production total
+
+**Fact.** Section 3 was recomputed on this machine from `/Users/vladimino/.local/share/iptv-watchlist/snapshots/2026-10-19-trial-01`. `run.json` records `startedAt` `2026-10-18T23:31:38.829Z` and `sourceOrigin` `https://iptv.vladimino.chatgpt.site`. `manifest.json` records `finishedAt` `2026-10-19T00:32:22.364Z` and says the listing is not an atomic bucket snapshot. The export is the pre-cutover Site reserve. Since the 19 October 2026 cutover, bucket `iptv` is the authoritative store.
+
+**Fact.** That export contains 1,986 fingerprint files and 399 watchlist films, all of which have a fingerprint. The other 1,587 fingerprints are outside that watchlist. Those two numbers cannot be lined up with the current catalog by subtraction. The populations differ in four ways that a total does not show:
+
+- Watchlist membership changed. The sorted-id digest of the export is not the digest of the current watchlist. Section 2.3 measures the overlap.
+- Catalog-only membership changed by more than the watchlist. The current index has 1,882 keys that are not on the watchlist. The export has 1,587 fingerprints outside its own watchlist. The exact catalog-id overlap was not computed, so the difference of 295 is not a count of new films.
+- One shared watchlist film has a different `fingerprintHash`. A larger fingerprint-file total can be new films, replaced films, or both.
+- The profile body is still version 1 from 4 October 2026. The growth is new and changed film records under the same profile, not a profile regeneration.
+
+The stored sidecar in the export (`completedAt` 2026-10-11, 484 films, `mappingVersion` 1) is older than the export. The production sidecar uploaded on 19 October is also not the inventory. Both censuses rerun `mapRawMood` from `5f9b92c`.
+
+### 2.3 Watchlist identity
+
+**Fact.** Each watchlist film was compared as the first 64 bits of SHA-256 of the string `watch:` plus the film id, and the first 64 bits of `fingerprintHash`. The 399 export prefixes are unique. The compare returned only counts.
+
+| | Films |
+| --- | --- |
+| Export watchlist | 399 |
+| Production watchlist | 398 |
+| In both | 397 |
+| Export only | 2 |
+| Production only | 1 |
+| Shared, same `fingerprintHash` prefix | 396 |
+| Shared, different `fingerprintHash` prefix | 1 |
+| Shared, missing fingerprint | 0 |
+
+The current watchlist is the same set plus one film and minus two films, not a one-film deletion. Of the films that stayed, one fingerprint changed and 396 did not. Catalog-only identity overlap was not computed.
+
+### 2.4 Production census
+
+**Fact.** Populations at the object times in section 2.1:
+
+| Population | Count |
+| --- | --- |
+| Watchlist films | 398, all with a fingerprint, a prediction, and a `fingerprintHash`. None use a `tmdb_` id prefix |
+| Programme films | 398. Same membership as the watchlist. Same `programmeRunId` as the published generation |
+| View-index keys | 2,280. `tmdb_` 1,867, other 413 |
+| Catalog-only index keys | 1,882 (1,867 `tmdb_` and 15 other) |
+| `enrichment/films/` folders | 2,279. `fingerprint.json` 2,278, `predictions.json` 2,278, `mood-facet.json` 2,278 |
+| Index key with no film folder | 1 |
+| Index rows missing both fingerprint and prediction | 2 |
+
+Every prediction that exists (2,278) has `predictionPromptVersion` 1, `tasteProfileVersion` 1, the current profile hash, `fingerprintSchemaVersion` 1, and a fingerprint hash that matches the index. Stale predictions: 0. The fingerprint facet stored in the index does not carry `fingerprintSchemaVersion`; the version above is the prediction record, not a missing schema.
+
+Label occurrences on the 2,278 films that have labels: 7,302 occurrences, 1,385 distinct raw strings, mapped 6,201, unmapped 914, mechanic-only 187, compound mechanic strings that stay unmapped 196. Fingerprint and prediction id sets disagree on 160 films. 55 films derive more than four ids.
+
+Canonical ids, a film counted once. The first number is the 2,278 films with labels. The second is the 398 watchlist films.
+
+| Id | All labeled films | Watchlist |
+| --- | --- | --- |
+| funny | 570 | 46 |
+| tense | 555 | 15 |
+| adventurous | 484 | 60 |
+| family | 479 | 76 |
+| dark | 441 | 33 |
+| dynamic | 404 | 9 |
+| historical | 375 | 39 |
+| friendship | 325 | 47 |
+| romantic | 274 | 14 |
+| violent | 272 | 15 |
+| eerie | 208 | 37 |
+| epic | 201 | 15 |
+| warm | 180 | 1 |
+| light | 179 | 6 |
+| military | 155 | 45 |
+| inspiring | 151 | 6 |
+| tragic | 139 | 10 |
+| touching | 134 | 2 |
+| melancholic | 121 | 4 |
+| absurd | 106 | 4 |
+| paranoid | 103 | 9 |
+| political | 101 | 21 |
+| revenge | 97 | 24 |
+| black_humor | 87 | 24 |
+| satirical | 82 | 13 |
+| contemplative | 76 | 2 |
+| surreal | 51 | 4 |
+| noir | 44 | 7 |
+
+Highest raw occurrence counts: «Напряжённый» 458, «Комедийный» 404, «Приключенческий» 361, «Мрачный» 347, «Семья и отношения» 338, «Динамичный» 334, «Дружба и команда» 265, «Романтический» 222, «Жёсткий» 218.
+
+Family on the 2,278: `family` present 479, exact broad label 394, narrower kinship cue 0, broad-label-only chip 2, `family` as the only derived id 21. The live pass did not split that last 21 by watchlist membership. The export's "16 of them on the watchlist" stays an export figure.
+
+Romantic heuristic, same rule as section 5.1: romantic stem 259, `historical` present 375, `historical` gained with no separate historical stem 227, `historical` without a romantic stem 128.
+
+Watchlist genre and mood overlap. Genre counts are films, and a film can have several genres. Unknown English leftovers: none.
+
+| Genre | Other signal | Genre | Other | Both | Genre only | Other only |
+| --- | --- | --- | --- | --- | --- | --- |
+| Военный | `military` | 29 | 45 | 18 | 11 | 27 |
+| Исторический | `historical` | 40 | 39 | 19 | 21 | 20 |
+| Семейный | `family` | 46 | 76 | 20 | 26 | 56 |
+| Ужасы | `eerie` | 65 | 37 | 28 | 37 | 9 |
+| Мелодрама | `romantic` | 25 | 14 | 10 | 15 | 4 |
+| Комедия | `funny` | 84 | 46 | 40 | 44 | 6 |
+| Детектив | `mystery` or `investigation` | 38 | 137 | 36 | 2 | 101 |
+
+Watchlist genres beside the export, where they differ: Боевик 157 (was 158), Драма 153 (was 152), Триллер 149 (was 148), Фантастика 72 (was 73), Ужасы 65 (was 66). The other 14 Russian labels match the export table in section 3.1, including «Телефильм» 2 and «Документальный» 0. The deltas are not attributed to a named film.
+
+Watchlist `black_humor` is 24, and 22 of those have no independent funny label. That pair matches the export.
+
+Mechanic counts on the 2,278 fingerprints: `multi_party_conflict` 798, `rescue` 654, `chase_escape` 561, `plan_counterplan` 535, `survival` 528, `mystery` 480, `investigation` 434, `expedition_discovery` 297, `ticking_clock` 272, `siege` 181, `escort_protection` 179, `scam` 154, `puzzle` 122, `heist` 95.
+
+Corpus-wide films whose only derived id is one broad label: `family` 21, `military` 20, `revenge` 9, `eerie` 8, `political` 7, `historical` 6, `noir` 3, `violent` 3. Those eight integers match the export.
+
+### 2.5 Historical against current
+
+| Measure | Site export, finished 2026-10-19T00:32:22.364Z | R2 `iptv`, objects in section 2.1 |
+| --- | --- | --- |
+| Watchlist films | 399 | 398 |
+| Watchlist overlap | — | 397 shared, 2 export-only, 1 production-only |
+| Shared fingerprints unchanged | — | 396 same prefix, 1 changed |
+| Fingerprinted films | 1,986 | 2,278 with labels; 2 index rows without a fingerprint |
+| Outside the watchlist | 1,587 | 1,882 catalog-only index keys. Id overlap not computed |
+| Profile | not used as a version pin | version 1 since 2026-10-04, schema 1 |
+| Predictions current for that profile | not measured this way | 2,278 current, 0 stale, prompt 1 |
+| Fingerprint/prediction id disagree | 110 / 1,986 | 160 / 2,278 |
+| Raw occurrences / distinct | 6,241 / 1,371 | 7,302 / 1,385 |
+| Mapped / unmapped / mechanic-only | 5,150 / 904 / 187 | 6,201 / 914 / 187 |
+| Compound mechanic, still unmapped | 196 | 196 |
+| More than four derived ids | 19 | 55 |
+| `historical` from a romantic stem only | 178 | 227 |
+| `family` as the only id | 21, of which 16 on the watchlist | 21. Watchlist split not measured |
+| Narrow kinship cue on a broad family label | 0 | 0 |
+| Watchlist `black_humor` without its own funny label | 22 of 24 | 22 of 24 |
+| `ui/filter-presets.json` | absent | absent |
+
+### 2.6 What the two corpora are allowed to decide
+
+Safe on the code, with either corpus as illustration: the romantic/historical substring bug, the other substring collisions in section 5.2, the tested dual map of «Чёрный юмор», TV Movie as the genre string «Телефильм», `family` as one broad id, mechanics and execution as separate closed lists, and the rule that a mapping change does not change `fingerprintHash` or retire a `mood=` id.
+
+The fresh census confirms the sizes those decisions care about, and it changes the composition claim. The watchlist is almost the same set. The catalog is larger, and which catalog films are new was not identified. Filter-impact counts that section 10 still asks the owner to weigh (the 22-film funny dual map, the romantic/historical inflation, the family singleton) were remeasured. The 22-film figure is unchanged. The romantic/historical inflation grew with the catalog (178 to 227). The corpus-wide singleton integers did not move.
+
+Still not measured, and not filled in by the export: catalog-only id overlap, the watchlist share of the 21 family-only films, execution-value frequencies, and saved preset queries. None of those four block the code-proven mapping bugs. Catalog-only identity would be required only for a claim about which non-watchlist films appeared after the resolver cutover.
+
+## 3. Inventory of the October export
+
+Every count in this section is the Site export from section 2.2. It is not the production census. Production counts are in section 2.4.
 
 ### 3.1 Watchlist genres
 
@@ -150,7 +310,7 @@ Execution values were not counted. The closed lists are the inventory. Eight gen
 
 **Fact.** The historical rule contains `антич`. The normalized label «романтический» contains that substring, and the romantic rule also matches. `mapRawMood('Романтический')` returns `['romantic','historical']`. The same is true of the lowercase label. Two of the 28 vocabulary labels fail a round trip through their own rule: «Романтический» gains `historical`, and «Чёрный юмор» gains `funny`. The second one is intentional in `tests/mood-vocabulary.mjs`. The first is not covered by that test.
 
-**Fact.** 203 of 1,986 films have a romantic stem in some raw label. 178 of those receive `historical` even after romantic words are removed from the stem check and no separate historical stem remains. `historical` is therefore inflated. The watchlist still shows 39 films with `historical` and only 14 with `romantic`, which is consistent with the extra id landing on films that already have other labels, but the 178 figure is the corpus-level measurement.
+**Fact.** On the October export, 203 of 1,986 films have a romantic stem in some raw label. 178 of those receive `historical` even after romantic words are removed from the stem check and no separate historical stem remains. On the 24 October index the same heuristic is 227 of 259. `historical` is inflated on both corpora. The watchlist still shows 39 films with `historical` and 14 with `romantic` in both censuses.
 
 **Proposal.** A vocabulary label maps to its own id and to no other id. `антич` must not match inside «романтический».
 
@@ -180,7 +340,7 @@ Execution values were not counted. The closed lists are the inventory. Eight gen
 
 **Fact.** The family rule collapses «семья», «семейный», «семейная драма», «отец и сын», and «брак» into one id. 307 films carry an exact broad label (`Семья и отношения`, `family`, `семейный`, or `семья`). On those films, no other raw label contained a narrower kinship cue from the set отец, сын, дочь, брак, сестра, брат, родитель, материн. The relationship kind was not stored.
 
-**Fact.** 21 films have `family` as their only derived id (16 of them on the watchlist, out of 77 watchlist films with `family`). The card then shows a single chip, «Семья и отношения». That chip does not say whether the film is about parents, a marriage, siblings, or a household in the generic sense.
+**Fact.** On the October export, 21 films have `family` as their only derived id (16 of them on the watchlist, out of 77 watchlist films with `family`). The 24 October index still has 21 such films and 76 watchlist films with `family`. The live pass did not recount how many of the 21 are on the watchlist. The card then shows a single chip, «Семья и отношения». That chip does not say whether the film is about parents, a marriage, siblings, or a household in the generic sense.
 
 **Fact.** Letterboxd genre «Семейный» is a different fact. On the watchlist, 46 films have the genre and 77 have the mood. Only 20 have both. 26 have the genre without the mood. 57 have the mood without the genre. Merging them would mix an audience label with a theme label.
 
@@ -190,7 +350,7 @@ The same singleton shape exists for other broad ids on the whole corpus: `milita
 
 ### 5.4 Genre and mood describe the same subject twice
 
-Watchlist overlap of the Letterboxd genre and the derived mood or mechanic:
+Watchlist overlap of the Letterboxd genre and the derived mood or mechanic on the October export. The 24 October recount is section 2.4. The war, history, romance, and comedy rows match. Horror, family, and detective each move by one film.
 
 | Genre | Other signal | Genre films | Other films | Both | Genre only | Other only |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -235,7 +395,7 @@ Dispositions are proposals. `keep` means the id, the Russian label, and the filt
 | black_humor | keep | The specific label is the one the model was asked to prefer | Dual `funny` membership is an open question. Filter membership of about 22 watchlist films depends on it |
 | eerie | keep as tone, narrow the rule | «Мистический / пугающий» is a tone. Matching every `ужас` and `horror` copies the horror genre into the mood filter | Films whose only eerie evidence is the word «ужасы» or `horror` would leave the eerie filter. Supernatural stems stay |
 | military, historical, political | move to theme | They say what the film is about. They are also Letterboxd genres under other Russian words | Chip group changes. `mood=military` must keep working. See section 7 |
-| family | move to theme, and suppress as a lone chip | One id hides parents, marriage, and siblings. 16 watchlist films show only this chip | The chip disappears when it is the only one. The filter id remains. No narrower ids are created in AIR-108 |
+| family | move to theme, and suppress as a lone chip | One id hides parents, marriage, and siblings. The export shows 16 watchlist films with only this chip. The live index still has 21 corpus-wide and did not resplit them | The chip disappears when it is the only one. The filter id remains. No narrower ids are created in AIR-108 |
 | friendship | move to theme | «Дружба и команда» is a subject, and the rule also matches «команда», which is broad | Same URL-keep rule as family. Whether «команда» is too broad is an open question |
 | revenge | move to theme | It is not one of the 14 mechanics | Same URL-keep rule. Do not add a mechanic |
 | noir | move to style | A manner, not a feeling | Same URL-keep rule |
@@ -360,4 +520,6 @@ Rollback of that PR is a revert. Stored fingerprints and predictions do not need
 
 ## 12. What this audit did not do
 
-No file under `src/`, `public/`, `tests/`, or `migrations/` was edited. No feature flag, Scheduled Task, R2 object, or D1 database was touched. Production diagnostics were not called, including the read-only mood diagnostics route, because a live census was not approved. The frequency gap against current R2 is the limit in section 2.
+No file under `src/`, `public/`, `tests/`, or `migrations/` was edited. No feature flag, Scheduled Task, R2 object, or D1 database was written. Worker GET routes that can write were not called. The read-only mood diagnostics route was not called; the census used the account R2 `GET` API instead.
+
+**LIVE EVIDENCE AVAILABLE.** Section 2.4 is the production census. The audit is not finished as a product decision. Section 10 is still open. Catalog-only film identity, the watchlist share of the 21 family-only films, execution-value frequencies, and saved presets were not measured. AIR-108 stays blocked on those owner answers and on [AIR-69](https://trello.com/c/FlcWZX7W). This document does not authorize a backfill, a prediction run, or a schema bump.
