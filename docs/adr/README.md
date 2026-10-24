@@ -1,22 +1,25 @@
 # Architecture Decision Records
 
-Architectural Decision Records (ADRs) preserve the **reasoning and durable constraints** behind material design choices. They are not feature lists, migration execution approvals, or production observations. Read [documentation governance](../README.md) and use the [ADR template](template.md).
+ADRs document durable accepted choices, not live feature flags, operational permissions or observations. See [template](template.md), [documentation governance](../README.md) and [evidence registry](../evidence/README.md).
 
 ## Accepted records
 
-| ADR | Status | Scope and evidence |
+| ADR | Status | Decision and evidence |
 | --- | --- | --- |
-| [0001 — D1 schema v1 is unapplied](0001-d1-schema-v1.md) | Accepted (existing historical record, unchanged) | Immutable schema v1 and local-only D1 adapters with R2 still authoritative; [AIR-49](https://trello.com/c/YNaLFwtW), [PR #51](https://github.com/vladimino/iptv-watchlist/pull/51) |
+| [0001 — D1 schema v1 is unapplied](0001-d1-schema-v1.md) | Accepted (existing record, unchanged) | Local-only D1 schema/repositories; [AIR-49](https://trello.com/c/YNaLFwtW), [PR #51](https://github.com/vladimino/iptv-watchlist/pull/51) |
+| [0002 — Cloudflare Worker and R2 authority](0002-cloudflare-worker-r2-authority.md) | Accepted; retrospective record 2026-10-24 | Production cutover on 19 October; legacy Sites reserve |
+| [0003 — GitHub Actions tested-artifact deployment](0003-github-ci-deployment.md) | Accepted; original date unknown | GitHub main build and Cloudflare CD, code-only rollback |
+| [0004 — Owner-only MCP Access and JWT boundary](0004-mcp-access-boundary.md) | Accepted; original date unknown | Managed OAuth, JWT verification, tool allowlist |
+| [0005 — External ChatGPT Scheduled Tasks](0005-external-chatgpt-tasks.md) | Accepted; retrospective record 2026-10-24 | AIR-62 restored orchestration 21 October, independent of Worker cron |
+| [0006 — One-chunk explicit discovery continuation](0006-one-chunk-discovery.md) | Accepted; original date unknown | Bounded request-driven discovery, no recursive waitUntil |
 
-Retrospective ADR reconstruction is **planned, not yet recorded**: [AIR-116 platform](https://trello.com/c/6MHbRFZR), [AIR-117 domain/resolution](https://trello.com/c/ORglHnul), [AIR-118 prediction/data](https://trello.com/c/5qf3Zn3p). Do not reserve numbers by publishing invented decisions; add each documented decision to this register only after verification.
+[Platform ADR reconstruction](https://trello.com/c/6MHbRFZR) is distinct from the planned [domain ADRs](https://trello.com/c/ORglHnul) and [prediction/data ADRs](https://trello.com/c/5qf3Zn3p). Never infer an original approval date from a later deployment test.
 
-## Decision lifecycle
+## Lifecycle
 
-- **Proposed:** under review, not yet agreed.
-- **Accepted:** documented owner/architecture acceptance for an explicit scope. Include both original date (if known) and date documented.
-- **Superseded:** replaced by an explicitly linked later ADR; leave the old adopted decision intact and add the successor in the index.
-- **Rejected:** evaluated but never accepted; do not claim implemented status.
+- **Proposed:** under review.
+- **Accepted:** documented decision at the specified scope; original date and retrospective recording date are separate.
+- **Superseded:** successor ADR explicitly replaces the previous record.
+- **Rejected:** evaluated but not adopted.
 
-A new ADR is expected for authoritative source ownership, persistent identity/schema, module or trust/security boundary, orchestration model, publication/recovery strategy, migration/cutover contract, or fundamental domain invariant. A routine bug fix, UI styling, or non-architectural refactor does not itself require ADR.
-
-An Accepted ADR must link Trello/PR/commit and appropriate dated evidence; when historically recovering one, note *unknown* motivations and alternatives honestly. ADRs capture design decisions; **current implementation** is described in reference docs and actual deployed runtime is established by safe production checks. Rolling back a code commit does not automatically roll back R2 data, settings, or schedules.
+Each ADR must cite evidence, include consequences and recovery boundaries, and identify unsupported assumptions. Current runtime state requires separate safe verification. A GitHub commit, a successful deploy and a production data migration are not equivalent. Rollback of code is not rollback of R2 data, OAuth policy or external schedules.
