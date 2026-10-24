@@ -130,7 +130,7 @@ function filmQueryStore(name){try{return globalThis[name]||null;}catch{return nu
 function writeFilmQuery(search){for(const name of ['sessionStorage','localStorage']){try{filmQueryStore(name)?.setItem(FILM_QUERY_KEY,search);}catch{}}}
 function readFilmQuery(){try{const session=filmQueryStore('sessionStorage');if(session){const value=session.getItem(FILM_QUERY_KEY);if(value!==null)return value;}}catch{}try{return filmQueryStore('localStorage')?.getItem(FILM_QUERY_KEY)||'';}catch{return '';}}
 function rememberFilmList(){if(eventsScreen||eventsRequested()||filmIdFromLocation())return;writeFilmQuery(filmSearchFrom(window.location.href));}
-let eventsScreen=false,filmScreen=null,filmReturnId=null,movieScrollY=0,eventsTrigger=null;
+let eventsScreen=false,filmScreen=null,filmReturnId=null,filmFiltersAtOpen=null,movieScrollY=0,eventsTrigger=null;
 function applyEventsScreen(on){
  if(on&&!eventsScreen)movieScrollY=window.scrollY||0;
  eventsScreen=!!on;
@@ -157,15 +157,17 @@ function focusFilmReturn(id){
  if(opener?.focus){opener.focus({preventScroll:true});return;}
  $('#search')?.focus?.({preventScroll:true});
 }
+function filmFiltersChanged(){return filmFiltersAtOpen!=null&&filmFiltersAtOpen!==filterStateKey(state);}
 function showFilmList(search){
  const next='/'+(search.startsWith('?')||!search?search:'?'+search);
- const leavingFilm=!!filmScreen,returnId=filmReturnId;
+ const leavingFilm=!!filmScreen,returnId=filmReturnId,filtersChanged=filmFiltersChanged();
  window.history.replaceState(null,'',next);
  applyEventsScreen(false);
  if(filmScreen)applyFilmScreen(null);
  const incoming=readUrlState(new URL(window.location.href));
  const sameList=filterStateKey(incoming)===filterStateKey(state);
- if(!sameList)restoreUrl();
+ if(leavingFilm&&filtersChanged)render();
+ else if(!sameList)restoreUrl();
  if(leavingFilm)focusFilmReturn(returnId);
  else if(sameList)(eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
 }
@@ -176,10 +178,12 @@ function renderFilmShell(){
  if(title)title.textContent=film?film.title:'Фильм не найден';
  if(identity)identity.textContent=id||'';
  if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?'В загруженной программе нет фильма с этим идентификатором.':'';
+ fillFilmPage(film);
 }
 function applyFilmScreen(id){
  const next=id||null;
- if(next&&!filmScreen)movieScrollY=window.scrollY||0;
+ if(next&&!filmScreen){movieScrollY=window.scrollY||0;filmFiltersAtOpen=filterStateKey(state);}
+ if(!next)filmFiltersAtOpen=null;
  filmScreen=next;
  document.documentElement?.classList?.toggle('film-screen',!!filmScreen);
  const screen=$('#film-screen');
@@ -211,11 +215,11 @@ function closeEventsScreen(){
 }
 function onHistoryNavigation(){
  const filmId=filmIdFromLocation();
- const leavingFilm=!!filmScreen&&!filmId,returnId=filmReturnId;
+ const leavingFilm=!!filmScreen&&!filmId,returnId=filmReturnId,filtersChanged=leavingFilm&&filmFiltersChanged();
  if(filmId){applyFilmScreen(filmId);return;}
  if(filmScreen)applyFilmScreen(null);
  const onEvents=eventsRequested();
- if(!onEvents){const next=readUrlState(new URL(window.location.href));if(filterStateKey(next)!==filterStateKey(state))restoreUrl();}
+ if(!onEvents){const next=readUrlState(new URL(window.location.href));if(leavingFilm&&filtersChanged)render();else if(filterStateKey(next)!==filterStateKey(state))restoreUrl();}
  if(onEvents!==eventsScreen)applyEventsScreen(onEvents);
  if(eventsScreen)$('#activity-title')?.focus?.({preventScroll:true});
  else if(leavingFilm)focusFilmReturn(returnId);
@@ -418,10 +422,23 @@ function startedButton(film){
 }
 function progressError(message){$('#progress-error-text').textContent=message;$('#progress-error').hidden=!message;}
 async function loadStarted(options={}){if(startedLoading||savingStarted.size)return 'busy';startedLoading=true;try{const r=await fetch('/api/started');if(!r.ok)throw new Error();const data=await r.json();if(!Array.isArray(data.ids))throw new Error();const next=new Set(data.ids.map(String)),wasReady=startedReady,same=next.size===startedIds.size&&[...next].every(id=>startedIds.has(id));startedIds=next;startedReady=true;$('#started-only').disabled=false;progressError('');if(!same||!wasReady)renderPreservingScroll();return true;}catch{if(!options.quiet)progressError('Не удалось загрузить отметки просмотра. Повтори попытку.');return false;}finally{startedLoading=false;}}
-async function toggleStarted(id){if(!startedReady||startedLoading||savingStarted.has(id))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();try{const r=await fetch('/api/started',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();const b=document.querySelector(`[data-started-id="${id}"]`);if(b)b.focus({preventScroll:true});}}
+function refreshFilmStarted(id){if(!filmScreen||String(filmScreen)!==String(id))return;const film=films.find(item=>String(item.id)===String(id)),actions=$('#film-screen-actions');if(!film||!actions)return;actions.innerHTML=`${letterboxdLink(film)}${startedButton(film)}`;const button=document.querySelector(`#film-screen [data-started-id="${String(id).replace(/"/g,'')}"]`);button?.focus?.({preventScroll:true});}
+async function toggleStarted(id){if(!startedReady||startedLoading||savingStarted.has(id))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();refreshFilmStarted(id);try{const r=await fetch('/api/started',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();refreshFilmStarted(id);}}
+function confidenceText(value){return {low:'низкая',medium:'средняя',high:'высокая'}[value]||'';}
+function setFilmHtml(id,html){const node=$('#'+id);if(node)node.innerHTML=html;}
+function availableShows(film,now=viewingClock()){const model=viewingWindow(now);return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&(inArchive(model,show)||inFuture(model,show))).sort((a,b)=>a.start-b.start||String(a.channel||'').localeCompare(String(b.channel||''),'ru'));}
+function nearestAvailable(shows,now){const live=shows.find(show=>show.start<=now&&finiteTime(show.end)!==null&&show.end>now),upcoming=shows.find(show=>show.start>now);if(live&&upcoming)return {show:live,also:upcoming,label:'Сейчас в эфире',nextLabel:'Следующий показ'};if(live)return {show:live,label:'Сейчас в эфире'};if(upcoming)return {show:upcoming,label:'Ближайший показ'};return shows.length?{show:shows[shows.length-1],label:'Последний доступный показ'}:null;}
+function filmScore(film){const item=enrichment.films?.[String(film.id)]||{},actual=item.actualRating,prediction=item.prediction,lines=[];if(actual!==null&&actual!==undefined&&Number.isFinite(Number(actual)))lines.push(`<p class="film-score-line"><span>Оценка Letterboxd</span><strong>${Number(actual).toFixed(1)}</strong></p>`);else lines.push('<p class="film-missing">Оценка Letterboxd не сохранена</p>');if(prediction&&Number.isFinite(prediction.predictedRating)){const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'',confidence=confidenceText(prediction.confidence);lines.push(`<p class="film-score-line"><span>Прогноз</span><strong>${Number(prediction.predictedRating).toFixed(1)}</strong>${chance?`<span>шанс 4.0+ ${chance}</span>`:''}${confidence?`<span>уверенность ${escapeHTML(confidence)}</span>`:''}${prediction.stale?'<span>ожидает пересчёта</span>':''}</p>`);}else lines.push('<p class="film-missing">Прогноз ещё не готов</p>');return `<section class="film-score" aria-label="Оценка и прогноз">${lines.join('')}</section>`;}
+function filmSynopsis(film){const text=String(film.synopsis||'').trim();return text?`<p class="film-page-synopsis">${escapeHTML(text)}</p>`:'<p class="film-missing">Синопсис не сохранён</p>';}
+function filmCredits(film){const body=credits(film);return body.includes('credit-link')?body:'<p class="film-missing">Режиссёр и актёры не указаны</p>';}
+function filmShowMark(show,nearest){if(!nearest)return '';if(show.start===nearest.show.start&&show.channel===nearest.show.channel)return nearest.label==='Сейчас в эфире'?' is-live':' is-nearest';if(nearest.also&&show.start===nearest.also.start&&show.channel===nearest.also.channel)return ' is-next';return '';}
+function filmShowRow(show,nearest){const time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(new Date(show.start));return `<div class="show-row${filmShowMark(show,nearest)}">${channelControl(show)}<time class="show-time" datetime="${new Date(show.start).toISOString()}">${madridStamp(show.start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`;}
+function filmNowLine(kind,show){return `<p class="film-nearest"><span>${kind}</span> ${channelControl(show)}<time datetime="${new Date(show.start).toISOString()}">${escapeHTML(madridStamp(show.start))}</time></p>`;}
+function filmAvailability(film){const now=viewingClock(),shows=availableShows(film,now),until=availabilityTime(film,now),nearest=nearestAvailable(shows,now),untilText=until?madridStamp(until):'';const summary=`<div class="film-availability-summary">${isLastChance(film,now)?lastChanceBadge(film):''}<p>Осталось показов <strong>${shows.length}</strong></p>${untilText?`<p>Доступно до <time datetime="${new Date(until).toISOString()}">${escapeHTML(untilText)}</time></p>`:'<p class="film-missing">Срок доступности не определён</p>'}${nearest?filmNowLine(nearest.label,nearest.show)+(nearest.also?filmNowLine(nearest.nextLabel,nearest.also):''):''}</div>`;const list=shows.length?`<div class="film-show-list">${shows.map(show=>filmShowRow(show,nearest)).join('')}</div>`:'<p class="film-missing">Нет показов в текущем окне программы</p>';return `<section class="film-availability" aria-label="Показы">${summary}${list}</section>`;}
+function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-synopsis','film-screen-credits','film-screen-availability'])setFilmHtml(id,'');if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="185" height="278" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');if(actions)actions.innerHTML=`${letterboxdLink(film)}${startedButton(film)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-synopsis',filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-availability',filmAvailability(film));}
 function creditLinks(people,key){return (people||[]).map(p=>`<button type="button" class="credit-link" data-credit-kind="${key}" data-credit-id="${escapeHTML(p.id)}" title="Показать фильмы: ${escapeHTML(p.name)}">${escapeHTML(p.name)}</button>`).join(', ');}
 function credits(film){return `<div class="film-credits">${film.directors?.length?`<p><span class="credit-label">${film.directors.length>1?'Режиссёры':'Режиссёр'}</span> ${creditLinks(film.directors,'directors')}</p>`:''}${film.actors?.length?`<p><span class="credit-label">В ролях</span> ${creditLinks(film.actors,'actors')}</p>`:''}</div>`;}
-function selectPerson(key,id){const p=report.people?.[key]?.find(p=>p.id===id);if(!p)return;state[key]=id;const input=$('#'+key+'-input');input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');$('#'+key+'-options').hidden=true;render();}
+function selectPerson(key,id){const p=report.people?.[key]?.find(person=>person.id===id);if(!p)return;const onFilm=filmIdFromLocation();state[key]=id;const input=$('#'+key+'-input');if(input){input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');}const options=$('#'+key+'-options');if(options)options.hidden=true;if(!onFilm){render();return;}const list=urlForState('https://iptv.local/'),target=list.pathname+list.search+list.hash;window.history.pushState(null,'',target);applyFilmScreen(null);render();input?.focus?.({preventScroll:true});}
 function synopsis(film){
  const text=String(film.synopsis||'').trim();if(!text)return '';
  const max=280;if(text.length<=max)return `<p class="film-synopsis">${escapeHTML(text)}</p>`;
@@ -507,6 +524,7 @@ function render(){
   const sortBox=$('#sort');if(sortBox)sortBox.value=state.sort;
   $('#sort-time').textContent=state.period==='archive'?'Свежие показы — сначала':'Ближайшие эфиры — сначала';
   syncUrl();
+  if(filmScreen)renderFilmShell();
   noteTimeView(valid?visible:[]);
   return {period:state.period,query:state.query,genres:[...state.genres],mechanics:[...state.mechanics],moods:[...state.moods],years:[state.from,state.to],maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
 }
@@ -659,21 +677,23 @@ function addChannelFilter(name){
  const channel=typeof name==='string'?name:'';
  if(!channel.trim()||state.channels.has(channel))return;
  state.channels.add(channel);
- if(urlReady&&window.history?.pushState){
+ if(urlReady&&window.history?.pushState&&!filmIdFromLocation()){
   const next=urlForState(window.location.href);
   const target=next.pathname+next.search+next.hash;
   const current=new URL(window.location.href);
   if(target!==current.pathname+current.search+current.hash)window.history.pushState(window.history.state,'',target);
  }
+ if(filmIdFromLocation())writeFilmQuery(urlForState('https://iptv.local/').search);
  render();
- const button=[...document.querySelectorAll('[data-channel]')].find(node=>node.dataset?.channel===channel);
+ const scope=filmIdFromLocation()?'#film-screen [data-channel]':'[data-channel]';
+ const button=[...document.querySelectorAll(scope)].find(node=>node.dataset?.channel===channel)||[...document.querySelectorAll('[data-channel]')].find(node=>node.dataset?.channel===channel);
  button?.focus?.({preventScroll:true});
 }
 function onMovieClick(event){
  const channel=event.target.closest?.('[data-channel]');
  if(channel){event.preventDefault?.();event.stopPropagation?.();addChannelFilter(channel.dataset.channel);return;}
  const mark=event.target.closest?.('[data-started-id]');
- if(mark){toggleStarted(mark.dataset.startedId);return;}
+ if(mark)return toggleStarted(mark.dataset.startedId);
  const credit=event.target.closest?.('[data-credit-id]');
  if(credit){selectPerson(credit.dataset.creditKind,credit.dataset.creditId);return;}
  const opener=event.target.closest?.('a.film-open');
@@ -694,6 +714,7 @@ function bindControls(){
  document.querySelectorAll('[data-min-probability]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minProbability=b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability);render();}}));
  $('#progress-retry').addEventListener('click',()=>loadStarted());
  $('#movies').addEventListener('click',onMovieClick);
+ $('#film-screen')?.addEventListener('click',onMovieClick);
  document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.addEventListener('click',()=>{state.shortlistMode=button.dataset.shortlistMode;render();}));
  $('#shortlist').addEventListener('click',event=>{const button=event.target.closest('[data-shortlist-film]');if(!button)return;const target=[...document.querySelectorAll('.movie-card')].find(card=>card.dataset.filmId===button.dataset.shortlistFilm);if(target){target.scrollIntoView({behavior:'smooth',block:'start'});target.setAttribute('tabindex','-1');target.focus({preventScroll:true});}});
  $('#sort').addEventListener('change',e=>{state.sort=e.target.value;state.sortExplicit=true;render();});
