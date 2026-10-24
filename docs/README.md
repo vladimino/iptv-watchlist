@@ -5,7 +5,7 @@
 ## Entrypoints and sources of truth
 
 - [Agent guide](../AGENTS.md): essential repository/safety instructions. [Agent workflow](agent-workflow.md) and [Trello conventions](trello-card-conventions.md): collaboration policy until [AIR-111](https://trello.com/c/WXVqNJ25) relocates them.
-- [Deployment](deployment.md), [MCP](mcp.md), [Local setup](local-setup.md): operations. [AIR-110](https://trello.com/c/HIMB8pfv) must correct stale claims about schedules and scored rollout **before** they are treated as current operational directions.
+- [Deployment](deployment.md), [MCP](mcp.md), [Local setup](local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
 - [Film/Person](film-person-lifecycle.md), [Scored resolution](scored-resolution.md), [Prediction runner](prediction-runner.md), [D1 schema](d1-schema.md): technical contracts, some mixed with historical notes.
 - [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
 - Root [ENRICHMENT_API.md](../ENRICHMENT_API.md), [CONTRIBUTING.md](../CONTRIBUTING.md), [README.md](../README.md) remain outside `docs/` and are also in scope for AIR-110/113/119.
