@@ -2,7 +2,7 @@
 
 **Role:** maintained contract for the owner admin shell. It records what the current source can already answer and what [AIR-123](https://trello.com/c/uatDiouD), [AIR-52](https://trello.com/c/siWtiRcm), and [AIR-124](https://trello.com/c/Xotv4r2f) must not invent. The read paths were checked against source on GitHub `main` `8596d2f` (24 October 2026). Authority and access statements follow [ADR 0002](../../adr/0002-cloudflare-worker-r2-authority.md) and [ADR 0004](../../adr/0004-mcp-access-boundary.md), recorded in `d4c50e3`. This audit did **not** call production, list R2, or open a GET that can write.
 
-Related work: [AIR-122](https://trello.com/c/MouyDTjX), [AIR-69](https://trello.com/c/FlcWZX7W), [Film/Person contract](film-person.md), [D1 schema](../data/d1-schema.md). Upstream admin cards [AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/8cljigv1), and [AIR-65](https://trello.com/c/MKb4JMXi) stay writers and are out of this read contract.
+Related work: [AIR-122](https://trello.com/c/MouyDTjX), [AIR-69](https://trello.com/c/FlcWZX7W), [Film/Person contract](film-person.md), [D1 schema](../data/d1-schema.md). Upstream admin cards [AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy), and [AIR-65](https://trello.com/c/MKb4JMXi) stay writers and are out of this read contract.
 
 ## Access
 
@@ -133,7 +133,7 @@ The bounded design is:
 | [AIR-124](https://trello.com/c/Xotv4r2f) programme-snapshot search | No | Yes, behind the checks below, and only with a separate acceptance |
 | Ledger-wide candidate queues and a publish-time admin index | No | Only as its own card after AIR-69. Not implied by AIR-124's first slice |
 | D1 `readFilm` / `readPerson` as the admin source | No | Only after the D1 cutover that makes those tables authoritative. AIR-69 finishing does not do that |
-| Reviewed-title and reviewed-name writes ([AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/8cljigv1)) | No | Those cards stay behind AIR-69 and the storage gate. This contract does not add them |
+| Reviewed-title and reviewed-name writes ([AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy)) | No | Those cards stay behind AIR-69 and the storage gate. This contract does not add them |
 
 ## AIR-123 query contract
 
