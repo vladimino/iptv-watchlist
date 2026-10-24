@@ -46,3 +46,10 @@ Labels can be combined: D1 Film repository = Каталог + Платформа
 - **AIR-69 + AIR-73 + all three adapters → AIR-74 → AIR-75 → AIR-76 → AIR-77 → AIR-78 → AIR-79**: live backfill, shadow writes, shadow reads, read cutover, authoritative write cutover, legacy runtime retirement, each with independent acceptance and owner approvals.
 
 The Trello checklist is the visible progress source. The repo documentation is the policy reference; neither a checklist checkmark nor a code merge is a substitute for production verification.
+
+## Language conventions
+
+- **Trello:** use Russian for card descriptions, comments, delivery reports, dependency descriptions, and instructions for Cursor.
+- **GitHub:** use English for PR descriptions, code reviews, inline review comments, and technical discussions. This repository is public; do not include secrets, private production data, or confidential internal information.
+- **Technical identifiers:** preserve function/class names, API paths, reason codes, commit SHAs, and other identifiers verbatim, without translation.
+- **ChatGPT collaboration:** communicate in Russian by default unless the user requests another language.
