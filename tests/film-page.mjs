@@ -209,8 +209,17 @@ for(const [kind,id,param] of [['directors','d1','director'],['actors','a1','acto
 }
 
 const css=fs.readFileSync('public/styles.css','utf8');
+const html=fs.readFileSync('public/index.html','utf8');
 assert.match(css,/@media\(max-width:760px\)\{\s*\.film-hero\{grid-template-columns:1fr/);
 assert.match(css,/\.movie-card \.started-action|\.started-action\{position:absolute;right:18px;bottom:16px/);
 assert.match(css,/\.film-screen \.started-action\{position:static/);
-assert.match(fs.readFileSync('public/index.html','utf8'),/id="film-screen-availability"/);
+assert.match(css,/\.film-screen\{max-width:760px/);
+assert.match(css,/\.film-score-card\{[^}]*max-width:240px/);
+assert.match(css,/#film-screen-identity\{display:none\}/);
+assert.match(css,/html\.film-screen \.workspace\{display:none!important\}/);
+assert.match(css,/html\.film-screen \.search-panel\{display:none!important\}/);
+assert.match(html,/id="film-screen-availability"/);
+assert.match(html,/id="film-screen-identity" hidden/);
+const filmMarkup=html.slice(html.indexOf('id="film-screen"'),html.indexOf('class="search-panel"'));
+assert.doesNotMatch(filmMarkup,/search-scope|Названия|Люди|Сюжет/);
 console.log('Film page: metadata, scores, full showings, partial data and no render fetch passed');
