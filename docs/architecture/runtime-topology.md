@@ -28,7 +28,7 @@ flowchart TB
     prediction <--> store
     discovery <--> store
     classDef current fill:#edf8ef,stroke:#579266,color:#15361e
-    class store,current current
+    class store current
 ```
 
 The **one-chunk continuation** is executed inside the explicit step/request that asks for it. `DiscoveryContinuation` is an internal entrypoint, not an unauthenticated public endpoint, a second Worker, a cross-isolate guarantee, or a self-fetch with credentials. Only authorized operations invoke write handlers. Route names such as GET/status cannot universally be assumed read-only: consult [deployment safety notes](../runbooks/deployment.md).
