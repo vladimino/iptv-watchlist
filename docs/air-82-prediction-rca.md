@@ -1,6 +1,6 @@
 # AIR-82 prediction queue RCA
 
-[AIR-82](https://trello.com/c/Oa33pTQK) investigates five prediction films and the difference between a finished run, an empty eligible set, and outstanding pending work. [AIR-98](https://trello.com/c/JQEa1aK7) supplied the read-only MCP view used for the 24 October 2026 baseline. [AIR-88](https://trello.com/c/xWA4evuk) remains the later task for structured run and error telemetry. This change does not alter retry policy, queue completion, generation, validation, or Scheduled Tasks.
+[AIR-82](https://trello.com/c/Oa33pTQK) investigates five prediction films and the difference between a finished run, an empty eligible set, and outstanding pending work. [AIR-98](https://trello.com/c/JQEa1aK7) supplied the read-only MCP view used for the 24 October 2026 baseline. [AIR-88](air-88-run-diagnostics.md) records step chronology and caller-reported faults. It does not change the queue result below. This change does not alter retry policy, queue completion, generation, validation, or Scheduled Tasks.
 
 ## Confirmed state on 24 October 2026
 

@@ -137,6 +137,10 @@ for(const name of ['epg_sync_start','epg_sync_step','prediction_start','predicti
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
 assert.equal(tools.find(item=>item.name==='epg_sync_step').annotations.openWorldHint,true);
+const faultSchema=tools.find(item=>item.name==='prediction_complete').inputSchema.properties.fault;
+assert.equal(faultSchema.type,'object');
+assert.equal(faultSchema.additionalProperties,false);
+assert.deepEqual(faultSchema.properties.origin.enum,['worker_http','transport','model_provider','orchestrator','unknown']);
 
 const background=[];
 const execution={waitUntil(work){background.push(Promise.resolve(work));},exports:{DiscoveryContinuation:{async fetch(){return Response.json({ok:true});}}}};
@@ -293,5 +297,25 @@ assert.equal(diagnosticPuts.length,0);
 assert.equal(diagnosticLists.length,0);
 assert.ok(diagnosticGets.length<=70,diagnosticGets.join(','));
 assert.ok(diagnosticGets.every(key=>/^(enrichment\/prediction-queue\.json|enrichment\/profile\/current\.json|enrichment\/view-index\.json|programme\.json|epg\/discovered-films\.json|epg\/published-generation\.json|epg\/generations\/run-zz\/(?:programme|discovered-films)\.json|enrichment\/films\/film-zz-[1-5]\/(?:fingerprint|predictions)\.json)$/.test(key)),diagnosticGets.join(','));
+
+const rejectedFault=await tool(env(),'prediction_complete',{runId:'run-1',fault:{url:'https://evil.example'}});
+assert.equal(rejectedFault.body.result.isError,true);
+const faultStore=store();
+faultStore.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
+faultStore.records.set('programme.json',{runId:'programme-1',updatedAt:new Date().toISOString(),films:[{id:'film-zz-9',title:'Fixture',original:'Fixture',year:1995,tmdbId:'8809',genres:[],directors:[],actors:[],shows:[{start:Date.now()}]}],watchlistCount:1});
+faultStore.records.set('sync.json',{runId:'programme-1',stage:'complete'});
+const faultEnvironment={BUCKET:faultStore.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
+const faultStart=await tool(faultEnvironment,'prediction_start',{trigger:'manual'});
+assert.equal(faultStart.body.result.isError,undefined,JSON.stringify(faultStart.body));
+const faultRunId=faultStart.body.result.structuredContent.runId;
+const faultNext=await tool(faultEnvironment,'prediction_next',{runId:faultRunId});
+assert.equal(faultNext.body.result.structuredContent.items.length,1);
+const faultDone=await tool(faultEnvironment,'prediction_complete',{runId:faultRunId,reason:'api_error',fault:{origin:'model_provider',failedStep:'next',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:faultNext.body.result.structuredContent.requestId}});
+assert.equal(faultDone.body.result.isError,undefined,JSON.stringify(faultDone.body));
+assert.equal(faultDone.body.result.structuredContent.stopReason,'api_error');
+const faultRow=[...faultStore.records.values()].find(value=>value?.runId===faultRunId&&Array.isArray(value.steps));
+assert.equal(faultRow.callerFault.reportedBy,'caller');
+assert.equal(faultRow.callerFault.origin,'model_provider');
+assert.equal(faultRow.serverFault,null);
 
 console.log('MCP tools: read tools match the HTTP contracts, rejected arguments do not write or fetch, write tools stay behind the Access JWT, and local EPG and prediction lifecycles pass');
