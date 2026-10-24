@@ -1,0 +1,162 @@
+{
+  "archive": {
+    "schemaVersion": 1,
+    "status": "provisional_no_change_detected",
+    "changes": 0,
+    "listingPages": 66,
+    "startedAt": "2026-10-18T23:31:38.829Z",
+    "finishedAt": "2026-10-19T00:32:22.364Z",
+    "objects": 6520,
+    "bytes": 97759255,
+    "aggregateSha256": "8b21c82db0cf8580250f1d8c8ecd51f114eba437a48c3ec4d3b0ca41f1f39ca9"
+  },
+  "inventory": {
+    "complete": true,
+    "production": false,
+    "scope": "historical-snapshot",
+    "families": {
+      "watchlist": "present",
+      "programme": "present",
+      "discovery": "present",
+      "profile": "present",
+      "fingerprint": "present",
+      "prediction": "present",
+      "actual": "present"
+    },
+    "absent": []
+  },
+  "catalogue": {
+    "programmeFilms": 399,
+    "watchlistFilms": 399,
+    "programmeAndWatchlist": 399,
+    "metadataRecords": 419,
+    "discoveredFilms": 1739,
+    "readerFilms": 2137,
+    "readerTmdbFilms": 1738,
+    "storedFilms": 2137,
+    "storedTmdbFilms": 1738,
+    "redirects": 1
+  },
+  "coverage": {
+    "denominator": 6520,
+    "mapped": 3987,
+    "excluded": 0,
+    "unmapped": 2533,
+    "unmappedKinds": {
+      "mood-facet": 1986,
+      "enrichmentRunUuid": 234,
+      "enrichmentRunStampedUuid": 95,
+      "namedEnrichmentState": 6,
+      "events": 179,
+      "started": 25,
+      "epgStatusCopies": 4,
+      "leases": 3,
+      "otherRootJson": 1
+    }
+  },
+  "stored": {
+    "person": 15874,
+    "film": 2137,
+    "fingerprint_payload": 399,
+    "profile_version": 1,
+    "film_redirect": 1,
+    "prediction_current": 0,
+    "actual_rating": 0,
+    "programme_generation": 0,
+    "import_receipt": 18412
+  },
+  "firstProcess": {
+    "startedAt": "2026-10-24T06:51:24.504Z",
+    "endedAt": "2026-10-24T07:26:23.094Z",
+    "exitCode": 1,
+    "receiptsWritten": 18411,
+    "reportBytes": 0,
+    "stop": "sqlite3 JSON for person is 1387031 bytes; spawnSync stops at 1048576"
+  },
+  "continuation": {
+    "startedAt": "2026-10-24T07:31:08.921Z",
+    "endedAt": "2026-10-24T07:39:14.190Z",
+    "exitCode": 0,
+    "applied": 1,
+    "resumed": 18411,
+    "reconciled": 0,
+    "explained": 0,
+    "conflicts": 1591,
+    "unportable": 45586,
+    "partial": 0,
+    "uncheckpointed": 0,
+    "pending": 0
+  },
+  "repeat": {
+    "startedAt": "2026-10-24T07:39:41.174Z",
+    "endedAt": "2026-10-24T07:46:52.688Z",
+    "exitCode": 0,
+    "applied": 0,
+    "resumed": 18412,
+    "reconciled": 0,
+    "explained": 0,
+    "conflicts": 1591,
+    "unportable": 45586,
+    "partial": 0,
+    "uncheckpointed": 0,
+    "pending": 0
+  },
+  "conflicts": {
+    "reason": "reference_missing",
+    "units": 1591,
+    "distinctFilms": 1588,
+    "fingerprints": {
+      "units": 1587,
+      "legacyTmdbKeyStoredAsCanonical": 1575,
+      "legacyTmdbKeyRedirected": 1,
+      "metadataSlugStoredUnderTmdb": 1,
+      "metadataOnly": 10
+    },
+    "actualRatings": {
+      "units": 4,
+      "slugStoredUnderTmdb": 2,
+      "metadataOnly": 2,
+      "alsoFingerprintConflict": 3,
+      "ratingOnly": 1
+    }
+  },
+  "unportable": {
+    "units": 45586,
+    "predictionVersionObjectMissing": 1986,
+    "discoveryObservationFieldsMissing": 43599,
+    "generationObservationFieldsMissing": 1
+  },
+  "parity": {
+    "ok": false,
+    "claimsFullParity": false,
+    "denominator": 20003,
+    "missing": 1591,
+    "missingFingerprints": 1587,
+    "missingActualRatings": 4,
+    "extra": 0,
+    "mismatched": 0,
+    "unprojected": 2533,
+    "recordsMapped": 2808,
+    "recordsUnportable": 14467
+  },
+  "streamingReadback": {
+    "startedAt": "2026-10-24T08:16:43.530Z",
+    "endedAt": "2026-10-24T08:24:09.963Z",
+    "exitCode": 0,
+    "applied": 0,
+    "resumed": 18412,
+    "reconciled": 0,
+    "explained": 0,
+    "conflicts": 1591,
+    "unportable": 45586,
+    "partial": 0,
+    "uncheckpointed": 0,
+    "pending": 0,
+    "parityOk": false,
+    "claimsFullParity": false,
+    "missing": 1591,
+    "extra": 0,
+    "mismatched": 0,
+    "ledgerMatchesRepeat": true
+  }
+}

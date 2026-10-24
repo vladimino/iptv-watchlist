@@ -10,7 +10,7 @@ Version 84 remains the pre-exporter code rollback checkpoint. A code rollback do
 
 ## Trial snapshot (19 October 2026)
 
-An owner-authorized, read-only trial export from the legacy Site completed to a private local directory outside this repository. The first listing covered 66 pages and 6,520 unique objects. The downloader saved 97,759,255 raw bytes, with no download errors or source-change conflicts. Its second complete listing found **zero** added, missing or metadata-changed keys. The manifest and report both record `provisional_no_change_detected`; a separate `--verify` pass checked every local object's raw-byte SHA-256 and size, plus the manifest totals and aggregate checksum, and passed. The private snapshot, manifest, object keys, authorization material and aggregate checksum are not committed here.
+An owner-authorized, read-only trial export from the legacy Site completed to a private local directory outside this repository. The first listing covered 66 pages and 6,520 unique objects. The downloader saved 97,759,255 raw bytes, with no download errors or source-change conflicts. Its second complete listing found **zero** added, missing or metadata-changed keys. The manifest and report both record `provisional_no_change_detected`; a separate `--verify` pass checked every local object's raw-byte SHA-256 and size, plus the manifest totals and aggregate checksum, and passed. The private snapshot, manifest, object keys, and authorization material are not committed. The aggregate checksum of this archive is recorded in [docs/air-73-offline-run.md](air-73-offline-run.md).
 
 | Prefix | Objects | Raw bytes |
 | --- | ---: | ---: |

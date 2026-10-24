@@ -1,6 +1,6 @@
 // Import one verified historical snapshot into a local SQLite file.
 // The snapshot and the database stay outside this repository. This command does not read production R2.
-import {spawnSync} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
@@ -125,12 +125,29 @@ function readLifecycle(store,now){
 function record(family,kind,sourceKey,sourceSha256,targetTable,targetId,input){return {family,kind,sourceKey,sourceSha256,targetTable,targetId,unportable:false,input};}
 function unportable(sourceKey,sourceSha256,targetTable,targetId,reason,family){return {family,kind:'unportable',sourceKey,sourceSha256,targetTable,targetId,unportable:true,reason};}
 
-function openSqlite(file){
+export function openSqlite(file){
  const state={buffer:null};
- return {run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},get(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return Promise.resolve(query(file,sql,params)[0]??null);},all(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return Promise.resolve(query(file,sql,params));},async transaction(fn){if(state.buffer)return fn();state.buffer=[];try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}finally{state.buffer=null;}}};
+ return {run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},get(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return query(file,sql,params).then(rows=>rows[0]??null);},all(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return query(file,sql,params);},async transaction(fn){if(state.buffer)return fn();state.buffer=[];try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}finally{state.buffer=null;}}};
 }
 function exec(file,sql){const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');}
-function query(file,sql,params){const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');const text=result.stdout.trim();return text?JSON.parse(text):[];}
+// sqlite3 -json prints every row. spawnSync stops at 1MB of output, which is smaller than this archive's person table.
+// The stream has no byte cap: each chunk is kept until the process exits, then parsed. A larger table still returns every row.
+function query(file,sql,params){
+ return new Promise((resolve,reject)=>{
+  const child=spawn('sqlite3',['-json','-bail',file],{stdio:['pipe','pipe','pipe']});
+  const stdout=[];
+  const stderr=[];
+  child.stdout.on('data',chunk=>stdout.push(chunk));
+  child.stderr.on('data',chunk=>stderr.push(chunk));
+  child.on('error',reject);
+  child.on('close',code=>{
+   if(code!==0){reject(new Error(Buffer.concat(stderr).toString('utf8')||'sqlite failed'));return;}
+   const text=Buffer.concat(stdout).toString('utf8').trim();
+   try{resolve(text?JSON.parse(text):[]);}catch(error){reject(error);}
+  });
+  child.stdin.end('PRAGMA foreign_keys=ON;\n'+render(sql,params)+';');
+ });
+}
 function render(sql,params=[]){let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('Missing SQL parameter');return literal(params[index++]);});if(index!==params.length)throw new Error('Unused SQL parameter');return text;}
 function literal(value){if(value==null)return 'NULL';if(typeof value==='number'){if(!Number.isFinite(value))throw new Error('Bad SQL number');return String(value);}if(typeof value==='boolean')return value?'1':'0';return "'"+String(value).replaceAll("'","''")+"'";}
 
