@@ -42,6 +42,10 @@ At the start of work, read the relevant current card and latest comments, its na
 
 The reviewer must not return an unfinished routine handoff just because a merge happened while post-merge deployment is still running. If tooling fails or access prevents verification, explicitly distinguish blocked from Done rather than guessing.
 
+## Visual QA
+
+A substantial UI change needs real browser screenshots at a desktop width around 1280 px and a mobile width around 390 px. Cover a representative full state and a sparse state. Upload the images on the GitHub PR description or discussion. Do not commit screenshots anywhere in the repository: not under `docs/`, tests, fixtures, or build output. The reviewer checks hierarchy, spacing, control placement, responsive overflow, accessibility, and the important interactive states. Green tests or CI are not visual acceptance. Do not close the card until that visual check passes.
+
 ## Safety and production boundaries
 
 - Never run production sync, discovery/TMDB, model predictions, retry resets, lease overrides, destructive cleanup, R2/D1 migration/backfill, authoritative read/write cutovers, or enable/disable scheduled jobs/feature flags without **separate explicit authorization** for that action.
