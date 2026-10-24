@@ -58,7 +58,7 @@ assert.match(query('#film-screen-meta').textContent,/1995 · 170 мин/);
 assert.match(query('#film-screen-genres').textContent,/Драма · Криминал/);
 assert.match(poster,/src="https:\/\/image\.example\/heat\.jpg"/);
 assert.match(poster,/referrerpolicy="no-referrer"/);
-assert.equal(synopsis,'<p class="film-page-synopsis">Полный синопсис без сокращения.</p>');
+assert.match(synopsis,/<h2>Синопсис<\/h2><p class="film-page-synopsis">Полный синопсис без сокращения\.<\/p>/);
 assert.doesNotMatch(synopsis,/details|summary/);
 assert.match(credits,/data-credit-kind="directors"/);
 assert.match(credits,/data-credit-id="a1"/);
@@ -74,6 +74,8 @@ assert.doesNotMatch(score,/НЕ ПОКАЗЫВАТЬ|matchSignals|mainRisk/);
 assert.match(actions,/href="https:\/\/letterboxd\.com\/film\/heat-1995\/"/);
 assert.match(actions,/data-started-id="heat-1995"/);
 assert.match(actions,/aria-pressed="true"/);
+assert.match(actions,/Просмотр начат/);
+assert.doesNotMatch(actions,/Начал просмотр/);
 assert.equal(actions.indexOf('letterboxd-link')<actions.indexOf('</a>'),true);
 assert.ok(actions.indexOf('data-started-id')>actions.indexOf('</a>'));
 assert.doesNotMatch(availability,/<details\b|<summary\b/);
@@ -207,6 +209,8 @@ for(const [kind,id,param] of [['directors','d1','director'],['actors','a1','acto
 }
 
 const css=fs.readFileSync('public/styles.css','utf8');
-assert.match(css,/@media\(max-width:760px\)\{\.film-page-head\{flex-direction:column/);
+assert.match(css,/@media\(max-width:760px\)\{\s*\.film-hero\{grid-template-columns:1fr/);
+assert.match(css,/\.movie-card \.started-action|\.started-action\{position:absolute;right:18px;bottom:16px/);
+assert.match(css,/\.film-screen \.started-action\{position:static/);
 assert.match(fs.readFileSync('public/index.html','utf8'),/id="film-screen-availability"/);
 console.log('Film page: metadata, scores, full showings, partial data and no render fetch passed');
