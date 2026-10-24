@@ -249,6 +249,63 @@ await fullDb.run("UPDATE film_metadata SET synopsis='Text' WHERE film_id='film:z
 await fullDb.run("INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:zz-extra',1,NULL,'Extra',?) ",[at]);
 assert.equal((await verifyParity(fullDb,fullSpec)).extra.some(item=>item.table==='film'&&item.id==='film:zz-extra'),true);
 
+const predictionBody={tasteProfileVersion:1,tasteProfileHash:'profile-a',fingerprintHash:'print-hash',fingerprintSchemaVersion:1,predictionPromptVersion:1};
+const hashed=projectSource({keys:['programme.json','enrichment/films/zz-hash/predictions.json','enrichment/profile/versions/1.json'],bodies:{
+ 'programme.json':{runId:'run-empty',films:[{id:'zz-hash',shows:[]}]},
+ 'enrichment/films/zz-hash/predictions.json':{current:{...predictionBody,predictedRating:4,r2Key:'r2/prediction/new',contentSha256:'sha-new',updatedAt:later},history:[{...predictionBody,predictedRating:3,r2Key:'r2/prediction/old',contentSha256:'sha-old',updatedAt:at}]},
+ 'enrichment/profile/versions/1.json':{version:1,profileHash:'profile-a',createdAt:at},
+},films:[film('film:zz-hash','Hash Title',at)],people:[],shas:{'enrichment/profile/versions/1.json':'sha-profile'}});
+assert.equal(hashed.generations[0].films[0].filmId,'film:zz-hash');
+assert.equal(hashed.generations[0].films[0].shows.length,0);
+assert.equal(hashed.publishedPointer,'run-empty');
+assert.equal(hashed.predictions[0].contentSha256,'sha-new');
+assert.equal(hashed.predictions[0].history[0].contentSha256,'sha-old');
+assert.equal(hashed.profiles[0].contentSha256,'sha-profile');
+const brokenHistory=projectSource({keys:['enrichment/films/zz-hash/predictions.json'],bodies:{'enrichment/films/zz-hash/predictions.json':{current:{...predictionBody,predictedRating:4,r2Key:'r2/prediction/new',contentSha256:'sha-new',updatedAt:later},history:[{note:'no-version'}]}},films:[],people:[]});
+assert.equal(brokenHistory.predictions.length,0);
+assert.equal(brokenHistory.records.some(record=>record.disposition==='unportable'),true);
+
+const emptyFile=path.join(root,'empty-show.sqlite');
+exec(emptyFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+const emptyDb=openSqlite(emptyFile);
+const emptyRepos={canonical:createCanonicalRepository(emptyDb),epg:createEpgRepository(emptyDb),prediction:createPredictionRepository(emptyDb)};
+const emptyFilm=film('film:zz-empty','Empty Title',at);
+await importBatch(emptyDb,emptyRepos,{importedAt:at,units:[
+ {family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-empty-film',targetTable:'film',targetId:emptyFilm.id,unportable:false,input:{film:emptyFilm,watchlist:false}},
+ {family:'programme',kind:'generation',sourceKey:'programme.json',sourceSha256:'sha-empty-run',targetTable:'programme_generation',targetId:'run-empty',unportable:false,input:{programmeRunId:'run-empty',phase:'published',expectedProgrammeRunId:null,publishedAt:at,films:[{filmId:emptyFilm.id,shows:[]}],candidates:[]}},
+]});
+const emptySpec={generations:[{id:'run-empty',phase:'published',films:[{filmId:emptyFilm.id,shows:[]}],shows:[]}],publishedPointer:'run-empty'};
+assert.equal((await verifyParity(emptyDb,emptySpec)).ok,true);
+await emptyDb.run("DELETE FROM film_generation WHERE programme_run_id='run-empty' AND film_id='film:zz-empty'");
+assert.equal((await verifyParity(emptyDb,emptySpec)).mismatched.some(item=>item.table==='film_generation'&&item.field==='membership'),true);
+await emptyDb.run("INSERT INTO film_generation (programme_run_id,film_id) VALUES ('run-empty','film:zz-empty')");
+await emptyDb.run("INSERT INTO programme_generation (programme_run_id,phase,published_at) VALUES ('run-other','withheld',NULL)");
+await emptyDb.run("UPDATE published_generation SET programme_run_id='run-other' WHERE id=1");
+assert.equal((await verifyParity(emptyDb,emptySpec)).mismatched.some(item=>item.table==='published_generation'&&item.field==='pointer'),true);
+
+const hashFile=path.join(root,'hash.sqlite');
+exec(hashFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
+const hashDb=openSqlite(hashFile);
+const hashRepos={canonical:createCanonicalRepository(hashDb),epg:createEpgRepository(hashDb),prediction:createPredictionRepository(hashDb)};
+const hashFilm=film('film:zz-hash','Hash Title',at);
+const hashRun=await importBatch(hashDb,hashRepos,{importedAt:at,units:[
+ {family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:'sha-hash-film',targetTable:'film',targetId:hashFilm.id,unportable:false,input:{film:hashFilm,watchlist:false}},
+ {family:'profile',kind:'profile',sourceKey:'enrichment/profile/versions/1.json',sourceSha256:'sha-profile',targetTable:'profile_version',targetId:'1',unportable:false,input:{version:1,profileHash:'profile-a',createdAt:at,r2Key:'enrichment/profile/versions/1.json',contentSha256:'sha-profile'}},
+ {family:'prediction',kind:'prediction',sourceKey:'enrichment/films/zz-hash/predictions.json',sourceSha256:'sha-prediction-bundle',targetTable:'prediction_current',targetId:hashFilm.id,unportable:false,input:{filmId:hashFilm.id,...predictionBody,predictedRating:3,r2Key:'r2/prediction/old',contentSha256:'sha-old',updatedAt:at}},
+ {family:'prediction',kind:'prediction',sourceKey:'enrichment/films/zz-hash/predictions.json',sourceSha256:'sha-prediction-bundle',targetTable:'prediction_current',targetId:hashFilm.id+'#1',unportable:false,input:{filmId:hashFilm.id,...predictionBody,predictedRating:4,r2Key:'r2/prediction/new',contentSha256:'sha-new',updatedAt:later}},
+]});
+assert.equal(hashRun.applied,4,JSON.stringify(hashRun.ledger));
+const hashSpec={predictions:[{id:hashFilm.id,predictedRating:4,updatedAt:later,r2Key:'r2/prediction/new',fingerprintHash:'print-hash',contentSha256:'sha-new',history:[{filmId:hashFilm.id,predictedRating:3,updatedAt:at,r2Key:'r2/prediction/old',contentSha256:'sha-old',fingerprintHash:'print-hash',tasteProfileVersion:1,tasteProfileHash:'profile-a',fingerprintSchemaVersion:1,predictionPromptVersion:1}]}],profiles:[{id:1,profileHash:'profile-a',createdAt:at,r2Key:'enrichment/profile/versions/1.json',contentSha256:'sha-profile'}]};
+const hashClean=await verifyParity(hashDb,hashSpec);
+assert.equal(hashClean.ok,true,JSON.stringify({missing:hashClean.missing,extra:hashClean.extra,mismatched:hashClean.mismatched}));
+await hashDb.run("UPDATE prediction_current SET content_sha256='corrupt' WHERE film_id='film:zz-hash'");
+assert.equal((await verifyParity(hashDb,hashSpec)).mismatched.some(item=>item.field==='prediction'),true);
+await hashDb.run("UPDATE prediction_current SET content_sha256='sha-new' WHERE film_id='film:zz-hash'");
+await hashDb.run("UPDATE prediction_history SET content_sha256='corrupt', payload_json='{}' WHERE film_id='film:zz-hash'");
+assert.equal((await verifyParity(hashDb,hashSpec)).mismatched.some(item=>item.field==='history'),true);
+await hashDb.run("UPDATE profile_version SET content_sha256='corrupt' WHERE version=1");
+assert.equal((await verifyParity(hashDb,hashSpec)).mismatched.some(item=>item.field==='profile'),true);
+
 const snapshot=path.join(root,'snapshot');
 const canary='CANARY-TITLE';
 const secret='history-secret';

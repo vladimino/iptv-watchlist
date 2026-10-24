@@ -131,6 +131,7 @@ export async function verifyParity(db,spec){
  if(spec.predictions)await verifyPredictions(db,spec.predictions,missing,extra,mismatched);
  if(spec.profiles)await verifyProfiles(db,spec.profiles,missing,extra,mismatched);
  if(spec.generations)await verifyGenerations(db,spec.generations,missing,extra,mismatched);
+ if(Object.prototype.hasOwnProperty.call(spec,'publishedPointer'))await verifyPointer(db,spec.publishedPointer,mismatched);
  if(spec.candidates)await verifyCandidates(db,spec.candidates,missing,extra,mismatched);
  if(spec.decisions)await verifyDecisions(db,spec.decisions,missing,extra,mismatched);
  const denominator=['films','persons','redirects','fingerprints','ratings','predictions','profiles','generations','candidates','decisions'].reduce((sum,key)=>sum+(spec[key]?.length||0),0);
@@ -382,7 +383,7 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   const programme=bodies[programmeKey];
   const pointer=bodies['epg/published-generation.json']||{programmeRunId:programme?.runId||null,phase:'published'};
   const generation=discoveryPortable?generationExpectation(pointer,programme):null;
-  if(generation){expected.generations.push(generation);note(programmeKey,'mapped',generation.id);if(keys.includes('epg/published-generation.json'))note('epg/published-generation.json','mapped',generation.id);}
+  if(generation){expected.generations.push(generation);if(generation.phase==='published')expected.publishedPointer=generation.id;note(programmeKey,'mapped',generation.id);if(keys.includes('epg/published-generation.json'))note('epg/published-generation.json','mapped',generation.id);}
   else{note(programmeKey,'unportable',pointer?.programmeRunId||programmeKey);if(keys.includes('epg/published-generation.json'))note('epg/published-generation.json','unportable',pointer?.programmeRunId||'epg/published-generation.json');}
  }
  if(keys.includes('epg/discovery-latest.json')){
@@ -481,8 +482,8 @@ async function verifyPredictions(db,predictions,missing,extra,mismatched){
  for(const row of rows)if(!wanted.has(row.id))extra.push({table:'prediction_current',id:row.id});
  for(const row of predictions){
   const stored=rows.find(item=>item.id===row.id);
-  if(stored&&(stored.predicted_rating!==row.predictedRating||stored.updated_at!==row.updatedAt||('r2Key' in row&&stored.r2_key!==row.r2Key)||('fingerprintHash' in row&&stored.fingerprint_hash!==row.fingerprintHash)))mismatched.push({table:'prediction_current',id:row.id,field:'prediction'});
-  if('history' in row){const history=await db.all('SELECT predicted_rating,r2_key,content_sha256 FROM prediction_history WHERE film_id=? ORDER BY replaced_at',[row.id]);if(history.length!==row.history.length||row.history.some((item,index)=>history[index]?.predicted_rating!==item.predictedRating||history[index]?.r2_key!==item.r2Key))mismatched.push({table:'prediction_history',id:row.id,field:'history'});}
+  if(stored&&(stored.predicted_rating!==row.predictedRating||stored.updated_at!==row.updatedAt||('r2Key' in row&&stored.r2_key!==row.r2Key)||('fingerprintHash' in row&&stored.fingerprint_hash!==row.fingerprintHash)||('contentSha256' in row&&stored.content_sha256!==row.contentSha256)))mismatched.push({table:'prediction_current',id:row.id,field:'prediction'});
+  if('history' in row){const history=await db.all('SELECT predicted_rating,r2_key,content_sha256,payload_json FROM prediction_history WHERE film_id=? ORDER BY replaced_at',[row.id]);if(history.length!==row.history.length||row.history.some((item,index)=>!sameHistory(history[index],item,row.id)))mismatched.push({table:'prediction_history',id:row.id,field:'history'});}
  }
 }
 async function verifyProfiles(db,profiles,missing,extra,mismatched){
@@ -490,7 +491,7 @@ async function verifyProfiles(db,profiles,missing,extra,mismatched){
  const wanted=new Map(profiles.map(row=>[row.id,row]));
  for(const row of profiles)if(!rows.some(stored=>stored.id===row.id))missing.push({table:'profile_version',id:row.id});
  for(const row of rows)if(!wanted.has(row.id))extra.push({table:'profile_version',id:row.id});
- for(const row of profiles){const stored=rows.find(item=>item.id===row.id);if(stored&&(stored.profile_hash!==row.profileHash||stored.created_at!==row.createdAt||stored.r2_key!==row.r2Key))mismatched.push({table:'profile_version',id:row.id,field:'profile'});}
+ for(const row of profiles){const stored=rows.find(item=>item.id===row.id);if(stored&&(stored.profile_hash!==row.profileHash||stored.created_at!==row.createdAt||stored.r2_key!==row.r2Key||('contentSha256' in row&&stored.content_sha256!==row.contentSha256)))mismatched.push({table:'profile_version',id:row.id,field:'profile'});}
 }
 async function verifyGenerations(db,generations,missing,extra,mismatched){
  const rows=await db.all('SELECT programme_run_id AS id,phase FROM programme_generation ORDER BY programme_run_id');
@@ -502,7 +503,12 @@ async function verifyGenerations(db,generations,missing,extra,mismatched){
   const stored=rows.find(item=>item.id===row.id);
   if(stored&&'phase' in row&&stored.phase!==row.phase)mismatched.push({table:'programme_generation',id:row.id,field:'phase'});
   if('shows' in row){const got=shows.filter(show=>show.programme_run_id===row.id).map(show=>show.film_id+'/'+show.channel_id+'/'+show.start_ms+'/'+(show.epg_title??'')).sort().join(',');const want=[...row.shows].map(show=>show.filmId+'/'+show.channelId+'/'+show.startMs+'/'+(show.epgTitle??'')).sort().join(',');if(got!==want)mismatched.push({table:'film_show',id:row.id,field:'shows'});}
+  if('films' in row){const members=await db.all('SELECT film_id FROM film_generation WHERE programme_run_id=? ORDER BY film_id',[row.id]);const got=members.map(item=>item.film_id).join(',');const want=row.films.map(film=>film.filmId).sort().join(',');if(got!==want)mismatched.push({table:'film_generation',id:row.id,field:'membership'});}
  }
+}
+async function verifyPointer(db,pointer,mismatched){
+ const row=await db.get('SELECT programme_run_id FROM published_generation WHERE id=1');
+ if((row?.programme_run_id??null)!==(pointer??null))mismatched.push({table:'published_generation',id:pointer??'none',field:'pointer'});
 }
 async function verifyCandidates(db,candidates,missing,extra,mismatched){
  const rows=await db.all('SELECT programme_run_id,observation_key AS id,evidence_key FROM candidate_generation ORDER BY observation_key');
@@ -526,16 +532,19 @@ async function verifyDecisions(db,decisions,missing,extra,mismatched){
 function generationExpectation(pointer,programme){
  const programmeRunId=pointer?.programmeRunId||programme?.runId||null;
  if(!programmeRunId||!Array.isArray(programme?.films))return null;
- const shows=[];
+ const films=[];
  for(const film of programme.films){
   if(!film||!Array.isArray(film.shows))return null;
+  const filmId=String(film.filmId||(String(film.id).startsWith('film:')?film.id:'film:'+film.id));
+  const shows=[];
   for(const show of film.shows){
    const startMs=show?.startMs??show?.start;
    if(!show?.channelId||typeof startMs!=='number')return null;
-   shows.push({filmId:String(film.filmId||(String(film.id).startsWith('film:')?film.id:'film:'+film.id)),channelId:show.channelId,startMs,epgTitle:show.epgTitle??show.title??null});
+   shows.push({filmId,channelId:show.channelId,startMs,epgTitle:show.epgTitle??show.title??null});
   }
+  films.push({filmId,shows});
  }
- return {id:programmeRunId,phase:pointer?.phase==='withheld'?'withheld':'published',shows};
+ return {id:programmeRunId,phase:pointer?.phase==='withheld'?'withheld':'published',films,shows:films.flatMap(film=>film.shows)};
 }
 function discoveryRecords(body){
  const items=[];
@@ -547,12 +556,28 @@ function discoveryRecords(body){
  return {portable:items.length>0,items};
 }
 function predictionExpectation(key,filmId,body){
- const current=body?.current;
- if(!filmId||!current?.r2Key||!current.contentSha256||current.r2Key===key)return null;
- const updatedAt=current.updatedAt||current.generatedAt||null;
- if(typeof current.predictedRating!=='number'||!updatedAt)return null;
- const history=(Array.isArray(body.history)?body.history:[]).filter(item=>item?.r2Key&&item.contentSha256&&item.r2Key!==key).map(item=>({predictedRating:item.predictedRating,r2Key:item.r2Key,contentSha256:item.contentSha256}));
- return {id:filmId,predictedRating:current.predictedRating,updatedAt,r2Key:current.r2Key,fingerprintHash:current.fingerprintHash,history};
+ const current=versionedPrediction(body?.current,key);
+ if(!filmId||!current)return null;
+ const history=[];
+ for(const item of Array.isArray(body.history)?body.history:[]){
+  const version=versionedPrediction(item,key);
+  if(!version)return null;
+  history.push({filmId,...version});
+ }
+ return {id:filmId,...current,history};
+}
+function versionedPrediction(item,bundleKey){
+ if(!item?.r2Key||!item.contentSha256||item.r2Key===bundleKey)return null;
+ const updatedAt=item.updatedAt||item.generatedAt||null;
+ if(typeof item.tasteProfileVersion!=='number'||!item.tasteProfileHash||!item.fingerprintHash||typeof item.fingerprintSchemaVersion!=='number'||typeof item.predictionPromptVersion!=='number'||typeof item.predictedRating!=='number'||!updatedAt)return null;
+ return {predictedRating:item.predictedRating,updatedAt,r2Key:item.r2Key,contentSha256:item.contentSha256,fingerprintHash:item.fingerprintHash,tasteProfileVersion:item.tasteProfileVersion,tasteProfileHash:item.tasteProfileHash,fingerprintSchemaVersion:item.fingerprintSchemaVersion,predictionPromptVersion:item.predictionPromptVersion};
+}
+function sameHistory(stored,item,filmId){
+ if(!stored)return false;
+ if(stored.predicted_rating!==item.predictedRating||stored.r2_key!==item.r2Key||stored.content_sha256!==item.contentSha256)return false;
+ let body;
+ try{body=JSON.parse(stored.payload_json);}catch{return false;}
+ return body.filmId===(item.filmId||filmId)&&body.predictedRating===item.predictedRating&&body.r2Key===item.r2Key&&body.contentSha256===item.contentSha256&&body.updatedAt===item.updatedAt&&body.tasteProfileVersion===item.tasteProfileVersion&&body.tasteProfileHash===item.tasteProfileHash&&body.fingerprintHash===item.fingerprintHash&&body.fingerprintSchemaVersion===item.fingerprintSchemaVersion&&body.predictionPromptVersion===item.predictionPromptVersion;
 }
 function peopleRecords(body){if(Array.isArray(body))return body;if(Array.isArray(body?.people))return body.people;return Object.values(body||{});}
 function identityView(item){return {scheme:item.scheme,value:String(item.value),trusted:!!(item.trusted&&!item.conflicting),conflicting:!!item.conflicting};}
