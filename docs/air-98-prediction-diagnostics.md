@@ -1,6 +1,6 @@
 # AIR-98 read-only prediction diagnostics
 
-[AIR-98](https://trello.com/c/JQEa1aK7) adds three owner-only MCP tools so a client can inspect the existing prediction queue without a one-off storage read. [AIR-82](https://trello.com/c/Oa33pTQK) can use that view for the queue investigation. [AIR-88](https://trello.com/c/xWA4evuk) remains the later task for new structured run and error telemetry. This change does not add stored diagnostics, a D1 table, or a Scheduled Task, and it does not change how the queue, retries, coverage, or scoring are written.
+[AIR-98](https://trello.com/c/JQEa1aK7) adds three owner-only MCP tools so a client can inspect the existing prediction queue without a one-off storage read. [AIR-82](https://trello.com/c/Oa33pTQK) can use that view for the queue investigation. [AIR-88](air-88-run-diagnostics.md) adds the run step log and caller-reported fault. These three tools stay read-only. This change does not add stored diagnostics, a D1 table, or a Scheduled Task, and it does not change how the queue, retries, coverage, or scoring are written.
 
 ## Tools
 
