@@ -6,8 +6,9 @@ const source=fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'')
 const hour=3600000;
 const clock=Date.parse('2026-10-24T12:00:00Z');
 const nodes=new Map();
+const focused=[];
 function element(selector){
- return {selector,innerHTML:'',textContent:'',hidden:false,value:'',checked:false,disabled:false,open:false,dataset:{},style:{},classList:{toggle(){},add(){},remove(){},contains(){return false;}},setAttribute(){},getAttribute(){return null;},removeAttribute(){},focus(){},scrollIntoView(){},closest(){return null;},contains(){return false;},querySelector(){return null;},querySelectorAll(){return [];},addEventListener(){}};
+ return {selector,innerHTML:'',textContent:'',hidden:false,value:'',checked:false,disabled:false,open:false,dataset:{},style:{},classList:{toggle(){},add(){},remove(){},contains(){return false;}},setAttribute(){},getAttribute(){return null;},removeAttribute(){},focus(){focused.push(selector);},scrollIntoView(){},closest(){return null;},contains(){return false;},querySelector(){return null;},querySelectorAll(){return [];},addEventListener(){}};
 }
 function query(selector){if(!nodes.has(selector))nodes.set(selector,element(selector));return nodes.get(selector);}
 const fetches=[];
@@ -131,6 +132,79 @@ window.history.back();
 assert.equal(new URL(window.location.href).pathname,'/');
 assert.equal(new URL(window.location.href).searchParams.get('channel'),'Премьера');
 assert.equal(run(`state.channels.has('Премьера')`),true);
+
+const liveNow={id:'live-1',title:'Прямой эфир',original:'Live',year:2024,runtime:100,genres:['Драма'],directors:[],actors:[],shows:[{channel:'Эфир',start:clock-hour,end:clock+hour},{channel:'Повтор',start:clock+4*hour,end:clock+6*hour}]};
+live.liveNow=liveNow;
+run(`films.push(liveNow);filmScreen='live-1';renderFilmShell()`);
+const onAir=query('#film-screen-availability').innerHTML;
+assert.match(onAir,/Сейчас в эфире/);
+assert.match(onAir,/Следующий показ/);
+assert.ok(onAir.indexOf('Сейчас в эфире')<onAir.indexOf('Следующий показ'));
+assert.match(onAir,/data-channel="Эфир"/);
+assert.match(onAir,/data-channel="Повтор"/);
+assert.match(onAir,/is-live/);
+assert.match(onAir,/is-next/);
+const listed=onAir.slice(onAir.indexOf('film-show-list'));
+assert.ok(listed.indexOf('Эфир')>=0&&listed.indexOf('Повтор')>listed.indexOf('Эфир'));
+
+run(`startedReady=true;startedIds=new Set();filmScreen='heat-1995';savingStarted.clear();loadEvents=()=>{}`);
+run('renderFilmShell()');
+let startedPosts=0;
+let releaseStarted;
+live.fetch=(url,options)=>{
+ const method=options?.method||'GET';
+ if(String(url)==='/api/started'&&method==='POST'){startedPosts++;return new Promise(resolve=>{releaseStarted=resolve;});}
+ return Promise.resolve({ok:true,json:async()=>({events:[]})});
+};
+const clickStarted=()=>run(`onMovieClick({target:{closest(selector){return selector==='[data-started-id]'?{dataset:{startedId:'heat-1995'}}:null;}},preventDefault(){},stopPropagation(){}})`);
+const firstClick=clickStarted();
+assert.match(query('#film-screen-actions').innerHTML,/aria-busy="true"/);
+assert.match(query('#film-screen-actions').innerHTML,/disabled/);
+assert.match(query('#film-screen-actions').innerHTML,/aria-pressed="false"/);
+clickStarted();
+assert.equal(startedPosts,1,'a second click does not send another started request');
+releaseStarted({ok:true,json:async()=>({id:'heat-1995',started:true})});
+await firstClick;
+assert.match(query('#film-screen-actions').innerHTML,/aria-pressed="true"/);
+assert.doesNotMatch(query('#film-screen-actions').innerHTML,/\sdisabled/);
+assert.doesNotMatch(query('#film-screen-actions').innerHTML,/aria-busy="true"/);
+assert.equal(run(`startedIds.has('heat-1995')`),true);
+assert.equal(focused.at(-1),'#film-screen [data-started-id="heat-1995"]');
+live.fetch=async()=>({ok:false,status:500,json:async()=>({})});
+await run(`toggleStarted('heat-1995')`);
+assert.equal(run(`startedIds.has('heat-1995')`),true,'a failed save does not change the started mark');
+assert.match(query('#film-screen-actions').innerHTML,/aria-pressed="true"/);
+assert.doesNotMatch(query('#film-screen-actions').innerHTML,/\sdisabled/);
+assert.equal(query('#progress-error').hidden,false);
+assert.match(query('#progress-error-text').textContent,/Не удалось сохранить/);
+assert.equal(focused.at(-1),'#film-screen [data-started-id="heat-1995"]');
+
+function openFromList(){
+ stack.splice(0,stack.length,{href:'https://iptv.example/?q=zara',state:null});
+ index=0;
+ window.location.href=stack[0].href;
+ run(`state.query='zara';state.directors='';state.actors='';state.channels=new Set();filmScreen=null;openFilm('heat-1995')`);
+}
+function choosePerson(kind,id){
+ run(`onMovieClick({target:{closest(selector){return selector==='[data-credit-id]'?{dataset:{creditKind:'${kind}',creditId:'${id}'}}:null;}},preventDefault(){},stopPropagation(){}})`);
+}
+for(const [kind,id,param] of [['directors','d1','director'],['actors','a1','actor']]){
+ openFromList();
+ const filmEntry=window.location.href;
+ choosePerson(kind,id);
+ assert.equal(new URL(window.location.href).pathname,'/','a person opens the filtered list');
+ assert.equal(new URL(window.location.href).searchParams.get(param),id);
+ assert.equal(run('filmScreen'),null);
+ assert.equal(stack[0].href,'https://iptv.example/?q=zara');
+ window.history.back();
+ assert.equal(window.location.href,filmEntry);
+ assert.equal(new URL(window.location.href).pathname,'/film/heat-1995');
+ window.history.back();
+ assert.equal(window.location.href,'https://iptv.example/?q=zara');
+ assert.equal(run('state.query'),'zara');
+ assert.equal(run('state.directors'),'');
+ assert.equal(run('state.actors'),'');
+}
 
 const css=fs.readFileSync('public/styles.css','utf8');
 assert.match(css,/@media\(max-width:760px\)\{\.film-page-head\{flex-direction:column/);
