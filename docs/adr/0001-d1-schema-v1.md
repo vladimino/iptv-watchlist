@@ -18,4 +18,4 @@ This pull request has nothing to roll back in production. After a later card app
 
 ## Consequences
 
-[AIR-70](https://trello.com/c/8PRWRx2C), [AIR-71](https://trello.com/c/UAUUQ2jh), and [AIR-72](https://trello.com/c/MfAGc1Dd) have local repositories against these tables. None of them apply the migration to production. [AIR-74](https://trello.com/c/5AdAmKPe) is the first card that may write a production database, and only after [AIR-69](https://trello.com/c/FlcWZX7W).
+[AIR-70](https://trello.com/c/8PRWRx2C), [AIR-71](https://trello.com/c/UAUUQ2jh), and [AIR-72](https://trello.com/c/MfAGc1Dd) have local repositories against these tables. [AIR-73](https://trello.com/c/gX2xdQAz) imports a verified historical snapshot into a caller-supplied local database and records `import_receipt` only for a unit stored as given. None of them apply the migration to production. [AIR-74](https://trello.com/c/5AdAmKPe) is the first card that may write a production database, and only after [AIR-69](https://trello.com/c/FlcWZX7W).
