@@ -135,6 +135,14 @@
 .film-people-row{display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px 12px;align-items:baseline;margin:0 0 10px}
 .film-people-row h3{margin:0;color:var(--muted);font-size:14px;font-weight:600}
 .film-people{display:flex;flex-wrap:wrap;gap:8px 12px;min-width:0}
+.film-facet-row{display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px 12px;align-items:baseline;margin:0 0 10px}
+.film-facet-row h3,.film-execution-item h3{margin:0;color:var(--muted);font-size:14px;font-weight:600}
+.film-chips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.film-chip{border:1px solid var(--line);background:var(--surface);color:#d5dece;border-radius:999px;padding:4px 10px;font-size:13px;line-height:1.3}
+.film-chip:hover{border-color:var(--lime);color:var(--lime)}
+.film-execution{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px}
+.film-execution-item{min-width:0}
+.film-execution-item h3{margin:0 0 4px;font-size:12px}
 .film-screen .credit-link{overflow-wrap:anywhere}
 .film-facts{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .film-fact{margin:0;padding:7px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:#d5dece}
@@ -157,7 +165,7 @@
 .film-screen .started-button{width:100%}
 .film-score-card{flex-basis:calc(50% - 5px);max-width:none}
 .film-why{max-width:none}
-.film-callouts,.film-people-row{grid-template-columns:1fr}
+.film-callouts,.film-people-row,.film-facet-row,.film-execution{grid-template-columns:1fr}
 .film-show-list .show-row{grid-template-columns:1fr}
 .film-show-list .show-time{text-align:left}
 }html.film-screen .page-heading,html.film-screen .search-box,html.film-screen .demo-note,html.film-screen .workspace{display:none!important}html.film-screen .status-footer{display:none!important}html.film-screen .search-panel{display:none!important}html.events-screen .page-heading,html.events-screen .search-box,html.events-screen .demo-note,html.events-screen .filter-toggle,html.events-screen .results,html.events-screen .filters>:not(.activity){display:none!important}html.events-screen .workspace{display:block}html.events-screen .filters{display:block!important;width:auto;max-width:none;padding:0;border:0}html.events-screen .activity{max-width:920px;margin:0;border:0;padding-top:0}html.events-screen .activity-head h2{font-size:28px}html.events-screen .activity-scroll{max-height:calc(100dvh - 220px)}html.events-screen .activity-event{font-size:16px}html.events-screen .activity-event time{font-size:13px}@media(max-width:760px){html.events-screen .activity-head h2{font-size:24px}html.events-screen .activity-scroll{max-height:calc(100dvh - 180px)}html.events-screen .filters{display:block!important}}
