@@ -21,7 +21,7 @@ Variants below are `candidateSearchVariants` from the current source, capped at 
 | Eligible structural | 8 | 24 |
 | All 38 | 38 | 87 |
 
-87 is 63 + 31 − 7. The overlap is Blade (4) and Goal (3). The machine-readable copy is `docs/evidence/scored-resolver/air-86-replay-manifest.json`. `capApproved` is false.
+87 is 63 + 31 − 7. The overlap is Blade (4) and Goal (3). The machine-readable copy is `docs/evidence/scored-resolver/air-86-replay-manifest.json`. `capApproved: false` is this plan's state before the owner separately approved the 130-call cap. That later approval is stored in the manifest as `capApproved: true`. The dry run still sent no TMDB request, and this note does not change that result.
 
 ## Drift since the census
 

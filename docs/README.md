@@ -79,7 +79,7 @@ Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text 
 | [`archive/legacy-r2/r2-import.md`](archive/legacy-r2/r2-import.md) | Archived procedure | **Moved (AIR-111), not operational** |
 | [`archive/legacy-sites/prediction-scheduled-prompt.md`](archive/legacy-sites/prediction-scheduled-prompt.md) | Archived procedure | **Moved (AIR-111), not operational** |
 
-**Machine-readable evidence:** [AIR-115](https://trello.com/c/TRp1oXpA) moved the four JSON samples into `evidence/` and updated `scripts/air-86-replay.mjs`, `scripts/air-97-rescore.mjs`, `scripts/air-99-detail.mjs`, and `tests/air-86-replay.mjs` to those paths. The historical bytes stay the verification source. Ordinary tests do not call TMDB or rewrite the samples.
+**Machine-readable evidence:** [AIR-115](https://trello.com/c/TRp1oXpA) moved the four JSON samples into `evidence/`. `scripts/air-97-rescore.mjs` and `tests/air-86-replay.mjs` read those paths. `scripts/air-86-replay.mjs` and `scripts/air-99-detail.mjs` require an explicit output path and refuse to overwrite the four historical files. Ordinary tests do not call TMDB or rewrite the samples.
 
 ## Modification policy
 

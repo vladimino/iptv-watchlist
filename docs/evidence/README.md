@@ -17,7 +17,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 
 ## Machine-readable files
 
-[AIR-115](https://trello.com/c/TRp1oXpA) moved the four JSON samples next to their reports. The bytes are unchanged historical evidence. `scripts/air-86-replay.mjs`, `scripts/air-97-rescore.mjs`, `scripts/air-99-detail.mjs`, and `tests/air-86-replay.mjs` read or write these paths. Running those scripts against TMDB is not part of ordinary tests.
+[AIR-115](https://trello.com/c/TRp1oXpA) moved the four JSON samples next to their reports. The bytes are unchanged historical evidence. `scripts/air-97-rescore.mjs` and `tests/air-86-replay.mjs` only read them. `scripts/air-86-replay.mjs` and `scripts/air-99-detail.mjs` require an explicit output path and refuse any path that resolves to one of these four files, before calling TMDB. Ordinary tests do not call TMDB.
 
 | Sample | Path |
 | --- | --- |

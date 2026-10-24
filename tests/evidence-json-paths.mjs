@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {historicalEvidenceOutput} from '../scripts/air-86-replay.mjs';
 
 const samples=[
  {
@@ -71,14 +75,62 @@ assert.equal(offline.archive.aggregateSha256,'8b21c82db0cf8580250f1d8c8ecd51f114
 assert.equal(offline.archive.startedAt,'2026-10-18T23:31:38.829Z');
 assert.equal(offline.archive.finishedAt,'2026-10-19T00:32:22.364Z');
 
-const readers=[
- ['scripts/air-86-replay.mjs','docs/evidence/scored-resolver/air-86-replay-manifest.json'],
- ['scripts/air-86-replay.mjs','docs/evidence/scored-resolver/air-86-replay-results.json'],
- ['scripts/air-97-rescore.mjs','docs/evidence/scored-resolver/air-86-replay-manifest.json'],
- ['scripts/air-97-rescore.mjs','docs/evidence/scored-resolver/air-86-replay-results.json'],
- ['scripts/air-99-detail.mjs','docs/evidence/scored-resolver/air-99-detail.json'],
- ['tests/air-86-replay.mjs','docs/evidence/scored-resolver/air-86-replay-manifest.json'],
+const replay=fs.readFileSync('scripts/air-86-replay.mjs','utf8');
+const rescore=fs.readFileSync('scripts/air-97-rescore.mjs','utf8');
+const detailScript=fs.readFileSync('scripts/air-99-detail.mjs','utf8');
+for(const sample of samples)assert.equal(replay.includes(sample.path),true,sample.path);
+assert.equal(rescore.includes(samples[0].path),true);
+assert.equal(rescore.includes(samples[1].path),true);
+assert.equal(fs.readFileSync('tests/air-86-replay.mjs','utf8').includes(samples[0].path),true);
+assert.match(detailScript,/historicalEvidenceOutput\(process\.argv\[2\]\)/);
+assert.match(replay,/historicalEvidenceOutput\(process\.argv\[2\]\)/);
+assert.doesNotMatch(detailScript,/writeFileSync\(process\.argv\[2\]\|\|/);
+assert.doesNotMatch(replay,/writeFileSync\(process\.argv\[2\]\|\|/);
+
+function runScript(script,args){
+ return spawnSync(process.execPath,[script,...args],{
+  encoding:'utf8',
+  env:{...process.env,TMDB_API_READ_ACCESS_TOKEN:'offline-test'},
+ });
+}
+const commands=['scripts/air-86-replay.mjs','scripts/air-99-detail.mjs'];
+for(const script of commands){
+ const missing=runScript(script,[]);
+ assert.equal(missing.status,2,script);
+ assert.match(missing.stderr,/output path is required/);
+ assert.equal(missing.stdout,'');
+}
+const protectedPaths=[
+ samples[0].path,
+ path.resolve(samples[1].path),
+ 'docs/evidence/d1-migration/../scored-resolver/air-86-replay-results.json',
+ 'docs/evidence/scored-resolver/../d1-migration/air-73-offline-run.json',
+ samples[2].path,
+ samples[3].path,
 ];
-for(const [file,needle] of readers)assert.equal(fs.readFileSync(file,'utf8').includes(needle),true,file);
+const before=new Map(samples.map(sample=>[sample.path,fs.readFileSync(sample.path)]));
+for(const script of commands){
+ for(const target of protectedPaths){
+  const refused=runScript(script,[target]);
+  assert.equal(refused.status,2,`${script} ${target}`);
+  assert.match(refused.stderr,/refusing to overwrite historical evidence/);
+  assert.equal(refused.stdout,'');
+ }
+}
+for(const [file,bytes] of before)assert.equal(fs.readFileSync(file).equals(bytes),true,file);
+if(process.platform!=='linux')assert.equal(historicalEvidenceOutput(samples[2].path.replace('air-99-detail.json','AIR-99-DETAIL.json')).ok,false);
+
+const link=path.join(os.tmpdir(),`air115-evidence-${process.pid}.json`);
+try{
+ fs.symlinkSync(path.resolve(samples[2].path),link);
+ for(const script of commands){
+  const refused=runScript(script,[link]);
+  assert.equal(refused.status,2,`${script} symlink`);
+  assert.match(refused.stderr,/refusing to overwrite historical evidence/);
+  assert.equal(refused.stdout,'');
+ }
+}finally{
+ fs.rmSync(link,{force:true});
+}
 
 console.log('Evidence JSON paths passed');
