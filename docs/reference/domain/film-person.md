@@ -69,5 +69,6 @@ The reader's `*.lifecycle.json` sidecars are **computed views**, not permission 
 - Match scoring and canonical identity have separate owners: scoring cannot silently verify a TMDB identity. `src/domain/resolution-acceptance.js` requires trusted existing decision/owner evidence or valid TMDB movie-detail confirmation and a matching actionable programme generation.
 - Phase 3 localization flag rollout is **not** Film/Person persistent-entity cutover. Do not change `LIFECYCLE_LOCALIZATION`, `SCORED_RESOLUTION` or any production writer while maintaining this reference.
 - D1 repositories `src/canonical-repository.js`, `src/epg-repository.js` and `src/prediction-repository.js` were developed for migration work but must not be portrayed as authoritative until a separately approved live migration. Historical parity observations remain in [the original audit and rollout record](../../evidence/film-person/lifecycle-audit-and-rollout.md); follow Trello for current rollout completion and flags.
+- Owner admin search, quality queues, and a later live read API use the contract in [admin read boundaries](admin-read-contract.md). That page does not add a route or change this domain.
 - **Do not rewrite historical evidence.** Material new architecture choices need future ADRs; current reference and historical audit have different jobs.
 
