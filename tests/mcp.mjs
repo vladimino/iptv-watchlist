@@ -27,7 +27,7 @@ const BUCKET=new Proxy({},{get(_,property){bucketAccess.push(String(property));t
 const env={BUCKET,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
 
 const context=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextEncoder,TextDecoder,AbortSignal,atob,crypto:webcrypto,fetch,console,ASSETS:{}});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/prediction-diagnostics.js','src/mcp.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 
 const encode=value=>Buffer.from(typeof value==='string'?value:JSON.stringify(value)).toString('base64url');
 async function accessJwt({header={},claims={},key=signing.privateKey}={}){
@@ -76,7 +76,7 @@ assert.deepEqual(await result(rpc(6,'ping')),{});
 
 // Tool discovery keeps the two probes read-only. Domain tools are covered in tests/mcp-tools.mjs.
 const {tools}=await result(rpc(7,'tools/list'));
-assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','epg_sync_start','epg_sync_step','prediction_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete']);
+assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_pending','epg_sync_start','epg_sync_step','prediction_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete']);
 const probes=tools.filter(tool=>tool.name.startsWith('probe_'));
 for(const tool of probes){
  assert.equal(tool.inputSchema.type,'object');assert.equal(tool.inputSchema.additionalProperties,false);

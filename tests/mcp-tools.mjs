@@ -15,7 +15,7 @@ const FILM_HTML='<meta name="description" content="A crew plans a robbery."><spa
 const FILMS_HTML='<span title="1&nbsp;films"></span><li class="griditem"><div data-postered-identifier=\'{&quot;lid&quot;:&quot;film1&quot;}\'></div></li>';
 const xmltv=t=>new Date(t).toISOString().replace(/[-:T]/g,'').slice(0,14)+' +0000';
 const epgXml=()=>{const start=Date.now()+10*3600000;return `<tv><channel id="c1"><display-name>Кино</display-name></channel><programme channel="c1" start="${xmltv(start)}" stop="${xmltv(start+170*60000)}"><title>Heat (1995)</title></programme></tv>`;};
-const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,atob,crypto:webcrypto,console,setTimeout,ASSETS:{},
+const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,atob,encodeURIComponent,decodeURIComponent,crypto:webcrypto,console,setTimeout,ASSETS:{},
  fetch:async url=>{
   const href=String(url);fetches.push(href);
   if(href===TEAM+'/cdn-cgi/access/certs')return Response.json({keys:[publicJwk]});
@@ -26,7 +26,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
   if(href.startsWith('https://query.wikidata.org/sparql'))return Response.json({results:{bindings:[]}});
   throw new Error('Unexpected network access '+href);
  }});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/enrichment.js','src/migration-export.js','src/mcp.js','src/continuation.js','src/worker.js']){
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/enrichment.js','src/migration-export.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -88,6 +88,12 @@ const forbidden=[
  ['prediction_submit',{runId:'run-1',items:[{filmId:'film-1',fingerprint:{},key:'enrichment/x'}]}],
  ['prediction_submit',{runId:'run-1',items:[{filmId:'../secret'},{filmId:'film-2'}]}],
  ['prediction_complete',{runId:'run-1',path:'/api/enrichment/complete'}],
+ ['prediction_queue_overview',{key:'enrichment/prediction-queue.json'}],
+ ['prediction_film_diagnostics',{filmId:'../secret'}],
+ ['prediction_film_diagnostics',{filmId:'film-zz-1',path:'enrichment/films'}],
+ ['prediction_pending',{limit:100}],
+ ['prediction_pending',{limit:1,cursor:'not-a-cursor'}],
+ ['prediction_pending',{limit:1,prefix:'enrichment/'}],
 ];
 for(const [name,args] of forbidden){
  fetches.length=0;
@@ -122,6 +128,11 @@ for(const tool of tools){
  assert.doesNotMatch(properties,/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,false);
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_pending']){
+ assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
+ assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
+ assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
+}
 for(const name of ['epg_sync_start','epg_sync_step','prediction_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
@@ -224,5 +235,63 @@ const changed=await tool(conflictEnv,'prediction_next',{runId:restartedId});
 assert.equal(changed.body.result.isError,true);
 assert.equal(changed.body.result.structuredContent.httpStatus,409);
 assert.match(JSON.stringify(changed.body.result.structuredContent),/Profile changed/);
+
+const diagnosticNow=Date.now();
+const diagnosticIds=['film-zz-1','film-zz-2','film-zz-3','film-zz-4','film-zz-5'];
+const diagnosticRetries=Object.fromEntries(diagnosticIds.map(id=>[id,{kind:id==='film-zz-2'?'Error: Bearer CANARY-TOKEN stack':'validation_error',scope:'item',attempts:2,failedAt:diagnosticNow-1000,retryAt:diagnosticNow+3600000,lastRunId:'run-zz-retry'}]));
+const diagnosticRecords=new Map(Object.entries({
+ 'enrichment/prediction-queue.json':{schemaVersion:3,profileVersion:3,profileHash:'hash-zz',programmeRunId:'run-zz',refreshedAt:'2026-10-24T08:00:00.000Z',hotPending:diagnosticIds,coldPending:[],pending:diagnosticIds,priorityCount:5,retries:diagnosticRetries},
+ 'enrichment/profile/current.json':{version:3,profileHash:'hash-zz',updatedAt:'2026-10-24T07:00:00.000Z',profile:'CANARY-PROFILE-TEXT'},
+ 'enrichment/view-index.json':{},
+ 'programme.json':{runId:'run-zz',films:[]},
+ 'epg/discovered-films.json':{},
+ 'epg/published-generation.json':{programmeRunId:'run-zz',phase:'published'},
+ 'enrichment/films/film-zz-1/fingerprint.json':{fingerprintSchemaVersion:1,fingerprintHash:'fp-zz',plotMechanics:['CANARY-PLOT'.repeat(2000)]},
+ 'enrichment/films/film-zz-1/predictions.json':{current:{tasteProfileVersion:2,tasteProfileHash:'old-hash',fingerprintHash:'fp-zz',fingerprintSchemaVersion:1,predictionPromptVersion:1,mainRisk:'CANARY-RISK'}},
+}));
+const diagnosticGets=[],diagnosticPuts=[],diagnosticLists=[];
+const diagnosticBucket={async get(key){diagnosticGets.push(key);const value=diagnosticRecords.get(key);return value?{json:async()=>structuredClone(value)}:null;},async put(key){diagnosticPuts.push(key);},async list(options){diagnosticLists.push(options||{});return {objects:[],truncated:false};}};
+const diagnosticEnv={BUCKET:diagnosticBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
+const denied=[];
+const sealedBucket={async get(){denied.push('get');},async put(){denied.push('put');},async list(){denied.push('list');}};
+const anonymousDiagnostic=await tool({BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_queue_overview',{},{assertion:null});
+assert.equal(anonymousDiagnostic.response.status,403);
+assert.deepEqual(denied,[]);
+const diagnosticOverview=await tool(diagnosticEnv,'prediction_queue_overview',{});
+assert.equal(diagnosticOverview.body.result.isError,undefined);
+assert.equal(diagnosticOverview.body.result.structuredContent.state,'temporarily_ineligible');
+assert.equal(diagnosticOverview.body.result.structuredContent.pending.total,5);
+assert.equal(diagnosticOverview.body.result.structuredContent.pending.eligibleNow,0);
+assert.equal(diagnosticOverview.body.result.structuredContent.pending.hot,5);
+assert.equal(diagnosticOverview.body.result.structuredContent.pending.cold,0);
+assert.equal(diagnosticOverview.body.result.structuredContent.pending.deferredByRetry,5);
+assert.equal(diagnosticOverview.body.result.structuredContent.atomic,false);
+assert.notEqual(diagnosticOverview.body.result.structuredContent.state,'drained');
+assert.ok(diagnosticGets.length>0&&diagnosticGets.length<=12,diagnosticGets.join(','));
+assert.ok(diagnosticGets.every(key=>!key.includes('/films/')),diagnosticGets.join(','));
+diagnosticGets.length=0;
+const diagnosticFilm=await tool(diagnosticEnv,'prediction_film_diagnostics',{filmId:'film-zz-1'});
+assert.equal(diagnosticFilm.body.result.structuredContent.lane,'hot');
+assert.equal(diagnosticFilm.body.result.structuredContent.eligibleNow,false);
+assert.equal(diagnosticFilm.body.result.structuredContent.cause,'retry_backoff');
+assert.equal(diagnosticFilm.body.result.structuredContent.prediction.cause,'profile_changed');
+assert.equal(diagnosticFilm.body.result.structuredContent.prediction.stale,true);
+assert.equal(diagnosticFilm.body.result.structuredContent.retry.classification,'validation_error');
+assert.equal(diagnosticFilm.body.result.structuredContent.retry.retryAt,new Date(diagnosticNow+3600000).toISOString());
+const diagnosticSecret=await tool(diagnosticEnv,'prediction_film_diagnostics',{filmId:'film-zz-2'});
+assert.equal(diagnosticSecret.body.result.structuredContent.retry.classification,'model_error');
+const diagnosticPage=await tool(diagnosticEnv,'prediction_pending',{filter:'eligible',limit:20});
+assert.deepEqual(diagnosticPage.body.result.structuredContent.items,[]);
+const diagnosticDeferred=await tool(diagnosticEnv,'prediction_pending',{filter:'deferred',limit:2});
+assert.deepEqual(diagnosticDeferred.body.result.structuredContent.items.map(item=>item.filmId),['film-zz-1','film-zz-2']);
+const diagnosticNext=await tool(diagnosticEnv,'prediction_pending',{filter:'deferred',limit:2,cursor:diagnosticDeferred.body.result.structuredContent.nextCursor});
+assert.deepEqual(diagnosticNext.body.result.structuredContent.items.map(item=>item.filmId),['film-zz-3','film-zz-4']);
+const diagnosticReport=JSON.stringify([diagnosticOverview.body.result.structuredContent,diagnosticFilm.body.result.structuredContent,diagnosticSecret.body.result.structuredContent,diagnosticDeferred.body.result.structuredContent]);
+assert.doesNotMatch(diagnosticReport,/CANARY|Bearer|plotMechanics|mainRisk|enrichment\/|\.json/);
+assert.ok(diagnosticReport.length<8000);
+assert.equal(diagnosticPuts.length,0);
+assert.equal(diagnosticLists.length,0);
+assert.ok(diagnosticGets.length<=70,diagnosticGets.join(','));
+assert.ok(diagnosticGets.every(key=>/^(enrichment\/prediction-queue\.json|enrichment\/profile\/current\.json|enrichment\/view-index\.json|programme\.json|epg\/discovered-films\.json|epg\/published-generation\.json|epg\/generations\/run-zz\/(?:programme|discovered-films)\.json|enrichment\/films\/film-zz-[1-5]\/(?:fingerprint|predictions)\.json)$/.test(key)),diagnosticGets.join(','));
 
 console.log('MCP tools: read tools match the HTTP contracts, rejected arguments do not write or fetch, write tools stay behind the Access JWT, and local EPG and prediction lifecycles pass');

@@ -1,13 +1,15 @@
 // MCP endpoint (Streamable HTTP, JSON responses, stateless).
 // Cloudflare Access application "IPTV MCP" (Managed OAuth) authenticates every
 // request before it reaches the Worker. This module re-verifies the signed Access
-// JWT. probe_read and probe_echo do not touch storage. The EPG and prediction tools
-// call the existing Worker functions; they do not accept a URL, an R2 key, or an API path.
+// JWT. probe_read and probe_echo do not touch storage. The prediction diagnostic
+// tools only read the existing queue and one requested film. The other EPG and
+// prediction tools call the existing Worker functions; they do not accept a URL,
+// an R2 key, or an API path.
 // AIR-58 is the Access prerequisite, AIR-60 is the internal continuation used by the EPG step,
 // and AIR-62 is the later decision to enable Scheduled Tasks. This module does not enable them.
 const MCP_PROTOCOL_VERSIONS=['2025-11-25','2025-06-18'];
-const MCP_SERVER_INFO={name:'iptv-watchlist-probe',title:'IPTV Watchlist MCP',version:'0.2.0'};
-const MCP_INSTRUCTIONS='IPTV Watchlist MCP. probe_read and probe_echo only test the connection and do not touch stored data. Read epg_status, epg_pipeline_status, enrichment_schema, enrichment_profile, enrichment_runner, enrichment_queue and enrichment_status before writing. epg_sync_start then epg_sync_step use the returned runId and advance one existing step at a time. After stage is complete, read discovery.nextAction: continue means call epg_sync_step again with the same runId; wait means do not call before discovery.nextCatchUpAt; stop means discovery is finished until the next EPG commit. ratingsPending does not request a Letterboxd retry. prediction_start uses trigger scheduled or manual; already_running means stop and do not adopt that runId. prediction_next returns one film; generate the fingerprint and prediction in ChatGPT, then prediction_submit that one film. prediction_heartbeat renews the lease. prediction_complete only when the runner says mustComplete or a real quota, model, API or storage failure stops the run. Do not pass URLs, R2 keys or API paths. Do not enable Scheduled Tasks; that is AIR-62. Prerequisites: AIR-58 authorization and AIR-60 one-chunk discovery.';
+const MCP_SERVER_INFO={name:'iptv-watchlist-probe',title:'IPTV Watchlist MCP',version:'0.3.0'};
+const MCP_INSTRUCTIONS='IPTV Watchlist MCP. probe_read and probe_echo only test the connection and do not touch stored data. Read epg_status, epg_pipeline_status, enrichment_schema, enrichment_profile, enrichment_runner, enrichment_queue and enrichment_status before writing. epg_sync_start then epg_sync_step use the returned runId and advance one existing step at a time. After stage is complete, read discovery.nextAction: continue means call epg_sync_step again with the same runId; wait means do not call before discovery.nextCatchUpAt; stop means discovery is finished until the next EPG commit. ratingsPending does not request a Letterboxd retry. prediction_start uses trigger scheduled or manual; already_running means stop and do not adopt that runId. prediction_next returns one film; generate the fingerprint and prediction in ChatGPT, then prediction_submit that one film. prediction_heartbeat renews the lease. prediction_complete only when the runner says mustComplete or a real quota, model, API or storage failure stops the run. Do not pass URLs, R2 keys or API paths. prediction_queue_overview, prediction_film_diagnostics and prediction_pending only read the existing queue and one requested film. They do not retry, reset or start a run. AIR-98. Structured run telemetry is AIR-88. Do not enable Scheduled Tasks; that is AIR-62. Prerequisites: AIR-58 authorization and AIR-60 one-chunk discovery.';
 const MCP_ALLOWED_ORIGINS=['https://chatgpt.com'];
 const MCP_MAX_BODY_BYTES=64*1024;
 const MCP_MAX_JWT_LENGTH=8192;
@@ -32,6 +34,9 @@ const MCP_TOOLS=[
  {name:'enrichment_runner',title:'Prediction runner contract',description:'Read the current prediction runner contract before a run. Same body as GET /api/enrichment/runner. AIR-58. Enabling the hourly task is AIR-62.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
  {name:'enrichment_queue',title:'Prediction queue',description:'Read prediction queue counts and the last batch. Same body as GET /api/enrichment/queue/status. It does not reconcile or start a run. AIR-58.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
  {name:'enrichment_status',title:'Prediction status',description:'Read prediction runner state. Same body as GET /api/enrichment/status, including its recovery of an undelivered stop event. It does not start a run. AIR-58; schedule enablement is AIR-62.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_STATUS},
+ {name:'prediction_queue_overview',title:'Prediction queue overview',description:'Read the existing prediction queue: pending, eligible and deferred counts, the next retry time in UTC, coverage, and whether the queue, profile and published generation agree. A drained queue is distinct from one that is only waiting on retry. This does not refresh, retry or start a run. AIR-98.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_READ},
+ {name:'prediction_film_diagnostics',title:'Film prediction diagnostics',description:'Read one film already in storage: fingerprint and prediction presence, whether the prediction matches the current profile, queue lane, retry summary, and index agreement. Missing facts stay unknown or not_recorded. This does not create a fingerprint or a prediction. AIR-98.',inputSchema:{type:'object',properties:{filmId:{type:'string',minLength:1,maxLength:80,pattern:'^[A-Za-z0-9_-]{1,80}$',description:'Film id, 1–80 letters, digits, "_" or "-".'}},required:['filmId'],additionalProperties:false},annotations:MCP_READ},
+ {name:'prediction_pending',title:'Prediction pending page',description:'Read one page of outstanding prediction film ids from the existing queue. filter is all, eligible or deferred. limit is 1–20. Pass the returned cursor for the next page of the same snapshot. This does not list storage or start a run. AIR-98.',inputSchema:{type:'object',properties:{filter:{type:'string',enum:['all','eligible','deferred']},limit:{type:'integer',minimum:1,maximum:20},cursor:{type:'string',minLength:1,maxLength:500,description:'Page token returned by the previous pending page.'}},required:['limit'],additionalProperties:false},annotations:MCP_READ},
  {name:'epg_sync_start',title:'Start EPG sync',description:'Start one EPG/watchlist sync, or return the active run when it is still within its freshness window. No arguments: the Worker chooses the Letterboxd and EPG sources. Returns runId, stage and remaining. Then call epg_sync_step. AIR-58. The EPG commit pauses discovery for a later step. AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:MCP_WRITE_WORLD},
  {name:'epg_sync_step',title:'Advance EPG sync one step',description:'Advance the runId from epg_sync_start by one existing step: one metadata batch, the single EPG commit, or one discovery chunk. The response discovery object has state, remainingChunks and nextAction. continue: call again now with the same runId. wait: do not call before nextCatchUpAt. stop: do not call until the next EPG commit. ratingsPending is not a reason to retry Letterboxd. This tool accepts no URL, R2 key, limit or chunk count. AIR-58 and AIR-60; AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{runId:MCP_RUN_ID},required:['runId'],additionalProperties:false},annotations:MCP_WRITE_WORLD},
  {name:'prediction_start',title:'Start prediction run',description:'Start the prediction runner with scope watchlist_all and mode queued. trigger is scheduled or manual. Pass capacity.remainingPercent only when the real value is known. already_running is success: stop and do not adopt that runId. busy means retry later. This does not generate a fingerprint or a prediction. AIR-58. AIR-62 enables the schedule.',inputSchema:{type:'object',properties:{trigger:{type:'string',enum:['scheduled','manual']},capacity:MCP_CAPACITY},required:['trigger'],additionalProperties:false},annotations:MCP_WRITE},
@@ -177,8 +182,25 @@ async function mcpCallTool(params,protocolVersion,env,execution){
  }
  if(!MCP_TOOLS.some(tool=>tool.name===params.name))return {error:'Unknown tool'};
  if(!env.BUCKET)return {result:mcpToolError('Storage unavailable')};
- const fields={epg_status:[],epg_pipeline_status:[],enrichment_schema:[],enrichment_profile:[],enrichment_runner:[],enrichment_queue:[],enrichment_status:[],epg_sync_start:[],epg_sync_step:['runId'],prediction_start:['trigger','capacity'],prediction_next:['runId','capacity'],prediction_submit:['runId','items'],prediction_heartbeat:['runId'],prediction_complete:['runId','reason']};
+ const fields={epg_status:[],epg_pipeline_status:[],enrichment_schema:[],enrichment_profile:[],enrichment_runner:[],enrichment_queue:[],enrichment_status:[],prediction_queue_overview:[],prediction_film_diagnostics:['filmId'],prediction_pending:['filter','limit','cursor'],epg_sync_start:[],epg_sync_step:['runId'],prediction_start:['trigger','capacity'],prediction_next:['runId','capacity'],prediction_submit:['runId','items'],prediction_heartbeat:['runId'],prediction_complete:['runId','reason']};
  const rejected=mcpRejectFields(params.name,args,fields[params.name]);if(rejected)return rejected;
+ if(params.name==='prediction_queue_overview'||params.name==='prediction_film_diagnostics'||params.name==='prediction_pending'){
+  try{
+   const now=Date.now();
+   if(params.name==='prediction_film_diagnostics'){
+    if(typeof args.filmId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(args.filmId))return {result:mcpToolError('"filmId" must be 1–80 letters, digits, "_" or "-".')};
+    return mcpPayload(200,predictionFilmDiagnostic(await loadPredictionDiagnosticSnapshot(env,args.filmId),args.filmId,now));
+   }
+   if(params.name==='prediction_pending'){
+    const query=predictionPendingQuery(args);
+    if(query.error)return {result:mcpToolError(query.error)};
+    const page=predictionPendingPage(await loadPredictionDiagnosticSnapshot(env),args,now);
+    if(page.error)return {result:mcpToolError(page.error)};
+    return mcpPayload(200,page);
+   }
+   return mcpPayload(200,predictionQueueOverview(await loadPredictionDiagnosticSnapshot(env),now));
+  }catch{return {result:mcpToolError('Prediction diagnostics unavailable')};}
+ }
  if(params.name==='epg_status')return mcpPayload(200,await syncStatus(env));
  if(params.name==='epg_pipeline_status')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/pipeline/status'));
  if(params.name==='enrichment_schema')return mcpDomain(()=>mcpEnrichment(env,execution,'GET','/api/enrichment/schema'));
