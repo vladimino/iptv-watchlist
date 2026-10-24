@@ -3,6 +3,7 @@
 Maintained source-verified domain contracts, distinct from dated rollout evidence and implementation flags:
 
 - [Film/Person identity and lifecycle](film-person.md)
+- [Admin Film/Person read contract](admin-read-contract.md) — offline query and fixture boundary now; live read API only after AIR-69
 - [Scored resolution and independent identity acceptance](scored-resolution.md)
 - [Candidate discovery and optional search variants](candidate-discovery.md)
 
