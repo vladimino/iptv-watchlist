@@ -122,12 +122,15 @@ function filterStateKey(snapshot=state){
 }
 const FILM_QUERY_KEY='iptv-film-list-query';
 function eventsRequested(href=window.location.href){const url=new URL(href);if(url.searchParams.get('screen')==='events')return true;const path=url.pathname.replace(/\/+$/,'')||'/';return path==='/events';}
+const FILM_ID=/^[A-Za-z0-9_-]{1,80}$/;
+const FILM_CONTROL='a,button,summary,input,select,label,textarea';
+function filmIdFromLocation(href=window.location.href){const path=new URL(href,'https://iptv.local').pathname.replace(/\/+$/,'')||'/';const match=path.match(/^\/film\/([^/]+)$/);if(!match)return null;let id;try{id=decodeURIComponent(match[1]);}catch{return null;}return FILM_ID.test(id)?id:null;}
 function filmSearchFrom(href){const url=new URL(href);url.searchParams.delete('screen');return url.search;}
 function filmQueryStore(name){try{return globalThis[name]||null;}catch{return null;}}
 function writeFilmQuery(search){for(const name of ['sessionStorage','localStorage']){try{filmQueryStore(name)?.setItem(FILM_QUERY_KEY,search);}catch{}}}
 function readFilmQuery(){try{const session=filmQueryStore('sessionStorage');if(session){const value=session.getItem(FILM_QUERY_KEY);if(value!==null)return value;}}catch{}try{return filmQueryStore('localStorage')?.getItem(FILM_QUERY_KEY)||'';}catch{return '';}}
-function rememberFilmList(){if(eventsScreen||eventsRequested())return;writeFilmQuery(filmSearchFrom(window.location.href));}
-let eventsScreen=false,movieScrollY=0,eventsTrigger=null;
+function rememberFilmList(){if(eventsScreen||eventsRequested()||filmIdFromLocation())return;writeFilmQuery(filmSearchFrom(window.location.href));}
+let eventsScreen=false,filmScreen=null,movieScrollY=0,eventsTrigger=null;
 function applyEventsScreen(on){
  if(on&&!eventsScreen)movieScrollY=window.scrollY||0;
  eventsScreen=!!on;
@@ -148,15 +151,50 @@ function showFilmList(search){
  const next='/'+(search.startsWith('?')||!search?search:'?'+search);
  window.history.replaceState(null,'',next);
  applyEventsScreen(false);
+ if(filmScreen)applyFilmScreen(null);
  const incoming=readUrlState(new URL(window.location.href));
  if(filterStateKey(incoming)!==filterStateKey(state))restoreUrl();
  else (eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
+}
+function renderFilmShell(){
+ const id=filmScreen,film=id?films.find(item=>String(item.id)===id):null,screen=$('#film-screen');
+ if(screen)screen.dataset.filmId=id||'';
+ const title=$('#film-screen-title'),identity=$('#film-screen-identity'),status=$('#film-screen-status');
+ if(title)title.textContent=film?film.title:'Фильм не найден';
+ if(identity)identity.textContent=id||'';
+ if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?'В загруженной программе нет фильма с этим идентификатором.':'';
+}
+function applyFilmScreen(id){
+ const next=id||null;
+ if(next&&!filmScreen)movieScrollY=window.scrollY||0;
+ filmScreen=next;
+ document.documentElement?.classList?.toggle('film-screen',!!filmScreen);
+ const screen=$('#film-screen');
+ if(screen)screen.hidden=!filmScreen;
+ if(filmScreen)renderFilmShell();
+ if(typeof window.scrollTo==='function')window.scrollTo(0,filmScreen?0:movieScrollY||0);
+ if(filmScreen)$('#film-screen-title')?.focus?.({preventScroll:true});
+}
+function openFilm(id){
+ const filmId=filmIdFromLocation('https://iptv.local/film/'+encodeURIComponent(String(id??'')));
+ if(!filmId)return;
+ if(filmIdFromLocation()===filmId){applyFilmScreen(filmId);return;}
+ rememberFilmList();
+ window.history.pushState({iptvFilm:filmId},'','/film/'+encodeURIComponent(filmId));
+ applyFilmScreen(filmId);
+}
+function closeFilm(){
+ if(window.history.state?.iptvFilm){window.history.back();return;}
+ showFilmList(readFilmQuery());
 }
 function closeEventsScreen(){
  if(window.history.state?.iptvEvents){window.history.back();return;}
  showFilmList(readFilmQuery());
 }
 function onHistoryNavigation(){
+ const filmId=filmIdFromLocation();
+ if(filmId){applyFilmScreen(filmId);return;}
+ if(filmScreen)applyFilmScreen(null);
  const onEvents=eventsRequested();
  if(!onEvents){const next=readUrlState(new URL(window.location.href));if(filterStateKey(next)!==filterStateKey(state))restoreUrl();}
  if(onEvents!==eventsScreen)applyEventsScreen(onEvents);
@@ -164,7 +202,7 @@ function onHistoryNavigation(){
  else (eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
 }
 function syncUrl(){
- if(!urlReady||urlRestoring||eventsRequested()||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
+ if(!urlReady||urlRestoring||eventsRequested()||filmIdFromLocation()||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
  const next=urlForState(window.location.href);
  const target=next.pathname+next.search+next.hash,current=window.location.pathname+window.location.search+window.location.hash;
  if(target!==current)window.history.replaceState(window.history.state,'',target);
@@ -617,7 +655,10 @@ function onMovieClick(event){
  const mark=event.target.closest?.('[data-started-id]');
  if(mark){toggleStarted(mark.dataset.startedId);return;}
  const credit=event.target.closest?.('[data-credit-id]');
- if(credit)selectPerson(credit.dataset.creditKind,credit.dataset.creditId);
+ if(credit){selectPerson(credit.dataset.creditKind,credit.dataset.creditId);return;}
+ if(event.target.closest?.(FILM_CONTROL))return;
+ const card=event.target.closest?.('article.movie-card');
+ if(card?.dataset?.filmId)openFilm(card.dataset.filmId);
 }
 function bindControls(){
  if(controlsReady)return;
@@ -658,6 +699,7 @@ function bindControls(){
  const integrationEvents=$('#status-integrations-events');if(integrationEvents)integrationEvents.addEventListener('click',event=>{event.preventDefault();openEventsScreen(integrationEvents);});
  const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
  const activityBack=$('#activity-back');if(activityBack)activityBack.addEventListener('click',closeEventsScreen);
+ const filmBack=$('#film-back');if(filmBack)filmBack.addEventListener('click',closeFilm);
  $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>loadEvents(true));
  const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
  const presetEditorForm=$('#preset-editor');if(presetEditorForm)presetEditorForm.addEventListener('submit',event=>{event.preventDefault();const name=$('#preset-name').value;if(presetEditor?.mode==='rename')renamePreset(presetEditor.id,name);else createPreset(name);});
@@ -679,7 +721,9 @@ async function finishProgrammeUi(){
  updateSourceInfo();
  initPeopleFilters();
  refreshGenreOptions();
- restoreUrl();
+ const openingFilm=filmIdFromLocation();
+ if(openingFilm)applyFilmScreen(openingFilm);
+ else restoreUrl();
  urlReady=true;
  programmeReady=true;
  await registerModelTool();
@@ -695,7 +739,7 @@ async function loadProgramme({quiet}={}){
   programmeRefreshError=false;
   const changed=installProgramme(data);
   if(!programmeReady)await finishProgrammeUi();
-  else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();}
+  else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();if(filmScreen)renderFilmShell();}
   else updateSourceInfo();
   return true;
  }catch(error){
@@ -764,6 +808,7 @@ function stopLiveRefresh(){
 async function init(){
  bindControls();
  if(eventsRequested()){const here=new URL(window.location.href);if((here.pathname.replace(/\/+$/,'')||'/')!=='/events'){writeFilmQuery(filmSearchFrom(here.href));window.history.replaceState(window.history.state,'','/events');}applyEventsScreen(true);}
+ else{const openingFilm=filmIdFromLocation();if(openingFilm)applyFilmScreen(openingFilm);}
  setYearBounds(true);
  try{await loadProgramme();}
  catch(error){showProgrammeUnavailable(error);console.error(error);}
