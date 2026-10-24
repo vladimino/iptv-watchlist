@@ -36,5 +36,5 @@ assert.match(doc,/Remaining gaps/);
 assert.match(doc,/49715/);
 assert.match(doc,/15036/);
 assert.match(doc,/14896/);
-assert.match(doc,/0 of 5/);
+assert.match(doc,/5 of 5 are `detail_verified`/);
 console.log('AIR-99 census sampler passed');

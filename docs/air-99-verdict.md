@@ -4,11 +4,9 @@
 
 Read-only snapshot at `2026-10-24T08:43:16.398Z`. Published generation `cf3ba3ac-f962-4475-b9cd-3de1b07bd1eb`, phase `published`, ledger `updatedAt` `2026-10-23T15:02:58.050Z`. `origin/main` at the read was `e46729c`. Worker deploy `56ed7fb9-b509-4944-a51b-e3bdb672d7be`, source `wrangler`, 2026-10-24T08:28:57Z, message `PR #69: Stream the offline import read-back and record the AIR-73 archive run`. `SCORED_RESOLUTION` is `shadow`. `CANDIDATE_DISCOVERY` is unset. Schedules are 0. No R2 write, no resolver chunk, no EPG sync, and no prediction run.
 
-## Detail HTTP is blocked
+## Detail HTTP
 
-`TMDB_API_READ_ACCESS_TOKEN` is not in this process. The Worker secret was not read, and the token was not written to a file. **0 of 5** detail calls were made. No `docs/air-99-detail.json` was produced. Catalog rows and the AIR-86 search hits are not a substitute for those responses.
-
-`scripts/air-99-detail.mjs` uses the same check and `Authorization: Bearer` header as `scripts/air-86-replay.mjs`. It exits 2 before any HTTP call when the variable is unset. The live path requests only `movie/{id}` for `36647`, `161`, `395`, `163`, and `603`, one call each, cap 5. A 429 stops the rest. There is no search, no alias read, and no retry. The interactive handoff is the same `getpass` pattern as 23 October, pointed at this script rather than the AIR-86 replay. It was not started here.
+Five calls, all `200`, none halted. The saved cards are `docs/air-99-detail.json`. The script requested only `movie/{id}` for `36647`, `161`, `395`, `163`, and `603`. Cap 5. No search, no alias read, and no retry. A second local pass of `gateFetched` on those cards matches the stored score and gate. Catalog rivals passed into that gate are the empty list from the catalog read: each structural form had either no film or only the fetched id.
 
 ## Population
 
@@ -84,22 +82,24 @@ The 8 cheap-pass rows, already `verified` as `known_epg_alias`, scored against t
 
 ## The five ids
 
-Competitors were read from the catalog. The read succeeded. An empty list here is an empty index, not a failed read. The detail card itself was not fetched.
+Competitors were read from the catalog before the calls. The read succeeded. An empty rival list is an empty index, not a failed read. The fetched card is the TMDB detail, not the catalog copy.
 
-| Id | Observation now | Catalog under the structural form | HTTP detail |
+| Id | Observation | Fetched card | Gate |
 | --- | --- | --- | --- |
-| 36647 | `блейд 1\|1998`, current, `retryAt` due, durations 120 | 36647 Блэйд / Blade, 1998, 120 min. No second id | not fetched |
-| 161 | `11 друзей оушена\|2001`, current, `retryAt` due, evidence changed, duration 117 | no film | not fetched |
-| 395 | `чужой против хищника 1\|2004`, current, `retryAt` due, evidence changed, duration 101 | 395 Чужой против Хищника, 2004, 100 min. No second id | not fetched |
-| 163 | `12 друзей оушена\|2004`, current, `retryAt` due, duration 125 | no film | not fetched |
-| 603 | `матрица 1\|1999`, current, `retryAt` due, durations 136 and 137 | 603 Матрица / The Matrix, 1999, 136 min. No second id | not fetched |
+| 36647 | `блейд 1\|1998`, durations 120 | Блэйд / Blade, 1998-08-21, 120 min | `accepted_spelling_e`, `detail_verified` |
+| 161 | `11 друзей оушена\|2001`, duration 117 | Одиннадцать друзей Оушена / Ocean's Eleven, 2001-12-07, 116 min | `accepted_numeral`, `detail_verified` |
+| 395 | `чужой против хищника 1\|2004`, duration 101 | Чужой против Хищника / AVP: Alien vs. Predator, 2004-08-12, 100 min | `accepted_part_suffix`, `detail_verified` |
+| 163 | `12 друзей оушена\|2004`, duration 125 | Двенадцать друзей Оушена / Ocean's Twelve, 2004-12-09, 120 min | `accepted_numeral`, `detail_verified` |
+| 603 | `матрица 1\|1999`, durations 136 and 137 | Матрица / The Matrix, 1999-03-31, 136 min | `accepted_part_suffix`, `detail_verified` |
+
+Year is exact on all five. Runtime distance is 0, 1, 1, 5, and 0 minutes. No `competingEditions`. `блейд 1` is a short title, and the year gap is 0, so the neighbouring-year hold does not apply.
 
 ## What AIR-68 still needs
 
-1. The five `movie/{id}` responses, scored by the current gate. Zero are in hand. A stored catalog runtime is not that response.
+1. The five `movie/{id}` responses, scored by the current gate. Met: 5 of 5 are `detail_verified`. That does not measure the 14896 `readyNow` rows with no catalog title.
 2. A search sample of `readyNow`. 14896 of 15036 current rows have no catalog title, and this pass did not search them. An empty index is not a false-id rate and not a recall rate.
-3. No known false `detail_verified` on a fetched card. This pass verified nothing, so that rate is unmeasured, not zero.
+3. No known false `detail_verified` on a fetched card. Met inside these five: each title is the structural form, the year matches, and the runtime is inside tolerance. It is not met for the rest of `readyNow`.
 4. The cheap pass still verifies before the scorer. `11 14|` shows a yearless short title the scorer will not accept and the cheap pass already verified.
 5. Rollback of `SCORED_RESOLUTION=on` is AIR-100. It was not exercised.
 
-A clean result on the five ids would close item 1 only.
+The five ids close item 1 only.
