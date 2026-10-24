@@ -12,7 +12,6 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0004 — Owner-only MCP Access and JWT boundary](0004-mcp-access-boundary.md) | Accepted; original date unknown | Managed OAuth, JWT verification, tool allowlist |
 | [0005 — External ChatGPT Scheduled Tasks](0005-external-chatgpt-tasks.md) | Accepted; retrospective record 2026-10-24 | AIR-62 restored orchestration 21 October, independent of Worker cron |
 | [0006 — One-chunk explicit discovery continuation](0006-one-chunk-discovery.md) | Accepted; original date unknown | Bounded request-driven discovery, no recursive waitUntil |
-
 | [0007 — Preserve discovery observations separately from transient showings](0007-persistent-discovery-evidence.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
 | [0008 — Publish an EPG generation as one coherent snapshot](0008-atomic-epg-publication.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
 | [0009 — Canonical Film/Person identity requires trusted provenance](0009-canonical-film-person-identity.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
@@ -20,7 +19,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0011 — Constrain title variants and preserve ambiguity gates](0011-bounded-title-variants.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
 | [0012 — Require measured shadow and explicit GO before scored cutover](0012-scored-resolution-rollout.md) | Accepted; retrospectively recorded 2026-10-24 | [AIR-117](https://trello.com/c/ORglHnul), primary sources in ADR |
 
-[Platform ADR reconstruction](https://trello.com/c/6MHbRFZR) is distinct from the planned [domain ADRs](https://trello.com/c/ORglHnul) and [prediction/data ADRs](https://trello.com/c/5qf3Zn3p). Never infer an original approval date from a later deployment test.
+[Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are the next documentation scope. Never infer an original approval date from a later deployment test.
 
 ## Lifecycle
 
