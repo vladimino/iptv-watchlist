@@ -4,5 +4,6 @@ These records preserve old migration and Sites-specific operations for audit and
 
 - [Legacy ChatGPT Sites](legacy-sites/README.md): exporter, Sites release and obsolete Scheduled Task prompt.
 - [Historical R2 import](legacy-r2/README.md): cutover record and importer safety boundaries.
+- [Superseded MCP and enrichment procedures](superseded/README.md): historical criteria and v3 batch, not active instructions.
 
 For currently maintained procedures see [runbooks](../runbooks/README.md).

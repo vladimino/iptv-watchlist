@@ -49,7 +49,7 @@ A substantial UI change needs real browser screenshots at a desktop width around
 ## Safety and production boundaries
 
 - Never run production sync, discovery/TMDB, model predictions, retry resets, lease overrides, destructive cleanup, R2/D1 migration/backfill, authoritative read/write cutovers, or enable/disable scheduled jobs/feature flags without **separate explicit authorization** for that action.
-- Deploying main code is not permission to exercise writable endpoints. A route named GET or 'status' may still have recovery side effects: follow [deployment.md](../runbooks/deployment.md), [mcp.md](../mcp.md), README and side-effect tests for safe verification.
+- Deploying main code is not permission to exercise writable endpoints. A route named GET or 'status' may still have recovery side effects: follow [deployment.md](../runbooks/deployment.md), [mcp.md](../reference/api/mcp.md), README and side-effect tests for safe verification.
 - Check the live authoritative storage and configuration; do not assume that a historical Site, R2 snapshot or D1 dry-run has become current production. Treat snapshot integrity/parity and source/target identity reconciliation as evidence gates, not as permission for migration.
 - Keep production and historical data private. Do not reproduce raw record dumps in public issues, PR comments, docs, CI logs or chat summaries if those contain sensitive information.
 - Verify current Scheduled Task and Access state from authorized live sources before operational claims. Neither an older runbook nor a successful Worker deployment proves tasks are enabled, disabled, connected or executed.

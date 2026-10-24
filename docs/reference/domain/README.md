@@ -1,7 +1,9 @@
 # Domain reference
 
-**Maintained contracts, not historical observations.**
+Maintained source-verified domain contracts, distinct from dated rollout evidence and implementation flags:
 
-- [Film and Person lifecycle](film-person.md): canonical identity, provenance, readiness, localization and projection boundaries.
+- [Film/Person identity and lifecycle](film-person.md)
+- [Scored resolution and independent identity acceptance](scored-resolution.md)
+- [Candidate discovery and optional search variants](candidate-discovery.md)
 
-Other domain contracts remain at their previous paths until their owning documentation cards move them. Start at the [docs map](../../README.md); consult [historical evidence](../../evidence/film-person/README.md) to understand original decisions without treating rollout logs as live configuration.
+Current rollout status belongs in Trello and production observations. See [the main documentation map](../../README.md) and [historical evidence](../../evidence/README.md).

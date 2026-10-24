@@ -1,14 +1,14 @@
 # IPTV Watchlist documentation
 
-**Inventory baseline:** 24 October 2026 — [AIR-109](https://trello.com/c/whae9vKn), covering 35 original `docs/` files. [AIR-111](https://trello.com/c/WXVqNJ25) has now moved maintained process/runbooks and three historical procedures; the original locations contain link-only compatibility stubs. `reference/domain/` and `evidence/film-person/` now exist from AIR-112; other target folders in the plan may still be unpopulated. Use the canonical links below, not the old stubs.
+**Inventory baseline:** 24 October 2026 — [AIR-109](https://trello.com/c/whae9vKn), covering 35 original `docs/` files. [AIR-111](https://trello.com/c/WXVqNJ25) has now moved maintained process/runbooks and three historical procedures; the original locations contain link-only compatibility stubs. AIR-112 created `reference/domain/` and `evidence/film-person/`; AIR-113 organized maintained API, domain, data and integration references and added operator runbooks plus superseded procedure archives. The broader evidence registry and architecture diagrams are still future work. Use the canonical links below, not the old stubs.
 
 ## Entrypoints and sources of truth
 
 - [Agent guide](../AGENTS.md): essential repository/safety instructions. [Agent workflow](process/agent-workflow.md) and [Trello conventions](process/trello-card-conventions.md): the maintained collaboration policies (relocated by AIR-111).
-- [Deployment](runbooks/deployment.md), [Recovery](runbooks/recovery/README.md), [MCP](mcp.md), [Local setup](runbooks/local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
-- [Film/Person](reference/domain/film-person.md), [Scored resolution](scored-resolution.md), [Prediction runner](prediction-runner.md), [D1 schema](d1-schema.md): technical contracts, some mixed with historical notes.
+- [Deployment](runbooks/deployment.md), [Recovery](runbooks/recovery/README.md), [MCP protocol](reference/api/mcp.md), [MCP runbook](runbooks/mcp-connectivity.md), [Local setup](runbooks/local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
+- [Film/Person](reference/domain/film-person.md), [Scored resolution](reference/domain/scored-resolution.md), [Prediction runner](reference/api/prediction-runner.md), [D1 schema](reference/data/d1-schema.md): technical contracts, some mixed with historical notes.
 - [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
-- Root [ENRICHMENT_API.md](../ENRICHMENT_API.md), [CONTRIBUTING.md](../CONTRIBUTING.md), [README.md](../README.md) remain outside `docs/` and are also in scope for AIR-110/113/119.
+- The canonical [Enrichment API](reference/api/enrichment.md) now lives under `docs/`; the root `ENRICHMENT_API.md` remains a link-only compatibility stub. Root [CONTRIBUTING.md](../CONTRIBUTING.md) and [README.md](../README.md) remain in the scope of later AIR-119/121 refresh.
 
 **Authoritative information:** current Trello cards/linked checklists give delivery status; GitHub main gives versioned source; authorized production reads establish current runtime settings/data; current reference defines the contract; runbooks define safe procedures; ADRs explain adopted choices; evidence proves only the specific dated sample. Historic reports and past handoffs are not proof of live flags/schedules.
 
@@ -20,11 +20,11 @@
 | --- | --- | --- |
 | `architecture/` | current topology and flows with planned vs deployed clearly separated; index and 13 page plans, **no diagrams yet** | [AIR-120](https://trello.com/c/olwWKaXU) |
 | `adr/` | numbered, stable architectural decisions and register | [AIR-109](https://trello.com/c/whae9vKn), [AIR-116](https://trello.com/c/6MHbRFZR)–[118](https://trello.com/c/5qf3Zn3p) |
-| `reference/{api,domain,data,integrations}/` | maintained interfaces, invariants and schemas | [AIR-112](https://trello.com/c/uzsaLuye), [AIR-113](https://trello.com/c/svVrqavq) |
+| [`reference/`](reference/README.md) (API, domain, data, integrations) | maintained interfaces, invariants and schemas | [AIR-112](https://trello.com/c/uzsaLuye), [AIR-113](https://trello.com/c/svVrqavq) |
 | [`runbooks/`](runbooks/README.md) with [`recovery/`](runbooks/recovery/README.md) | currently maintained operational procedures | [AIR-110](https://trello.com/c/HIMB8pfv), [AIR-111](https://trello.com/c/WXVqNJ25) |
 | [`process/`](process/README.md) | delivery workflow and Trello formatting | [AIR-111](https://trello.com/c/WXVqNJ25) |
 | `evidence/{scored-resolver,prediction,d1-migration,film-person,legacy-r2}/` | frozen audits, outcomes, aggregate machine-readable results and a usage registry | [AIR-114](https://trello.com/c/ia9tnXbc), [AIR-115](https://trello.com/c/TRp1oXpA) |
-| [`archive/`](archive/README.md) (legacy-sites, legacy-r2; superseded planned) | superseded instructions retained with references to successors; never an operational runbook | [AIR-111](https://trello.com/c/WXVqNJ25), [AIR-114](https://trello.com/c/ia9tnXbc) |
+| [`archive/`](archive/README.md) (legacy-sites, legacy-r2, superseded) | superseded instructions retained with references to successors; never an operational runbook | [AIR-111](https://trello.com/c/WXVqNJ25), [AIR-114](https://trello.com/c/ia9tnXbc) |
 
 ## Document lifecycle and evidence governance
 
@@ -46,16 +46,16 @@ Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text 
 | [`process/agent-workflow.md`](process/agent-workflow.md) | Process | **Moved (AIR-111)** |
 | [`process/trello-card-conventions.md`](process/trello-card-conventions.md) | Process | **Moved (AIR-111)** |
 | [`runbooks/local-setup.md`](runbooks/local-setup.md) | Runbook | **Moved (AIR-111)** |
-| [`air-64-ratings.md`](air-64-ratings.md) | Reference | `reference/` |
-| [`air-88-run-diagnostics.md`](air-88-run-diagnostics.md) | Reference | `reference/` |
-| [`air-98-prediction-diagnostics.md`](air-98-prediction-diagnostics.md) | Reference | `reference/` |
-| [`candidate-discovery.md`](candidate-discovery.md) | Reference | `reference/` |
-| [`d1-schema.md`](d1-schema.md) | Reference | `reference/` |
-| [`scored-resolution.md`](scored-resolution.md) | Reference | `reference/` |
+| [`reference/integrations/letterboxd-ratings.md`](reference/integrations/letterboxd-ratings.md) | Maintained reference | **Moved (AIR-113)** |
+| [`reference/api/run-diagnostics.md`](reference/api/run-diagnostics.md) | Maintained reference | **Moved (AIR-113)** |
+| [`reference/api/prediction-diagnostics.md`](reference/api/prediction-diagnostics.md) | Maintained reference | **Moved (AIR-113)** |
+| [`reference/domain/candidate-discovery.md`](reference/domain/candidate-discovery.md) | Maintained reference | **Moved (AIR-113)** |
+| [`reference/data/d1-schema.md`](reference/data/d1-schema.md) | Maintained reference | **Moved (AIR-113)** |
+| [`reference/domain/scored-resolution.md`](reference/domain/scored-resolution.md) | Maintained reference | **Moved (AIR-113)** |
 | [`air-47-taxonomy-audit.md`](air-47-taxonomy-audit.md) | Mixed—split | `reference/ + evidence/` |
 | [`reference/domain/film-person.md`](reference/domain/film-person.md) | Maintained domain contract | **Split (AIR-112)**; [historical audit](evidence/film-person/lifecycle-audit-and-rollout.md) retained, legacy path is a compatibility link |
-| [`mcp.md`](mcp.md) | Mixed—split | `reference/ + evidence/` |
-| [`prediction-runner.md`](prediction-runner.md) | Mixed—split | `reference/ + evidence/` |
+| [`reference/api/mcp.md`](reference/api/mcp.md) | API/operations split | **Split (AIR-113)**; [MCP runbook](runbooks/mcp-connectivity.md), [historical checklist](archive/superseded/mcp-air-62-checklist.md) |
+| [`reference/api/prediction-runner.md`](reference/api/prediction-runner.md) | API/operations split | **Split (AIR-113)**; [MCP runbook](runbooks/mcp-connectivity.md), [historical checklist](archive/superseded/mcp-air-62-checklist.md) |
 | [`air-100-rollout.md`](air-100-rollout.md) | Historical scored rollout plan + evidence | `archive/ or evidence/` in AIR-114; **not moved by AIR-111** |
 | [`runbooks/deployment.md`](runbooks/deployment.md) | Operational runbook | **Moved and split (AIR-111)**; active [`recovery/`](runbooks/recovery/README.md) and archived [`Sites release`](archive/legacy-sites/site-release.md) |
 | [`air-43-shadow-rollout.md`](air-43-shadow-rollout.md) | Evidence | `evidence/scored-resolver/` |

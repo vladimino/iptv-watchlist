@@ -1,6 +1,6 @@
 # ADR 0001: D1 schema v1 is unapplied
 
-[AIR-49](https://trello.com/c/YNaLFwtW). The schema itself is [docs/d1-schema.md](../d1-schema.md).
+[AIR-49](https://trello.com/c/YNaLFwtW). The schema itself is [docs/d1-schema.md](../reference/data/d1-schema.md).
 
 ## Decision
 

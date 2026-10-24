@@ -1,0 +1,22 @@
+# Prediction schedule and run diagnostics
+
+> **Operator procedure:** inspect already authorized state; do not start an additional production prediction run, clear a lease, or modify ChatGPT Scheduled Tasks without separate owner approval.
+
+[Prediction-runner API contract](../reference/api/prediction-runner.md).
+
+## ChatGPT Scheduled Tasks: timing and troubleshooting
+
+**The hourly schedule is a target, not an exact Worker execution time.** The ChatGPT Scheduled Task is external to Cloudflare Worker `iptv` (there is no hourly Cloudflare Cron driving predictions). A nominal `:00` trigger can begin around the hour rather than precisely at `:00`; delays can vary and there is **no documented guaranteed ±10-minute window**. The footer's `Следующий запуск: около HH:MM` is calculated from `nextScheduledRun` as an **estimate**, not a countdown, SLA, or evidence that a new run has started. Times shown in the app use Europe/Madrid.
+
+**Do not infer scheduler accuracy from /events timestamps.** A `Прогнозы запущены` event records a server-side run start; `Прогнозы восстановлены` or `Прогнозы продолжены` describes a lease recovery/continuation, not necessarily a fresh scheduled trigger. Progress/completion events can appear much later. In the Events history captured on 15–21 October 2026, visible event times included minutes around `:50` through `:07`, plus a `:22` outlier; these mixed event types do **not** establish a reliable scheduler start-time distribution. For exact scheduler triggers, inspect the Scheduled Task execution history separately.
+
+**An unchanged status is not a missed trigger.** The footer can retain a previous `storage_error` until a later run emits updated state, and an invocation with `already_running`, `busy`, or `noop` may not produce a new Events entry. Verify independently:
+
+1. Check the ChatGPT Scheduled Task is enabled and review its last execution time/result; do not treat the next nominal clock hour as a deadline.
+2. Via authorized IPTV Watchlist MCP, inspect `enrichment_runner`, `enrichment_status`, and `enrichment_queue`, including `runId`, `state`, `lastHeartbeatAt`, `hotRemaining`, `coldRemaining`, and retry/backoff.
+3. `pendingCount=0` only means no immediate *hot/watchlist* work. It does **not** mean the full database is complete if `coldRemaining>0` (the queued runner can process off-watchlist cold films). Validate complete coverage using `confirmedFilmsTotal` versus `currentPredictionsTotal`, not the viewing-window counter. `localPercent` and `windowPercent` are tenths of a percent. The value `100` means the two counts are equal, or that the denominator was empty. An incomplete pair stays at or below `99.9`. A finished run and `queue_empty` are also separate from those counts: outstanding films can remain in retry backoff. See [AIR-82](../air-82-prediction-rca.md).
+4. Check /events for the corresponding run's start/resume, progress, and terminal event. If a run is stuck or `storage_error` recurs, inspect authorized Cloudflare logs and stored checkpoints rather than forcibly clearing leases or resetting the queue.
+
+Keep existing Cloudflare Access protections; don't embed auth tokens in links, logs or documentation. Do not trigger extra production sync or prediction runs just to test timestamps. The legacy Sites-specific prompt in [prediction-scheduled-prompt.md](../archive/legacy-sites/prediction-scheduled-prompt.md) is historical and must remain disabled.
+
+The Scheduled Task itself is outside this repository. Until that task sends `fault` and echoes `receivedRequestId`, caller-reported metadata on a production run stays unconfirmed. The Worker records the attempt and the response it formed either way. The caller change is specified in [AIR-88](../reference/api/run-diagnostics.md).
