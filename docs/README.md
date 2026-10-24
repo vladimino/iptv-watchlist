@@ -1,12 +1,12 @@
 # IPTV Watchlist documentation
 
-**Inventory baseline:** 24 October 2026 — [AIR-109](https://trello.com/c/whae9vKn), covering 35 original `docs/` files. [AIR-111](https://trello.com/c/WXVqNJ25) has now moved maintained process/runbooks and three historical procedures; the original locations contain link-only compatibility stubs. Other target folders in the plan may still be unpopulated. Use the canonical links below, not the old stubs.
+**Inventory baseline:** 24 October 2026 — [AIR-109](https://trello.com/c/whae9vKn), covering 35 original `docs/` files. [AIR-111](https://trello.com/c/WXVqNJ25) has now moved maintained process/runbooks and three historical procedures; the original locations contain link-only compatibility stubs. `reference/domain/` and `evidence/film-person/` now exist from AIR-112; other target folders in the plan may still be unpopulated. Use the canonical links below, not the old stubs.
 
 ## Entrypoints and sources of truth
 
 - [Agent guide](../AGENTS.md): essential repository/safety instructions. [Agent workflow](process/agent-workflow.md) and [Trello conventions](process/trello-card-conventions.md): the maintained collaboration policies (relocated by AIR-111).
 - [Deployment](runbooks/deployment.md), [Recovery](runbooks/recovery/README.md), [MCP](mcp.md), [Local setup](runbooks/local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
-- [Film/Person](film-person-lifecycle.md), [Scored resolution](scored-resolution.md), [Prediction runner](prediction-runner.md), [D1 schema](d1-schema.md): technical contracts, some mixed with historical notes.
+- [Film/Person](reference/domain/film-person.md), [Scored resolution](scored-resolution.md), [Prediction runner](prediction-runner.md), [D1 schema](d1-schema.md): technical contracts, some mixed with historical notes.
 - [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
 - Root [ENRICHMENT_API.md](../ENRICHMENT_API.md), [CONTRIBUTING.md](../CONTRIBUTING.md), [README.md](../README.md) remain outside `docs/` and are also in scope for AIR-110/113/119.
 
@@ -53,7 +53,7 @@ Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text 
 | [`d1-schema.md`](d1-schema.md) | Reference | `reference/` |
 | [`scored-resolution.md`](scored-resolution.md) | Reference | `reference/` |
 | [`air-47-taxonomy-audit.md`](air-47-taxonomy-audit.md) | Mixed—split | `reference/ + evidence/` |
-| [`film-person-lifecycle.md`](film-person-lifecycle.md) | Mixed—split | `reference/ + evidence/` |
+| [`reference/domain/film-person.md`](reference/domain/film-person.md) | Maintained domain contract | **Split (AIR-112)**; [historical audit](evidence/film-person/lifecycle-audit-and-rollout.md) retained, legacy path is a compatibility link |
 | [`mcp.md`](mcp.md) | Mixed—split | `reference/ + evidence/` |
 | [`prediction-runner.md`](prediction-runner.md) | Mixed—split | `reference/ + evidence/` |
 | [`air-100-rollout.md`](air-100-rollout.md) | Historical scored rollout plan + evidence | `archive/ or evidence/` in AIR-114; **not moved by AIR-111** |
