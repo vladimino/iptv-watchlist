@@ -23,6 +23,12 @@ function barePresetEtag(value){return String(value||'').trim().replace(/^W\//,''
 function cleanPresetText(value,max){if(typeof value!=='string')return '';const text=value.trim().replace(/\s+/g,' ');if(!text||text.length>max||/[\u0000-\u001f\u007f]/.test(text))return '';return text;}
 function cleanPresetName(value){return cleanPresetText(value,MAX_PRESET_NAME);}
 function uniquePresetValues(values){return [...new Set(values)];}
+const PRESET_SEARCH_SCOPES=['titles','people','plot'];
+function presetSearchScope(value){
+ const selected=new Set(String(value||'').split(',').map(item=>item.trim()).filter(id=>PRESET_SEARCH_SCOPES.includes(id)));
+ const ordered=PRESET_SEARCH_SCOPES.filter(id=>selected.has(id));
+ return !ordered.length||(ordered.length===1&&ordered[0]==='titles')?'':ordered.join(',');
+}
 function normalizePresetQuery(input){
  const source=String(input??'');
  if(source.length>MAX_PRESET_QUERY)return null;
@@ -33,6 +39,7 @@ function normalizePresetQuery(input){
  if(params.get('view')==='watchlist')add('view','watchlist');
  if(['archive','future'].includes(params.get('period')))add('period',params.get('period'));
  const query=cleanPresetText(params.get('q')||'',200);if(query)add('q',query);
+ const searchIn=presetSearchScope(params.get('searchIn'));if(searchIn)add('searchIn',searchIn);
  if(['personal','expiring','time','relevance','title'].includes(params.get('sort')))add('sort',params.get('sort'));
  for(const genre of uniquePresetValues(params.getAll('genre').map(value=>cleanPresetText(value,80)).filter(Boolean)).sort((a,b)=>a.localeCompare(b,'ru')))add('genre',genre);
  for(const mechanic of uniquePresetValues(params.getAll('mechanic').filter(value=>/^[a-z0-9_]{1,80}$/.test(value))).sort())add('mechanic',mechanic);
