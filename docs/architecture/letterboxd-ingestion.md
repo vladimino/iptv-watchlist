@@ -31,7 +31,7 @@ sequenceDiagram
         else 403 or interrupted scan
             LB-->>Refresh: 403 / incomplete
             Refresh->>R2: Keep previous published generation
-            Note over Refresh,R2: Retry backoff; do not bypass anti-bot
+            Note over Refresh,R2: Retry backoff applies — anti-bot bypass is prohibited
         end
     end
 ```
