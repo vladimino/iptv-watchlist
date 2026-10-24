@@ -29,6 +29,14 @@
       <div id="film-screen-synopsis"></div>
       <div id="film-screen-credits"></div>
       <div id="film-screen-fingerprint"></div>
+      <section id="film-compare" class="film-section film-compare" aria-label="Сравнение характеристик">
+        <h2>Сравнение</h2>
+        <div class="person-combo" id="film-compare-combo">
+          <div class="person-input"><input id="film-compare-input" type="text" role="combobox" aria-label="Сравнить с фильмом" aria-autocomplete="list" aria-expanded="false" aria-controls="film-compare-options" autocomplete="off" placeholder="Название другого фильма"><button type="button" id="film-compare-clear" class="person-clear" aria-label="Сбросить сравнение">×</button></div>
+          <ul id="film-compare-options" class="person-options" role="listbox" aria-label="Фильмы" hidden></ul>
+        </div>
+        <div id="film-compare-result"></div>
+      </section>
       <div id="film-screen-availability"></div>
       <p id="film-screen-identity" hidden></p>
     </section>
