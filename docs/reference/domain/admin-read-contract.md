@@ -78,7 +78,7 @@ Production authority is Cloudflare R2 for Worker `iptv`, as [ADR 0002](../../adr
 | Lifecycle `*.lifecycle.json` sidecars | Computed by `readLifecycle` | Forbidden from replacing `discovery-latest` or predictions. Nothing in the Worker writes them on a GET |
 | D1 `film` / `person` tables | Offline and future migration | Empty of production authority until a separate cutover |
 
-One admin response must name its pin. Today the only atomic EPG pin is the published generation id plus the programme `runId` / `updatedAt`. Titles and people are a second clock. A response that mixes them must set `skew: true` rather than imply one snapshot. Candidate rows that exist only in the resolution ledger are a third set and are not part of `programme.json`.
+One admin response must name its pin. [ADR 0008](../../adr/0008-atomic-epg-publication.md) makes the published generation the coherent EPG snapshot: programme, discovery-latest, and discovered-films for that generation. Titles and people are a second clock, outside that object. A response that mixes them must set `skew: true` rather than imply one snapshot. [ADR 0007](../../adr/0007-persistent-discovery-evidence.md) keeps the resolution ledger as candidate evidence, not canonical Film. An unresolved observation is not a Film row. Those rows are a third set and are not part of `programme.json`.
 
 ## GET side effects and safe reads
 
@@ -154,7 +154,7 @@ getPerson(records, id) -> record | null
 - `limit` is an integer 1–25. Missing `limit` is an error the caller can surface as 400. Default inside the UI adapter may be 25, but the function does not silently substitute a default that hides a bad call.
 - `cursor` is opaque. It is valid only for the same records array, the same query or queue, and the same limit. A mismatched cursor returns an error result `{ error: 'stale_cursor' }`, not an empty page.
 - Sort a search by rank, then `id` ascending with `en` comparison. Ranks: `0` exact external id, `1` exact preferred, `2` exact original or alias, `3` prefix of any of those, `4` substring. Tokens of a multi-word query are AND. Fold Latin diacritics, map `ё`/`Ё` to `е`, and compare case-insensitively. Do not score synopsis.
-- Two records with the same folded preferred title are both returned. Each item includes `collision: true` when another item on the full result, not only the page, shares that folded title. Do not merge them.
+- Two records with the same folded preferred title are both returned. Each item includes `collision: true` when another item on the full result, not only the page, shares that folded title. Do not merge them. This flag is a search result, not the identity collision in [ADR 0009](../../adr/0009-canonical-film-person-identity.md). It does not authorize linking films or unifying two Person role ids.
 - `filmQueue` accepts every code in the table above. `personQueue` accepts only `localization-missing`, `localization-provisional`, `localization-conflict`, and `external-id-conflict`. Any other code is `{ error: 'unknown_queue' }`.
 - `getFilm` / `getPerson` follow no redirects. Redirects are data on the record, not a hidden hop.
 - Items are the supplied records plus `rank` and `collision` on searches. Do not drop fields and do not add a model score.
