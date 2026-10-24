@@ -1,12 +1,12 @@
 # AIR-47 taxonomy audit
 
-Read-only audit of genre, mood, plot-mechanic, and execution labels, plus a specification for a later taxonomy v2. This document does not change normalization, the generation contract, fingerprints, predictions, filters, or the UI. [AIR-108](https://trello.com/c/QIke4H2N) is the implementation card and must not start from this text until the open questions in section 10 are answered. [AIR-69](https://trello.com/c/FlcWZX7W) is not a blocker for this audit. It remains a blocker for AIR-108. R2 stays authoritative. D1 is not bound.
+Read-only audit of genre, mood, plot-mechanic, and execution labels, plus the accepted specification for taxonomy v2. This document does not change normalization, the generation contract, fingerprints, predictions, filters, or the UI. [AIR-108](https://trello.com/c/QIke4H2N) implements section 10 and does not start until this audit is accepted and [AIR-69](https://trello.com/c/FlcWZX7W) is done. AIR-69 is not a blocker for this audit. R2 stays authoritative. D1 is not bound. Section 10 does not authorize a backfill, a model regeneration, or a production writer.
 
 Related work: [AIR-47](https://trello.com/c/wkM9WSZB), [AIR-69](https://trello.com/c/FlcWZX7W), [AIR-108](https://trello.com/c/QIke4H2N).
 
-Mood-mapping behavior was checked against `5f9b92c44c2bade51416a917148e82c02739bc1c`. `origin/main` later moved to `98273ef3b48089fe4e9770b20a478717a6116094` (film route, pull request 76). That commit does not change `mapRawMood`, `MOOD_LABELS`, or the generation contract. The production census below is a read of R2 objects, not a claim about that route change.
+Mood-mapping behavior was checked against `5f9b92c44c2bade51416a917148e82c02739bc1c`. Later `origin/main` commits through `0a8fbd04786036926b1dd93c6caf4a2932371bb2` change the film route and the film page. They do not change `mapRawMood`, `MOOD_LABELS`, or the generation contract. The production census below is a read of R2 objects.
 
-Conclusion of the 24 October freshness check: **LIVE EVIDENCE AVAILABLE**. Aggregates were read from the current R2 bucket. This audit is not closed: section 10 is still an owner decision, and the catalog-only identity overlap was not computed.
+Conclusion of the 24 October freshness check: **LIVE EVIDENCE AVAILABLE**. Aggregates were read from the current R2 bucket. The owner's taxonomy decisions are recorded in section 10. The catalog-only identity overlap was not computed. That limit does not reopen section 10.
 
 ## How to read this document
 
@@ -14,9 +14,9 @@ Three levels. A number from one level is not evidence for another.
 
 - **Code-proven.** Observed in the repository. It does not depend on which films are in the bucket, or on the age of a snapshot. The romantic/historical substring bug, the other substring collisions, the closed mechanic and execution lists, the URL id rules, and the fact that derived ids are outside `fingerprintHash` are this level.
 - **Corpus-dependent.** A count, with an explicit source, date, coverage, and limit. Section 3 is the 18–19 October Site export. Section 2.4 is the 24 October R2 read. Neither number is a substitute for the other. A blank cell was not measured. It is not an estimate.
-- **Product proposal.** A rule for AIR-108. It is not implemented and is not a product decision until the owner accepts it. Section 10 lists the choices this audit does not make.
+- **Accepted decision.** A product rule the owner approved on 24 October 2026 and recorded on [AIR-47](https://trello.com/c/wkM9WSZB) and [AIR-108](https://trello.com/c/QIke4H2N). Section 10 is that list. AIR-108 implements it. This pull request does not.
 
-**Hypothesis** means a reading that was not proven film by film. **Open question** means a choice left to the owner.
+**Hypothesis** means a reading that was not proven film by film.
 
 ## 1. What is in force today
 
@@ -200,7 +200,7 @@ Corpus-wide films whose only derived id is one broad label: `family` 21, `milita
 
 Safe on the code, with either corpus as illustration: the romantic/historical substring bug, the other substring collisions in section 5.2, the tested dual map of «Чёрный юмор», TV Movie as the genre string «Телефильм», `family` as one broad id, mechanics and execution as separate closed lists, and the rule that a mapping change does not change `fingerprintHash` or retire a `mood=` id.
 
-The fresh census confirms the sizes those decisions care about, and it changes the composition claim. The watchlist is almost the same set. The catalog is larger, and which catalog films are new was not identified. Filter-impact counts that section 10 still asks the owner to weigh (the 22-film funny dual map, the romantic/historical inflation, the family singleton) were remeasured. The 22-film figure is unchanged. The romantic/historical inflation grew with the catalog (178 to 227). The corpus-wide singleton integers did not move.
+The fresh census confirms the sizes those decisions care about, and it changes the composition claim. The watchlist is almost the same set. The catalog is larger, and which catalog films are new was not identified. The owner kept the dual `funny` map, so the 22 watchlist films stay in `mood=funny`. The romantic substring fix still removes the false `historical` ids; that inflation grew with the catalog from 178 to 227. The corpus-wide singleton integers did not move. Section 10 now hides a lone generic theme chip for `family`, `military`, `political`, `historical`, and `revenge`, and leaves the filter match in place.
 
 Still not measured, and not filled in by the export: catalog-only id overlap, the watchlist share of the 21 family-only films, execution-value frequencies, and saved preset queries. None of those four block the code-proven mapping bugs. Catalog-only identity would be required only for a claim about which non-watchlist films appeared after the resolver cutover.
 
@@ -291,18 +291,18 @@ Execution values were not counted. The closed lists are the inventory. Eight gen
 
 ## 4. Category split
 
-**Proposal.** Keep plot mechanics and execution as they are. Classify everything that is currently a genre or a mood id into the six buckets below. The bucket is a presentation and filter grouping. It is not a new stored field and not a new D1 column.
+**Accepted.** Keep plot mechanics and execution as closed lists. Classify everything that is currently a genre or a mood id into the six buckets below. The bucket is a presentation and filter grouping. It is not a new stored field and not a new D1 column. Genre migration stops at «Телефильм».
 
-| Bucket | Meaning | Current members |
+| Bucket | Meaning | Members |
 | --- | --- | --- |
-| Genre | Story kind a viewer already expects from Letterboxd | Боевик, Драма, Триллер, Приключения, Криминал, Комедия, Фантастика, Ужасы, Фэнтези, Детектив, Мелодрама, Вестерн, Музыкальный, plus the genre readings of Военный, Исторический, Семейный |
-| Format / type | What kind of object it is, not the story | Телефильм. Документальный and Мультфильм are candidates |
-| Mood / tone | How it feels | tense, dark, light, adventurous, dynamic, epic, funny, satirical, absurd, warm, touching, inspiring, melancholic, tragic, contemplative, paranoid, and the tone reading of eerie and surreal |
+| Genre | Story kind a viewer already expects from Letterboxd | The current `GENRE_MAP` labels, including «Документальный», «Мультфильм», «Военный», «Исторический», and «Семейный» |
+| Format / type | What kind of object it is, not the story | «Телефильм» only |
+| Mood / tone | How it feels | tense, dark, light, adventurous, dynamic, epic, funny, black_humor, satirical, warm, touching, inspiring, melancholic, tragic, contemplative, paranoid, eerie |
 | Theme / context | What it is about | military, historical, political, family, friendship, revenge |
-| Style | A recognizable manner | noir. surreal and absurd are candidates for style instead of tone |
-| Content property | A viewer-facing property that is not a tone | violent, if «Жёсткий» means graphic content |
+| Style | A recognizable manner | noir, surreal, absurd |
+| Content property | A viewer-facing property that is not a tone | violent. «Жёсткий» does not by itself mean graphic violence |
 
-**Proposal.** Do not invent a `revenge` plot mechanic. Revenge stays out of `MECHANICS` unless a later card adds it. Do not copy `investigation` or `heist` into a mood chip.
+**Accepted.** Do not invent a `revenge` plot mechanic. Do not add a mechanic id because a mood string looks like one. A stored `plotMechanics` value may occupy one chip under section 8. It stays out of `MOOD_LABELS` and out of the `mood` filter.
 
 ## 5. Conflicts and lossiness
 
@@ -312,7 +312,7 @@ Execution values were not counted. The closed lists are the inventory. Eight gen
 
 **Fact.** On the October export, 203 of 1,986 films have a romantic stem in some raw label. 178 of those receive `historical` even after romantic words are removed from the stem check and no separate historical stem remains. On the 24 October index the same heuristic is 227 of 259. `historical` is inflated on both corpora. The watchlist still shows 39 films with `historical` and 14 with `romantic` in both censuses.
 
-**Proposal.** A vocabulary label maps to its own id and to no other id. `антич` must not match inside «романтический».
+**Accepted.** «Романтический» maps to `romantic` only. `антич` must not match inside «романтический». The dual map of «Чёрный юмор» to `funny` and `black_humor` stays; it is the exception in section 10.
 
 ### 5.2 Other substring collisions
 
@@ -344,9 +344,9 @@ Execution values were not counted. The closed lists are the inventory. Eight gen
 
 **Fact.** Letterboxd genre «Семейный» is a different fact. On the watchlist, 46 films have the genre and 77 have the mood. Only 20 have both. 26 have the genre without the mood. 57 have the mood without the genre. Merging them would mix an audience label with a theme label.
 
-**Proposal.** «Семья и отношения» is a theme, not a mood. It is not eligible as the only chip on a card. The id `family` stays, so existing `mood=family` URLs keep a meaning. Narrower kinship labels are an open question, not a silent split.
+**Accepted.** «Семья и отношения» is a theme. The id `family` stays, so `mood=family` keeps its meaning. AIR-108 does not invent narrower kinship ids. A lone `family` chip is suppressed because it is an overly generic theme. The same suppression applies to a lone `military`, `political`, `historical`, or `revenge` chip. A lone tone, style, content property, format, or stored mechanic is not suppressed by that rule.
 
-The same singleton shape exists for other broad ids on the whole corpus: `military` 20 films, `revenge` 9, `eerie` 8, `political` 7, `historical` 6, `noir` 3, `violent` 3. Only `family` is called out by AIR-47 as ineligible to stand alone.
+The same singleton shape exists on the whole corpus for other ids: `military` 20 films, `revenge` 9, `eerie` 8, `political` 7, `historical` 6, `noir` 3, `violent` 3. Of those, the generic-theme rule covers `military`, `revenge`, `political`, and `historical`. `eerie`, `noir`, and `violent` can still stand alone.
 
 ### 5.4 Genre and mood describe the same subject twice
 
@@ -364,13 +364,13 @@ Watchlist overlap of the Letterboxd genre and the derived mood or mechanic on th
 
 **Fact.** A war film often has neither the war genre nor the military mood, or only one of them. Showing both chips repeats the subject when they do co-occur, and hiding the mood whenever the genre is present would hide the 27 military-mood films that are not genre «Военный». The detective genre is almost a subset of the mechanic (36 of 38), while the mechanic covers 102 further watchlist films and is not shown on the card.
 
-**Proposal.** A chip does not repeat a genre that is already printed in `.film-tags` when the mood id is only the theme echo of that genre (`military` with «Военный», `historical` with «Исторический»). The mood id remains available as a filter. `eerie` is not that echo: the eerie rule also matches supernatural words, and 9 watchlist films have `eerie` without the horror genre.
+**Accepted.** A chip does not repeat a genre that is already printed in `.film-tags` when the id is only the theme echo of that genre (`military` with «Военный», `historical` with «Исторический»). The id remains a filter. `eerie` is not that echo. The accepted eerie rule matches an independent frightening or mystical stem, and it does not match «ужасы» or `horror`. Nine export watchlist films have `eerie` without the horror genre. A stored plot mechanic, such as `mystery` or `investigation` on a detective film, may be the chip under section 8. That does not create a mood id.
 
 ### 5.5 «Чёрный юмор» also means funny
 
 **Fact.** «чёрная комедия» and «Чёрный юмор» map to `funny` and `black_humor`. On the watchlist, 24 films have `black_humor`. 22 of those have no separate raw label that maps to `funny` without `black_humor`. Dropping the extra `funny` id would remove those films from a `mood=funny` filter unless another funny label is present.
 
-**Open question.** Keep the dual map, or let the specific label win?
+**Accepted.** Keep the dual map. Those 22 films stay in `mood=funny`. The card prefers the `black_humor` chip when both ids came from the same raw string.
 
 ### 5.6 TV Movie, noir, violent, revenge
 
@@ -380,34 +380,34 @@ Watchlist overlap of the Letterboxd genre and the derived mood or mechanic on th
 
 **Fact.** `violent` matches жесток, кровав, брутал, насили, and also «жёсткий», which is the vocabulary label itself. The label does not say whether the film is graphic or merely harsh.
 
+**Accepted.** `violent` is a content property. AIR-108 does not read graphic violence out of «Жёсткий» and does not invent a second raw label to split the two readings.
+
 **Fact.** `revenge` matches месть, возмезд, and `revenge`. There is no revenge mechanic. A revenge film can also carry `investigation` or `chase_escape` as the plot shape.
 
 ## 6. Decision table
 
-Dispositions are proposals. `keep` means the id, the Russian label, and the filter parameter stay. `move` means the id stays and the chip or filter group changes. Nothing here is `retire`, because retiring an id silently drops it from `readUrlState` and from the next preset save.
+Dispositions are the accepted decisions in section 10. `keep` means the id, the Russian label, and the filter parameter stay. `move` means the id stays and the chip or filter group changes. Nothing here is `retire`, because retiring an id silently drops it from `readUrlState` and from the next preset save.
 
-| Legacy value | Proposed disposition | Why | What changes for users and data |
+| Legacy value | Disposition | Why | What changes for users and data |
 | --- | --- | --- | --- |
-| tense, dark, light, adventurous, dynamic, epic, funny, warm, touching, inspiring, melancholic, tragic, contemplative, paranoid | keep | They are tones. The probes map each vocabulary label to itself, except the two rows below | None, if the romantic and black-humor fixes are the only rule edits |
-| satirical, absurd | keep | Tone. Absurd is a style candidate | None unless section 10 moves absurd to style |
-| surreal | keep | Tone. Style is the alternative | Open question |
-| romantic | keep, and fix the rule | The label is a tone. The `historical` extra id is a substring bug | Films that gained `historical` only from «романтический» leave the historical filter. Fingerprints stay |
-| black_humor | keep | The specific label is the one the model was asked to prefer | Dual `funny` membership is an open question. Filter membership of about 22 watchlist films depends on it |
-| eerie | keep as tone, narrow the rule | «Мистический / пугающий» is a tone. Matching every `ужас` and `horror` copies the horror genre into the mood filter | Films whose only eerie evidence is the word «ужасы» or `horror` would leave the eerie filter. Supernatural stems stay |
-| military, historical, political | move to theme | They say what the film is about. They are also Letterboxd genres under other Russian words | Chip group changes. `mood=military` must keep working. See section 7 |
-| family | move to theme, and suppress as a lone chip | One id hides parents, marriage, and siblings. The export shows 16 watchlist films with only this chip. The live index still has 21 corpus-wide and did not resplit them | The chip disappears when it is the only one. The filter id remains. No narrower ids are created in AIR-108 |
-| friendship | move to theme | «Дружба и команда» is a subject, and the rule also matches «команда», which is broad | Same URL-keep rule as family. Whether «команда» is too broad is an open question |
-| revenge | move to theme | It is not one of the 14 mechanics | Same URL-keep rule. Do not add a mechanic |
-| noir | move to style | A manner, not a feeling | Same URL-keep rule |
-| violent | unresolved | «Жёсткий» may mean graphic content or a harsh tone. The corpus cannot separate them without rereading raw strings against titles | Leave the id in the mood filter until the owner chooses. Do not split the stored strings |
-| «Телефильм» / `TV Movie` | move to format in presentation | It is a type of object. Two watchlist films use it | `genre=Телефильм` keeps matching the stored string. The card can show it as format instead of as one more genre. Do not rewrite `watchlist.json` |
-| «Документальный», «Мультфильм» | unresolved | Both are Letterboxd genres. Documentary is unused in this watchlist. Animation has 45 films | They stay genres until the owner says they are formats |
-| «Семейный», «Военный», «Исторический» | keep as genres | They are not the same values as `family`, `military`, and `historical` | Chip selection may hide the echo mood when the genre is already printed. Both filters remain |
+| tense, dark, light, adventurous, dynamic, epic, funny, warm, touching, inspiring, melancholic, tragic, contemplative, paranoid, satirical | keep as tone | They are tones. Each vocabulary label maps to itself, except the accepted dual map below | None from a category move. The romantic, eerie, and friendship rule edits are separate rows |
+| black_humor | keep as tone, and keep the dual map | «Чёрный юмор» stays in `funny` as well | The 22 watchlist films stay in `mood=funny`. The card shows `black_humor` when both ids came from the same raw string. Fingerprints stay |
+| romantic | keep as tone, and fix the rule | The `historical` extra id is a substring bug | Films that gained `historical` only from «романтический» leave the historical filter. Fingerprints stay |
+| eerie | keep as tone, and narrow the rule | The tone is an independent frightening or mystical atmosphere. «ужасы» and `horror` copy the horror genre | Films whose only eerie evidence is «ужасы» or `horror` leave the eerie filter. Mystical stems stay |
+| surreal, absurd | move to style | They are a manner. The ids stay | Chip group changes. `mood=surreal` and `mood=absurd` keep working |
+| noir | move to style | A manner, not a feeling | `mood=noir` keeps working |
+| military, historical, political, revenge | move to theme, and suppress a lone chip | They say what the film is about. A lone chip of this kind is too generic to stand as the only label | Chip group changes. A singleton chip is hidden. `mood=<id>` still matches. Do not add a revenge mechanic |
+| family | move to theme, and suppress a lone chip | One id hides parents, marriage, and siblings. The export shows 16 watchlist films with only this chip. The live index still has 21 corpus-wide and did not resplit them | The lone chip disappears. The filter id remains. No narrower ids are created |
+| friendship | move to theme, and narrow the rule | «Дружба и команда» is a subject. The bare word «команда» is not friendship | «команда» alone leaves the friendship filter. «Дружба и команда» stays. `mood=friendship` keeps working |
+| violent | move to content property | The owner accepted the bucket. «Жёсткий» is not evidence of graphic violence | Sidebar group changes. The stored string is not split and not rewritten. `mood=violent` keeps working |
+| «Телефильм» / `TV Movie` | move to format in presentation | It is a type of object. Two watchlist films use it | `genre=Телефильм` keeps matching the stored string. The card shows it as format. Do not rewrite `watchlist.json` |
+| «Документальный», «Мультфильм» | keep as genres | Legacy genre compatibility. Documentary is unused on this watchlist. Animation has 45 export watchlist films | They stay in the genre control. The genre migration does not grow to cover them |
+| «Семейный», «Военный», «Исторический» | keep as genres | They are not the same values as `family`, `military`, and `historical` | The echo rule may hide the theme chip when the genre is already printed. Both filters remain |
 | Other `GENRE_MAP` values | keep | They round-trip and the watchlist has no unknown English leftover | None |
-| `MECHANICS` and `EXECUTION` | keep | Closed, hashed, and already separate from mood | AIR-108 does not add, rename, or display a new mechanic. Execution filters stay the 13 general dimensions |
-| Exact mechanic mood strings | keep as mechanic-only | Already tested | Still no mood chip |
-| Compound mechanic strings that are otherwise unmapped | unresolved | 196 occurrences are invisible as moods and invisible as mechanics | A later mapping may mark them mechanic-only. That does not create a chip. It does change diagnostics |
-| Unmapped raw strings | keep as diagnostics | 904 occurrences. They are not chips today | Still not chips. Still not guessed from the title |
+| `MECHANICS` and `EXECUTION` | keep the closed lists | Already separate from mood | AIR-108 does not add or rename a mechanic. One stored mechanic may occupy a chip. Execution filters stay the 13 general dimensions and do not become chips |
+| Exact mechanic mood strings | keep as mechanic-only | Already tested | Still no mood id |
+| Compound strings that only express a mechanic | mechanic-only | 196 occurrences are invisible as moods today | They become `mechanic_only`. They do not become a mood id, and they do not create a `plotMechanics` value |
+| Unmapped raw strings | keep as diagnostics | 904 export occurrences. They are not chips today | Still not chips. Still not guessed from the title |
 
 ## 7. URLs, presets, fingerprints, and regeneration
 
@@ -415,19 +415,21 @@ Dispositions are proposals. `keep` means the id, the Russian label, and the filt
 
 **Fact.** Today the view response already recomputes ids from stored raw labels. A new `MOOD_MAPPING_VERSION` with the same function shape does not rewrite `fingerprint.json` or `predictions.json`, does not change `fingerprintHash`, and does not make a current prediction stale.
 
-**Proposal.** AIR-108 ships that kind of change only:
+**Accepted.** AIR-108 ships that kind of change only:
 
-- Fix the substring rules and the vocabulary-label round trip.
-- Attach a category to each existing id in the client and in the schema description.
-- Select chips with the rules in section 8.
-- Accept every current `mood=<id>` in `readUrlState`, including ids that move to theme or style.
-- Keep writing `mood=<id>` from `urlForState` for those ids. Do not add `theme`, `style`, or `format` query keys in AIR-108.
+- Fix the romantic substring, map both `war` and `war film` to `military`, stop `eerie` from matching «ужасы» and `horror`, and stop bare «команда» from matching `friendship`.
+- Keep the dual map of «Чёрный юмор» to `funny` and `black_humor`.
+- Mark a compound that only expresses a plot mechanic as `mechanic_only`, without writing a new `plotMechanics` value.
+- Attach the section 4 bucket to each existing id in the client and in the schema description.
+- Select chips with section 8.
+- Accept every current `mood=<id>` in `readUrlState`, including ids that move to theme, style, or content property.
+- Keep writing `mood=<id>` from `urlForState`. Do not add `theme`, `style`, `format`, or `mechanic` query keys.
 
-**Why no new query keys yet.** Presets store the ids inside `mood`. A new key would leave saved presets on the old key, and `normalizePresetQuery` would drop an unknown key on the next edit. Keeping the id on `mood` preserves OR-within and AND-across without a preset migration. `ui/filter-presets.json` was not in the frequency snapshot, so this audit cannot list the saved presets. The compatibility rule does not need that list if the ids are unchanged.
+**Accepted.** Presets store the ids inside `mood`. A new key would leave saved presets on the old key, and `normalizePresetQuery` would drop an unknown key on the next edit. Keeping the id on `mood` preserves OR-within and AND-across without a preset migration. The sidebar groups those same ids under «Настроение», «Темы», «Стиль», and «Особенности». `ui/filter-presets.json` was absent from both corpora, so this audit cannot list the saved presets. The compatibility rule does not need that list if the ids are unchanged.
 
-Genre URLs store the Russian string (`genre=Телефильм`), not an English key. Renaming the visible word without an alias drops the filter. **Proposal.** Do not rename stored genre strings in AIR-108.
+Genre URLs store the Russian string (`genre=Телефильм`), not an English key. Renaming the visible word without an alias drops the filter. **Accepted.** Do not rename stored genre strings. Do not move «Документальный» or «Мультфильм» out of the genre control.
 
-`mood-facet.json` and `enrichment/diagnostics/moods.json` would become stale. The UI does not read the sidecar for chips. **Proposal.** Do not run `POST /api/enrichment/moods/backfill` as part of AIR-108. A sidecar refresh is a separate approved write, and only if something other than the view starts reading the sidecar.
+`mood-facet.json` and `enrichment/diagnostics/moods.json` would become stale. The UI does not read the sidecar for chips. **Accepted.** Do not run `POST /api/enrichment/moods/backfill` as part of AIR-108. A sidecar refresh is a separate approved write, and only if something other than the view starts reading the sidecar. This audit does not grant that approval.
 
 ### Requires model regeneration
 
@@ -438,24 +440,22 @@ Any of the following invalidates stored predictions or fingerprints and is outsi
 - Rewrite stored `moodLabels` so that `contentHash` changes.
 - Ask the external generator to emit category ids instead of the current 2–4 strings. The generator is not in this repository. `PREDICTION_PROMPT_VERSION` is only a number the caller must echo.
 
-**Proposal.** AIR-108 leaves the generation contract as the schema endpoint describes it: 2–4 short labels, preferably the canonical vocabulary, raw input preserved, mapped at read. New films pick up the new mapping when their existing raw labels are read. Old films do too. No queued prediction run is required.
+**Accepted.** AIR-108 leaves the generation contract as the schema endpoint describes it: 2–4 short labels, preferably the canonical vocabulary, raw input preserved, mapped at read. New films pick up the new mapping when their existing raw labels are read. Old films do too. No queued prediction run is required. This document does not authorize one.
 
-`film_metadata.genres_json` stays the Letterboxd list. Format is derived at read from «Телефильм» and from whatever format decision section 10 records. That derivation is not a schema migration.
+`film_metadata.genres_json` stays the Letterboxd list. Format is derived at read from the stored genre «Телефильм» only. That derivation is not a schema migration.
 
 ## 8. Card chips
 
 **Fact.** The card prints every genre, then up to four mood labels in id order. The shortlist prints neither. Mechanics and execution never appear on the card.
 
-**Proposal.** Choose two or three chips from different buckets. Do not replace the genre line in AIR-108. The new selector applies to the mood row only, plus a format chip when the film's stored genres include a value that section 6 has moved.
+**Accepted.** Choose two or three chips from different buckets. Do not replace the genre line. The selector applies to the mood row, plus a format chip when the stored genres include «Телефильм», plus at most one stored plot mechanic.
 
-1. Expand raw labels with mapping v2. Drop `mechanic_only` and `unmapped`. A vocabulary label contributes its own id only.
-2. Build one candidate per bucket: tone, theme, style, content property, format. If a bucket has several ids, keep the more specific one (`black_humor` over `funny` when both came from the same raw string; a narrow kinship id over `family` if one exists later).
+1. Expand raw labels with mapping v2. Drop `mechanic_only` and `unmapped`. «Чёрный юмор» contributes `black_humor` and `funny`. «Романтический» contributes `romantic` only. «ужасы» and `horror` do not contribute `eerie`. «команда» alone does not contribute `friendship`.
+2. Build one candidate for each of format, theme, style, content property, and tone. Add at most one stored `plotMechanics` id as its own candidate. Do not invent that id from a mood string. If a bucket has several ids, keep the more specific one on the card (`black_humor` over `funny` when both came from the same raw string). Several unrelated tones are not an English-id sort: keep the order of the raw labels. The filter still has every derived id.
 3. Remove a theme candidate that only echoes a genre already on the card (`military` when «Военный» is present, `historical` when «Исторический» is present).
-4. If `family` is the only remaining candidate, show no mood chip.
-5. Otherwise show the first two or three candidates in this order: format, theme, style, content property, tone. Never show four. Never order by the English id.
-6. The filter panel still lists every id. Hiding a chip does not remove the film from `mood=family`.
-
-**Open question.** Whether one of the three slots may be a plot mechanic. The card does not show mechanics today, and the detective overlap says the mechanic is often the more precise fact. Putting it on the card is a separate UI change from remapping moods. Default for AIR-108: do not take a slot for a mechanic.
+4. If the only remaining candidate is `family`, `military`, `political`, `historical`, or `revenge`, show no chip. A lone tone, style, content property, format, or stored mechanic still shows.
+5. Otherwise fill up to three slots in this order: format, plot mechanic, theme, style, content property, tone. Never show four. Never order by the English id.
+6. The sidebar lists every id under «Настроение», «Темы», «Стиль», and «Особенности». Hiding a chip does not remove the film from `mood=<id>`. The mechanic chip does not add the mechanic to that parameter.
 
 ## 9. Regression matrix for AIR-108
 
@@ -463,57 +463,65 @@ Each row is a fixture input and the required outcome. Use synthetic labels, as `
 
 | Case | Input | Required outcome |
 | --- | --- | --- |
-| Vocabulary round trip | Each of the 28 Russian labels | Exactly its own id. «Романтический» does not include `historical`. «Чёрный юмор» follows the owner's dual-map decision |
+| Vocabulary round trip | Each of the 28 Russian labels | Its own id. «Романтический» does not include `historical`. «Чёрный юмор» includes `black_humor` and `funny` |
 | Romantic bug | «Романтический», «романтический» | `romantic` only |
 | Substring guards | семьдесят, браконьер, двойная жизнь, конфронтация, паранормальный | Not `family`, not `military`, and «паранормальный» is `eerie` only |
-| Bare `war` | `war` and `war film` | Both `military`, or both documented. Today they disagree |
-| Family singleton | Raw labels that map only to `family` | Filter `mood=family` still matches. The card mood row is empty |
-| Family plus a tone | «Семья и отношения» and «Напряжённый» | The chip is the tone, not the family label |
+| Bare `war` | `war` and `war film` | Both `military`. The trailing space in today's rule is not the discriminator |
+| Dual map kept | «Чёрный юмор», «чёрная комедия» | `funny` and `black_humor`. `mood=funny` matches. The card chip is `black_humor` when no more specific funny label is separate |
+| Family singleton | Raw labels that map only to `family` | `mood=family` still matches. The card shows no family chip |
+| Generic theme singleton | A raw label that maps only to `military`, `political`, `historical`, or `revenge` | The matching `mood=` filter still matches. That chip is hidden |
+| Informative singleton | A raw label that maps only to `tense`, `noir`, or `violent` | That chip is shown. `violent` does not gain a graphic-violence claim |
+| Family plus a tone | «Семья и отношения» and «Напряжённый» | The chip is the tone, not the family label. `mood=family` still matches |
 | Family is not a genre | Genre «Семейный» and no family raw label | Genre line still shows «Семейный». No family chip is invented |
-| Theme echo | Genre «Военный» and raw «Военная тема» | No military chip. `mood=military` still matches |
-| Theme without the genre | No «Военный», raw «Военная тема» | Military chip remains |
+| Theme echo | Genre «Военный» and raw «Военная тема» plus «Напряжённый» | No military chip. The tone chip remains. `mood=military` still matches |
+| Theme beside another chip | No «Военный», raw «Военная тема» and «Напряжённый» | The military chip remains beside the tone |
+| Style move | «сюрреалистический», «абсурдный», «нуарный» | Ids `surreal`, `absurd`, and `noir`. Sidebar group «Стиль». `mood=surreal` still matches |
+| Friendship narrowing | «команда»; «Дружба и команда» | The first is not `friendship`. The second is `friendship` |
 | TV Movie | Stored genre «Телефильм» | `genre=Телефильм` still matches. Presentation calls it format. The string in the film record is unchanged |
-| Horror echo | Raw «ужасы» or `horror` | Does not become `eerie` if the owner accepts the narrower eerie rule. «мистический» still does |
-| Mechanic exact | «ограбление», «расследование» | `mechanic_only`. No mood chip. `plotMechanics` unchanged |
-| Mechanic compound | «криминальная афера», «спасательная миссия» | Not a mood id. Outcome `unmapped` or `mechanic_only` per the open question. Not a new mechanic id |
-| Military compound already pinned | «Военная осада», «военная погоня» | Still `military` only, unless the owner changes this pin |
-| Multi-map that is real | «тёплая семейная комедия» | `funny`, `warm`, and `family`, matching the current test, then the chip rule drops `family` if a tone is present |
+| Genres that stay genres | Stored «Документальный» or «Мультфильм» | They stay genre chips and genre filters. They are not format |
+| Horror echo | Raw «ужасы» or `horror`; raw «мистический» | The first two are not `eerie`. «мистический» is `eerie` |
+| Mechanic exact | «ограбление», «расследование» | `mechanic_only`. No mood id. `plotMechanics` unchanged |
+| Mechanic compound | «криминальная афера», «спасательная миссия» | `mechanic_only`. Not a mood id. Not a new `plotMechanics` value |
+| Military compound already pinned | «Военная осада», «военная погоня» | Still `military` only |
+| Multi-map that is real | «тёплая семейная комедия» | `funny`, `warm`, and `family`. The card drops `family` because a tone is present |
 | Unknown | «неизвестная формулировка 777» | `unmapped`. Absent from chips and from filter options |
 | Union | Fingerprint and prediction disagree | The facet is still the union. Hashes unchanged |
-| Overflow | Five real tone ids | At most three chips, and not the alphabetical prefix |
-| URL id | `mood=family`, `mood=dark`, `mood=military` | Still selects that id after the category move |
+| Overflow | Five real tone ids and no other bucket | One tone chip. It is not chosen by English id order |
+| Mechanic chip | `plotMechanics: ['heist']` and two tone labels | The chips are `heist` and one tone. `heist` is not a mood id. The mechanic filter still matches `heist` |
+| URL id | `mood=family`, `mood=dark`, `mood=military`, `mood=surreal`, `mood=violent` | Each still selects that id after the category move |
 | URL Russian label | `mood=Мрачный` | Still selects `dark`. An unknown label selects nothing |
+| Sidebar | The filter panel | Groups «Настроение», «Темы», «Стиль», «Особенности». The query key is still `mood` |
 | Preset | A stored query `mood=dark&genre=Драма` | `normalizePresetQuery` keeps both. Applying it restores both filters |
 | Preset rejection | `mood` value with a space or a character outside `[a-z0-9_]` | Still dropped |
 | Hash | The same fingerprint payload before and after the mapping change | Same `fingerprintHash`. `predictionCurrent` stays true |
-| Mechanics and execution | A fingerprint with `plotMechanics: ['heist']` and a general execution value | Those filters match exactly as they do now. No extra chip |
+| Execution | A general execution value on the fingerprint | That filter matches as it does now. Execution does not become a chip |
 | Immutable source | The mood-vocabulary backfill fixture | Fingerprint and prediction JSON remain byte-for-byte unchanged |
 
-`tests/mood-vocabulary.mjs` will need to change where it asserts the old `historical` or `funny` extras. That test change belongs to the implementation PR, not this one.
+`tests/mood-vocabulary.mjs` already pins the dual map of «чёрная комедия». The implementation PR updates that test to the rest of this matrix, including the romantic bug, the narrower eerie rule, bare «команда», and mechanic compounds. That test change belongs to AIR-108, not this pull request.
 
-## 10. Open questions
+## 10. Accepted decisions
 
-These block a faithful AIR-108. The audit does not pick them.
+The owner approved these ten decisions on 24 October 2026. The same text is on [AIR-47](https://trello.com/c/wkM9WSZB) and [AIR-108](https://trello.com/c/QIke4H2N). They specify AIR-108. They do not start it, and they do not authorize a backfill, a model regeneration, a production writer, or a flag change.
 
-1. Does «Чёрный юмор» also stay in `funny`? About 22 watchlist films sit in `mood=funny` only because of the dual map.
-2. Does the eerie rule stop matching «ужасы» and `horror`?
-3. Are «Документальный» and «Мультфильм» formats or genres?
-4. Do `surreal` and `absurd` stay tones, or move to style?
-5. Is `violent` a content property, a tone, or a split that needs new raw labels from a future generator?
-6. Is the broad friendship match on «команда» acceptable?
-7. Should a compound that is only a mechanic become `mechanic_only`, or stay `unmapped`?
-8. May a plot mechanic occupy one of the two or three chip slots?
-9. After ids move to theme and style, should the filter sidebar group them under new headings while the query key stays `mood`? The proposal says yes. Confirm the headings before implementation.
-10. Is the watchlist-only suppression of a lone `family` chip also required for `military`, `political`, `historical`, and `revenge` singletons? This audit suppresses only `family`.
+1. `black_humor` also stays `funny`. The existing dual mapping and the `mood=funny` filter stay.
+2. `eerie` does not match `horror` or «ужасы» automatically. It matches an independent frightening or mystical stem.
+3. «Документальный» and «Мультфильм» stay genres. «Телефильм» is format. The genre migration does not grow beyond that.
+4. `surreal` and `absurd` move to style. Their ids and `mood=` URLs stay.
+5. `violent` is a content property. «Жёсткий» is not evidence of graphic violence, and AIR-108 does not invent raw evidence to split it.
+6. «команда» without a friendship stem is not `friendship`. The friendship rule is narrowed.
+7. A compound raw phrase that only expresses a plot mechanic is `mechanic_only`. It is not a mood. AIR-108 does not fabricate a `plotMechanics` value from it.
+8. A stored plot mechanic may occupy one of the two or three card chips. Mood ids, mechanic filters, and the `mood` query stay separate.
+9. The sidebar groups are «Настроение», «Темы», «Стиль», and «Особенности». Legacy ids and presets keep the `mood` query key.
+10. A lone overly generic theme chip is suppressed, including `family`, `military`, `political`, `historical`, and `revenge`. The rule is informativeness, so a lone specific tone, style, content property, format, or mechanic still shows. The hidden theme id still matches its filter.
 
-## 11. Recommended sequence for AIR-108
+## 11. What AIR-108 implements after the blockers clear
 
-AIR-108 can stay one implementation card if the answers above are in the card before code starts. It should not grow a backfill or a regeneration.
+AIR-108 is one implementation of this specification. It does not start until this audit is accepted and [AIR-69](https://trello.com/c/FlcWZX7W) is done. It does not include a backfill, a model regeneration, or a production writer.
 
-1. Record the section 10 answers on the AIR-108 card. If the owner splits format, chip selection, and the substring fixes into separate releases, split the card before coding. The substring fixes change who matches `mood=historical` and can ship alone. Chip selection can ship after the mapping, because it only hides labels the mapping already produced.
-2. In one PR, change `mapRawMood` and the duplicated label tables, bump `MOOD_MAPPING_VERSION`, and update `tests/mood-vocabulary.mjs` to the matrix in section 9. Do not bump `fingerprintSchemaVersion` or `predictionPromptVersion`. Do not call the model.
-3. In that same PR, apply the chip rule in `moodTags` only. Leave genre text, mechanic filters, execution filters, channel filters, and preset storage keys as they are, except that moved ids remain valid `mood` values.
-4. Do not rewrite R2, do not run mood backfill, and do not enqueue predictions. Stale sidecars are acceptable because the view recomputes ids.
+1. The section 10 decisions are already on the AIR-108 card. Planning uses that text. Code starts after this audit is accepted and AIR-69 is done.
+2. In one PR, change `mapRawMood` and the duplicated label tables, bump `MOOD_MAPPING_VERSION`, and update `tests/mood-vocabulary.mjs` to section 9. Apply the chip rule and the four sidebar headings. Do not bump `fingerprintSchemaVersion` or `predictionPromptVersion`. Do not call the model.
+3. Leave genre strings, mechanic filters, execution filters, channel filters, and preset storage keys as they are, except that moved ids remain valid `mood` values and «Телефильм» is presented as format.
+4. Do not rewrite R2, do not run mood backfill, and do not enqueue predictions. Stale sidecars are acceptable because the view recomputes ids. A later sidecar refresh needs its own approval.
 5. After merge, the safe check is a local fixture or the existing test, not `GET /api/enrichment/view` and not `GET /api/events`. A production read of `GET /api/enrichment/moods/diagnostics` is a separate approval and is not required to ship the code.
 
 Rollback of that PR is a revert. Stored fingerprints and predictions do not need a restore, because the PR must not write them.
@@ -522,4 +530,6 @@ Rollback of that PR is a revert. Stored fingerprints and predictions do not need
 
 No file under `src/`, `public/`, `tests/`, or `migrations/` was edited. No feature flag, Scheduled Task, R2 object, or D1 database was written. Worker GET routes that can write were not called. The read-only mood diagnostics route was not called; the census used the account R2 `GET` API instead.
 
-**LIVE EVIDENCE AVAILABLE.** Section 2.4 is the production census. The audit is not finished as a product decision. Section 10 is still open. Catalog-only film identity, the watchlist share of the 21 family-only films, execution-value frequencies, and saved presets were not measured. AIR-108 stays blocked on those owner answers and on [AIR-69](https://trello.com/c/FlcWZX7W). This document does not authorize a backfill, a prediction run, or a schema bump.
+**LIVE EVIDENCE AVAILABLE.** Section 2.4 is the production census. Catalog-only film identity, the watchlist share of the 21 family-only films, execution-value frequencies, and saved presets were not measured. Those gaps stay gaps. They do not reopen section 10.
+
+AIR-108 remains blocked on acceptance of this audit and on [AIR-69](https://trello.com/c/FlcWZX7W). This document does not authorize a backfill, a model regeneration, a schema or prompt bump, or any production writer.
