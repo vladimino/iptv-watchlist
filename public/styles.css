@@ -143,6 +143,14 @@
 .film-execution{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px}
 .film-execution-item{min-width:0}
 .film-execution-item h3{margin:0 0 4px;font-size:12px}
+.film-compare .person-input{width:100%}
+.film-compare .person-options{width:100%;max-width:none}
+.film-compare-with{margin:10px 0 0;color:#d5dece}
+.film-compare-block{margin-top:10px}
+.film-compare-block h3{margin:0 0 6px;color:var(--muted);font-size:12px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}
+.film-compare-chip{display:inline-flex;align-items:center;border:1px solid var(--line);background:var(--surface);color:#d5dece;border-radius:999px;padding:4px 10px;font-size:13px;line-height:1.3}
+.film-compare-diff{margin:0;padding-left:18px;color:#d5dece}
+.film-compare-diff li{margin:0 0 4px}
 .film-screen .credit-link{overflow-wrap:anywhere}
 .film-facts{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .film-fact{margin:0;padding:7px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:#d5dece}
