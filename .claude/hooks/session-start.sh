@@ -9,9 +9,12 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
 fi
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
+  # The managed container runs as root; a self-hosted or custom image may not.
+  SUDO=""
+  if [ "$(id -u)" -ne 0 ]; then SUDO="sudo -n"; fi
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq --no-install-recommends sqlite3
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y -qq --no-install-recommends sqlite3
 fi
 
 cd "$CLAUDE_PROJECT_DIR"
