@@ -40,7 +40,7 @@ sequenceDiagram
         EPG->>R2: Fenced continuation and chunk writes
         MCP-->>Hourly: nextAction / nextCatchUpAt
     else Live, unknown or generation conflict
-        Note over Hourly,EPG: Fail closed; never start a new EPG run
+        Note over Hourly,EPG: Fail closed and do not start a new EPG run
     end
     opt Server explicitly returns continue, same generation and safe budget
         loop While safe nextAction is continue
