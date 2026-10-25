@@ -200,12 +200,12 @@ export function loadAdmin(params = new URLSearchParams(), options = {}) {
   if (params.get('loading') === '1') return {...fail(limit, null), mode: 'loading'};
   const queues = [];
   for (const code of FILM_QUEUE_CODES) {
-    const result = filmQueue(films, {queue: code, limit});
+    const result = readAll(cursor => filmQueue(films, cursor ? {queue: code, limit, cursor} : {queue: code, limit}));
     if (result.error) return fail(limit, result.error);
     queues.push({code, kind: 'film', count: result.items.length});
   }
   for (const code of PERSON_QUEUE_CODES) {
-    const result = personQueue(people, {queue: code, limit});
+    const result = readAll(cursor => personQueue(people, cursor ? {queue: code, limit, cursor} : {queue: code, limit}));
     if (result.error) return fail(limit, result.error);
     queues.push({code, kind: 'person', count: result.items.length});
   }

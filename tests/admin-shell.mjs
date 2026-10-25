@@ -117,6 +117,10 @@ assert.equal(JSON.stringify(pastQueuePage.filmResults.map(item => item.id)), JSO
 const searchPage = loadAdmin(new URLSearchParams('q=beacon'), {films: manyFilms});
 assert.equal(searchPage.filmResults.length, 25);
 assert.equal(searchPage.filmResults.some(item => item.id === 'film:beacon-late'), false);
+const manyPeople = Array.from({length: 26}, (_, index) => ({id: `person:missing-${String(index).padStart(2, '0')}`, preferred: 'Extra', original: 'Extra', aliases: [], externalIds: [], identity: {status: 'resolved'}, localization: {status: 'missing'}, localizationConflicts: []}));
+const queueCounts = loadAdmin(new URLSearchParams(), {films: manyFilms, people: manyPeople});
+assert.equal(queueCounts.queues.find(item => item.kind === 'film' && item.code === 'localization-missing').count, 27);
+assert.equal(queueCounts.queues.find(item => item.kind === 'person' && item.code === 'localization-missing').count, 26);
 assert.equal(JSON.stringify(searchFilms(ADMIN_FILMS, {query: 'одинаковый', limit: 25}).items.map(item => item.id)), JSON.stringify(collision.filmResults.map(item => item.id)));
 
 const listeners = new Map();
