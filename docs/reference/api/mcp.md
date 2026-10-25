@@ -41,7 +41,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `probe_echo` | no | Returns `text`, 1–200 characters. |
 | `epg_status` | no | `GET /api/status` |
 | `epg_pipeline_status` | no | `GET /api/enrichment/pipeline/status` |
-| `enrichment_schema` | no | `GET /api/enrichment/schema` |
+| `enrichment_schema` | no | `GET /api/enrichment/schema`, including `contract`: the rules `prediction_submit` validates with and the issue codes it reports ([AIR-152](enrichment.md#submit-validation-contract-air-152)). |
 | `enrichment_profile` | no | `GET /api/enrichment/profile` |
 | `enrichment_runner` | no | `GET /api/enrichment/runner` |
 | `enrichment_queue` | no | `GET /api/enrichment/queue/status` |
@@ -53,7 +53,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. After `stage` is `complete`, each call runs one discovery chunk or reports why it did not, and the response carries `diagnostic` (see Continuation diagnostics). |
 | `prediction_start` | yes | `POST /api/enrichment/start` with `scope: watchlist_all` and `mode: queued`. `trigger` is `scheduled` or `manual`. |
 | `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
-| `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction. |
+| `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction against the same contract; a rejected item stays a retryable `parse_error` and carries `results[].validation {stage, reportedBy, issues[{path, code}]}` naming the field, never the payload ([AIR-152](enrichment.md#submit-validation-contract-air-152)). |
 | `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
 | `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. [AIR-88](run-diagnostics.md). |
 
@@ -61,7 +61,7 @@ Prerequisite for every tool is [AIR-58](https://trello.com/c/BB01YN2f) (this Acc
 
 Write tools are annotated `readOnlyHint: false`. `enrichment_status` is too, because the HTTP status route can persist a recovered stop event. `epg_sync_start` and `epg_sync_step` are `openWorldHint: true` because they fetch Letterboxd, the configured EPG source, or TMDB. A wrong argument returns a tool result with `isError: true` and does not call the domain function. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.
 
-The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `discovery.nextAction`: `continue` means call `epg_sync_step` again now with the same `runId`; `wait` means do not call before `discovery.nextCatchUpAt`; `stop` means discovery is finished until the next EPG commit. `ratingsPending` does not mean retry Letterboxd; that follow-up is [AIR-64](https://trello.com/c/WTnyO8bX). One call is one metadata batch, the EPG commit, or one discovery chunk. A separate request does not guarantee a new isolate. The caller repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. ChatGPT generates the fingerprint and prediction; the Worker only validates and stores them.
+The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `discovery.nextAction`: `continue` means call `epg_sync_step` again now with the same `runId`; `wait` means do not call before `discovery.nextCatchUpAt`; `stop` means discovery is finished until the next EPG commit. `ratingsPending` does not mean retry Letterboxd; that follow-up is [AIR-64](https://trello.com/c/WTnyO8bX). One call is one metadata batch, the EPG commit, or one discovery chunk. A separate request does not guarantee a new isolate. The caller repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. ChatGPT generates the fingerprint and prediction, checks them against the `enrichment_schema` `contract`, and submits; the Worker only validates and stores them. A rejection names the field and the violation code in `results[].validation.issues`; the caller fixes that field for the following films, and the rejected film stays deferred under the unchanged retry rules.
 
 ### Discovery contract for Scheduled Tasks
 

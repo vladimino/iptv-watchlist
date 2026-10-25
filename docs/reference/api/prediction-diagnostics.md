@@ -7,7 +7,7 @@
 | Tool | What it returns |
 | --- | --- |
 | `prediction_queue_overview` | Published-generation and queue identity, snapshot time, hot/cold/total pending, `eligibleNow`, `deferredByRetry`, `nextRetryAt` in UTC, and coverage. `state` is `drained` only when nothing is outstanding. `temporarily_ineligible` means work remains and none of it is eligible, including retry backoff. |
-| `prediction_film_diagnostics` | One film id: fingerprint presence and schema, prediction presence and whether it matches the current profile, hot/cold membership, retry kind/scope/attempts/`failedAt`/`retryAt`/`lastRunId`, and whether the view index agrees with the film objects. A missing fact is `unknown` or `not_recorded`. |
+| `prediction_film_diagnostics` | One film id: fingerprint presence and schema, prediction presence and whether it matches the current profile, hot/cold membership, retry kind/scope/attempts/`failedAt`/`retryAt`/`lastRunId`, the retry's `validation` summary when the last rejection recorded one ([AIR-152](enrichment.md#submit-validation-contract-air-152)), and whether the view index agrees with the film objects. A missing fact is `unknown` or `not_recorded`. |
 | `prediction_pending` | A page of at most 20 outstanding film ids. `filter` is `all`, `eligible`, or `deferred`. `deferred` includes retry backoff and cold films waiting behind hot work. The cursor belongs to one queue snapshot; after the queue changes it returns `snapshot_changed` and no ids. |
 
 Eligibility is the same comparison the runner already uses (`queueReadyIds`): a numeric `retryAt` in the future is deferred. The response prints that instant as UTC. The tools do not refresh the queue or rewrite a retry.
@@ -16,7 +16,7 @@ Each response has `atomic: false`. The queue, profile, programme, and view index
 
 The overview reads the prediction queue, taste profile, view index, programme, discovered films, and published generation. A film diagnostic also reads that film's fingerprint and prediction. A pending page reads the overview set and does not read one object per film. None of the tools lists the bucket or writes.
 
-A saved failure is returned only as a short classification (`validation_error`, `parse_error`, `storage_error`, `quota`, and the existing safe stop reasons). The tools do not return profile text, fingerprint bodies, prediction text, prompts, tokens, or stack traces. A failure that was not stored is `not_recorded`.
+A saved failure is returned only as a short classification (`validation_error`, `parse_error`, `storage_error`, `quota`, and the existing safe stop reasons). The tools do not return profile text, fingerprint bodies, prediction text, prompts, tokens, or stack traces. A failure that was not stored is `not_recorded`. `retry.validation` is `null` when the stored retry has no summary (a retry written before AIR-152, or a system failure); otherwise it is `{stage, reportedBy, issues}` re-checked against the closed vocabulary: a `stage` outside `caller_reported`, `fingerprint_schema`, `fingerprint_missing`, `prediction_schema` becomes `unknown`, a `reportedBy` other than `caller` or `worker` becomes `null`, and an issue whose `path` is not `fingerprint` / `prediction` with up to two field segments or whose `code` is not a contract issue code is dropped.
 
 ## Production impact and rollback
 

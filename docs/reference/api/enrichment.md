@@ -29,6 +29,30 @@ Use `rating:null` to clear one. The film's actual rating never enters the `/next
 
 `GET /api/enrichment/status` returns the latest run with trigger, start/finish, checked/added/updated/failed, and queue status with remaining count, last batch stage/reason, and next catch-up time. The programme API does not read enrichment storage. A failed recompute keeps the previously committed prediction and its history, and the UI continues to show the programme. Ordinary successful checks need no ChatGPT notification; the Site's Events panel and footer expose progress. `GET /api/enrichment/footer/status` also returns `integrations` for that footer: watchlist, ratings, EPG ingestion, film recognition and predictions. The states come from the stored job results. The route still does not start a sync, a ratings refresh, or recognition. Ratings health is the later of `sync.json` `ratingObservedAt` / `ratingError` and the ratings status document. `manualRefreshEnabled` is false while `RATINGS_REFRESH` is unset; that note is separate from the source state, and an older blocked status does not override a newer EPG films success. A watchlist fetch that fails before `sync.json` is replaced is recorded in `watchlist-ingest.json` with a fixed code and a timestamp. Recognition uses the current programme run: a normal `epg_committed` or `chunk_budget` continuation is in progress, and a previous generation's completion is not this generation's success. A stored ratings or watchlist failure does not change the EPG or prediction state.
 
+## Submit validation contract (AIR-152)
+
+[AIR-152](https://trello.com/c/12A3EM3e) makes one declarative contract drive both the `POST /api/enrichment/submit` validator and `GET /api/enrichment/schema`, so a caller can run the same checks before `prediction_submit` and, when the Worker still rejects an item, learn which field failed. The rule tables (`FINGERPRINT_RULES`, `PREDICTION_RULES` in `src/enrichment.js`) are the only source of field names, enum lists, list sizes and lengths; the validator interprets them, and the schema route serialises them. The accepted set of payloads is unchanged from the previous hand-written checks: `payoff` and `ending_quality` take `weak | mixed | strong | unknown`, `hero_vulnerability` takes `low | mixed | high | unknown`, `moodLabels` holds 2–4 labels of at most 45 characters, the thirteen general `execution` dimensions are required and the genre dimensions are optional.
+
+`GET /api/enrichment/schema` keeps its descriptive fields and adds `contract`:
+
+| Field | Meaning |
+| --- | --- |
+| `contract.version` | `1` |
+| `contract.fingerprint.rules`, `contract.prediction.rules` | One rule per field. `kind` is `const` (`value`), `enum` (`values`), `enum_list` (`values`), `enum_object` (`fields` with the allowed values per key, `required`, `optional`), `text_list` (`minItems`, `maxItems`, `maxLength`), `ref_list` (as `text_list`; each item is an `https://` URL or `model_knowledge`), `number` (`min`, `max`, optional `step`) or `text` (`maxLength`, `nullable`) |
+| `contract.fingerprint.maxChars` | Serialised size cap of an otherwise valid fingerprint (`12000`) |
+| `contract.issueCodes` | `required`, `invalid_type`, `invalid_version`, `invalid_enum`, `too_few`, `too_many`, `empty`, `too_long`, `out_of_range`, `invalid_step`, `invalid_ref`, `too_large` |
+
+A rejected item in the `submit` response keeps its previous shape (`status: retryable_failure`, `error: parse_error`, `failureScope: item`, `retryable`, `retryAt`) and adds `validation`:
+
+```json
+{"filmId":"tmdb_1","status":"retryable_failure","error":"parse_error","failureScope":"item","retryable":true,"retryAt":1792957895257,
+ "validation":{"stage":"fingerprint_schema","reportedBy":"worker","issues":[{"path":"fingerprint.execution.payoff","code":"invalid_enum"},{"path":"fingerprint.moodLabels","code":"required"}]}}
+```
+
+`stage` is `fingerprint_schema` or `prediction_schema` (the Worker rejected the submitted object), `fingerprint_missing` (the film has no current fingerprint and none was submitted; `issues` is `[{path: "fingerprint", code: "required"}]`) or `caller_reported` (the caller sent `failure.kind`; `issues` is empty). `path` is `fingerprint` or `prediction`, optionally followed by the field and, for `execution`, the dimension; a list issue names the list, not the item. At most 20 issues are reported, in rule-table order. The same `validation` object is stored on `run.failures[filmId]` and copied into the queue `retries` record, and [`prediction_film_diagnostics`](prediction-diagnostics.md) returns it as `retry.validation` after re-checking every path and code against the vocabulary. A system failure (`storage_error`, run scope) carries no `validation`: a schema violation, a model output the caller could not parse and a storage or API failure are three different records.
+
+Nothing else about item failures changed: the failure is still a retryable `parse_error` with the same backoff, re-delivery of the same film is idempotent and returns the stored `validation`, five consecutive distinct format failures still stop the run as `format_error_storm`, and the AIR-88 `itemValidation.stages` entries keep their `{stage, reportedBy}` shape. The thrown validator message, the payload, the model output and the film title are never copied into the response, the run record, the queue or a log line; only paths and codes from the closed vocabulary are. The runner contract (`GET /api/enrichment/runner`, `itemFailures.validation`) and the MCP tool descriptions point the caller at the contract before `submit`. Deferred films are not retried or reset by this change; their retry records simply gain the summary from the next rejection.
+
 ## Letterboxd personal ratings and runtime
 
 Film runtime is already parsed from each Letterboxd film page as minutes and is included in the programme snapshot. Some unreleased films have no published runtime; their value remains `null` until Letterboxd supplies it. The card displays runtime when available.

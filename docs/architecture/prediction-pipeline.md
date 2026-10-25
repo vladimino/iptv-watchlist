@@ -44,4 +44,6 @@ sequenceDiagram
 
 The fingerprint schema/hash tracks the film independently from a personal prediction, which also requires the current profile version/hash and prompt version. A profile change makes predictions stale without forcing a fingerprint regeneration; EPG showtimes do not invalidate either. One malformed film output is deferred with exponential backoff rather than discarding successes. This diagram is a conceptual view of the runner protocol, not an assertion that every branch occurs on each invocation.
 
+The "Read schema" step and the "Isolated invalid output" branch share one contract since [AIR-152](../reference/api/enrichment.md#submit-validation-contract-air-152): the schema the client reads carries the exact rules the Worker validates with, and a rejected submit returns the violated field and code from that vocabulary alongside the unchanged per-film failure and `retryAt`. The components, data authority, trust boundary and queue semantics in the diagram are unchanged; the Mermaid source was not modified.
+
 The [queue ADR](../adr/0015-queued-prediction-recovery.md) specifies hot priority, lease and retry limits. [Actual ratings](../reference/api/enrichment.md) remain independent evidence, not an answer passed into model prompts. No prediction run was started to draw this diagram.

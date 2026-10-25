@@ -45,9 +45,17 @@ function predictionDiagnosticClassification(kind){
  const safe=safePredictionReason(kind);
  return safe||'not_recorded';
 }
+// AIR-152: the stored validation summary is re-checked against the closed vocabulary before it is
+// returned; a path or code outside it is dropped, so a tampered retry record cannot leak text.
+const PREDICTION_VALIDATION_STAGES=['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema'];
+function predictionDiagnosticValidation(validation){
+ if(!validation||typeof validation!=='object')return null;
+ const issues=Array.isArray(validation.issues)?validation.issues.filter(issue=>issue&&typeof issue==='object'&&typeof issue.path==='string'&&/^(fingerprint|prediction)(\.[A-Za-z0-9_]{1,40}){0,2}$/.test(issue.path)&&ISSUE_CODES.includes(issue.code)).slice(0,MAX_ISSUES).map(issue=>({path:issue.path,code:issue.code})):[];
+ return {stage:PREDICTION_VALIDATION_STAGES.includes(validation.stage)?validation.stage:'unknown',reportedBy:validation.reportedBy==='caller'||validation.reportedBy==='worker'?validation.reportedBy:null,issues};
+}
 function predictionDiagnosticRetry(queue,filmId){
  const retry=queue?.retries?.[filmId];
- if(!retry||typeof retry!=='object')return {classification:'not_recorded',scope:null,attempts:null,failedAt:null,retryAt:null,lastRunId:null};
+ if(!retry||typeof retry!=='object')return {classification:'not_recorded',scope:null,attempts:null,failedAt:null,retryAt:null,lastRunId:null,validation:null};
  const failedAt=predictionDiagnosticRetryAt(retry.failedAt);
  return {
   classification:predictionDiagnosticClassification(retry.kind),
@@ -55,6 +63,7 @@ function predictionDiagnosticRetry(queue,filmId){
   attempts:Number.isInteger(retry.attempts)&&retry.attempts>=0?retry.attempts:null,
   failedAt,retryAt:predictionDiagnosticRetryAt(retry.retryAt),
   lastRunId:typeof retry.lastRunId==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(retry.lastRunId)?retry.lastRunId:null,
+  validation:predictionDiagnosticValidation(retry.validation),
  };
 }
 function predictionDiagnosticLane(queue,filmId){
