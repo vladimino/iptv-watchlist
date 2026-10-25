@@ -17,6 +17,7 @@ The documentation is organized by **purpose**, not by the former flat file layou
 ## Common starting points
 
 - **New contributor:** [README](../README.md), [AGENTS.md](../AGENTS.md), [CONTRIBUTING.md](../CONTRIBUTING.md) and [agent workflow](process/agent-workflow.md).
+- **Runtime feature flags:** [flag contract and dated production evidence](reference/feature-flags.md); live bindings must be verified separately.
 - **Runtime / deployment:** [system context](architecture/system-context.md), [deployment and rollback diagram](architecture/deployment-and-rollback.md), [deployment runbook](runbooks/deployment.md).
 - **EPG / discovery:** [EPG publication](architecture/epg-and-availability.md), [discovery and resolution](architecture/discovery-and-resolution.md), [scored-resolution contract](reference/domain/scored-resolution.md), [candidate discovery](reference/domain/candidate-discovery.md).
 - **Film/Person:** [lifecycle diagram](architecture/film-person-lifecycle.md) and [domain contract](reference/domain/film-person.md).
