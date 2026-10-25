@@ -193,6 +193,17 @@ assert.equal(applyTitleReview(corrected,{...typed,basis:'  Официальны�
 assert.equal(applyTitleReview(corrected,{...typed,basis:null},LATER).reason,'request_id_reused','dropping the basis is a different request');
 assert.equal(corrected.titleReviews[1].version.before,first.version);
 assert.equal(corrected.titleReviews[1].version.after,second.version);
+assert.equal(second.version,titleReviewVersion(corrected),'stamping version.after on the new entry does not move the token');
+// The audit history is part of the token in full: a metadata-only correction to an earlier entry under the same requestId is a version change.
+const historyEdit=(patch,index=0)=>titleReviewVersion({...corrected,titleReviews:corrected.titleReviews.map((review,i)=>i===index?{...review,...patch}:review)});
+assert.notEqual(historyEdit({basis:'Задним числом'}),second.version,'an audit basis edit is a version change');
+assert.notEqual(historyEdit({selectedFrom:'wikidata'}),second.version,'an audit provenance edit is a version change');
+assert.notEqual(historyEdit({at:new Date(LATER).toISOString()}),second.version,'an audit timestamp edit is a version change');
+assert.notEqual(historyEdit({from:{...corrected.titleReviews[0].from,value:'Другое'}}),second.version,'an audit from/to edit is a version change');
+assert.notEqual(historyEdit({version:{...corrected.titleReviews[0].version,before:'title-review:1:00000000000000'}}),second.version,'an audit version.before edit is a version change');
+assert.equal(historyEdit({version:{...corrected.titleReviews[0].version,after:'title-review:1:00000000000000'}}),second.version,'version.after is the one field outside the token');
+assert.equal(titleReviewVersion({...corrected,titleReviews:[corrected.titleReviews[1],corrected.titleReviews[0]]})===second.version,false,'audit order is part of the history');
+assert.equal(applyTitleReview({...corrected,titleReviews:corrected.titleReviews.map((review,i)=>i===0?{...review,basis:'Задним числом'}:review)},{filmId:'film:28nq',requestId:'req-6',mode:'alias',value:'Зорро (2005)',expectedVersion:second.version},LATER).reason,'version_conflict','a review prepared before the history edit is refused');
 assert.equal(corrected.titleReviews[0],reviewed.titleReviews[0],'earlier audit entries are kept as they were');
 assert.equal(corrected.canonicalIdentity,'tmdb:1656');
 assert.equal(snapshot(reviewed.titleReviews),snapshot(first.film.titleReviews));

@@ -66,10 +66,10 @@ Legal transitions are the lifecycle contract's: `missing → reviewed`, `provisi
 - the whole `localization` envelope, including its `provenance` (`basis`, `requestId`, `selectedFrom`, `authority`, …);
 - the title aliases with their provenance;
 - the selectable option texts (so a changed original or EPG title counts);
-- the `requestId`s of earlier reviews;
+- the earlier audit entries (`titleReviews`) in full and in order, except each entry's own `version.after`: that field is the token of the state the entry belongs to, so it is stamped after the token is computed and cannot be part of it;
 - the `localizationConflicts` held by reviewed precedence.
 
-Metadata, fingerprint, prediction and identity are not part of it. Any successful review changes the token, and so does a provenance-only or conflict-only concurrent change: a screen that shows stale provenance or misses a newly held value cannot pass the check and has to reload. A stale token is `version_conflict`; the only command that is accepted with a stale or missing token is the replay of an already committed `requestId` (see Transition). A storage adapter (AIR-53) may map this token onto a row version or etag and must check the mapped version in the same write. Offline, this token is the only version there is.
+Metadata, fingerprint, prediction and identity are not part of it. Any successful review changes the token, and so does a provenance-only, conflict-only or audit-history-only concurrent change (a corrected `basis`, `selectedFrom`, timestamp or `from`/`to` on an earlier entry under the same `requestId`): a screen that shows stale provenance or history, or misses a newly held value, cannot pass the check and has to reload. A stale token is `version_conflict`; the only command that is accepted with a stale or missing token is the replay of an already committed `requestId` (see Transition). A storage adapter (AIR-53) may map this token onto a row version or etag and must check the mapped version in the same write. Offline, this token is the only version there is.
 
 ## Not in this contract
 

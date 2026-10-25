@@ -30,17 +30,24 @@ function reviewHash(text,seed=0){
  return (4294967296*(2097151&h2)+(h1>>>0)).toString(16).padStart(14,'0');
 }
 function reviewTitleAliases(film){return (film?.aliases||[]).filter(alias=>alias?.value&&(alias.kind||'title')==='title');}
+// An audit entry as the version token sees it: the whole entry except its own `version.after`,
+// which is the token of the state that contains the entry and so cannot be part of that token.
+function reviewAuditBody(review){
+ if(!review||typeof review!=='object')return review??null;
+ const {version,...rest}=review;
+ return {...rest,version:{before:version?.before??null}};
+}
 // Compare-and-set token over everything titleReviewState shows: the whole localization envelope
 // including its provenance, the title aliases with their provenance, the selectable option texts,
-// the ids of earlier reviews and the held conflicts. Metadata, fingerprint, prediction and identity
-// are not part of it. A storage adapter can map it onto its own row version or etag; offline it is
-// the only version there is.
+// the earlier audit entries in full (minus each entry's own `version.after`) and the held conflicts.
+// Metadata, fingerprint, prediction and identity are not part of it. A storage adapter can map it
+// onto its own row version or etag; offline it is the only version there is.
 function titleReviewVersion(film){
  const body={
   localization:film?.localization??null,
   aliases:reviewTitleAliases(film).slice().sort((a,b)=>a.value<b.value?-1:a.value>b.value?1:0),
   options:titleReviewOptions(film).map(option=>option.value).sort(),
-  reviews:(film?.titleReviews||[]).map(review=>review.requestId),
+  reviews:(film?.titleReviews||[]).map(reviewAuditBody),
   conflicts:film?.localizationConflicts??[],
  };
  return 'title-review:1:'+reviewHash(reviewStableJson(body));
