@@ -94,6 +94,10 @@ const forbidden=[
  ['prediction_pending',{limit:100}],
  ['prediction_pending',{limit:1,cursor:'not-a-cursor'}],
  ['prediction_pending',{limit:1,prefix:'enrichment/'}],
+ ['prediction_validate',{}],
+ ['prediction_validate',{fingerprint:{},key:'enrichment/x'}],
+ ['prediction_validate',{fingerprint:'text'}],
+ ['prediction_validate',{prediction:[]}],
 ];
 for(const [name,args] of forbidden){
  fetches.length=0;
@@ -128,7 +132,7 @@ for(const tool of tools){
  assert.doesNotMatch(properties,/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,false);
-for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_pending']){
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_pending']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
@@ -215,6 +219,49 @@ assert.equal(happyDone.body.result.structuredContent.status,'complete');
 assert.equal((await tool(happyEnv,'prediction_complete',{runId:happyRunId})).body.result.structuredContent.status,'complete');
 assert.ok([...happy.records.keys()].some(key=>key.startsWith('events/items/')&&key.includes('enrichment')));
 
+// AIR-152: a schema rejection names the field through the MCP result; the contract is published by enrichment_schema.
+const schemaTool=await tool(happyEnv,'enrichment_schema',{});
+assert.equal(schemaTool.body.result.structuredContent.contract.version,1);
+assert.deepEqual(schemaTool.body.result.structuredContent.contract.fingerprint.rules.execution.fields.payoff,['weak','mixed','strong','unknown']);
+assert.ok(schemaTool.body.result.structuredContent.contract.issueCodes.includes('invalid_enum'));
+const invalid=store();
+invalid.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
+invalid.records.set('programme.json',{runId:'programme-1',updatedAt:new Date(now).toISOString(),films:[{id:'film2',title:'Heat TITLE-CANARY',original:'Heat',year:1995,tmdbId:'1657',genres:[],directors:[],actors:[],shows:[{start:now}]}],watchlistCount:1});
+invalid.records.set('sync.json',{runId:'programme-1',stage:'complete'});
+const invalidEnv={BUCKET:invalid.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
+const invalidRunId=(await tool(invalidEnv,'prediction_start',{trigger:'manual'})).body.result.structuredContent.runId;
+await tool(invalidEnv,'prediction_next',{runId:invalidRunId});
+const {moodLabels:_noMood,...fingerprintWithoutMood}=fingerprint;
+const rejected=await tool(invalidEnv,'prediction_submit',{runId:invalidRunId,items:[{filmId:'film2',fingerprint:{...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']},prediction}]});
+assert.equal(rejected.body.result.isError,undefined,JSON.stringify(rejected.body));
+assert.equal(rejected.body.result.structuredContent.httpStatus,200);
+const rejectedItem=rejected.body.result.structuredContent.results[0];
+assert.equal(rejectedItem.status,'retryable_failure');assert.equal(rejectedItem.error,'parse_error');assert.equal(rejectedItem.failureScope,'item');
+assert.deepEqual(rejectedItem.validation,{stage:'fingerprint_schema',reportedBy:'worker',issues:[{path:'fingerprint.execution.payoff',code:'invalid_enum'},{path:'fingerprint.moodLabels',code:'required'}]});
+assert.equal(invalid.records.has('enrichment/films/film2/fingerprint.json'),false);
+assert.doesNotMatch(JSON.stringify(rejected.body),/PAYLOAD-CANARY|TITLE-CANARY|Invalid fingerprint/);
+assert.doesNotMatch(JSON.stringify([...invalid.records]),/PAYLOAD-CANARY|Invalid fingerprint/);
+assert.deepEqual(invalid.records.get('enrichment/prediction-queue.json').retries.film2.validation.issues.map(issue=>issue.path),['fingerprint.execution.payoff','fingerprint.moodLabels']);
+
+// prediction_validate is the executable preflight: same contract, no storage, no run, not a failure.
+const validateDenied=[];
+const validateSealed={BUCKET:{async get(){validateDenied.push('get');},async put(){validateDenied.push('put');},async list(){validateDenied.push('list');}},MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
+fetches.length=0;
+const preflightBad=await tool(validateSealed,'prediction_validate',{fingerprint:{...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']},prediction:{...prediction,predictedRating:4.2}});
+assert.equal(preflightBad.body.result.isError,undefined,JSON.stringify(preflightBad.body));
+assert.deepEqual(preflightBad.body.result.structuredContent,{valid:false,contractVersion:1,fingerprint:{checked:true,issues:[{path:'fingerprint.execution.payoff',code:'invalid_enum'},{path:'fingerprint.moodLabels',code:'required'}]},prediction:{checked:true,issues:[{path:'prediction.predictedRating',code:'invalid_step'}]},storage:'not_accessed',sideEffects:'none'});
+assert.doesNotMatch(JSON.stringify(preflightBad.body),/PAYLOAD-CANARY/);
+const preflightGood=await tool(validateSealed,'prediction_validate',{fingerprint,prediction});
+assert.deepEqual(preflightGood.body.result.structuredContent,{valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:true,issues:[]},storage:'not_accessed',sideEffects:'none'});
+const preflightOne=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_validate',{prediction});
+assert.deepEqual(preflightOne.body.result.structuredContent.fingerprint,{checked:false,issues:[]});assert.equal(preflightOne.body.result.structuredContent.valid,true,'answers without a bucket binding');
+assert.deepEqual(validateDenied,[]);
+assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[]);
+assert.equal((await tool(validateSealed,'prediction_validate',{fingerprint},{assertion:null})).response.status,403,'preflight stays behind the Access JWT');
+assert.deepEqual(validateDenied,[]);
+// The preflight verdict and the submit verdict agree on the same payload.
+assert.deepEqual(preflightBad.body.result.structuredContent.fingerprint.issues,rejectedItem.validation.issues);
+
 const conflicts=store();
 conflicts.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
 conflicts.records.set('programme.json',structuredClone(happy.records.get('programme.json')));
@@ -256,6 +303,7 @@ assert.match(JSON.stringify(changed.body.result.structuredContent),/Profile chan
 const diagnosticNow=Date.now();
 const diagnosticIds=['film-zz-1','film-zz-2','film-zz-3','film-zz-4','film-zz-5'];
 const diagnosticRetries=Object.fromEntries(diagnosticIds.map(id=>[id,{kind:id==='film-zz-2'?'Error: Bearer CANARY-TOKEN stack':'validation_error',scope:'item',attempts:2,failedAt:diagnosticNow-1000,retryAt:diagnosticNow+3600000,lastRunId:'run-zz-retry'}]));
+diagnosticRetries['film-zz-3'].validation={stage:'fingerprint_schema',reportedBy:'worker',issues:[{path:'fingerprint.execution.hero_vulnerability',code:'invalid_enum'},{path:'fingerprint.strengths CANARY-TEXT',code:'too_long'},{path:'prediction.mainRisk',code:'CANARY-CODE'}]};
 const diagnosticRecords=new Map(Object.entries({
  'enrichment/prediction-queue.json':{schemaVersion:3,profileVersion:3,profileHash:'hash-zz',programmeRunId:'run-zz',refreshedAt:'2026-10-24T08:00:00.000Z',hotPending:diagnosticIds,coldPending:[],pending:diagnosticIds,priorityCount:5,retries:diagnosticRetries},
  'enrichment/profile/current.json':{version:3,profileHash:'hash-zz',updatedAt:'2026-10-24T07:00:00.000Z',profile:'CANARY-PROFILE-TEXT'},
@@ -295,15 +343,18 @@ assert.equal(diagnosticFilm.body.result.structuredContent.prediction.cause,'prof
 assert.equal(diagnosticFilm.body.result.structuredContent.prediction.stale,true);
 assert.equal(diagnosticFilm.body.result.structuredContent.retry.classification,'validation_error');
 assert.equal(diagnosticFilm.body.result.structuredContent.retry.retryAt,new Date(diagnosticNow+3600000).toISOString());
+assert.equal(diagnosticFilm.body.result.structuredContent.retry.validation,null);
 const diagnosticSecret=await tool(diagnosticEnv,'prediction_film_diagnostics',{filmId:'film-zz-2'});
 assert.equal(diagnosticSecret.body.result.structuredContent.retry.classification,'model_error');
+const diagnosticValidation=await tool(diagnosticEnv,'prediction_film_diagnostics',{filmId:'film-zz-3'});
+assert.deepEqual(diagnosticValidation.body.result.structuredContent.retry.validation,{stage:'fingerprint_schema',reportedBy:'worker',issues:[{path:'fingerprint.execution.hero_vulnerability',code:'invalid_enum'}]});
 const diagnosticPage=await tool(diagnosticEnv,'prediction_pending',{filter:'eligible',limit:20});
 assert.deepEqual(diagnosticPage.body.result.structuredContent.items,[]);
 const diagnosticDeferred=await tool(diagnosticEnv,'prediction_pending',{filter:'deferred',limit:2});
 assert.deepEqual(diagnosticDeferred.body.result.structuredContent.items.map(item=>item.filmId),['film-zz-1','film-zz-2']);
 const diagnosticNext=await tool(diagnosticEnv,'prediction_pending',{filter:'deferred',limit:2,cursor:diagnosticDeferred.body.result.structuredContent.nextCursor});
 assert.deepEqual(diagnosticNext.body.result.structuredContent.items.map(item=>item.filmId),['film-zz-3','film-zz-4']);
-const diagnosticReport=JSON.stringify([diagnosticOverview.body.result.structuredContent,diagnosticFilm.body.result.structuredContent,diagnosticSecret.body.result.structuredContent,diagnosticDeferred.body.result.structuredContent]);
+const diagnosticReport=JSON.stringify([diagnosticOverview.body.result.structuredContent,diagnosticFilm.body.result.structuredContent,diagnosticSecret.body.result.structuredContent,diagnosticValidation.body.result.structuredContent,diagnosticDeferred.body.result.structuredContent]);
 assert.doesNotMatch(diagnosticReport,/CANARY|Bearer|plotMechanics|mainRisk|enrichment\/|\.json/);
 assert.ok(diagnosticReport.length<8000);
 assert.equal(diagnosticPuts.length,0);

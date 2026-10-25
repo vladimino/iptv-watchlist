@@ -33,7 +33,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 
 ### Tools
 
-`probe_read` and `probe_echo` do not read or write R2. `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` read a fixed set of stored objects and return that diagnostic with `httpStatus: 200`. They do not call an HTTP route, list storage, or write. Every other tool returns `structuredContent.httpStatus` plus the JSON body of the existing HTTP contract. `400`, `404`, `409`, `503`, and `5xx` set `isError`, and the body stays in `structuredContent` so the caller can still read `Run id mismatch`, `lease_lost`, `busy`, or `Queue not empty`. `already_running` is HTTP 200: stop and do not adopt that `runId`.
+`probe_read`, `probe_echo` and `prediction_validate` do not read or write R2; `prediction_validate` runs the submit validators on the caller's own candidate objects and answers even without a bucket binding. `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` read a fixed set of stored objects and return that diagnostic with `httpStatus: 200`. They do not call an HTTP route, list storage, or write. Every other tool returns `structuredContent.httpStatus` plus the JSON body of the existing HTTP contract. `400`, `404`, `409`, `503`, and `5xx` set `isError`, and the body stays in `structuredContent` so the caller can still read `Run id mismatch`, `lease_lost`, `busy`, or `Queue not empty`. `already_running` is HTTP 200: stop and do not adopt that `runId`.
 
 | Tool | Writes | What it calls |
 | --- | --- | --- |
@@ -41,19 +41,20 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `probe_echo` | no | Returns `text`, 1–200 characters. |
 | `epg_status` | no | `GET /api/status` |
 | `epg_pipeline_status` | no | `GET /api/enrichment/pipeline/status` |
-| `enrichment_schema` | no | `GET /api/enrichment/schema` |
+| `enrichment_schema` | no | `GET /api/enrichment/schema`, including `contract`: the rules `prediction_submit` validates with and the issue codes it reports (see [the submit validation contract](enrichment.md#submit-validation-contract)). |
 | `enrichment_profile` | no | `GET /api/enrichment/profile` |
 | `enrichment_runner` | no | `GET /api/enrichment/runner` |
 | `enrichment_queue` | no | `GET /api/enrichment/queue/status` |
 | `enrichment_status` | recovery only | `GET /api/enrichment/status`, including an undelivered stop event |
 | `prediction_queue_overview` | no | Existing queue, profile, view index, programme, discovered films, and published generation. No HTTP route. See [prediction diagnostics](prediction-diagnostics.md). |
 | `prediction_film_diagnostics` | no | The same snapshot plus that film's fingerprint and prediction. No HTTP route. [AIR-98](prediction-diagnostics.md). |
+| `prediction_validate` | no | The complete `fingerprint` and/or `prediction` the caller intends to submit, checked with the same validators `prediction_submit` uses. Returns `valid`, per object `{checked, issues[{path, code}]}`, `contractVersion`, `storage: not_accessed`. No HTTP route, no storage, no run or lease; it is not a submit and records no failure ([submit validation contract](enrichment.md#submit-validation-contract)). |
 | `prediction_pending` | no | One page of the same queue snapshot. No HTTP route. [AIR-98](prediction-diagnostics.md). |
 | `epg_sync_start` | yes | `POST /api/sync/start`. No arguments. |
 | `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. After `stage` is `complete`, each call runs one discovery chunk or reports why it did not, and the response carries `diagnostic` (see Continuation diagnostics). |
 | `prediction_start` | yes | `POST /api/enrichment/start` with `scope: watchlist_all` and `mode: queued`. `trigger` is `scheduled` or `manual`. |
 | `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
-| `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction. |
+| `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction against the same contract; a rejected item stays a retryable `parse_error` and carries `results[].validation {stage, reportedBy, issues[{path, code}]}` naming the field, never the payload (see [the submit validation contract](enrichment.md#submit-validation-contract)). |
 | `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
 | `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. See [run diagnostics](run-diagnostics.md). |
 
@@ -61,7 +62,7 @@ All MCP tools require the [Cloudflare Access and Worker JWT validation](#authori
 
 Write tools are annotated `readOnlyHint: false`. `enrichment_status` is too, because the HTTP status route can persist a recovered stop event. `epg_sync_start` and `epg_sync_step` are `openWorldHint: true` because they fetch Letterboxd, the configured EPG source, or TMDB. A wrong argument returns a tool result with `isError: true` and does not call the domain function. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.
 
-The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `discovery.nextAction`: `continue` means call `epg_sync_step` again now with the same `runId`; `wait` means do not call before `discovery.nextCatchUpAt`; `stop` means discovery is finished until the next EPG commit. `ratingsPending` does not mean retry Letterboxd; a separate ratings-refresh workflow handles that follow-up. One call is one metadata batch, the EPG commit, or one discovery chunk. A separate request does not guarantee a new isolate. The caller repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. ChatGPT generates the fingerprint and prediction; the Worker only validates and stores them.
+The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `discovery.nextAction`: `continue` means call `epg_sync_step` again now with the same `runId`; `wait` means do not call before `discovery.nextCatchUpAt`; `stop` means discovery is finished until the next EPG commit. `ratingsPending` does not mean retry Letterboxd; a separate ratings-refresh workflow handles that follow-up. One call is one metadata batch, the EPG commit, or one discovery chunk. A separate request does not guarantee a new isolate. The caller repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. ChatGPT generates the fingerprint and prediction, calls `prediction_validate` with the complete objects (or applies the `enrichment_schema` `contract` itself), fixes every issue, and submits; the Worker validates again and stores them. A submit rejection names the field and the violation code in `results[].validation.issues`; the caller fixes that field for the following films, and the rejected film stays deferred under the ordinary retry rules. The Worker is the enforcement point: the preflight tool is available to the client, but whether the external Scheduled Task calls it is decided by that task's prompt, outside this repository.
 
 ### Discovery contract for Scheduled Tasks
 
@@ -146,7 +147,7 @@ This repository change does not modify Cloudflare Access. Each item below must b
 ## Limitations
 
 
-- Probe tools do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. Scheduled task rollout was AIR-62; new invocations or modifications need separate approval.
+- Probe tools and `prediction_validate` do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. A connected ChatGPT or Claude client may cache the tool list; a tool added by a deploy appears only after that client refreshes or reconnects the server. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. The external Scheduled Tasks were enabled under their own owner approval; new invocations or modifications need separate approval.
 - No SSE, sessions, server-to-client requests, `list_changed` notifications, resources, prompts, or batches. Clients that support only `2026-07-28` are not supported.
 - The origin allow-list is fixed in code: the Worker's own origin and `https://chatgpt.com`.
 - Initial October 19–20 interactive MCP probes did not establish unattended access. [AIR-62](https://trello.com/c/CU71gW4c) subsequently accepted scheduled EPG/prediction runs on October 21; on October 24 both external recurring tasks remained enabled with recent executions. These dated checks do not prove current OAuth health or unspecified security/revocation test results.
