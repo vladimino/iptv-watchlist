@@ -40,7 +40,7 @@ const event=plain([...records].find(([key,value])=>key.startsWith('events/items/
 assert.equal(event.stopReason,'eligible_queue_empty');assert.equal(event.stage,'complete');
 const eventHTML=render('eventHTML',event);
 assert.match(eventHTML,/Прогнозы обновлены/);assert.match(eventHTML,/Локальная база: 2286 из 2287 · 99,9%/);assert.match(eventHTML,/Окно просмотра: 1877 из 1878 · 99,9%/);
-assert.match(eventHTML,/Остался 1 фильм без актуального прогноза\. Ожидает повторной попытки не раньше \d{2}:\d{2}/);
+assert.match(eventHTML,/Остался 1 фильм без актуального прогноза\. Ожидает повторной попытки не раньше (\d+ [а-я]+\., )?\d{2}:\d{2}/);
 assert.doesNotMatch(eventHTML,FORBIDDEN);assert.doesNotMatch(eventHTML,/приостановлен|прерван|ошибка/);
 // The footer reads the same slices from the stored queue, read-only, and keeps the schedule estimate apart from the film retry time.
 const writesBefore=revision;

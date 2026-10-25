@@ -56,8 +56,9 @@ assert.doesNotMatch(exact.local,/100,0%/);
 assert.match(exact.windowCoverage,/ · 100%/);
 assert.equal(text.runLabel,'Последний run');assert.equal(text.runLine,'завершён · 27 фильмов без актуального прогноза','a stored queue_empty never claims a drained queue while films are outstanding');assert.match(text.nextLine,/Следующий запуск: около /);assert.match(text.nextRun,/^около /);
 // Queue outcome comes from the stored slices, never from the stop reason alone (Europe/Madrid times).
-const outcome=(predictions,lastRun={status:'completed',reason:'eligible_queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:1})=>{context.outcome={...context.input,predictions:{...context.input.predictions,...predictions},lastRun};return vm.runInContext('footerStatusText(outcome)',context);};
-let line=outcome({pendingHot:0,pendingCold:0,outstanding:0,eligibleNow:0,deferredByRetry:0,nextRetryAt:null,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0});
+const fullCoverage={confirmedFilmsTotal:100,currentPredictionsTotal:100,windowFilmsTotal:20,windowCurrentPredictions:20,cacheOffWindowTotal:80,localPercent:100,windowPercent:100};
+const outcome=(predictions,lastRun={status:'completed',reason:'eligible_queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:1},coverage=context.input.coverage)=>{context.outcome={...context.input,coverage,predictions:{...context.input.predictions,...predictions},lastRun};return vm.runInContext('footerStatusText(outcome)',context);};
+let line=outcome({pendingHot:0,pendingCold:0,outstanding:0,eligibleNow:0,deferredByRetry:0,nextRetryAt:null,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0},fullCoverage);
 assert.equal(line.runLine,'завершён · все фильмы с актуальными прогнозами');assert.equal(line.nextBatch,'очередь пуста');assert.equal(line.deferred,'нет');
 line=outcome({pendingHot:1,pendingCold:0,outstanding:1,eligibleNow:0,deferredByRetry:1,nextRetryAt:'2026-10-13T21:00:00Z',nextBatchSize:0});
 assert.equal(line.runLine,'завершён · 1 фильм ожидает повторной попытки не раньше 23:00');assert.equal(line.nextBatch,'ждёт повторной попытки');assert.match(line.deferred,/^1 фильм · не раньше 13 окт\., 23:00$/);assert.match(line.nextLine,/^Следующий запуск: около 12:00$/,'the schedule estimate stays separate from the film retry time');
@@ -73,6 +74,14 @@ line=outcome({pendingHot:2,pendingCold:1,outstanding:undefined,eligibleNow:undef
 assert.equal(line.runLine,'завершён · 3 фильма без актуального прогноза','missing retry data stays neutral');assert.equal(line.deferred,'нет данных');
 line=outcome({pendingHot:1,pendingCold:0,outstanding:1,eligibleNow:0,deferredByRetry:1,nextRetryAt:null});
 assert.equal(line.runLine,'завершён · 1 фильм ожидает повторной попытки','no time is claimed without a stored retryAt');
+// Zero counters without slices (a legacy stored queue) are unknown, not drained, and coverage 75/100 is not overridden.
+line=outcome({pendingHot:0,pendingCold:0,outstanding:undefined,eligibleNow:undefined,deferredByRetry:undefined,nextRetryAt:undefined,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:0});
+assert.equal(line.runLine,'завершён · данные об очереди неполные');assert.equal(line.deferred,'нет данных');assert.equal(line.nextBatch,'нет данных');assert.doesNotMatch(line.runLine,/все фильмы/);
+line=outcome({pendingHot:0,pendingCold:0,outstanding:undefined,eligibleNow:undefined,deferredByRetry:undefined,nextRetryAt:undefined,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:0},fullCoverage);
+assert.equal(line.runLine,'завершён · данные об очереди неполные','missing slices stay unknown even with complete coverage');
+// Explicit slices saying drained while coverage says 75/100: no claim of full coverage.
+line=outcome({pendingHot:0,pendingCold:0,outstanding:0,eligibleNow:0,deferredByRetry:0,nextRetryAt:null,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:0});
+assert.equal(line.runLine,'завершён · остались фильмы без прогноза');assert.equal(line.nextBatch,'нет готовых фильмов');
 for(const sample of [text,line])for(const value of Object.values(sample))if(typeof value==='string')assert.doesNotMatch(value,/очередь обработана|обработана полностью|пакет завершён/);
 context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.match(active.nextLine,/Следующий запуск: около /);assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
 for(const line of [text.profile,text.local,text.windowCoverage,text.runLine,text.nextLine,text.integrationAggregate])assert(line.length<100,'collapsed lines stay compact');
