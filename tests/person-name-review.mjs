@@ -14,8 +14,8 @@ for(const name of topLevelNames(review))assert.equal(taken.has(name),false,`${na
 for(const file of ['build.mjs','src/worker.js','src/sources.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/fixtures.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/person-name-review|applyPersonNameReview|personNameState|reconcilePersonName/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,Math,String});
-vm.runInContext(domain+'\n'+review+'\n'+titleReview+'\nglobalThis.api={personView,applyAutomaticLocalization,applyReviewedLocalization,transition,NAME_REVIEW_CONTRACT_VERSION,NAME_REVIEW_MODES,personNameVersion,personNameOptions,personNameCollisions,personNameState,personNameProjection,validatePersonNameReview,applyPersonNameReview,reconcilePersonName};',ctx);
-const {personView,applyAutomaticLocalization,applyReviewedLocalization,transition,NAME_REVIEW_CONTRACT_VERSION,NAME_REVIEW_MODES,personNameVersion,personNameOptions,personNameCollisions,personNameState,personNameProjection,validatePersonNameReview,applyPersonNameReview,reconcilePersonName}=ctx.api;
+vm.runInContext(domain+'\n'+review+'\n'+titleReview+'\nglobalThis.api={personView,applyAutomaticLocalization,applyReviewedLocalization,transition,NAME_REVIEW_CONTRACT_VERSION,NAME_REVIEW_MODES,personNameVersion,personNameOptions,personNameCollisions,personNameState,personNameProjection,validatePersonNameReview,applyPersonNameReview,personNameReviewCompletion,reconcilePersonName};',ctx);
+const {personView,applyAutomaticLocalization,applyReviewedLocalization,transition,NAME_REVIEW_CONTRACT_VERSION,NAME_REVIEW_MODES,personNameVersion,personNameOptions,personNameCollisions,personNameState,personNameProjection,validatePersonNameReview,applyPersonNameReview,personNameReviewCompletion,reconcilePersonName}=ctx.api;
 
 const NOW=Date.parse('2026-10-25T12:00:00.000Z');
 const LATER=NOW+60000;
@@ -103,7 +103,8 @@ deepEqual(first.reviews,[]);
 assert.equal(snapshot(people),frozen,'the input records are not mutated');
 assert.equal(reviewed.nameReviews.length,1);
 assert.equal(first.review,reviewed.nameReviews[0]);
-deepEqual(first.review,{contractVersion:1,requestId:'req-1',personId:actor.id,linkedFrom:null,at:new Date(NOW).toISOString(),mode:'alias',authority:'owner',basis:null,selectedFrom:'preferred',roles:[],from:{value:'Крис Пратт',status:'provisional',source:'wikidata'},to:{value:'Крис Пратт',status:'reviewed'},version:{before:state.version,after:first.version}});
+deepEqual(first.review,{contractVersion:1,requestId:'req-1',personId:actor.id,linkedFrom:null,at:new Date(NOW).toISOString(),mode:'alias',authority:'owner',basis:null,selectedFrom:'preferred',roles:[],nameChanged:true,records:[],from:{value:'Крис Пратт',status:'provisional',source:'wikidata'},to:{value:'Крис Пратт',status:'reviewed'},version:{before:state.version,after:first.version}});
+deepEqual(first.commit,[{id:actor.id,version:{before:state.version,after:first.version}}]);
 assert.notEqual(first.version,state.version);
 assert.equal(first.version,personNameVersion(reviewed));
 assert.equal(personNameState(reviewed).preferred.authority,'owner');
@@ -180,6 +181,9 @@ assert.equal(second.reviews[0].linkedFrom,actor.id);
 assert.equal(second.reviews[0].from.status,'missing');
 assert.equal(second.reviews[0].version.before,personNameVersion(director));
 assert.equal(second.reviews[0].version.after,personNameVersion(linkedDirector));
+assert.equal(second.reviews[0].nameChanged,true);
+deepEqual(corrected.nameReviews[1].records,[{id:director.id,version:{before:personNameVersion(director),after:personNameVersion(linkedDirector)}}]);
+deepEqual(second.commit,[{id:actor.id,version:{before:first.version,after:second.version}},{id:director.id,version:{before:personNameVersion(director),after:personNameVersion(linkedDirector)}}],'commit lists every record the writer must persist');
 assert.equal(snapshot(people),frozen,'linking never mutates the input records');
 assert.notEqual(personNameVersion(linkedDirector),personNameVersion(director),'the linked role has a new token of its own');
 deepEqual(personNameState(corrected,[corrected,linkedDirector,other]).collisions.map(item=>[item.id,item.linked,item.status]),[[director.id,true,'reviewed']]);
@@ -189,14 +193,69 @@ assert.equal(linkedReplay.idempotent,true);
 deepEqual(linkedReplay.people,[]);
 // The same name and the same links again under a new requestId is a no-op.
 assert.equal(applyPersonNameReview(corrected,{...typed,requestId:'req-5',expectedVersion:second.version,roles:[{id:director.id,expectedVersion:personNameVersion(linkedDirector)}]},LATER,[corrected,linkedDirector,other]).changed,false);
-// A linked role that already carries the name gets the link only, with no audit entry.
+// (a) The primary record already carries the name and the command links a new role whose name changes:
+// the primary record still gets an audit entry for the requestId, so a retry with the original tokens replays.
+const extra=personView({roleId:'role/Chris Pratt',original:'Chris Pratt',now:NOW});
+assert.equal(extra.localization.status,'missing');
+const extraCommand={personId:actor.id,requestId:'req-6',mode:'manual',value:'Крис Прэтт',basis:'Русская Википедия',expectedVersion:second.version,roles:[{id:extra.id,expectedVersion:personNameVersion(extra)}]};
+const third=applyPersonNameReview(corrected,extraCommand,LATER,[corrected,linkedDirector,extra]);
+assert.equal(third.ok,true);
+assert.equal(third.changed,true);
+assert.equal(third.person.localization,corrected.localization,'the primary name is untouched');
+assert.equal(third.review.requestId,'req-6');
+assert.equal(third.review.nameChanged,false);
+assert.equal(third.review.from.value,'Крис Прэтт');
+assert.equal(third.review.to.value,'Крис Прэтт');
+deepEqual(third.review.roles,[extra.id]);
+deepEqual(third.review.records.map(item=>item.id),[extra.id]);
+assert.equal(third.person.nameReviews.length,3);
+assert.equal(third.person.nameReviews[2],third.review);
+assert.equal(third.review.version.before,second.version);
+assert.equal(third.review.version.after,third.version);
+assert.equal(third.version,personNameVersion(third.person),'stamping version.after on a link-only entry does not move the token');
+assert.notEqual(third.version,second.version,'a new link is a version change on the primary record');
+deepEqual(third.person.roleLinks.map(link=>link.id),[director.id,extra.id]);
+const linkedExtra=third.people[0];
+assert.equal(linkedExtra.localization.value,'Крис Прэтт');
+assert.equal(linkedExtra.nameReviews.length,1);
+assert.equal(linkedExtra.nameReviews[0].linkedFrom,actor.id);
+assert.equal(linkedExtra.nameReviews[0].nameChanged,true);
+deepEqual(linkedExtra.roleLinks.map(link=>link.id),[actor.id]);
+const thirdRetry=applyPersonNameReview(third.person,extraCommand,LATER,[third.person,linkedDirector,linkedExtra]);
+assert.equal(thirdRetry.idempotent,true,'a retry with the original (now stale) tokens replays');
+assert.equal(thirdRetry.review,third.review);
+deepEqual(thirdRetry.people,[]);
+assert.equal(applyPersonNameReview(third.person,{...extraCommand,basis:'Другое'},LATER,[third.person,linkedDirector,linkedExtra]).reason,'request_id_reused');
+assert.equal(applyPersonNameReview(third.person,{...extraCommand,roles:[]},LATER,[third.person,linkedDirector,linkedExtra]).reason,'request_id_reused','dropping the role is a different request');
+assert.equal(applyPersonNameReview(linkedExtra,{personId:extra.id,requestId:'req-6',mode:'manual',value:'Крис Прэтт',expectedVersion:personNameVersion(linkedExtra)},LATER,[linkedExtra]).reason,'request_id_reused','the entry a link wrote onto the role is not a replay of a primary command');
+// (b) The primary record already carries the name and the command links a role that already carries it too:
+// link only, no entry on the role, an audit entry on the primary record, and the same replay guarantees.
 const preNamed={...personView({roleId:'tmdb_actor/10',original:'Chris Pratt',now:NOW}),localization:{...corrected.localization}};
-const linkOnly=applyPersonNameReview(corrected,{personId:actor.id,requestId:'req-6',mode:'manual',value:'Крис Прэтт',basis:'Русская Википедия',expectedVersion:second.version,roles:[{id:preNamed.id,expectedVersion:personNameVersion(preNamed)}]},LATER,[corrected,preNamed]);
+const linkCommand={personId:actor.id,requestId:'req-7',mode:'manual',value:'Крис Прэтт',basis:'Русская Википедия',expectedVersion:second.version,roles:[{id:preNamed.id,expectedVersion:personNameVersion(preNamed)}]};
+const linkOnly=applyPersonNameReview(corrected,linkCommand,LATER,[corrected,preNamed]);
 assert.equal(linkOnly.changed,true);
-assert.equal(linkOnly.review,null,'the primary record already carries the name');
-assert.equal(linkOnly.people[0].nameReviews,undefined);
-assert.equal(linkOnly.people[0].roleLinks.length,1);
+assert.equal(linkOnly.review.nameChanged,false);
+assert.equal(linkOnly.review.requestId,'req-7');
+deepEqual(linkOnly.review.records.map(item=>item.id),[preNamed.id]);
+assert.equal(linkOnly.people[0].nameReviews,undefined,'the role already carried the name: no entry of its own');
+assert.equal(linkOnly.people[0].localization,preNamed.localization);
+deepEqual(linkOnly.people[0].roleLinks.map(link=>link.id),[actor.id]);
+assert.equal(linkOnly.review.records[0].version.after,personNameVersion(linkOnly.people[0]));
 assert.notEqual(linkOnly.version,second.version,'a new link is a version change on the primary record');
+assert.equal(applyPersonNameReview(linkOnly.person,linkCommand,LATER,[linkOnly.person,linkOnly.people[0]]).idempotent,true,'a retry of a link-only command replays');
+assert.equal(applyPersonNameReview(linkOnly.person,{...linkCommand,mode:'alias'},LATER,[linkOnly.person,linkOnly.people[0]]).reason,'request_id_reused');
+// A command that changes nothing at all (same name, same links on both sides) stays a true no-op without an entry.
+const nothing=applyPersonNameReview(linkOnly.person,{personId:actor.id,requestId:'req-8',mode:'manual',value:'Крис Прэтт',expectedVersion:linkOnly.version,roles:[{id:preNamed.id,expectedVersion:personNameVersion(linkOnly.people[0])}]},LATER,[linkOnly.person,linkOnly.people[0]]);
+assert.equal(nothing.changed,false);
+assert.equal(nothing.review,null);
+assert.equal(nothing.person.nameReviews.length,linkOnly.person.nameReviews.length);
+// Completion check for a multi-record write: every record applied, a role still at its old token is pending, anything else diverged.
+deepEqual(personNameReviewCompletion(third.review,third.person,[linkedDirector,linkedExtra]),{complete:true,records:[{id:actor.id,state:'applied'},{id:extra.id,state:'applied'}]});
+deepEqual(personNameReviewCompletion(third.review,third.person,[extra]),{complete:false,records:[{id:actor.id,state:'applied'},{id:extra.id,state:'pending'}]},'the role write never landed');
+deepEqual(personNameReviewCompletion(third.review,corrected,[linkedExtra]).records[0],{id:actor.id,state:'pending'},'the primary write never landed');
+deepEqual(personNameReviewCompletion(third.review,third.person,[{...linkedExtra,aliases:[]}]).records[1],{id:extra.id,state:'diverged'});
+deepEqual(personNameReviewCompletion(third.review,third.person,[]).records[1],{id:extra.id,state:'missing'});
+deepEqual(personNameReviewCompletion(null,third.person,[]),{complete:false,records:[]});
 
 // Role failures: unknown, unrelated, rejected and stale roles are refused before anything changes.
 const roleCommand=(roles,extra={})=>({personId:actor.id,requestId:'req-7',mode:'manual',value:'Крис Прэтт',expectedVersion:first.version,roles,...extra});

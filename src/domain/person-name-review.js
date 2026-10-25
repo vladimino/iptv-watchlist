@@ -169,7 +169,8 @@ function validatePersonNameReview(person,command,people=[]){
  return {ok:true,value,basis,version,selected,linked};
 }
 // A replay is the same committed request sent again: same Person, mode, normalized value,
-// normalized basis and the same set of linked roles under the same requestId.
+// normalized basis and the same set of linked roles under the same requestId. Only the primary
+// record's own entry (linkedFrom null) counts; an entry a link wrote onto this record is not it.
 function samePersonNameReview(review,person,command,shape){
  const roleIds=shape.roles.map(role=>role.id).sort().join('\n'),reviewRoles=(review.roles||[]).slice().sort().join('\n');
  return review.personId===person.id&&review.linkedFrom==null&&review.mode===command.mode&&review.to?.value===shape.value&&(review.basis??null)===shape.basis&&reviewRoles===roleIds;
@@ -180,58 +181,90 @@ function nameReviewAddLink(links,link){
  out.push(link);
  return nameReviewSortById(out);
 }
-// Moves one record to the reviewed name with the owner's authority, keeps the previous preferred
-// name as an alias, drops the chosen value from the aliases and appends one audit entry.
-function nameReviewApplyTo(record,{value,basis,mode,requestId,selectedFrom,roles,linkedFrom,before},at){
- const provenance={source:NAME_REVIEW_AUTHORITY,authority:NAME_REVIEW_AUTHORITY,mode,basis,requestId,selectedFrom,linkedFrom};
- const moved=applyReviewedLocalization(record,{value,authority:NAME_REVIEW_AUTHORITY,source:NAME_REVIEW_AUTHORITY,provenance},at,'name');
- if(moved.localization===record.localization)return null;
- const review={contractVersion:NAME_REVIEW_CONTRACT_VERSION,requestId,personId:record.id,linkedFrom,at:stamp(at),mode,authority:NAME_REVIEW_AUTHORITY,basis,selectedFrom,roles,from:{value:record.localization?.value??null,status:record.localization?.status??'missing',source:record.localization?.source??null},to:{value,status:'reviewed'},version:{before,after:null}};
- return {next:{...moved,aliases:nameReviewRemoveAlias(moved.aliases,value),nameReviews:[...(record.nameReviews||[]),review]},review};
+function nameReviewCarries(record,value){return record?.localization?.status==='reviewed'&&record.localization.value===value;}
+function nameReviewLinked(record,id){return (record?.roleLinks||[]).some(link=>link.id===id);}
+function nameReviewEntry(record,{requestId,linkedFrom,mode,basis,selectedFrom,roles,value,nameChanged,before},at){
+ return {contractVersion:NAME_REVIEW_CONTRACT_VERSION,requestId,personId:record.id,linkedFrom,at:stamp(at),mode,authority:NAME_REVIEW_AUTHORITY,basis,selectedFrom,roles,nameChanged,records:[],from:{value:record.localization?.value??null,status:record.localization?.status??'missing',source:record.localization?.source??null},to:{value,status:'reviewed'},version:{before,after:null}};
 }
-// Applies one review. The result carries the next Person, the audit entry, the next linked role
-// records with their own audit entries, and the new version. A repeated requestId with the same
+// Moves one record to the reviewed name with the owner's authority, keeps the previous preferred
+// name as an alias, drops the chosen value from the aliases and appends one audit entry. A record
+// that already carries the name keeps its localization and still gets the entry (nameChanged:
+// false): the entry is the owner's assertion under this requestId, and the replay lookup needs it.
+function nameReviewApplyTo(record,fields,at){
+ const {value,basis,mode,requestId,selectedFrom,linkedFrom}=fields;
+ const nameChanged=!nameReviewCarries(record,value);
+ let moved=record;
+ if(nameChanged){
+  const provenance={source:NAME_REVIEW_AUTHORITY,authority:NAME_REVIEW_AUTHORITY,mode,basis,requestId,selectedFrom,linkedFrom};
+  moved=applyReviewedLocalization(record,{value,authority:NAME_REVIEW_AUTHORITY,source:NAME_REVIEW_AUTHORITY,provenance},at,'name');
+  if(moved.localization===record.localization)return null;
+  moved={...moved,aliases:nameReviewRemoveAlias(moved.aliases,value)};
+ }
+ const review=nameReviewEntry(record,{...fields,nameChanged},at);
+ return {next:{...moved,nameReviews:[...(record.nameReviews||[]),review]},review};
+}
+// Applies one review. The result carries the next Person, its audit entry, the next linked role
+// records with their own audit entries, the new version and `commit`, the list of every record the
+// writer has to persist with its token before and after. A repeated requestId with the same
 // payload replays the earlier outcome without a second change, even with a stale or missing
-// expectedVersion: the state checks guard new changes, not retries.
+// expectedVersion: the state checks guard new changes, not retries. The primary record gets an
+// audit entry whenever anything changes (its name, a linked role's name or a link), so a retry of
+// a link-only command replays too; only a command that changes nothing at all is a no-op.
 function applyPersonNameReview(person,command,at,people=[]){
  const shape=validatePersonNameReviewShape(person,command);
  if(!shape.ok)return shape;
  const replay=(person.nameReviews||[]).find(review=>review.requestId===command.requestId);
  if(replay){
-  if(samePersonNameReview(replay,person,command,shape))return {ok:true,idempotent:true,changed:false,person,people:[],review:replay,reviews:[],version:personNameVersion(person)};
+  if(samePersonNameReview(replay,person,command,shape))return {ok:true,idempotent:true,changed:false,person,people:[],review:replay,reviews:[],version:personNameVersion(person),commit:[]};
   return nameReviewFailure('request_id_reused',{review:replay});
  }
  const checked=validatePersonNameReview(person,command,people);
  if(!checked.ok)return checked;
  const {value,basis,selected,linked}=checked;
  const roleIds=linked.map(item=>item.record.id);
- const alreadyLinked=roleIds.every(id=>(person.roleLinks||[]).some(link=>link.id===id));
- if(person.localization?.status==='reviewed'&&person.localization.value===value&&alreadyLinked&&linked.every(item=>item.record.localization?.status==='reviewed'&&item.record.localization.value===value))return {ok:true,idempotent:false,changed:false,person,people:[],review:null,reviews:[],version:checked.version};
+ const nothingToDo=nameReviewCarries(person,value)&&linked.every(item=>nameReviewCarries(item.record,value)&&nameReviewLinked(person,item.record.id)&&nameReviewLinked(item.record,person.id));
+ if(nothingToDo)return {ok:true,idempotent:false,changed:false,person,people:[],review:null,reviews:[],version:checked.version,commit:[]};
  // selectedFrom names where the picked text came from: an alias reports its own source (wikidata, dictionary, letterboxd...).
  const selectedFrom=selected?(selected.origin==='alias'?selected.provenance?.source||'alias':selected.origin):null;
  const stampedAt=stamp(at);
- let next=person,review=null;
- if(!(person.localization?.status==='reviewed'&&person.localization.value===value)){
-  const applied=nameReviewApplyTo(person,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:roleIds,linkedFrom:null,before:checked.version},at);
-  if(!applied)return nameReviewFailure('illegal_transition',{from:person.localization?.status??null});
-  next=applied.next;review=applied.review;
- }
+ const applied=nameReviewApplyTo(person,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:roleIds,linkedFrom:null,before:checked.version},at);
+ if(!applied)return nameReviewFailure('illegal_transition',{from:person.localization?.status??null});
+ let next=applied.next;
+ const review=applied.review;
  const nextPeople=[],reviews=[];
  for(const item of linked){
   const record=item.record;
   let moved=record,roleReview=null;
-  if(!(record.localization?.status==='reviewed'&&record.localization.value===value)){
-   const applied=nameReviewApplyTo(record,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:[],linkedFrom:person.id,before:item.version},at);
-   if(!applied)return nameReviewFailure('illegal_transition',{role:record.id,from:record.localization?.status??null});
-   moved=applied.next;roleReview=applied.review;
+  // A role that already carries the name is linked without an audit entry of its own; the
+  // primary record's entry lists it under `records`.
+  if(!nameReviewCarries(record,value)){
+   const roleApplied=nameReviewApplyTo(record,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:[],linkedFrom:person.id,before:item.version},at);
+   if(!roleApplied)return nameReviewFailure('illegal_transition',{role:record.id,from:record.localization?.status??null});
+   moved=roleApplied.next;roleReview=roleApplied.review;
   }
   moved={...moved,roleLinks:nameReviewAddLink(moved.roleLinks,{id:person.id,roleId:person.roleId??null,reason:NAME_REVIEW_LINK_REASON,requestId:command.requestId,at:stampedAt})};
-  if(roleReview){roleReview.version.after=personNameVersion(moved);reviews.push(roleReview);}
+  const after=personNameVersion(moved);
+  if(roleReview){roleReview.version.after=after;reviews.push(roleReview);}
+  review.records.push({id:record.id,version:{before:item.version,after}});
   nextPeople.push(moved);
   next={...next,roleLinks:nameReviewAddLink(next.roleLinks,{id:record.id,roleId:record.roleId??null,reason:NAME_REVIEW_LINK_REASON,requestId:command.requestId,at:stampedAt})};
  }
- if(review)review.version.after=personNameVersion(next);
- return {ok:true,idempotent:false,changed:true,person:next,people:nextPeople,review,reviews,version:personNameVersion(next)};
+ review.version.after=personNameVersion(next);
+ const commit=[{id:next.id,version:{before:checked.version,after:review.version.after}},...review.records.map(item=>({id:item.id,version:{...item.version}}))];
+ return {ok:true,idempotent:false,changed:true,person:next,people:nextPeople,review,reviews,version:review.version.after,commit};
+}
+// Completion check for a multi-record result after a crash or a partial write. Given the primary
+// record's audit entry for a requestId and the records as they are stored now, each record is
+// `applied` when its token is the entry's `after`, `pending` when it is still the `before` (the
+// write never landed) and `diverged` otherwise (something else changed it since). A writer that
+// cannot persist every record of `commit` in one atomic write must run this before answering a
+// retry: a replay on the primary record alone says nothing about the linked roles.
+function personNameReviewCompletion(review,person,people=[]){
+ if(!review||typeof review!=='object'||!review.version)return {complete:false,records:[]};
+ const state=(record,version)=>{if(!record)return 'missing';const token=personNameVersion(record);return token===version.after?'applied':token===version.before?'pending':'diverged';};
+ const records=[{id:review.personId??person?.id??null,state:person?.id===review.personId?state(person,review.version):'missing'}];
+ for(const item of review.records||[])records.push({id:item.id,state:state(Array.isArray(people)?people.find(record=>record?.id===item.id):null,item.version)});
+ return {complete:records.every(item=>item.state==='applied'),records};
 }
 // Reviewed precedence for later inputs. The owner's reviewed name is kept against any later value,
 // automatic or dictionary: the incoming value is held in localizationConflicts with reason
