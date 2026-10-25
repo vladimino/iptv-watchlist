@@ -448,6 +448,78 @@ async function resolveDiscoveryChunk(env,report,limit){
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
 const DISCOVERY_CHUNK_BUDGET=12;
 const CONTINUATION_KEY='epg/resolver-continuation.json';
+// AIR-151: read-only diagnostics of the continuation boundary. Every POST /api/sync/epg step and
+// every discovery resolve request leaves one bounded entry (codes, counts, timestamps; no tokens,
+// titles or payloads) so that "the call never arrived" and "the call arrived but saved no chunk"
+// can be told apart from pipeline status. The same entry goes to the Worker log. Nothing here
+// retries, dispatches or changes the resolver.
+const CONTINUATION_DIAGNOSTICS_KEY='epg/resolver-continuation-diagnostics.json';
+const CONTINUATION_DIAGNOSTICS_LIMIT=20;
+// Closed vocabularies. A value outside its list is recorded as `other`; free text never enters an entry
+// or a log line. Ids must be server-generated UUIDs, times must parse, counts must be finite numbers.
+const DIAGNOSTIC_VOCABULARY={
+ caller:['http','mcp','internal'],
+ route:['/api/sync/metadata','/api/sync/epg','/api/enrichment/discovery/resolve'],
+ runStage:['metadata','epg','complete'],
+ stage:['idle','paused','running','complete','error','busy','partial','programme_changed','awaiting_epg_discovery','backoff','missing_secret'],
+ nextAction:['continue','wait','stop'],
+ reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed'],
+ errorName:['Error','TypeError','RangeError','SyntaxError','ReferenceError','AbortError','TimeoutError'],
+};
+function diagnosticCode(list,value,fallback='other'){return value==null?null:list.includes(value)?value:fallback;}
+function diagnosticId(value){return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)?value:null;}
+function diagnosticTime(value){return typeof value==='string'&&value.length<=40&&Number.isFinite(Date.parse(value))?value:null;}
+function diagnosticCount(value){return typeof value==='number'&&Number.isFinite(value)?value:null;}
+// Classifies a thrown error into one of seven codes. The message is matched, never copied.
+function diagnosticErrorCode(error){
+ const name=String(error?.name||''),message=String(error?.message||'');
+ if(name==='AbortError'||name==='TimeoutError'||/timed? ?out/i.test(message))return 'timeout';
+ if(/generation changed/i.test(message))return 'publish_conflict';
+ if(/resolver is writing/i.test(message))return 'resolver_busy';
+ if(/\br2\b|bucket|storage|etag/i.test(message))return 'storage';
+ if(/tmdb|fetch|http\s?\d{3}|upstream|network|socket|dns/i.test(message))return 'upstream';
+ if(name==='SyntaxError'||/invalid|not found|required|unexpected/i.test(message))return 'invalid_input';
+ return 'unknown';
+}
+function diagnosticError(error){return {code:diagnosticErrorCode(error),name:diagnosticCode(DIAGNOSTIC_VOCABULARY.errorName,String(error?.name||'Error'),'Error')};}
+// A continuation `reason` outside the vocabulary is the thrown message an error record kept; it is
+// classified like an error, not copied.
+function diagnosticReason(value){return value==null?null:DIAGNOSTIC_VOCABULARY.reason.includes(value)?value:diagnosticErrorCode({message:String(value)});}
+function continuationSummary(record){return record&&typeof record==='object'?{stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,record.stage),reason:diagnosticReason(record.reason),remainingChunks:diagnosticCount(record.remainingChunks),programmeRunId:diagnosticId(record.programmeRunId),at:diagnosticTime(record.at),nextCatchUpAt:diagnosticTime(record.nextCatchUpAt),retryAt:diagnosticTime(record.retryAt),hopId:diagnosticId(record.hopId)}:null;}
+function discoverySummary(contract){return contract&&typeof contract==='object'?{state:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,contract.state),nextAction:diagnosticCode(DIAGNOSTIC_VOCABULARY.nextAction,contract.nextAction),reason:diagnosticReason(contract.reason),remainingChunks:diagnosticCount(contract.remainingChunks),programmeRunId:diagnosticId(contract.programmeRunId),nextCatchUpAt:diagnosticTime(contract.nextCatchUpAt),retryAt:diagnosticTime(contract.retryAt)}:null;}
+function chunkSummary(result){return {stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),added:diagnosticCount(result.added),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:result.error?diagnosticErrorCode({message:String(result.error)}):null};}
+// One structured line per phase for Workers Logs; never throws.
+function observeContinuation(step){try{console.log(JSON.stringify({event:'epg_continuation',...step}));}catch{}}
+// A step entry. `runId` is kept only when it has the server-generated UUID shape; `runIdShape` says
+// what the caller sent. `recorded` holds the result of each best-effort ring write: the stored entry
+// can only carry `entered`, the final log line carries both.
+function continuationStep(caller,route,runId){
+ const id=diagnosticId(runId);
+ return {id:crypto.randomUUID(),at:new Date().toISOString(),phase:'entered',caller:diagnosticCode(DIAGNOSTIC_VOCABULARY.caller,caller||'http','http'),route:diagnosticCode(DIAGNOSTIC_VOCABULARY.route,route),runId:id,runIdShape:runId==null?null:id?'uuid':'invalid',runStage:null,branch:null,httpStatus:null,discovery:null,diagnostic:{},error:null,durationMs:null,recorded:{entered:null,outcome:null}};
+}
+// Upserts the entry by id into a bounded ring (newest first). Best effort: a failed write never fails the step.
+async function recordContinuationDiagnostic(env,entry){
+ for(let attempt=0;attempt<2;attempt++){
+  try{
+   const object=await env.BUCKET.get(CONTINUATION_DIAGNOSTICS_KEY),current=object?await object.json():null;
+   const recent=[entry,...(Array.isArray(current?.recent)?current.recent:[]).filter(item=>item?.id!==entry.id)].slice(0,CONTINUATION_DIAGNOSTICS_LIMIT);
+   const saved=await env.BUCKET.put(CONTINUATION_DIAGNOSTICS_KEY,JSON.stringify({schemaVersion:1,updatedAt:entry.at,recent}),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+   if(saved!==null)return true;
+  }catch{return false;}
+ }
+ return false;
+}
+// The `entered` log line is the arrival evidence and goes out before any storage access; the ring write
+// that follows is best effort and its result is kept in `recorded.entered`.
+async function openContinuationStep(env,step,persist){observeContinuation(step);if(persist)step.recorded.entered=await recordContinuationDiagnostic(env,step);return step;}
+// Outcome fields, then the outcome write, then the final log line carrying both write results.
+async function closeContinuationStep(env,step,started,response,error,persist){
+ step.durationMs=Date.now()-started;
+ if(error){step.phase='failed';step.error=diagnosticError(error);step.httpStatus=step.httpStatus??502;}
+ else{step.phase='completed';step.httpStatus=response?.status??step.httpStatus??null;}
+ if(persist)step.recorded.outcome=await recordContinuationDiagnostic(env,step);
+ observeContinuation(step);
+}
 function discoveryContract(record,override={}){
  const state=override.state||record?.stage||'idle';
  const reason=override.reason!==undefined?override.reason:record?.reason??null;
@@ -483,21 +555,30 @@ async function queueDiscovery(env,reason){
  const record={stage:'paused',reason,at:new Date().toISOString(),hopId:null,remainingChunks:DISCOVERY_CHUNK_BUDGET,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
  await saveJSON(env,CONTINUATION_KEY,record);return discoveryContract(record,{nextAction:'continue'});
 }
+// `body.trace`, when a caller passes an object, is filled with the branch taken and every intermediate
+// outcome (AIR-151). The same object is returned as `diagnostic`. It changes no decision.
 async function advanceDiscovery(env,body={}){
- const now=Date.now(),current=await loadJSON(env,CONTINUATION_KEY);
- if(body.chunks===0)return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current)};
+ const now=Date.now(),trace=body.trace&&typeof body.trace==='object'?body.trace:{};
+ trace.branch=null;trace.entry=null;trace.lease=null;trace.decision=null;trace.hopId=null;trace.budget=null;trace.chunk=null;trace.saved=null;
+ const current=await loadJSON(env,CONTINUATION_KEY);
+ trace.entry=continuationSummary(current);
+ if(body.chunks===0){trace.branch='report_only';return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current),diagnostic:trace};}
  const leaseObject=await env.BUCKET.get(DISCOVERY_LEASE_KEY),lease=leaseObject?await leaseObject.json():null;
- if(lease?.expiresAt>now)return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()})};
+ trace.lease=lease?.expiresAt>now?'live':lease?'expired':'none';
+ if(lease?.expiresAt>now){trace.branch='lease_live';return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()}),diagnostic:trace};}
  const decision=continuationDecision(current,now);
  const hardWait=current&&(['chunk_budget','backoff'].includes(current.reason)||current.stage==='error'||current.retryAt)&&Date.parse(current.retryAt||current.nextCatchUpAt||0)>now;
- if(!decision.run&&(!body.force||hardWait))return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract};
+ trace.decision={run:decision.run,budget:decision.run?decision.budget:null,force:!!body.force,hardWait:!!hardWait,nextAction:decision.run?null:decision.contract.nextAction};
+ if(!decision.run&&(!body.force||hardWait)){trace.branch='contract';return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract,diagnostic:trace};}
  if(!env.TMDB_API_READ_ACCESS_TOKEN){
+  trace.branch='missing_secret';
   const record={stage:'error',reason:'missing_secret',at:new Date().toISOString(),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null};
-  await saveJSON(env,CONTINUATION_KEY,record);return {stage:'missing_secret',checked:0,remaining:null,discovery:discoveryContract(record,{nextAction:'stop'})};
+  await saveJSON(env,CONTINUATION_KEY,record);trace.saved={...continuationSummary(record),owned:true};return {stage:'missing_secret',checked:0,remaining:null,discovery:discoveryContract(record,{nextAction:'stop'}),diagnostic:trace};
  }
  const acquired=await acquireDiscoveryLease(env);
- if(!acquired)return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()})};
+ if(!acquired){trace.branch='lease_lost';return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()}),diagnostic:trace};}
  const hopId=acquired.id,budget=decision.run?decision.budget:DISCOVERY_CHUNK_BUDGET;
+ trace.branch='chunk';trace.hopId=hopId;trace.budget=budget;
  await saveJSON(env,CONTINUATION_KEY,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null});
  let result;
  try{
@@ -505,6 +586,7 @@ async function advanceDiscovery(env,body={}){
   result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
  }catch(e){result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};}
  finally{await releaseDiscoveryLease(env,acquired);}
+ trace.chunk=chunkSummary(result);
  const at=new Date().toISOString();
  let record;
  if(result.stage==='programme_changed')record={stage:'paused',reason:'programme_changed',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId||null};
@@ -517,16 +599,28 @@ async function advanceDiscovery(env,body={}){
  else if(budget<=1)record={stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
  else record={stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
  const saved=await saveOwnedContinuation(env,hopId,record);
- return {...result,discovery:discoveryContract(saved&&saved.hopId===hopId?record:saved)};
+ const owned=!!saved&&saved.hopId===hopId;
+ trace.saved={...continuationSummary(owned?record:saved),owned};
+ return {...result,discovery:discoveryContract(owned?record:saved),diagnostic:trace};
 }
-async function resolveDiscoveryRequest(env,execution,body){
- if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24))return json({error:'Invalid limit'},400);
- const report=await loadJSON(env,'programme.json');if(!report?.films)return json({error:'No programme'},409);
- return json(await advanceDiscovery(env,{...body,force:body.chunks!==0}));
+async function resolveDiscoveryRequest(env,execution,body,caller='http'){
+ const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);
+ await openContinuationStep(env,step,true);
+ let response;
+ try{
+  if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24)){step.branch='invalid_limit';response=json({error:'Invalid limit'},400);}
+  else{
+   const report=await loadJSON(env,'programme.json');
+   if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
+   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:body.chunks!==0,trace:step.diagnostic});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
+  }
+ }catch(e){await closeContinuationStep(env,step,started,null,e,true);throw e;}
+ await closeContinuationStep(env,step,started,response,null,true);
+ return response;
 }
 async function discoveryPipelineStatus(env){
  const pinned=await pinEpg(env);
- const [source,decisions,catalog,last,queue,continuation,persistedQueue,scorePreview]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY)]);
+ const [source,decisions,catalog,last,queue,continuation,persistedQueue,scorePreview,continuationDiagnostics]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY)]);
  const items=source?.items||[],decisionsMap=decisions||{},counts=discoveryCounts(items,decisionsMap,Date.now()),statuses={},confirmed=new Set();for(const candidate of items){const state=decisionsMap[candidate.key];if(state){statuses[state.status]=(statuses[state.status]||0)+1;if(state.status==='verified')confirmed.add(String(state.tmdbId));}}
- return {schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,scoredResolutionMode(env),pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null};
+ return {schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,scoredResolutionMode(env),pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationDiagnostics:continuationDiagnostics||null};
 }
