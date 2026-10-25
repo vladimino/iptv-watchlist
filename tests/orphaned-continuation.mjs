@@ -209,10 +209,48 @@ assert.deepEqual(plain(continuation()),replacementRecord,'the replacement checkp
 assert.equal(verified(),replacementDecisions,'the stalled hop wrote no decisions');assert.equal(records.get('epg/resolver-lease.json').id,replacementHop,'the stalled hop did not release a lease it no longer held');
 assert.doesNotMatch(JSON.stringify(late.data),/lease lost/,'the thrown message is classified, not copied');
 
+// 12b. The fence is inside the helpers: an old hop that stalls between the two catalog writes of
+//      `saveDiscoveredFilms` (generation copy landed, shared copy not yet written) past the lease TTL
+//      does not perform the second write after a replacement has run the same generation.
+const GENERATION_CATALOG='epg/generations/'+GENERATION+'/discovered-films.json';
+function seedCatalogTouch(){seedOrphan();
+ set('epg/discovered-films.json',{tmdb_7:{id:'tmdb_7',tmdbId:'7',title:'Cold Film',original:'Cold Film',year:2019,runtime:100,canonicalIdentity:'tmdb:7',aliases:[],shows:[]}});
+ const latest=records.get('epg/discovery-latest.json');latest.items.push({key:'cold film|2019|0',title:'Cold Film',normalizedTitle:'cold film',year:2019,duration:100,durations:[100],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]});
+ const decisions=records.get('epg/discovery-resolution.json');decisions['cold film|2019|0']={status:'verified',filmId:'tmdb_7',tmdbId:'7',checkedAt:iso(now-70000)};etags.set('epg/discovery-resolution.json',String(++revision));}
+async function stallOldHop({gateKey,operation}){
+ let release,reached;const gate=new Promise(resolve=>{release=resolve;}),arrived=new Promise(resolve=>{reached=resolve;});let once=false;
+ if(operation==='put')bucket.put=async(key,value,options)=>{const result=await originalPut(key,value,options);if(key===gateKey&&!once){once=true;reached();await gate;}return result;};
+ else bucket.get=async key=>{if(key===gateKey&&!once){once=true;reached();await gate;}return originalGet(key);};
+ const old=step();await arrived;bucket.put=originalPut;bucket.get=originalGet;
+ const oldHopId=continuation().hopId;assert.equal(continuation().stage,'running');assert.notEqual(oldHopId,ORPHAN);
+ records.get('epg/resolver-lease.json').expiresAt=now-1;
+ const replacement=await step();
+ assert.equal(replacement.data.diagnostic.branch,'chunk');assert.equal(replacement.data.diagnostic.health.status,'orphaned');assert.equal(replacement.data.diagnostic.recovery.action,'resumed');
+ const snapshot=Object.fromEntries(['epg/resolver-continuation.json','epg/discovery-status.json','epg/discovery-resolution.json','epg/discovered-films.json',GENERATION_CATALOG,'enrichment/prediction-queue.json','epg/resolver-lease.json'].map(key=>[key,etags.get(key)]));
+ release();const late=await old;
+ assert.equal(late.data.diagnostic.hopId,oldHopId);assert.equal(late.data.diagnostic.chunk.stage,'error');assert.equal(late.data.diagnostic.chunk.error,'resolver_busy');assert.equal(late.data.diagnostic.saved.owned,false);assert.equal(late.data.diagnostic.saved.write,'other_hop');
+ for(const [key,etag] of Object.entries(snapshot))assert.equal(etags.get(key),etag,'the stalled hop did not write '+key+' after its replacement');
+ return {replacement,late,replacementHop:replacement.data.diagnostic.hopId};
+}
+seedCatalogTouch();
+let fenced=await stallOldHop({gateKey:GENERATION_CATALOG,operation:'put'});
+assert.equal(records.get(GENERATION_CATALOG).tmdb_7.shows.length,1,'the replacement touched the catalog film');
+assert.equal(records.get('epg/discovered-films.json').tmdb_7.shows.length,1,'the shared catalog is the replacement\'s copy');
+assert.equal(records.get('epg/discovery-status.json').hopId,fenced.replacementHop);assert.equal(continuation().hopId,fenced.replacementHop);assert.equal(continuation().stage,'paused');
+assert.equal(verified(),3+CHUNK,'one chunk of decisions, from the replacement only');
+// 12c. The queue refresh renews after its reads and right before its write: an old hop stalled inside
+//      `refreshPredictionQueue` past the TTL does not overwrite the replacement's queue snapshot.
+seedOrphan();
+fenced=await stallOldHop({gateKey:'enrichment/view-index.json',operation:'get'});
+assert.ok(records.has('enrichment/prediction-queue.json'),'the replacement wrote the queue checkpoint');
+assert.equal(records.get('epg/discovery-status.json').hopId,fenced.replacementHop);assert.equal(records.get('epg/discovery-status.json').stage,'partial');assert.ok(records.get('epg/discovery-status.json').finishedAt);
+assert.equal(continuation().hopId,fenced.replacementHop);assert.equal(verified(),2+2*CHUNK,'the stalled hop\'s decisions landed before it stalled; the replacement added one more chunk');
+assert.equal(records.get('epg/resolver-lease.json').id,fenced.replacementHop);
+
 // 13. Every reported value is from the closed vocabulary; nothing from the payload leaks into the ring or the log.
 seedOrphan();await step();
 const entries=records.get('epg/resolver-continuation-diagnostics.json').recent;
 for(const entry of entries){assert.ok(['idle','settled','live','orphaned'].includes(entry.diagnostic.health.status));if(entry.diagnostic.recovery)assert.ok(['settled','resumed','generation_conflict'].includes(entry.diagnostic.recovery.action));if(entry.diagnostic.saved)assert.ok(['saved','other_hop','write_conflict'].includes(entry.diagnostic.saved.write));}
 assert.doesNotMatch(JSON.stringify(entries),SECRET);assert.doesNotMatch(logs.join('\n'),SECRET);
 assert.ok(call('DIAGNOSTIC_VOCABULARY').reason.includes('orphaned'));
-console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation fence, concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out and sanitized diagnostics passed');
+console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation fence, concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out (before its first write, between two helper writes and inside the queue refresh) and sanitized diagnostics passed');

@@ -205,7 +205,7 @@ function scorePreviewSummary(preview,cutover,currentProgrammeRunId){
  const mode=cutover==='shadow'||cutover==='on'?cutover:'off';
  return {mode:preview?.mode||null,programmeRunId:previewRun,currentProgrammeRunId:current,stale,rows:items.length,outcomes,reasons,comparison,needsConfirmation:outcomes.needs_verification,cutover:mode};
 }
-async function saveScorePreview(env,mode,source,preview){if(mode==='off')return;await saveJSON(env,DISCOVERY_SCORE_PREVIEW_KEY,{schemaVersion:1,mode,programmeRunId:source.programmeRunId||null,items:preview});}
+async function saveScorePreview(env,mode,source,preview,fence=null){if(mode==='off')return;if(fence)await fence();await saveJSON(env,DISCOVERY_SCORE_PREVIEW_KEY,{schemaVersion:1,mode,programmeRunId:source.programmeRunId||null,items:preview});}
 async function acquireDiscoveryLease(env){
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY),old=object?await object.json():null;
  if(old?.expiresAt>Date.now())return null;
@@ -215,7 +215,9 @@ async function acquireDiscoveryLease(env){
 // AIR-154: a chunk renews its lease immediately before every durable write. Renewal fails as soon as
 // another hop holds the lease, so a hop that stalled past the lease TTL cannot write over its successor;
 // expiry therefore means the hop has been silent for a whole TTL, which is the quiescence a resume needs.
-// The residual window is a single storage write of the old hop that itself lasts longer than the TTL.
+// The fence is passed into every helper that writes, so each independent write (both catalog copies, the programme
+// showing, the prediction-queue checkpoint, the score preview) renews first; the residual window is one storage write
+// of the old hop that is already in flight and itself lasts longer than the TTL.
 async function renewDiscoveryLease(env,lease){
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);if(!object)return false;
  const current=await object.json();if(current?.id!==lease.id)return false;
@@ -245,14 +247,14 @@ async function publishedGenerationMatches(env,seenRunId){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return !(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId);
 }
-async function saveDiscoveredFilms(env,films,seenRunId){
+async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(typeof env.beforeCatalogWrite==='function'){const hook=env.beforeCatalogWrite;env.beforeCatalogWrite=null;await hook();}
  if(!await publishedGenerationMatches(env,seenRunId))return false;
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- if(generation?.phase==='published'&&generation.programmeRunId===seenRunId)await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films);
- await saveJSON(env,'epg/discovered-films.json',films);return true;
+ if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films);}
+ if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films);return true;
 }
-async function attachWatchlistShowing(env,seenRunId,filmId,candidate){
+async function attachWatchlistShowing(env,seenRunId,filmId,candidate,fence=null){
  if(!await publishedGenerationMatches(env,seenRunId))return false;
  const pinned=await pinEpg(env);
  if(pinned.epgPin?.programmeRunId&&seenRunId&&pinned.epgPin.programmeRunId!==seenRunId)return false;
@@ -267,12 +269,12 @@ async function attachWatchlistShowing(env,seenRunId,filmId,candidate){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  if(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId)return false;
  if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){
-  await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+  if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
   const again=await env.BUCKET.get(EPG_GENERATION_KEY),current=again?await again.json():null;
   if(current?.programmeRunId!==seenRunId||pointer?.etag&&again?.etag!==pointer.etag)return false;
   return true;
  }
- await saveJSON(env,'programme.json',report);return true;
+ if(fence)await fence();await saveJSON(env,'programme.json',report);return true;
 }
 async function resolveDiscoveryBatch(env,report,limit=24){
  if(!env.TMDB_API_READ_ACCESS_TOKEN)return {stage:'missing_secret',checked:0,remaining:null};
@@ -281,7 +283,7 @@ async function resolveDiscoveryBatch(env,report,limit=24){
 }
 async function resolveDiscoveryChunk(env,report,limit,lease=null){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
- // Every durable write below is preceded by a lease renewal; a lost lease aborts the chunk before the write.
+ // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
  const [source,resolution,catalog,last]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json')]);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
@@ -295,8 +297,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null){
   if(candidate.confirmedTmdbId&&!decision){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
   const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate,source.programmeRunId);indexFilm(films[key]);touched++;}}
  }
- await fence();
- if(touched||migrated){if(!await saveDiscoveredFilms(env,films,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,currentProgrammeRunId:null};}if(screenedOut||knownAliases)await saveJSON(env,'epg/discovery-resolution.json',decisions);
+ if(touched||migrated){if(!await saveDiscoveredFilms(env,films,source.programmeRunId,fence))return {schemaVersion:2,stage:'programme_changed',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,currentProgrammeRunId:null};}if(screenedOut||knownAliases){await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);}
  await fence();await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
  const mode=scoredResolutionMode(env),preview={},shadowDetails=[],now=Date.now(),pending=source.items.filter(c=>resolutionActionability(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
  pending.sort((a,b)=>hotRank.get(b)-hotRank.get(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
@@ -394,9 +395,8 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null){
     else if(gate.outcome==='detail_verified'){
      const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
      let saved=true;
-     await fence();
-     if(knownTmdb.has(String(movie.id)))saved=await attachWatchlistShowing(env,source.programmeRunId,id,candidate);
-     else{const old=films[id];if(!old)added++;films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId);}
+     if(knownTmdb.has(String(movie.id)))saved=await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence);
+     else{const old=films[id];if(!old)added++;films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
      if(!saved||!await publishedGenerationMatches(env,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
      decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,identitySource:'tmdb_detail',checkedAt:new Date().toISOString(),evidenceKey:candidateEvidence(candidate),provenance:{authority:'tmdb_detail',searchHit:searched,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null},scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null}};
     }
@@ -404,7 +404,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null){
    const beforeDecision=decisions[candidate.key],priorCandidates=knownScorerCandidates(aliasIndex,candidate),priorFilms={...films},priorCompetitors=detailCompetitors(aliasIndex,candidate,'');
    let searchHits=[],detailMovie=null;
    const matches=[...(aliasIndex.get(candidate.normalizedTitle)?.values()||[])].filter(f=>(!candidate.year||Number(f.year)===Number(candidate.year))&&f.runtime&&(candidate.durations||[candidate.duration]).some(d=>Math.abs(f.runtime-d)<=Math.max(8,f.runtime*.08)));
-   if(matches.length===1){const film=matches[0],id=knownTmdb.get(String(film.tmdbId))||'tmdb_'+film.tmdbId;if(films[id]){films[id]=touchCanonicalFilm(films[id],candidate,source.programmeRunId);await fence();if(!await saveDiscoveredFilms(env,films,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};}decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(film.tmdbId),canonicalIdentity:'tmdb:'+film.tmdbId,identitySource:candidate.year?'known_alias_year_runtime':'known_alias_unique_runtime',checkedAt:new Date().toISOString()};reused++;}
+   if(matches.length===1){const film=matches[0],id=knownTmdb.get(String(film.tmdbId))||'tmdb_'+film.tmdbId;if(films[id]){films[id]=touchCanonicalFilm(films[id],candidate,source.programmeRunId);if(!await saveDiscoveredFilms(env,films,source.programmeRunId,fence))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};}decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(film.tmdbId),canonicalIdentity:'tmdb:'+film.tmdbId,identitySource:candidate.year?'known_alias_year_runtime':'known_alias_unique_runtime',checkedAt:new Date().toISOString()};reused++;}
    else{
     if(tmdbCalls>13)break;let search=null,exact=[];
     for(const language of /[іїєґ]/i.test(candidate.title)?['uk-UA','ru-RU']:['ru-RU','uk-UA']){search=await query('search/movie?'+new URLSearchParams({query:candidate.title,language,include_adult:'false',...(candidate.year?{year:String(candidate.year)}:{})}));exact=(search.results||[]).filter(m=>[m.title,m.original_title].some(t=>norm(t)===candidate.normalizedTitle)&&(!candidate.year||Math.abs(Number(m.release_date?.slice(0,4))-candidate.year)<=1));if(exact.length)break;}
@@ -414,7 +414,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null){
      const movie=await query('movie/'+exact[0].id+'?language=ru-RU&append_to_response=credits,translations,alternative_titles'),tolerance=candidate.year?Math.max(25,movie.runtime*.2):Math.max(10,movie.runtime*.12);detailMovie=movie;
      if(movie.id===exact[0].id&&movie.runtime&&(candidate.durations||[candidate.duration]).some(d=>Math.abs(movie.runtime-d)<=tolerance)){
       status='verified';const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
-      if(!knownTmdb.has(String(movie.id))){const old=films[id];if(!old)added++;films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);await fence();if(!await saveDiscoveredFilms(env,films,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
+      if(!knownTmdb.has(String(movie.id))){const old=films[id];if(!old)added++;films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);if(!await saveDiscoveredFilms(env,films,source.programmeRunId,fence))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
       }
       decisions[candidate.key]={status,filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,checkedAt:new Date().toISOString()};
      }else status='duration_mismatch';
@@ -453,12 +453,11 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null){
  const currentReport=await loadJSON(env,'programme.json');
  if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
   const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,programmeChanged:true,...variantDiagnostic(variantMeter)};
-  await fence();await saveJSON(env,'epg/discovery-status.json',changed);await saveScorePreview(env,mode,source,preview);return {...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
+  await fence();await saveJSON(env,'epg/discovery-status.json',changed);await saveScorePreview(env,mode,source,preview,fence);return {...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
  }
- await fence();
- try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint');}catch(e){error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
+ try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint',fence);}catch(e){if(e?.name==='LeaseLostError')throw e;error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
  const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),variantPending=deferred.length,summary={schemaVersion:2,stage:error?'partial':ready.length||variantPending?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,variantPending,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,...variantDiagnostic(variantMeter)};
- await fence();await saveJSON(env,'epg/discovery-status.json',summary);await saveScorePreview(env,mode,source,preview);return summary;
+ await fence();await saveJSON(env,'epg/discovery-status.json',summary);await saveScorePreview(env,mode,source,preview,fence);return summary;
  }finally{if(shadowPlans){await fence();await saveJSON(env,VARIANT_PENDING_KEY,{schemaVersion:1,programmeRunId:source.programmeRunId||null,jobs:deferred});}}
 }
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
