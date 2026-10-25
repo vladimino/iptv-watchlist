@@ -18,4 +18,4 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
 fi
 
 cd "$CLAUDE_PROJECT_DIR"
-npm install --ignore-scripts --no-audit --no-fund
+npm ci --ignore-scripts --no-audit --no-fund
