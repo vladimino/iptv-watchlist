@@ -157,7 +157,7 @@ function adminRender() {
   const view = loadAdmin(params);
   document.querySelector('#admin-demo').setAttribute('data-admin-limit', String(view.limit));
   const search = document.querySelector('#admin-search');
-  if (document.activeElement !== search) search.value = state.q;
+  if (search.value !== state.q) search.value = state.q;
   const loading = document.querySelector('#admin-loading');
   const error = document.querySelector('#admin-error');
   const empty = document.querySelector('#admin-empty');

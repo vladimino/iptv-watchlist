@@ -101,6 +101,22 @@ const narrowed = loadAdmin(new URLSearchParams('q=тень&queue=identity-ambigu
 assert.equal(JSON.stringify(narrowed.filmResults.map(item => item.id)), JSON.stringify(['film:double']));
 assert.equal(loadAdmin(new URLSearchParams('q=мост&queue=identity-ambiguous')).filmResults.length, 0);
 assert.equal(loadAdmin(new URLSearchParams('queue=not-a-queue')).error, 'unknown_queue');
+function fixtureFilm(id, preferred, localization) {
+  return {id, preferred, originalTitle: preferred, aliases: [], externalIds: [], identity: {status: 'resolved'}, localization: {status: localization}, localizationConflicts: [], metadata: {status: 'fresh'}, fingerprint: {status: 'current'}, prediction: {status: 'current'}};
+}
+const manyFilms = [];
+for (let index = 0; index < 25; index += 1) manyFilms.push(fixtureFilm(`film:beacon-${String(index).padStart(2, '0')}`, 'beacon', 'reviewed'));
+manyFilms.push(fixtureFilm('film:beacon-late', 'beacon late', 'missing'));
+for (let index = 0; index < 25; index += 1) manyFilms.push(fixtureFilm(`film:queue-${String(index).padStart(2, '0')}`, 'other', 'missing'));
+manyFilms.push(fixtureFilm('film:queue-99', 'hidden beacon', 'missing'));
+assert.equal(manyFilms.length > 25, true);
+const pastSearchPage = loadAdmin(new URLSearchParams('q=beacon&queue=localization-missing'), {films: manyFilms});
+assert.equal(JSON.stringify(pastSearchPage.filmResults.map(item => item.id)), JSON.stringify(['film:beacon-late', 'film:queue-99']));
+const pastQueuePage = loadAdmin(new URLSearchParams('q=hidden&queue=localization-missing'), {films: manyFilms});
+assert.equal(JSON.stringify(pastQueuePage.filmResults.map(item => item.id)), JSON.stringify(['film:queue-99']));
+const searchPage = loadAdmin(new URLSearchParams('q=beacon'), {films: manyFilms});
+assert.equal(searchPage.filmResults.length, 25);
+assert.equal(searchPage.filmResults.some(item => item.id === 'film:beacon-late'), false);
 assert.equal(JSON.stringify(searchFilms(ADMIN_FILMS, {query: 'одинаковый', limit: 25}).items.map(item => item.id)), JSON.stringify(collision.filmResults.map(item => item.id)));
 
 const listeners = new Map();
@@ -124,6 +140,17 @@ function element(selector) {
   };
 }
 const nodes = new Map(['#admin-search', '#admin-queues', '#admin-results', '#admin-detail', '#admin-loading', '#admin-error', '#admin-empty', '#admin-demo', '#admin-detail-title'].map(selector => [selector, element(selector)]));
+const searchNode = nodes.get('#admin-search');
+let searchValue = '';
+let searchCaret = 0;
+Object.defineProperty(searchNode, 'value', {
+  get() {return searchValue;},
+  set(next) {searchValue = String(next); searchCaret = searchValue.length;},
+});
+Object.defineProperty(searchNode, 'selectionStart', {
+  get() {return searchCaret;},
+  set(next) {searchCaret = next;},
+});
 const document = {
   body: {name: 'body'},
   activeElement: null,
@@ -210,6 +237,27 @@ window.history.back();
 assert.equal(new URL(window.location.href).searchParams.get('queue'), null);
 assert.equal(new URL(window.location.href).searchParams.get('id'), 'film:same-east');
 
+nodes.get('#admin-search').value = 'одинаковый';
+nodes.get('#admin-search').selectionStart = 4;
+document.activeElement = nodes.get('#admin-search');
+run('onAdminSearch()');
+assert.equal(nodes.get('#admin-search').selectionStart, 4);
+assert.equal(document.activeElement, nodes.get('#admin-search'));
+run(`onAdminResult({target:{closest(selector){return selector==='[data-admin-id]'?{getAttribute(name){return {'data-admin-id':'film:same-east','data-admin-kind':'film'}[name]||null;}}:null;}},preventDefault(){this.defaultPrevented=true;},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
+nodes.get('#admin-search').value = 'мост';
+document.activeElement = nodes.get('#admin-search');
+run('onAdminSearch()');
+window.history.back();
+assert.equal(new URL(window.location.href).searchParams.get('q'), 'одинаковый');
+assert.equal(nodes.get('#admin-search').value, 'одинаковый');
+assert.match(nodes.get('#admin-results').innerHTML, /tmdb:900201/);
+assert.match(nodes.get('#admin-results').innerHTML, /tmdb:900202/);
+assert.equal(document.activeElement, nodes.get('#admin-search'));
+window.history.forward();
+assert.equal(new URL(window.location.href).searchParams.get('q'), 'мост');
+assert.equal(nodes.get('#admin-search').value, 'мост');
+assert.match(nodes.get('#admin-results').innerHTML, /film:north-bridge/);
+assert.equal(document.activeElement, nodes.get('#admin-search'));
 nodes.get('#admin-search').value = 'одинаковый';
 run('onAdminSearch()');
 run(`onAdminKey({key:'Escape',preventDefault(){this.defaultPrevented=true;}})`);

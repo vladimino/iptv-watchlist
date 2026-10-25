@@ -171,25 +171,41 @@ function fail(limit, error) {
   return {demo: true, pin: null, limit, mode: 'error', error, query: '', queue: '', kind: 'film', id: '', entity: null, entityMissing: false, filmResults: [], personResults: [], queues: []};
 }
 
-function listed(result, queueItems, queryActive) {
-  if (!queryActive) return queueItems ? queueItems : [];
-  if (!queueItems) return result.items;
-  const ids = new Set(queueItems.map(item => item.id));
-  return result.items.filter(item => ids.has(item.id));
+function readAll(load) {
+  const items = [];
+  let cursor;
+  for (;;) {
+    const page = load(cursor);
+    if (page.error) return page;
+    items.push(...page.items);
+    if (!page.nextCursor) return {items};
+    cursor = page.nextCursor;
+  }
+}
+
+function pageOf(searchItems, queueItems, queryActive, limit) {
+  const rows = !queryActive
+    ? (queueItems || [])
+    : !queueItems
+      ? (searchItems || [])
+      : searchItems.filter(item => queueItems.some(queued => queued.id === item.id));
+  return rows.slice(0, limit);
 }
 
 export function loadAdmin(params = new URLSearchParams(), options = {}) {
   const limit = Object.hasOwn(options, 'limit') ? options.limit : ADMIN_PAGE_LIMIT;
+  const films = options.films || ADMIN_FILMS;
+  const people = options.people || ADMIN_PEOPLE;
   if (params.get('error') === 'unavailable') return {...fail(limit, 'unavailable'), query: params.get('q') ?? '', queue: params.get('queue') ?? '', kind: params.get('kind') === 'person' ? 'person' : 'film', id: params.get('id') ?? ''};
   if (params.get('loading') === '1') return {...fail(limit, null), mode: 'loading'};
   const queues = [];
   for (const code of FILM_QUEUE_CODES) {
-    const result = filmQueue(ADMIN_FILMS, {queue: code, limit});
+    const result = filmQueue(films, {queue: code, limit});
     if (result.error) return fail(limit, result.error);
     queues.push({code, kind: 'film', count: result.items.length});
   }
   for (const code of PERSON_QUEUE_CODES) {
-    const result = personQueue(ADMIN_PEOPLE, {queue: code, limit});
+    const result = personQueue(people, {queue: code, limit});
     if (result.error) return fail(limit, result.error);
     queues.push({code, kind: 'person', count: result.items.length});
   }
@@ -198,13 +214,15 @@ export function loadAdmin(params = new URLSearchParams(), options = {}) {
   const kind = params.get('kind') === 'person' ? 'person' : 'film';
   const id = params.get('id') ?? '';
   const queryActive = query.length > 0;
-  let filmSearch = null;
-  let personSearch = null;
+  let filmSearchItems = null;
+  let personSearchItems = null;
   if (queryActive) {
-    filmSearch = searchFilms(ADMIN_FILMS, {query, limit});
+    const filmSearch = readAll(cursor => searchFilms(films, cursor ? {query, limit, cursor} : {query, limit}));
     if (filmSearch.error) return {...fail(limit, filmSearch.error), query, queue, kind, id, queues};
-    personSearch = searchPeople(ADMIN_PEOPLE, {query, limit});
+    const personSearch = readAll(cursor => searchPeople(people, cursor ? {query, limit, cursor} : {query, limit}));
     if (personSearch.error) return {...fail(limit, personSearch.error), query, queue, kind, id, queues};
+    filmSearchItems = filmSearch.items;
+    personSearchItems = personSearch.items;
   }
   let filmQueueItems = null;
   let personQueueItems = null;
@@ -213,19 +231,19 @@ export function loadAdmin(params = new URLSearchParams(), options = {}) {
     const personCode = PERSON_QUEUE_CODES.includes(queue);
     if (!filmCode && !personCode) return {...fail(limit, 'unknown_queue'), query, queue, kind, id, queues};
     if (filmCode) {
-      const result = filmQueue(ADMIN_FILMS, {queue, limit});
+      const result = readAll(cursor => filmQueue(films, cursor ? {queue, limit, cursor} : {queue, limit}));
       if (result.error) return {...fail(limit, result.error), query, queue, kind, id, queues};
       filmQueueItems = result.items;
     }
     if (personCode) {
-      const result = personQueue(ADMIN_PEOPLE, {queue, limit});
+      const result = readAll(cursor => personQueue(people, cursor ? {queue, limit, cursor} : {queue, limit}));
       if (result.error) return {...fail(limit, result.error), query, queue, kind, id, queues};
       personQueueItems = result.items;
     }
   }
-  const filmResults = queryActive || filmQueueItems ? listed(filmSearch, filmQueueItems, queryActive) : [];
-  const personResults = queryActive || personQueueItems ? listed(personSearch, personQueueItems, queryActive) : [];
-  const entity = id ? (kind === 'person' ? getPerson(ADMIN_PEOPLE, id) : getFilm(ADMIN_FILMS, id)) : null;
+  const filmResults = queryActive || filmQueueItems ? pageOf(filmSearchItems, filmQueueItems, queryActive, limit) : [];
+  const personResults = queryActive || personQueueItems ? pageOf(personSearchItems, personQueueItems, queryActive, limit) : [];
+  const entity = id ? (kind === 'person' ? getPerson(people, id) : getFilm(films, id)) : null;
   return {
     demo: true,
     pin: null,
