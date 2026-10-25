@@ -38,7 +38,7 @@ assert.match(css,/@media\(max-width:520px\)[\s\S]*\.status-row>span[^}]*text-ali
 
 const context=vm.createContext({Date,Intl,URL,Set,Map});
 vm.runInContext(app.replace(/init\(\);\s*$/,''),context);
-context.input={profile:{version:7,updatedAt:'2026-10-12T18:00:00Z'},coverage:{confirmedFilmsTotal:100,currentPredictionsTotal:75,windowFilmsTotal:20,windowCurrentPredictions:18,cacheOffWindowTotal:80,localPercent:75,windowPercent:90},predictions:{pendingHot:2,pendingCold:25,pendingOffWindow:23,nextBatchSize:12,nextScheduledRun:'2026-10-13T10:00:00Z'},epgTmdb:{},watchlist:{},lastRun:{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0}};
+context.input={generatedAt:'2026-10-13T09:30:00Z',profile:{version:7,updatedAt:'2026-10-12T18:00:00Z'},coverage:{confirmedFilmsTotal:100,currentPredictionsTotal:75,windowFilmsTotal:20,windowCurrentPredictions:18,cacheOffWindowTotal:80,localPercent:75,windowPercent:90},predictions:{pendingHot:2,pendingCold:25,pendingOffWindow:23,nextBatchSize:12,nextScheduledRun:'2026-10-13T10:00:00Z'},epgTmdb:{},watchlist:{},lastRun:{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0}};
 const text=vm.runInContext('footerStatusText(input)',context);
 assert.match(text.local,/75\/100 с актуальным прогнозом · 75%/);
 assert.match(text.windowCoverage,/18\/20 с актуальным прогнозом · 90%/);
@@ -54,7 +54,26 @@ const exact=vm.runInContext('footerStatusText(exact)',context);
 assert.match(exact.local,/ · 100%/);
 assert.doesNotMatch(exact.local,/100,0%/);
 assert.match(exact.windowCoverage,/ · 100%/);
-assert.equal(text.runLabel,'Последний run');assert.match(text.runLine,/завершён \/ очередь обработана/);assert.match(text.nextLine,/Следующий запуск: около /);assert.match(text.nextRun,/^около /);
+assert.equal(text.runLabel,'Последний run');assert.equal(text.runLine,'завершён · 27 фильмов без актуального прогноза','a stored queue_empty never claims a drained queue while films are outstanding');assert.match(text.nextLine,/Следующий запуск: около /);assert.match(text.nextRun,/^около /);
+// Queue outcome comes from the stored slices, never from the stop reason alone (Europe/Madrid times).
+const outcome=(predictions,lastRun={status:'completed',reason:'eligible_queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:1})=>{context.outcome={...context.input,predictions:{...context.input.predictions,...predictions},lastRun};return vm.runInContext('footerStatusText(outcome)',context);};
+let line=outcome({pendingHot:0,pendingCold:0,outstanding:0,eligibleNow:0,deferredByRetry:0,nextRetryAt:null,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0});
+assert.equal(line.runLine,'завершён · все фильмы с актуальными прогнозами');assert.equal(line.nextBatch,'очередь пуста');assert.equal(line.deferred,'нет');
+line=outcome({pendingHot:1,pendingCold:0,outstanding:1,eligibleNow:0,deferredByRetry:1,nextRetryAt:'2026-10-13T21:00:00Z',nextBatchSize:0});
+assert.equal(line.runLine,'завершён · 1 фильм ожидает повторной попытки не раньше 23:00');assert.equal(line.nextBatch,'ждёт повторной попытки');assert.match(line.deferred,/^1 фильм · не раньше 13 окт\., 23:00$/);assert.match(line.nextLine,/^Следующий запуск: около 12:00$/,'the schedule estimate stays separate from the film retry time');
+line=outcome({pendingHot:2,pendingCold:0,outstanding:2,eligibleNow:0,deferredByRetry:2,nextRetryAt:'2026-10-14T01:00:00Z',nextBatchSize:0});
+assert.equal(line.runLine,'завершён · 2 фильма ожидают повторной попытки не раньше 14 окт., 03:00');
+line=outcome({pendingHot:0,pendingCold:5,outstanding:5,eligibleNow:0,deferredByRetry:5,nextRetryAt:'2026-10-13T21:00:00Z',nextBatchSize:0});
+assert.equal(line.runLine,'завершён · 5 фильмов ожидают повторной попытки не раньше 23:00','cold-only deferred work reads the same way');
+line=outcome({pendingHot:3,pendingCold:0,outstanding:3,eligibleNow:3,deferredByRetry:0,nextRetryAt:null,nextBatchSize:3});
+assert.equal(line.runLine,'завершён · 3 фильма готовы к следующему запуску');assert.equal(line.nextBatch,'до 3 фильмов');
+line=outcome({pendingHot:3,pendingCold:0,outstanding:3,eligibleNow:0,deferredByRetry:3,nextRetryAt:'2026-10-13T21:00:00Z'},{status:'blocked',reason:'quota',startedAt:'2026-10-13T09:00:00Z',added:4,failed:0});
+assert.equal(line.runLine,'приостановлен · лимит','a system stop keeps its own status');assert.match(line.deferred,/^3 фильма · не раньше /);
+line=outcome({pendingHot:2,pendingCold:1,outstanding:undefined,eligibleNow:undefined,deferredByRetry:undefined,nextRetryAt:undefined});
+assert.equal(line.runLine,'завершён · 3 фильма без актуального прогноза','missing retry data stays neutral');assert.equal(line.deferred,'нет данных');
+line=outcome({pendingHot:1,pendingCold:0,outstanding:1,eligibleNow:0,deferredByRetry:1,nextRetryAt:null});
+assert.equal(line.runLine,'завершён · 1 фильм ожидает повторной попытки','no time is claimed without a stored retryAt');
+for(const sample of [text,line])for(const value of Object.values(sample))if(typeof value==='string')assert.doesNotMatch(value,/очередь обработана|обработана полностью|пакет завершён/);
 context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.match(active.nextLine,/Следующий запуск: около /);assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
 for(const line of [text.profile,text.local,text.windowCoverage,text.runLine,text.nextLine,text.integrationAggregate])assert(line.length<100,'collapsed lines stay compact');
 assert.equal(text.integrationAggregate,'нет данных');
