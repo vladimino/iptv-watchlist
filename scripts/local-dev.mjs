@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {loadLocalCatalog} from './local-fixtures.mjs';
 import {fixtureIdentity,importFixtures,importSnapshot,miniflareDirectory,persistDirectory,prepareLocalStore,snapshotIdentity,snapshotProgrammeUpdatedAt} from './local-store.mjs';
-import {DAY_MS,shiftDaysToNow} from './local-timeshift.mjs';
+import {LOCAL_TIME_ZONE,shiftDaysToNow} from './local-timeshift.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const here=fileURLToPath(import.meta.url);
@@ -93,10 +93,10 @@ async function start(){
    identity,
    persistDir,
    openBucket:()=>openBucket(devConfig,persistDir),
-   importInto:async bucket=>snapshot?importSnapshot(bucket,snapshot,{shiftMs:shiftDays*DAY_MS}):importFixtures(bucket,await loadLocalCatalog()),
+   importInto:async bucket=>snapshot?importSnapshot(bucket,snapshot,{shift:shiftDays?{days:shiftDays,timeZone:LOCAL_TIME_ZONE}:null}):importFixtures(bucket,await loadLocalCatalog()),
   });
  }catch(error){console.error(error.stack||error.message);process.exit(1);}
- console.log(result.action==='skip'?snapshot?`Local R2 already has this snapshot${shiftDays?` shifted forward by ${shiftDays} days`:''}.`:'Local R2 already has the dummy catalog.':result.message);
+ console.log(result.action==='skip'?snapshot?`Local R2 already has this snapshot${shiftDays?` shifted forward by ${shiftDays} calendar days`:''}.`:'Local R2 already has the dummy catalog.':result.message);
  const watchers=process.argv.includes('--watch')?startWatch():[];
  const child=spawn('wrangler',['dev','--config',devConfig,'--local','--ip','127.0.0.1','--port',port,'--persist-to',persistDir,'--compatibility-date','2026-05-03','--show-interactive-dev-session','false'],{cwd:root,stdio:'inherit',env:process.env});
  child.on('exit',code=>{for(const watcher of watchers)watcher.close();process.exit(code??1);});

@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {access,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {buildLocalFixtures} from './local-fixtures.mjs';
-import {DAY_MS,isTimeShifted,shiftSnapshotObject} from './local-timeshift.mjs';
+import {isTimeShifted,shiftSnapshotObject,timeMover} from './local-timeshift.mjs';
 
 const general=['plot_engine','pace','stakes','decision_logic','protagonist_competence','opposition_competence','problem_solving','plan_counterplan_strength','multi_party_goals','chemistry','payoff','ending_quality','technical_plausibility'];
 const dropped=new Set(['unknown','not_applicable']);
@@ -83,7 +83,8 @@ export async function importFixtures(bucket,catalog){
  await putObjects(bucket,objects);
  return {objects:objects.length,message:`Imported ${objects.length} dummy objects from fixtures/local-site/catalog.json.`};
 }
-export async function importSnapshot(bucket,snapshot,{shiftMs=0}={}){
+export async function importSnapshot(bucket,snapshot,{shift=null}={}){
+ const move=timeMover(shift);
  await emptyBucket(bucket);
  const names=await readdir(path.join(snapshot,'entries'));
  const executions=new Map();
@@ -91,7 +92,7 @@ export async function importSnapshot(bucket,snapshot,{shiftMs=0}={}){
  for(const name of names){
   const entry=JSON.parse(await readFile(path.join(snapshot,'entries',name),'utf8'));
   let bytes=await readFile(path.join(snapshot,entry.file));
-  if(shiftMs&&isTimeShifted(entry.key)){bytes=Buffer.from(JSON.stringify(shiftSnapshotObject(entry.key,JSON.parse(bytes.toString('utf8')),shiftMs)));shifted++;}
+  if(move&&isTimeShifted(entry.key)){bytes=Buffer.from(JSON.stringify(shiftSnapshotObject(entry.key,JSON.parse(bytes.toString('utf8')),move)));shifted++;}
   const film=String(entry.key||'').match(/^enrichment\/films\/([^/]+)\/fingerprint\.json$/);
   if(film){fingerprints++;try{executions.set(decodeURIComponent(film[1]),executionOf(JSON.parse(bytes.toString('utf8')).execution));}catch{executions.set(decodeURIComponent(film[1]),{});}}
   if(entry.key==='enrichment/view-index.json'){viewIndex=bytes;continue;}
@@ -102,8 +103,8 @@ export async function importSnapshot(bucket,snapshot,{shiftMs=0}={}){
  const index=JSON.parse(viewIndex.toString('utf8'));
  for(const [id,item] of Object.entries(index)){if(!item?.fingerprint||Object.hasOwn(item.fingerprint,'execution')||!executions.has(id))continue;item.fingerprint.execution=executions.get(id);patched++;}
  await bucket.put('enrichment/view-index.json',JSON.stringify(index),{httpMetadata:{contentType:'application/json'}});
- const shift=shiftMs?` Broadcast times moved forward by ${Math.round(shiftMs/DAY_MS)} days in ${shifted} objects.`:'';
- return {objects:names.length,patched,shifted,message:`Imported ${names.length} objects. Execution values attached for ${patched} of ${fingerprints} fingerprints.${shift}`};
+ const note=move?` Broadcast times moved forward by ${shift?.days??'?'} calendar days (${shift?.timeZone||'Europe/Madrid'}) in ${shifted} objects.`:'';
+ return {objects:names.length,patched,shifted,message:`Imported ${names.length} objects. Execution values attached for ${patched} of ${fingerprints} fingerprints.${note}`};
 }
 export async function prepareLocalStore({refresh=false,identity,persistDir,openBucket,importInto}){
  const markerFile=markerPath(persistDir);
