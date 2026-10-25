@@ -21,6 +21,14 @@ Applies to ChatGPT, Cursor and other agents working on this repository. Read [th
 - Documentation is part of Definition of Done. Changes to runtime topology, persistent data flow, security/trust boundaries, integrations, deployment or operations must update the affected [architecture diagrams](docs/architecture/README.md), [reference](docs/reference/README.md) and [runbooks](docs/runbooks/README.md) in the same PR. Record material durable decisions as [new ADRs](docs/adr/README.md); supersede rather than silently rewrite accepted decisions. Dated test results belong in [evidence](docs/evidence/README.md). Check whether this guide, `CONTRIBUTING.md` and root `README.md` also need changes.
 - For UI work, follow [Visual QA](docs/process/agent-workflow.md): check a local browser at desktop and mobile widths and put a short written report in the PR. Do not create, save, download, attach, or commit screenshots. For Mermaid work, syntax or CI alone is not visual QA: inspect actual GitHub rendering, legibility and arrow semantics.
 
+## Ways of work with the owner
+
+- Address the owner informally in Russian («ты», never «вы»/«ваш»). Chat with the owner and Trello comments are Russian; GitHub PRs, review replies, commit messages and repository docs are English.
+- Roles: the agent is the developer; ChatGPT is the project manager and reviewer and alone moves or closes Trello cards. The agent posts only handoff-to-review and fix-note comments on the card, never "Done" evidence comments.
+- Independent review is mandatory: open a PR, answer every inline comment on its thread, and mark each answered or fixed thread **Resolved** before requesting re-review. Merge is the owner's decision.
+- Approval is action-specific: a direct commit to `main`, a production writer call, a flag or Scheduled Task change each need the owner's explicit yes for that action; one approval does not carry over.
+- Report outcomes plainly with commit, PR, CI run and test evidence; say what was skipped or could not be verified rather than rounding up.
+
 ## Production and security boundaries
 
 - GitHub `main` is authoritative code. Production runs on Cloudflare Worker `iptv` with authoritative R2 bucket `iptv`; the historical ChatGPT Site is **reserve**, not a parallel writer. D1 schema/repositories and offline imports are not evidence of a live D1 cutover. See [deployment](docs/runbooks/deployment.md), [persistence diagram](docs/architecture/persistence-and-migration.md).
