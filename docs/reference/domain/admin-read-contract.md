@@ -192,7 +192,7 @@ The page shows search, an entity summary (id, preferred title or name, identity 
 
 The adapter always calls AIR-123 with an explicit `limit`. With no page-size control it passes 25. It never omits `limit`. A test that calls the adapter's library wrapper with `limit` omitted or `limit: 0` shows the `invalid_limit` error state and does not render a result page. A test that loads the page with no size selected asserts the library call received `limit: 25`.
 
-Keyboard: the search field, queue controls, and results are reachable in order; Escape clears the query. Desktop width about 1280 px and a 390 px mobile width are both required screenshots, attached to the AIR-52 PR and not committed. The public movie UI is unchanged.
+Keyboard: the search field, queue controls, and results are reachable in order; Escape clears the query. Check the page in a local browser at a desktop width around 1280 px and a mobile width around 390 px, and report that check in the PR. Do not commit screenshots. The public movie UI is unchanged.
 
 Deploying the static page is allowed only while the data module stays the fixture. Adding a live client in that PR is a failure of this boundary even if the route is unused.
 

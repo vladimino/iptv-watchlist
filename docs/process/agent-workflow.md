@@ -44,7 +44,7 @@ The reviewer must not return an unfinished routine handoff just because a merge 
 
 ## Visual QA
 
-A substantial UI change needs real browser screenshots at a desktop width around 1280 px and a mobile width around 390 px. Cover a representative full state and a sparse state. Upload the images on the GitHub PR description or discussion. Do not commit screenshots anywhere in the repository: not under `docs/`, tests, fixtures, or build output. The reviewer checks hierarchy, spacing, control placement, responsive overflow, accessibility, and the important interactive states. Green tests or CI are not visual acceptance. Do not close the card until that visual check passes.
+A substantial UI change requires visual QA in a local browser at a desktop width around 1280 px and a mobile width around 390 px. Check representative full and partial states, visual hierarchy, spacing, overflow, whether the controls can be reached, and the main interactions. The PR needs a short written report of what was checked and which problems were found or fixed. Creating, saving, downloading, or attaching screenshots is not required. The owner does the final visual acceptance on real production data after a successful merge and CI/CD. Until that acceptance, the UI card stays open. Green tests or CI are not visual QA. Do not commit screenshots anywhere in the repository.
 
 ## Safety and production boundaries
 
