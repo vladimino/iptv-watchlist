@@ -26,16 +26,28 @@ sequenceDiagram
     Note over Daily,EPG: wait / stop / conflict ends current series
     Hourly->>Access: Authorize hourly workflow
     Access->>MCP: JWT verified
-    Hourly->>MCP: Read current published generation
-    alt Safe outstanding discovery continuation
-        loop Until wait / stop or unsafe checkpoint
+    Hourly->>MCP: epg_status and epg_pipeline_status
+    MCP-->>Hourly: Published runId, continuation and health
+    alt Safe paused continuation of published generation
+        Hourly->>MCP: epg_sync_step(published runId)
+        MCP->>EPG: One discovery chunk
+        EPG->>R2: Fenced writes and checkpoint
+        MCP-->>Hourly: nextAction / nextCatchUpAt
+    else Running and Worker health proves orphaned
+        Note over Hourly,MCP: Expired lease, same generation, valid budget, no wait
+        Hourly->>MCP: epg_sync_step(published runId)
+        MCP->>EPG: CAS settle or resume, then at most one chunk
+        EPG->>R2: Fenced continuation and chunk writes
+        MCP-->>Hourly: nextAction / nextCatchUpAt
+    else Live, unknown or generation conflict
+        Note over Hourly,EPG: Fail closed and do not start a new EPG run
+    end
+    opt Server explicitly returns continue, same generation and safe budget
+        loop While safe nextAction is continue
             Hourly->>MCP: epg_sync_step(published runId)
             MCP->>EPG: One discovery chunk
-            EPG->>R2: Save checkpoint
-            MCP-->>Hourly: nextAction / nextCatchUpAt
+            MCP-->>Hourly: continue / wait / stop
         end
-    else No eligible discovery
-        Note over Hourly,EPG: Do not call epg_sync_start
     end
     Hourly->>MCP: Runner, schema, profile, queue preflight
     Hourly->>MCP: prediction_start(scheduled) once
