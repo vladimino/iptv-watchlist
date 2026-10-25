@@ -4,7 +4,7 @@ A recorded server response is **not proof that a client received it**. Worker di
 
 ```mermaid
 flowchart TD
-    call["MCP or HTTP runner step"]
+    requestStep["MCP or HTTP runner step"]
     server["Worker step diagnostic"]
     outcome{"What did the Worker observe?"}
     entered["Attempt entered"]
@@ -16,7 +16,7 @@ flowchart TD
     unknown["No receipt claim"]
     fault["Caller-reported fault with origin and failedStep"]
     status["Read-only status and diagnostics projection"]
-    call --> server --> outcome
+    requestStep --> server --> outcome
     outcome --> entered
     outcome --> produced --> delivery
     outcome --> failed --> status
@@ -24,7 +24,7 @@ flowchart TD
     delivery --> caller
     caller -->|yes| acknowledged --> status
     caller -->|no| unknown --> status
-    call -.->|separate later completion report| fault --> status
+    requestStep -.->|separate later completion report| fault --> status
 ```
 
 A step can be `entered`, `produced` or `failed`. The persisted server record retains `delivery: unconfirmed`; a later caller-supplied `receivedRequestId` can acknowledge only the matching step. External stops without attributed fault data remain `external_unattributed`. A caller's `origin` is recorded as a **caller report**, not reclassified as a server-observed cause. One item validation failure and retry backoff are not automatically system failures.
