@@ -147,7 +147,7 @@ This repository change does not modify Cloudflare Access. Each item below must b
 ## Limitations
 
 
-- Probe tools and `prediction_validate` do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. A connected ChatGPT or Claude client may cache the tool list; a tool added by a deploy appears only after that client refreshes or reconnects the server. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. Scheduled task rollout was AIR-62; new invocations or modifications need separate approval.
+- Probe tools and `prediction_validate` do not touch R2. The EPG and prediction tools can, and only when an authorized caller invokes them. A connected ChatGPT or Claude client may cache the tool list; a tool added by a deploy appears only after that client refreshes or reconnects the server. Exercising those tools on production, including an isolated write/read/cleanup, needs its own approval. The external Scheduled Tasks were enabled under their own owner approval; new invocations or modifications need separate approval.
 - No SSE, sessions, server-to-client requests, `list_changed` notifications, resources, prompts, or batches. Clients that support only `2026-07-28` are not supported.
 - The origin allow-list is fixed in code: the Worker's own origin and `https://chatgpt.com`.
 - Initial October 19–20 interactive MCP probes did not establish unattended access. [AIR-62](https://trello.com/c/CU71gW4c) subsequently accepted scheduled EPG/prediction runs on October 21; on October 24 both external recurring tasks remained enabled with recent executions. These dated checks do not prove current OAuth health or unspecified security/revocation test results.
