@@ -39,6 +39,7 @@ Labels can be combined: D1 Film repository = Каталог + Платформа
 8. Keep historical notes as history, but don't leave an obsolete "Prerequisites" text section that contradicts the checklist. If a dependency changes, update the checklist and the card's introductory context.
 9. **Production rollout is not code delivery.** A green PR/code-only Done must not be misrepresented as an enabled production feature. Put shadow experiment, go/no-go, cutover, and stabilization in separate tickets.
 10. No unsanctioned flag toggles, manual sync/model/TMDB calls, live migration, destructive cleanup or source-of-truth change as a side effect of drafting, testing, or closing documentation cards.
+11. **Normal PR merge is part of the approved card delivery.** When an independently reviewed PR satisfies the scope, prerequisites, CI and resolved review findings, ChatGPT merges without asking for a second per-PR owner permission. If the card has a named pre-merge owner gate (for example rendered Mermaid QA) or newly surfaced scope/security/architecture risk, that gate is still mandatory. Post-deploy owner visual acceptance for UI and separate authorizations for production writers, flags, Tasks, migrations and cutovers are unaffected. See [the delivery pipeline](agent-workflow.md#delivery-pipeline-for-already-approved-work).
 
 ## Example: independent preparation, then one cross-stream gate
 
