@@ -1,6 +1,6 @@
 # Hourly Scheduled Task: orphaned discovery recovery prompt
 
-**Captured at:** 2026-10-25, after the owner-authorized prompt change (update acknowledged at 21:50:51 UTC; configuration independently re-read from the live ChatGPT Scheduled Tasks registry during the same evening). **Source:** live ChatGPT Scheduled Tasks registry, not GitHub or the application's Events page. **Evidence type:** operational configuration snapshot. **Scope:** one hourly Task and its expected recovery contract; no storage contents, source-data sample, execution transcript or secrets captured.
+**Captured at:** 2026-10-25, after the owner-authorized prompt change (update acknowledged at 21:50:51 UTC; configuration independently re-read from the live ChatGPT Scheduled Tasks registry during the same evening). **Source:** live ChatGPT Scheduled Tasks registry, not GitHub or the application's Events page. **Pinned repository reference:** `dc19f4aa58a75c6f834041ae68f8500207e3f65e` (`main` at documentation preparation); live task configuration is external to Git. **Evidence lifecycle:** dated, historical configuration observation. **Scope/denominator:** one hourly Task out of two enabled IPTV Scheduled Tasks; no storage contents, source-data sample, execution transcript or secrets captured.
 
 ## Authorization and context
 
@@ -23,7 +23,7 @@ The owner requested that the safe orphaned-continuation behavior be added to the
 
 ## Result, uncertainty and verdict
 
-**Observed result:** the existing hourly Task remained enabled and retained its hourly Europe/Madrid recurrence; the prompt contained the recovery preflight and kept the full prediction-validation instructions. **Configuration verdict:** aligned with the maintained [expected operational contract](../reference/scheduled-tasks.md) after the documentation change.
+**Observed result:** the existing hourly Task remained enabled and retained its hourly Europe/Madrid recurrence; the prompt contained the recovery preflight and kept the full prediction-validation instructions. **Original verdict:** PASS for the configuration comparison only; runtime stabilization NOT VERIFIED. Aligned with the maintained [expected operational contract](../reference/scheduled-tasks.md) after the documentation change.
 
 **Limits:** reading the Task registry proves its configured instruction and recurrence, not that a scheduled execution actually called `epg_sync_step`, successfully committed a discovery checkpoint or produced a prediction. Worker `epg_pipeline_status` and the Scheduled Task execution history must be correlated separately for run acceptance. Server-side leases, published-generation identifiers and R2 state can change between status reads. The Task registry remains authoritative for actual configuration; this dated record is historical.
 
