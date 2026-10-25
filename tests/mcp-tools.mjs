@@ -94,6 +94,10 @@ const forbidden=[
  ['prediction_pending',{limit:100}],
  ['prediction_pending',{limit:1,cursor:'not-a-cursor'}],
  ['prediction_pending',{limit:1,prefix:'enrichment/'}],
+ ['prediction_validate',{}],
+ ['prediction_validate',{fingerprint:{},key:'enrichment/x'}],
+ ['prediction_validate',{fingerprint:'text'}],
+ ['prediction_validate',{prediction:[]}],
 ];
 for(const [name,args] of forbidden){
  fetches.length=0;
@@ -128,7 +132,7 @@ for(const tool of tools){
  assert.doesNotMatch(properties,/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,false);
-for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_pending']){
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_pending']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
@@ -238,6 +242,25 @@ assert.equal(invalid.records.has('enrichment/films/film2/fingerprint.json'),fals
 assert.doesNotMatch(JSON.stringify(rejected.body),/PAYLOAD-CANARY|TITLE-CANARY|Invalid fingerprint/);
 assert.doesNotMatch(JSON.stringify([...invalid.records]),/PAYLOAD-CANARY|Invalid fingerprint/);
 assert.deepEqual(invalid.records.get('enrichment/prediction-queue.json').retries.film2.validation.issues.map(issue=>issue.path),['fingerprint.execution.payoff','fingerprint.moodLabels']);
+
+// prediction_validate is the executable preflight: same contract, no storage, no run, not a failure.
+const validateDenied=[];
+const validateSealed={BUCKET:{async get(){validateDenied.push('get');},async put(){validateDenied.push('put');},async list(){validateDenied.push('list');}},MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
+fetches.length=0;
+const preflightBad=await tool(validateSealed,'prediction_validate',{fingerprint:{...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']},prediction:{...prediction,predictedRating:4.2}});
+assert.equal(preflightBad.body.result.isError,undefined,JSON.stringify(preflightBad.body));
+assert.deepEqual(preflightBad.body.result.structuredContent,{valid:false,contractVersion:1,fingerprint:{checked:true,issues:[{path:'fingerprint.execution.payoff',code:'invalid_enum'},{path:'fingerprint.moodLabels',code:'required'}]},prediction:{checked:true,issues:[{path:'prediction.predictedRating',code:'invalid_step'}]},storage:'not_accessed',sideEffects:'none'});
+assert.doesNotMatch(JSON.stringify(preflightBad.body),/PAYLOAD-CANARY/);
+const preflightGood=await tool(validateSealed,'prediction_validate',{fingerprint,prediction});
+assert.deepEqual(preflightGood.body.result.structuredContent,{valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:true,issues:[]},storage:'not_accessed',sideEffects:'none'});
+const preflightOne=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_validate',{prediction});
+assert.deepEqual(preflightOne.body.result.structuredContent.fingerprint,{checked:false,issues:[]});assert.equal(preflightOne.body.result.structuredContent.valid,true,'answers without a bucket binding');
+assert.deepEqual(validateDenied,[]);
+assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[]);
+assert.equal((await tool(validateSealed,'prediction_validate',{fingerprint},{assertion:null})).response.status,403,'preflight stays behind the Access JWT');
+assert.deepEqual(validateDenied,[]);
+// The preflight verdict and the submit verdict agree on the same payload.
+assert.deepEqual(preflightBad.body.result.structuredContent.fingerprint.issues,rejectedItem.validation.issues);
 
 const conflicts=store();
 conflicts.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});

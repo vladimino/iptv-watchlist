@@ -112,4 +112,25 @@ const tampered=plain(call('predictionFilmDiagnostic')(await call('loadPrediction
 assert.deepEqual(tampered.retry.validation,{stage:'unknown',reportedBy:null,issues:[]});
 assert.equal(call('predictionFilmDiagnostic')(await call('loadPredictionDiagnosticSnapshot')(env,'tmdb_11'),'tmdb_11',Date.now()).retry.validation.stage,'caller_reported');
 assert.doesNotMatch(JSON.stringify([diagnostic,tampered]),secret);
-console.log('Submit validation: contract-driven preflight parity, missing moodLabels, invalid enums, wrong types, missing prediction and fingerprint, caller report, valid payload, idempotent re-delivery, storage failure, runner contract and sanitized film diagnostics passed');
+// 6. Scheduled-style sequence (one film per next, as the MCP runner does): a malformed first item is named
+// precisely, the following valid films are saved, the run completes normally, and the malformed film stays
+// deferred with its original retry record. No format_error_storm from unrelated items.
+boot(['tmdb_31','tmdb_32','tmdb_33','tmdb_34','tmdb_35']);
+const scheduled=(await api('start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'})).data;assert.equal(scheduled.status,'running');assert.equal(scheduled.trigger,'scheduled');
+const seen=[],saved=[];let malformedId=null,originalRetry=null,step;
+for(let i=0;i<10;i++){step=(await api('next',{runId:scheduled.runId,batchSize:1})).data;if(step.mustComplete)break;assert.equal(step.items.length,1);const {filmId}=step.items[0];assert.ok(!seen.includes(filmId),'a deferred film is not offered again in the same run');seen.push(filmId);
+ if(seen.length===1){malformedId=filmId;r=(await api('submit',{runId:scheduled.runId,items:[{filmId,fingerprint:{...badEnums,strengths:['PAYLOAD-CANARY']},prediction}]})).data;
+  assert.equal(r.results[0].status,'retryable_failure');assert.deepEqual(codes(r.results[0].validation.issues),['fingerprint.execution.payoff invalid_enum','fingerprint.execution.hero_vulnerability invalid_enum']);assert.equal(r.mustComplete,false);assert.equal(r.status,'running');
+  originalRetry=structuredClone(records.get('enrichment/prediction-queue.json').retries[filmId]);assert.equal(originalRetry.attempts,1);assert.ok(originalRetry.retryAt>Date.now());}
+ else{r=(await api('submit',{runId:scheduled.runId,items:[{filmId,fingerprint,prediction}]})).data;assert.equal(r.results[0].status,'created');assert.equal('validation' in r.results[0],false);assert.equal(r.mustComplete,false);assert.equal(r.stopReason,null);saved.push(filmId);assert.equal(r.added,saved.length,'coverage progresses despite the deferred film');}}
+assert.equal(step.mustComplete,true);assert.equal(step.stopReason,'eligible_queue_empty','the deferred film is the only outstanding work');assert.equal(saved.length,4);assert.equal(seen.length,5);
+const finished=(await api('complete',{runId:scheduled.runId,reason:step.stopReason})).data;
+assert.equal(finished.status,'complete');assert.equal(finished.stopReason,'eligible_queue_empty');assert.equal(finished.reason,null);assert.deepEqual(finished.counts,{created:4,recalculated:0,failed:1,pending:0});assert.notEqual(finished.stopReason,'format_error_storm');
+for(const id of saved)assert.equal(records.get('enrichment/films/'+id+'/predictions.json').current.predictedRating,3.5);assert.equal(records.has('enrichment/films/'+malformedId+'/fingerprint.json'),false);
+const afterRetry=records.get('enrichment/prediction-queue.json').retries[malformedId];
+assert.deepEqual(afterRetry,originalRetry,'the deferred film keeps its original retry record: attempts, retryAt, validation');
+assert.ok(records.get('enrichment/prediction-queue.json').hotPending.includes(malformedId),'the deferred film is still outstanding');assert.deepEqual(call('queueReadyIds')(records.get('enrichment/prediction-queue.json')),[],'and not eligible before retryAt');
+run=records.get('enrichment/runs/'+scheduled.runId+'.json');assert.equal(run.formatFailureStreak,0,'valid films reset the consecutive-failure streak');assert.equal(Object.keys(run.failures).length,1);
+assert.doesNotMatch(stored(),secret);assert.doesNotMatch(logs.join('\n'),secret);
+
+console.log('Submit validation: contract-driven preflight parity, missing moodLabels, invalid enums, wrong types, missing prediction and fingerprint, caller report, valid payload, idempotent re-delivery, storage failure, runner contract, sanitized film diagnostics and a scheduled-style sequence with one deferred film passed');
