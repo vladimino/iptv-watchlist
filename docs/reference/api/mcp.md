@@ -46,7 +46,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `enrichment_runner` | no | `GET /api/enrichment/runner` |
 | `enrichment_queue` | no | `GET /api/enrichment/queue/status` |
 | `enrichment_status` | recovery only | `GET /api/enrichment/status`, including an undelivered stop event |
-| `prediction_queue_overview` | no | Existing queue, profile, view index, programme, discovered films, and published generation. No HTTP route. [AIR-98](prediction-diagnostics.md). |
+| `prediction_queue_overview` | no | Existing queue, profile, view index, programme, discovered films, and published generation. No HTTP route. See [prediction diagnostics](prediction-diagnostics.md). |
 | `prediction_film_diagnostics` | no | The same snapshot plus that film's fingerprint and prediction. No HTTP route. [AIR-98](prediction-diagnostics.md). |
 | `prediction_pending` | no | One page of the same queue snapshot. No HTTP route. [AIR-98](prediction-diagnostics.md). |
 | `epg_sync_start` | yes | `POST /api/sync/start`. No arguments. |
@@ -55,13 +55,13 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
 | `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction. |
 | `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
-| `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. [AIR-88](run-diagnostics.md). |
+| `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. See [run diagnostics](run-diagnostics.md). |
 
-Prerequisite for every tool is [AIR-58](https://trello.com/c/BB01YN2f) (this Access check). `epg_sync_step` depends on [AIR-60](https://trello.com/c/UO0YqoWw) for resolver continuation. [AIR-62](https://trello.com/c/CU71gW4c) completed the separate unattended scheduled-task rollout. [AIR-49](https://trello.com/c/YNaLFwtW) (D1) is independent and unused here.
+All MCP tools require the [Cloudflare Access and Worker JWT validation](#authorization) described below. `epg_sync_step` follows the [discovery continuation contract](#discovery-contract-for-scheduled-tasks). External Scheduled Tasks orchestrate EPG and predictions independently of deployment; D1 is not the authoritative data source for these tools.
 
 Write tools are annotated `readOnlyHint: false`. `enrichment_status` is too, because the HTTP status route can persist a recovered stop event. `epg_sync_start` and `epg_sync_step` are `openWorldHint: true` because they fetch Letterboxd, the configured EPG source, or TMDB. A wrong argument returns a tool result with `isError: true` and does not call the domain function. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.
 
-The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `discovery.nextAction`: `continue` means call `epg_sync_step` again now with the same `runId`; `wait` means do not call before `discovery.nextCatchUpAt`; `stop` means discovery is finished until the next EPG commit. `ratingsPending` does not mean retry Letterboxd; that follow-up is [AIR-64](https://trello.com/c/WTnyO8bX). One call is one metadata batch, the EPG commit, or one discovery chunk. A separate request does not guarantee a new isolate. The caller repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. ChatGPT generates the fingerprint and prediction; the Worker only validates and stores them.
+The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `discovery.nextAction`: `continue` means call `epg_sync_step` again now with the same `runId`; `wait` means do not call before `discovery.nextCatchUpAt`; `stop` means discovery is finished until the next EPG commit. `ratingsPending` does not mean retry Letterboxd; a separate ratings-refresh workflow handles that follow-up. One call is one metadata batch, the EPG commit, or one discovery chunk. A separate request does not guarantee a new isolate. The caller repeats `prediction_next` / `prediction_submit` until the runner returns `mustComplete` or the queue is empty. ChatGPT generates the fingerprint and prediction; the Worker only validates and stores them.
 
 ### Discovery contract for Scheduled Tasks
 
@@ -75,7 +75,7 @@ The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `d
 
 `discovery.state` is `paused`, `running`, `complete`, `error`, or `busy`. A finished response is not left `running`. `remainingChunks` counts chunks still allowed in the current series. The field list and the lease rules are in [ENRICHMENT_API.md](enrichment.md#epg-resolver--hotcold-pipeline-v2).
 
-### Continuation diagnostics (AIR-151)
+### Continuation diagnostics
 
 Every `epg_sync_step` that reaches `POST /api/sync/epg`, and every discovery resolve request, is one **step entry** with two channels. The Worker log gets one structured line per phase (`{"event":"epg_continuation", …}`): `entered` before any storage access, then `completed` or `failed`, both with the same `id`. The ring `epg/resolver-continuation-diagnostics.json` (newest first, at most 20) gets the same entry written best effort with `phase: entered` before the step and replaced by the outcome after it. `epg_pipeline_status` returns the stored ring as `continuationDiagnostics`; reading it writes nothing. The log line is the arrival evidence; the ring is a convenience view that can miss an entry (write failure, eviction after 20 later steps), so an absent ring entry means *no persisted evidence*, not *no call*.
 
