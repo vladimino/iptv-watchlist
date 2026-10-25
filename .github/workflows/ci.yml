@@ -40,6 +40,13 @@ jobs:
         if: github.event_name == 'pull_request'
         run: node scripts/check-documentation-governance.mjs
 
+      - name: Advise on task history in maintained docs
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: node scripts/check-timeless-documentation.mjs
+
       - name: Run tests
         run: npm test
 
