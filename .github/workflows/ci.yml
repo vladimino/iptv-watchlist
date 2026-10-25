@@ -45,6 +45,8 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node scripts/check-timeless-documentation.mjs
 
       - name: Run tests
