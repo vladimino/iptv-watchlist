@@ -10,6 +10,12 @@ After a new MCP tool deployment, refresh the connected ChatGPT tools if their ca
 
 To connect a replacement server, use the same URL and OAuth with an empty client ID and secret, and sign in as the owner. The current allow-list already permits a ChatGPT connector callback under `https://chatgpt.com/connector/oauth/*` (requirement 2).
 
+## Connecting Claude
+
+Claude Code cloud sessions reach `/mcp` through a claude.ai custom connector, not through a local MCP configuration. Settings → Connectors → Add custom connector: name `IPTV MCP`, URL `https://iptv.vladimino.workers.dev/mcp` exactly (the client sends it as the RFC 8707 `resource`), empty client ID and secret (DCR). The connector's callback, `https://claude.ai/api/mcp/auth_callback`, must be on the `IPTV MCP` allowed-redirect list (requirement 2). The claude.ai account email plays no part: the identity in the Access JWT is the one used at the Cloudflare Access login, so the owner signs in there with an identity the owner-only policy admits. Connectors are read when a session starts; an already running session can pick a new connector up after reconnecting. On 25 October 2026 the connected Claude client listed exactly the 19 tools above, `probe_read` returned `authorization: cloudflare-access-jwt-verified`, `storage: not_accessed`, protocol `2025-11-25`, and `probe_echo` returned its marker. The same boundaries apply to Claude as to ChatGPT: writer tools and `enrichment_status` only with an action-specific owner approval.
+
+The repository's `.claude/settings.json` pre-approves only `probe_read` and `probe_echo` from this server for cloud sessions; every other tool call still prompts the owner. The same file pre-approves read-only tools of the official Cloudflare MCP servers (`https://mcp.cloudflare.com/mcp` and `https://observability.mcp.cloudflare.com/mcp`) used to verify live Worker, Access and log state; the Cloudflare API `execute` tool, which can write, is deliberately not on that list.
+
 ## Safe verification procedure
 
 These checks contact production only through Cloudflare Access and the two probes. None of them reaches R2. Run them only with the owner's approval. Never paste tokens, JWTs, or cookies into logs, issues, or chats.

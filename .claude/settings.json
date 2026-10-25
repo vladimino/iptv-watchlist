@@ -27,7 +27,18 @@
       "mcp__github__add_reply_to_pull_request_comment",
       "mcp__github__resolve_review_thread",
       "mcp__github__create_pull_request",
-      "mcp__github__update_pull_request"
+      "mcp__github__update_pull_request",
+      "mcp__IPTV_MCP__probe_read",
+      "mcp__IPTV_MCP__probe_echo",
+      "mcp__Cloudflare_API__whoami",
+      "mcp__Cloudflare_API__search",
+      "mcp__Cloudflare_API__docs",
+      "mcp__Cloudflare_Observability__query_worker_observability",
+      "mcp__Cloudflare_Observability__observability_keys",
+      "mcp__Cloudflare_Observability__observability_values",
+      "mcp__Cloudflare_Observability__workers_list",
+      "mcp__Cloudflare_Observability__workers_get_worker",
+      "mcp__Cloudflare_Observability__search_cloudflare_documentation"
     ]
   },
   "hooks": {
