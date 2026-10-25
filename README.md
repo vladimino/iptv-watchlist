@@ -39,7 +39,7 @@ Letterboxd ratings refresh is a distinct, gated operation. HTTP 403 must not be 
 
 ## Local development
 
-Requires Node.js 20 or later. Local development uses fixture data and a local R2-compatible store; a private production snapshot is not needed.
+Requires Node.js 20 or later and the `sqlite3` command-line tool (the repository tests for the D1 schema and repositories shell out to it; GitHub Actions' Ubuntu runner ships it, and Claude Code cloud sessions install it through `.claude/hooks/session-start.sh`). Local development uses fixture data and a local R2-compatible store; a private production snapshot is not needed.
 
 ```bash
 npm ci
