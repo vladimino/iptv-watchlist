@@ -1,114 +1,68 @@
-# IPTV Watchlist
+# IPTV Watchlist — «В эфире»
 
-Pet project that combines a public Letterboxd watchlist with an XMLTV/IPTV programme. A Cloudflare Worker builds a rolling viewing window, enriches film metadata, stores state in R2, and serves a compact private dashboard. The repository also contains the prediction queue, status surfaces, and their tests; personal ratings, production data, credentials, and generated deployments are deliberately excluded.
+A private film guide built from a public [Letterboxd](https://letterboxd.com/) watchlist and an XMLTV/IPTV programme. It combines films on the watchlist with recently aired and upcoming broadcasts, adds discovered catalog films and metadata, and displays personal film-taste predictions when available.
 
-## Project layout
+**Production:** Cloudflare Worker `iptv` at [iptv.vladimino.workers.dev](https://iptv.vladimino.workers.dev/), protected by Cloudflare Access. **Authoritative storage:** Cloudflare R2 bucket `iptv`. GitHub `main` is the canonical code source. The former ChatGPT Site is a reserve, **not** a parallel writer. D1 schemas, repositories and offline migration tools exist, but D1 is **not production-authoritative**. See [deployment](docs/runbooks/deployment.md), [system context](docs/architecture/system-context.md) and [persistence/migration architecture](docs/architecture/persistence-and-migration.md).
 
-- `src/` — Worker source, sync pipeline, discovery and prediction orchestration. `src/continuation.js` is the internal-only entrypoint for one discovery chunk. `src/mcp.js` is the MCP endpoint: connection probes plus the EPG and prediction tools. `src/domain/film-person.js` is the Film and Person lifecycle contract. The Worker bundle includes that file. Title and name localization use its reviewed guard only when the Worker variable `LIFECYCLE_LOCALIZATION` names `metadata`, `epg`, `programme`, or `watchlist`. The variable is unset by default. `src/domain/film-person-reader.js` builds views from already loaded records, and `src/domain/film-person-backfill.js` compares them with sidecars the caller already has. Neither is in the bundle. `scripts/lifecycle-parity.mjs` runs that comparison against a private snapshot. The clock is the snapshot's `finishedAt`, or `--as-of`, and it prints counts only. `scripts/lifecycle-diagnostics.mjs` uses the same snapshot checks to print one Film, one Person, or the lifecycle summary as JSON. That snapshot is a historical archive, not current production. `migrations/0001_schema_v1.sql` is the unapplied D1 schema from [docs/d1-schema.md](docs/reference/data/d1-schema.md). It is not bound to the Worker, and R2 remains the production store. `src/epg-repository.js` is the local EPG repository for that schema, `src/canonical-repository.js` is the local Film and Person repository, and `src/prediction-repository.js` is the local fingerprint, profile, and prediction repository. `scripts/offline-import.mjs` imports one verified historical snapshot into a local SQLite file outside this repository; a missing family or an unportable record stays in the report and is not counted as a match. The 19 October 2026 run is [docs/air-73-offline-run.md](docs/air-73-offline-run.md). The Worker bundle includes none of them. Discovery, enrichment, fingerprint, and prediction do not call the domain.
-- `public/` — browser UI.
-- `data/` — reviewed public title/person dictionaries used at build time. How those records relate to watchlist films, discovered films, and people is audited in [Film/Person domain reference](docs/reference/domain/film-person.md).
-- `tests/` — self-contained unit and contract tests.
-- `build.mjs` — dependency-free Worker bundle builder.
-- `.openai/hosting.json` — legacy Sites identity and R2 binding (contains no credential).
-- `.github/workflows/ci.yml` — Cloudflare CI/CD.
-- `wrangler.jsonc` — Cloudflare Worker configuration.
+## What the site does
 
-## Local setup
+- **Programme and availability.** Displays a rolling 72-hour catch-up archive and upcoming programme, including on-air and last-chance showings. The current published EPG generation determines which broadcasts are known. The interface also supports films without a current showing.
+- **Finding films.** Search by title and optionally people and plot; filter by genre, year, runtime, channels, film characteristics and availability. Saved filters, sorting and list navigation work with the film detail view.
+- **Film details.** A film page includes available poster, synopsis, localized/original title, cast, director, broadcasts and saved predictions. Users can mark a film as started and compare available film characteristics.
+- **Personal predictions.** A versioned taste profile and film fingerprints support predicted ratings and explanations. Prediction freshness is separate from broadcast times. Actual Letterboxd ratings remain a different data source; a missing prediction or rating is not fabricated.
+- **Status and history.** The dashboard shows coverage/freshness and processing status. An Events page presents recorded additions, removals and other lifecycle events; inferred watches are not confirmed viewing history.
 
-Node.js 20 or newer is sufficient; there are no runtime npm dependencies.
+Features operate on stored snapshots: opening the page does **not** run model inference or trigger an EPG sync. Some legacy GET/read paths can recover or initialize persisted state; see [safe operational boundaries](docs/runbooks/deployment.md) and [GET side-effect tests](tests/get-side-effects.mjs).
 
-```bash
-cp .env.example .env
-npm test
-npm run build
+## Data and operations
+
+```text
+Public Letterboxd watchlist + configured XMLTV programme
+                         |
+                  authorized EPG sync
+                         |
+                Cloudflare Worker iptv
+                         |
+            published EPG generation in R2
+                         |
+                browser programme and film views
+
+TMDB metadata/discovery ----> verified catalog records in R2
+Published taste profile ----> external ChatGPT model runner ----> predictions in R2
 ```
 
-Local browsing uses dummy films from the repository and a gitignored local R2 store. `npm run dev` builds the Worker when the bundle is missing or older than the sources. See [docs/local-setup.md](docs/runbooks/local-setup.md).
+The Worker publishes a coherent EPG generation before switching its published pointer. Candidate scoring and TMDB detail verification are separate: an ambiguous match does not automatically become a canonical film. Discovery continues in bounded chunks **only after explicit requests**.
+
+EPG/watchlist and prediction orchestration are performed by **external ChatGPT Scheduled Tasks** through an owner-only MCP endpoint, not by Worker Cron. Tasks and active flags can change independently of GitHub deployments; historical documentation is not proof of their current state. Publishing Worker code neither invokes MCP writers nor runs sync, discovery, predictions or migration. See [EPG architecture](docs/architecture/epg-and-availability.md), [discovery architecture](docs/architecture/discovery-and-resolution.md), [prediction pipeline](docs/architecture/prediction-pipeline.md), [scheduling](docs/architecture/scheduling-and-orchestration.md) and [MCP contract](docs/reference/api/mcp.md).
+
+Letterboxd ratings refresh is a distinct, gated operation. HTTP 403 must not be bypassed; previously successful rating generations are retained when a new fetch cannot complete. See the [ratings contract](docs/reference/integrations/letterboxd-ratings.md).
+
+## Local development
+
+Requires Node.js 20 or later. Local development uses fixture data and a local R2-compatible store; a private production snapshot is not needed.
 
 ```bash
+npm ci
+npm test
+npm run build
 npm run dev
 ```
 
-A machine that has the private export can point `.local-dev.json` at it. That file is gitignored. The script does not change production R2.
+The development server starts at `http://127.0.0.1:8787`. For fixture behavior, watch mode, private snapshot isolation and safe reset instructions, follow [local setup](docs/runbooks/local-setup.md). Keep credentials in the appropriate local or Cloudflare environment; never commit them.
 
-Configure the deployment environment rather than committing values:
+## Repository and documentation
 
-- `LETTERBOXD_USERNAME` — public Letterboxd account whose watchlist is read.
-- `EPG_XML_URL` — HTTPS XMLTV source URL.
-- `TMDB_API_READ_ACCESS_TOKEN` — server-side TMDB read token.
-- `BUCKET` — R2 binding declared by the hosting platform.
-- `MCP_ACCESS_TEAM_DOMAIN` — Cloudflare Zero Trust team domain, `https://<team>.cloudflareaccess.com`, used to verify Access JWTs on `/mcp`.
-- `MCP_ACCESS_AUD` — AUD tag of Access application `IPTV MCP`. Without it and the team domain, `/mcp` fails closed with `503`.
-- `RATINGS_REFRESH` — set to `on` to allow `POST /api/enrichment/ratings/refresh`. Unset, the route does not call Letterboxd. The EPG commit still attempts ratings on its own and does not read this variable.
+| Entry point | Purpose |
+| --- | --- |
+| [Documentation home](docs/README.md) | Map of maintained docs and historical evidence |
+| [Architecture diagrams](docs/architecture/README.md) | Thirteen implemented pages covering system context, runtime, security, EPG, identity, predictions, data, UI and failures |
+| [ADR register](docs/adr/README.md) | Accepted architectural decisions and their evidence |
+| [Technical reference](docs/reference/README.md) | API, domain, data and integration contracts |
+| [Runbooks](docs/runbooks/README.md) | Deployment, safe operations and recovery |
+| [Process](docs/process/README.md) | Delivery, review and Trello conventions |
+| [Evidence registry](docs/evidence/README.md) | Dated experiments, parity and verification reports |
+| [Agent guide](AGENTS.md) · [Contributing](CONTRIBUTING.md) | Repository rules and contributor workflow |
 
-Runtime values are configured in Cloudflare. Worker `iptv` binds `BUCKET` to R2 bucket `iptv`, the authoritative production store since the 19 October 2026 cutover. The legacy Site keeps a separate R2 store as a temporary reserve and as the source of the historical snapshot. Do not run sync, prediction, or other writers there, and do not browse it for diagnosis: some of its GET routes can write. The tracked hosting manifest records only that legacy Site identity and binding.
+Code lives in `src/`, the browser interface in `public/`, reviewed public localization data in `data/`, tests in `tests/`, and reproducible build logic in `build.mjs`. GitHub Actions in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs tests/build for PRs and publishes a tested artifact on `main`; [`wrangler.jsonc`](wrangler.jsonc) declares the Worker and production R2 binding.
 
-## Tests
-
-`npm test` runs the self-contained suite and does not contact Letterboxd, EPG, TMDB, or production. Historical source-adapter tests that depended on downloaded HTML/XML snapshots are not part of the public test command because those local captures are intentionally excluded.
-
-## Live refresh
-
-A visible tab rereads published snapshots about once a minute, and again as soon as the tab becomes visible. A hidden tab does not poll. Each pass requests `/api/events`, `/api/enrichment/footer/status`, `/api/enrichment/view`, `/api/started`, and `/api/programme`. It does not start EPG sync, watchlist sync, an enrichment run, or prediction. Search, sort, scroll, and selected filters stay as the user left them.
-
-Those requests are GET, but two of them can still write. `GET /api/events` looks for an undelivered stop or start event and, only when one exists, saves the recovered event and related run record. `GET /api/enrichment/view` writes a built-in personal rating into `enrichment/view-index.json` when that film is missing from the index. The committed seed is empty, so that particular write does not happen until the seed contains an entry. `/api/enrichment/footer/status`, `/api/started`, and `/api/programme` only read on this pass. The footer adds one compact integrations line from the stored watchlist sync, ratings observations, EPG sync result, resolver continuation and prediction run. Reading it does not start those jobs. A ratings blockage stays on the ratings line when EPG and predictions succeeded. The ratings line follows the later of the EPG films scan and the separate ratings status. `RATINGS_REFRESH` left unset adds «отдельное обновление выключено» and does not by itself decide that line. A watchlist read that fails before the next sync starts is stored in `watchlist-ingest.json` and leaves the previous sync in place. Recognition queued for the current programme, including the usual pause between chunks, stays in progress. The expanded list links to Events. A filter with no current matches remains active and applies again when matching films return. Reloading the page restores those selections from the URL even when the current snapshot does not contain them. The same pass refreshes time-based presentation, including last chance and what is on now, even when the server snapshots are unchanged.
-
-Outside that pass, two more GET routes can write. `GET /api/enrichment/status` recovers undelivered stop events in the same way, and both it and `GET /api/enrichment/runs` mark a run whose lease has expired as interrupted. Every other GET route leaves R2 unchanged. `tests/get-side-effects.mjs` derives the GET routes from the source and fails if a different set writes; update it together with this section.
-
-## Internal continuation
-
-The EPG resolver works in bounded chunks. The EPG commit records a paused discovery series and does not start it. Each later `epg_sync_step`, or `POST /api/enrichment/discovery/resolve`, runs exactly one chunk and returns `discovery.nextAction`: `continue` means call again now, `wait` means do not call before `nextCatchUpAt`, and `stop` means wait for the next EPG commit. A separate request is a memory hypothesis, not a guarantee of a new isolate; that has to be checked in production after deploy. The `DiscoveryContinuation` entrypoint remains internal-only, so internet traffic cannot reach it and a public self-fetch is not a fallback. Statuses and failure reasons are described in [ENRICHMENT_API.md](docs/reference/api/enrichment.md#epg-resolver--hotcold-pipeline-v2).
-
-## Effective programme window
-
-The page reads the saved snapshot and the clock it is opened on. It does not rewrite `programme.json`. The saved `window` is a half-open envelope `[from, to)`: `to` is the last start the sync asked for, not proof that every channel has a listing until then, and not the end of catch-up. `stats.epgEnd` is the latest start actually seen. Times are absolute milliseconds. Europe/Madrid is only used when a time is shown.
-
-A past showing stays in the archive while `now - 72h < start <= now` and `start` is still inside the envelope. `start + 72h == now` has already left. A showing that starts at `now` is on air when its `end` is still ahead; it is not listed as later. Later showings are `start > now` and `start < to`. Empty ranges stay empty. When both the archive and the later range are empty, the film list shows the watchlist without a schedule, including when the open tab is already archive or the next day. That fallback does not check the box, change the address, or rewrite a preset. The archive and next-day counts stay at zero even if the watchlist box was already on, and «Последний шанс» does not pretend an expired showing is still there. Search and the other filters still apply. A newer snapshot brings the schedule back. The same clock updates counts, cards, channels, and the shortlist on the existing refresh; a tick that changes nothing leaves the open details and the scroll position alone. The badge describes this window. It does not say the sources are connected.
-
-A successful EPG scan replaces broadcast `shows` outright. The previous programme's showings are not copied forward, including ones still inside 72 hours. Candidates and catalog films keep their identity, aliases, and resolution decisions; a film missing from the new feed simply has no current showings. A failed or incomplete scan does not publish that replacement. The new discovery ledger, catalog, and programme are staged together, and readers of that trio follow one captured `epg/published-generation.json` value. A later scan or reconcile updates that same generation instead of a hidden legacy copy. `epgLastAiring` records that a film was seen, and it is not itself a current broadcast.
-
-`src/domain/scored-resolution.js` scores observations and an independent acceptance gate determines whether the proposed Film identity is verified. `SCORED_RESOLUTION` is intentionally not committed to the repository. On 24 October 2026 the owner-approved [AIR-68](https://trello.com/c/qbLDc6Ql) cutover set the live Dashboard binding from `shadow` to `on`, independently confirmed by MCP; the single authorized resolver chunk produced four `detail_verified` catalog additions, rejected two unverified proposals, and left R2 authoritative. [AIR-69](https://trello.com/c/FlcWZX7W) separately observes the next two normal EPG generations for stabilization. `CANDIDATE_DISCOVERY` was unset at cutover, so optional variant search was not activated. Earlier [AIR-66](docs/air-43-shadow-rollout.md), [AIR-67](docs/air-67-parity.md), [AIR-81](docs/air-81-parity.md), [AIR-84](docs/air-84-shadow.md) and [AIR-97](docs/air-97-verdict.md) evidence retain their historic NO-GO/limited verdicts; later [AIR-99](docs/air-99-verdict.md) and [AIR-100](docs/air-100-rollout.md) supported the independently approved AIR-68 rollout. Extra title/year searches require `CANDIDATE_DISCOVERY` in the matching scored mode; a trusted Film identity still needs TMDB detail verification. The cautious `≈` mark applies to uncertain matches and is not removed merely because a year is present. Consult [scored resolution](docs/reference/domain/scored-resolution.md) and [candidate discovery](docs/reference/domain/candidate-discovery.md); check live flags rather than relying on this dated summary.
-
-The resolver spends a lookup only on a candidate that is still in the latest feed and inside the viewing window. A previous feed stays in the ledger as history. Five identical uncertain matches stop further lookups until the title, year, duration, or a broadcast changes. That finished candidate stays stored as `terminalNoMatch` and is not current work. `GET /api/enrichment/pipeline/status` reports the remaining current work separately from `ledgerTotal`, `historicalUnresolved`, `expiredInactive`, and `terminalNoMatch`. The footer line «Ждут распознавания» is the current count. «Исторический журнал» is the retained backlog.
-
-## Events
-
-«События» open at `/events`, a bookmarkable page of their own. The film list keeps its filters in its own address. Leaving the list remembers that query in the tab and, as a fallback, in the browser. «К фильмам» after opening the list steps back to that same history entry, so Browser Back does not open events again. A bookmarked `/events` falls back to the remembered list without leaving the site. Back and Forward still switch the two pages. An explicit film-list link wins over the remembered query. The screen is not stored in a preset. The list itself is the existing events feed, still updated by the one live refresh. A film that leaves the watchlist stays on that same event. When the films list read for the sync has a half-star rating, the event records it. A later ratings refresh or a one-film repair can fill the same event in if that read failed. No rating means the rating is unknown, not that the film was watched without one. The rating time is when the rating was read. It is not the removal time and not a watch date. Added films stay in their own group. On the events screen, removed films with a rating are listed under «Вероятно просмотрены», and the other removals under «Остальные удаления». A rating that arrives later moves that film between those headings the next time the same event is shown. The heading is a guess from the rating. It is not a confirmed watch, and the screen does not show a watch date. An older event without a rating still renders.
-
-## Film page
-
-A film opens at `/film/<id>`, where `<id>` is the canonical film id already loaded with the programme: a watchlist id or a catalog-only id such as `tmdb_42`. The stylesheet and page script load from the site root, so that address can be opened directly. The address does not contain the title, and a reload, direct open, or Back/Forward keeps that same id. The film title is a link to that address. The link covers the free area of the card, so a normal click or Enter stays on this page and keeps the list in history. A modified click, such as one that opens a new tab, follows the link normally. Channel, person, Letterboxd, the started mark, and other controls sit outside that link and above it, so they keep their own actions. Returning by Back or «К списку» moves focus to the link that opened the film. If that card is no longer in the list, focus moves to the search field. The list address, including tab, filters, search, and sort, stays in history, and the return restores that entry and the list scroll without another page load. An in-app open adds a history entry, so Back returns to that list. A direct open has no such entry: «К списку» replaces the film address with the remembered list, or with the plain list when nothing was remembered. Browser Back then leaves for the page that was open before the film address. It does not open the film again and does not add another film entry. An unknown id stays on its address and says the film is not in the loaded programme. An id that is not a canonical film id does not select another film by title. The page then shows the loaded film: poster, Russian and original titles, year, genres, runtime, the full synopsis, director and actors, the current prediction with its probability and confidence, up to three saved match signals and one saved main risk when that snapshot contains them, a saved Letterboxd rating, and a labeled «Начал просмотр» button in the hero, not the floating card icon. The canonical id stays in the address and is not printed on the page. The list search field and its scope chips stay with the list. Availability uses the same window as the list: every catch-up and upcoming showing in that window is listed without folding, together with the showing on air now when there is one, the next showing, the last-chance mark, the time the film stays available, and the number of those showings. A catalog-only film uses the same page. Missing synopsis, prediction, rating, people, poster, or showings leave a short empty state and keep the rest of the page. A saved prediction without match signals or without a main risk does not add an empty explanation. Channel, person, Letterboxd, and started controls keep their existing actions. Choosing a director or actor leaves the film for the list filtered by that person. Back returns to the same film, and Back again restores the list that was open before it. A channel chosen on the film stays with that visit and is written onto the list when the film is closed. Opening or rendering the page does not call a model or write storage. Choosing a saved mechanic, mood, or execution value adds that canonical filter to the filters already selected and opens the film list. Back returns to the same film, and Back again restores the earlier list. A direct open does the same: Back returns to that film address. Unknown and not-applicable execution values are not shown. The page can compare the open film with another film already loaded in the programme. The choice is that film's canonical id, so two films with the same title stay distinct. Shared mechanics and moods stay beside a two-column execution table of short values. The other film's name opens `/film/<id>`, and Back returns to this comparison and its place on the page. A difference is not treated as a better film unless that dimension's own vocabulary is a quality scale. Unknown, not-applicable, and missing fields are not treated as low scores, and the comparison does not rank or recommend similar films. A timeline and similar films are later pages.
-
-## Search
-
-The top search field matches the current broadcast window or the full watchlist. By default it looks only through the loaded Russian title, original title, and aliases. Three switches under the field add the other scopes: «Люди» matches directors and actors, including known name variants; «Сюжет» matches the synopsis, genres, and the saved plot mechanics and moods, including their Russian labels. A URL with only `q` is titles only. `searchIn` lists every enabled scope in the order `titles,people,plot` and is omitted when titles are the only enabled scope, so an older link or preset that stored `q` alone stays titles only. The switches combine with OR. Every word still has to match the same film inside the enabled scopes. The last remaining switch cannot be turned off. An exact or initial title outranks a later field, and a disabled scope does not affect that rank. Typing into the default title order switches the sort to relevance; an explicit sort stays put. `sort=relevance` and a non-default `searchIn` are part of the page address and of a saved preset. The search does not call a model or an outside catalogue.
-
-## Execution filters
-
-«Исполнение» filters the general execution dimensions already stored on a fingerprint: plot engine, pace, stakes, decision logic, competence, problem solving, plans, chemistry, payoff, ending, and technical plausibility. Choices inside one dimension use OR. Different dimensions use AND, as do mechanics, mood, genre, channel, year, runtime, and search. `unknown` and `not_applicable` are not choices. Filtering reads the compact object on the enrichment view; it does not call a model. Genre-specific execution fields stay out of this sidebar. Genres, mechanics, mood, channel, and execution open as compact pickers; the selected values stay visible as removable chips and in the page address. Counts for a picker leave that picker out. For execution, each dimension is counted without its own selection and with the other dimensions still applied.
-
-Named presets store that same canonical query, not the films it currently matches. They live in R2 object `ui/filter-presets.json`. `GET /api/ui/filter-presets` only reads. Creating, renaming, replacing the saved conditions, and deleting send `If-Match`; a stale list gets HTTP 412 and is not overwritten. A stored document that is not a readable list of at most 30 presets is also left unchanged. Stale values inside an otherwise valid preset are still ignored one by one. Applying a preset replaces every app-owned filter, search, search scope, sort, and mode through `readUrlState()` / `urlForState()`, leaves unrelated query parameters in place, and does not change the saved preset. There is no built-in seed. For example, «Пересмотр 4.0+» is `viewing=rewatch` together with `prediction=4`, the predicted-rating threshold, not a filter on the saved personal rating.
-
-Deploying this change does not add `execution` to existing `enrichment/view-index.json` records. Until a film's fingerprint is saved again, or a separately approved `POST /api/enrichment/fingerprint-view/backfill` copies the saved fingerprints into the index, some execution choices stay absent. That backfill reads stored fingerprints and does not call a model. This change does not run it.
-
-## Experimental MCP endpoint
-
-`/mcp` is the remote MCP server (Streamable HTTP, JSON responses, no sessions) used by ChatGPT. `probe_read` and `probe_echo` only test the connection. `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` only read the existing prediction queue and one requested film. The other tools read EPG and prediction state or advance one existing sync or runner step; ChatGPT still generates fingerprints and predictions. A separate Cloudflare Access application, `IPTV MCP`, protects the path with Managed OAuth and handles the whole OAuth flow, including discovery and dynamic client registration. The Worker accepts a request only after verifying the signed `Cf-Access-Jwt-Assertion` against the team signing keys and that application's audience. Publishing the Worker does not start sync, prediction, or a Scheduled Task. Architecture, the tool allowlist, and the safe verification procedure are in [docs/mcp.md](docs/reference/api/mcp.md).
-
-## Operational safety
-
-Do not manually run EPG sync, the prediction runner, recurring/scheduled jobs, diagnostic exports, or production backfills merely to test the code. They mutate durable production state and may consume external model/API quota. Use the local test suite; run production jobs only for an explicit operational task against an environment you own.
-
-Generated `dist/`, archives, runtime caches, local diagnostics, `.env*`, personal rating seeds, and production credentials must remain untracked.
-
-## Git-first delivery
-
-GitHub `main` is the canonical production source. Before local changes, fetch and fast-forward from `origin/main`; dirty or diverged state must be resolved explicitly without discarding someone else's work. Changes are committed and pushed—production files are never edited or copied around Git.
-
-Branch and pull-request CI runs only the self-contained test/build commands above. Successful GitHub Actions runs for `main` automatically deploy the verified artifact to Cloudflare Worker `iptv`. The former independent Workers Builds integration is disabled.
-
-Production is Cloudflare Worker `iptv` at `https://iptv.vladimino.workers.dev/`, private behind Cloudflare Access. The Worker deploy does not configure hourly predictions: those run via a separate ChatGPT Scheduled Task using the authorized IPTV MCP connector, and the task's enablement is managed outside this repository. Do not infer the current task state from this README or relax Cloudflare Access. See [Scheduled Task timing and troubleshooting](docs/reference/api/prediction-runner.md#chatgpt-scheduled-tasks-timing-and-troubleshooting) for nominal trigger times, /events limitations, and queue checks. The historical Sites snapshot must not be imported over production R2 again. Publishing the legacy Site still requires a separate authorized Sites release, and that release must not resume writers there.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contract and [docs/deployment.md](docs/runbooks/deployment.md) for deployment, backup, and rollback.
-
-The historical Sites export is documented in [docs/migration-export.md](docs/archive/legacy-sites/migration-export.md). The completed Cloudflare restore and the ban on replaying it are documented in [docs/r2-import.md](docs/archive/legacy-r2/r2-import.md).
+**Safety:** no production EPG/prediction runs, retries, feature-flag changes, Access changes, lease resets, legacy-Site writes or R2/D1 migrations without separate explicit owner authorization. A successful deploy does not authorize a production write. Code rollback is not a rollback of R2 data or external Scheduled Tasks.
