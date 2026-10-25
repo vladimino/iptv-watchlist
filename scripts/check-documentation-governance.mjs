@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 
 const flagNames = ['SCORED_RESOLUTION', 'CANDIDATE_DISCOVERY', 'LIFECYCLE_LOCALIZATION', 'RATINGS_REFRESH'];
 
+// The value must sit on the label's own line: a label left empty by the PR template must not pick
+// up the next line as its value, so the whitespace after the colon excludes line breaks.
 function entry(body, label) {
-  const m = String(body || '').match(new RegExp('^\\s*' + label + '\\s*:\\s*(.+)$', 'im'));
+  const m = String(body || '').match(new RegExp('^[ \\t]*' + label + '[ \\t]*:[ \\t]*(.+)$', 'im'));
   return m?.[1]?.trim() || '';
 }
 

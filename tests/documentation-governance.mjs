@@ -7,6 +7,12 @@ function verify(files, patches, body=base) { return checkDocumentation({files, p
 assert.deepEqual(verify(['src/format.js'], {'src/format.js': '+const value = 4;'}), []);
 assert.match(verify([], {}, '' ).join(' '), /Documentation impact/);
 assert.match(verify([], {}, 'Documentation impact: none\nArchitecture impact: none\nResearch evidence: no').join(' '), /requires a concrete reason/);
+// A label left empty (as the PR template ships it) is missing, not filled with the following line.
+assert.match(verify([], {}, 'Documentation impact:\nArchitecture impact: none - no contracts changed\nResearch evidence: no').join(' '), /must contain "Documentation impact/);
+assert.match(verify([], {}, 'Documentation impact: docs/reference/api/mcp.md\nArchitecture impact:\nResearch evidence: no').join(' '), /must declare "Architecture impact/);
+assert.match(verify([], {}, 'Documentation impact: docs/reference/api/mcp.md\nArchitecture impact: none - no contracts changed\nResearch evidence:').join(' '), /must declare "Research evidence/);
+// The template's guidance comment mentions the labels mid-line; only standalone lines count.
+assert.match(verify([], {}, '<!-- fill Documentation impact: paths -->\n- Architecture impact: `changed` or `none - reason`\nResearch evidence: no').join(' '), /must contain "Documentation impact/);
 assert.match(verify(['src/discovery.js'], {'src/discovery.js': '+const mode = env.SCORED_RESOLUTION;'}).join(' '), /feature-flags/);
 assert.deepEqual(verify(['src/discovery.js','docs/reference/feature-flags.md'], {'src/discovery.js': '+const mode = env.SCORED_RESOLUTION;'}), []);
 assert.deepEqual(verify(['tests/scorer.mjs'], {'tests/scorer.mjs': '+env.SCORED_RESOLUTION = "on";'}), []);
