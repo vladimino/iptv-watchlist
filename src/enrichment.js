@@ -424,7 +424,8 @@ async function predictionWriter(env,work){
  if(saved===null)return json({status:'busy',reason:'prediction_writer_busy',nextCatchUpAt:nextCatchUpAt()},409);
  try{return await work();}finally{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
 }
-async function refreshPredictionQueue(env,report,trigger='reconcile'){
+// `beforeWrite` lets a lease-holding caller renew its lease immediately before the queue write; other callers pass nothing.
+async function refreshPredictionQueue(env,report,trigger='reconcile',beforeWrite=null){
  const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
  const [profile,index,previous,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,predictionQueueKey),loadJSON(pinned,'epg/discovered-films.json')]);
  if(!profile||!report?.films)return null;
@@ -433,7 +434,7 @@ async function refreshPredictionQueue(env,report,trigger='reconcile'){
  const hotPending=missing.filter(f=>priority[f.id].hot).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))],currentIds=new Set(missing.map(f=>String(f.id))),retries=Object.fromEntries(Object.entries(previous?.retries||{}).filter(([id])=>currentIds.has(id)));
  const hotCount=films.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-hotPending.length,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&indexedPredictionCurrent(index?.[String(f.id)],profile)).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
  const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:report.runId,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
- await saveJSON(env,predictionQueueKey,queue);return queue;
+ if(beforeWrite)await beforeWrite();await saveJSON(env,predictionQueueKey,queue);return queue;
 }
 async function queueStatus(env){const q=await loadJSON(env,predictionQueueKey);return q?{schemaVersion:q.schemaVersion,hotCount:q.hotCount,coldCount:q.coldCount,coldWithoutPrediction:q.coldWithoutPrediction,hotPredicted:q.hotPredicted,profileVersion:q.profileVersion,programmeRunId:q.programmeRunId,refreshedAt:q.refreshedAt,pendingCount:q.pending.length,priorityCount:q.priorityCount,hotRemaining:q.priorityCount,coldRemaining:q.coldRemaining??q.coldWithoutPrediction??0,urgentCount:q.urgentCount||0,adaptiveBatch:adaptivePredictionBatch(q),discovery:q.discovery||null,metrics:q.metrics||null,lastBatch:q.lastBatch,lastCheckAt:q.lastCheckAt,nextCatchUpAt:nextCatchUpAt()}:null;}
 function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now()){
