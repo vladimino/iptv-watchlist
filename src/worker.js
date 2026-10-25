@@ -149,14 +149,28 @@ async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
  return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
 }
-// Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step.
-async function postSync(env,execution,pathname,body){
+// Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step. `caller` names the
+// boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
+async function postSync(env,execution,pathname,body,caller='http'){
  if(pathname==='/api/sync/start')return json(await beginSync(env));
- const run=await loadJSON(env,'sync.json');if(!run||body.runId!==run.runId)return json({error:'Run id mismatch'},409);
- if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata')return json({runId:run.runId,stage:run.stage,remaining:run.remaining});return json(await metadataSync(env,run));}
- if(pathname!=='/api/sync/epg')return json({error:'Not found'},404);
- if(run.stage==='complete'){const discovery=await advanceDiscovery(env);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:discovery.discovery});}if(run.stage!=='epg')return json({error:'Metadata stage is not complete'},409);
- try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);return json({...result,discovery:await queueDiscovery(env,'epg_committed')});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
+ const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=pathname==='/api/sync/epg';
+ if(persisted)await recordContinuationDiagnostic(env,step);
+ let response;
+ try{response=await syncStep(env,pathname,body,step);}
+ catch(e){finishContinuationStep(step,started,null,e);if(persisted||step.branch==='run_mismatch')await recordContinuationDiagnostic(env,step);throw e;}
+ finishContinuationStep(step,started,response);
+ if(persisted||step.branch==='run_mismatch')await recordContinuationDiagnostic(env,step);
+ return response;
+}
+async function syncStep(env,pathname,body,step){
+ const run=await loadJSON(env,'sync.json');step.runStage=run?.stage??null;
+ if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
+ if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
+ if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
+ if(run.stage==='complete'){step.branch='continuation';const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
+ step.branch='epg_commit';
+ try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const discovery=await queueDiscovery(env,'epg_committed');step.discovery=discoverySummary(discovery);return json({...result,discovery});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await copyEpgGeneration(env,run.runId);return completeWithRatings(env,run,committed);}}

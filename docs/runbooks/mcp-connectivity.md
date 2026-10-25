@@ -38,6 +38,31 @@ These checks contact production only through Cloudflare Access and the two probe
 Leave Scheduled Tasks and writer MCP tools out of this connectivity smoke test. `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete` may write R2 or advance a run; AIR-62 completion is not permission for extra production calls. In contrast, `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` are read-only tools, suitable for separately authorized diagnostic checks. Do not use `/api/*`, the dashboard or synchronization as connectivity probes; some `GET` routes have side effects (see [README](../../README.md)).
 
 
+## Diagnosing a stalled EPG continuation
+
+Use this when the continuation stays `paused / epg_committed` with `remainingChunks: 12` after a published generation, as in [AIR-69](https://trello.com/c/FlcWZX7W). Everything below is a read; none of it starts a chunk, a sync or a task.
+
+1. Call `epg_pipeline_status` (or `GET /api/enrichment/pipeline/status`) and read `continuation` and `continuationDiagnostics.recent` (newest first, 20 entries). With the Cloudflare Observability connector, the same entries are the Worker log lines whose message contains `"event":"epg_continuation"`.
+2. Find the entries around the time the external Scheduled Task should have called `epg_sync_step` after the EPG commit. The commit itself is the entry with `branch: epg_commit` and `discovery.reason: epg_committed`.
+3. Read the table:
+
+| What the ring shows after the commit entry | Meaning | Next safe step |
+| --- | --- | --- |
+| No entry with `caller: mcp` and `route: /api/sync/epg` | The follow-up call never reached the Worker | Check the Scheduled Task's own execution history and its prompt; nothing on the Worker side ran |
+| `branch: run_mismatch`, `httpStatus: 409` | The call arrived with a `runId` that is not the current `sync.json` run | Compare the task's `runId` with `epg_status` |
+| `phase: entered` and nothing else | The call arrived and was interrupted before a response was formed | Look at the matching log line and the Worker invocation (CPU limit, exception); `diagnostic.branch` says how far it got |
+| `phase: failed` | The handler threw; `error.message` holds the code-sized cause | Fix the cause before any retry |
+| `branch: continuation`, `diagnostic.branch: lease_live` | Another chunk held the resolver lease; the contract answered `busy / wait` and nothing was overwritten | Wait for `nextCatchUpAt`; a lease that never expires is a separate defect |
+| `diagnostic.branch: contract` with `decision.nextAction: wait` or `stop` | The stored continuation already said wait or stop; `decision.hardWait` tells whether `force` would have been ignored too | Read `entry.reason` and `entry.nextCatchUpAt` |
+| `diagnostic.branch: missing_secret` | `TMDB_API_READ_ACCESS_TOKEN` was unset in that invocation | Verify the Worker variable; a deploy with `keep_vars` does not remove it |
+| `diagnostic.branch: chunk` with `chunk.stage: error` | The chunk ran and failed; `chunk.error` holds the cause; the continuation is `error` with a catch-up time | Fix the cause; the next call after `nextCatchUpAt` resumes |
+| `diagnostic.branch: chunk` with `saved.owned: false` | The chunk ran but another hop had replaced the continuation meanwhile; this call's result was not stored | Read the owner hop's entry (`saved.hopId`) |
+| `diagnostic.branch: chunk` with `saved.owned: true` and `remainingChunks` decremented | The step worked as designed | Nothing; the next call continues the series |
+
+4. Record the finding on the card with the entry `id`, `at`, `branch` and `diagnostic.branch`. Do not paste a whole entry into a public place if it contains a `runId` you consider private; the entry holds no tokens, titles or payloads.
+
+Deleting or editing `epg/resolver-continuation-diagnostics.json` is a production write and needs approval; it is never needed, the ring overwrites itself.
+
 ## Rollback
 
 Revert the change on `main` and let GitHub Actions deploy it; `/mcp` then returns the generic `404`. Removing the two variables makes `/mcp` return `503` immediately, which also requires approval because it publishes a version. Disabling `IPTV MCP` is an Access change and needs approval. It leaves `/mcp` closed (see Authorization). None of these steps touches R2 or Scheduled Tasks.

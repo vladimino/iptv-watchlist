@@ -50,7 +50,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `prediction_film_diagnostics` | no | The same snapshot plus that film's fingerprint and prediction. No HTTP route. [AIR-98](prediction-diagnostics.md). |
 | `prediction_pending` | no | One page of the same queue snapshot. No HTTP route. [AIR-98](prediction-diagnostics.md). |
 | `epg_sync_start` | yes | `POST /api/sync/start`. No arguments. |
-| `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. After `stage` is `complete`, each call runs one discovery chunk or reports why it did not. |
+| `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. After `stage` is `complete`, each call runs one discovery chunk or reports why it did not, and the response carries `diagnostic` (see Continuation diagnostics). |
 | `prediction_start` | yes | `POST /api/enrichment/start` with `scope: watchlist_all` and `mode: queued`. `trigger` is `scheduled` or `manual`. |
 | `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
 | `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction. |
@@ -74,6 +74,23 @@ The caller repeats `epg_sync_step` until `stage` is `complete`. It then reads `d
 | `stop` | Backlog finished, programme changed, or nothing to resolve | Do not call until the next EPG commit |
 
 `discovery.state` is `paused`, `running`, `complete`, `error`, or `busy`. A finished response is not left `running`. `remainingChunks` counts chunks still allowed in the current series. The field list and the lease rules are in [ENRICHMENT_API.md](enrichment.md#epg-resolver--hotcold-pipeline-v2).
+
+### Continuation diagnostics (AIR-151)
+
+Every `epg_sync_step` that reaches `POST /api/sync/epg`, and every discovery resolve request, leaves one bounded **step entry** in `epg/resolver-continuation-diagnostics.json` (newest first, at most 20) and one structured line in the Worker log (`{"event":"epg_continuation", …}`). `epg_pipeline_status` returns the stored ring as `continuationDiagnostics`; reading it writes nothing. The entry is written with `phase: entered` before the step runs and replaced by the outcome, so an interrupted request leaves an `entered` entry without outcome, and a scheduled call that never reached the Worker leaves no entry at all.
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `at`, `durationMs` | Entry identity, time the step was entered, wall time |
+| `phase` | `entered`, `completed` (a response was formed, including 4xx) or `failed` (the handler threw) |
+| `caller` | `mcp` (this endpoint), `http` (`/api/sync/*`, `/api/enrichment/discovery/resolve`) or `internal` (`DiscoveryContinuation`) |
+| `route`, `runId`, `runStage` | Route taken, the caller's `runId` (max 100 chars) and the server's `sync.json` stage at entry |
+| `branch` | `run_mismatch`, `stage_mismatch`, `metadata`, `epg_commit`, `continuation`, `resolve`, `invalid_limit`, `no_programme`, `not_found` |
+| `httpStatus`, `error` | HTTP status of the formed response; `error.message` (160 chars) when the step failed |
+| `discovery` | The `discovery` contract the response carried: `state`, `nextAction`, `reason`, `remainingChunks`, `programmeRunId`, `nextCatchUpAt`, `retryAt` |
+| `diagnostic` | The `advanceDiscovery` trace, also returned in the step response: `branch` (`report_only`, `lease_live`, `contract`, `missing_secret`, `lease_lost`, `chunk`), `entry` (continuation record before), `lease` (`none`, `expired`, `live`), `decision` (`run`, `budget`, `force`, `hardWait`, `nextAction`), `hopId`, `budget`, `chunk` (`stage`, `checked`, `remaining`, `added`, `variantPending`, `retryAt`, `programmeRunId`, `error`), `saved` (continuation record after, with `owned: false` when another hop had taken the continuation) |
+
+Entries hold codes, counts and timestamps only: no tokens, cookies, identities, raw payloads or film titles. The metadata route is logged but not persisted. Writing the entry is best effort: a failed or conflicting write never fails the step. Recording an outcome does not retry, dispatch or change the resolver; the interpretation table is in [the connectivity runbook](../../runbooks/mcp-connectivity.md#diagnosing-a-stalled-epg-continuation).
 
 ## Authorization
 

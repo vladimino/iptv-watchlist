@@ -212,7 +212,7 @@ async function mcpCallTool(params,protocolVersion,env,execution){
  if(params.name==='epg_sync_step'){
   if(!mcpRunId(args.runId))return {result:mcpToolError('"runId" must be 1–100 letters, digits, "_" or "-".')};
   const run=await loadJSON(env,'sync.json');
-  return mcpDomain(()=>postSync(env,execution,!run||run.stage==='metadata'?'/api/sync/metadata':'/api/sync/epg',{runId:args.runId}));
+  return mcpDomain(()=>postSync(env,execution,!run||run.stage==='metadata'?'/api/sync/metadata':'/api/sync/epg',{runId:args.runId},'mcp'));
  }
  if(params.name==='prediction_start'){
   if(args.trigger!=='scheduled'&&args.trigger!=='manual')return {result:mcpToolError('"trigger" must be scheduled or manual.')};
