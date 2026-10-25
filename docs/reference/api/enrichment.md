@@ -75,16 +75,36 @@ The canonical cache is persistent, independently of current broadcasts. `hot` is
 
 One request runs one discovery chunk and does not schedule another. A separate HTTP request does not guarantee a new Cloudflare isolate; one chunk per request is a memory hypothesis to verify in production after this change is deployed. `chunks:0` reports the contract without running a chunk. The `DiscoveryContinuation` entrypoint (`src/continuation.js`) stays internal-only and also runs one chunk. Public HTTP always reaches the default export, so the entrypoint has no internet-facing route. A public self-fetch is not a fallback: Access would refuse it, and Cloudflare rejects a Worker's subrequest to its own zone (error 1042). No cookie, Access JWT, `OAI-Sites-Authorization`, or other credential is forwarded or stored. The Sites-era `EPG_SITE_SERVICE_TOKEN` is no longer read.
 
-`epg/resolver-continuation.json` (shown as `continuation` in pipeline status) records `paused` (`epg_committed`, `scan_committed`, `chunk_budget`, `backoff`, `programme_changed`), `running`, `complete`, or `error`. A historical `scheduled` or `running` record whose resolver lease is expired or missing is an interrupted chunk: the next call resumes it and does not leave `scheduled` in place. A live lease (`expiresAt` still in the future) returns `discovery.state: busy` and `nextAction: wait` without overwriting the continuation or writing decisions. An expired lease is not deleted ahead of that call.
+`epg/resolver-continuation.json` (shown as `continuation` in pipeline status) records `paused` (`epg_committed`, `scan_committed`, `chunk_budget`, `backoff`, `programme_changed`), `running`, `complete`, or `error`. A live lease (`expiresAt` still in the future) returns `discovery.state: busy` and `nextAction: wait` without overwriting the continuation or writing decisions. An expired lease is not deleted ahead of that call.
+
+### Live and orphaned `running` records
+
+A `running` record names the hop (`hopId`) that opened it and the budget that hop had (`remainingChunks`). The raw record cannot say whether that hop is still writing, so pipeline status derives `continuationHealth` from the record, the resolver lease `epg/resolver-lease.json` and the last discovery status `epg/discovery-status.json`, and every continuation response carries the same derivation as `diagnostic.health`:
+
+| `continuationHealth.status` | Meaning | Contract for a `running` record |
+| --- | --- | --- |
+| `live` | The lease is unexpired (`leaseHop` says whether it belongs to the record's hop or to another one). A writer is active. | `state: running`, `reason: busy`, `nextAction: wait`, `nextCatchUpAt` = the lease expiry (`leaseExpiresAt`) |
+| `orphaned` | The lease is expired or missing. The hop ended between its chunk and its checkpoint: an interrupted invocation, because a thrown handler or a failed write would have produced an `error` record. | `state: running`, `reason: orphaned`, `nextAction: continue`, `remainingChunks` = `resumeBudget` |
+| `settled` / `idle` | The record is not `running` / there is no record. | Unchanged contract |
+
+For an orphan, `chunkCompleted` says whether the dead hop's chunk finished: the last discovery status has a `finishedAt`, was started after the record was opened (`startedAt` ≥ `record.at`) and names the same programme generation. A cheap-pass checkpoint (no `finishedAt`) or a status from before the hop does not count. `resumeBudget` is the hop's budget minus one when the chunk completed, otherwise the full budget.
+
+The next explicit `epg_sync_step` (or `POST /api/enrichment/discovery/resolve`) recovers an orphan in one call, atomically against the record it read:
+
+1. **Generation fence.** When the record's `programmeRunId` differs from the published generation, the orphan is closed as `paused` / `programme_changed` with `remainingChunks: 0` (`nextAction: stop`) and no chunk runs; the next EPG commit queues discovery again.
+2. **Settle.** When `chunkCompleted` is true, the record is replaced by the checkpoint the dead hop would have written from the persisted status (the same rule that turns a chunk result into `paused`, `chunk_budget`, `backoff`, `complete` or `programme_changed`), under the dead hop's `hopId`. The chunk's decisions and catalog writes were already stored individually, so nothing is repeated and `remainingChunks` moves by exactly that one chunk.
+3. **Resume.** The ordinary decision then applies to the settled record: a chunk runs under a new lease and a new `hopId` when budget and backoff allow (`diagnostic.branch: chunk`, `recovery.action: settled`), or the call reports the settled contract without running one (`diagnostic.branch: orphan_settled`, for example `chunk_budget` / `wait` or `complete` / `stop`). When the chunk had not finished, the record is resumed directly with the hop's full budget (`recovery.action: resumed`).
+
+Every write to the continuation is a compare-and-swap on the object's etag, and the final checkpoint is written only while the record still names the writing hop. A call whose record moved between its read and its write (another hop settled or opened it) releases its lease and answers `busy` / `wait` with `diagnostic.branch: record_changed`; it never overwrites the newer checkpoint, and a hop that finishes late cannot overwrite a successor's checkpoint either. Concurrent callers therefore end with exactly one owner per chunk and one budget decrement. One chunk per explicit call, the 12-chunk budget, backoff and `wait` times, idempotent decisions and the owner boundary are unchanged by recovery; no lease is reset and nothing is forced.
 
 Every EPG commit and discovery response includes `discovery`:
 
 | Field | Meaning |
 | --- | --- |
-| `state` | `paused`, `running`, `complete`, `error`, or `busy`. A finished response is not left `running`. |
+| `state` | `paused`, `running`, `complete`, `error`, or `busy`. A finished response is not left `running`; a `running` state in a report is a live writer (`reason: busy`) or an orphan (`reason: orphaned`), see above. |
 | `remainingChunks` | Chunks still allowed in this series. A new series starts at 12. |
 | `nextAction` | `continue`: call again now. `wait`: do not call before `nextCatchUpAt`. `stop`: do not call until the next EPG commit. |
-| `reason` | Why the series is paused or waiting, or `null` between chunks. |
+| `reason` | Why the series is paused or waiting (`epg_committed`, `scan_committed`, `chunk_budget`, `backoff`, `programme_changed`, `busy`, `orphaned`, `idle`, `missing_secret`, an error code), or `null` between chunks. |
 | `nextCatchUpAt` | Earliest time for the next call when `nextAction` is `wait`. |
 | `retryAt` | Discovery backoff, when one is stored. |
 | `programmeRunId` | Programme the chunk was reading, when known. |

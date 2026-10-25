@@ -59,11 +59,17 @@ Use this when the continuation stays `paused / epg_committed` with `remainingChu
 | `diagnostic.branch: missing_secret` | `TMDB_API_READ_ACCESS_TOKEN` was unset in that invocation | Verify the Worker variable; a deploy with `keep_vars` does not remove it |
 | `diagnostic.branch: chunk` with `chunk.stage: error` | The chunk ran and failed; `chunk.error` classifies the cause; the continuation is `error` with a catch-up time | Fix the cause; the next call after `nextCatchUpAt` resumes |
 | `diagnostic.branch: chunk` with `saved.owned: false` | The chunk ran but another hop had replaced the continuation meanwhile; this call's result was not stored | Read the owner hop's entry (`saved.hopId`) |
+| `continuation.stage: running` in pipeline status with `continuationHealth.status: live` (`diagnostic.health.status: live`, `branch: lease_live`) | A writer holds the resolver lease; `leaseHop` says whether it is the record's own hop or another one | Wait until `continuationHealth.leaseExpiresAt`; the record is not an orphan yet |
+| `continuation.stage: running` with `continuationHealth.status: orphaned` | The writer's lease expired without a checkpoint: the invocation was interrupted between its chunk and its checkpoint. `chunkCompleted` says whether the chunk's status was saved; `resumeBudget` is what the next step resumes with | One ordinary explicit `epg_sync_step` recovers it; no lease reset or forced call is needed or allowed |
+| `diagnostic.branch: chunk` or `orphan_settled` with `recovery.action: settled` | The orphan was settled from the persisted chunk status under the dead hop's id (`recovery.orphanHopId`), then the step continued as usual (`chunk`) or reported the settled contract (`orphan_settled`, for example `chunk_budget` / `wait`) | Nothing; the series continues from the correct remaining budget |
+| `recovery.action: resumed` | The orphan's chunk had not finished; the step ran it again with the hop's full budget | Nothing; decisions already saved for that chunk were reused |
+| `diagnostic.branch: generation_conflict` | The orphan belonged to another published generation; it was closed as `programme_changed` / `stop` without running a chunk | Wait for the next EPG commit, which queues discovery for the current generation |
+| `diagnostic.branch: record_changed` | The continuation moved between this call's read and its write (a concurrent step settled or opened it); the call released its lease and wrote nothing | Read the entry of the hop named in `saved.hopId`; call again after `nextCatchUpAt` |
 | `diagnostic.branch: chunk` with `saved.owned: true` and `remainingChunks` decremented | The step worked as designed | Nothing; the next call continues the series |
 
 5. Record the finding on the card with the entry `id`, `at`, `branch` and `diagnostic.branch`. The entry holds codes, UUIDs, timestamps and counts only, never tokens, titles, messages or payloads.
 
-Deleting or editing `epg/resolver-continuation-diagnostics.json` is a production write and needs approval; it is never needed, the ring overwrites itself.
+Deleting or editing `epg/resolver-continuation-diagnostics.json` is a production write and needs approval; it is never needed, the ring overwrites itself. The same holds for `epg/resolver-continuation.json` and `epg/resolver-lease.json`: an orphaned `running` record is recovered by the next ordinary `epg_sync_step`, not by editing or deleting either object. Running that step on production is a writer call and needs its own approval like any other discovery step.
 
 ## Rollback
 

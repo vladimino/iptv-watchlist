@@ -463,7 +463,7 @@ const DIAGNOSTIC_VOCABULARY={
  runStage:['metadata','epg','complete'],
  stage:['idle','paused','running','complete','error','busy','partial','programme_changed','awaiting_epg_discovery','backoff','missing_secret'],
  nextAction:['continue','wait','stop'],
- reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed'],
+ reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned'],
  errorName:['Error','TypeError','RangeError','SyntaxError','ReferenceError','AbortError','TimeoutError'],
 };
 function diagnosticCode(list,value,fallback='other'){return value==null?null:list.includes(value)?value:fallback;}
@@ -542,15 +542,69 @@ function continuationDecision(current,now){
   if(due>now)return {run:false,contract:discoveryContract(current,{nextAction:'wait',reason:current.reason||(current.stage==='error'?'error':'backoff')})};
   return {run:true,budget:current.reason==='chunk_budget'?DISCOVERY_CHUNK_BUDGET:Math.max(chunks,1)};
  }
- if(current.stage==='scheduled'||current.stage==='running')return {run:true,budget:Math.min(DISCOVERY_CHUNK_BUDGET,(Number.isInteger(current.remainingChunks)?current.remainingChunks:DISCOVERY_CHUNK_BUDGET-1)+1)};
+ // AIR-154: a running record is resumed with the budget its hop still had. continuationHealth has already
+ // settled the record when that hop's chunk finished, so a completed chunk is never counted twice.
+ if(current.stage==='running')return {run:true,budget:Math.min(DISCOVERY_CHUNK_BUDGET,Math.max(1,chunks))};
+ if(current.stage==='scheduled')return {run:true,budget:Math.min(DISCOVERY_CHUNK_BUDGET,(Number.isInteger(current.remainingChunks)?current.remainingChunks:DISCOVERY_CHUNK_BUDGET-1)+1)};
  if(current.stage==='paused'&&chunks>0)return {run:true,budget:chunks};
  return {run:false,contract:discoveryContract(current,{nextAction:'stop'})};
 }
+// AIR-154: continuation reads carry the object etag so that every write below is a compare-and-swap.
+// A hop that lost the record (another hop replaced it, or the record moved while this call waited for
+// the lease) never overwrites the newer checkpoint.
+// `etag` is the precondition for the next write: the object's etag, `null` for a missing object (the write
+// then requires absence), or `undefined` when the store returned an object without an etag (no
+// precondition is possible, so the write is plain; R2 always supplies one).
+async function readContinuation(env){const object=await env.BUCKET.get(CONTINUATION_KEY);return {record:object?await object.json():null,etag:object?(object.etag||undefined):null};}
+async function replaceContinuation(env,record,etag){const saved=await env.BUCKET.put(CONTINUATION_KEY,JSON.stringify(record),{httpMetadata:{contentType:'application/json'},...(etag===undefined?{}:{onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}})});return saved!==null;}
 async function saveOwnedContinuation(env,hopId,record){
- const current=await loadJSON(env,CONTINUATION_KEY);
- if(current&&current.hopId!==hopId)return current;
- await saveJSON(env,CONTINUATION_KEY,record);return record;
+ for(let attempt=0;attempt<2;attempt++){
+  const current=await readContinuation(env);
+  if(current.record&&current.record.hopId!==hopId)return current.record;
+  if(await replaceContinuation(env,record,current.etag))return record;
+ }
+ return (await readContinuation(env)).record||record;
 }
+// A `running` record is a live writer only while the resolver lease it named is unexpired. Afterwards it
+// is an orphan: its hop ended between the chunk and the checkpoint (an interrupted invocation; a thrown
+// handler or a failed write would have produced an error record instead). The persisted discovery status
+// tells whether that chunk finished: `startedAt` after the record was opened and a `finishedAt` mean the
+// chunk's decisions and catalog writes are already stored, so the resume starts from the checkpoint the
+// dead hop would have written. Without them the chunk is simply run again with the budget the hop had.
+const CONTINUATION_HEALTH=['idle','settled','live','orphaned'];
+function continuationHealth(record,lease,last,now,published){
+ const hopId=diagnosticId(record?.hopId);
+ if(!record||record.stage!=='running')return {status:record?'settled':'idle',hopId,lease:null,leaseHop:null,leaseExpiresAt:null,chunkCompleted:null,resumeBudget:null,generationConflict:null};
+ const live=!!lease&&lease.expiresAt>now,leaseHop=lease?(lease.id===record.hopId?'same':'other'):null;
+ const leaseExpiresAt=Number.isFinite(lease?.expiresAt)&&lease.expiresAt>0?new Date(lease.expiresAt).toISOString():null;
+ const generationConflict=!!(published&&record.programmeRunId&&published!==record.programmeRunId);
+ if(live)return {status:'live',hopId,lease:'live',leaseHop,leaseExpiresAt,chunkCompleted:null,resumeBudget:null,generationConflict};
+ const openedAt=Date.parse(record.at||''),startedAt=Date.parse(last?.startedAt||'');
+ const chunkCompleted=typeof last?.finishedAt==='string'&&Number.isFinite(openedAt)&&Number.isFinite(startedAt)&&startedAt>=openedAt&&(!record.programmeRunId||!last.programmeRunId||last.programmeRunId===record.programmeRunId);
+ const budget=Math.min(DISCOVERY_CHUNK_BUDGET,Math.max(1,Number.isInteger(record.remainingChunks)?record.remainingChunks:1));
+ return {status:'orphaned',hopId,lease:lease?'expired':'none',leaseHop,leaseExpiresAt,chunkCompleted,resumeBudget:chunkCompleted?budget-1:budget,generationConflict};
+}
+function healthSummary(health){return {status:diagnosticCode(CONTINUATION_HEALTH,health.status),hopId:health.hopId,lease:diagnosticCode(['live','expired','none'],health.lease),leaseHop:diagnosticCode(['same','other'],health.leaseHop),leaseExpiresAt:diagnosticTime(health.leaseExpiresAt),chunkCompleted:typeof health.chunkCompleted==='boolean'?health.chunkCompleted:null,resumeBudget:diagnosticCount(health.resumeBudget),generationConflict:typeof health.generationConflict==='boolean'?health.generationConflict:null};}
+// What the discovery contract says about a running record: wait for a live writer until its lease expires,
+// continue (one explicit call settles or resumes it) when the writer is gone.
+function runningOverride(health){
+ if(health.status==='live')return {state:'running',reason:'busy',nextAction:'wait',nextCatchUpAt:health.leaseExpiresAt||nextCatchUpAt()};
+ if(health.status==='orphaned')return {state:'running',reason:'orphaned',nextAction:'continue',remainingChunks:health.resumeBudget,nextCatchUpAt:null};
+ return {};
+}
+// The checkpoint a hop writes after its chunk, from the chunk result and the budget the hop had.
+function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
+ if(result.stage==='programme_changed')return {stage:'paused',reason:'programme_changed',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId||null};
+ if(result.stage==='awaiting_epg_discovery')return {stage:'paused',reason:'idle',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
+ if(result.stage==='error')return {stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null};
+ if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
+ if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
+ if(result.variantPending)return budget<=1?{stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null}:{stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ if(!result.remaining)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ if(budget<=1)return {stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
+ return {stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+}
+const busyOutcome=(record,trace,nextCatchUp)=>({stage:'busy',checked:0,remaining:null,discovery:discoveryContract(record,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUp||nextCatchUpAt()}),diagnostic:trace});
 async function queueDiscovery(env,reason){
  const record={stage:'paused',reason,at:new Date().toISOString(),hopId:null,remainingChunks:DISCOVERY_CHUNK_BUDGET,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
  await saveJSON(env,CONTINUATION_KEY,record);return discoveryContract(record,{nextAction:'continue'});
@@ -559,27 +613,58 @@ async function queueDiscovery(env,reason){
 // outcome (AIR-151). The same object is returned as `diagnostic`. It changes no decision.
 async function advanceDiscovery(env,body={}){
  const now=Date.now(),trace=body.trace&&typeof body.trace==='object'?body.trace:{};
- trace.branch=null;trace.entry=null;trace.lease=null;trace.decision=null;trace.hopId=null;trace.budget=null;trace.chunk=null;trace.saved=null;
- const current=await loadJSON(env,CONTINUATION_KEY);
+ trace.branch=null;trace.entry=null;trace.lease=null;trace.health=null;trace.recovery=null;trace.decision=null;trace.hopId=null;trace.budget=null;trace.chunk=null;trace.saved=null;
+ let stored=await readContinuation(env),current=stored.record;
  trace.entry=continuationSummary(current);
- if(body.chunks===0){trace.branch='report_only';return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current),diagnostic:trace};}
  const leaseObject=await env.BUCKET.get(DISCOVERY_LEASE_KEY),lease=leaseObject?await leaseObject.json():null;
  trace.lease=lease?.expiresAt>now?'live':lease?'expired':'none';
- if(lease?.expiresAt>now){trace.branch='lease_live';return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()}),diagnostic:trace};}
+ const running=current?.stage==='running';
+ const [last,generation]=running?await Promise.all([loadJSON(env,'epg/discovery-status.json'),loadJSON(env,EPG_GENERATION_KEY)]):[null,null];
+ const health=continuationHealth(current,lease,last,now,generation?.phase==='published'?generation.programmeRunId||null:null);
+ trace.health=healthSummary(health);
+ if(body.chunks===0){trace.branch='report_only';return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current,runningOverride(health)),diagnostic:trace};}
+ if(lease?.expiresAt>now){trace.branch='lease_live';return busyOutcome(current,trace,health.leaseExpiresAt);}
+ if(health.status==='orphaned'){
+  // AIR-154: settle the orphan atomically against the record we read; a concurrent writer wins and we wait.
+  const at=new Date().toISOString(),budget=Math.min(DISCOVERY_CHUNK_BUDGET,Math.max(1,Number.isInteger(current.remainingChunks)?current.remainingChunks:1));
+  if(health.generationConflict){
+   trace.branch='generation_conflict';
+   const record={stage:'paused',reason:'programme_changed',at,hopId:current.hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current.programmeRunId};
+   const settled=await replaceContinuation(env,record,stored.etag);
+   const after=settled?record:(await readContinuation(env)).record;
+   trace.recovery={orphanHopId:health.hopId,action:'generation_conflict',chunkCompleted:health.chunkCompleted,budget:0,settled};
+   trace.saved={...continuationSummary(after),owned:settled};
+   return {stage:'programme_changed',checked:0,remaining:null,discovery:discoveryContract(after,settled?{nextAction:'stop'}:{}),diagnostic:trace};
+  }
+  if(health.chunkCompleted){
+   const record=continuationAfterChunk(last.programmeChanged?{...last,stage:'programme_changed'}:last,budget,current.hopId,at,current.programmeRunId);
+   const settled=await replaceContinuation(env,record,stored.etag);
+   trace.recovery={orphanHopId:health.hopId,action:'settled',chunkCompleted:true,budget:health.resumeBudget,settled};
+   if(!settled){trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false};return busyOutcome(after,trace);}
+   trace.saved={...continuationSummary(record),owned:true};
+   stored=await readContinuation(env);current=stored.record;
+  }
+  else trace.recovery={orphanHopId:health.hopId,action:'resumed',chunkCompleted:false,budget:health.resumeBudget,settled:false};
+ }
  const decision=continuationDecision(current,now);
  const hardWait=current&&(['chunk_budget','backoff'].includes(current.reason)||current.stage==='error'||current.retryAt)&&Date.parse(current.retryAt||current.nextCatchUpAt||0)>now;
  trace.decision={run:decision.run,budget:decision.run?decision.budget:null,force:!!body.force,hardWait:!!hardWait,nextAction:decision.run?null:decision.contract.nextAction};
- if(!decision.run&&(!body.force||hardWait)){trace.branch='contract';return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract,diagnostic:trace};}
+ if(!decision.run&&(!body.force||hardWait)){trace.branch=trace.recovery?.settled?'orphan_settled':'contract';return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract,diagnostic:trace};}
  if(!env.TMDB_API_READ_ACCESS_TOKEN){
   trace.branch='missing_secret';
   const record={stage:'error',reason:'missing_secret',at:new Date().toISOString(),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null};
   await saveJSON(env,CONTINUATION_KEY,record);trace.saved={...continuationSummary(record),owned:true};return {stage:'missing_secret',checked:0,remaining:null,discovery:discoveryContract(record,{nextAction:'stop'}),diagnostic:trace};
  }
  const acquired=await acquireDiscoveryLease(env);
- if(!acquired){trace.branch='lease_lost';return {stage:'busy',checked:0,remaining:null,discovery:discoveryContract(current,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUpAt()}),diagnostic:trace};}
+ if(!acquired){trace.branch='lease_lost';return busyOutcome(current,trace);}
+ // AIR-154 fence: the decision was made on the record read before the lease; another hop may have moved
+ // it meanwhile. A changed record is not ours to continue from, so the lease is released and we wait.
+ const fresh=await readContinuation(env);
+ if(fresh.etag!==stored.etag){await releaseDiscoveryLease(env,acquired);trace.branch='record_changed';trace.saved={...continuationSummary(fresh.record),owned:false};return busyOutcome(fresh.record,trace);}
  const hopId=acquired.id,budget=decision.run?decision.budget:DISCOVERY_CHUNK_BUDGET;
  trace.branch='chunk';trace.hopId=hopId;trace.budget=budget;
- await saveJSON(env,CONTINUATION_KEY,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null});
+ const opened=await replaceContinuation(env,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null},fresh.etag);
+ if(!opened){await releaseDiscoveryLease(env,acquired);trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false};return busyOutcome(after,trace);}
  let result;
  try{
   const report=await loadJSON(env,'programme.json');
@@ -587,17 +672,7 @@ async function advanceDiscovery(env,body={}){
  }catch(e){result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};}
  finally{await releaseDiscoveryLease(env,acquired);}
  trace.chunk=chunkSummary(result);
- const at=new Date().toISOString();
- let record;
- if(result.stage==='programme_changed')record={stage:'paused',reason:'programme_changed',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId||null};
- else if(result.stage==='awaiting_epg_discovery')record={stage:'paused',reason:'idle',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
- else if(result.stage==='error')record={stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:current?.programmeRunId??null};
- else if(result.stage==='backoff'||result.retryAt&&!result.checked)record={stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??current?.programmeRunId??null};
- else if(result.retryAt)record={stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
- else if(result.variantPending)record=budget<=1?{stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null}:{stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
- else if(!result.remaining)record={stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
- else if(budget<=1)record={stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
- else record={stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ const record=continuationAfterChunk(result,budget,hopId,new Date().toISOString(),current?.programmeRunId??null);
  const saved=await saveOwnedContinuation(env,hopId,record);
  const owned=!!saved&&saved.hopId===hopId;
  trace.saved={...continuationSummary(owned?record:saved),owned};
@@ -620,7 +695,9 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
 }
 async function discoveryPipelineStatus(env){
  const pinned=await pinEpg(env);
- const [source,decisions,catalog,last,queue,continuation,persistedQueue,scorePreview,continuationDiagnostics]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY)]);
+ const [source,decisions,catalog,last,queue,continuation,persistedQueue,scorePreview,continuationDiagnostics,lease]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY),loadJSON(env,DISCOVERY_LEASE_KEY)]);
+ // AIR-154: the raw record cannot tell a live writer from an orphan; the derived health can.
+ const continuationHealthReport=healthSummary(continuationHealth(continuation,lease,last,Date.now(),pinned.epgPin?.programmeRunId||null));
  const items=source?.items||[],decisionsMap=decisions||{},counts=discoveryCounts(items,decisionsMap,Date.now()),statuses={},confirmed=new Set();for(const candidate of items){const state=decisionsMap[candidate.key];if(state){statuses[state.status]=(statuses[state.status]||0)+1;if(state.status==='verified')confirmed.add(String(state.tmdbId));}}
- return {schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,scoredResolutionMode(env),pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationDiagnostics:continuationDiagnostics||null};
+ return {schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,scoredResolutionMode(env),pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
 }
