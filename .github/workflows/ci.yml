@@ -3,6 +3,10 @@ name: CI/CD
 on:
   pull_request:
     branches: [main]
+    # `edited` re-runs the documentation governance check when a PR description is filled in after
+    # opening (the PR template starts with the three declaration lines empty); a re-run of a failed
+    # job keeps the original event payload and would not see the edited body.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
   workflow_dispatch:
