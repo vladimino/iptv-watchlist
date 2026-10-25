@@ -4,7 +4,8 @@ import {watch} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {loadLocalCatalog} from './local-fixtures.mjs';
-import {fixtureIdentity,importFixtures,importSnapshot,miniflareDirectory,persistDirectory,prepareLocalStore,snapshotIdentity} from './local-store.mjs';
+import {fixtureIdentity,importFixtures,importSnapshot,miniflareDirectory,persistDirectory,prepareLocalStore,snapshotIdentity,snapshotProgrammeUpdatedAt} from './local-store.mjs';
+import {DAY_MS,shiftDaysToNow} from './local-timeshift.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const here=fileURLToPath(import.meta.url);
@@ -74,11 +75,13 @@ async function start(){
  if(!/^\d+$/.test(port)||Number(port)<1||Number(port)>65535){console.error('IPTV_DEV_PORT must be a TCP port.');process.exit(1);}
  const configPath=path.resolve(process.env.IPTV_LOCAL_CONFIG||path.join(root,'.local-dev.json'));
  const stateRoot=path.resolve(process.env.IPTV_LOCAL_STATE||path.join(root,'.wrangler/state'));
- let snapshot='';
- try{snapshot=String(JSON.parse(await readFile(configPath,'utf8')).snapshot||'').trim();}catch{}
- let identity;
- try{identity=snapshot?await snapshotIdentity(snapshot):await fixtureIdentity(root);}
- catch(error){console.error(error.message);process.exit(1);}
+ let snapshot='',shiftToNow=false;
+ try{const config=JSON.parse(await readFile(configPath,'utf8'));snapshot=String(config.snapshot||'').trim();shiftToNow=config.shiftToNow===true;}catch{}
+ let identity,shiftDays=0;
+ try{
+  identity=snapshot?await snapshotIdentity(snapshot):await fixtureIdentity(root);
+  if(snapshot&&shiftToNow){shiftDays=shiftDaysToNow(await snapshotProgrammeUpdatedAt(snapshot));identity={...identity,shiftDays};}
+ }catch(error){console.error(error.message);process.exit(1);}
  await ensureBundle();
  const devConfig=path.join(stateRoot,'dev.jsonc');
  await writeDevConfig(devConfig);
@@ -90,10 +93,10 @@ async function start(){
    identity,
    persistDir,
    openBucket:()=>openBucket(devConfig,persistDir),
-   importInto:async bucket=>snapshot?importSnapshot(bucket,snapshot):importFixtures(bucket,await loadLocalCatalog()),
+   importInto:async bucket=>snapshot?importSnapshot(bucket,snapshot,{shiftMs:shiftDays*DAY_MS}):importFixtures(bucket,await loadLocalCatalog()),
   });
  }catch(error){console.error(error.stack||error.message);process.exit(1);}
- console.log(result.action==='skip'?snapshot?'Local R2 already has this snapshot.':'Local R2 already has the dummy catalog.':result.message);
+ console.log(result.action==='skip'?snapshot?`Local R2 already has this snapshot${shiftDays?` shifted forward by ${shiftDays} days`:''}.`:'Local R2 already has the dummy catalog.':result.message);
  const watchers=process.argv.includes('--watch')?startWatch():[];
  const child=spawn('wrangler',['dev','--config',devConfig,'--local','--ip','127.0.0.1','--port',port,'--persist-to',persistDir,'--compatibility-date','2026-05-03','--show-interactive-dev-session','false'],{cwd:root,stdio:'inherit',env:process.env});
  child.on('exit',code=>{for(const watcher of watchers)watcher.close();process.exit(code??1);});

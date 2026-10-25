@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {access,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {buildLocalFixtures} from './local-fixtures.mjs';
+import {DAY_MS,isTimeShifted,shiftSnapshotObject} from './local-timeshift.mjs';
 
 const general=['plot_engine','pace','stakes','decision_logic','protagonist_competence','opposition_competence','problem_solving','plan_counterplan_strength','multi_party_goals','chemistry','payoff','ending_quality','technical_plausibility'];
 const dropped=new Set(['unknown','not_applicable']);
@@ -15,7 +16,7 @@ export function markerPath(persistDir){return path.join(persistDir,'iptv-snapsho
 export function miniflareDirectory(persistDir){return path.join(persistDir,'v3');}
 export function importDecision({refresh,marker,identity,ready}){
  if(refresh||!marker)return 'replace';
- const same=marker.snapshot===identity.snapshot&&marker.manifestBytes===identity.manifestBytes&&marker.manifestMtimeMs===identity.manifestMtimeMs;
+ const same=marker.snapshot===identity.snapshot&&marker.manifestBytes===identity.manifestBytes&&marker.manifestMtimeMs===identity.manifestMtimeMs&&(marker.shiftDays??0)===(identity.shiftDays??0);
  return same&&ready?'skip':'replace';
 }
 function isFilmRecord(item){
@@ -50,6 +51,14 @@ export async function snapshotIdentity(snapshot){
  const manifest=await stat(path.join(snapshot,'manifest.json'));
  return {snapshot,manifestBytes:manifest.size,manifestMtimeMs:manifest.mtimeMs};
 }
+export async function snapshotProgrammeUpdatedAt(snapshot){
+ for(const name of await readdir(path.join(snapshot,'entries'))){
+  const entry=JSON.parse(await readFile(path.join(snapshot,'entries',name),'utf8'));
+  if(entry.key!=='programme.json')continue;
+  try{return JSON.parse(await readFile(path.join(snapshot,entry.file),'utf8')).updatedAt??null;}catch{return null;}
+ }
+ return null;
+}
 export async function replacePersist(persistDir){await rm(miniflareDirectory(persistDir),{recursive:true,force:true});}
 export async function writeMarker(file,identity,extra={}){await mkdir(path.dirname(file),{recursive:true});await writeFile(file,JSON.stringify({...identity,...extra}));}
 export async function emptyBucket(bucket){
@@ -74,14 +83,15 @@ export async function importFixtures(bucket,catalog){
  await putObjects(bucket,objects);
  return {objects:objects.length,message:`Imported ${objects.length} dummy objects from fixtures/local-site/catalog.json.`};
 }
-export async function importSnapshot(bucket,snapshot){
+export async function importSnapshot(bucket,snapshot,{shiftMs=0}={}){
  await emptyBucket(bucket);
  const names=await readdir(path.join(snapshot,'entries'));
  const executions=new Map();
- let written=0,fingerprints=0,patched=0,viewIndex=null;
+ let written=0,fingerprints=0,patched=0,shifted=0,viewIndex=null;
  for(const name of names){
   const entry=JSON.parse(await readFile(path.join(snapshot,'entries',name),'utf8'));
-  const bytes=await readFile(path.join(snapshot,entry.file));
+  let bytes=await readFile(path.join(snapshot,entry.file));
+  if(shiftMs&&isTimeShifted(entry.key)){bytes=Buffer.from(JSON.stringify(shiftSnapshotObject(entry.key,JSON.parse(bytes.toString('utf8')),shiftMs)));shifted++;}
   const film=String(entry.key||'').match(/^enrichment\/films\/([^/]+)\/fingerprint\.json$/);
   if(film){fingerprints++;try{executions.set(decodeURIComponent(film[1]),executionOf(JSON.parse(bytes.toString('utf8')).execution));}catch{executions.set(decodeURIComponent(film[1]),{});}}
   if(entry.key==='enrichment/view-index.json'){viewIndex=bytes;continue;}
@@ -92,7 +102,8 @@ export async function importSnapshot(bucket,snapshot){
  const index=JSON.parse(viewIndex.toString('utf8'));
  for(const [id,item] of Object.entries(index)){if(!item?.fingerprint||Object.hasOwn(item.fingerprint,'execution')||!executions.has(id))continue;item.fingerprint.execution=executions.get(id);patched++;}
  await bucket.put('enrichment/view-index.json',JSON.stringify(index),{httpMetadata:{contentType:'application/json'}});
- return {objects:names.length,patched,message:`Imported ${names.length} objects. Execution values attached for ${patched} of ${fingerprints} fingerprints.`};
+ const shift=shiftMs?` Broadcast times moved forward by ${Math.round(shiftMs/DAY_MS)} days in ${shifted} objects.`:'';
+ return {objects:names.length,patched,shifted,message:`Imported ${names.length} objects. Execution values attached for ${patched} of ${fingerprints} fingerprints.${shift}`};
 }
 export async function prepareLocalStore({refresh=false,identity,persistDir,openBucket,importInto}){
  const markerFile=markerPath(persistDir);

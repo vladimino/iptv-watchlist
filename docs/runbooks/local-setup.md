@@ -31,6 +31,12 @@ Do not copy these fixtures into the production bucket.
 
 If this machine has the private export, copy [.local-dev.example.json](../../.local-dev.example.json) to `.local-dev.json` and set `snapshot` to that directory’s absolute path. `.local-dev.json` is gitignored. `npm run dev` then imports that snapshot into its own store instead of the dummy catalog. Remove `snapshot` or set it to an empty string to return to the fixtures. The fixture store stays on disk and is not served while the snapshot is selected.
 
+### Shifting broadcast times to today
+
+An exported snapshot is frozen at its export date, so every show is soon in the past and the dashboard reports that the saved window has ended. Set `"shiftToNow": true` next to `snapshot` in `.local-dev.json` to import the snapshot as if the programme had been refreshed today. The import moves the broadcast timestamps forward by a whole number of days, chosen so that `programme.updatedAt` falls within the last 24 hours. Every show keeps its original hour of the day.
+
+The shift applies to `programme.json` (`updatedAt`, `watchlistUpdatedAt`, `cutoff`, `window`, `stats.epgStart`/`epgEnd`, every `shows[].start`/`end` and stored `availableUntil`), `watchlist.json`, `sync.json`, `epg/discovery-latest.json`, `epg/discovered-films.json`, staged copies under `epg/generations/`, and the `at` of EPG and watchlist events in `events/items/*`. Fingerprints, predictions, the taste profile, leases, started markers and their events keep their real timestamps, so prediction freshness is not faked and no event lands in the future. The shift is part of the store marker: the next `npm run dev` on a later day imports the snapshot again with a larger shift, while a restart on the same day reuses the store. The option has no effect on the dummy catalog, whose shows are already built from the current time, and it never writes to the snapshot directory or to Cloudflare.
+
 `IPTV_DEV_PORT`, `IPTV_LOCAL_STATE`, and `IPTV_LOCAL_CONFIG` override the port, the state root, and the config file. The local smoke test uses them so it does not touch a developer’s `.local-dev.json` or `.wrangler/state`.
 
 Local Node 20 uses Wrangler 4.86 and compatibility date `2026-05-03` for this process only. The committed Worker compatibility date is unchanged.
