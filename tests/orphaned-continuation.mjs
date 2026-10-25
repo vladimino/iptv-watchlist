@@ -33,7 +33,7 @@ const verified=()=>Object.values(records.get('epg/discovery-resolution.json')||{
 const items=count=>Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:100,durations:[100],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]}));
 // The production shape on 25 Oct: a hop opened `running` with budget 5, its chunk finished (status saved with
 // finishedAt, added 2, no error), its lease expired, and no checkpoint followed.
-function seedOrphan({remainingChunks=5,lease='expired',completed=true,programmeRunId=GENERATION,published=GENERATION,lastRemaining=3,verifiedBefore=2}={}){
+function seedOrphan({remainingChunks=5,lease='expired',completed=true,programmeRunId=GENERATION,published=GENERATION,lastRemaining=3,verifiedBefore=2,statusHop=ORPHAN}={}){
  records.clear();etags.clear();puts=[];fetches.length=0;logs.length=0;
  const opened=now-60000;
  set('programme.json',{runId:GENERATION,updatedAt:iso(now),films:[{id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,shows:[]}]});
@@ -47,7 +47,7 @@ function seedOrphan({remainingChunks=5,lease='expired',completed=true,programmeR
  else if(lease==='live')set('epg/resolver-lease.json',{id:ORPHAN,expiresAt:now+60000});
  else if(lease==='other')set('epg/resolver-lease.json',{id:'11111111-2222-4333-8444-555555555555',expiresAt:now+60000});
  const started=completed?opened+10:opened-30000;
- set('epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt:iso(started),finishedAt:iso(started+500),at:iso(started+500),programmeRunId:GENERATION,checked:3,screenedOut:0,reused:0,touched:0,tmdbCalls:0,added:2,remaining:lastRemaining,variantPending:0,hotRemaining:lastRemaining,error:null,retryAt:null});
+ set('epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt:iso(started),finishedAt:iso(started+500),at:iso(started+500),programmeRunId:GENERATION,...(statusHop?{hopId:statusHop}:{}),checked:3,screenedOut:0,reused:0,touched:0,tmdbCalls:0,added:2,remaining:lastRemaining,variantPending:0,hotRemaining:lastRemaining,error:null,retryAt:null});
 }
 const SECRET=/Hot Film|legacy|Bearer|token=/;
 // A sync step runs a chunk of 24 candidates; every candidate resolves through the watchlist alias, without TMDB.
@@ -61,17 +61,17 @@ assert.equal(r.status,200);assert.equal(r.data.stage,'complete');
 let d=r.data.diagnostic;
 assert.deepEqual(d.health,{status:'orphaned',hopId:ORPHAN,lease:'expired',leaseHop:'same',leaseExpiresAt:iso(now-1000),chunkCompleted:true,resumeBudget:4,generationConflict:false});
 assert.deepEqual(d.recovery,{orphanHopId:ORPHAN,action:'settled',chunkCompleted:true,budget:4,settled:true});
-assert.equal(d.branch,'chunk');assert.equal(d.decision.budget,4);assert.notEqual(d.hopId,ORPHAN);
+assert.equal(d.branch,'chunk');assert.equal(d.decision.budget,4);assert.notEqual(d.hopId,ORPHAN);assert.equal(d.saved.owned,true);assert.equal(d.saved.write,'saved');
 assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,null);assert.equal(r.data.discovery.remainingChunks,3);assert.equal(r.data.discovery.nextAction,'continue');assert.equal(r.data.discovery.programmeRunId,GENERATION);
 assert.equal(continuation().stage,'paused');assert.equal(continuation().remainingChunks,3);assert.equal(continuation().hopId,d.hopId);assert.equal(continuation().programmeRunId,GENERATION);
 assert.equal(verified(),2+CHUNK,'the completed chunk\'s decisions stay and exactly one more chunk ran');
 assert.equal(records.get('epg/discovery-status.json').added,0);assert.equal(records.has('epg/discovered-films.json'),false,'no catalog write was repeated');
 assert.deepEqual(fetches,[]);assert.equal(records.get('epg/resolver-lease.json').expiresAt,0);
-assert.ok(Date.parse(records.get('epg/discovery-status.json').startedAt)>now-60000,'lastBatch now belongs to the new chunk');
+assert.ok(Date.parse(records.get('epg/discovery-status.json').startedAt)>now-60000,'lastBatch now belongs to the new chunk');assert.equal(records.get('epg/discovery-status.json').hopId,d.hopId,'the chunk status is marked with the hop that wrote it');
 // The dead hop cannot overwrite the newer checkpoint, whatever it tries.
 const newer=structuredClone(continuation());
 const stale=plain(await call('saveOwnedContinuation')(env,ORPHAN,{stage:'paused',reason:null,at:iso(now),hopId:ORPHAN,remainingChunks:4,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}));
-assert.deepEqual(stale,newer);assert.deepEqual(continuation(),newer);
+assert.deepEqual(stale,{saved:false,reason:'other_hop',record:newer});assert.deepEqual(continuation(),newer);
 assert.equal(await call('replaceContinuation')(env,{stage:'running',hopId:ORPHAN,remainingChunks:5},'stale-etag'),false);assert.deepEqual(continuation(),newer);
 const ring=records.get('epg/resolver-continuation-diagnostics.json').recent[0];
 assert.equal(ring.branch,'continuation');assert.equal(ring.diagnostic.recovery.action,'settled');assert.equal(ring.diagnostic.health.status,'orphaned');
@@ -105,6 +105,14 @@ assert.deepEqual(puts.filter(key=>!key.includes('continuation-diagnostics')),[])
 r=await step();
 assert.equal(r.data.diagnostic.recovery.action,'resumed');assert.equal(r.data.diagnostic.recovery.chunkCompleted,false);assert.equal(r.data.diagnostic.decision.budget,5);
 assert.equal(r.data.discovery.remainingChunks,4);assert.equal(continuation().stage,'paused');assert.equal(verified(),2+CHUNK);
+// A newer finished status written by another hop of the same generation is not this orphan's chunk.
+seedOrphan({statusHop:'99999999-8888-4777-8666-555555555555'});
+r=await step();assert.equal(r.data.diagnostic.health.chunkCompleted,false);assert.equal(r.data.diagnostic.recovery.action,'resumed');assert.equal(r.data.discovery.remainingChunks,4);
+// A status without a hop marker (written before statuses carried one, as on the stalled generation) is not attributed either:
+// the orphan resumes with the budget its hop had, which is one more chunk than strictly needed, never a reset.
+seedOrphan({statusHop:null});
+pipeline=await status();assert.equal(pipeline.continuationHealth.chunkCompleted,false);assert.equal(pipeline.continuationHealth.resumeBudget,5);
+r=await step();assert.equal(r.data.diagnostic.recovery.action,'resumed');assert.equal(r.data.discovery.remainingChunks,4);assert.equal(r.data.discovery.programmeRunId,GENERATION);
 // A cheap-pass checkpoint without finishedAt is not a completed chunk either.
 seedOrphan();records.get('epg/discovery-status.json').finishedAt=undefined;records.get('epg/discovery-status.json').checkpoint='cheap_pass';
 r=await step();assert.equal(r.data.diagnostic.health.chunkCompleted,false);assert.equal(r.data.discovery.remainingChunks,4);
@@ -166,10 +174,45 @@ bucket.put=async(key,value,options)=>{if(key==='epg/resolver-continuation.json'&
 r=await step();bucket.put=originalPut;
 assert.equal(r.data.diagnostic.branch,'record_changed');assert.equal(r.data.diagnostic.recovery.settled,false);assert.equal(continuation().hopId,'22222222-3333-4444-8555-666666666666');assert.equal(verified(),2);
 
-// 11. Every reported value is from the closed vocabulary; nothing from the payload leaks into the ring or the log.
+// 11. Both conditional writes of the final checkpoint rejected while the record still names this hop: the step
+//     reports the checkpoint as not stored (not as owned), the record stays `running`, and the next step settles
+//     it from the hop-marked status instead of repeating the chunk.
+seedOrphan({remainingChunks:5,completed:false});
+const realPut=bucket.put.bind(bucket);let rejectCheckpoint=0;
+bucket.put=async(key,value,options)=>{const body=JSON.parse(value);if(key==='epg/resolver-continuation.json'&&body.stage!=='running'&&rejectCheckpoint<2){rejectCheckpoint++;return null;}return realPut(key,value,options);};
+r=await step();bucket.put=realPut;
+assert.equal(rejectCheckpoint,2);assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(r.data.diagnostic.saved.owned,false);assert.equal(r.data.diagnostic.saved.write,'write_conflict');
+assert.equal(continuation().stage,'running');assert.equal(continuation().hopId,r.data.diagnostic.hopId);
+assert.equal(r.data.discovery.state,'running');assert.equal(r.data.discovery.reason,'orphaned');assert.equal(r.data.discovery.nextAction,'continue');assert.equal(r.data.discovery.remainingChunks,4);
+assert.equal(verified(),2+CHUNK);assert.equal(records.get('epg/discovery-status.json').hopId,r.data.diagnostic.hopId);
+const afterConflict=await step();
+assert.equal(afterConflict.data.diagnostic.health.status,'orphaned');assert.equal(afterConflict.data.diagnostic.health.chunkCompleted,true,'the hop-marked status attributes the finished chunk');assert.equal(afterConflict.data.diagnostic.recovery.action,'settled');
+assert.equal(afterConflict.data.diagnostic.recovery.budget,4);assert.equal(afterConflict.data.discovery.remainingChunks,3);assert.equal(verified(),2+2*CHUNK,'the finished chunk is not repeated');
+
+// 12. An old hop that stalls past the lease TTL cannot write over its replacement: its first write renews the
+//     lease, the renewal fails because the replacement holds it, and the chunk aborts before touching storage.
+seedOrphan();
+let holdOld,oldHeld=false;const oldGate=new Promise(resolve=>{holdOld=resolve;});
+bucket.get=async key=>{if(key==='epg/discovery-latest.json'&&!oldHeld){oldHeld=true;await oldGate;}return originalGet(key);};
+const oldHop=step();
+for(let i=0;i<50&&!(continuation()?.stage==='running'&&continuation().hopId!==ORPHAN);i++)await new Promise(resolve=>setTimeout(resolve,0));
+const oldHopId=continuation().hopId;bucket.get=originalGet;
+records.get('epg/resolver-lease.json').expiresAt=now-1;
+const replacement=await step();
+assert.equal(replacement.data.diagnostic.branch,'chunk');assert.equal(replacement.data.diagnostic.health.status,'orphaned');assert.equal(replacement.data.diagnostic.recovery.action,'resumed','the stalled hop wrote no status, so its chunk is not attributed');
+const replacementHop=replacement.data.diagnostic.hopId,replacementRecord=plain(continuation()),replacementDecisions=verified(),replacementStatus=plain(records.get('epg/discovery-status.json'));
+assert.equal(replacementRecord.stage,'paused');assert.equal(replacementRecord.hopId,replacementHop);assert.equal(replacementStatus.hopId,replacementHop);
+holdOld();const late=await oldHop;
+assert.equal(late.data.diagnostic.hopId,oldHopId);assert.equal(late.data.diagnostic.chunk.stage,'error');assert.equal(late.data.diagnostic.chunk.error,'resolver_busy');
+assert.equal(late.data.diagnostic.saved.owned,false);assert.equal(late.data.diagnostic.saved.write,'other_hop');
+assert.deepEqual(plain(continuation()),replacementRecord,'the replacement checkpoint stands');assert.deepEqual(plain(records.get('epg/discovery-status.json')),replacementStatus,'the stalled hop wrote no status');
+assert.equal(verified(),replacementDecisions,'the stalled hop wrote no decisions');assert.equal(records.get('epg/resolver-lease.json').id,replacementHop,'the stalled hop did not release a lease it no longer held');
+assert.doesNotMatch(JSON.stringify(late.data),/lease lost/,'the thrown message is classified, not copied');
+
+// 13. Every reported value is from the closed vocabulary; nothing from the payload leaks into the ring or the log.
 seedOrphan();await step();
 const entries=records.get('epg/resolver-continuation-diagnostics.json').recent;
-for(const entry of entries){assert.ok(['idle','settled','live','orphaned'].includes(entry.diagnostic.health.status));if(entry.diagnostic.recovery)assert.ok(['settled','resumed','generation_conflict'].includes(entry.diagnostic.recovery.action));}
+for(const entry of entries){assert.ok(['idle','settled','live','orphaned'].includes(entry.diagnostic.health.status));if(entry.diagnostic.recovery)assert.ok(['settled','resumed','generation_conflict'].includes(entry.diagnostic.recovery.action));if(entry.diagnostic.saved)assert.ok(['saved','other_hop','write_conflict'].includes(entry.diagnostic.saved.write));}
 assert.doesNotMatch(JSON.stringify(entries),SECRET);assert.doesNotMatch(logs.join('\n'),SECRET);
 assert.ok(call('DIAGNOSTIC_VOCABULARY').reason.includes('orphaned'));
-console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation fence, concurrent steps, stale-read fence, conflicting settle and sanitized diagnostics passed');
+console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation fence, concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out and sanitized diagnostics passed');
