@@ -4,7 +4,7 @@
 
 - **Historical source and original rollout observations:** [AIR-42 audit and rollout log](../../evidence/film-person/lifecycle-audit-and-rollout.md).
 - **Work and decisions:** [AIR-42](https://trello.com/c/drLBuWjl), [AIR-48](https://trello.com/c/rVf8rRoJ), [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-49](https://trello.com/c/YNaLFwtW), [ADR-0001](../../adr/0001-d1-schema-v1.md).
-- **Implementation:** [pure domain model](../../../src/domain/film-person.js), [storage-neutral reader](../../../src/domain/film-person-reader.js), [dry-run backfill](../../../src/domain/film-person-backfill.js), [diagnostics](../../../src/domain/film-person-diagnostics.js), [runtime read/write paths](../../../src/worker.js), [localization helpers](../../../src/sources.js).
+- **Implementation:** [pure domain model](../../../src/domain/film-person.js), [storage-neutral reader](../../../src/domain/film-person-reader.js), [dry-run backfill](../../../src/domain/film-person-backfill.js), [diagnostics](../../../src/domain/film-person-diagnostics.js), [runtime read/write paths](../../../src/worker.js), [localization helpers](../../../src/sources.js). The owner's manual title review builds on `applyReviewedLocalization`; its rules are in [the title review contract](film-title-review.md).
 - **Related maintained contracts:** [scored resolution](scored-resolution.md), [candidate discovery](candidate-discovery.md), [prediction runner](../api/prediction-runner.md), [D1 schema (not production-authoritative)](../data/d1-schema.md).
 
 ## Where the model runs (do not confuse with source of truth)
