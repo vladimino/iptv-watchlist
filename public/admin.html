@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Данные каталога — демонстрация</title>
+  <meta name="description" content="Демонстрационная страница владельца: поиск фильмов и людей по синтетическим данным, без обращения к программе и API.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ данные</span></div>
+    <a class="admin-home" href="/">К программе</a>
+  </header>
+  <main class="admin-shell">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">ДЕМОНСТРАЦИЯ</p>
+        <h1>Каталог данных</h1>
+        <p class="admin-intro">Поиск фильмов и людей и очереди качества на синтетических записях.</p>
+      </div>
+    </section>
+    <p id="admin-demo" class="demo-note"><span class="info-icon" aria-hidden="true">i</span><span>Это демонстрационные данные. Страница не читает программу, хранилище и не вызывает API.</span></p>
+    <form class="search-panel" role="search" action="/admin">
+      <label class="search-box"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="admin-search" type="search" name="q" placeholder="Название, имя или внешний id" aria-label="Найти фильм или человека" autocomplete="off" enterkeyhint="search"></label>
+    </form>
+    <section aria-labelledby="admin-queue-title">
+      <h2 id="admin-queue-title">Очереди качества</h2>
+      <div id="admin-queues" class="admin-queues" role="group" aria-label="Очереди качества"></div>
+    </section>
+    <p id="admin-loading" class="admin-state" role="status" aria-busy="true" hidden>Собираем демонстрационную страницу…</p>
+    <p id="admin-error" class="admin-state admin-state-error" role="alert" hidden></p>
+    <div class="admin-layout">
+      <section aria-labelledby="admin-results-title">
+        <h2 id="admin-results-title">Результаты</h2>
+        <p id="admin-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b>Ничего не найдено</b><span>В демонстрационных данных нет такой строки.</span></p>
+        <div id="admin-results"></div>
+      </section>
+      <article id="admin-detail" class="admin-card" aria-live="polite" hidden></article>
+    </div>
+  </main>
+  <script src="/admin.js"></script>
+</body>
+</html>

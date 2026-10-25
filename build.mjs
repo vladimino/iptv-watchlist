@@ -1,6 +1,8 @@
 import fs from 'node:fs';
+import {bundleAdmin} from './src/admin/bundle.js';
 const assets={};
-for(const [path,file,type] of [['/','index.html','text/html'],['/styles.css','styles.css','text/css'],['/app.js','app.js','text/javascript']]) assets[path]={body:fs.readFileSync('public/'+file,'utf8'),type};
+for(const [path,file,type] of [['/','index.html','text/html'],['/styles.css','styles.css','text/css'],['/app.js','app.js','text/javascript'],['/admin','admin.html','text/html'],['/admin.css','admin.css','text/css']]) assets[path]={body:fs.readFileSync('public/'+file,'utf8'),type};
+assets['/admin.js']={body:bundleAdmin([fs.readFileSync('src/domain/admin-query.js','utf8'),fs.readFileSync('src/admin/fixtures.js','utf8'),fs.readFileSync('public/admin.js','utf8')]),type:'text/javascript'};
 fs.rmSync('dist',{recursive:true,force:true});
 fs.mkdirSync('dist/server',{recursive:true});
 fs.writeFileSync('dist/server/index.js','const ASSETS='+JSON.stringify(assets)+';\nconst PERSON_NAME_DICTIONARY='+fs.readFileSync('data/person-names.json','utf8')+';\nconst FILM_TITLE_DICTIONARY='+fs.readFileSync('data/film-titles.json','utf8')+';\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/scored-resolution.js','utf8')+'\n'+fs.readFileSync('src/domain/resolution-acceptance.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/ratings-seed.js','utf8')+'\n'+fs.readFileSync('src/discovery.js','utf8')+'\n'+fs.readFileSync('src/enrichment.js','utf8')+'\n'+fs.readFileSync('src/migration-export.js','utf8')+'\n'+fs.readFileSync('src/prediction-diagnostics.js','utf8')+'\n'+fs.readFileSync('src/mcp.js','utf8')+'\n'+fs.readFileSync('src/continuation.js','utf8')+'\n'+fs.readFileSync('src/filter-presets.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8'));

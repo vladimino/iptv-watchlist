@@ -161,7 +161,7 @@ getPerson(records, id) -> record | null
 
 Tests must cover empty query (error, not "all records"), empty records, the rank order, Cyrillic `ё`, a collision, every queue code, a stale cursor, a missing `limit`, and `limit` values `0`, `26`, and `1.5`. `limit` 1 and `limit` 25 succeed. No network. The library tests must not accept a call that omits `limit`.
 
-The library is `src/domain/admin-query.js`. `build.mjs` does not concatenate it, and `public/app.js` does not import it. [AIR-52](https://trello.com/c/siWtiRcm) is the first caller.
+The library is `src/domain/admin-query.js`. `build.mjs` does not add it to the Worker script. `public/app.js` does not import it. [AIR-52](https://trello.com/c/siWtiRcm) is the first caller and bundles the library only into the static `/admin.js` asset.
 
 These choices fix points the signature alone leaves open:
 
@@ -195,6 +195,8 @@ The adapter always calls AIR-123 with an explicit `limit`. With no page-size con
 Keyboard: the search field, queue controls, and results are reachable in order; Escape clears the query. Check the page in a local browser at a desktop width around 1280 px and a mobile width around 390 px, and report that check in the PR. Do not commit screenshots. The public movie UI is unchanged.
 
 Deploying the static page is allowed only while the data module stays the fixture. Adding a live client in that PR is a failure of this boundary even if the route is unused.
+
+The page is `public/admin.html`, `public/admin.css`, and `public/admin.js`. `src/admin/fixtures.js` is the only caller of the query library. `build.mjs` serves `/admin` and `/admin.css` as static assets and builds `/admin.js` with `src/admin/bundle.js`, which strips `import` and `export` and concatenates the library, the fixture adapter, and the page script. The existing asset lookup serves `/admin`; `/film/...` and `/events` still map to the movie page. `?loading=1` is the local loading harness and returns before any library call, as does `?error=unavailable`. A blank `q` is not a search. A present query, including whitespace or punctuation, is passed through so an empty or invalid query cannot list every record. Search and queue together are read in full through the library cursor, then intersected by id before the combined page is cut to 25. Queue counts use that full read. Search rows are kept so `collision` stays visible. The page has no size control and always passes `25` into each library call, except a harness call that sets `limit: 0` to show `invalid_limit`.
 
 ## AIR-124 live API requirements
 
