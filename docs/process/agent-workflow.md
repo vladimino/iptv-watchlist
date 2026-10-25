@@ -42,6 +42,12 @@ At the start of work, read the relevant current card and latest comments, its na
 
 The reviewer must not return an unfinished routine handoff just because a merge happened while post-merge deployment is still running. If tooling fails or access prevents verification, explicitly distinguish blocked from Done rather than guessing.
 
+## Documentation acceptance
+
+Before implementation, record the documentation impact in the Trello card and implementation handoff using the [documentation governance matrix](documentation-governance.md). At independent review, compare the actual diff with that matrix; require the matching source, contract, evidence, ADR and diagram changes in the same delivery. A claimed `Documentation impact: none` needs a reason that survives review. Missing required documentation is a blocking finding even when tests are green. Do not defer it to a future cleanup card.
+
+Every material architectural change requires a new ADR that records alternatives, rationale, trade-offs, and supersession where applicable, plus corresponding Mermaid diagrams and technical contracts. Pure refactoring that preserves architectural decisions does not require a new ADR. Mermaid modifications retain the existing owner visual review gate.
+
 ## Visual QA
 
 A substantial UI change requires visual QA in a local browser at a desktop width around 1280 px and a mobile width around 390 px. Check representative full and partial states, visual hierarchy, spacing, overflow, whether the controls can be reached, and the main interactions. The PR needs a short written report of what was checked and which problems were found or fixed. Creating, saving, downloading, or attaching screenshots is not required. The owner does the final visual acceptance on real production data after a successful merge and CI/CD. Until that acceptance, the UI card stays open. Green tests or CI are not visual QA. Do not commit screenshots anywhere in the repository.
