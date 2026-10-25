@@ -21,8 +21,8 @@ export function inspectAddedLines(patch, file) {
 }
 
 function main() {
-  let base = process.env.GITHUB_EVENT_BEFORE;
-  const head = process.env.GITHUB_SHA || 'HEAD';
+  let base = process.env.GITHUB_EVENT_NAME === 'pull_request' ? process.env.PR_BASE_SHA : process.env.GITHUB_EVENT_BEFORE;
+  const head = process.env.GITHUB_EVENT_NAME === 'pull_request' ? process.env.PR_HEAD_SHA : (process.env.GITHUB_SHA || 'HEAD');
   if (!/^[a-f0-9]{40}$/.test(base || '') || /^0{40}$/.test(base)) base = 'HEAD^';
   const changed = execFileSync('git', ['diff', '--name-only', base, head, '--', 'docs/reference', 'docs/architecture', 'docs/runbooks'], {encoding:'utf8'}).trim();
   if (!changed) return console.log('Timeless documentation: no relevant changes.');
