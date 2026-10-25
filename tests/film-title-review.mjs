@@ -7,6 +7,10 @@ const domain=fs.readFileSync('src/domain/film-person.js','utf8'),review=fs.readF
 // Offline contract: pure, dependency-free, outside the Worker bundle and outside every runtime writer.
 assert.doesNotMatch(review,/\b(fetch|import|export|require|BUCKET|wrangler|R2|D1)\b/);
 assert.doesNotMatch(review,/linkFilms\(|localFilmId\(|externalIds\(|mergeExternal\(|identityState\(/,'a title review never mints or links identity');
+// Both files share one script scope, so a top-level name defined twice would silently replace the lifecycle contract's function.
+const topLevelNames=source=>new Set([...source.matchAll(/^(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map(match=>match[1]));
+const lifecycleNames=topLevelNames(domain);
+for(const name of topLevelNames(review))assert.equal(lifecycleNames.has(name),false,`${name} is already defined by film-person.js`);
 for(const file of ['build.mjs','src/worker.js','src/sources.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/fixtures.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-title-review|applyTitleReview|titleReviewState/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,Math});
@@ -53,6 +57,15 @@ assert.match(state.version,/^title-review:1:[0-9a-f]{14}$/);
 assert.equal(state.version,titleReviewVersion(provisional),'the token is deterministic');
 assert.equal(titleReviewVersion({...provisional,aliases:[...provisional.aliases,{kind:'title',value:'Ещё одно'}]})===state.version,false,'an alias change is a version change');
 assert.equal(titleReviewVersion({...provisional,metadata:{...provisional.metadata,status:'stale'}}),state.version,'metadata is not part of the title version');
+assert.equal(titleReviewVersion({...provisional,fingerprint:{...provisional.fingerprint,status:'stale'},prediction:{...provisional.prediction,status:'stale'}}),state.version,'fingerprint and prediction are not part of the title version');
+// Provenance-only concurrent changes are version changes too: the screen shows provenance, so a stale screen must not pass CAS.
+assert.notEqual(titleReviewVersion({...provisional,localization:{...provisional.localization,provenance:{...provisional.localization.provenance,basis:'другое основание'}}}),state.version,'a localization provenance change is a version change');
+assert.notEqual(titleReviewVersion({...provisional,localization:{...provisional.localization,provenance:{...provisional.localization.provenance,requestId:'req-x'}}}),state.version,'a localization requestId change is a version change');
+assert.notEqual(titleReviewVersion({...provisional,aliases:provisional.aliases.map((alias,index)=>index===0?{...alias,provenance:{...alias.provenance,source:'tmdb'}}:alias)}),state.version,'an alias provenance change is a version change');
+assert.notEqual(titleReviewVersion({...provisional,localizationConflicts:[{reason:'untrusted_review',value:'Удержано'}]}),state.version,'a held conflict is a version change');
+assert.notEqual(titleReviewVersion({...provisional,aliases:[],epgTitle:'Зорро (2006)'}),titleReviewVersion({...provisional,aliases:[]}),'an option text change is a version change');
+assert.equal(titleReviewVersion({...provisional,aliases:[provisional.aliases[1],provisional.aliases[0],...provisional.aliases.slice(2)]}),state.version,'alias order does not matter');
+assert.equal(titleReviewVersion({...provisional,localization:Object.fromEntries(Object.entries(provisional.localization).reverse())}),state.version,'key order does not matter');
 assert.equal(snapshot(provisional),frozen,'reading does not mutate');
 const dedupe=titleReviewOptions({...provisional,aliases:[{kind:'title',value:'The Legend of Zorro',provenance:{source:'epg'}},{kind:'name',value:'Not a title'}]});
 deepEqual(dedupe.map(option=>option.value),['Легенда о Зорро','The Legend of Zorro','Зорро (2005)']);
@@ -93,7 +106,7 @@ assert.equal(snapshot(provisional),frozen,'the input Film is not mutated');
 // Audit entry and version.
 assert.equal(reviewed.titleReviews.length,1);
 assert.equal(first.review,reviewed.titleReviews[0]);
-deepEqual(first.review,{contractVersion:1,requestId:'req-1',at:new Date(NOW).toISOString(),mode:'alias',authority:'owner',basis:null,selectedFrom:'epg',from:{value:'Легенда о Зорро',status:'provisional',source:'wikidata'},to:{value:'Зорро (2005)',status:'reviewed'},version:{before:state.version,after:first.version}});
+deepEqual(first.review,{contractVersion:1,requestId:'req-1',filmId:'film:28nq',at:new Date(NOW).toISOString(),mode:'alias',authority:'owner',basis:null,selectedFrom:'epg',from:{value:'Легенда о Зорро',status:'provisional',source:'wikidata'},to:{value:'Зорро (2005)',status:'reviewed'},version:{before:state.version,after:first.version}});
 assert.notEqual(first.version,state.version);
 assert.equal(first.version,titleReviewVersion(reviewed));
 assert.equal(titleReviewState(reviewed).preferred.reviewedAt,new Date(NOW).toISOString());
@@ -109,6 +122,8 @@ assert.equal(stale.received,state.version);
 assert.equal(validateTitleReview(reviewed,{filmId:'film:28nq',requestId:'req-2',mode:'manual',value:'Легенда Зорро'}).reason,'version_conflict','a missing token is a conflict, not a bypass');
 
 // Idempotency: the same requestId with the same payload replays, with a different payload is refused.
+// pickEpg still carries the token from before the review, so this is the retry with a stale expectedVersion.
+assert.notEqual(pickEpg.expectedVersion,first.version);
 const replay=applyTitleReview(reviewed,pickEpg,LATER);
 assert.equal(replay.ok,true);
 assert.equal(replay.idempotent,true);
@@ -116,10 +131,35 @@ assert.equal(replay.changed,false);
 assert.equal(replay.film,reviewed,'the same Film object comes back');
 assert.equal(replay.review,reviewed.titleReviews[0]);
 assert.equal(replay.version,first.version);
+assert.equal(applyTitleReview(reviewed,{...pickEpg,expectedVersion:undefined},LATER).idempotent,true,'a retry without a token replays too');
+assert.equal(applyTitleReview(reviewed,{...pickEpg,value:'  Зорро   (2005) ',basis:'   '},LATER).idempotent,true,'normalized value and blank basis match the committed request');
 const reused=applyTitleReview(reviewed,{...pickEpg,mode:'manual',value:'Другое',expectedVersion:first.version},LATER);
 assert.equal(reused.ok,false);
 assert.equal(reused.reason,'request_id_reused');
 assert.equal(reused.review.requestId,'req-1');
+// Replay identity covers every semantic field, not only mode and value.
+const reusedBasis=applyTitleReview(reviewed,{...pickEpg,basis:'Другое основание'},LATER);
+assert.equal(reusedBasis.ok,false,'a changed basis under the same requestId is not a replay');
+assert.equal(reusedBasis.reason,'request_id_reused');
+assert.equal(applyTitleReview(reviewed,{...pickEpg,mode:'manual'},LATER).reason,'request_id_reused','a changed mode is not a replay');
+// Shape checks run before the replay lookup: a mismatching Film or an identity payload is refused, never replayed.
+const otherFilm=applyTitleReview(reviewed,{...pickEpg,filmId:'film:other'},LATER);
+assert.equal(otherFilm.ok,false);
+assert.equal(otherFilm.reason,'film_mismatch');
+assert.equal(Object.hasOwn(otherFilm,'idempotent'),false);
+for(const field of ['canonicalIdentity','externalIds','identity','tmdbId','letterboxdId','id','redirects']){
+ const forbidden=applyTitleReview(reviewed,{...pickEpg,[field]:'tmdb:999'},LATER);
+ assert.equal(forbidden.ok,false,field);
+ assert.equal(forbidden.reason,'identity_change_forbidden');
+ assert.equal(forbidden.field,field);
+}
+assert.equal(applyTitleReview(reviewed,{...pickEpg,mode:'pick'},LATER).reason,'invalid_mode');
+assert.equal(applyTitleReview(reviewed,{...pickEpg,value:'Зорро\u0007(2005)'},LATER).reason,'invalid_title');
+assert.equal(applyTitleReview(reviewed,{...pickEpg,basis:'b'.repeat(501)},LATER).reason,'invalid_basis');
+// An audit entry recorded for another Film never replays here, even with a matching requestId.
+const foreign={...reviewed,titleReviews:[{...reviewed.titleReviews[0],filmId:'film:other'}]};
+assert.equal(applyTitleReview(foreign,pickEpg,LATER).reason,'request_id_reused');
+assert.equal(reviewed.titleReviews.length,1,'replays and refusals leave the audit as it was');
 // Re-sending the current reviewed title under a new requestId changes nothing and leaves no audit noise.
 const same=applyTitleReview(reviewed,{filmId:'film:28nq',requestId:'req-3',mode:'manual',value:'  Зорро   (2005) ',expectedVersion:first.version},LATER);
 assert.equal(same.ok,true);
@@ -147,6 +187,10 @@ assert.equal(corrected.titleReviews.length,2);
 assert.equal(corrected.titleReviews[1].from.value,'Зорро (2005)');
 assert.equal(corrected.titleReviews[1].from.status,'reviewed');
 assert.equal(corrected.titleReviews[1].basis,'Официальный прокатный перевод');
+assert.equal(corrected.titleReviews[1].filmId,'film:28nq');
+assert.equal(applyTitleReview(corrected,typed,LATER).idempotent,true,'a manual review with a basis replays with the same basis');
+assert.equal(applyTitleReview(corrected,{...typed,basis:'  Официальный прокатный перевод  '},LATER).idempotent,true,'basis whitespace is normalized for replay');
+assert.equal(applyTitleReview(corrected,{...typed,basis:null},LATER).reason,'request_id_reused','dropping the basis is a different request');
 assert.equal(corrected.titleReviews[1].version.before,first.version);
 assert.equal(corrected.titleReviews[1].version.after,second.version);
 assert.equal(corrected.titleReviews[0],reviewed.titleReviews[0],'earlier audit entries are kept as they were');
@@ -160,6 +204,10 @@ assert.equal(refreshed.localizationConflicts.length,1);
 assert.equal(refreshed.localizationConflicts[0].reason,'untrusted_review');
 assert.equal(refreshed.aliases.some(alias=>alias.value==='Легенда о Зорро 2'),true,'the held value is kept as an alias');
 assert.equal(titleReviewState(refreshed).heldConflicts,1);
+// The held value changed what the screen shows, so a review prepared from the earlier screen must reload.
+assert.notEqual(titleReviewVersion(refreshed),second.version);
+assert.equal(applyTitleReview(refreshed,{filmId:'film:28nq',requestId:'req-5',mode:'alias',value:'Легенда о Зорро 2',expectedVersion:second.version},LATER).reason,'version_conflict');
+assert.equal(applyTitleReview(refreshed,typed,LATER).idempotent,true,'the committed request still replays after the concurrent change');
 assert.equal(transition(corrected.localization,'provisional').ok,false);
 assert.equal(transition(corrected.localization,'missing').ok,false);
 const spoofed=applyAutomaticLocalization(corrected,{status:'reviewed',value:'Подмена',source:'wikidata',provenance:{source:'wikidata'}},LATER);
@@ -193,6 +241,10 @@ expectFailure({filmId:'film:28nq',requestId:'r',mode:'alias',value:'Нет та�
 deepEqual(expectFailure({filmId:'film:28nq',requestId:'r',mode:'alias',value:'Нет такого алиаса',expectedVersion:fresh},'unknown_alias').options,['Легенда о Зорро','The Legend of Zorro','Зорро (2005)']);
 for(const field of ['canonicalIdentity','externalIds','identity','tmdbId','letterboxdId','id','redirects'])assert.equal(expectFailure({filmId:'film:28nq',requestId:'r',mode:'manual',value:'X',expectedVersion:fresh,[field]:'tmdb:999'},'identity_change_forbidden').field,field);
 expectFailure({filmId:'film:28nq',requestId:'r',mode:'manual',value:'X',expectedVersion:fresh},'rejected_identity',{...provisional,identity:{...provisional.identity,status:'rejected'}});
+// Shape failures come before the state checks: a bad title on a rejected or stale Film reports the title.
+assert.equal(validateTitleReview({...provisional,identity:{...provisional.identity,status:'rejected'}},{filmId:'film:28nq',requestId:'r',mode:'manual',value:'',expectedVersion:fresh}).reason,'invalid_title');
+assert.equal(validateTitleReview(provisional,{filmId:'film:28nq',requestId:'r',mode:'manual',value:'X',basis:42,expectedVersion:'stale'}).reason,'invalid_basis');
+assert.equal(validateTitleReview(provisional,{filmId:'film:28nq',requestId:'r',mode:'manual',value:'X',basis:'  Основание  ',expectedVersion:fresh}).basis,'Основание');
 assert.equal(applyTitleReview(null,{filmId:'x',requestId:'r',mode:'manual',value:'X'},NOW).reason,'missing_film');
 assert.equal(applyTitleReview(provisional,null,NOW).reason,'invalid_command');
 assert.equal(applyTitleReview(provisional,['x'],NOW).reason,'invalid_command');
