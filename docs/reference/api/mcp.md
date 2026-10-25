@@ -41,7 +41,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `probe_echo` | no | Returns `text`, 1–200 characters. |
 | `epg_status` | no | `GET /api/status` |
 | `epg_pipeline_status` | no | `GET /api/enrichment/pipeline/status` |
-| `enrichment_schema` | no | `GET /api/enrichment/schema`, including `contract`: the rules `prediction_submit` validates with and the issue codes it reports ([AIR-152](enrichment.md#submit-validation-contract-air-152)). |
+| `enrichment_schema` | no | `GET /api/enrichment/schema`, including `contract`: the rules `prediction_submit` validates with and the issue codes it reports (see [the submit validation contract](enrichment.md#submit-validation-contract)). |
 | `enrichment_profile` | no | `GET /api/enrichment/profile` |
 | `enrichment_runner` | no | `GET /api/enrichment/runner` |
 | `enrichment_queue` | no | `GET /api/enrichment/queue/status` |
@@ -53,7 +53,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `epg_sync_step` | yes | One `POST /api/sync/metadata` or `POST /api/sync/epg` for the given `runId`. After `stage` is `complete`, each call runs one discovery chunk or reports why it did not, and the response carries `diagnostic` (see Continuation diagnostics). |
 | `prediction_start` | yes | `POST /api/enrichment/start` with `scope: watchlist_all` and `mode: queued`. `trigger` is `scheduled` or `manual`. |
 | `prediction_next` | yes | `POST /api/enrichment/next` with `batchSize: 1`. |
-| `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction against the same contract; a rejected item stays a retryable `parse_error` and carries `results[].validation {stage, reportedBy, issues[{path, code}]}` naming the field, never the payload ([AIR-152](enrichment.md#submit-validation-contract-air-152)). |
+| `prediction_submit` | yes | `POST /api/enrichment/submit` for exactly one film. The Worker validates the fingerprint and prediction against the same contract; a rejected item stays a retryable `parse_error` and carries `results[].validation {stage, reportedBy, issues[{path, code}]}` naming the field, never the payload (see [the submit validation contract](enrichment.md#submit-validation-contract)). |
 | `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
 | `prediction_complete` | yes | `POST /api/enrichment/complete`. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. [AIR-88](run-diagnostics.md). |
 
