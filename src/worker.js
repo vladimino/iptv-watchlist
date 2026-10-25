@@ -153,17 +153,16 @@ async function syncStatus(env){
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
 async function postSync(env,execution,pathname,body,caller='http'){
  if(pathname==='/api/sync/start')return json(await beginSync(env));
- const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=pathname==='/api/sync/epg';
- if(persisted)await recordContinuationDiagnostic(env,step);
+ const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=()=>pathname==='/api/sync/epg'||step.branch==='run_mismatch';
+ await openContinuationStep(env,step,persisted());
  let response;
  try{response=await syncStep(env,pathname,body,step);}
- catch(e){finishContinuationStep(step,started,null,e);if(persisted||step.branch==='run_mismatch')await recordContinuationDiagnostic(env,step);throw e;}
- finishContinuationStep(step,started,response);
- if(persisted||step.branch==='run_mismatch')await recordContinuationDiagnostic(env,step);
+ catch(e){await closeContinuationStep(env,step,started,null,e,persisted());throw e;}
+ await closeContinuationStep(env,step,started,response,null,persisted());
  return response;
 }
 async function syncStep(env,pathname,body,step){
- const run=await loadJSON(env,'sync.json');step.runStage=run?.stage??null;
+ const run=await loadJSON(env,'sync.json');step.runStage=diagnosticCode(DIAGNOSTIC_VOCABULARY.runStage,run?.stage??null);
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}

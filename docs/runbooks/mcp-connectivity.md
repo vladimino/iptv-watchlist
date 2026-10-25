@@ -42,24 +42,26 @@ Leave Scheduled Tasks and writer MCP tools out of this connectivity smoke test. 
 
 Use this when the continuation stays `paused / epg_committed` with `remainingChunks: 12` after a published generation, as in [AIR-69](https://trello.com/c/FlcWZX7W). Everything below is a read; none of it starts a chunk, a sync or a task.
 
-1. Call `epg_pipeline_status` (or `GET /api/enrichment/pipeline/status`) and read `continuation` and `continuationDiagnostics.recent` (newest first, 20 entries). With the Cloudflare Observability connector, the same entries are the Worker log lines whose message contains `"event":"epg_continuation"`.
-2. Find the entries around the time the external Scheduled Task should have called `epg_sync_step` after the EPG commit. The commit itself is the entry with `branch: epg_commit` and `discovery.reason: epg_committed`.
-3. Read the table:
+1. Read the Worker log first: with the Cloudflare Observability connector (or the dashboard's Workers Logs), filter the `iptv` Worker for messages containing `"event":"epg_continuation"` in the window around the scheduled call. Each step produces two lines with the same `id`: `phase: entered`, then `completed` or `failed`. This is the arrival evidence; the ring below is a convenience view of the same entries.
+2. Call `epg_pipeline_status` (or `GET /api/enrichment/pipeline/status`) and read `continuation` and `continuationDiagnostics.recent` (newest first, at most 20 entries; `recorded.entered: false` in a log line means the ring never got that entry, and 20 later steps evict an entry).
+3. Find the entries around the time the external Scheduled Task should have called `epg_sync_step` after the EPG commit. The commit itself is the entry with `branch: epg_commit` and `discovery.reason: epg_committed`.
+4. Read the table:
 
-| What the ring shows after the commit entry | Meaning | Next safe step |
+| What the log and the ring show after the commit entry | Meaning | Next safe step |
 | --- | --- | --- |
-| No entry with `caller: mcp` and `route: /api/sync/epg` | The follow-up call never reached the Worker | Check the Scheduled Task's own execution history and its prompt; nothing on the Worker side ran |
-| `branch: run_mismatch`, `httpStatus: 409` | The call arrived with a `runId` that is not the current `sync.json` run | Compare the task's `runId` with `epg_status` |
-| `phase: entered` and nothing else | The call arrived and was interrupted before a response was formed | Look at the matching log line and the Worker invocation (CPU limit, exception); `diagnostic.branch` says how far it got |
-| `phase: failed` | The handler threw; `error.message` holds the code-sized cause | Fix the cause before any retry |
+| No `entered` log line with `caller: mcp` and `route: /api/sync/epg` in the retention window, and no ring entry | No request reached the Worker handler. This does not say where it stopped: a call rejected by Cloudflare Access (`401`/`403`), dropped by the client or never sent leaves the same absence | Check the Scheduled Task's own execution history and prompt, then the Access logs for `/mcp` in that window |
+| No ring entry but an `entered` log line exists | The call arrived; the ring write failed or the entry was evicted | Read the log pair for that `id`; `recorded` on the outcome line says which write failed |
+| `branch: run_mismatch`, `httpStatus: 409` | The call arrived with a `runId` that is not the current `sync.json` run; `runIdShape: invalid` means it was not even a server-generated id | Compare the task's `runId` with `epg_status` |
+| `entered` log line without a `completed`/`failed` line of the same `id` (or a ring entry stuck at `phase: entered`) | The call arrived and was interrupted before a response was formed | Look at the Worker invocation in the same window (CPU limit, exception); `diagnostic.branch` says how far it got |
+| `phase: failed` | The handler threw; `error.code` classifies the cause (`storage`, `upstream`, `timeout`, `publish_conflict`, `resolver_busy`, `invalid_input`, `unknown`) | Fix the cause before any retry; the message itself is only in the Worker exception, never in the entry |
 | `branch: continuation`, `diagnostic.branch: lease_live` | Another chunk held the resolver lease; the contract answered `busy / wait` and nothing was overwritten | Wait for `nextCatchUpAt`; a lease that never expires is a separate defect |
 | `diagnostic.branch: contract` with `decision.nextAction: wait` or `stop` | The stored continuation already said wait or stop; `decision.hardWait` tells whether `force` would have been ignored too | Read `entry.reason` and `entry.nextCatchUpAt` |
 | `diagnostic.branch: missing_secret` | `TMDB_API_READ_ACCESS_TOKEN` was unset in that invocation | Verify the Worker variable; a deploy with `keep_vars` does not remove it |
-| `diagnostic.branch: chunk` with `chunk.stage: error` | The chunk ran and failed; `chunk.error` holds the cause; the continuation is `error` with a catch-up time | Fix the cause; the next call after `nextCatchUpAt` resumes |
+| `diagnostic.branch: chunk` with `chunk.stage: error` | The chunk ran and failed; `chunk.error` classifies the cause; the continuation is `error` with a catch-up time | Fix the cause; the next call after `nextCatchUpAt` resumes |
 | `diagnostic.branch: chunk` with `saved.owned: false` | The chunk ran but another hop had replaced the continuation meanwhile; this call's result was not stored | Read the owner hop's entry (`saved.hopId`) |
 | `diagnostic.branch: chunk` with `saved.owned: true` and `remainingChunks` decremented | The step worked as designed | Nothing; the next call continues the series |
 
-4. Record the finding on the card with the entry `id`, `at`, `branch` and `diagnostic.branch`. Do not paste a whole entry into a public place if it contains a `runId` you consider private; the entry holds no tokens, titles or payloads.
+5. Record the finding on the card with the entry `id`, `at`, `branch` and `diagnostic.branch`. The entry holds codes, UUIDs, timestamps and counts only, never tokens, titles, messages or payloads.
 
 Deleting or editing `epg/resolver-continuation-diagnostics.json` is a production write and needs approval; it is never needed, the ring overwrites itself.
 

@@ -455,14 +455,48 @@ const CONTINUATION_KEY='epg/resolver-continuation.json';
 // retries, dispatches or changes the resolver.
 const CONTINUATION_DIAGNOSTICS_KEY='epg/resolver-continuation-diagnostics.json';
 const CONTINUATION_DIAGNOSTICS_LIMIT=20;
-function continuationSummary(record){return record&&typeof record==='object'?{stage:record.stage??null,reason:record.reason??null,remainingChunks:record.remainingChunks??null,programmeRunId:record.programmeRunId??null,at:record.at??null,nextCatchUpAt:record.nextCatchUpAt??null,retryAt:record.retryAt??null,hopId:record.hopId??null}:null;}
-function discoverySummary(contract){return contract&&typeof contract==='object'?{state:contract.state??null,nextAction:contract.nextAction??null,reason:contract.reason??null,remainingChunks:contract.remainingChunks??null,programmeRunId:contract.programmeRunId??null,nextCatchUpAt:contract.nextCatchUpAt??null,retryAt:contract.retryAt??null}:null;}
-function diagnosticError(error){return {message:String(error?.message||error||'error').slice(0,160)};}
-// One structured line per step for Workers Logs; never throws.
+// Closed vocabularies. A value outside its list is recorded as `other`; free text never enters an entry
+// or a log line. Ids must be server-generated UUIDs, times must parse, counts must be finite numbers.
+const DIAGNOSTIC_VOCABULARY={
+ caller:['http','mcp','internal'],
+ route:['/api/sync/metadata','/api/sync/epg','/api/enrichment/discovery/resolve'],
+ runStage:['metadata','epg','complete'],
+ stage:['idle','paused','running','complete','error','busy','partial','programme_changed','awaiting_epg_discovery','backoff','missing_secret'],
+ nextAction:['continue','wait','stop'],
+ reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed'],
+ errorName:['Error','TypeError','RangeError','SyntaxError','ReferenceError','AbortError','TimeoutError'],
+};
+function diagnosticCode(list,value,fallback='other'){return value==null?null:list.includes(value)?value:fallback;}
+function diagnosticId(value){return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)?value:null;}
+function diagnosticTime(value){return typeof value==='string'&&value.length<=40&&Number.isFinite(Date.parse(value))?value:null;}
+function diagnosticCount(value){return typeof value==='number'&&Number.isFinite(value)?value:null;}
+// Classifies a thrown error into one of seven codes. The message is matched, never copied.
+function diagnosticErrorCode(error){
+ const name=String(error?.name||''),message=String(error?.message||'');
+ if(name==='AbortError'||name==='TimeoutError'||/timed? ?out/i.test(message))return 'timeout';
+ if(/generation changed/i.test(message))return 'publish_conflict';
+ if(/resolver is writing/i.test(message))return 'resolver_busy';
+ if(/\br2\b|bucket|storage|etag/i.test(message))return 'storage';
+ if(/tmdb|fetch|http\s?\d{3}|upstream|network|socket|dns/i.test(message))return 'upstream';
+ if(name==='SyntaxError'||/invalid|not found|required|unexpected/i.test(message))return 'invalid_input';
+ return 'unknown';
+}
+function diagnosticError(error){return {code:diagnosticErrorCode(error),name:diagnosticCode(DIAGNOSTIC_VOCABULARY.errorName,String(error?.name||'Error'),'Error')};}
+// A continuation `reason` outside the vocabulary is the thrown message an error record kept; it is
+// classified like an error, not copied.
+function diagnosticReason(value){return value==null?null:DIAGNOSTIC_VOCABULARY.reason.includes(value)?value:diagnosticErrorCode({message:String(value)});}
+function continuationSummary(record){return record&&typeof record==='object'?{stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,record.stage),reason:diagnosticReason(record.reason),remainingChunks:diagnosticCount(record.remainingChunks),programmeRunId:diagnosticId(record.programmeRunId),at:diagnosticTime(record.at),nextCatchUpAt:diagnosticTime(record.nextCatchUpAt),retryAt:diagnosticTime(record.retryAt),hopId:diagnosticId(record.hopId)}:null;}
+function discoverySummary(contract){return contract&&typeof contract==='object'?{state:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,contract.state),nextAction:diagnosticCode(DIAGNOSTIC_VOCABULARY.nextAction,contract.nextAction),reason:diagnosticReason(contract.reason),remainingChunks:diagnosticCount(contract.remainingChunks),programmeRunId:diagnosticId(contract.programmeRunId),nextCatchUpAt:diagnosticTime(contract.nextCatchUpAt),retryAt:diagnosticTime(contract.retryAt)}:null;}
+function chunkSummary(result){return {stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),added:diagnosticCount(result.added),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:result.error?diagnosticErrorCode({message:String(result.error)}):null};}
+// One structured line per phase for Workers Logs; never throws.
 function observeContinuation(step){try{console.log(JSON.stringify({event:'epg_continuation',...step}));}catch{}}
-// Opens a step entry. `phase: entered` is written before the work and replaced by the outcome, so an
-// interrupted request leaves an entered entry without outcome.
-function continuationStep(caller,route,runId){return {id:crypto.randomUUID(),at:new Date().toISOString(),phase:'entered',caller:caller||'http',route,runId:typeof runId==='string'?runId.slice(0,100):null,runStage:null,branch:null,httpStatus:null,discovery:null,diagnostic:{},error:null,durationMs:null};}
+// A step entry. `runId` is kept only when it has the server-generated UUID shape; `runIdShape` says
+// what the caller sent. `recorded` holds the result of each best-effort ring write: the stored entry
+// can only carry `entered`, the final log line carries both.
+function continuationStep(caller,route,runId){
+ const id=diagnosticId(runId);
+ return {id:crypto.randomUUID(),at:new Date().toISOString(),phase:'entered',caller:diagnosticCode(DIAGNOSTIC_VOCABULARY.caller,caller||'http','http'),route:diagnosticCode(DIAGNOSTIC_VOCABULARY.route,route),runId:id,runIdShape:runId==null?null:id?'uuid':'invalid',runStage:null,branch:null,httpStatus:null,discovery:null,diagnostic:{},error:null,durationMs:null,recorded:{entered:null,outcome:null}};
+}
 // Upserts the entry by id into a bounded ring (newest first). Best effort: a failed write never fails the step.
 async function recordContinuationDiagnostic(env,entry){
  for(let attempt=0;attempt<2;attempt++){
@@ -475,10 +509,15 @@ async function recordContinuationDiagnostic(env,entry){
  }
  return false;
 }
-function finishContinuationStep(step,started,response,error){
+// The `entered` log line is the arrival evidence and goes out before any storage access; the ring write
+// that follows is best effort and its result is kept in `recorded.entered`.
+async function openContinuationStep(env,step,persist){observeContinuation(step);if(persist)step.recorded.entered=await recordContinuationDiagnostic(env,step);return step;}
+// Outcome fields, then the outcome write, then the final log line carrying both write results.
+async function closeContinuationStep(env,step,started,response,error,persist){
  step.durationMs=Date.now()-started;
  if(error){step.phase='failed';step.error=diagnosticError(error);step.httpStatus=step.httpStatus??502;}
  else{step.phase='completed';step.httpStatus=response?.status??step.httpStatus??null;}
+ if(persist)step.recorded.outcome=await recordContinuationDiagnostic(env,step);
  observeContinuation(step);
 }
 function discoveryContract(record,override={}){
@@ -547,7 +586,7 @@ async function advanceDiscovery(env,body={}){
   result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
  }catch(e){result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};}
  finally{await releaseDiscoveryLease(env,acquired);}
- trace.chunk={stage:result.stage??null,checked:result.checked??null,remaining:result.remaining??null,added:result.added??null,variantPending:result.variantPending??null,retryAt:result.retryAt??null,programmeRunId:result.programmeRunId??null,error:result.error?String(result.error).slice(0,160):null};
+ trace.chunk=chunkSummary(result);
  const at=new Date().toISOString();
  let record;
  if(result.stage==='programme_changed')record={stage:'paused',reason:'programme_changed',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId||null};
@@ -566,7 +605,7 @@ async function advanceDiscovery(env,body={}){
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);
- await recordContinuationDiagnostic(env,step);
+ await openContinuationStep(env,step,true);
  let response;
  try{
   if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24)){step.branch='invalid_limit';response=json({error:'Invalid limit'},400);}
@@ -575,9 +614,8 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
    if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
    else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:body.chunks!==0,trace:step.diagnostic});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
   }
- }catch(e){finishContinuationStep(step,started,null,e);await recordContinuationDiagnostic(env,step);throw e;}
- finishContinuationStep(step,started,response);
- await recordContinuationDiagnostic(env,step);
+ }catch(e){await closeContinuationStep(env,step,started,null,e,true);throw e;}
+ await closeContinuationStep(env,step,started,response,null,true);
  return response;
 }
 async function discoveryPipelineStatus(env){

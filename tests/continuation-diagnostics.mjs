@@ -8,7 +8,7 @@ import {webcrypto} from 'node:crypto';
 // "the call never arrived" and "the call arrived but saved no chunk" can be told apart.
 const TEAM='https://probe-team.cloudflareaccess.com',AUD='a1'.repeat(32),SITE='https://iptv.example';
 const KEY='epg/resolver-continuation-diagnostics.json',CONTINUATION='epg/resolver-continuation.json';
-const TOKEN='tmdb-secret-token-xyz';
+const TOKEN='tmdb-secret-token-xyz',RUN='6d1f3f1e-5b7e-4d6a-9c2b-1a2b3c4d5e6f';
 const signing=await webcrypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
 const publicJwk={...await webcrypto.subtle.exportKey('jwk',signing.publicKey),kid:'kid-1',alg:'RS256',use:'sig'};
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -23,9 +23,10 @@ const jwt=await accessJwt();
 const records=new Map(),etags=new Map();let revision=0,puts=[],putBodies=[],conflictOnce=false;
 const failing={get:new Set(),put:new Set()};
 const bucket={
- async get(key){if(failing.get.has(key))throw new Error('r2 get failed: '+key);return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},
+ // Storage errors carry a secret and a film title, like a real upstream message could; nothing of them may be recorded.
+ async get(key){if(failing.get.has(key))throw new Error('r2 get failed: '+key+' token='+TOKEN+' title=Hot Film');return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},
  async put(key,value,options={}){
-  if(failing.put.has(key))throw new Error('r2 put failed: '+key);
+  if(failing.put.has(key))throw new Error('r2 put failed: '+key+' token='+TOKEN+' title=Hot Film');
   if(key===KEY&&conflictOnce){conflictOnce=false;return null;}
   const c=options.onlyIf;if(c?.etagDoesNotMatch==='*'&&records.has(key)||c?.etagMatches&&c.etagMatches!==etags.get(key))return null;
   records.set(key,JSON.parse(value));etags.set(key,String(++revision));puts.push(key);if(key===KEY)putBodies.push(JSON.parse(value));return {etag:etags.get(key)};
@@ -61,22 +62,22 @@ const candidate=()=>({key:'hot film|2020',title:'Hot Film',normalizedTitle:'hot 
 const committed=()=>({stage:'paused',reason:'epg_committed',at:new Date(now).toISOString(),hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId:null});
 function seed({continuation=committed(),lease=null,runStage='complete'}={}){
  records.clear();etags.clear();puts=[];putBodies=[];logs.length=0;failing.get.clear();failing.put.clear();conflictOnce=false;
- records.set('programme.json',{runId:'run-1',updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[{id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,shows:[]}],stats:{}});
- records.set('sync.json',{runId:'run-1',stage:runStage,updatedAt:new Date(now).toISOString()});
+ records.set('programme.json',{runId:RUN,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[{id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,shows:[]}],stats:{}});
+ records.set('sync.json',{runId:RUN,stage:runStage,updatedAt:new Date(now).toISOString()});
  records.set(profileKey,{version:1,profileHash:'p'});
- records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[candidate()]});
+ records.set('epg/discovery-latest.json',{programmeRunId:RUN,items:[candidate()]});
  if(continuation)records.set(CONTINUATION,continuation);
  if(lease)records.set('epg/resolver-lease.json',lease);
 }
 const diag=()=>records.get(KEY);
 const summary=contract=>({state:contract.state??null,nextAction:contract.nextAction??null,reason:contract.reason??null,remainingChunks:contract.remainingChunks??null,programmeRunId:contract.programmeRunId??null,nextCatchUpAt:contract.nextCatchUpAt??null,retryAt:contract.retryAt??null});
 const logged=()=>logs.map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(entry=>entry?.event==='epg_continuation');
-const SECRETS=[TOKEN,'Hot Film','Горячий',jwt.slice(0,20)];
+const SECRETS=[TOKEN,'Hot Film','Горячий','title=','token=',jwt.slice(0,20)];
 function assertSanitized(label){const text=JSON.stringify(diag()??null)+'\n'+logs.join('\n');for(const secret of SECRETS)assert.equal(text.includes(secret),false,label+' must not contain '+secret);}
 
 // 1. After the EPG commit the follow-up step runs one chunk: the response, the stored entry and the log agree.
 seed();
-const chunk=await http('/api/sync/epg','POST',{runId:'run-1'});
+const chunk=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(chunk.status,200,JSON.stringify(chunk.body));
 assert.equal(chunk.body.stage,'complete');
 assert.equal(chunk.body.diagnostic.branch,'chunk');
@@ -98,8 +99,10 @@ const entry=stored.recent[0];
 assert.equal(entry.phase,'completed');
 assert.equal(entry.caller,'http');
 assert.equal(entry.route,'/api/sync/epg');
-assert.equal(entry.runId,'run-1');
+assert.equal(entry.runId,RUN);
+assert.equal(entry.runIdShape,'uuid');
 assert.equal(entry.runStage,'complete');
+assert.deepEqual(entry.recorded,{entered:true,outcome:null},'the stored entry can only know about the entered write');
 assert.equal(entry.branch,'continuation');
 assert.equal(entry.httpStatus,200);
 assert.equal(entry.error,null);
@@ -113,17 +116,22 @@ assert.equal(putBodies[0].recent[0].phase,'entered');
 assert.equal(putBodies[0].recent[0].id,entry.id);
 assert.equal(putBodies[0].recent[0].branch,null);
 assert.equal(putBodies[1].recent[0].phase,'completed');
+// Two log lines share the entry id: `entered` before any storage access, the outcome after the ring write.
 const lines=logged();
-assert.equal(lines.length,1);
+assert.equal(lines.length,2);
 assert.equal(lines[0].id,entry.id);
-assert.equal(lines[0].phase,'completed');
-assert.equal(lines[0].branch,'continuation');
-assert.equal(lines[0].diagnostic.branch,'chunk');
+assert.equal(lines[0].phase,'entered');
+assert.equal(lines[0].branch,null);
+assert.equal(lines[1].id,entry.id);
+assert.equal(lines[1].phase,'completed');
+assert.equal(lines[1].branch,'continuation');
+assert.equal(lines[1].diagnostic.branch,'chunk');
+assert.deepEqual(lines[1].recorded,{entered:true,outcome:true});
 assertSanitized('chunk step');
 
 // 2. A live resolver lease: busy / wait, the continuation is untouched, and the entry says why.
 seed({lease:{id:'other',expiresAt:now+60000}});
-const busy=await http('/api/sync/epg','POST',{runId:'run-1'});
+const busy=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(busy.status,200);
 assert.equal(busy.body.discovery.state,'busy');
 assert.equal(busy.body.discovery.nextAction,'wait');
@@ -138,19 +146,21 @@ assert.equal(diag().recent[0].diagnostic.branch,'lease_live');
 
 // 3. The contract says wait (chunk budget spent, catch-up in the future): no chunk, the decision is recorded.
 const future=new Date(now+3600000).toISOString();
-seed({continuation:{stage:'paused',reason:'chunk_budget',at:new Date(now).toISOString(),hopId:'h0',remainingChunks:0,nextCatchUpAt:future,retryAt:null,programmeRunId:'run-1'}});
-const wait=await http('/api/sync/epg','POST',{runId:'run-1'});
+seed({continuation:{stage:'paused',reason:'chunk_budget',at:new Date(now).toISOString(),hopId:'h0',remainingChunks:0,nextCatchUpAt:future,retryAt:null,programmeRunId:RUN}});
+const wait=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(wait.body.discovery.nextAction,'wait');
 assert.equal(wait.body.diagnostic.branch,'contract');
 assert.deepEqual(wait.body.diagnostic.decision,{run:false,budget:null,force:false,hardWait:true,nextAction:'wait'});
 assert.equal(wait.body.diagnostic.hopId,null);
 assert.equal(diag().recent[0].discovery.nextAction,'wait');
 assert.equal(diag().recent[0].discovery.reason,'chunk_budget');
+assert.equal(diag().recent[0].diagnostic.entry.hopId,null,'a hop id that is not a UUID is not echoed');
+assert.equal(diag().recent[0].diagnostic.entry.programmeRunId,RUN);
 
 // 4. No TMDB secret: the step records the missing_secret branch and the error continuation it wrote.
 seed();
 const secretless=baseEnv();delete secretless.TMDB_API_READ_ACCESS_TOKEN;
-const missing=await http('/api/sync/epg','POST',{runId:'run-1'},secretless);
+const missing=await http('/api/sync/epg','POST',{runId:RUN},secretless);
 assert.equal(missing.body.discovery.reason,'missing_secret');
 assert.equal(missing.body.discovery.nextAction,'stop');
 assert.equal(missing.body.diagnostic.branch,'missing_secret');
@@ -158,45 +168,71 @@ assert.equal(missing.body.diagnostic.saved.reason,'missing_secret');
 assert.equal(missing.body.diagnostic.saved.owned,true);
 assert.equal(diag().recent[0].diagnostic.branch,'missing_secret');
 
-// 5. The chunk itself fails: the error is kept as a code-sized message, the continuation is `error`, the step completed.
+// 5. The chunk itself fails: the error is kept as a classified code, the continuation is `error`, the step completed.
 seed();
 failing.get.add('epg/discovery-latest.json');
-const failedChunk=await http('/api/sync/epg','POST',{runId:'run-1'});
+const failedChunk=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(failedChunk.status,200);
 assert.equal(failedChunk.body.discovery.state,'error');
 assert.equal(failedChunk.body.diagnostic.branch,'chunk');
 assert.equal(failedChunk.body.diagnostic.chunk.stage,'error');
-assert.match(failedChunk.body.diagnostic.chunk.error,/r2 get failed/);
+assert.equal(failedChunk.body.diagnostic.chunk.error,'storage');
 assert.equal(failedChunk.body.diagnostic.saved.stage,'error');
+assert.equal(failedChunk.body.diagnostic.saved.reason,'storage','the error record keeps the thrown message as its reason; the summary classifies it');
+assert.match(records.get(CONTINUATION).reason,/r2 get failed/,'the resolver record itself is unchanged by the diagnostics');
 assert.equal(diag().recent[0].phase,'completed');
 assert.equal(diag().recent[0].error,null,'a chunk error is an outcome, not a failed step');
 assert.equal(diag().recent[0].diagnostic.chunk.stage,'error');
+assert.equal(diag().recent[0].discovery.reason,'storage');
+assertSanitized('chunk error');
 
-// 6. The step fails before any outcome: the entry stays with phase failed, the error and the branch reached.
+// 6. The step fails before any outcome: the entry stays with phase failed, the error code and the branch reached,
+// and the two log lines correlate by id.
 seed();
 failing.get.add(CONTINUATION);
-const broken=await http('/api/sync/epg','POST',{runId:'run-1'});
+const broken=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(broken.status,502);
 const failedEntry=diag().recent[0];
 assert.equal(failedEntry.phase,'failed');
 assert.equal(failedEntry.branch,'continuation');
 assert.equal(failedEntry.httpStatus,502);
-assert.match(failedEntry.error.message,/r2 get failed/);
+assert.deepEqual(failedEntry.error,{code:'storage',name:'Error'});
 assert.equal(failedEntry.discovery,null);
-assert.equal(logged().at(-1).phase,'failed');
+assert.equal(logged().length,2);
+assert.equal(logged()[0].phase,'entered');
+assert.equal(logged()[1].phase,'failed');
+assert.equal(logged()[0].id,logged()[1].id);
+assert.deepEqual(logged()[1].recorded,{entered:true,outcome:true});
+assertSanitized('failed step');
+// The classifier maps messages to codes and never copies them.
+assert.equal(vm.runInContext('diagnosticErrorCode(new Error("TMDB HTTP 401 "+"'+TOKEN+'"))',context),'upstream');
+assert.equal(vm.runInContext('diagnosticErrorCode(Object.assign(new Error("The operation was aborted"),{name:"AbortError"}))',context),'timeout');
+assert.equal(vm.runInContext('diagnosticErrorCode(new Error("EPG generation changed during publish"))',context),'publish_conflict');
+assert.equal(vm.runInContext('diagnosticErrorCode(new Error("Hot Film is not a secret"))',context),'unknown');
+assert.equal(JSON.stringify(vm.runInContext('diagnosticError(Object.assign(new Error("x"),{name:"Горячий фильм"}))',context)),'{"code":"unknown","name":"Error"}','an unlisted error name is not echoed');
 
-// 7. The diagnostics write itself fails: the step still runs and answers, the log line is still emitted.
+// 7. The diagnostics write itself fails: the step still runs and answers; both log lines are still emitted and
+// the final one says that nothing was persisted, so "no ring entry" is not read as "no call".
 seed();
 failing.put.add(KEY);
-const unrecorded=await http('/api/sync/epg','POST',{runId:'run-1'});
+const unrecorded=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(unrecorded.status,200);
 assert.equal(unrecorded.body.diagnostic.branch,'chunk');
 assert.equal(diag(),undefined);
-assert.equal(logged().length,1);
+assert.equal(logged().length,2);
+assert.equal(logged()[0].phase,'entered');
+assert.deepEqual(logged()[1].recorded,{entered:false,outcome:false});
+assertSanitized('write failure');
+seed();
+failing.get.add(KEY);
+const unreadable=await http('/api/sync/epg','POST',{runId:RUN});
+assert.equal(unreadable.status,200);
+assert.deepEqual(logged()[1].recorded,{entered:false,outcome:false},'a ring read failure is reported the same way');
 // A conditional-write conflict is retried once.
 seed();conflictOnce=true;
-await http('/api/sync/epg','POST',{runId:'run-1'});
+await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(diag().recent.length,1);
+assert.deepEqual(logged()[1].recorded,{entered:true,outcome:true});
 
 // 8. Run id mismatch through MCP: the call reached the Worker, and the entry says so with caller mcp.
 seed();
@@ -207,8 +243,11 @@ const rejected=diag().recent[0];
 assert.equal(rejected.caller,'mcp');
 assert.equal(rejected.route,'/api/sync/epg');
 assert.equal(rejected.branch,'run_mismatch');
-assert.equal(rejected.runId,'nope');
+assert.equal(rejected.runId,null,'a runId without the server-generated shape is not echoed');
+assert.equal(rejected.runIdShape,'invalid');
 assert.equal(rejected.runStage,'complete');
+assert.equal(JSON.stringify(diag()).includes('nope'),false);
+assert.equal(logs.join('\n').includes('nope'),false);
 assert.equal(rejected.httpStatus,409);
 assert.equal(rejected.phase,'completed');
 assert.equal(rejected.discovery,null);
@@ -217,7 +256,7 @@ assertSanitized('mcp mismatch');
 
 // 9. The same continuation step through MCP carries the diagnostic in structuredContent and records caller mcp.
 seed();
-const viaMcp=await mcp('epg_sync_step',{runId:'run-1'});
+const viaMcp=await mcp('epg_sync_step',{runId:RUN});
 assert.equal(viaMcp.isError,undefined,JSON.stringify(viaMcp));
 assert.equal(viaMcp.structuredContent.diagnostic.branch,'chunk');
 assert.equal(diag().recent[0].caller,'mcp');
@@ -226,17 +265,21 @@ assertSanitized('mcp chunk');
 
 // 10. A metadata step is logged but not persisted: the ring buffer is for the continuation boundary.
 seed({runStage:'metadata'});
-const metadata=await http('/api/sync/metadata','POST',{runId:'run-1'});
+const metadata=await http('/api/sync/metadata','POST',{runId:RUN});
 assert.equal(metadata.status,502,'the fixture has no Letterboxd, so the batch fails');
 assert.equal(diag(),undefined);
-assert.equal(logged().length,1);
-assert.equal(logged()[0].route,'/api/sync/metadata');
-assert.equal(logged()[0].branch,'metadata');
-assert.equal(logged()[0].phase,'failed');
+assert.equal(logged().length,2);
+assert.equal(logged()[0].phase,'entered');
+assert.equal(logged()[1].route,'/api/sync/metadata');
+assert.equal(logged()[1].branch,'metadata');
+assert.equal(logged()[1].phase,'failed');
+assert.deepEqual(logged()[1].recorded,{entered:null,outcome:null},'not persisted, by design');
+assert.ok(['storage','upstream','timeout','publish_conflict','resolver_busy','invalid_input','unknown'].includes(logged()[1].error.code));
+assertSanitized('metadata step');
 
 // 11. The ring keeps the newest 20 entries, newest first, each with its own id.
 seed({lease:{id:'other',expiresAt:now+60000}});
-for(let i=0;i<25;i++)await http('/api/sync/epg','POST',{runId:'run-1'});
+for(let i=0;i<25;i++)await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(diag().recent.length,20);
 assert.equal(new Set(diag().recent.map(item=>item.id)).size,20);
 assert.ok(diag().recent.every(item=>item.phase==='completed'&&item.branch==='continuation'));
@@ -264,6 +307,7 @@ assert.equal(diag().recent[0].caller,'http');
 assert.equal(diag().recent[0].route,'/api/enrichment/discovery/resolve');
 assert.equal(diag().recent[0].branch,'resolve');
 assert.equal(diag().recent[0].runId,null);
+assert.equal(diag().recent[0].runIdShape,null);
 seed();
 const internal=await entrypoint.fetch(new Request(continuationUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chunks:0})}),baseEnv(),execution);
 const internalBody=await internal.json();
@@ -277,5 +321,25 @@ const badLimit=await http('/api/enrichment/discovery/resolve','POST',{limit:99})
 assert.equal(badLimit.status,400);
 assert.equal(diag().recent[0].branch,'invalid_limit');
 assert.equal(diag().recent[0].httpStatus,400);
+
+// 14. Free text already stored in the continuation (an error record keeps the thrown message as its reason)
+// is classified, not copied: neither the entry nor the log carries the secret or the title.
+seed({continuation:{stage:'error',reason:'TMDB HTTP 401 token='+TOKEN+' title=Hot Film',at:new Date(now).toISOString(),hopId:'h0',remainingChunks:12,nextCatchUpAt:future,retryAt:null,programmeRunId:RUN}});
+const poisoned=await http('/api/sync/epg','POST',{runId:RUN});
+assert.equal(poisoned.status,200);
+assert.equal(poisoned.body.diagnostic.branch,'contract');
+assert.equal(poisoned.body.diagnostic.entry.reason,'upstream');
+assert.equal(diag().recent[0].discovery.reason,'upstream');
+assert.equal(diag().recent[0].diagnostic.entry.stage,'error');
+assertSanitized('poisoned reason');
+// Values outside the vocabularies become `other`, never the value itself.
+seed({continuation:{...committed(),stage:'Hot Film stage'},runStage:'Hot Film'});
+const unlisted=await http('/api/sync/epg','POST',{runId:RUN});
+assert.equal(unlisted.status,409,'an unknown sync stage is a stage mismatch');
+assert.equal(diag().recent[0].runStage,'other');
+seed({continuation:{...committed(),stage:'Hot Film stage'}});
+await http('/api/sync/epg','POST',{runId:RUN});
+assert.equal(diag().recent[0].diagnostic.entry.stage,'other');
+assertSanitized('unlisted values');
 
 console.log('Continuation diagnostics: chunk, busy, wait, missing secret, chunk error, failed step, write failure, mismatch, MCP/HTTP/internal callers, ring buffer and read-only status passed');
