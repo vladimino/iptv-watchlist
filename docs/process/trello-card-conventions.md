@@ -36,9 +36,9 @@ Labels can be combined: D1 Film repository = Каталог + Платформа
 5. Don't introduce false blockers: a previously delivered domain *contract* may be available even when the broader parent card is not fully closed. Make that nuance explicit in context; never label an incomplete card as completed.
 6. State **Documentation impact**: exact affected paths/sections according to [documentation governance](documentation-governance.md), or `Documentation impact: none` with specific justification. A material architectural change must include a **new ADR**, relevant Mermaid diagrams and updated contracts; do not treat a Trello comment or PR summary as a substitute. Documentation obligations are part of Done and independently checked in review.
 7. State **Scope**, **Done / Acceptance** (objective, verifiable), **Tests / evidence**, **Production impact and rollback**. For integration PRs, link related Trello cards and current prerequisites in PR description and final report.
-7. Keep historical notes as history, but don't leave an obsolete "Prerequisites" text section that contradicts the checklist. If a dependency changes, update the checklist and the card's introductory context.
-8. **Production rollout is not code delivery.** A green PR/code-only Done must not be misrepresented as an enabled production feature. Put shadow experiment, go/no-go, cutover, and stabilization in separate tickets.
-9. No unsanctioned flag toggles, manual sync/model/TMDB calls, live migration, destructive cleanup or source-of-truth change as a side effect of drafting, testing, or closing documentation cards.
+8. Keep historical notes as history, but don't leave an obsolete "Prerequisites" text section that contradicts the checklist. If a dependency changes, update the checklist and the card's introductory context.
+9. **Production rollout is not code delivery.** A green PR/code-only Done must not be misrepresented as an enabled production feature. Put shadow experiment, go/no-go, cutover, and stabilization in separate tickets.
+10. No unsanctioned flag toggles, manual sync/model/TMDB calls, live migration, destructive cleanup or source-of-truth change as a side effect of drafting, testing, or closing documentation cards.
 
 ## Example: independent preparation, then one cross-stream gate
 
