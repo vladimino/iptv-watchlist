@@ -145,12 +145,24 @@
 .film-execution-item h3{margin:0 0 4px;font-size:12px}
 .film-compare .person-input{width:100%}
 .film-compare .person-options{width:100%;max-width:none}
-.film-compare-with{margin:10px 0 0;color:#d5dece}
-.film-compare-block{margin-top:10px}
-.film-compare-block h3{margin:0 0 6px;color:var(--muted);font-size:12px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}
-.film-compare-chip{display:inline-flex;align-items:center;border:1px solid var(--line);background:var(--surface);color:#d5dece;border-radius:999px;padding:4px 10px;font-size:13px;line-height:1.3}
-.film-compare-diff{margin:0;padding-left:18px;color:#d5dece}
-.film-compare-diff li{margin:0 0 4px}
+.film-compare-block{margin-top:14px}
+.film-compare-block h3{margin:0 0 8px;color:var(--muted);font-size:12px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}
+.film-compare-chip{display:inline-flex;align-items:center;border:1px solid #4d6244;background:#243024;color:var(--lime);border-radius:999px;padding:4px 10px;font-size:13px;line-height:1.3}
+.film-compare-matrix{width:100%;margin-top:14px;border-collapse:separate;border-spacing:0 6px;table-layout:fixed}
+.film-compare-matrix th,.film-compare-matrix td{padding:8px 8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.film-compare-matrix thead th{padding-bottom:10px;border-bottom:1px solid var(--line);font-size:13px;font-weight:650}
+.film-compare-matrix tbody th{width:34%;color:var(--muted);font-size:13px;font-weight:600}
+.film-compare-matrix td{width:33%;font-size:14px}
+.film-compare-open{display:inline;padding:0;border:0;background:none;color:var(--lime);font:inherit;font-weight:650;text-align:left;text-decoration:underline;text-underline-offset:3px}
+.film-compare-matrix tr.is-diff td{background:#243024}
+.film-compare-matrix tr.is-diff td:first-of-type{border-radius:8px 0 0 8px}
+.film-compare-matrix tr.is-diff td:last-child{border-radius:0 8px 8px 0}
+.film-compare-matrix tr.is-same td{color:#8d978a}
+.film-compare-matrix tr.is-gap td,.film-compare-forecast td.is-missing{color:var(--muted)}
+.film-compare-score{color:var(--lime);font-weight:650;font-variant-numeric:tabular-nums}
+.film-compare-rank{display:block;margin-top:2px;font-size:11px;font-weight:650;letter-spacing:.04em}
+.film-compare-rank.is-better{color:var(--lime)}
+.film-compare-rank.is-worse{color:#d7b48a}
 .film-screen .credit-link{overflow-wrap:anywhere}
 .film-facts{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .film-fact{margin:0;padding:7px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:#d5dece}
@@ -174,6 +186,7 @@
 .film-score-card{flex-basis:calc(50% - 5px);max-width:none}
 .film-why{max-width:none}
 .film-callouts,.film-people-row,.film-facet-row,.film-execution{grid-template-columns:1fr}
+.film-compare-matrix th,.film-compare-matrix td{padding:7px 4px}
 .film-show-list .show-row{grid-template-columns:1fr}
 .film-show-list .show-time{text-align:left}
 }html.film-screen .page-heading,html.film-screen .search-box,html.film-screen .demo-note,html.film-screen .workspace{display:none!important}html.film-screen .status-footer{display:none!important}html.film-screen .search-panel{display:none!important}html.events-screen .page-heading,html.events-screen .search-box,html.events-screen .demo-note,html.events-screen .filter-toggle,html.events-screen .results,html.events-screen .filters>:not(.activity){display:none!important}html.events-screen .workspace{display:block}html.events-screen .filters{display:block!important;width:auto;max-width:none;padding:0;border:0}html.events-screen .activity{max-width:920px;margin:0;border:0;padding-top:0}html.events-screen .activity-head h2{font-size:28px}html.events-screen .activity-scroll{max-height:calc(100dvh - 220px)}html.events-screen .activity-event{font-size:16px}html.events-screen .activity-event time{font-size:13px}@media(max-width:760px){html.events-screen .activity-head h2{font-size:24px}html.events-screen .activity-scroll{max-height:calc(100dvh - 180px)}html.events-screen .filters{display:block!important}}
