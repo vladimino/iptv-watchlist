@@ -1,20 +1,19 @@
-# Contributing
+# Contributing to IPTV Watchlist
 
-GitHub `main` is the canonical production source.
+GitHub `main` is the canonical code source. Begin with [AGENTS.md](AGENTS.md), the [documentation map](docs/README.md) and the [delivery workflow](docs/process/agent-workflow.md). The [architecture index](docs/architecture/README.md) contains actual diagrams; the [ADR register](docs/adr/README.md) explains durable choices.
 
-Before local work:
+## Work on a change
 
-1. Run `git fetch origin --prune`.
-2. Confirm the working tree is clean with `git status --short`.
-3. Confirm the local branch has not diverged from `origin/main`.
-4. Fast-forward with `git pull --ff-only origin main`.
+1. Read the live [Trello roadmap](https://trello.com/b/HODRHtcO/iptv-watchlist-roadmap), card acceptance criteria and any native prerequisites. Keep implementation separate from independently gated production rollout.
+2. Run `git fetch origin main`, inspect `git status --short`, branch/head, remote and divergence. Start from fresh `origin/main` without overwriting unfinished work.
+3. Work on a branch and open a focused PR. Direct `main` documentation commits require **explicit owner approval**. For diagrams or meaningful UI changes, include evidence of actual rendering; wait for owner visual approval when the card requires it.
+4. Run `npm ci`, `npm test`, and `npm run build` where a local checkout exists. Verify PR CI, then review the real diff and links. Updating architecture, data flows or trust boundaries requires updated diagrams and reference/runbooks; significant new decisions require an [ADR](docs/adr/README.md).
+5. After an approved merge, verify the new `main` SHA and **both** GitHub Actions jobs: `Test and build` and `Deploy to Cloudflare`. Record evidence and limitations in Trello before Done. A deployment is code publication only, not proof of a successful job invocation or migration.
 
-Resolve dirty or diverged state explicitly. Do not overwrite other changes, force-push in the normal workflow, or copy files directly to production.
+## Safety
 
-All changes go through commits and pushes. Pull requests run self-contained tests and build. Successful pushes to `main` automatically publish the verified artifact to Cloudflare Worker `iptv` using GitHub Actions and environment `Cloudflare Prod`. That deploy updates Worker code only. It does not copy R2 data, enable Scheduled Tasks, or change Cloudflare Access.
+Production runs on Cloudflare Worker `iptv`, with R2 bucket `iptv` authoritative. The old ChatGPT Site is a reserve, and D1 is not the current authoritative store. Worker deployment does not migrate data, invoke MCP writers, change Cloudflare Access or manage external ChatGPT Scheduled Tasks.
 
-Production data lives in Cloudflare R2 bucket `iptv`. The legacy Site is a temporary reserve. Do not republish it in order to resume writers, and do not replay the 19 October 2026 snapshot onto production R2. A historical Sites publication used its own merge SHA and required that publication's Git tree to equal the GitHub SHA selected for it. That does not mean the legacy Site must match today's Cloudflare `main`. External ChatGPT EPG/prediction Scheduled Tasks were restored separately by [AIR-62](https://trello.com/c/CU71gW4c) on 21 October (observed enabled on 24 October). Worker `schedules=0` does not report the external task state; verify live schedules and run outcomes separately. Never edit them as part of deployment or smoke testing.
+Do **not** execute EPG, discovery/TMDB, ratings refresh, model/prediction, production mutation endpoints, feature-flag changes, scheduled jobs, R2/D1 import, cutover or lease recovery without separate owner authorization. Access-protected GET endpoints are not always side-effect-free. Keep secrets, actual production records and raw prompts out of public code and PRs.
 
-Never run EPG sync, prediction, scheduled jobs, or mutation endpoints as part of CI or deployment verification. Emergency fixes follow the same Git-first rule: commit the fix first, let CI validate it, and deploy that commit.
-
-See [docs/deployment.md](docs/runbooks/deployment.md) for deployment and rollback.
+For operations use the [deployment and rollback runbook](docs/runbooks/deployment.md), [recovery procedures](docs/runbooks/recovery/README.md), [MCP contract](docs/reference/api/mcp.md) and [architecture diagrams](docs/architecture/README.md). The full process and review rules live in [agent workflow](docs/process/agent-workflow.md), not in this short contributor entrypoint.

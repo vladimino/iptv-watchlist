@@ -1,8 +1,6 @@
 # Architecture overview and diagram plan
 
-This is a **navigation and planning index**, created by [AIR-120](https://trello.com/c/olwWKaXU) on 24 October 2026. **Four runtime/security pages from AIR-140 are merged.** Four catalog/discovery pages from AIR-141 are merged. Three predictions/data pages from AIR-142 are merged. The final two read-model/observability pages are drafts awaiting owner review in AIR-143. Drafts are not production authorization. Each page requires its own scoped task, source verification and review.
-
-For decisions read the [ADR register](../adr/README.md); for maintained implementation contracts see [reference](../reference/README.md); for operations see [runbooks](../runbooks/README.md); for bounded historical measurements see [evidence](../evidence/README.md).
+This is the maintained architecture navigation. All thirteen pages have been implemented and merged following owner visual review. Diagrams describe confirmed current behavior and explicitly label future migration boundaries; they do not authorize production operations.\n\nFor decisions read the [ADR register](../adr/README.md); for maintained implementation contracts see [reference](../reference/README.md); for operations see [runbooks](../runbooks/README.md); for bounded historical measurements see [evidence](../evidence/README.md).
 
 ## Boundary and reading rules
 
@@ -11,7 +9,7 @@ For decisions read the [ADR register](../adr/README.md); for maintained implemen
 - **Operational independence:** GitHub deployment, external ChatGPT Scheduled Tasks, MCP invocation, and R2 writes are separate actions. No diagram grants approval for live operations.
 - **Plans versus facts:** proposed diagrams must show observed/current paths distinctly from future migration paths, citing supporting reference/ADR documents. No guessed alternatives or invented topology.
 
-## Architecture pages — draft and planned
+## Architecture pages
 
 | Page and review status | Goal | Mermaid type | Starting evidence | Current vs future boundary |
 | --- | --- | --- | --- | --- |
@@ -25,12 +23,12 @@ For decisions read the [ADR register](../adr/README.md); for maintained implemen
 | [`film-person-lifecycle.md`](film-person-lifecycle.md) — **merged (AIR-141)** | Identity, metadata, localization, fingerprint and prediction dimensions | `stateDiagram-v2` | [Film/Person](../reference/domain/film-person.md), [Identity ADR](../adr/0009-canonical-film-person-identity.md) | domain contract and R2 projections; persistent canonical cutover not claimed |
 | [`prediction-pipeline.md`](prediction-pipeline.md) — **merged (AIR-142)** | Profile publication, queued next/submit, reuse, errors and completion | `sequenceDiagram` | [Runner contract](../reference/api/prediction-runner.md), [Queue ADR](../adr/0015-queued-prediction-recovery.md) | existing queue; external model caller remains outside Worker |
 | [`persistence-and-migration.md`](persistence-and-migration.md) — **merged (AIR-142)** | R2 authority, D1 schema, offline import, staged gates and receipts | `flowchart` | [D1 reference](../reference/data/d1-schema.md), [Migration ADR](../adr/0017-staged-d1-migration.md) | R2 current; D1 future target until separate cutover |
-| [`ui-and-read-models.md`](ui-and-read-models.md) — **draft, owner review pending** | Programme/watchlist displays, view index, prediction and ratings projections | `flowchart` | [Film/Person](../reference/domain/film-person.md), [Prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md) | existing projections; do not assume read-model migration |
+| [`ui-and-read-models.md`](ui-and-read-models.md) — **merged (AIR-143)** | Programme/watchlist displays, view index, prediction and ratings projections | `flowchart` | [Film/Person](../reference/domain/film-person.md), [Prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md) | existing projections; do not assume read-model migration |
 | [`scheduling-and-orchestration.md`](scheduling-and-orchestration.md) — **merged (AIR-142)** | External Scheduled Tasks, MCP calls, explicit chunk continuation and leases | `sequenceDiagram` | [Runner](../reference/api/prediction-runner.md), [Scheduling ADR](../adr/0005-external-chatgpt-tasks.md) | external automation; Worker cron is not scheduler |
-| [`observability-and-failures.md`](observability-and-failures.md) — **draft, owner review pending** | Runtime diagnostic states, caller reports, retries, fault boundaries | `flowchart` | [Run diagnostics](../reference/api/run-diagnostics.md), [Provenance ADR](../adr/0016-run-diagnostic-provenance.md) | server evidence versus caller delivery remains distinct |
+| [`observability-and-failures.md`](observability-and-failures.md) — **merged (AIR-143)** | Runtime diagnostic states, caller reports, retries, fault boundaries | `flowchart` | [Run diagnostics](../reference/api/run-diagnostics.md), [Provenance ADR](../adr/0016-run-diagnostic-provenance.md) | server evidence versus caller delivery remains distinct |
 
 ## Authoring checklist for future tasks
 
 Each page should identify the authoritative code/ref at review time; label deployed versus planned transitions; explain data ownership, trust boundaries, retry/error paths and rollback implications where relevant; and link the source ADR and maintained reference. When Mermaid is added, check rendering in GitHub and confirm arrows do not imply a non-existent D1 writer, internal credential-forwarding hop or autonomous discovery recursion.
 
-Creating these pages, validating rendered diagrams, and updating the eventual root README belong to later approved tasks. [AIR-119](https://trello.com/c/Mvi1pXYL) refreshes agent instructions after this index exists; [AIR-121](https://trello.com/c/eId8ykTr) refreshes the root README.
+The diagrams were delivered across AIR-140–143. Future changes to the depicted architecture must revise the relevant pages along with implementation and ADRs. [Contributor and agent instructions](../../AGENTS.md) provide the required review and safety rules; the root README is a separate navigation entrypoint.
