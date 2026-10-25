@@ -39,7 +39,7 @@ assert.equal(created.decision.status,'verified');
 assert.equal(created.decision.identitySource,'known_epg_alias');
 assert.equal(created.decision.tmdbId,'1');
 assert.equal(created.film.titleStatus,'reviewed');
-const doc=fs.readFileSync('docs/air-100-rollout.md','utf8');
+const doc=fs.readFileSync('docs/evidence/scored-resolver/air-100-rollout.md','utf8');
 assert.match(doc,/not a cutover/);
 assert.match(doc,/CANDIDATE_DISCOVERY` stays unset/);
 assert.match(doc,/known_epg_alias/);

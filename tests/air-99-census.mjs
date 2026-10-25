@@ -31,7 +31,7 @@ assert.equal(new Set(report.sample.map(row=>row.key)).size,report.sample.length)
 const again=census(items,decisions,films,now);
 assert.equal(JSON.stringify(again.sample.map(row=>row.key)),JSON.stringify(report.sample.map(row=>row.key)));
 assert.equal(report.sample.find(row=>row.key==='дешёвый 0|2001').catalog.count,1);
-const doc=fs.readFileSync('docs/air-99-verdict.md','utf8');
+const doc=fs.readFileSync('docs/evidence/scored-resolver/air-99-verdict.md','utf8');
 assert.match(doc,/Remaining gaps/);
 assert.match(doc,/49715/);
 assert.match(doc,/15036/);

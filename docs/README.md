@@ -1,100 +1,34 @@
 # IPTV Watchlist documentation
 
-**Documentation reorganization baseline:** 24 October 2026. [AIR-109](https://trello.com/c/whae9vKn) inventoried the original files; [AIR-111](https://trello.com/c/WXVqNJ25)–[AIR-115](https://trello.com/c/TRp1oXpA) organized references, runbooks and evidence. [AIR-116](https://trello.com/c/6MHbRFZR)–[AIR-118](https://trello.com/c/5qf3Zn3p) reconstructed the ADR register; [AIR-120](https://trello.com/c/olwWKaXU) adds the architecture index, not actual diagrams. Use the canonical links below rather than link-only compatibility stubs.
+The documentation is organized by **purpose**, not by the former flat file layout. Start with the maintained page for the task you are working on. Old link-only redirect stubs have been removed; original historical reports remain in evidence or archive.
 
-## Entrypoints and sources of truth
+## Find the right document
 
-- [Agent guide](../AGENTS.md): essential repository/safety instructions. [Agent workflow](process/agent-workflow.md) and [Trello conventions](process/trello-card-conventions.md): the maintained collaboration policies (relocated by AIR-111).
-- [Deployment](runbooks/deployment.md), [Recovery](runbooks/recovery/README.md), [MCP protocol](reference/api/mcp.md), [MCP runbook](runbooks/mcp-connectivity.md), [Local setup](runbooks/local-setup.md): operational reference. [AIR-110](https://trello.com/c/HIMB8pfv) reconciled its dated schedule/scored rollout claims with completed AIR-62/AIR-68; still verify live task state, runtime flags and permissions before acting.
-- [Film/Person](reference/domain/film-person.md), [Admin read contract](reference/domain/admin-read-contract.md), [Scored resolution](reference/domain/scored-resolution.md), [Prediction runner](reference/api/prediction-runner.md), [D1 schema](reference/data/d1-schema.md): technical contracts, some mixed with historical notes.
-- [Evidence registry](evidence/README.md): captured scope, original verdict, downstream decision and historical authority.
-- [Architecture index](architecture/README.md): planned diagrams and navigation only. [Architecture decisions](adr/README.md) and [ADR template](adr/template.md): why substantial design choices were accepted, not a record of temporary task status.
-- The canonical [Enrichment API](reference/api/enrichment.md) now lives under `docs/`; the root `ENRICHMENT_API.md` remains a link-only compatibility stub. Root [CONTRIBUTING.md](../CONTRIBUTING.md) and [README.md](../README.md) remain in the scope of later AIR-119/121 refresh.
+| Section | What to read |
+| --- | --- |
+| [Architecture](architecture/README.md) | Thirteen implemented Mermaid diagrams covering system context, Worker, MCP, EPG, discovery, Film/Person, predictions, data, UI and failures |
+| [Architecture decisions](adr/README.md) | Accepted ADRs, constraints and historical approval evidence |
+| [Reference](reference/README.md) | Maintained API, integration, domain and data contracts |
+| [Runbooks](runbooks/README.md) | Approved operations, deployment, local development and [recovery](runbooks/recovery/README.md) |
+| [Process](process/README.md) | Delivery workflow, Trello card conventions and review gates |
+| [Evidence](evidence/README.md) | Dated investigations, parity measurements and original rollout outcomes |
+| [Archive](archive/README.md) | Superseded procedures and legacy Sites/R2 material; **not current instructions** |
 
-**Authoritative information:** current Trello cards/linked checklists give delivery status; GitHub main gives versioned source; authorized production reads establish current runtime settings/data; current reference defines the contract; runbooks define safe procedures; ADRs explain adopted choices; evidence proves only the specific dated sample. Historic reports and past handoffs are not proof of live flags/schedules.
+## Common starting points
 
-**GitHub directory landing pages:** every navigable documentation directory must use a `README.md` (rather than `index.md`) so GitHub automatically renders its contents when the folder is opened. This applies to [`adr/`](adr/README.md), [`process/`](process/README.md), [`runbooks/`](runbooks/README.md), [`archive/`](archive/README.md) and [`evidence/`](evidence/README.md) plus the planned `architecture/README.md` in [AIR-120](https://trello.com/c/olwWKaXU). Do not link to pages that have not been created.
+- **New contributor:** [root README](../README.md), [AGENTS.md](../AGENTS.md), [CONTRIBUTING.md](../CONTRIBUTING.md) and [agent workflow](process/agent-workflow.md).
+- **Runtime / deployment:** [system context](architecture/system-context.md), [deployment and rollback diagram](architecture/deployment-and-rollback.md), [deployment runbook](runbooks/deployment.md).
+- **EPG / discovery:** [EPG publication](architecture/epg-and-availability.md), [discovery and resolution](architecture/discovery-and-resolution.md), [scored-resolution contract](reference/domain/scored-resolution.md), [candidate discovery](reference/domain/candidate-discovery.md).
+- **Film/Person:** [lifecycle diagram](architecture/film-person-lifecycle.md) and [domain contract](reference/domain/film-person.md).
+- **Predictions / profiles:** [prediction pipeline](architecture/prediction-pipeline.md), [runner API](reference/api/prediction-runner.md), [enrichment API](reference/api/enrichment.md), [taste-profile publication](runbooks/taste-profile-publication.md).
+- **Storage / migrations:** [persistence architecture](architecture/persistence-and-migration.md), [D1 contract](reference/data/d1-schema.md), [migration ADR](adr/0017-staged-d1-migration.md).
+- **Security / MCP:** [authentication diagram](architecture/authentication-and-mcp.md), [MCP contract](reference/api/mcp.md), [connectivity runbook](runbooks/mcp-connectivity.md).
+- **Failures / observability:** [observability diagram](architecture/observability-and-failures.md), [run diagnostics](reference/api/run-diagnostics.md), [prediction diagnostics](reference/api/prediction-diagnostics.md).
 
-## Documentation structure
+## How to interpret the documentation
 
-The following directories exist and have GitHub-rendered landing pages. The status describes the **documentation role**, not the Trello task that first created the directory.
+GitHub `main` is the canonical **code** source. The currently deployed Cloudflare Worker `iptv` uses R2 bucket `iptv` as authoritative production storage. D1 schema and offline repositories do **not** imply production D1 cutover; the historical ChatGPT Site is a reserve, not a concurrent writer. External ChatGPT Scheduled Tasks orchestrate EPG/predictions, rather than Worker Cron. A successful GitHub deployment does not execute these jobs or establish production acceptance.
 
-| Folder | Purpose | Status |
-| --- | --- | --- |
-| [`architecture/`](architecture/README.md) | System architecture navigation and plans for future diagrams | Index available; 13 pages planned |
-| [`adr/`](adr/README.md) | Accepted architectural choices and their evidence | Maintained decision register |
-| [`reference/`](reference/README.md) | Current API, domain, data and integration contracts | Maintained reference |
-| [`runbooks/`](runbooks/README.md), [`recovery/`](runbooks/recovery/README.md) | Approved operating and recovery procedures | Maintained runbooks |
-| [`process/`](process/README.md) | Engineering collaboration and Trello conventions | Maintained process |
-| [`evidence/`](evidence/README.md) | Dated reports, bounded measurements and preserved JSON samples | Historical evidence registry |
-| [`archive/`](archive/README.md) | Superseded or legacy procedures retained for traceability | Historical archive |
+**Use the right evidence:** Trello and live GitHub establish delivery state; the maintained reference describes contracts; ADRs record durable choices; runbooks describe allowed operations; dated evidence proves only the captured sample. Before relying on a runtime claim, check its current state through an **authorized safe diagnostic**. Some GET endpoints have write side effects. Do not launch production sync, discovery/TMDB, model calls, retries, lease resets, flag changes, Tasks, Access changes or storage operations without separate owner approval.
 
-The [architecture plan](architecture/README.md) is an index **only**. Its proposed child pages and Mermaid diagrams do not exist yet; do not link to them as implemented documentation.
-
-## Document lifecycle and evidence governance
-
-Do **not** confuse these independent axes:
-
-- **Document role:** active reference / operational runbook / ADR / dated evidence / obsolete procedure. A mixed file must be split: current contract in reference, dated observations in evidence, obsolete procedures in archive.
-- **Evidence verdict:** GO, NO-GO, INSUFFICIENT/INCONCLUSIVE, or MEASUREMENT ONLY. Its meaning is limited to the tested candidate and capture time. Historical NO-GO must not masquerade as a current production prohibition; historical GO does not grant fresh owner approval.
-- **Evidence lifecycle:** current-for-its-scope, superseded, or archived. This is independent of the verdict.
-
-[AIR-114](https://trello.com/c/ia9tnXbc) created the canonical [evidence registry](evidence/README.md); `evidence/index.md` is a compatibility link. Each record must state **capturedAt (UTC), environment/generation/code SHA or limitations, measured scope, source, verdict, lifecycle, operational authority (historical or maintained), Used by (direct ADR/PR/Trello decision URLs, or explicitly not yet consumed), Superseded by (if any), and unresolved caveats**. Do not retroactively rewrite measurements or claim an uncertain sample was accepted. A subsequent result is a new record; the index documents how it changed the decision.
-
-Major design choices are documented as [ADRs](adr/README.md). Accepted ADR text is stable; reverse a decision by writing a successor and recording the link in the index. A PR merge is not the same as activation, runtime parity, or user authorization.
-
-## Original inventory and current disposition
-
-| Document (canonical link where moved) | Type | Disposition / next owner |
-| --- | --- | --- |
-| [`adr/0001-d1-schema-v1.md`](adr/0001-d1-schema-v1.md) | Decision | `adr/` |
-| [`process/agent-workflow.md`](process/agent-workflow.md) | Process | **Moved (AIR-111)** |
-| [`process/trello-card-conventions.md`](process/trello-card-conventions.md) | Process | **Moved (AIR-111)** |
-| [`runbooks/local-setup.md`](runbooks/local-setup.md) | Runbook | **Moved (AIR-111)** |
-| [`reference/integrations/letterboxd-ratings.md`](reference/integrations/letterboxd-ratings.md) | Maintained reference | **Moved (AIR-113)** |
-| [`reference/api/run-diagnostics.md`](reference/api/run-diagnostics.md) | Maintained reference | **Moved (AIR-113)** |
-| [`reference/api/prediction-diagnostics.md`](reference/api/prediction-diagnostics.md) | Maintained reference | **Moved (AIR-113)** |
-| [`reference/domain/candidate-discovery.md`](reference/domain/candidate-discovery.md) | Maintained reference | **Moved (AIR-113)** |
-| [`reference/data/d1-schema.md`](reference/data/d1-schema.md) | Maintained reference | **Moved (AIR-113)** |
-| [`reference/domain/scored-resolution.md`](reference/domain/scored-resolution.md) | Maintained reference | **Moved (AIR-113)** |
-| [`evidence/taxonomy/air-47-taxonomy-audit.md`](evidence/taxonomy/air-47-taxonomy-audit.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`reference/domain/film-person.md`](reference/domain/film-person.md) | Maintained domain contract | **Split (AIR-112)**; [historical audit](evidence/film-person/lifecycle-audit-and-rollout.md) retained, legacy path is a compatibility link |
-| [`reference/api/mcp.md`](reference/api/mcp.md) | API/operations split | **Split (AIR-113)**; [MCP runbook](runbooks/mcp-connectivity.md), [historical checklist](archive/superseded/mcp-air-62-checklist.md) |
-| [`reference/api/prediction-runner.md`](reference/api/prediction-runner.md) | API/operations split | **Split (AIR-113)**; [MCP runbook](runbooks/mcp-connectivity.md), [historical checklist](archive/superseded/mcp-air-62-checklist.md) |
-| [`evidence/scored-resolver/air-100-rollout.md`](evidence/scored-resolver/air-100-rollout.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`runbooks/deployment.md`](runbooks/deployment.md) | Operational runbook | **Moved and split (AIR-111)**; active [`recovery/`](runbooks/recovery/README.md) and archived [`Sites release`](archive/legacy-sites/site-release.md) |
-| [`evidence/scored-resolver/air-43-shadow-rollout.md`](evidence/scored-resolver/air-43-shadow-rollout.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-43-verification-audit.md`](evidence/scored-resolver/air-43-verification-audit.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-67-parity.md`](evidence/scored-resolver/air-67-parity.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-81-parity.md`](evidence/scored-resolver/air-81-parity.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-84-shadow.md`](evidence/scored-resolver/air-84-shadow.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-86-census.md`](evidence/scored-resolver/air-86-census.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-86-replay-plan.md`](evidence/scored-resolver/air-86-replay-plan.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-86-replay.md`](evidence/scored-resolver/air-86-replay.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-97-verdict.md`](evidence/scored-resolver/air-97-verdict.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/scored-resolver/air-99-verdict.md`](evidence/scored-resolver/air-99-verdict.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/prediction/air-82-prediction-rca.md`](evidence/prediction/air-82-prediction-rca.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/d1-migration/air-73-offline-run.md`](evidence/d1-migration/air-73-offline-run.md) | Historical evidence | **Filed (AIR-114)**; [registry](evidence/README.md), original path now a compatibility link |
-| [`evidence/d1-migration/air-73-offline-run.json`](evidence/d1-migration/air-73-offline-run.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-73 report; bytes unchanged |
-| [`evidence/scored-resolver/air-86-replay-manifest.json`](evidence/scored-resolver/air-86-replay-manifest.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-86 plan; bytes unchanged |
-| [`evidence/scored-resolver/air-86-replay-results.json`](evidence/scored-resolver/air-86-replay-results.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-86 replay; bytes unchanged |
-| [`evidence/scored-resolver/air-99-detail.json`](evidence/scored-resolver/air-99-detail.json) | Machine-readable evidence | **Moved (AIR-115)** beside the AIR-99 verdict; bytes unchanged |
-| [`archive/legacy-sites/migration-export.md`](archive/legacy-sites/migration-export.md) | Archived procedure | **Moved (AIR-111), not operational** |
-| [`archive/legacy-r2/r2-import.md`](archive/legacy-r2/r2-import.md) | Archived procedure | **Moved (AIR-111), not operational** |
-| [`archive/legacy-sites/prediction-scheduled-prompt.md`](archive/legacy-sites/prediction-scheduled-prompt.md) | Archived procedure | **Moved (AIR-111), not operational** |
-
-**Machine-readable evidence:** [AIR-115](https://trello.com/c/TRp1oXpA) moved the four JSON samples into `evidence/`. `scripts/air-97-rescore.mjs` and `tests/air-86-replay.mjs` read those paths. `scripts/air-86-replay.mjs` and `scripts/air-99-detail.mjs` require an explicit output path and refuse to overwrite the four historical files. Ordinary tests do not call TMDB or rewrite the samples.
-
-## Modification policy
-
-1. Keep the source and metadata of historical experiments; do not update past NO-GO/GO statements to describe a newer release. Corrections to *active* guides go in AIR-110 or their owning card.
-2. Before relocating docs, update all relative links and code/script references, identify the new canonical path and avoid duplicate active contracts; run appropriate tests. No fake links to future docs.
-3. GitHub documentation is English, Trello and Cursor instructions are Russian. Never publish production secrets or raw private data.
-4. Documentation-only direct changes to main require owner approval and still require post-commit diff verification plus **both** CI/CD jobs. Executable script/test changes are handled in an independently reviewed PR. No documentation work grants permission for production R2/D1, sync, flags, retries or Scheduled Tasks.
-5. **Documentation workstream exception:** report a finished commit and terminal CI/CD, close the Trello card, and **wait for owner signal** before taking the next card.
-
-## Approved delivery sequence (order is not a fabricated dependency)
-
-[AIR-109](https://trello.com/c/whae9vKn) → [AIR-110](https://trello.com/c/HIMB8pfv) → [AIR-111](https://trello.com/c/WXVqNJ25) → [AIR-112](https://trello.com/c/uzsaLuye) → [AIR-113](https://trello.com/c/svVrqavq) → [AIR-114](https://trello.com/c/ia9tnXbc) → [AIR-115](https://trello.com/c/TRp1oXpA) → [AIR-116](https://trello.com/c/6MHbRFZR) → [AIR-117](https://trello.com/c/ORglHnul) → [AIR-118](https://trello.com/c/5qf3Zn3p) → [AIR-119](https://trello.com/c/Mvi1pXYL) → [AIR-120](https://trello.com/c/olwWKaXU).
-
-**Actual blockers:** native Trello prerequisite checklists, not every predecessor in this priority sequence.
+New architecture changes should update the relevant [diagrams](architecture/README.md), [ADR register](adr/README.md) when a substantial decision changes, and current [reference](reference/README.md) / [runbooks](runbooks/README.md) in the same reviewed delivery. Mermaid diagrams need actual rendered visual QA when an owner-review gate applies.

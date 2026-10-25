@@ -1,6 +1,6 @@
 # Prediction-runner step diagnostics — contract
 
-[AIR-88](https://trello.com/c/xWA4evuk) records what the Worker attempted, what response it formed, and what the caller later reports. [AIR-87](https://trello.com/c/aeimvOxq) stays closed. Its historical `api_error` (`b9b8e90e-0f64-4217-9de2-0c42ea0da10a`, `firstNextAt` set, `firstSubmitAt` null, `added` 0) is not rewritten or explained by this telemetry. [AIR-82](../../air-82-prediction-rca.md) still owns the `queue_empty` / outstanding-pending mismatch; this change does not alter queue membership, retry delay, or completion codes.
+[AIR-88](https://trello.com/c/xWA4evuk) records what the Worker attempted, what response it formed, and what the caller later reports. [AIR-87](https://trello.com/c/aeimvOxq) stays closed. Its historical `api_error` (`b9b8e90e-0f64-4217-9de2-0c42ea0da10a`, `firstNextAt` set, `firstSubmitAt` null, `added` 0) is not rewritten or explained by this telemetry. [AIR-82](../../evidence/prediction/air-82-prediction-rca.md) still owns the `queue_empty` / outstanding-pending mismatch; this change does not alter queue membership, retry delay, or completion codes.
 
 ## What a step means
 

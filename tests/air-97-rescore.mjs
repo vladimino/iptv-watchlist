@@ -26,7 +26,7 @@ assert.equal(report.missingDetail.every(row=>row.verification==='not_evaluated')
 assert.equal(report.rows.find(row=>row.key==='блейд 1|1998').after.live.outcome,'refused');
 assert.equal(report.rows.filter(row=>row.verification==='evaluated'&&row.after.recognition.outcome==='detail_verified').length,1);
 assert.equal(report.rows.filter(row=>row.after.status==='ambiguous').length,0);
-const doc=fs.readFileSync('docs/air-97-verdict.md','utf8');
+const doc=fs.readFileSync('docs/evidence/scored-resolver/air-97-verdict.md','utf8');
 assert.match(doc,/\*\*NO-GO\.\*\*/);
 assert.match(doc,/short_title_adjacent_year/);
 for(const id of ['36647','161','395','163','603','801970','1228477'])assert.match(doc,new RegExp(id));

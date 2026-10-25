@@ -85,4 +85,4 @@ Mood presentation uses 28 stable canonical IDs. The original fingerprint/predict
 
 URL mood params contain canonical IDs (e.g. mood=dark&mood=military). Exact legacy Russian vocabulary labels migrate to IDs; unknown old values are ignored. OR within moods and AND across filters are preserved.
 
-[AIR-47](../../air-47-taxonomy-audit.md) audits this vocabulary and does not change it. Mapping v1 stays in force until [AIR-108](https://trello.com/c/QIke4H2N) implements an accepted successor.
+[AIR-47](../../evidence/taxonomy/air-47-taxonomy-audit.md) audits this vocabulary and does not change it. Mapping v1 stays in force until [AIR-108](https://trello.com/c/QIke4H2N) implements an accepted successor.

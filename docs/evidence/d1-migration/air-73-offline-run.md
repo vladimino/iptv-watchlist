@@ -8,7 +8,7 @@ The machine-readable counts are [air-73-offline-run.json](air-73-offline-run.jso
 
 ## Archive
 
-The directory is the trial export described in [migration-export.md](../../migration-export.md). `node scripts/migration-export.mjs --output /absolute/private/snapshot-directory --verify` recomputed every object hash and the aggregate checksum locally. It does not contact the legacy Site when `--verify` is present.
+The directory is the trial export described in [migration-export.md](../../archive/legacy-sites/migration-export.md). `node scripts/migration-export.mjs --output /absolute/private/snapshot-directory --verify` recomputed every object hash and the aggregate checksum locally. It does not contact the legacy Site when `--verify` is present.
 
 | Field | Value |
 | --- | --- |
