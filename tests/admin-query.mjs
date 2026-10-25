@@ -8,7 +8,10 @@ const sha256 = new Function(`${source.replaceAll('export function', 'function')}
 for (const sample of ['', 'abc', 'ёжик', 'a'.repeat(80)]) {
   assert.equal(sha256(sample), createHash('sha256').update(sample).digest('hex'), sample);
 }
-assert.equal(fs.readFileSync('build.mjs', 'utf8').includes('admin-query'), false);
+const buildSource = fs.readFileSync('build.mjs', 'utf8');
+const workerBundle = buildSource.slice(buildSource.indexOf("fs.writeFileSync('dist/server/index.js'"));
+assert.equal(workerBundle.includes('admin-query'), false);
+assert.match(buildSource, /src\/domain\/admin-query\.js/);
 assert.equal(fs.readFileSync('public/app.js', 'utf8').includes('admin-query'), false);
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:fs|film-person-reader|R2|D1/);
 
