@@ -4,6 +4,17 @@
 
 [Prediction-runner API contract](../reference/api/prediction-runner.md). Expected task behavior and hourly discovery catch-up are defined in [Scheduled Tasks](../reference/scheduled-tasks.md); verify actual settings in the live registry.
 
+## Hourly discovery preflight and orphaned checkpoints
+
+The hourly Task's discovery catch-up runs **before** prediction processing, but a blocked discovery continuation must not stop safe prediction work. Read `probe_read`, `epg_status` and `epg_pipeline_status`; verify the currently published `programmeRunId` and the pinned continuation generation. Only a server-authorized existing-generation continuation may be advanced by a separate, owner-authorized writer execution. A healthy paused checkpoint may allow ordinary sequential `epg_sync_step` calls; each call runs no more than one discovery chunk.
+
+For `continuation.stage=running`, do **not** treat elapsed wall time, a stale event, or the `running` value alone as permission to recover. Use the Worker's read-only `continuationHealth`:
+- **`live` / live lease:** another writer may still own the work. Do not call `epg_sync_step`.
+- **`orphaned` with `lease=expired|none`:** the Scheduled Task may issue one ordinary step **only** after independently confirming an exact match with the published generation in both read-only status responses, `generationConflict=false`, positive integer `remainingChunks`, `resumeBudget` within that budget, and no other active lease, hard wait or future retry timestamp. The Worker, not the caller, settles a hop-marked completed chunk or safely resumes an unmarked/incomplete chunk. A missing hop marker does not prove that the older chunk completed.
+- **Missing/unknown health, wrong generation, `settled`, `busy`, or conflicting lease:** fail closed; never reset the lease, overwrite the checkpoint, force a retry, or launch a new EPG run from the hourly task.
+
+After the step, inspect `discovery.nextAction`: `continue` permits only the next verified step on the same published generation; `wait` honors backoff and `nextCatchUpAt`; `stop` ends discovery. An MCP error is not proof the underlying write was rolled back: re-read status before any further owner-authorized action. A published programme and a completed discovery continuation are separate milestones. For deeper checkpoint interpretation see [MCP connectivity and recovery](mcp-connectivity.md); for the caller's expected rules see the [Scheduled Task contract](../reference/scheduled-tasks.md).
+
 ## ChatGPT Scheduled Tasks: timing and troubleshooting
 
 **The hourly schedule is a target, not an exact Worker execution time.** The ChatGPT Scheduled Task is external to Cloudflare Worker `iptv` (there is no hourly Cloudflare Cron driving predictions). A nominal `:00` trigger can begin around the hour rather than precisely at `:00`; delays can vary and there is **no documented guaranteed ±10-minute window**. The footer's `Следующий запуск: около HH:MM` is calculated from `nextScheduledRun` as an **estimate**, not a countdown, SLA, or evidence that a new run has started. Times shown in the app use Europe/Madrid.

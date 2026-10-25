@@ -6,7 +6,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 
 | Area | Reports and decisions |
 | --- | --- |
-| [Scheduled Tasks](scheduled-tasks-audit-2026-10-25.md) | Two-task live registry snapshot, 25 October 2026; documentation drift and timezone metadata uncertainty, not evidence of actual run completion |
+| [Scheduled Tasks](scheduled-tasks-audit-2026-10-25.md) | Two-task live registry snapshot, 25 October 2026; [hourly recovery prompt change](scheduled-tasks-prompt-recovery-2026-10-25.md), independently read from the live task registry; neither is evidence of a successful discovery run |
 | [Scored resolver](scored-resolver/README.md) | Eleven dated shadow/parity/replay/rollout reports, separate verdicts; [AIR-68](https://trello.com/c/qbLDc6Ql) later authorized scored-only on |
 | [Prediction](prediction/README.md) | AIR-82 partial queue RCA; exact original per-film cause unknown |
 | [Taxonomy](taxonomy/README.md) | AIR-47 accepted future v2 specification, separate from AIR-108 implementation |
