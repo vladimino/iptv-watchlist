@@ -41,6 +41,10 @@ Labels can be combined: D1 Film repository = Каталог + Платформа
 10. No unsanctioned flag toggles, manual sync/model/TMDB calls, live migration, destructive cleanup or source-of-truth change as a side effect of drafting, testing, or closing documentation cards.
 11. **Normal PR merge is part of the approved card delivery.** When an independently reviewed PR satisfies the scope, prerequisites, CI and resolved review findings, ChatGPT merges without asking for a second per-PR owner permission. If the card has a named pre-merge owner gate (for example rendered Mermaid QA) or newly surfaced scope/security/architecture risk, that gate is still mandatory. Post-deploy owner visual acceptance for UI and separate authorizations for production writers, flags, Tasks, migrations and cutovers are unaffected. See [the delivery pipeline](agent-workflow.md#delivery-pipeline-for-already-approved-work).
 
+## Self-contained implementation handoff
+
+Before moving an approved card to `В процессе`, the coordinator must ensure its current description or a clearly identified handoff comment contains **the full executable scope**: inputs/contract, exclusions, acceptance, test and visual QA expectations, documentation impact, production safety, and PR evidence. Remove stale prerequisite or status claims and reconcile native checklists first. The owner should be able to tell a coding agent simply **«Приступай к AIR-N»**; no separate ChatGPT prompt may be required to implement the agreed outcome. The agent reads the entire live card, latest comments, current `main`, and AGENTS/workflow instructions. Review-fix instructions likewise belong in a linked card comment and the GitHub review, rather than only in chat. See [delivery workflow](agent-workflow.md#delivery-pipeline-for-already-approved-work).
+
 ## Example: independent preparation, then one cross-stream gate
 
 - **AIR-43 → AIR-66 → AIR-67 → AIR-68 → AIR-69**: scored EPG resolver implementation, real shadow, parity go/no-go, on cutover, stable normal EPG generations (R2 remains authoritative).
