@@ -9,5 +9,6 @@ These pages describe the **currently maintained** operational boundaries; none i
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
 - [Taste-profile publication procedure (owner approval required)](taste-profile-publication.md)
 - [Production R2 snapshot export, read-only (owner approval required)](r2-snapshot-export.md)
+- [Immutable prediction versions: activation and one-time materialization (owner approval required)](prediction-versions.md)
 
 Historical, non-authoritative Sites and R2 migration steps are in [archive](../archive/README.md). Contracts, ADRs and dated experiments have separate roles in the [documentation index](../README.md).

@@ -640,7 +640,10 @@ async function enrichmentSubmit(env,body){
    if(item.fingerprint&&!fingerprintCurrent(fingerprint)){const found=fingerprintIssues(item.fingerprint);if(found.length){failureStage='parse_error';validationStage='fingerprint_schema';reportedBy='worker';issues=found;throw new Error('Invalid fingerprint');}const value={...item.fingerprint,filmId:id,generatedAt:new Date().toISOString(),invalidatedAt:null};value.fingerprintHash=await contentHash({...item.fingerprint,filmId:id});await saveJSON(env,filmKey(id)+'fingerprint.json',value);fingerprint=value;await updateViewIndex(env,id,{fingerprintHash:value.fingerprintHash,fingerprint:fingerprintFacet(value)});}
    if(!fingerprintCurrent(fingerprint)){failureStage='parse_error';validationStage='fingerprint_missing';reportedBy='worker';issues=[{path:'fingerprint',code:'required'}];throw new Error('Current fingerprint required');}
    if(predictionCurrent(state.predictions?.current,profile,fingerprint)){await updateViewIndex(env,id,{prediction:state.predictions.current,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint)});run.results[id] ||= 'already_current';delete run.failures[id];results.push({filmId:id,status:'already_current'});}
-   else{const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}const at=new Date().toISOString(),prediction={...item.prediction,filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION},old=state.predictions?.current,history=[...(state.predictions?.history||[])];if(old)history.push({...old,replacedAt:at});await saveJSON(env,filmKey(id)+'predictions.json',{current:prediction,history});await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint)});delete run.failures[id];run.results[id]=old?'recalculated':'created';results.push({filmId:id,status:run.results[id]});}
+   else{const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}const at=new Date().toISOString(),generated={...item.prediction,filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION},old=state.predictions?.current,history=[...(state.predictions?.history||[])];
+    // The version object is written first (write-once, keyed by checksum); a crash before the bundle write leaves an unreferenced object and an unchanged bundle, never a pointer to a missing object.
+    const prediction=predictionVersionsEnabled(env)?{...generated,...(await writePredictionVersion(env,id,generated))}:generated;
+    if(old)history.push({...old,replacedAt:at});await saveJSON(env,filmKey(id)+'predictions.json',{current:prediction,history});await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint)});delete run.failures[id];run.results[id]=old?'recalculated':'created';results.push({filmId:id,status:run.results[id]});}
    if(['created','recalculated'].includes(run.results[id]))run.firstSubmitAt||=new Date().toISOString();run.formatFailureStreak=0;
   }catch(e){const at=new Date().toISOString(),retryable=failureStage==='parse_error',previous=await loadJSON(env,predictionQueueKey),attempts=(previous?.retries?.[id]?.attempts||0)+1,retryAt=Date.now()+Math.min(6*3600000,3600000*2**(attempts-1));
    const validation=validationStage?{stage:validationStage,reportedBy,issues}:null;
@@ -713,6 +716,19 @@ const RATINGS_LEASE_KEY=ENRICHMENT_KEY+'ratings/lease.json';
 const RATINGS_LEASE_MS=120000;
 const ratingsGenerationKey=id=>ENRICHMENT_KEY+'ratings/generations/'+encodeURIComponent(id)+'.json';
 const ratingsEnabled=env=>env.RATINGS_REFRESH==='on';
+// Immutable prediction versions are written only when the owner has enabled the flag; the bundle stays the runtime record either way.
+const predictionVersionsEnabled=env=>typeof env?.PREDICTION_VERSION_OBJECTS==='string'&&env.PREDICTION_VERSION_OBJECTS.trim()==='on';
+// Write-once: the key carries the checksum, so an existing object must hold the same bytes. Anything else is a storage conflict and the bundle is left unchanged.
+async function writePredictionVersion(env,filmId,prediction){
+ const text=predictionVersionText(prediction),sha256=await contentHash(predictionVersionBody(prediction)),key=predictionVersionKey(filmId,sha256);
+ const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ if(saved===null){
+  const existing=await env.BUCKET.get(key);
+  const stored=existing?await existing.text():null;
+  if(stored!==text)throw new Error('Prediction version object conflicts');
+ }
+ return predictionVersionPointer(filmId,sha256);
+}
 function ratingsStatusView(stored,enabled){
  const empty={schemaVersion:1,state:'idle',lastSuccessAt:null,lastFailureAt:null,nextRetryAt:null,generationId:null,pages:null,watched:null,attempt:null,diary:{state:'unchecked',cause:null,error:null}};
  return {...(stored||empty),enabled:!!enabled};

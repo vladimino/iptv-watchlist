@@ -9,10 +9,12 @@ const FAMILIES=[
  ['discovery',key=>key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json'||key==='epg/discovered-films.json'],
  ['profile',key=>key==='enrichment/profile/current.json'||/^enrichment\/profile\/versions\/\d+\.json$/.test(key)],
  ['fingerprint',key=>/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(key)],
- ['prediction',key=>/^enrichment\/films\/[^/]+\/predictions\.json$/.test(key)],
+ ['prediction',key=>/^enrichment\/films\/[^/]+\/predictions\.json$/.test(key)||VERSION_OBJECT.test(key)],
  ['actual',key=>/^enrichment\/films\/[^/]+\/actual\.json$/.test(key)],
 ];
 const MANDATORY_FAMILIES=['prediction'];
+// Immutable prediction version objects: the key names the film and the checksum of the body. Whether one is referenced is known only with its bundle.
+const VERSION_OBJECT=/^enrichment\/films\/([^/]+)\/predictions\/versions\/([0-9a-f]{64})\.json$/;
 
 // Declared R2-only prefixes. Each family names the stage that must decide its disposition before the keys may be left behind.
 // A key outside these families and outside every mapped family is unknown and fails closed.
@@ -251,7 +253,7 @@ export function acceptanceClasses({inventory,coverage,counts={},ledger=[],applie
  const records=ledger.filter(item=>item.class==='C');
  return {
   A:{blocking:blockers.length>0||open>0||!(parity?.ok===true),blockers,open,mandatory:{prediction:{status:prediction.status,keys:prediction.keys.length,applied:appliedByFamily.prediction||0,unportable:predictionUnportable,portable:prediction.status==='present'&&predictionUnportable===0}}},
-  B:{keys:(coverage?.r2_only||[]).length,families:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0),decisionRequired:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0&&item.decisionRequired).map(item=>item.family)},
+  B:{keys:(coverage?.r2_only||[]).length,families:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0),decisionRequired:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0&&item.decisionRequired).map(item=>item.family),unreferencedVersions:(parity?.records||[]).filter(record=>record.disposition==='unreferenced').map(record=>record.key)},
   C:{count:records.length,acknowledgementRequired:records.length>0,reasons:Object.fromEntries([...new Set(records.map(item=>item.reason))].sort().map(reason=>[reason,records.filter(item=>item.reason===reason).length])),records},
  };
 }
@@ -280,7 +282,7 @@ export function parityClaim({coverage,parity,counts,ledger,inventory,classes,rec
  const incomplete=inventory?.complete!==true;
  const vacuous=!(parity?.denominator>0);
  const unprojected=(parity?.unprojected||[]).length>0;
- const openRecords=(parity?.records||[]).some(record=>record.disposition!=='mapped');
+ const openRecords=(parity?.records||[]).some(record=>record.disposition!=='mapped'&&record.disposition!=='unreferenced');
  const open=(counts?.pending||0)+(counts?.unportable||0)+(counts?.unresolved||0)+(counts?.conflicts||0)+(counts?.explained||0)+(counts?.partial||0)+(counts?.uncheckpointed||0);
  const blocked=classes?.A?.blocking===true;
  const unreconciled=(receipts?.stale||[]).length+(receipts?.foreign||[]).length>0;
@@ -295,15 +297,29 @@ export function fingerprintUnit(entry,body,identity){
  return unit({family:'fingerprint',kind:'fingerprint',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'fingerprint_payload',targetId:filmId,identity:provenanceOf(resolved),input:{filmId,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,fingerprintHash:body.fingerprintHash,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:entry.key,contentSha256:entry.sha256}});
 }
 
-export function predictionUnits(entry,body,identity){
+// links (optional) checks a version pointer against the snapshot: linked(record,storedId) is the shared rule for a well-formed pointer,
+// exists(key) and sha(key) come from the manifest. Without links only the shape of the pointer is checked.
+export function predictionUnits(entry,body,identity,links=null){
  const resolved=enrichmentIdentity(entry.key,identity);
  if(!resolved.filmId)return [unresolved(entry,'prediction_current',resolved.canonical||entry.key,resolved.reason,'prediction',resolved)];
- const filmId=resolved.filmId;
+ const filmId=resolved.filmId,storedId=enrichmentStoredId(entry.key);
  const units=[];
  const history=Array.isArray(body?.history)?body.history:[];
- history.forEach((item,index)=>units.push(versionUnit(entry,filmId,item,'prediction_history',filmId+'#'+index,resolved)));
- units.push(versionUnit(entry,filmId,body?.current,'prediction_current',filmId,resolved));
+ history.forEach((item,index)=>units.push(versionUnit(entry,filmId,item,'prediction_history',filmId+'#'+index,resolved,links,storedId)));
+ units.push(versionUnit(entry,filmId,body?.current,'prediction_current',filmId,resolved,links,storedId));
  return units;
+}
+// The reason a version pointer cannot be carried, or null when the pointer names an object the snapshot holds with the same checksum.
+export function versionPointerProblem(item,bundleKey,storedId,links){
+ if(!item?.r2Key||!item.contentSha256)return 'prediction_version_object_missing';
+ if(item.r2Key===bundleKey)return 'mutable_bundle_is_not_a_version_object';
+ const parsed=item.r2Key.match(VERSION_OBJECT);
+ let keyFilm=null;try{keyFilm=parsed?decodeURIComponent(parsed[1]):null;}catch{keyFilm=null;}
+ const wellFormed=links?.linked?links.linked(item,storedId):!!parsed&&parsed[2]===item.contentSha256&&(storedId==null||keyFilm===String(storedId));
+ if(!wellFormed)return 'prediction_version_pointer_malformed';
+ if(links?.exists&&!links.exists(item.r2Key))return 'prediction_version_object_absent';
+ if(links?.sha){const sha=links.sha(item.r2Key);if(sha!=null&&sha!==item.contentSha256)return 'prediction_version_checksum_mismatch';}
+ return null;
 }
 
 export function actualUnit(entry,body,identity){
@@ -398,10 +414,10 @@ export function decisionUnits(entry,body,programmeRunId,{candidates=[],identity}
  return {units,blockers};
 }
 
-function versionUnit(entry,filmId,item,table,targetId,resolved){
+function versionUnit(entry,filmId,item,table,targetId,resolved,links,storedId){
  if(!item||typeof item!=='object')return unportable(entry,table,targetId,'prediction_fields_missing','prediction');
- if(!item.r2Key||!item.contentSha256)return unportable(entry,table,targetId,'prediction_version_object_missing','prediction');
- if(item.r2Key===entry.key)return unportable(entry,table,targetId,'mutable_bundle_is_not_a_version_object','prediction');
+ const problem=versionPointerProblem(item,entry.key,storedId,links);
+ if(problem)return unportable(entry,table,targetId,problem,'prediction');
  const updatedAt=item.updatedAt||item.generatedAt||null;
  if(typeof item.tasteProfileVersion!=='number'||!item.tasteProfileHash||!item.fingerprintHash||typeof item.fingerprintSchemaVersion!=='number'||typeof item.predictionPromptVersion!=='number'||typeof item.predictedRating!=='number'||!updatedAt)return unportable(entry,table,targetId,'prediction_fields_missing','prediction');
  return unit({family:'prediction',kind:'prediction',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:table,targetId,identity:provenanceOf(resolved),input:{filmId,tasteProfileVersion:item.tasteProfileVersion,tasteProfileHash:item.tasteProfileHash,fingerprintHash:item.fingerprintHash,fingerprintSchemaVersion:item.fingerprintSchemaVersion,predictionPromptVersion:item.predictionPromptVersion,predictedRating:item.predictedRating,r2Key:item.r2Key,contentSha256:item.contentSha256,updatedAt}});
@@ -502,7 +518,7 @@ function provenanceSummary(units){
 }
 function isMappedKey(key){
  if(['watchlist.json','programme.json','metadata.json','titles.json','people.json','epg/published-generation.json','epg/discovery-latest.json','epg/discovery-resolution.json','epg/discovered-films.json','enrichment/profile/current.json'].includes(key))return true;
- return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key);
+ return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key)||VERSION_OBJECT.test(key);
 }
 function personIdFor(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
 function withCredits(unit){
@@ -563,7 +579,7 @@ async function personStored(repositories,unit){
 
 // The source projection is independent of the write list: every mapped object is projected to the rows it must produce,
 // through the same identity and evidence rules, and the read-back is compared against that projection.
-export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence}={}){
+export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence,links=null}={}){
  requireIdentity(identity);
  const expected={films:[],persons:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[],generations:[],profiles:[],records:[],unprojected:[],r2Only:[],blockers:[]};
  for(const film of films){
@@ -597,14 +613,25 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   if(key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json')continue;
   if(key==='enrichment/profile/current.json'){const version='enrichment/profile/versions/'+body?.version+'.json';note(key,keys.includes(version)?'mapped':'unportable',String(body?.version??key));continue;}
   if(/^enrichment\/profile\/versions\/\d+\.json$/.test(key)){if(typeof body?.version==='number'&&body.profileHash&&(body.createdAt||body.updatedAt)){expected.profiles.push({id:body.version,profileHash:body.profileHash,createdAt:body.createdAt||body.updatedAt,r2Key:key,contentSha256:shas[key]||null});note(key,'mapped',String(body.version));}else note(key,'unportable',String(body?.version??key));continue;}
+  if(VERSION_OBJECT.test(key)){
+   // A version object is mapped through the bundle that points at it. One nothing points at was written before a bundle write that never
+   // followed: no row is derived from it, the Worker never deletes it, and it is listed as unreferenced rather than hidden or counted as parity.
+   const parsed=key.match(VERSION_OBJECT);let stored=null;try{stored=decodeURIComponent(parsed[1]);}catch{stored=null;}
+   const bundleKey=stored==null?null:'enrichment/films/'+parsed[1]+'/predictions.json';
+   const bundle=bundleKey&&keys.includes(bundleKey)?bodies[bundleKey]:null;
+   const referenced=!!bundle&&[bundle.current,...(Array.isArray(bundle.history)?bundle.history:[])].some(item=>item&&item.r2Key===key);
+   if(referenced)note(key,'mapped',stored!=null?(identity.resolve(stored).filmId||identity.canonical(stored)||key):key,{via:'bundle_pointer'});
+   else note(key,'unreferenced',stored!=null?(identity.canonical(stored)||key):key,{reason:'version_unreferenced'});
+   continue;
+  }
   if(/^enrichment\/films\/[^/]+\/(?:fingerprint|actual|predictions)\.json$/.test(key)){
    const resolved=recordIdentity(key,enrichmentStoredId(key));
    if(!resolved)continue;
    const filmId=resolved.filmId,provenance={identity:provenanceOf(resolved)};
    if(key.endsWith('/fingerprint.json')){if(body?.fingerprintHash){expected.fingerprints.push({id:filmId,fingerprintHash:body.fingerprintHash,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:key,contentSha256:shas[key]||null});note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'fingerprint_fields_missing'});continue;}
    if(key.endsWith('/actual.json')){const recordedAt=body?.recordedAt||body?.updatedAt||null;if(typeof body?.rating==='number'&&body.source&&recordedAt){expected.ratings.push({id:filmId,rating:body.rating,source:body.source,recordedAt});note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'rating_fields_missing'});continue;}
-   const current=predictionExpectation(key,filmId,body);
-   if(current){expected.predictions.push(current);note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'prediction_version_object_missing'});
+   const projection=predictionExpectation(key,filmId,body,enrichmentStoredId(key),links);
+   if(projection.current){expected.predictions.push(projection.current);note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:projection.reason});
    continue;
   }
   note(key,'unportable',key);
@@ -801,22 +828,25 @@ function discoveryRecords(body,deriveEvidence){
  }
  return {portable:items.length>0,items,blockers};
 }
-function predictionExpectation(key,filmId,body){
- const current=versionedPrediction(body?.current,key);
- if(!filmId||!current)return null;
+function predictionExpectation(key,filmId,body,storedId,links){
+ if(!filmId)return {current:null,reason:'film_unresolved'};
+ const current=versionedPrediction(body?.current,key,storedId,links);
+ if(current.reason)return {current:null,reason:current.reason};
  const history=[];
  for(const item of Array.isArray(body.history)?body.history:[]){
-  const version=versionedPrediction(item,key);
-  if(!version)return null;
-  history.push({filmId,...version});
+  const version=versionedPrediction(item,key,storedId,links);
+  if(version.reason)return {current:null,reason:version.reason};
+  history.push({filmId,...version.value});
  }
- return {id:filmId,...current,history};
+ return {current:{id:filmId,...current.value,history},reason:null};
 }
-function versionedPrediction(item,bundleKey){
- if(!item?.r2Key||!item.contentSha256||item.r2Key===bundleKey)return null;
+function versionedPrediction(item,bundleKey,storedId,links){
+ if(!item||typeof item!=='object')return {value:null,reason:'prediction_fields_missing'};
+ const problem=versionPointerProblem(item,bundleKey,storedId,links);
+ if(problem)return {value:null,reason:problem};
  const updatedAt=item.updatedAt||item.generatedAt||null;
- if(typeof item.tasteProfileVersion!=='number'||!item.tasteProfileHash||!item.fingerprintHash||typeof item.fingerprintSchemaVersion!=='number'||typeof item.predictionPromptVersion!=='number'||typeof item.predictedRating!=='number'||!updatedAt)return null;
- return {predictedRating:item.predictedRating,updatedAt,r2Key:item.r2Key,contentSha256:item.contentSha256,fingerprintHash:item.fingerprintHash,tasteProfileVersion:item.tasteProfileVersion,tasteProfileHash:item.tasteProfileHash,fingerprintSchemaVersion:item.fingerprintSchemaVersion,predictionPromptVersion:item.predictionPromptVersion};
+ if(typeof item.tasteProfileVersion!=='number'||!item.tasteProfileHash||!item.fingerprintHash||typeof item.fingerprintSchemaVersion!=='number'||typeof item.predictionPromptVersion!=='number'||typeof item.predictedRating!=='number'||!updatedAt)return {value:null,reason:'prediction_fields_missing'};
+ return {value:{predictedRating:item.predictedRating,updatedAt,r2Key:item.r2Key,contentSha256:item.contentSha256,fingerprintHash:item.fingerprintHash,tasteProfileVersion:item.tasteProfileVersion,tasteProfileHash:item.tasteProfileHash,fingerprintSchemaVersion:item.fingerprintSchemaVersion,predictionPromptVersion:item.predictionPromptVersion},reason:null};
 }
 function sameHistory(stored,item,filmId){
  if(!stored)return false;

@@ -38,3 +38,5 @@ Do not regenerate fingerprints or predictions, modify actual ratings, or change 
 ## Follow-ups
 
 [AIR-118](https://trello.com/c/5qf3Zn3p); any materially different design or production cutover requires its own approval and documentation.
+
+Storage of each committed prediction as an immutable version object beside the mutable bundle follows [ADR-0019](0019-live-d1-backfill-boundaries.md) item 4 ([AIR-164](https://trello.com/c/iZzON44A)); the freshness semantics recorded here are unchanged by it, and the writer is gated by `PREDICTION_VERSION_OBJECTS` until its activation is approved.
