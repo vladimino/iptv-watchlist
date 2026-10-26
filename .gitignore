@@ -34,3 +34,5 @@ tmp/
 .air86-context.json
 __pycache__/
 *.py[cod]
+# Local agent worktrees
+.claude/worktrees/
