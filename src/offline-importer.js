@@ -39,9 +39,11 @@ const KNOWN_CONFLICTS=new Set([
 const SOURCE_QUALITY=/_fields_missing$|^json_invalid$|^decision_without_candidate$/;
 const CLASS_A_BLOCKERS={prediction_absent:'prediction_family_absent',prediction_unportable:'prediction_family_unportable'};
 
+// Excluded is one declared prefix: raw EPG dumps under epg/raw/ are archive by the publication ADR and are counted, never parsed.
+// No current writer produces XML or an archive/ prefix, so any other XML-shaped or archive-shaped key is unknown and fails closed.
 export function classifyObject(key){
  if(typeof key!=='string')return 'unmapped';
- if(/\.xml($|\.)/.test(key)||key.startsWith('epg/raw/')||key.startsWith('archive/'))return 'excluded';
+ if(key.startsWith('epg/raw/'))return 'excluded';
  if(isMappedKey(key))return 'mapped';
  if(r2OnlyFamily(key))return 'r2_only';
  return 'unmapped';
@@ -87,17 +89,27 @@ export function identityResolver({canonicalize,films=[]}={}){
   const conflict=film.id.match(/^film:conflict:(.+)$/);
   if(conflict)for(const value of conflict[1].split('+'))conflicting.add(value);
  }
+ // Conflicts are checked before either fast path: a canonical id that is stored while another Film or a conflict record also
+ // claims its TMDB id, or that is itself the retired side of a redirect, is a conflict, never a silent direct hit.
  const resolve=storedId=>{
   const source=storedId==null?null:String(storedId);
   const canonical=canonicalize(storedId);
   if(!canonical)return {source,canonical:null,filmId:null,via:null,reason:'identity_unreadable'};
-  if(ids.has(canonical))return {source,canonical,filmId:canonical,via:'direct',reason:null};
-  const targets=survivors.get(canonical)||[];
-  if(targets.length===1&&ids.has(targets[0]))return {source,canonical,filmId:targets[0],via:'redirect',reason:null};
-  if(targets.length>1)return {source,canonical,filmId:null,via:null,reason:'identity_conflict'};
+  const conflict={source,canonical,filmId:null,via:null,reason:'identity_conflict'};
   const tmdb=canonical.match(/^film:tmdb:(\d+)$/)?.[1]||null;
-  if(tmdb&&conflicting.has(tmdb))return {source,canonical,filmId:null,via:null,reason:'identity_conflict'};
-  if(tmdb&&holders.has(tmdb))return {source,canonical,filmId:null,via:null,reason:holders.get(tmdb).length>1?'identity_conflict':'identity_unlinked'};
+  const claimants=tmdb?(holders.get(tmdb)||[]):[];
+  const targets=(survivors.get(canonical)||[]).filter(id=>id!==canonical);
+  if(tmdb&&conflicting.has(tmdb))return conflict;
+  if(ids.has(canonical)){
+   if(targets.length||claimants.some(id=>id!==canonical))return conflict;
+   return {source,canonical,filmId:canonical,via:'direct',reason:null};
+  }
+  if(targets.length>1)return conflict;
+  if(targets.length===1&&ids.has(targets[0])){
+   if(claimants.some(id=>id!==targets[0]))return conflict;
+   return {source,canonical,filmId:targets[0],via:'redirect',reason:null};
+  }
+  if(claimants.length)return claimants.length>1?conflict:{source,canonical,filmId:null,via:null,reason:'identity_unlinked'};
   return {source,canonical,filmId:null,via:null,reason:'film_unresolved'};
  };
  return {canonical:storedId=>canonicalize(storedId),resolve};
@@ -199,37 +211,48 @@ export async function importBatch(db,repositories,batch){
  const parity=batch.expected?await verifyParity(db,batch.expected):{ok:false,missing:[],extra:[],mismatched:[],denominator:0,unprojected:[],records:[],reason:'no_source_projection'};
  const coverage=batch.inventory?.coverage||emptyCoverage();
  const receipts=batch.shas?await receiptAudit(db,batch.shas):null;
- const classes=acceptanceClasses({inventory:batch.inventory,coverage,counts,ledger,appliedByFamily,parity,stopped:false});
+ const classes=acceptanceClasses({inventory:batch.inventory,coverage,counts,ledger,appliedByFamily,parity,receipts,stopped:false});
  const provenance=provenanceSummary(units);
- return {stopped:false,stopReasons:[],blockers:[],...counts,ledger,coverage,parity,receipts,provenance,classes,claimsFullParity:parityClaim({coverage,parity,counts,ledger,inventory:batch.inventory,classes})};
+ return {stopped:false,stopReasons:[],blockers:[],...counts,ledger,coverage,parity,receipts,provenance,classes,claimsFullParity:parityClaim({coverage,parity,counts,ledger,inventory:batch.inventory,classes,receipts})};
 }
 
-// Receipts are keyed by source checksum. A receipt whose source key is in the manifest with another checksum is stale: that object changed since it was receipted and is imported again.
+// Receipts are keyed by source checksum and reconciled against this manifest, the baseline identity of the run.
+// matching: the receipt names the manifest checksum. superseded: an older checksum of a source key whose same target also carries
+// a receipt with the manifest checksum, so the revision landed and was read back. stale: an older checksum with no such receipt,
+// so the revised object did not land (unportable, unresolved, conflicting or not yet run). foreign: a source key this manifest does not list.
+// Stale and foreign receipts block acceptance: the database then carries rows this baseline cannot vouch for.
 export async function receiptAudit(db,shas){
  const rows=await db.all('SELECT source_key,source_sha256,target_table,target_id FROM import_receipt ORDER BY source_key,target_table,target_id');
- const audit={total:rows.length,matching:0,stale:[],foreign:[]};
+ const current=new Set(rows.filter(row=>shas[row.source_key]===row.source_sha256).map(row=>row.source_key+'\n'+row.target_table+'\n'+row.target_id));
+ const audit={total:rows.length,matching:0,superseded:[],stale:[],foreign:[],blocking:false};
  for(const row of rows){
-  if(!Object.prototype.hasOwnProperty.call(shas,row.source_key)){audit.foreign.push({sourceKey:row.source_key,sourceSha256:row.source_sha256,targetTable:row.target_table,targetId:row.target_id});continue;}
-  if(shas[row.source_key]===row.source_sha256)audit.matching++;
-  else audit.stale.push({sourceKey:row.source_key,sourceSha256:row.source_sha256,manifestSha256:shas[row.source_key],targetTable:row.target_table,targetId:row.target_id});
+  const item={sourceKey:row.source_key,sourceSha256:row.source_sha256,targetTable:row.target_table,targetId:row.target_id};
+  if(!Object.prototype.hasOwnProperty.call(shas,row.source_key)){audit.foreign.push(item);continue;}
+  if(shas[row.source_key]===row.source_sha256){audit.matching++;continue;}
+  const revised={...item,manifestSha256:shas[row.source_key]};
+  if(current.has(row.source_key+'\n'+row.target_table+'\n'+row.target_id))audit.superseded.push(revised);
+  else audit.stale.push(revised);
  }
+ audit.blocking=audit.stale.length+audit.foreign.length>0;
  return audit;
 }
 
 // Three classes that are never merged into one verdict: A mapped-domain parity, B declared R2-only artifacts, C unresolved identity and source-quality records.
-export function acceptanceClasses({inventory,coverage,counts={},ledger=[],appliedByFamily={},parity=null,stopped=false}={}){
+export function acceptanceClasses({inventory,coverage,counts={},ledger=[],appliedByFamily={},parity=null,receipts=null,stopped=false}={}){
  const prediction=inventory?.families?.prediction||{status:'unknown',keys:[]};
  const predictionUnportable=ledger.filter(item=>item.family==='prediction'&&item.outcome==='unportable').length;
  const blockers=[];
  if(prediction.status==='absent')blockers.push(CLASS_A_BLOCKERS.prediction_absent);
  if(predictionUnportable>0)blockers.push(CLASS_A_BLOCKERS.prediction_unportable);
+ if((receipts?.stale||[]).length)blockers.push('receipts_stale');
+ if((receipts?.foreign||[]).length)blockers.push('receipts_foreign');
  if(stopped)blockers.push('import_stopped');
  const open=(counts.conflicts||0)+(counts.explained||0)+(counts.partial||0)+(counts.uncheckpointed||0)+ledger.filter(item=>item.class==='A'&&item.outcome==='unportable').length;
  const records=ledger.filter(item=>item.class==='C');
  return {
   A:{blocking:blockers.length>0||open>0||!(parity?.ok===true),blockers,open,mandatory:{prediction:{status:prediction.status,keys:prediction.keys.length,applied:appliedByFamily.prediction||0,unportable:predictionUnportable,portable:prediction.status==='present'&&predictionUnportable===0}}},
   B:{keys:(coverage?.r2_only||[]).length,families:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0),decisionRequired:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0&&item.decisionRequired).map(item=>item.family)},
-  C:{count:records.length,reasons:Object.fromEntries([...new Set(records.map(item=>item.reason))].sort().map(reason=>[reason,records.filter(item=>item.reason===reason).length])),records},
+  C:{count:records.length,acknowledgementRequired:records.length>0,reasons:Object.fromEntries([...new Set(records.map(item=>item.reason))].sort().map(reason=>[reason,records.filter(item=>item.reason===reason).length])),records},
  };
 }
 
@@ -250,7 +273,9 @@ export async function verifyParity(db,spec){
  return {ok:missing.length+extra.length+mismatched.length===0,missing,extra,mismatched,denominator,unprojected:spec.unprojected||[],records:spec.records||[],r2Only:spec.r2Only||[]};
 }
 
-export function parityClaim({coverage,parity,counts,ledger,inventory,classes}={}){
+// The lossless claim. It is never true with a class C record, a stale or foreign receipt, or a class A blocker; an owner acknowledgement
+// of the class C list is recorded elsewhere and does not change this verdict.
+export function parityClaim({coverage,parity,counts,ledger,inventory,classes,receipts}={}){
  const uncovered=(coverage?.unmapped||[]).length>0;
  const incomplete=inventory?.complete!==true;
  const vacuous=!(parity?.denominator>0);
@@ -258,7 +283,8 @@ export function parityClaim({coverage,parity,counts,ledger,inventory,classes}={}
  const openRecords=(parity?.records||[]).some(record=>record.disposition!=='mapped');
  const open=(counts?.pending||0)+(counts?.unportable||0)+(counts?.unresolved||0)+(counts?.conflicts||0)+(counts?.explained||0)+(counts?.partial||0)+(counts?.uncheckpointed||0);
  const blocked=classes?.A?.blocking===true;
- return !uncovered&&!incomplete&&!vacuous&&!unprojected&&!openRecords&&!blocked&&!!parity?.ok&&open===0&&(ledger||[]).length===0;
+ const unreconciled=(receipts?.stale||[]).length+(receipts?.foreign||[]).length>0;
+ return !uncovered&&!incomplete&&!vacuous&&!unprojected&&!openRecords&&!blocked&&!unreconciled&&!!parity?.ok&&open===0&&(ledger||[]).length===0;
 }
 
 export function fingerprintUnit(entry,body,identity){

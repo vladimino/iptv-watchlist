@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {classifyObject,identityResolver,importBatch,inventory,parityClaim,projectSource,readDiscovery,refusal,verifyParity} from '../src/offline-importer.js';
+import {acceptanceClasses,classifyObject,identityResolver,importBatch,inventory,parityClaim,projectSource,readDiscovery,refusal,verifyParity} from '../src/offline-importer.js';
 import {manifestFor} from '../scripts/migration-export.mjs';
 import {loadDomainRules,openSqlite as snapshotSqlite} from '../scripts/offline-import.mjs';
 
@@ -104,6 +104,9 @@ assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.j
 assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[{disposition:'mapped'}]},counts:{},ledger:[],inventory:{complete:true}}),true);
 assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[{disposition:'mapped'}]},counts:{},ledger:[],inventory:{complete:true},classes:{A:{blocking:true}}}),false);
 assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[{disposition:'unresolved'}]},counts:{},ledger:[],inventory:{complete:true}}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[{disposition:'mapped'}]},counts:{},ledger:[],inventory:{complete:true},receipts:{stale:[],foreign:[],superseded:[{sourceKey:'x'}]}}),true);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[{disposition:'mapped'}]},counts:{},ledger:[],inventory:{complete:true},receipts:{stale:[{sourceKey:'x'}],foreign:[]}}),false);
+assert.equal(parityClaim({coverage:{unmapped:[],excluded:[],mapped:['watchlist.json']},parity:{ok:true,denominator:1,unprojected:[],records:[{disposition:'mapped'}]},counts:{},ledger:[],inventory:{complete:true},receipts:{stale:[],foreign:[{sourceKey:'y'}]}}),false);
 
 const receiptFilm=film('film:zz-receipt','Receipt Title',at);
 db.beforeReceipt=async()=>{throw new Error('receipt_failed');};
@@ -207,6 +210,9 @@ assert.equal(classifyObject('started/zz.json'),'r2_only');
 assert.equal(classifyObject('sync.json'),'r2_only');
 assert.equal(classifyObject('mystery/zz.json'),'unmapped');
 assert.equal(classifyObject('epg/raw/guide.xml'),'excluded');
+assert.equal(classifyObject('archive/export.zip'),'unmapped');
+assert.equal(classifyObject('guide.xml'),'unmapped');
+assert.equal(classifyObject('epg/guide.xml.gz'),'unmapped');
 assert.equal(projected.records.some(record=>record.key==='enrichment/films/zz-omit/predictions.json'&&record.disposition==='unportable'),true);
 const omitFile=path.join(root,'omit.sqlite');
 exec(omitFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
@@ -411,6 +417,16 @@ assert.equal(identity.resolve('tmdb_8').reason,'identity_conflict');
 assert.equal(identity.resolve('tmdb_8').filmId,null);
 assert.equal(identity.resolve('tmdb_11').reason,'identity_unlinked');
 assert.equal(identity.resolve('tmdb_404').reason,'film_unresolved');
+// A stored canonical id is not a silent direct hit while another claimant exists: conflicts are detected before the fast path.
+const directTmdb={...film('film:tmdb:21','Direct',at),externalIds:[{scheme:'tmdb',value:'21',trusted:true,conflicting:false}]};
+const rivalTmdb={...film('film:slug-r','Rival',at),externalIds:[{scheme:'letterboxd',value:'slug-r',trusted:true,conflicting:false},{scheme:'tmdb',value:'21',trusted:true,conflicting:false}]};
+assert.equal(identityFor([directTmdb]).resolve('tmdb_21').via,'direct');
+assert.equal(identityFor([directTmdb,rivalTmdb]).resolve('tmdb_21').reason,'identity_conflict');
+assert.equal(identityFor([directTmdb,rivalTmdb]).resolve('film:tmdb:21').reason,'identity_conflict');
+assert.equal(identityFor([directTmdb,{...film('film:conflict:21+22','Conflict',at),externalIds:[]}]).resolve('tmdb_21').reason,'identity_conflict');
+assert.equal(identityFor([directTmdb,{...film('film:slug-s','Survivor',at),redirects:[{from:'film:tmdb:21',to:'film:slug-s',at}]}]).resolve('tmdb_21').reason,'identity_conflict');
+assert.equal(identityFor([survivor,{...film('film:slug-t','Third',at),externalIds:[{scheme:'letterboxd',value:'slug-t',trusted:true,conflicting:false},{scheme:'tmdb',value:'7',trusted:true,conflicting:false}]}]).resolve('tmdb_7').reason,'identity_conflict');
+assert.equal(identityFor([directTmdb,{...film('film:slug-u','Marked',at),externalIds:[{scheme:'tmdb',value:'21',trusted:false,conflicting:true}]}]).resolve('tmdb_21').reason,'identity_conflict');
 assert.equal(identity.resolve('').reason,'identity_unreadable');
 assert.throws(()=>identityResolver({films:[]}),/canonicalFilmId/);
 assert.throws(()=>projectSource({keys:[],films:[]}),/identity resolver/);
@@ -513,8 +529,37 @@ const staleSha=(await legacyHandle.get("SELECT source_sha256 FROM import_receipt
 writeSnapshot(legacy,{...legacyBodies,'enrichment/films/tmdb_9/actual.json':{rating:4.5,source:'letterboxd',updatedAt:later}});
 const revised=runImport(legacy,legacyDb);
 assert.equal(revised.applied,1);
-assert.equal(revised.receipts.stale.some(item=>item.sourceKey==='enrichment/films/tmdb_9/actual.json'&&item.sourceSha256===staleSha),true);
+assert.equal(revised.receipts.superseded.some(item=>item.sourceKey==='enrichment/films/tmdb_9/actual.json'&&item.sourceSha256===staleSha),true);
+assert.equal(revised.receipts.stale.length,0);
+assert.equal(revised.receipts.blocking,false);
+assert.equal(revised.classes.A.blockers.includes('receipts_stale'),false);
 assert.equal((await legacyHandle.get("SELECT rating FROM actual_rating WHERE film_id='film:tmdb:9'")).rating,4.5);
+// A revision that cannot land leaves the earlier receipts stale with nothing superseding them: acceptance fails closed on the audit, not only on the read-back.
+writeSnapshot(legacy,{...legacyBodies,'enrichment/films/tmdb_9/actual.json':{rating:'broken',source:'letterboxd',updatedAt:later}});
+const broken=runImport(legacy,legacyDb);
+assert.equal(broken.applied,0);
+assert.equal(broken.parity.extra.some(item=>item.table==='actual_rating'&&item.id==='film:tmdb:9'),true);
+assert.equal(broken.receipts.stale.filter(item=>item.sourceKey==='enrichment/films/tmdb_9/actual.json').length,2);
+// The verdict itself is tested apart from the read-back: a clean parity with a stale or foreign receipt still blocks class A.
+assert.equal(acceptanceClasses({inventory:inventory({finishedAt:at,aggregateSha256:'sha',keys:['enrichment/films/zz/predictions.json']}),coverage:emptyCoverageFor(),parity:{ok:true},receipts:{stale:[],foreign:[]}}).A.blocking,false);
+assert.deepEqual(acceptanceClasses({inventory:inventory({finishedAt:at,aggregateSha256:'sha',keys:['enrichment/films/zz/predictions.json']}),coverage:emptyCoverageFor(),parity:{ok:true},receipts:{stale:[{sourceKey:'x'}],foreign:[]}}).A.blockers,['receipts_stale']);
+assert.deepEqual(acceptanceClasses({inventory:inventory({finishedAt:at,aggregateSha256:'sha',keys:['enrichment/films/zz/predictions.json']}),coverage:emptyCoverageFor(),parity:{ok:true},receipts:{stale:[],foreign:[{sourceKey:'y'}]}}).A.blockers,['receipts_foreign']);
+assert.equal(broken.receipts.superseded.length,0);
+assert.equal(broken.receipts.blocking,true);
+assert.equal(broken.classes.A.blockers.includes('receipts_stale'),true);
+assert.equal(broken.classes.A.blocking,true);
+assert.equal(broken.claimsFullParity,false);
+await legacyHandle.run("INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('enrichment/films/tmdb_77/actual.json','sha-foreign','actual_rating','film:tmdb:77',?)",[at]);
+writeSnapshot(legacy,{...legacyBodies,'enrichment/films/tmdb_9/actual.json':{rating:4.5,source:'letterboxd',updatedAt:later}});
+const foreign=runImport(legacy,legacyDb);
+assert.equal(foreign.receipts.stale.length,0);
+assert.equal(foreign.receipts.foreign.length,1);
+assert.equal(foreign.receipts.foreign[0].sourceKey,'enrichment/films/tmdb_77/actual.json');
+assert.equal(foreign.classes.A.blockers.includes('receipts_foreign'),true);
+assert.equal(foreign.classes.A.blocking,true);
+assert.equal(foreign.claimsFullParity,false);
+assert.equal(foreign.classes.C.acknowledgementRequired,true);
+assert.equal(foreign.parity.ok,true,JSON.stringify({missing:foreign.parity.missing,extra:foreign.parity.extra,mismatched:foreign.parity.mismatched}));
 
 // A stored decision whose key disagrees with the derived key stops the run before the database exists.
 const mismatch=path.join(root,'mismatch');
@@ -571,6 +616,7 @@ const collisionHandle=snapshotSqlite(path.join(root,'collision.sqlite'));
 assert.equal(await count(collisionHandle,"SELECT COUNT(*) AS n FROM fingerprint_payload"),0);
 assert.equal(await count(collisionHandle,"SELECT COUNT(*) AS n FROM film"),1);
 
+function emptyCoverageFor(){return {denominator:0,mapped:[],r2_only:[],excluded:[],unmapped:[],r2OnlyFamilies:[]};}
 function dim(dimension,status,updatedAt,extra={}){return {dimension,status,updatedAt,source:extra.source||'letterboxd',sourceVersion:null,provenance:extra.provenance||null,value:extra.value??null,nextAction:'none',attempts:0};}
 function film(id,title,updatedAt,localization){return {contractVersion:1,id,canonicalIdentity:null,originalTitle:title,externalIds:[{scheme:'letterboxd',value:id.slice('film:'.length),trusted:true,conflicting:false}],aliases:[],identity:dim('identity','resolved',updatedAt),metadata:dim('metadata','fresh',updatedAt),localization:localization||dim('localization','missing',updatedAt),fingerprint:dim('fingerprint','missing',updatedAt),prediction:dim('prediction','missing',updatedAt)};}
 function person(id,roleId,updatedAt,localization){return {contractVersion:1,id,roleId,externalIds:[{scheme:'letterboxd-role',value:roleId,trusted:true,conflicting:false}],aliases:[],identity:dim('identity','resolved',updatedAt),localization:localization||dim('localization','missing',updatedAt)};}
