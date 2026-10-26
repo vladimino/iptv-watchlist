@@ -12,8 +12,9 @@
 | Credential | `D1_BACKFILL_API_TOKEN` in the environment only, scoped to D1 edit on the two databases | never written to a report, ledger or the repository |
 | Acknowledged class C list | owner-reviewed JSON file, `--acknowledged` | only class C records; class A is never acknowledgeable |
 | Batch limits | `D1_BACKFILL_MAX_BATCH_STATEMENTS` (default 1,000), `D1_BACKFILL_MAX_BATCH_BYTES` (default 1 MiB) | proven by the probe; larger units stop with `batch_too_large` |
+| Staged generation | `--staged-generation`; the target and dry-run database carry `migrations/0002_generation_stage.sql` (schema version 2) | `schema_missing` or `schema_version_mismatch` before any write; chunks at most 950 statements and 1,000,000 bytes, never above the batch limits |
 
-Outputs go to an absolute directory outside the repository: `report.json` (status, stop reasons, probe, identity findings, counts, parity, receipt audit, classes A/B/C, adapter statistics) and `ledger.json` (every ledger row and the class C list with source key, checksum and reason). Exit code 0 is `completed`; 3 is `partial`, `stopped` or `no_go`; 2 is usage or configuration; 1 is an error.
+Outputs go to an absolute directory outside the repository: `report.json` (status, stop reasons, probe, identity findings, counts, parity, receipt audit, classes A/B/C, adapter statistics; with `--staged-generation`, the `staged` section: per generation chunks planned/sent/already received, rows, bytes, largest chunk and row, requests, phase durations, commit statements/bytes/duration, and `staged.gate` against the 10-second commit budget) and `ledger.json` (every ledger row and the class C list with source key, checksum and reason). Exit code 0 is `completed`; 3 is `partial`, `stopped` or `no_go`; 2 is usage or configuration; 1 is an error.
 
 ## D1 HTTP API requirements
 
@@ -24,13 +25,13 @@ Outputs go to an absolute directory outside the repository: `report.json` (statu
 
 ## Sizes, memory and duration
 
-- Units are small except one: a film, person, fingerprint, prediction version or rating unit is tens of statements; the programme generation unit writes every film membership, show and candidate of the published generation in one statement list. At the production order of magnitude (about 22,000 candidates) it is 73,500 to 122,500 statements and 63 to 75 MiB, and one of its statements is about 710 KB, above the documented D1 limit of 100,000 bytes per statement ([size evidence](../evidence/d1-migration/generation-unit-size-2026-10-26.md); measure any size with `node scripts/d1-generation-size.mjs --films F --shows-per-film sf --candidates C --shows-per-candidate sc`). No batch size makes it fit: the run stops at that unit with `batch_too_large`. The staged import of [ADR-0021](../adr/0021-staged-atomic-generation-import.md) (accepted conceptually, conditional on the scratch G4 gate; not implemented) is the design that replaces this unit; until its implementation is merged and verified on the scratch database, the production run cannot complete. This is an open item for G4/G5, not a solved one.
+- Units are small except one: a film, person, fingerprint, prediction version or rating unit is tens of statements; the programme generation unit writes every film membership, show and candidate of the published generation. As one statement list, at the production order of magnitude (about 22,000 candidates), it is 73,500 to 122,500 statements and 63 to 75 MiB, and one of its statements is about 710 KB, above the documented D1 limit of 100,000 bytes per statement ([size evidence](../evidence/d1-migration/generation-unit-size-2026-10-26.md); measure any size with `node scripts/d1-generation-size.mjs --films F --shows-per-film sf --candidates C --shows-per-candidate sc`). Without `--staged-generation` the run stops at that unit with `batch_too_large`. With it, the unit is staged per [ADR-0021](../adr/0021-staged-atomic-generation-import.md): at 1.25× the production candidates that is about 96 chunk requests of at most about 450 KB, a validation, a paged read-back of about 90,000 rows, one commit of 12 statements and a read-back of the committed generation ([local rehearsal](../evidence/d1-migration/air-168-staged-generation-local-2026-10-26.md)). The commit's duration on D1 grows with the rows it moves and is unproven until the scratch verification below; staging storage holds one extra copy of the generation until an approved cleanup.
 - Requests are sequential. Each unit costs roughly one to three reads, one write and one receipt write. A baseline of about 100,000 units is therefore several hundred thousand requests; bound each run with `--limit` and resume, which costs nothing because receipts make completed units free.
 - `prepareImport` holds the mapped snapshot objects in memory (the 19 October archive was about 100 MB in total); run on a machine with a few GB of free memory.
 
 ## Scratch verification of the staged generation import (separate owner approval)
 
-Once the ADR-0021 implementation is merged, and only under an explicit owner approval naming the scratch database: apply `0001` and `0002` to the scratch database (never to `iptv` in this step); stage a synthetic generation at 1.25× the production candidates (27,749 candidates, 2,300 films, two shows each) in chunks at the probe-proven size; interrupt after an arbitrary chunk and resume; validate, read back and commit; repeat the commit and commit a stale stage (both must change nothing); fail and discard a stage in bounded batches. Record requests, bytes, durations, any `429`/`5xx`, and the commit duration. GO for the generation unit in the production run needs every chunk accepted, an equal read-back after resume, and a commit of at most 10 seconds at 1.25×; otherwise NO-GO and no production write. No production payload is used in this step.
+Only under an explicit owner approval naming the scratch database: apply `0001` and `0002` to the scratch database (never to `iptv` in this step); stage a synthetic generation at 1.25× the production candidates (27,749 candidates, 2,300 films, two shows each) in chunks at the probe-proven size; interrupt after an arbitrary chunk and resume; validate, read back and commit; repeat the commit and commit a stale stage (both must change nothing); fail and discard a stage in bounded batches. Record requests, bytes, durations, any `429`/`5xx`, and the commit duration. GO for the generation unit in the production run needs every chunk accepted, an equal read-back after resume, and a commit of at most 10 seconds at 1.25×; otherwise NO-GO and no production write. No production payload is used in this step.
 
 ## Procedure
 
@@ -57,6 +58,18 @@ Once the ADR-0021 implementation is merged, and only under an explicit owner app
 | `no_go: baseline_rollback` | the snapshot is older than the newest baseline the target holds, or was imported before a newer one | export a fresh baseline; going back needs the recovery below, not a flag |
 | `no_go: baseline_ambiguous` | two baselines are recorded at the same newest instant | stop; the owner decides from the evidence which lineage is real |
 | `no_go: write_uncertain` | a write response was lost | rerun; the read-back reconciles |
+| `no_go: schema_missing` / `schema_version_mismatch` (staged) | the database lacks migration `0002` or schema version 2 | the owner applies `0002` under its own approval; nothing was written |
+| `no_go: stage_row_too_large` | one staged row would exceed 90,000 bytes | stop; the row is never split; investigate the source record |
+| `no_go: stage_baseline_changed` / `stage_owned_elsewhere` | the run's stage was opened by another baseline or token | abandon and discard that stage under the cleanup approval, then rerun |
+| `no_go: stage_plan_changed` / `chunk_conflict` / `chunk_receipts_out_of_order` | the stage does not describe this plan (limits, counts, rows) | do not force; restore the limits of the earlier run, or abandon and discard the stage |
+| `no_go: stage_validation_failed` / `stage_parity_mismatch` | staged rows differ from the plan; the stage is now `failed` | discard the stage under the cleanup approval and rerun; the final tables are unchanged |
+| `no_go: pointer_moved` | another generation was published after this stage was planned; the stage is now `failed` | discard it; re-export a fresh baseline if the published generation is newer |
+| `no_go: commit_readback_mismatch` | the commit landed but the final tables differ from the plan | stop the window; the owner decides between the recovery below and an investigation |
+| `staged.gate.go: false` | a commit took longer than 10 seconds | NO-GO for production per ADR-0021, even though the commit itself succeeded |
+
+## Stage cleanup (separate owner approval)
+
+Staged rows of a `failed` or `superseded` stage stay until the owner approves their removal. `node scripts/d1-backfill.mjs --discard-stage <programmeRunId> --cleanup-approved --target d1|sqlite --output /abs/cleanup [--database /abs/dry.sqlite]` deletes staging rows only, in bounded batches, children before parents, and writes `cleanup.json`. `--abandon` first marks a stage that never committed (one left by another baseline) as failed; a committed stage is never abandoned. Without `--cleanup-approved` the command refuses (exit code 2). Final tables are never touched, so this is reversible only by re-staging, not by restore.
 
 ## Recovery and rollback
 
@@ -75,8 +88,8 @@ Record in a dated file under `docs/evidence/d1-migration/`:
 
 - Approvals: snapshot read, credential, database creation and schema, each run window, any recovery (who, when, what).
 - Baseline: manifest aggregate SHA-256, `finishedAt`, baseline identity, exporter status and fence result.
-- Target: database uuid and name, schema migration applied, restore bookmark, scratch database uuid.
+- Target: database uuid and name, schema migrations applied (`0001`, and `0002` for the staged path), restore bookmark, scratch database uuid.
 - Probe: statements and bytes probed, `atomic`, `rowsAfterFailure`.
-- Runs: for each run, command (without secrets), status, applied, resumed, reconciled, pending, stop reason, adapter statistics.
+- Runs: for each run, command (without secrets), status, applied, resumed, reconciled, pending, stop reason, adapter statistics, and with `--staged-generation` the `staged` section and its gate.
 - Result: parity (denominator, missing, extra, mismatched), receipts audit, class A blockers (must be empty), class B families with dispositions, class C list with the acknowledgement reference, two empty reruns, delta result.
 - Statement that the Worker still has no D1 binding, Scheduled Tasks and flags are unchanged, and R2 remains authoritative.
