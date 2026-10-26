@@ -42,6 +42,7 @@ function payload(url){
  if(url==='/api/started')return {ids:[...startedIds]};
  if(url==='/api/enrichment/view')return enrichment;
  if(url==='/api/enrichment/footer/status')return footer;
+ if(url==='/api/catalog/available')return {programmeRunId:'run',pinned:true,films:[]};
  throw new Error('unexpected '+url);
 }
 const context=vm.createContext({
@@ -100,8 +101,8 @@ assert.equal(hiddenTick,null);
 document.hidden=false;
 handler('document','visibilitychange')();
 await untilIdle();
-assert.equal(calls.length,5,'returning to a visible tab refreshes once');
-assert.deepEqual([...new Set(calls)].sort(),['/api/enrichment/footer/status','/api/enrichment/view','/api/events','/api/programme','/api/started']);
+assert.equal(calls.length,6,'returning to a visible tab refreshes once');
+assert.deepEqual([...new Set(calls)].sort(),['/api/catalog/available','/api/enrichment/footer/status','/api/enrichment/view','/api/events','/api/programme','/api/started']);
 run('stopLiveRefresh()');
 
 resetTraffic();
@@ -111,17 +112,17 @@ resetTraffic();
 handler('window','focus')();
 handler('document','visibilitychange')();
 await untilIdle();
-assert.equal(calls.length,5,'focus and visibility in the same turn share one refresh');
+assert.equal(calls.length,6,'focus and visibility in the same turn share one refresh');
 run('stopLiveRefresh()');
 
 resetTraffic();
 const first=run('runLiveRefresh()');
 const second=run('runLiveRefresh()');
-assert.equal(calls.length,5);
-assert.equal(maxInFlight,5,'one refresh does not overlap its own requests');
+assert.equal(calls.length,6);
+assert.equal(maxInFlight,6,'one refresh does not overlap its own requests');
 await untilIdle();
-assert.equal(calls.length,10,'a refresh requested while one is running waits for a single follow-up');
-assert.equal(maxInFlight,5);
+assert.equal(calls.length,12,'a refresh requested while one is running waits for a single follow-up');
+assert.equal(maxInFlight,6);
 await first;
 await second;
 run('stopLiveRefresh()');
