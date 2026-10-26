@@ -25,13 +25,12 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0017 — Migrate R2 to D1 through separate evidence-gated stages](0017-staged-d1-migration.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
 | [0018 — Preserve last-good ratings when Letterboxd returns HTTP 403](0018-letterboxd-last-good-ratings.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
 | [0019 — Live D1 backfill reads a verified production baseline and maps identities by rule](0019-live-d1-backfill-boundaries.md) | Accepted 2026-10-26 (design decision; no production operation authorized) | [AIR-74](https://trello.com/c/5AdAmKPe) owner G0 decision; [readiness assessment](../evidence/d1-migration/air-74-backfill-readiness-2026-10-26.md) |
+| [0020 — Owner-triggered, bounded poster hydration for verified catalog records](0020-owner-triggered-catalog-poster-hydration.md) | Accepted 2026-10-26 (accepted on owner review; no flag change or execution authorized) | [AIR-15](https://trello.com/c/Yz6SGd3R), [PR #122](https://github.com/vladimino/iptv-watchlist/pull/122) |
+| [0021 — A large programme generation is staged in bounded chunks and published by one fixed-size commit](0021-staged-atomic-generation-import.md) | Accepted 2026-10-26 conceptually, conditional on the scratch G4 performance and atomicity gate (design decision; no migration, scratch or production write authorized) | [AIR-167](https://trello.com/c/6ZaRfXWL), [owner review](https://github.com/vladimino/iptv-watchlist/pull/123#pullrequestreview-5655427816); [generation unit size](../evidence/d1-migration/generation-unit-size-2026-10-26.md) |
 
 ## Proposed records
 
-| ADR | Status | Decision and evidence |
-| --- | --- | --- |
-| [0020 — Owner-triggered, bounded poster hydration for verified catalog records](0020-owner-triggered-catalog-poster-hydration.md) | Accepted 2026-10-26 (accepted on owner review; no flag change or execution authorized) | [AIR-15](https://trello.com/c/Yz6SGd3R), [PR #122](https://github.com/vladimino/iptv-watchlist/pull/122) |
-| [0021 — A large programme generation is staged in bounded chunks and published by one fixed-size commit](0021-staged-atomic-generation-import.md) | Proposed 2026-10-26 (design only; no migration, scratch or production write authorized) | [AIR-167](https://trello.com/c/6ZaRfXWL), [generation unit size](../evidence/d1-migration/generation-unit-size-2026-10-26.md) |
+None at present.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
