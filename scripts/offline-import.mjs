@@ -31,7 +31,7 @@ export async function prepareImport(directory,{limit=null}={}){
   catch{units.push(unportable(entry.key,entry.sha256,'object',entry.key,'json_invalid','watchlist'));}
  }
  const keys=[...byKey.keys()];
- const snapshotInventory=inventory({finishedAt:manifest.finishedAt||null,aggregateSha256:manifest.totals?.aggregateSha256||null,keys});
+ const snapshotInventory=inventory({finishedAt:manifest.finishedAt||null,aggregateSha256:manifest.totals?.aggregateSha256||null,keys,production:loaded.production===true});
  const store=scopedStore(loaded.store,byKey);
  const view=readLifecycle(store,Date.parse(manifest.finishedAt));
  const identity=identityResolver({canonicalize:rules.canonicalFilmId,films:view.films});
@@ -88,7 +88,7 @@ export async function prepareImport(directory,{limit=null}={}){
  const shas=Object.fromEntries([...byKey].map(([key,entry])=>[key,entry.sha256]));
  const expected=projectSource({keys,bodies:Object.fromEntries(bodies),films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence,links});
  for(const blocker of expected.blockers||[])if(!blockers.some(item=>item.reason===blocker.reason&&item.targetTable===blocker.targetTable&&item.targetId===blocker.targetId))blockers.push(blocker);
- return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit};
+ return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit,production:loaded.production===true,source:loaded.source,baselineIdentity:loaded.baselineIdentity,aggregateSha256:manifest.totals?.aggregateSha256??null};
 }
 
 // The shared rules come from the production sources themselves: canonicalFilmId from the domain model and candidateEvidence from the resolver.

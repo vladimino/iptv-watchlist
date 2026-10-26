@@ -29,7 +29,7 @@ Transient failures (`429`, `5xx`, a dropped connection) are retried a bounded nu
 4. **Export.** `node scripts/r2-snapshot-export.mjs --output /absolute/private/snapshot`. Exit 0 is a fenced consistent cut; exit 3 is a NO-GO to read in `report.json`; exit 1 is a failed run; exit 2 is a usage or configuration error.
 5. **Verify independently.** `node scripts/r2-snapshot-export.mjs --output /absolute/private/snapshot --verify` re-reads every stored object against the manifest, recomputes the aggregate SHA-256 and re-checks the source identity, status and fence record. Exit 3 means the manifest itself records a NO-GO.
 6. **On NO-GO.** Do not import. Re-run during a quieter interval; the opening listing is taken again and unchanged objects are reused. If the proof cannot be produced within a reasonable number of attempts, the alternative is a short, separately approved freeze of the Scheduled Tasks for the export window; this page does not grant it.
-7. **Afterwards.** The owner revokes or keeps the credential as decided; the snapshot directory stays private. The lifecycle snapshot loader used for the historical archive accepts the historical source identity only; a production manifest is consumed by the backfill executor.
+7. **Afterwards.** The owner revokes or keeps the credential as decided; the snapshot directory stays private. The [backfill executor](d1-backfill.md) consumes the manifest; it refuses one whose status is not `consistent_fenced`.
 
 ## Rollback
 
