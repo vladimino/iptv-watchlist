@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {manifestFor} from '../scripts/migration-export.mjs';
 import {loadDomainRules} from '../scripts/offline-import.mjs';
-import {BackfillStop,D1Error,createD1Adapter,probeAtomicity,readTarget,renderSql,runBackfill,schemaTables,verifyTargetIdentity} from '../scripts/d1-backfill.mjs';
+import {BackfillStop,D1Error,createD1Adapter,probeAtomicity,readTarget,renderSql,runBackfill,runStageCleanup,schemaTables,stageOwner,verifyTargetIdentity} from '../scripts/d1-backfill.mjs';
 
 // The executor never touches R2, a Worker binding or the deploy configuration, and the Worker bundle does not include it.
 const source=fs.readFileSync('scripts/d1-backfill.mjs','utf8');
@@ -350,6 +350,71 @@ try{
   assert.equal(fence instanceof BackfillStop&&fence.reason==='baseline_changed',true,'restoring a backup and pointing a different baseline at it is fenced');
  }
 
+ // Staged generation (ADR-0021, schema v2): opt-in, fenced on schema version, reported with perf counters and the commit gate,
+ // and its cleanup needs an explicit approval and touches staging rows only.
+ {
+  const stagedSchema=migration+'\n'+fs.readFileSync('migrations/0002_generation_stage.sql','utf8');
+  const stagedDatabase=name=>{const file=path.join(root,name+'.sqlite');fs.rmSync(file,{force:true});const result=sqlite(file,'PRAGMA foreign_keys=ON;\n'+stagedSchema);assert.equal(result.status,0,result.stderr);return file;};
+  const STAGED_TARGET='33333333-3333-4333-8333-333333333333',STAGED_SCRATCH='44444444-4444-4444-8444-444444444444';
+  const stagedFile=stagedDatabase('staged-target');
+  const stagedFake=fakeD1({[STAGED_TARGET]:{file:stagedFile,name:'iptv'},[STAGED_SCRATCH]:{file:freshDatabase('staged-scratch',{schema:false}),name:'iptv-scratch'}});
+  const stagedEndpoint=await stagedFake.start();
+  const stagedTarget=readTarget(envFor(stagedEndpoint,{D1_BACKFILL_DATABASE_ID:STAGED_TARGET,D1_BACKFILL_SCRATCH_DATABASE_ID:STAGED_SCRATCH,D1_BACKFILL_MAX_BATCH_STATEMENTS:'200',D1_BACKFILL_MAX_BATCH_BYTES:'65536'}));
+  const first=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:stagedTarget,output:output('staged-d1'),sleep:noSleep,stagedGeneration:true});
+  assert.equal(first.status,'completed',JSON.stringify(first.noGo||first.stopReasons));
+  assert.deepEqual(first.staged.limits,{maxStatements:200,maxBytes:65536});
+  assert.equal(first.staged.generations.length,1);
+  assert.equal(first.staged.generations[0].outcome,'committed');
+  assert.equal(first.staged.generations[0].commit.statements,12);
+  assert.equal(first.staged.gate.go,true);
+  assert.equal(first.result.parity.ok,true);
+  assert.equal(count(stagedFile,"SELECT COUNT(*) AS n FROM generation_stage WHERE state='published'"),1);
+  assert.equal(count(stagedFile,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_table='programme_generation'"),1);
+  assert.equal(stagedFake.calls.some(call=>/\bBEGIN\b|\bCOMMIT\b/.test(call.sql)),false,'no transaction keywords are sent');
+  const rerun=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:stagedTarget,output:output('staged-d1-rerun'),sleep:noSleep,stagedGeneration:true});
+  assert.equal(rerun.status,'completed');
+  assert.equal(rerun.result.applied,0);
+  assert.equal(rerun.staged.generations.length,0,'a receipted generation is not staged again');
+  await stagedFake.stop();
+
+  // Schema fence: the staged path needs migration 0002 and schema version 2.
+  const v1Only=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:freshDatabase('staged-v1'),output:output('staged-v1'),sleep:noSleep,stagedGeneration:true});
+  assert.deepEqual(v1Only.stopReasons,['schema_missing']);
+  assert.ok(v1Only.noGo.details.missing.includes('generation_stage'));
+  const wrongVersion=stagedDatabase('staged-version');
+  assert.equal(sqlite(wrongVersion,'UPDATE schema_contract SET version=1;').status,0);
+  const versionReport=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:wrongVersion,output:output('staged-version'),sleep:noSleep,stagedGeneration:true});
+  assert.deepEqual(versionReport.stopReasons,['schema_version_mismatch']);
+  assert.equal(count(wrongVersion,'SELECT COUNT(*) AS n FROM import_receipt'),0,'nothing is written before the fence passes');
+
+  // A stage this baseline does not own stops the run as a NO-GO with its reason, and its cleanup is approval-gated.
+  const owned=stagedDatabase('staged-owned');
+  assert.equal(sqlite(owned,"PRAGMA foreign_keys=ON;\nINSERT INTO generation_stage (programme_run_id,baseline_sha256,phase,published_at,expected_programme_run_id,state,owner_token,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,created_at,updated_at) VALUES ('run-1','"+snapshot.aggregateSha256+"','published',NULL,NULL,'loading','someone-else',1,1,1,0,0,'"+at+"','"+at+"');").status,0);
+  const ownedReport=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:owned,output:output('staged-owned'),sleep:noSleep,stagedGeneration:true});
+  assert.equal(ownedReport.status,'no_go');
+  assert.deepEqual(ownedReport.stopReasons,['stage_owned_elsewhere']);
+  assert.equal(count(owned,'SELECT COUNT(*) AS n FROM programme_generation'),0);
+  assert.notEqual(stageOwner('sqlite:staged-owned.sqlite',snapshot.aggregateSha256),'someone-else');
+  await assert.rejects(runStageCleanup({mode:'sqlite',sqliteFile:owned,programmeRunId:'run-1',output:output('cleanup-unapproved')}),/cleanup-approved/);
+  const live=await runStageCleanup({mode:'sqlite',sqliteFile:owned,programmeRunId:'run-1',approved:true,output:output('cleanup-live')});
+  assert.deepEqual(live.noGo.reason,'stage_not_discardable');
+  assert.equal(sqlite(owned,"UPDATE generation_stage SET state='failed';").status,0);
+  const cleaned=await runStageCleanup({mode:'sqlite',sqliteFile:owned,programmeRunId:'run-1',approved:true,output:output('cleanup-failed')});
+  assert.equal(cleaned.status,'completed');
+  assert.equal(count(owned,'SELECT COUNT(*) AS n FROM generation_stage'),0);
+  const afterCleanup=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:owned,output:output('staged-after-cleanup'),sleep:noSleep,stagedGeneration:true});
+  assert.equal(afterCleanup.status,'completed',JSON.stringify(afterCleanup.noGo||afterCleanup.stopReasons));
+  assert.equal(afterCleanup.staged.generations[0].outcome,'committed');
+
+  // CLI opt-in and the approval flag.
+  const cliStaged=spawnSync(process.execPath,['scripts/d1-backfill.mjs','--snapshot',snapshot.directory,'--output',output('cli-staged'),'--target','sqlite','--database',stagedDatabase('cli-staged'),'--staged-generation'],{encoding:'utf8'});
+  assert.equal(cliStaged.status,0,cliStaged.stderr);
+  assert.equal(JSON.parse(cliStaged.stdout).staged.generations[0].outcome,'committed');
+  const cliCleanup=spawnSync(process.execPath,['scripts/d1-backfill.mjs','--discard-stage','run-1','--target','sqlite','--database',owned,'--output',output('cli-cleanup')],{encoding:'utf8'});
+  assert.equal(cliCleanup.status,2);
+  assert.match(cliCleanup.stderr,/cleanup-approved/);
+ }
+
  // The CLI: usage, configuration and exit codes, with the secret only in the environment.
  {
   assert.equal(spawnSync(process.execPath,['scripts/d1-backfill.mjs','--snapshot','relative'],{encoding:'utf8'}).status,2);
@@ -368,4 +433,4 @@ try{
  }
  await fake.stop();
 }finally{fs.rmSync(root,{recursive:true,force:true});}
-console.log('D1 backfill: environment-only target, scratch atomicity proof at size, non-atomic service NO-GO, identity and schema fence, bounded resume, empty reruns, changed baseline and delta, duplicate/stale/foreign receipts, lost-response writes, bounded retries, oversized units, fail-closed classes A and C, snapshot gates, dry-run and rollback rehearsal passed');
+console.log('D1 backfill: environment-only target, scratch atomicity proof at size, non-atomic service NO-GO, identity and schema fence, bounded resume, empty reruns, changed baseline and delta, duplicate/stale/foreign receipts, lost-response writes, bounded retries, oversized units, fail-closed classes A and C, snapshot gates, dry-run and rollback rehearsal, staged generation with schema v2 fence, stage ownership NO-GO and approval-gated cleanup passed');

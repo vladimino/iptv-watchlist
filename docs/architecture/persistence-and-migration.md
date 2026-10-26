@@ -25,6 +25,6 @@ flowchart TD
     class gate,backfill,shadowWrite,shadowRead,cutRead,cutWrite,retire future
 ```
 
-The historical archive is not live production. Offline import receipts, schema compatibility and replay parity are evidence, not authorization. An incomplete or conflicting import must report gaps; it must not invent Film identities or silently omit unportable data. No R2/D1 shared transaction exists, so read/write migration must be staged with separate acceptance and recovery boundaries.
+The historical archive is not live production. Offline import receipts, schema compatibility and replay parity are evidence, not authorization. An incomplete or conflicting import must report gaps; it must not invent Film identities or silently omit unportable data. No R2/D1 shared transaction exists, so read/write migration must be staged with separate acceptance and recovery boundaries. Inside the future live backfill, the one large unit (a programme generation) is written to D1 staging tables in bounded chunks and published by one commit request ([ADR-0021](../adr/0021-staged-atomic-generation-import.md)); this changes no node or arrow above, and the staging tables are read by no runtime path.
 
 **Not deployed:** D1 production binding, shadow writers/readers and authoritative D1 cutover. Each orange node is a planned step, not a claim that its Trello task is completed or an instruction to perform it.

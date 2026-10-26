@@ -15,21 +15,47 @@ export function createEpgRepository(db){
  };
 }
 
-async function publishGeneration(db,input){
+// The rows one generation writes, shared by publishGeneration and the staged import (ADR-0021) so both write the same values.
+// Films and candidates keep the input order; each film carries the latest start of its shows for film_epg_last_airing.
+export function generationProjection(input){
  const programmeRunId=required(input?.programmeRunId,'programmeRunId');
  if(input.phase!=='published'&&input.phase!=='withheld')throw new Error('Generation phase must be published or withheld');
- const films=input.films||[],candidates=input.candidates||[];
- for(const film of films)requiredFilm(film.filmId);
- for(const candidate of candidates)validateCandidate(candidate);
- const existing=await readGeneration(db,programmeRunId);
- if(existing){
-  if(stable(storedGeneration(existing))!==stable(incomingGeneration(input)))throw new Error('Generation payload conflicts with the committed run');
-  const published=await readPublished(db);
-  return {programmeRunId,phase:existing.phase,pointed:published?.programmeRunId===programmeRunId,replay:true};
- }
- const observedAt=input.publishedAt||null,current=input.phase==='published';
- if(current&&!Object.prototype.hasOwnProperty.call(input,'expectedProgrammeRunId'))throw new Error('expectedProgrammeRunId is required');
- const expected=current?input.expectedProgrammeRunId??null:null;
+ const current=input.phase==='published';
+ const films=(input.films||[]).map(film=>{
+  const filmId=requiredFilm(film.filmId);
+  const shows=(film.shows||[]).map(show=>({film_id:filmId,channel_id:show.channelId,channel:show.channel??null,start_ms:show.startMs,end_ms:show.endMs??null,epg_title:show.epgTitle??null,basis:show.basis??null,match_reason:show.matchReason??null}));
+  let latest=null;
+  for(const show of shows)if(latest==null||show.start_ms>latest)latest=show.start_ms;
+  return {filmId,shows,latest};
+ });
+ const candidates=(input.candidates||[]).map(candidate=>{
+  validateCandidate(candidate);
+  const row={observation_key:candidate.observationKey,title:candidate.title,normalized_title:candidate.normalizedTitle,year:candidate.year??null,raw_titles_json:JSON.stringify(candidate.rawTitles||[]),durations_json:JSON.stringify(candidate.durations||[]),description:candidate.description??null,first_airing_ms:candidate.firstAiringMs??null,last_airing_ms:candidate.lastAiringMs??null,airings:candidate.airings??null,confirmed_tmdb_id:candidate.confirmedTmdbId??null,observation_json:observationJson(candidate),activity:candidate.activity??null,last_seen_at:candidate.lastSeenAt??null,last_seen_programme_run_id:candidate.lastSeenProgrammeRunId??null,seen_in_latest:candidate.seenInLatest?1:0,evidence_key:candidate.evidenceKey};
+  const shows=(candidate.shows||[]).map(show=>({observation_key:candidate.observationKey,channel_id:show.channelId,channel:show.channel??null,start_ms:show.startMs,end_ms:show.endMs??null,epg_title:show.epgTitle??null}));
+  return {row,shows};
+ });
+ return {programmeRunId,phase:input.phase,current,publishedAt:input.publishedAt||null,expectedProgrammeRunId:current?input.expectedProgrammeRunId??null:null,films,candidates};
+}
+
+export function requireExpected(input){
+ if(input.phase==='published'&&!Object.prototype.hasOwnProperty.call(input,'expectedProgrammeRunId'))throw new Error('expectedProgrammeRunId is required');
+}
+
+// A committed run is never written twice: the same payload is a replay, a different one a conflict.
+export async function replayGeneration(db,input){
+ const existing=await readGeneration(db,input.programmeRunId);
+ if(!existing)return null;
+ if(stable(storedGeneration(existing))!==stable(incomingGeneration(input)))throw new Error('Generation payload conflicts with the committed run');
+ const published=await readPublished(db);
+ return {programmeRunId:input.programmeRunId,phase:existing.phase,pointed:published?.programmeRunId===input.programmeRunId,replay:true};
+}
+
+async function publishGeneration(db,input){
+ const projection=generationProjection(input);
+ const {programmeRunId,current,publishedAt:observedAt,expectedProgrammeRunId:expected}=projection;
+ const replayed=await replayGeneration(db,input);
+ if(replayed)return replayed;
+ requireExpected(input);
  return db.transaction(async()=>{
   if(current)await db.run(`INSERT INTO programme_generation (programme_run_id,phase,published_at)
    SELECT ?,'stale',NULL
@@ -38,22 +64,18 @@ async function publishGeneration(db,input){
   await db.run('INSERT INTO programme_generation (programme_run_id,phase,published_at) VALUES (?,?,?)',[programmeRunId,input.phase,observedAt]);
   if(current)await db.run(`INSERT INTO published_generation (id,programme_run_id) VALUES (1,?)
    ON CONFLICT(id) DO UPDATE SET programme_run_id=excluded.programme_run_id`,[programmeRunId]);
-  for(const film of films){
+  for(const film of projection.films){
    await db.run('INSERT INTO film_generation (programme_run_id,film_id) VALUES (?,?)',[programmeRunId,film.filmId]);
-   let latest=null;
-   for(const show of film.shows||[]){
-    await db.run('INSERT INTO film_show (programme_run_id,film_id,channel_id,channel,start_ms,end_ms,epg_title,basis,match_reason) VALUES (?,?,?,?,?,?,?,?,?)',
-     [programmeRunId,film.filmId,show.channelId,show.channel??null,show.startMs,show.endMs??null,show.epgTitle??null,show.basis??null,show.matchReason??null]);
-    if(latest==null||show.startMs>latest)latest=show.startMs;
-   }
-   if(current&&latest!=null)await db.run(`INSERT INTO film_epg_last_airing (film_id,airing_ms,programme_run_id) VALUES (?,?,?)
+   for(const show of film.shows)await db.run('INSERT INTO film_show (programme_run_id,film_id,channel_id,channel,start_ms,end_ms,epg_title,basis,match_reason) VALUES (?,?,?,?,?,?,?,?,?)',
+    [programmeRunId,show.film_id,show.channel_id,show.channel,show.start_ms,show.end_ms,show.epg_title,show.basis,show.match_reason]);
+   if(current&&film.latest!=null)await db.run(`INSERT INTO film_epg_last_airing (film_id,airing_ms,programme_run_id) VALUES (?,?,?)
     ON CONFLICT(film_id) DO UPDATE SET
      airing_ms=MAX(film_epg_last_airing.airing_ms,excluded.airing_ms),
      programme_run_id=CASE WHEN excluded.airing_ms>=film_epg_last_airing.airing_ms THEN excluded.programme_run_id ELSE film_epg_last_airing.programme_run_id END`,
-    [film.filmId,latest,programmeRunId]);
+    [film.filmId,film.latest,programmeRunId]);
   }
-  for(const candidate of candidates){
-   const observation=observationJson(candidate);
+  for(const {row,shows} of projection.candidates){
+   const base=[row.observation_key,row.title,row.normalized_title,row.year,row.raw_titles_json,row.durations_json,row.description,row.first_airing_ms,row.last_airing_ms,row.airings,row.confirmed_tmdb_id,1,row.observation_json];
    if(current)await db.run(`INSERT INTO candidate (observation_key,title,normalized_title,year,raw_titles_json,durations_json,description,first_airing_ms,last_airing_ms,airings,confirmed_tmdb_id,observation_schema_version,observation_json,activity,last_seen_at,last_seen_programme_run_id,seen_in_latest,attempts,last_attempt_at,retry_at,terminal_reason,evidence_key)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,NULL,NULL,?)
     ON CONFLICT(observation_key) DO UPDATE SET
@@ -62,16 +84,16 @@ async function publishGeneration(db,input){
      retry_at=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.retry_at ELSE NULL END,
      attempts=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.attempts ELSE 0 END,
      last_attempt_at=CASE WHEN candidate.evidence_key=excluded.evidence_key THEN candidate.last_attempt_at ELSE NULL END`,
-    candidateParams(candidate,observation));
+    [...base,row.activity,row.last_seen_at,row.last_seen_programme_run_id,row.seen_in_latest,row.evidence_key]);
    else await db.run(`INSERT INTO candidate (observation_key,title,normalized_title,year,raw_titles_json,durations_json,description,first_airing_ms,last_airing_ms,airings,confirmed_tmdb_id,observation_schema_version,observation_json,activity,last_seen_at,last_seen_programme_run_id,seen_in_latest,attempts,evidence_key)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)
     ON CONFLICT(observation_key) DO NOTHING`,
-    withheldParams(candidate,observation));
-   await db.run('INSERT INTO candidate_generation (programme_run_id,observation_key,observation_schema_version,observation_json,evidence_key) VALUES (?,?,?,?,?)',[programmeRunId,candidate.observationKey,1,observation,candidate.evidenceKey]);
-   for(const show of candidate.shows||[])await db.run('INSERT INTO candidate_show (programme_run_id,observation_key,channel_id,channel,start_ms,end_ms,epg_title) VALUES (?,?,?,?,?,?,?)',[programmeRunId,candidate.observationKey,show.channelId,show.channel??null,show.startMs,show.endMs??null,show.epgTitle??null]);
+    [...base,row.activity==='current'?'historical':row.activity,row.last_seen_at,row.last_seen_programme_run_id,row.evidence_key]);
+   await db.run('INSERT INTO candidate_generation (programme_run_id,observation_key,observation_schema_version,observation_json,evidence_key) VALUES (?,?,?,?,?)',[programmeRunId,row.observation_key,1,row.observation_json,row.evidence_key]);
+   for(const show of shows)await db.run('INSERT INTO candidate_show (programme_run_id,observation_key,channel_id,channel,start_ms,end_ms,epg_title) VALUES (?,?,?,?,?,?,?)',[programmeRunId,show.observation_key,show.channel_id,show.channel,show.start_ms,show.end_ms,show.epg_title]);
   }
   if(current){
-   const keys=candidates.map(candidate=>candidate.observationKey);
+   const keys=projection.candidates.map(candidate=>candidate.row.observation_key);
    const absent=`seen_in_latest=0,activity=CASE WHEN activity='current' THEN 'historical' ELSE activity END`;
    if(keys.length)await db.run(`UPDATE candidate SET ${absent} WHERE observation_key NOT IN (${keys.map(()=>'?').join(',')})`,keys);
    else await db.run(`UPDATE candidate SET ${absent}`);
@@ -155,19 +177,32 @@ async function readPublishedShows(db){
  return rows.map(showRow);
 }
 
+// Large generations are read in bounded pages and grouped by key, so a production-size generation is neither one response nor quadratic.
+export const READ_PAGE_ROWS=5000;
+export async function pagedAll(db,sql,params=[],pageRows=READ_PAGE_ROWS){
+ const rows=[];
+ for(let offset=0;;offset+=pageRows){
+  const page=await db.all(sql+' LIMIT ? OFFSET ?',[...params,pageRows,offset]);
+  rows.push(...page);
+  if(page.length<pageRows)return rows;
+ }
+}
+
 async function readGeneration(db,programmeRunId){
  const generation=await db.get('SELECT programme_run_id,phase,published_at FROM programme_generation WHERE programme_run_id=?',[programmeRunId]);
  if(!generation)return null;
- const membership=await db.all('SELECT film_id FROM film_generation WHERE programme_run_id=? ORDER BY film_id',[programmeRunId]);
- const filmShows=await db.all('SELECT film_id,channel_id,channel,start_ms,end_ms,epg_title,basis,match_reason FROM film_show WHERE programme_run_id=? ORDER BY film_id,start_ms',[programmeRunId]);
- const observations=await db.all('SELECT observation_key,observation_schema_version,observation_json,evidence_key FROM candidate_generation WHERE programme_run_id=? ORDER BY observation_key',[programmeRunId]);
- const candidateShows=await db.all('SELECT observation_key,channel_id,channel,start_ms,end_ms,epg_title FROM candidate_show WHERE programme_run_id=? ORDER BY observation_key,start_ms',[programmeRunId]);
+ const membership=await pagedAll(db,'SELECT film_id FROM film_generation WHERE programme_run_id=? ORDER BY film_id',[programmeRunId]);
+ const filmShows=await pagedAll(db,'SELECT film_id,channel_id,channel,start_ms,end_ms,epg_title,basis,match_reason FROM film_show WHERE programme_run_id=? ORDER BY film_id,channel_id,start_ms',[programmeRunId]);
+ const observations=await pagedAll(db,'SELECT observation_key,observation_schema_version,observation_json,evidence_key FROM candidate_generation WHERE programme_run_id=? ORDER BY observation_key',[programmeRunId]);
+ const candidateShows=await pagedAll(db,'SELECT observation_key,channel_id,channel,start_ms,end_ms,epg_title FROM candidate_show WHERE programme_run_id=? ORDER BY observation_key,channel_id,start_ms',[programmeRunId]);
+ const group=(rows,key)=>{const map=new Map();for(const row of rows){if(!map.has(row[key]))map.set(row[key],[]);map.get(row[key]).push(row);}return map;};
+ const showsByFilm=group(filmShows,'film_id'),showsByKey=group(candidateShows,'observation_key');
  return {
   programmeRunId:generation.programme_run_id,
   phase:generation.phase,
   publishedAt:generation.published_at,
-  films:membership.map(row=>({filmId:row.film_id,shows:filmShows.filter(show=>show.film_id===row.film_id).map(showRow)})),
-  candidates:observations.map(row=>({observationKey:row.observation_key,schemaVersion:row.observation_schema_version,evidenceKey:row.evidence_key,observation:JSON.parse(row.observation_json),shows:candidateShows.filter(show=>show.observation_key===row.observation_key).map(candidateShowRow)})),
+  films:membership.map(row=>({filmId:row.film_id,shows:(showsByFilm.get(row.film_id)||[]).sort((a,b)=>a.start_ms-b.start_ms).map(showRow)})),
+  candidates:observations.map(row=>({observationKey:row.observation_key,schemaVersion:row.observation_schema_version,evidenceKey:row.evidence_key,observation:JSON.parse(row.observation_json),shows:(showsByKey.get(row.observation_key)||[]).sort((a,b)=>a.start_ms-b.start_ms).map(candidateShowRow)})),
  };
 }
 
@@ -209,15 +244,6 @@ function candidateShowRow(row){
 
 function observationJson(candidate){
  return JSON.stringify({schemaVersion:1,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,rawTitles:candidate.rawTitles||[],durations:candidate.durations||[],description:candidate.description??null,firstAiring:candidate.firstAiringMs??null,lastAiring:candidate.lastAiringMs??null,airings:candidate.airings??null,confirmedTmdbId:candidate.confirmedTmdbId??null});
-}
-
-function candidateParams(candidate,observation){
- return [candidate.observationKey,candidate.title,candidate.normalizedTitle,candidate.year??null,JSON.stringify(candidate.rawTitles||[]),JSON.stringify(candidate.durations||[]),candidate.description??null,candidate.firstAiringMs??null,candidate.lastAiringMs??null,candidate.airings??null,candidate.confirmedTmdbId??null,1,observation,candidate.activity??null,candidate.lastSeenAt??null,candidate.lastSeenProgrammeRunId??null,candidate.seenInLatest?1:0,candidate.evidenceKey];
-}
-
-function withheldParams(candidate,observation){
- const activity=candidate.activity==='current'?'historical':candidate.activity??null;
- return [candidate.observationKey,candidate.title,candidate.normalizedTitle,candidate.year??null,JSON.stringify(candidate.rawTitles||[]),JSON.stringify(candidate.durations||[]),candidate.description??null,candidate.firstAiringMs??null,candidate.lastAiringMs??null,candidate.airings??null,candidate.confirmedTmdbId??null,1,observation,activity,candidate.lastSeenAt??null,candidate.lastSeenProgrammeRunId??null,candidate.evidenceKey];
 }
 
 function incomingGeneration(input){

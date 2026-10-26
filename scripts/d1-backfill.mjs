@@ -10,6 +10,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
+import {PUBLISH_BUDGET_MS,DEFAULT_CHUNK_BYTES,DEFAULT_CHUNK_STATEMENTS,STAGE_TABLES,StageStop,discardStage,publishStaged} from '../src/generation-stage.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {importBatch,refusal} from '../src/offline-importer.js';
 import {ExportError} from './migration-export.mjs';
@@ -146,10 +147,12 @@ export async function probeAtomicity(adapter,{statements=DEFAULT_MAX_BATCH_STATE
  return {statements:rows+1,approxBytes:rows*(pad.length+60),multiStatement:applied===rows,lastStatementFailed:failed,rowsAfterFailure:remaining,atomic:applied===rows&&failed&&remaining===0};
 }
 
-export function schemaTables(){
- const migration=fs.readFileSync(path.join(REPO_ROOT,'migrations/0001_schema_v1.sql'),'utf8');
- return [...migration.matchAll(/CREATE TABLE ([a-z_]+)/g)].map(match=>match[1]).sort();
+export function schemaTables({staged=false}={}){
+ const files=['migrations/0001_schema_v1.sql',...(staged?['migrations/0002_generation_stage.sql']:[])];
+ return files.flatMap(file=>[...fs.readFileSync(path.join(REPO_ROOT,file),'utf8').matchAll(/CREATE TABLE ([a-z_]+)/g)].map(match=>match[1])).sort();
 }
+// Schema v2 (migration 0002) adds the staging tables the staged generation import writes.
+export const STAGED_SCHEMA_VERSION=2;
 
 // The database identity fence: the live database must be the configured one by uuid and name, carry the frozen schema, and its
 // identity receipts must belong to this baseline lineage. A receipt from another database id is a conflict. The lineage only moves
@@ -157,7 +160,7 @@ export function schemaTables(){
 // that baseline is allowed; a baseline never imported and newer than the mark needs --delta; re-running an older baseline after a
 // newer one, or importing a never-seen baseline older than the mark, is a rollback and is refused whatever the flags, because no
 // reconciliation path back to an older baseline exists in this executor.
-export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggregateSha256,baselineAt=null,delta=false,describe=true}){
+export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggregateSha256,baselineAt=null,delta=false,describe=true,staged=false}){
  const findings={databaseId,databaseName,described:null,schema:null,identityReceipts:[],baseline:null};
  if(describe){
   const described=await adapter.describe();
@@ -165,9 +168,14 @@ export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggr
   if(described.uuid!==databaseId||described.name!==databaseName)throw new BackfillStop('target_identity_mismatch',{expected:{databaseId,databaseName},actual:described});
  }
  const tables=(await adapter.all("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")).map(row=>row.name);
- const missing=schemaTables().filter(name=>!tables.includes(name));
+ const missing=schemaTables({staged}).filter(name=>!tables.includes(name));
  findings.schema={tables:tables.length,missing};
  if(missing.length)throw new BackfillStop('schema_missing',{missing});
+ if(staged){
+  const version=(await adapter.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
+  findings.schema.version=version;
+  if(version!==STAGED_SCHEMA_VERSION)throw new BackfillStop('schema_version_mismatch',{expected:STAGED_SCHEMA_VERSION,actual:version});
+ }
  const receipts=await adapter.all('SELECT source_key,source_sha256,target_id,imported_at FROM import_receipt WHERE target_table=? ORDER BY imported_at',[IDENTITY_TARGET_TABLE]);
  findings.identityReceipts=receipts.map(row=>({sourceSha256:row.source_sha256,targetId:row.target_id,importedAt:row.imported_at}));
  const foreign=receipts.filter(row=>row.target_id!==databaseId);
@@ -197,11 +205,17 @@ export async function readAcknowledged(file){
 
 // One bounded run. mode 'd1' writes to the configured target through the HTTP adapter after the identity fence and the atomicity
 // probe; mode 'sqlite' is the dry-run against a local file with the same rules and report shape.
-export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fetchImpl=fetch,limit=null,delta=false,acknowledged=[],output,now=()=>new Date(),sleep=sleepFor}){
+// stagedGeneration routes the programme generation unit through the staging tables of schema v2 (ADR-0021) instead of one request.
+// The stage owner token is derived from the target database and the baseline, so a resumed run of the same baseline continues the
+// stage and a run from another baseline cannot write into it.
+export function stageOwner(databaseId,aggregateSha256){return createHash('sha256').update(['generation-stage',databaseId,aggregateSha256].join('\n')).digest('hex');}
+const sha256Text=text=>createHash('sha256').update(text,'utf8').digest('hex');
+export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fetchImpl=fetch,limit=null,delta=false,acknowledged=[],output,now=()=>new Date(),sleep=sleepFor,stagedGeneration=false,clock=()=>Date.now()}){
  const absoluteOutput=outsideRepository(output);
  await mkdir(absoluteOutput,{recursive:true,mode:0o700});
- const report={mode,startedAt:now().toISOString(),snapshot:null,target:null,probe:null,identity:null,result:null,status:null,stopReasons:[]};
- const finish=async(status,extra={})=>{Object.assign(report,{status,finishedAt:now().toISOString()},extra);await writeFile(path.join(absoluteOutput,'report.json'),JSON.stringify(report,null,2)+'\n',{mode:0o600});return report;};
+ const report={mode,startedAt:now().toISOString(),snapshot:null,target:null,probe:null,identity:null,result:null,status:null,stopReasons:[],staged:stagedGeneration?{generations:[],gate:null}:null};
+ const stagedGate=()=>{if(!report.staged)return;const commits=report.staged.generations.filter(item=>item.commit?.ms!=null&&item.outcome==='committed');report.staged.gate={commitBudgetMs:PUBLISH_BUDGET_MS,commits:commits.length,slowestCommitMs:commits.length?Math.max(...commits.map(item=>item.commit.ms)):null,go:commits.every(item=>item.commit.withinBudget)};};
+ const finish=async(status,extra={})=>{stagedGate();Object.assign(report,{status,finishedAt:now().toISOString()},extra);await writeFile(path.join(absoluteOutput,'report.json'),JSON.stringify(report,null,2)+'\n',{mode:0o600});return report;};
  try{
   const verified=await verifyProductionSnapshot(snapshot);
   report.snapshot={status:verified.status,objects:verified.objects,aggregateSha256:verified.aggregateSha256,source:verified.source,baselineIdentity:verified.baselineIdentity};
@@ -220,21 +234,29 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
    report.probe={database:target.scratchDatabaseId,...probe};
    if(!probe.atomic)throw new BackfillStop('batch_not_atomic',probe);
    db=createD1Adapter({target,databaseId:target.databaseId,fetchImpl,sleep});
-   identityFindings=await verifyTargetIdentity(db,{databaseId:target.databaseId,databaseName:target.databaseName,aggregateSha256:batch.aggregateSha256,baselineAt:batch.finishedAt,delta});
+   identityFindings=await verifyTargetIdentity(db,{databaseId:target.databaseId,databaseName:target.databaseName,aggregateSha256:batch.aggregateSha256,baselineAt:batch.finishedAt,delta,staged:stagedGeneration});
    report.target={kind:'d1',databaseId:target.databaseId,databaseName:target.databaseName,endpoint:new URL(target.endpoint).host,endpointOverride:target.endpointOverride,limits:{maxBatchStatements:target.maxBatchStatements,maxBatchBytes:target.maxBatchBytes}};
   }else if(mode==='sqlite'){
    if(!sqliteFile)throw new ExportError('configuration','A SQLite file is required for the dry-run');
    const file=outsideRepository(sqliteFile);
    db=openSqlite(file);
-   identityFindings=await verifyTargetIdentity(db,{databaseId:'sqlite:'+path.basename(file),databaseName:'dry-run',aggregateSha256:batch.aggregateSha256,baselineAt:batch.finishedAt,delta,describe:false});
+   identityFindings=await verifyTargetIdentity(db,{databaseId:'sqlite:'+path.basename(file),databaseName:'dry-run',aggregateSha256:batch.aggregateSha256,baselineAt:batch.finishedAt,delta,describe:false,staged:stagedGeneration});
    report.target={kind:'sqlite',file};
   }else throw new ExportError('configuration','mode must be d1 or sqlite');
   report.identity=identityFindings;
   await recordIdentity(db,{databaseId:mode==='d1'?target.databaseId:identityFindings.databaseId,aggregateSha256:batch.aggregateSha256,importedAt:batch.finishedAt});
   const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
+  if(stagedGeneration){
+   const databaseId=mode==='d1'?target.databaseId:identityFindings.databaseId;
+   const limits=mode==='d1'?{maxStatements:Math.min(DEFAULT_CHUNK_STATEMENTS,target.maxBatchStatements),maxBytes:Math.min(DEFAULT_CHUNK_BYTES,target.maxBatchBytes)}:{};
+   const options={owner:stageOwner(databaseId,batch.aggregateSha256),baseline:batch.aggregateSha256,sha256:sha256Text,now:()=>now().toISOString(),clock,limits,report:report.staged.generations};
+   report.staged.limits={maxStatements:limits.maxStatements??DEFAULT_CHUNK_STATEMENTS,maxBytes:limits.maxBytes??DEFAULT_CHUNK_BYTES};
+   repositories.epg={...repositories.epg,publishGeneration:input=>publishStaged(db,input,options)};
+  }
   let result;
   try{result=await importBatch(db,repositories,{...batch,importedAt:batch.finishedAt,shas:{...batch.shas,[IDENTITY_SOURCE_KEY]:batch.aggregateSha256},stopOn:{conflicts:true,unacknowledged:true},acknowledged});}
   catch(error){
+   if(error instanceof StageStop)throw new BackfillStop(error.reason,error.details);
    if(error instanceof D1Error&&['write_uncertain','batch_too_large','statement'].includes(error.kind))throw new BackfillStop(error.kind,{message:error.message,...error.details});
    throw error;
   }
@@ -249,6 +271,35 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
   throw error;
  }
 }
+// Owner-approved, bounded cleanup of one failed or superseded stage. It deletes staging rows only, never a final row, and refuses
+// any other stage state. It is never part of a backfill run.
+export async function runStageCleanup({mode,target=null,sqliteFile=null,fetchImpl=fetch,programmeRunId,approved=false,abandon=false,limit=500,output,now=()=>new Date(),sleep=sleepFor}){
+ if(approved!==true)throw new ExportError('configuration','Stage cleanup needs the explicit --cleanup-approved flag');
+ if(!programmeRunId)throw new ExportError('configuration','A programme run id is required');
+ const absoluteOutput=outsideRepository(output);
+ await mkdir(absoluteOutput,{recursive:true,mode:0o700});
+ const report={mode,action:abandon?'abandon_and_discard_stage':'discard_stage',programmeRunId,startedAt:now().toISOString(),target:null,result:null,status:null};
+ const finish=async(status,extra={})=>{Object.assign(report,{status,finishedAt:now().toISOString()},extra);await writeFile(path.join(absoluteOutput,'cleanup.json'),JSON.stringify(report,null,2)+'\n',{mode:0o600});return report;};
+ try{
+  let db;
+  if(mode==='d1'){
+   db=createD1Adapter({target,databaseId:target.databaseId,fetchImpl,sleep});
+   const described=await db.describe();
+   if(described.uuid!==target.databaseId||described.name!==target.databaseName)throw new BackfillStop('target_identity_mismatch',{actual:described});
+   report.target={kind:'d1',databaseId:target.databaseId,databaseName:target.databaseName};
+  }else if(mode==='sqlite'){db=openSqlite(outsideRepository(sqliteFile));report.target={kind:'sqlite',file:sqliteFile};}
+  else throw new ExportError('configuration','mode must be d1 or sqlite');
+  const tables=(await db.all("SELECT name FROM sqlite_master WHERE type='table'")).map(row=>row.name);
+  const missing=STAGE_TABLES.filter(name=>!tables.includes(name));
+  if(missing.length)throw new BackfillStop('schema_missing',{missing});
+  report.result=await discardStage(db,programmeRunId,{limit,abandon,now:()=>now().toISOString()});
+  return await finish('completed');
+ }catch(error){
+  if(error instanceof StageStop||error instanceof BackfillStop)return await finish('no_go',{noGo:{reason:error.reason,details:error.details}});
+  if(error instanceof D1Error&&['write_uncertain','statement'].includes(error.kind))return await finish('no_go',{noGo:{reason:error.kind,details:{message:error.message}}});
+  throw error;
+ }
+}
 function outsideRepository(directory){
  if(!directory||!path.isAbsolute(directory))throw new ExportError('configuration','Output and database paths must be absolute and outside the Git repository');
  const absolute=path.resolve(directory);
@@ -260,14 +311,27 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  const args=process.argv.slice(2),value=flag=>{const index=args.indexOf(flag);return index<0?null:args[index+1];};
  const snapshot=value('--snapshot'),output=value('--output'),mode=value('--target'),sqliteFile=value('--database'),limitText=value('--limit'),acknowledgedFile=value('--acknowledged');
  const limit=limitText==null?null:Number(limitText);
- if(!snapshot||!path.isAbsolute(snapshot)||!output||!['d1','sqlite'].includes(mode)||(limit!=null&&!(Number.isInteger(limit)&&limit>0))){console.error('Usage: node scripts/d1-backfill.mjs --snapshot /absolute/private/snapshot --output /absolute/private/run --target d1|sqlite [--database /absolute/private/dry-run.sqlite] [--limit <units>] [--delta] [--acknowledged /absolute/private/class-c.json]');process.exit(2);}
- try{
-  const target=mode==='d1'?readTarget(process.env):null;
-  const report=await runBackfill({snapshot,mode,target,sqliteFile,limit,delta:args.includes('--delta'),acknowledged:await readAcknowledged(acknowledgedFile),output});
-  console.log(JSON.stringify(report));
-  process.exitCode=report.status==='completed'?0:3;
- }catch(error){
-  if(error instanceof ExportError||error instanceof SnapshotError){console.error((error.kind||'snapshot')+': '+error.message);process.exitCode=error instanceof ExportError&&error.kind==='configuration'?2:1;}
-  else{console.error('Backfill failed');process.exitCode=1;}
+ const discard=value('--discard-stage');
+ if(discard!=null){
+  if(!output||!['d1','sqlite'].includes(mode)){console.error('Usage: node scripts/d1-backfill.mjs --discard-stage <programmeRunId> --cleanup-approved [--abandon] --output /absolute/private/run --target d1|sqlite [--database /absolute/private/dry-run.sqlite]');process.exit(2);}
+  try{
+   const report=await runStageCleanup({mode,target:mode==='d1'?readTarget(process.env):null,sqliteFile,programmeRunId:discard,approved:args.includes('--cleanup-approved'),abandon:args.includes('--abandon'),output});
+   console.log(JSON.stringify(report));
+   process.exitCode=report.status==='completed'?0:3;
+  }catch(error){
+   if(error instanceof ExportError){console.error(error.kind+': '+error.message);process.exitCode=error.kind==='configuration'?2:1;}
+   else{console.error('Stage cleanup failed');process.exitCode=1;}
+  }
+ }else{
+  if(!snapshot||!path.isAbsolute(snapshot)||!output||!['d1','sqlite'].includes(mode)||(limit!=null&&!(Number.isInteger(limit)&&limit>0))){console.error('Usage: node scripts/d1-backfill.mjs --snapshot /absolute/private/snapshot --output /absolute/private/run --target d1|sqlite [--database /absolute/private/dry-run.sqlite] [--limit <units>] [--delta] [--staged-generation] [--acknowledged /absolute/private/class-c.json]');process.exit(2);}
+  try{
+   const target=mode==='d1'?readTarget(process.env):null;
+   const report=await runBackfill({snapshot,mode,target,sqliteFile,limit,delta:args.includes('--delta'),acknowledged:await readAcknowledged(acknowledgedFile),output,stagedGeneration:args.includes('--staged-generation')});
+   console.log(JSON.stringify(report));
+   process.exitCode=report.status==='completed'?0:3;
+  }catch(error){
+   if(error instanceof ExportError||error instanceof SnapshotError){console.error((error.kind||'snapshot')+': '+error.message);process.exitCode=error instanceof ExportError&&error.kind==='configuration'?2:1;}
+   else{console.error('Backfill failed');process.exitCode=1;}
+  }
  }
 }
