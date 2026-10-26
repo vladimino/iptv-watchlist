@@ -81,6 +81,8 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
     throw new D1Error('network','D1 request failed after retries');
    }
    let payload=null;try{payload=await response.json();}catch{payload=null;}
+   // A transient status on a write says nothing about whether the batch committed: never repeat it, stop and reconcile on the next run.
+   if(write&&TRANSIENT.has(response.status))throw new D1Error('write_uncertain','A write request answered HTTP '+response.status+'; its outcome is unknown and it is not retried',{status:response.status});
    if(TRANSIENT.has(response.status)&&attempt<retries){stats.retries++;await sleep(100*2**attempt);continue;}
    if(response.status===401||response.status===403)throw new D1Error('authorization','D1 credential was refused');
    if(!response.ok||payload?.success===false){const message=payload?.errors?.[0]?.message||('D1 request failed with HTTP '+response.status);throw new D1Error(write?'statement':'request',message,{status:response.status});}
@@ -150,9 +152,12 @@ export function schemaTables(){
 }
 
 // The database identity fence: the live database must be the configured one by uuid and name, carry the frozen schema, and its
-// identity receipts must belong to this baseline lineage. A receipt from another database id is a conflict; a receipt of another
-// manifest checksum is a changed baseline, accepted only when the run is declared a delta.
-export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggregateSha256,delta=false,describe=true}){
+// identity receipts must belong to this baseline lineage. A receipt from another database id is a conflict. The lineage only moves
+// forward: the newest identity receipt (by the baseline's finishedAt, recorded as imported_at) is the high-water mark. Re-running
+// that baseline is allowed; a baseline never imported and newer than the mark needs --delta; re-running an older baseline after a
+// newer one, or importing a never-seen baseline older than the mark, is a rollback and is refused whatever the flags, because no
+// reconciliation path back to an older baseline exists in this executor.
+export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggregateSha256,baselineAt=null,delta=false,describe=true}){
  const findings={databaseId,databaseName,described:null,schema:null,identityReceipts:[],baseline:null};
  if(describe){
   const described=await adapter.describe();
@@ -167,10 +172,17 @@ export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggr
  findings.identityReceipts=receipts.map(row=>({sourceSha256:row.source_sha256,targetId:row.target_id,importedAt:row.imported_at}));
  const foreign=receipts.filter(row=>row.target_id!==databaseId);
  if(foreign.length)throw new BackfillStop('database_identity_conflict',{receipts:findings.identityReceipts});
- const same=receipts.some(row=>row.source_sha256===aggregateSha256);
- const others=receipts.filter(row=>row.source_sha256!==aggregateSha256);
- findings.baseline=receipts.length===0?'first_run':same?'same_baseline':'changed_baseline';
- if(others.length&&!same&&!delta)throw new BackfillStop('baseline_changed',{previous:others.map(row=>row.source_sha256),current:aggregateSha256});
+ if(!receipts.length){findings.baseline='first_run';return findings;}
+ const newestAt=receipts.reduce((max,row)=>row.imported_at>max?row.imported_at:max,'');
+ const newest=[...new Set(receipts.filter(row=>row.imported_at===newestAt).map(row=>row.source_sha256))];
+ if(newest.length>1)throw new BackfillStop('baseline_ambiguous',{newestAt,checksums:newest});
+ const mark=newest[0],seen=receipts.some(row=>row.source_sha256===aggregateSha256);
+ findings.highWater={sourceSha256:mark,importedAt:newestAt};
+ if(mark===aggregateSha256){findings.baseline='same_baseline';return findings;}
+ if(seen)throw new BackfillStop('baseline_rollback',{current:aggregateSha256,highWater:findings.highWater});
+ if(baselineAt!=null&&!(baselineAt>newestAt))throw new BackfillStop('baseline_rollback',{current:aggregateSha256,baselineAt,highWater:findings.highWater});
+ findings.baseline='changed_baseline';
+ if(!delta)throw new BackfillStop('baseline_changed',{previous:[...new Set(receipts.map(row=>row.source_sha256))],current:aggregateSha256});
  return findings;
 }
 async function recordIdentity(adapter,{databaseId,aggregateSha256,importedAt}){
@@ -208,13 +220,13 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
    report.probe={database:target.scratchDatabaseId,...probe};
    if(!probe.atomic)throw new BackfillStop('batch_not_atomic',probe);
    db=createD1Adapter({target,databaseId:target.databaseId,fetchImpl,sleep});
-   identityFindings=await verifyTargetIdentity(db,{databaseId:target.databaseId,databaseName:target.databaseName,aggregateSha256:batch.aggregateSha256,delta});
+   identityFindings=await verifyTargetIdentity(db,{databaseId:target.databaseId,databaseName:target.databaseName,aggregateSha256:batch.aggregateSha256,baselineAt:batch.finishedAt,delta});
    report.target={kind:'d1',databaseId:target.databaseId,databaseName:target.databaseName,endpoint:new URL(target.endpoint).host,endpointOverride:target.endpointOverride,limits:{maxBatchStatements:target.maxBatchStatements,maxBatchBytes:target.maxBatchBytes}};
   }else if(mode==='sqlite'){
    if(!sqliteFile)throw new ExportError('configuration','A SQLite file is required for the dry-run');
    const file=outsideRepository(sqliteFile);
    db=openSqlite(file);
-   identityFindings=await verifyTargetIdentity(db,{databaseId:'sqlite:'+path.basename(file),databaseName:'dry-run',aggregateSha256:batch.aggregateSha256,delta,describe:false});
+   identityFindings=await verifyTargetIdentity(db,{databaseId:'sqlite:'+path.basename(file),databaseName:'dry-run',aggregateSha256:batch.aggregateSha256,baselineAt:batch.finishedAt,delta,describe:false});
    report.target={kind:'sqlite',file};
   }else throw new ExportError('configuration','mode must be d1 or sqlite');
   report.identity=identityFindings;
@@ -232,6 +244,8 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
   return await finish(result.stopped?'stopped':result.pending>0?'partial':'completed');
  }catch(error){
   if(error instanceof BackfillStop){report.stopReasons=[error.reason];return await finish('no_go',{noGo:{reason:error.reason,details:error.details}});}
+  // An uncertain or oversized write anywhere in the run (identity receipt, probe, unit) is a NO-GO with a report, never a silent retry.
+  if(error instanceof D1Error&&['write_uncertain','batch_too_large','statement'].includes(error.kind)){report.stopReasons=[error.kind];return await finish('no_go',{noGo:{reason:error.kind,details:{message:error.message,...error.details}}});}
   throw error;
  }
 }

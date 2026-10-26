@@ -46,7 +46,7 @@ function fakeD1(databases){
    for(const hook of hooks){const result=await hook({...call,phase:'before'});if(typeof result==='number')return send(result,{success:false,errors:[{message:'Injected'}]});}
    const input='PRAGMA foreign_keys=ON;\n'+(database.atomic!==false&&call.write?'BEGIN;\n'+body.sql+'\nCOMMIT;\n':body.sql+'\n');
    const result=sqlite(database.file,input,{json:true});
-   for(const hook of hooks){const after=await hook({...call,phase:'after',ok:result.status===0});if(after==='drop'){request.socket.destroy();return;}}
+   for(const hook of hooks){const after=await hook({...call,phase:'after',ok:result.status===0});if(after==='drop'){request.socket.destroy();return;}if(typeof after==='number')return send(after,{success:false,errors:[{message:'Injected after commit'}]});}
    if(result.status!==0)return send(400,{success:false,errors:[{code:7500,message:(result.stderr||'SQL error').trim().slice(0,300)}],result:[]});
    const text=result.stdout.trim();
    const rows=text?JSON.parse(text.split('\n').filter(Boolean).length&&text.startsWith('[')?text.replace(/\]\s*\[/g,','):'[]'):[];
@@ -70,10 +70,10 @@ const baseBodies=()=>({
  'enrichment/films/heat-1995/predictions.json':{current:{...version.record,...version.pointer},history:[]},
  [version.pointer.r2Key]:Buffer.from(version.text,'utf8'),
 });
-function writeSnapshot(name,bodies,{production=true,status='consistent_fenced'}={}){
+function writeSnapshot(name,bodies,{production=true,status='consistent_fenced',finishedAt='2026-10-26T01:00:00.000Z'}={}){
  const directory=path.join(root,name);fs.rmSync(directory,{recursive:true,force:true});fs.mkdirSync(path.join(directory,'objects'),{recursive:true});
  const entries=Object.entries(bodies).map(([key,value])=>{const bytes=Buffer.isBuffer(value)?value:Buffer.from(JSON.stringify(value),'utf8');const file=sha256(Buffer.from(key,'utf8'))+'.bin';fs.writeFileSync(path.join(directory,'objects',file),bytes);return {key,file:'objects/'+file,size:bytes.length,sha256:sha256(bytes),metadata:{key,size:bytes.length,etag:'etag-'+sha256(bytes).slice(0,8)}};});
- const manifest=manifestFor(entries,1,'2026-10-26T00:00:00.000Z','2026-10-26T01:00:00.000Z',[]);
+ const manifest=manifestFor(entries,1,'2026-10-26T00:00:00.000Z',finishedAt,[]);
  if(production)Object.assign(manifest,{sourceSiteId:null,sourceOrigin:null,status,noGoReasons:status==='consistent_fenced'?[]:['fence_changed'],source:{kind:'cloudflare-r2-s3',bucket:'iptv',accountId:ACCOUNT,endpoint:'example.r2',endpointOverride:true,exporter:'scripts/r2-snapshot-export.mjs',readOnly:true},fence:{ok:status==='consistent_fenced',keys:[]},baselineIdentity:{publishedProgrammeRunId:'run-1',syncUpdatedAt:null,continuationAt:null,continuationHopId:null,latestEnrichmentRunId:null}});
  fs.writeFileSync(path.join(directory,'manifest.json'),JSON.stringify(manifest));
  return {directory,aggregateSha256:manifest.totals.aggregateSha256};
@@ -174,7 +174,7 @@ try{
  assert.equal(fake.calls.filter(call=>call.database===TARGET&&call.write&&!/import_receipt/.test(call.sql)).length,writesBefore,'a same-baseline rerun sends no data write');
 
  // Changed manifest: refused without --delta; with --delta the changed object is re-imported and its old receipt is superseded.
- const revised=writeSnapshot('revised',{...baseBodies(),'enrichment/films/heat-1995/actual.json':{rating:4.5,source:'letterboxd',updatedAt:later}});
+ const revised=writeSnapshot('revised',{...baseBodies(),'enrichment/films/heat-1995/actual.json':{rating:4.5,source:'letterboxd',updatedAt:later}},{finishedAt:'2026-10-26T06:00:00.000Z'});
  const refusedDelta=await runBackfill({snapshot:revised.directory,mode:'d1',target,output:output('changed'),sleep:noSleep});
  assert.deepEqual(refusedDelta.stopReasons,['baseline_changed']);
  assert.equal(refusedDelta.noGo.details.previous.includes(snapshot.aggregateSha256),true);
@@ -186,6 +186,21 @@ try{
  assert.equal(delta.result.receipts.superseded.some(item=>item.sourceKey==='manifest.json'),true);
  assert.equal(delta.result.receipts.stale.length,0);
  assert.equal(count(targetFile,"SELECT rating*10 AS n FROM actual_rating WHERE film_id='film:heat-1995'"),45);
+ // The lineage only moves forward: after A then B, running A again is a rollback, with or without --delta; so is a never-seen
+ // baseline older than the high-water mark. Re-running B (the mark) is allowed.
+ for(const delta of [false,true]){
+  const back=await runBackfill({snapshot:snapshot.directory,mode:'d1',target,delta,output:output('rollback-'+delta),sleep:noSleep});
+  assert.deepEqual(back.stopReasons,['baseline_rollback'],'A after B with delta='+delta);
+  assert.equal(back.noGo.details.highWater.sourceSha256,revised.aggregateSha256);
+ }
+ const older=writeSnapshot('older',{...baseBodies(),'enrichment/films/heat-1995/actual.json':{rating:3,source:'letterboxd',updatedAt:at}},{finishedAt:'2026-10-26T03:00:00.000Z'});
+ assert.deepEqual((await runBackfill({snapshot:older.directory,mode:'d1',target,delta:true,output:output('older'),sleep:noSleep})).stopReasons,['baseline_rollback']);
+ assert.equal(count(targetFile,"SELECT rating*10 AS n FROM actual_rating WHERE film_id='film:heat-1995'"),45,'no rollback write landed');
+ assert.equal((await runBackfill({snapshot:revised.directory,mode:'d1',target,output:output('mark-again'),sleep:noSleep})).identity.baseline,'same_baseline');
+ // Two different baselines recorded at the same instant are ambiguous, never resolved by guessing.
+ sqlite(targetFile,"INSERT INTO import_receipt (source_key,source_sha256,target_table,target_id,imported_at) VALUES ('manifest.json','twin-sha','database','"+TARGET+"','2026-10-26T06:00:00.000Z');");
+ assert.deepEqual((await runBackfill({snapshot:revised.directory,mode:'d1',target,output:output('twin'),sleep:noSleep})).stopReasons,['baseline_ambiguous']);
+ sqlite(targetFile,"DELETE FROM import_receipt WHERE source_sha256='twin-sha';");
 
  // Duplicate receipts are a no-op; a stale receipt (old checksum, nothing superseding it) and a foreign receipt block class A.
  {
@@ -224,6 +239,30 @@ try{
   assert.equal(after.status,'completed',JSON.stringify(after.noGo||after.result?.ledger));
   assert.equal(after.result.reconciled>=1,true,'the landed write is read back and receipted, not written again');
   assert.equal(after.result.parity.ok,true);
+  // A batch that commits and then answers HTTP 500 is sent exactly once: the run stops, and the next run reconciles by read-back.
+  const fiveFile=freshDatabase('five'),fiveFake=fakeD1({[TARGET]:{file:fiveFile,name:'iptv'},[SCRATCH]:{file:freshDatabase('five-scratch',{schema:false}),name:'iptv-scratch'}});
+  const fiveEndpoint=await fiveFake.start(),fiveTarget=readTarget(envFor(fiveEndpoint));
+  let fiveArmed=true;
+  fiveFake.hooks.push(({database,write,sql,phase,ok})=>{if(fiveArmed&&phase==='after'&&ok&&database===TARGET&&write&&/INSERT INTO actual_rating/.test(sql)){fiveArmed=false;return 500;}});
+  const five=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:fiveTarget,output:output('five'),sleep:noSleep});
+  assert.equal(five.status,'no_go');
+  assert.deepEqual(five.stopReasons,['write_uncertain']);
+  assert.equal(five.noGo.details.status,500);
+  assert.equal(fiveFake.calls.filter(call=>call.database===TARGET&&/INSERT INTO actual_rating/.test(call.sql)).length,1,'the uncertain batch was sent exactly once');
+  assert.equal(count(fiveFile,'SELECT COUNT(*) AS n FROM actual_rating'),1,'it did commit');
+  assert.equal(count(fiveFile,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_table='actual_rating'"),0);
+  const fiveAfter=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:fiveTarget,output:output('five-after'),sleep:noSleep});
+  assert.equal(fiveAfter.status,'completed',JSON.stringify(fiveAfter.noGo||fiveAfter.result?.ledger));
+  assert.equal(fiveAfter.result.reconciled>=1,true);
+  assert.equal(fiveFake.calls.filter(call=>call.database===TARGET&&/INSERT INTO actual_rating/.test(call.sql)).length,1,'the reconciling run did not resend it');
+  assert.equal(fiveAfter.result.parity.ok,true);
+  // A 503 on a write is just as uncertain and is not retried either.
+  let writeBusy=true;
+  fiveFake.hooks.push(({database,write,phase})=>{if(writeBusy&&phase==='before'&&database===TARGET&&write){writeBusy=false;return 503;}});
+  sqlite(fiveFile,'DELETE FROM import_receipt;');
+  const busy=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:fiveTarget,output:output('five-busy'),sleep:noSleep});
+  assert.deepEqual(busy.stopReasons,['write_uncertain']);
+  await fiveFake.stop();
   // Transient read failures are retried within a bound; a refused credential is not retried.
   let flaky=2;
   lostFake.hooks.push(({database,write,phase})=>{if(flaky>0&&phase==='before'&&database===TARGET&&!write){flaky--;return 503;}});
@@ -307,7 +346,7 @@ try{
   const again=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:dryFile,output:output('dry-again'),sleep:noSleep});
   assert.equal(again.identity.baseline,'first_run');
   assert.equal(again.result.applied,totalApplied);
-  const fence=await verifyTargetIdentity((await import('../scripts/offline-import.mjs')).openSqlite(dryFile),{databaseId:'sqlite:dry.sqlite',databaseName:'dry-run',aggregateSha256:revised.aggregateSha256,describe:false}).catch(error=>error);
+  const fence=await verifyTargetIdentity((await import('../scripts/offline-import.mjs')).openSqlite(dryFile),{databaseId:'sqlite:dry.sqlite',databaseName:'dry-run',aggregateSha256:revised.aggregateSha256,baselineAt:'2026-10-26T06:00:00.000Z',describe:false}).catch(error=>error);
   assert.equal(fence instanceof BackfillStop&&fence.reason==='baseline_changed',true,'restoring a backup and pointing a different baseline at it is fenced');
  }
 
@@ -321,8 +360,8 @@ try{
   const cli=spawnSync(process.execPath,['scripts/d1-backfill.mjs','--snapshot',snapshot.directory,'--output',output('cli'),'--target','sqlite','--database',cliDb],{encoding:'utf8'});
   assert.equal(cli.status,0,cli.stderr);
   assert.equal(JSON.parse(cli.stdout).status,'completed');
-  // The fake D1 server lives in this process, so the CLI runs asynchronously; a synchronous spawn would block the server it calls.
-  const cliD1=await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['scripts/d1-backfill.mjs','--snapshot',snapshot.directory,'--output',output('cli-d1'),'--target','d1'],{env:{PATH:process.env.PATH,...envFor(endpoint)}});let stdout='',stderr='';child.stdout.on('data',chunk=>stdout+=chunk);child.stderr.on('data',chunk=>stderr+=chunk);child.on('error',reject);child.on('close',status=>resolve({status,stdout,stderr}));});
+  // The target's high-water mark is the revised baseline now, so the CLI re-runs that one. The fake D1 server lives in this process, so the CLI runs asynchronously; a synchronous spawn would block the server it calls.
+  const cliD1=await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['scripts/d1-backfill.mjs','--snapshot',revised.directory,'--output',output('cli-d1'),'--target','d1'],{env:{PATH:process.env.PATH,...envFor(endpoint)}});let stdout='',stderr='';child.stdout.on('data',chunk=>stdout+=chunk);child.stderr.on('data',chunk=>stderr+=chunk);child.on('error',reject);child.on('close',status=>resolve({status,stdout,stderr}));});
   assert.equal(cliD1.status,0,cliD1.stderr);
   assert.equal(JSON.parse(cliD1.stdout).result.applied,0);
   assert.equal(cliD1.stdout.includes(TOKEN),false);

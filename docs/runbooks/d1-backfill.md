@@ -20,7 +20,7 @@ Outputs go to an absolute directory outside the repository: `report.json` (statu
 - `GET /accounts/{account}/d1/database/{uuid}` returns the database `uuid` and `name`; the fence compares both.
 - `POST /accounts/{account}/d1/database/{uuid}/query` with a body `{sql}` executes the statements of one unit. Statements carry their values as SQL literals. The executor never sends `BEGIN`/`COMMIT`, which D1 rejects; whether a multi-statement request is all-or-nothing is exactly what the probe measures on the scratch database. The executor is correct only for a service that passes the probe at the configured size.
 - Reads are single `SELECT` statements; their `results` rows are used as returned.
-- Writes are not retried on a lost response (`write_uncertain`); the next run reconciles by reading back.
+- Writes are never retried: a lost response or a `429`/`5xx` answer to a write stops the run with `write_uncertain`, because the batch may already have committed; the next run reconciles by reading back. Only reads are retried, within a bound.
 
 ## Sizes, memory and duration
 
@@ -36,7 +36,7 @@ Outputs go to an absolute directory outside the repository: `report.json` (statu
 4. **Back up before the first write.** Record the D1 bookmark of the empty target (Time Travel) and an export of it in the evidence; the bookmark is the restore point.
 5. **Run in bounded batches.** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-N --target d1 --limit 5000 --acknowledged /abs/class-c.json`, repeated until `completed`. The first command of each run is the probe on the scratch database; a run that does not pass it never reads the target.
 6. **Rerun twice on the same baseline.** Both runs must report `applied: 0` and the same parity.
-7. **Delta.** Export a fresh baseline with its own consistency proof and run with `--delta`: changed objects are re-imported, old receipts are `superseded`, anything `stale` or `foreign` is a class A blocker, and keys missing from the new inventory are anomalies for the owner, never deletions in D1.
+7. **Delta.** Export a fresh baseline with its own consistency proof (its `finishedAt` must be later than the target's newest baseline) and run with `--delta`: changed objects are re-imported, old receipts are `superseded`, anything `stale` or `foreign` is a class A blocker, and keys missing from the new inventory are anomalies for the owner, never deletions in D1.
 
 ## GO/NO-GO for one run
 
@@ -50,6 +50,8 @@ Outputs go to an absolute directory outside the repository: `report.json` (statu
 | `no_go: batch_not_atomic` / `batch_too_large` | the service did not prove atomicity at this size, or a unit is larger | do not write; adjust limits only with a new probe, or design staging |
 | `no_go: target_identity_mismatch` / `scratch_identity_mismatch` / `schema_missing` / `database_identity_conflict` | wrong database, or not the database this lineage wrote | stop; check the environment and the database |
 | `no_go: baseline_changed` | the target already holds another baseline | run with `--delta` only if a delta is intended |
+| `no_go: baseline_rollback` | the snapshot is older than the newest baseline the target holds, or was imported before a newer one | export a fresh baseline; going back needs the recovery below, not a flag |
+| `no_go: baseline_ambiguous` | two baselines are recorded at the same newest instant | stop; the owner decides from the evidence which lineage is real |
 | `no_go: write_uncertain` | a write response was lost | rerun; the read-back reconciles |
 
 ## Recovery and rollback
