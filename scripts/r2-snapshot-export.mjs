@@ -84,7 +84,8 @@ export function createReadOnlyClient({credentials,fetchImpl=fetch,retries=4,slee
   url.pathname='/'+rfc3986(credentials.bucket)+(key==null?'':'/'+key.split('/').map(rfc3986).join('/'));
   for(const [name,value] of Object.entries(query||{}))if(value!=null)url.searchParams.set(name,value);
   for(let attempt=0;;attempt++){
-   const headers=signRequest({method,url,headers:extraHeaders,credentials,now:now()});
+   // identity: Cloudflare otherwise compresses on the fly, weakening the ETag (so If-Match fails) and changing the bytes fetch hashes.
+   const headers=signRequest({method,url,headers:{'Accept-Encoding':'identity',...extraHeaders},credentials,now:now()});
    let response;
    try{response=await fetchImpl(url,{method,headers,redirect:'error',cache:'no-store',signal:AbortSignal.timeout(timeoutMs)});}
    catch{if(attempt<retries){await sleep(100*2**attempt);continue;}throw new ExportError('network','Source request failed after retries');}
@@ -106,6 +107,9 @@ export function createReadOnlyClient({credentials,fetchImpl=fetch,retries=4,slee
 function quoteEtag(etag){return /^".*"$/.test(etag)?etag:'"'+etag+'"';}
 function unquoteEtag(etag){return String(etag||'').trim().replace(/^"(.*)"$/,'$1');}
 function headMetadata(key,response){
+ const encoding=(response.headers.get('content-encoding')||'identity').trim().toLowerCase();
+ if(encoding!=='identity')throw new ExportError('protocol','Object response is content-encoded; raw bytes are required');
+ if(/^W\//.test(String(response.headers.get('etag')||'').trim()))throw new ExportError('protocol','Object response carries a weak ETag');
  const size=Number(response.headers.get('content-length'));
  const etag=unquoteEtag(response.headers.get('etag'));
  if(!etag||!Number.isSafeInteger(size)||size<0)throw new ExportError('protocol','Object response lacks ETag or Content-Length');
