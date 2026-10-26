@@ -32,4 +32,6 @@ The scorer combines duplicate rows by **TMDB ID** before calculating uniqueness;
 
 `CANDIDATE_DISCOVERY` is an **independent optional runtime flag** for bounded title/year variants. The dated [AIR-68 cutover](https://trello.com/c/qbLDc6Ql) enabled scored resolution but did not approve optional variants. A historical rollout result does not establish today's flag setting. Each explicit discovery step processes a bounded chunk; no recursive public self-fetch or unbounded TMDB work is implied. See [one-chunk ADR](../adr/0006-one-chunk-discovery.md).
 
+The catalogue upsert above is the only writer that creates or re-identifies catalogue records. The owner-triggered [poster hydration](../reference/api/catalog.md#poster-hydration) is a field repair outside this flow: it fills only the `poster` field of already verified records from TMDB detail by the same id, under the same resolver lease, and never creates a record, a decision or an identity.
+
 R2 remains authoritative. The separately planned D1 candidate tables are not active production authority.

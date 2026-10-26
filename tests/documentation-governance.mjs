@@ -17,6 +17,7 @@ assert.match(verify(['src/discovery.js'], {'src/discovery.js': '+const mode = en
 assert.deepEqual(verify(['src/discovery.js','docs/reference/feature-flags.md'], {'src/discovery.js': '+const mode = env.SCORED_RESOLUTION;'}), []);
 assert.deepEqual(verify(['tests/scorer.mjs'], {'tests/scorer.mjs': '+env.SCORED_RESOLUTION = "on";'}), []);
 assert.deepEqual(verify(['src/discovery.js'], {'src/discovery.js': ' const mode = env.SCORED_RESOLUTION;'}), []);
+assert.match(verify(['src/discovery.js'], {'src/discovery.js': "+const on = env.CATALOG_POSTER_HYDRATION==='on';"}).join(' '), /feature-flags/, 'the poster hydration flag is registered');
 assert.match(verify(['src/logic.js'], {}, base.replace('Research evidence: no','Research evidence: yes')).join(' '), /docs\/evidence/);
 assert.deepEqual(verify(['docs/evidence/example.md'],{},base.replace('Research evidence: no','Research evidence: yes')),[]);
 const arch = 'Documentation impact: docs/adr/0020.md and diagrams\nArchitecture impact: changed - modify source of truth\nResearch evidence: no';

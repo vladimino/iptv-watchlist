@@ -254,6 +254,103 @@ async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films);}
  if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films);return true;
 }
+// Owner-triggered poster hydration for catalog records that were stored without a poster. It touches only the `poster`
+// field of records with a verified TMDB identity, takes the asset from TMDB movie detail by that id (the same w342 form the
+// discovery writer stores), and writes under the resolver lease with a compare-and-swap on both catalog copies. A dry run
+// reads and counts only. Identity, aliases, shows, decisions, the generation pointer and every other key stay untouched.
+const CATALOG_POSTER_LIMIT=20,CATALOG_POSTER_DEFAULT_LIMIT=10,CATALOG_POSTER_ID_SAMPLE=50;
+const catalogPosterHydrationEnabled=env=>env?.CATALOG_POSTER_HYDRATION==='on';
+function catalogPosterPresent(value){return typeof value==='string'&&value.startsWith('https://');}
+function catalogPosterVerified(film){return !!film&&typeof film==='object'&&film.tmdbId!=null&&film.tmdbId!==''&&/^\d+$/.test(String(film.tmdbId))&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId);}
+function catalogPosterFromDetail(movie){const path=movie?.poster_path;return typeof path==='string'&&/^\/[A-Za-z0-9._-]+$/.test(path)?'https://image.tmdb.org/t/p/w342'+path:null;}
+async function catalogPosterObject(env,key){const object=await env.BUCKET.get(key);return object?{key,etag:object.etag,films:await object.json()}:{key,etag:null,films:null};}
+function catalogPosterMissing(sources){
+ const records=new Map();
+ for(const source of sources)for(const [id,film] of Object.entries(source.films||{})){if(!film||typeof film!=='object')continue;const seen=records.get(id);if(!seen)records.set(id,{id,film,missing:!catalogPosterPresent(film.poster)});else if(!catalogPosterPresent(film.poster))seen.missing=true;}
+ const all=[...records.values()].sort((a,b)=>a.id.localeCompare(b.id,'en')),missing=all.filter(row=>row.missing);
+ return {all,missing,verified:missing.filter(row=>catalogPosterVerified(row.film)),unverified:missing.filter(row=>!catalogPosterVerified(row.film))};
+}
+async function catalogPosterDetail(env,tmdbId){
+ let lastError=null;
+ for(let attempt=0;attempt<2;attempt++){
+  try{return {movie:await tmdbRequest(env,'movie/'+tmdbId+'?language=ru-RU')};}
+  catch(error){lastError=error;if(error?.retryAt)return {error:String(error.message||error),retryAt:error.retryAt};}
+ }
+ return {error:String(lastError?.message||lastError||'TMDB request failed')};
+}
+// Applies the fetched posters to one catalog copy: re-read, set only `poster` where the record is still the same verified
+// identity and still has no poster, compare-and-swap on the ETag. A lost race re-reads once; a second loss writes nothing.
+async function catalogPosterApply(env,key,found,lease){
+ for(let attempt=0;attempt<2;attempt++){
+  const current=await catalogPosterObject(env,key);
+  if(!current.films)return {key,written:false,reason:'absent',applied:[]};
+  const next={...current.films},applied=[];
+  for(const row of found){
+   const film=next[row.id];
+   if(!catalogPosterVerified(film)||String(film.tmdbId)!==row.tmdbId||catalogPosterPresent(film.poster))continue;
+   next[row.id]={...film,poster:row.poster};applied.push(row.id);
+  }
+  if(!applied.length)return {key,written:false,reason:'nothing_to_apply',applied};
+  if(!await renewDiscoveryLease(env,lease))throw leaseLostError();
+  if(typeof env.beforeCatalogPosterWrite==='function'){const hook=env.beforeCatalogPosterWrite;env.beforeCatalogPosterWrite=null;await hook(key);}
+  const saved=await env.BUCKET.put(key,JSON.stringify(next),{onlyIf:{etagMatches:current.etag},httpMetadata:{contentType:'application/json'}});
+  if(saved!==null)return {key,written:true,reason:null,applied};
+ }
+ return {key,written:false,reason:'catalog_changed',applied:[]};
+}
+async function catalogPosterHydration(env,body={}){
+ if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
+ if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>CATALOG_POSTER_LIMIT))return json({error:'Invalid limit'},400);
+ if(body.cursor!==undefined&&body.cursor!==null&&(typeof body.cursor!=='string'||body.cursor.length>200))return json({error:'Invalid cursor'},400);
+ const dryRun=body.dryRun!==false,limit=body.limit??CATALOG_POSTER_DEFAULT_LIMIT,cursor=body.cursor||null;
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const programmeRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
+ const sources=[await catalogPosterObject(env,'epg/discovered-films.json')];
+ if(programmeRunId)sources.push(await catalogPosterObject(env,epgGenerationKey(programmeRunId,'discovered-films.json')));
+ const counts=catalogPosterMissing(sources);
+ const summary={programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length};
+ if(dryRun)return json({dryRun:true,enabled:catalogPosterHydrationEnabled(env),...summary,ids:counts.verified.slice(0,CATALOG_POSTER_ID_SAMPLE).map(row=>row.id)});
+ if(!catalogPosterHydrationEnabled(env))return json({dryRun:false,enabled:false,error:'Catalog poster hydration is off',...summary},409);
+ if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({error:'TMDB is not configured'},503);
+ const lease=await acquireDiscoveryLease(env);
+ if(!lease)return json({dryRun:false,enabled:true,error:'Resolver is writing the catalog',...summary},409);
+ try{
+  const queue=counts.verified.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0),batch=queue.slice(0,limit),outcomes=[],found=[];
+  let retryAt=null;
+  for(const row of batch){
+   const tmdbId=String(row.film.tmdbId);
+   if(retryAt){outcomes.push({id:row.id,tmdbId,outcome:'not_attempted'});continue;}
+   const detail=await catalogPosterDetail(env,tmdbId);
+   if(detail.retryAt){retryAt=detail.retryAt;outcomes.push({id:row.id,tmdbId,outcome:'rate_limited'});continue;}
+   if(detail.error){outcomes.push({id:row.id,tmdbId,outcome:'tmdb_failed',error:detail.error});continue;}
+   if(String(detail.movie?.id)!==tmdbId){outcomes.push({id:row.id,tmdbId,outcome:'tmdb_id_mismatch'});continue;}
+   const poster=catalogPosterFromDetail(detail.movie);
+   if(!poster){outcomes.push({id:row.id,tmdbId,outcome:'no_poster_on_tmdb'});continue;}
+   found.push({id:row.id,tmdbId,poster});outcomes.push({id:row.id,tmdbId,outcome:'pending',poster});
+  }
+  const writes=[];let generationChanged=false;
+  if(found.length){
+   // A generation published while the details were fetched makes this call write nothing, so no copy of another generation is touched.
+   if(!await publishedGenerationMatches(env,programmeRunId)||(programmeRunId===null&&(await env.BUCKET.get(EPG_GENERATION_KEY))))generationChanged=true;
+   else{
+    if(programmeRunId)writes.push(await catalogPosterApply(env,epgGenerationKey(programmeRunId,'discovered-films.json'),found,lease));
+    writes.push(await catalogPosterApply(env,'epg/discovered-films.json',found,lease));
+   }
+  }
+  const appliedAnywhere=new Set(writes.flatMap(write=>write.applied));
+  for(const item of outcomes)if(item.outcome==='pending'){item.outcome=generationChanged?'generation_changed':appliedAnywhere.has(item.id)?'hydrated':'skipped_changed';if(item.outcome!=='hydrated')delete item.poster;}
+  // The cursor advances past every record that reached a final outcome. A rate limit stops before the limited record, and a
+  // generation change repeats the whole batch on the next call, so nothing is skipped by the cursor that was not answered.
+  const limited=outcomes.findIndex(item=>item.outcome==='rate_limited');
+  const settled=generationChanged?0:limited>=0?limited:batch.length;
+  const nextCursor=settled>0?batch[settled-1].id:cursor;
+  const remainingAfterCursor=Math.max(0,queue.length-settled);
+  return json({dryRun:false,enabled:true,...summary,requested:limit,processed:outcomes.filter(item=>item.outcome!=='not_attempted').length,hydrated:outcomes.filter(item=>item.outcome==='hydrated').length,outcomes,writes:writes.map(write=>({key:write.key,written:write.written,reason:write.reason,records:write.applied.length})),generationChanged,retryAt,nextCursor:remainingAfterCursor?nextCursor:null,remainingAfterCursor});
+ }catch(error){
+  if(error?.name==='LeaseLostError')return json({dryRun:false,enabled:true,error:'Resolver lease lost before the write',...summary},409);
+  throw error;
+ }finally{await releaseDiscoveryLease(env,lease);}
+}
 async function attachWatchlistShowing(env,seenRunId,filmId,candidate,fence=null){
  if(!await publishedGenerationMatches(env,seenRunId))return false;
  const pinned=await pinEpg(env);
