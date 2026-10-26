@@ -22,6 +22,59 @@ async function loadEpgSnapshot(env){
  const [programme,discovery,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovered-films.json')]);
  return {programmeRunId:pinned.epgPin?.programmeRunId||null,programme,discovery,catalog};
 }
+// Read-only catalog of verified films outside the watchlist that are available now, in the 72-hour
+// catch-up or within the next 24 hours of the published generation, with their stored current prediction.
+// Everything is derived in memory from the pinned generation, the watchlist, the view index and the current
+// profile: no R2 write, no model call, no TMDB call, no sync. The catalogue shape of `/api/programme` is not
+// changed. Films whose shows belong to another generation, whose prediction is not current for the profile,
+// whose identity is unverified, or that are rated or on the watchlist are not returned.
+const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
+function catalogShowStatus(show,now){return Number(show.start)>now?'future':Number(show.end)>now?'on_air':'archive';}
+function catalogPerson(person){return {id:String(person.id),name:person.name||person.original||null};}
+function catalogAvailable({catalog,programme,watchlist,index,profile,programmeRunId,pinned,now}){
+ const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set();
+ for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
+ const byIdentity=new Map();
+ for(const film of Object.values(catalog||{})){
+  if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
+  const id=String(film.id),identity=film.canonicalIdentity;
+  if(excluded.has(id)||excluded.has(identity))continue;
+  const item=index?.[id];
+  if(item?.actualRating!=null)continue;
+  if(!profile||!indexedPredictionCurrent(item,profile))continue;
+  if(!Array.isArray(film.shows)||film.showsProgrammeRunId!==programmeRunId)continue;
+  const shows=dedupeShows(film.shows).filter(show=>Number(show.start)>from&&Number(show.start)<to).sort((a,b)=>Number(a.start)-Number(b.start)||String(a.channelId||'').localeCompare(String(b.channelId||''),'en'));
+  if(!shows.length)continue;
+  const latest=Math.max(...shows.map(show=>Number(show.start))),availableUntil=latest+CATALOG_ARCHIVE_MS,future=shows.filter(show=>Number(show.start)>now);
+  const prediction=item.prediction,fingerprint=item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=canonicalMoodFacet(fingerprint,prediction);
+  const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:film.poster||null,url:film.url||null,
+   directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
+   shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
+   availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),
+   prediction:{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds},
+   fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
+  const kept=byIdentity.get(identity);
+  if(!kept||Date.parse(entry.availableUntil)>Date.parse(kept.availableUntil)||(entry.availableUntil===kept.availableUntil&&id<kept.id))byIdentity.set(identity,entry);
+ }
+ const films=[...byIdentity.values()].sort((a,b)=>Date.parse(a.availableUntil)-Date.parse(b.availableUntil)||a.id.localeCompare(b.id,'en'));
+ const channels=new Map();
+ for(const film of films)for(const channelId of new Set(film.shows.map(show=>show.channelId))){const show=film.shows.find(item=>item.channelId===channelId),entry=channels.get(channelId)||{channelId,channel:show.channel,films:0};entry.films++;channels.set(channelId,entry);}
+ return {programmeRunId,pinned,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
+}
+async function catalogAvailableRoute(env){
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const pinnedRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
+ // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
+ // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
+ const generationCopy=async name=>{const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;};
+ const [programme,catalog,watchlist,index,profile]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey)]);
+ if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
+ if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
+ if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
+ // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
+ const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now:Date.now()}));
+}
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
@@ -202,6 +255,7 @@ export default {async fetch(request,env,execution){
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
   if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const mode=lifecycleMode(env,'programme');const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,mode);return localizationResponse(presented.data,mode,presented,'programme');}
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};const mode=lifecycleMode(env,'watchlist');const presented=presentLocalized(data,titles,mode);return localizationResponse(presented.data,mode,presented,'watchlist');}
+  if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
   if(url.pathname==='/api/integrations/tmdb/status'&&request.method==='GET'){
    if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({connected:false,stage:'missing_secret'},503);
