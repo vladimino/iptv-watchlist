@@ -20,6 +20,12 @@ Run counters and film outcomes persist after each submission. Current-batch film
 Tests: node tests/continuous-drain.mjs; node tests/throughput.mjs; node tests/enrichment.mjs. The multi-batch integration test uses an isolated R2 implementation and deterministic validated model outputs; it is not a production LLM throughput benchmark.
 
 
+## Immutable prediction version objects
+
+Each committed prediction can also be written once as its own object. With `PREDICTION_VERSION_OBJECTS=on` (see the [feature flag register](../feature-flags.md)), a submit that creates or recalculates a prediction first writes `enrichment/films/<id>/predictions/versions/<sha256>.json`, where `<id>` is the stored film id as used in the bundle key and `<sha256>` is the SHA-256 of the object's exact bytes: the prediction record with its keys sorted recursively, without the pointer fields and without the history-only `replacedAt`. The write is conditional on the key being absent. If the key exists, its bytes are read back and must equal the bytes about to be written; a retry of the same record is therefore idempotent and a differing object is a storage conflict that fails the item and leaves the bundle unchanged. Only then is `predictions.json` rewritten with `current` carrying `r2Key` and `contentSha256`; a replaced record moves into `history` with its own pointer intact. A crash between the two writes leaves an unreferenced version object and an unchanged bundle, never a bundle pointer at a missing object. The view index receives the same record as the bundle.
+
+Readers are unchanged: freshness is still decided by profile version and hash, fingerprint hash and schema version, and prompt version; the pointer fields are extra data. Records written before the rule, or while the flag is `off`, carry no pointer and stay valid for the runtime. The shared rules (`src/domain/prediction-versions.js`) are the only definition of the body, the key and what counts as a linked pointer; the offline importer loads them from that source. The one-time materialization of records without a pointer is designed in the [prediction versions runbook](../../runbooks/prediction-versions.md) and planned, without writing, by `scripts/prediction-versions-plan.mjs`.
+
 ## Operator procedure
 
 External ChatGPT Tasks, schedule timing and troubleshooting are documented in [prediction operations](../../runbooks/prediction-operations.md); this page defines the runner protocol, idempotency and queue semantics. A caller must not infer task execution from code deployment.
