@@ -56,9 +56,11 @@ The watchlist parser stores `data-postered-identifier.lid` as the film id, and t
 
 | Verdict | Meaning |
 | --- | --- |
-| `supported` | Some codes equal stored ids, none of those disagree on year or rating, and no code matched a stored id only by title |
+| `supported` | Some codes equal stored ids, none of those disagree on year or rating, and no export film matched by title alone a stored id that no export code equals |
 | `refuted` | No code equals a stored id while titles do match stored ids |
-| `mixed` | Both exact id matches and title-only matches to stored ids, or disagreements |
+| `mixed` | Both exact id matches and title-only matches to stored ids no code equals, or disagreements |
 | `inconclusive` | The snapshot holds no Letterboxd id |
+
+A title match to a stored id that another export code already equals is a second film with a similar title (a remake or namesake); the report counts it as `titleYearOnCodeMatchedLid` and it does not weaken the verdict. `titleYearOnStoredLid` counts only title matches to stored ids no code claims.
 
 Until a snapshot verdict is `supported`, treat `lid_exact` counts as an observation about this one snapshot, not as a general rule.

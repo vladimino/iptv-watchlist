@@ -138,6 +138,13 @@ const lidOnly=buildIndex({watchlist:{films:[{id:'Q7r1',title:'Match Me',year:200
 assert.equal(lidHypothesis(matchExport([{code:'Q7r1',name:'Match Me',year:2000,rating:3}],lidOnly),lidOnly).verdict,'supported');
 assert.equal(lidHypothesis(matchExport([{code:'Q7s2',name:'Match Me',year:2000,rating:3}],lidOnly),lidOnly).verdict,'refuted');
 assert.equal(lidHypothesis(matchExport([{code:'Q7s2',name:'Match Me',year:2000}],buildIndex({})),buildIndex({})).verdict,'inconclusive');
+// A namesake whose title matches a stored id already equal to another export code does not weaken the verdict;
+// a title-only match to a stored id no code claims still does.
+const namesake=lidHypothesis(matchExport([{code:'Q7r1',name:'Match Me',year:2000,rating:3},{code:'Q7u9',name:'Match Me',year:2001,rating:1}],lidOnly),lidOnly);
+assert.equal(namesake.verdict,'supported');assert.equal(namesake.titleYearOnStoredLid,0);assert.equal(namesake.titleYearOnCodeMatchedLid,1);
+const twoIds=buildIndex({watchlist:{films:[{id:'Q7r1',title:'Match Me',year:2000},{id:'Q7r2',title:'Other Film',year:2005}]},ratings:{ratings:{Q7r1:3}}});
+const unclaimed=lidHypothesis(matchExport([{code:'Q7r1',name:'Match Me',year:2000,rating:3},{code:'Q7u8',name:'Other Film',year:2005}],twoIds),twoIds);
+assert.equal(unclaimed.verdict,'mixed');assert.equal(unclaimed.titleYearOnStoredLid,1);assert.equal(unclaimed.titleYearOnCodeMatchedLid,0);
 
 // CLI end to end.
 const exportDir=path.join(scratch,'export'),snapshotDir=path.join(scratch,'snapshot');

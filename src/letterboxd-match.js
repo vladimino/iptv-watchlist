@@ -120,12 +120,16 @@ export function lidHypothesis(matches,index){
  const byCodeRows=matches.filter(row=>row.basis==='code');
  const titleYear={agree:0,title_differs:0,year_only:0,unknown:0,disagree:0},rating={agree:0,disagree:0,unknown:0};
  for(const row of byCodeRows){titleYear[row.evidence.titleYear]++;rating[row.evidence.rating]++;}
- const titleOnly=matches.filter(row=>row.method==='title_year'&&row.filmId).length;
+ // A title match to a stored id that another export code already equals is a second film with a similar title (a remake,
+ // a namesake), not a sign that codes differ from ids; it is counted apart and does not weaken the verdict.
+ const claimed=new Set(byCodeRows.map(row=>row.filmId).filter(Boolean));
+ const titleRows=matches.filter(row=>row.method==='title_year'&&row.filmId);
+ const titleOnly=titleRows.filter(row=>!claimed.has(row.filmId)).length,titleOnClaimed=titleRows.length-titleOnly;
  let verdict='inconclusive';
  if(index.summary.storedLids>0){
   if(!byCodeRows.length)verdict=titleOnly?'refuted':'inconclusive';
   else if(titleYear.disagree===0&&rating.disagree===0&&titleYear.agree+titleYear.year_only+rating.agree>0)verdict=titleOnly?'mixed':'supported';
   else verdict='mixed';
  }
- return {storedLids:index.summary.storedLids,codesEqualToStoredLid:byCodeRows.length,titleYearOnStoredLid:titleOnly,titleYear,rating,verdict};
+ return {storedLids:index.summary.storedLids,codesEqualToStoredLid:byCodeRows.length,titleYearOnStoredLid:titleOnly,titleYearOnCodeMatchedLid:titleOnClaimed,titleYear,rating,verdict};
 }
