@@ -26,6 +26,12 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0018 — Preserve last-good ratings when Letterboxd returns HTTP 403](0018-letterboxd-last-good-ratings.md) | Accepted; retrospective 2026-10-24 | [AIR-118](https://trello.com/c/5qf3Zn3p), primary evidence in ADR |
 | [0019 — Live D1 backfill reads a verified production baseline and maps identities by rule](0019-live-d1-backfill-boundaries.md) | Accepted 2026-10-26 (design decision; no production operation authorized) | [AIR-74](https://trello.com/c/5AdAmKPe) owner G0 decision; [readiness assessment](../evidence/d1-migration/air-74-backfill-readiness-2026-10-26.md) |
 
+## Proposed records
+
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0020 — Owner-triggered, bounded poster hydration for verified catalog records](0020-owner-triggered-catalog-poster-hydration.md) | Accepted 2026-10-26 (accepted on owner review; no flag change or execution authorized) | [AIR-15](https://trello.com/c/Yz6SGd3R), [PR #122](https://github.com/vladimino/iptv-watchlist/pull/122) |
+
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
 ## Lifecycle

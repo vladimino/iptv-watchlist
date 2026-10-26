@@ -919,6 +919,7 @@ async function ratingsRefresh(env,body){
 async function enrichmentRoute(request,env,url,execution){const path=url.pathname,requestId=predictionRequestId(request);let body=null;if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!isObject(body))return json({error:'Invalid request'},400);}
  if(path==='/api/enrichment/ratings/status'&&request.method==='GET'){const stored=await loadJSON(env,RATINGS_STATUS_KEY),readable=await readableRatings(env);return json({...ratingsStatusView(stored,ratingsEnabled(env)),generationId:readable.generationId??stored?.generationId??null,pendingGenerationId:readable.pendingGenerationId});}
  if(path==='/api/enrichment/ratings/refresh'&&request.method==='POST')return ratingsRefresh(env,body);
+ if(path==='/api/enrichment/catalog/posters'&&request.method==='POST')return await catalogPosterHydration(env,body);
  if(path==='/api/enrichment/discovery/reconcile'&&request.method==='POST'){
   const pinned=await pinEpg(env);
   let [source,decisions]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')]);if(!source?.items)return json({error:'No discovery catalog'},409);
