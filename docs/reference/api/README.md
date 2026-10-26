@@ -4,6 +4,7 @@ Current interface contracts, not a grant of production writer access:
 
 - [MCP transport, tools and authorization](mcp.md)
 - [Enrichment endpoints, taste profile, EPG pipeline, and mood vocabulary](enrichment.md)
+- [Catalog of available films outside the watchlist (read-only)](catalog.md)
 - [Continuous prediction runner](prediction-runner.md)
 - [Run-step diagnostic provenance](run-diagnostics.md)
 - [Read-only prediction queue diagnostics](prediction-diagnostics.md)
