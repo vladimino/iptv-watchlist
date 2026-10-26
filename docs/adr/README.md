@@ -27,6 +27,12 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
+## Proposed records
+
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0019 — Live D1 backfill reads a verified production baseline and maps identities by rule](0019-live-d1-backfill-boundaries.md) | Proposed 2026-10-26; owner decision pending | [AIR-74](https://trello.com/c/5AdAmKPe) planning; [readiness assessment](../evidence/d1-migration/air-74-backfill-readiness-2026-10-26.md) |
+
 ## Lifecycle
 
 - **Proposed:** under review.
