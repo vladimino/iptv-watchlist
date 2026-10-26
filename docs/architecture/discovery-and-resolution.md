@@ -15,6 +15,10 @@ flowchart TD
     gate{"Independent identity gate:<br/>detail, competitors, generation"}
     writer["Verified decision and<br/>film/catalogue upsert"]
     unresolved["Persist uncertainty / retryAt;<br/>do not create Film"]
+    catalogue[("Film catalogue in R2:<br/>live copy and published generation copy")]
+    owner["Owner-approved call;<br/>CATALOG_POSTER_HYDRATION=on"]
+    hydrate["Poster hydration:<br/>verified records without poster,<br/>bounded batch under resolver lease"]
+    posterdetail["TMDB movie detail<br/>by the record's verified id"]
     epg --> ledger --> eligible
     eligible -->|no| unresolved
     eligible -->|yes| search --> scorer
@@ -25,13 +29,18 @@ flowchart TD
     gate -->|detail_verified and current| writer
     gate -->|ambiguous, mismatch, stale| unresolved
     writer --> ledger
+    writer --> catalogue
     unresolved --> ledger
+    owner --> hydrate
+    catalogue -.->|read records with poster null| hydrate
+    hydrate --> posterdetail
+    posterdetail -->|poster field only; generation and lease re-checked before each copy write| catalogue
 ```
 
 The scorer combines duplicate rows by **TMDB ID** before calculating uniqueness; multiple distinct editions with compatible titles and years remain competitors. `accepted`, `trusted: true`, an alias or another observation's verified decision is insufficient to write a Film. The detail gate checks the exact accepted ID, compatible title/year/runtime, competing editions, and the same pinned programme generation. A rejected, ambiguous or stale result must not be silently promoted.
 
 `CANDIDATE_DISCOVERY` is an **independent optional runtime flag** for bounded title/year variants. The dated [AIR-68 cutover](https://trello.com/c/qbLDc6Ql) enabled scored resolution but did not approve optional variants. A historical rollout result does not establish today's flag setting. Each explicit discovery step processes a bounded chunk; no recursive public self-fetch or unbounded TMDB work is implied. See [one-chunk ADR](../adr/0006-one-chunk-discovery.md).
 
-The catalogue upsert above is the only writer that creates or re-identifies catalogue records. The owner-triggered [poster hydration](../reference/api/catalog.md#poster-hydration) is a field repair outside this flow: it fills only the `poster` field of already verified records from TMDB detail by the same id, under the same resolver lease, and never creates a record, a decision or an identity.
+The catalogue upsert above is the only writer that creates or re-identifies catalogue records. The owner-triggered [poster hydration](../reference/api/catalog.md#poster-hydration) ([ADR 0020](../adr/0020-owner-triggered-catalog-poster-hydration.md)) is a second, separately gated writer outside this flow: it fills only the `poster` field of already verified records from TMDB detail by the same id, under the same resolver lease, and never creates a record, a decision or an identity. Its two catalogue writes are separate compare-and-swaps, not one atomic step; a stop between them is reported and completed by the next call. It runs only on an owner-approved call, never on a schedule.
 
 R2 remains authoritative. The separately planned D1 candidate tables are not active production authority.

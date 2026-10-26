@@ -53,6 +53,7 @@ function seed(){
 }
 const snapshot=()=>JSON.stringify([...records.entries()].filter(([key])=>key!==LEASE).sort());
 const without=(record,key)=>{const copy={...record};delete copy[key];return copy;};
+const outcomeOf=(response,id)=>response.body.outcomes.find(item=>item.id===id);
 
 // 1. Dry run (the default) reads and counts only, with the flag off or on.
 seed();let before=snapshot(),r=await post({});
@@ -95,7 +96,9 @@ assert.equal(outcome('tmdb_5'),undefined,'an unverified identity is never reques
 assert.equal(fetches.filter(url=>url.includes('/movie/4?')).length,2,'one bounded retry for a failing request');
 assert.equal(fetches.some(url=>url.includes('/movie/2?')||url.includes('/movie/5?')),false);
 assert.equal(fetches.every(url=>url.startsWith('https://api.themoviedb.org/3/movie/')),true);
-assert.equal(r.body.hydrated,2);assert.equal(r.body.processed,5);assert.equal(r.body.generationChanged,false);assert.equal(r.body.nextCursor,null);assert.equal(r.body.remainingAfterCursor,0);
+assert.equal(r.body.hydrated,2);assert.equal(r.body.processed,5);assert.equal(r.body.generationChanged,false);
+assert.equal(r.body.done,false,'a transient TMDB failure keeps the sweep open');assert.deepEqual(Array.from(r.body.retryable),['tmdb_4']);
+assert.equal(r.body.nextCursor,'tmdb_3','the cursor stops before the retryable record');assert.equal(r.body.remainingAfterCursor,2);
 assert.deepEqual(Array.from(r.body.writes.map(write=>[write.key,write.written,write.records])),[[COPY,true,2],[LIVE,true,2]]);
 for(const [key,before] of [[LIVE,original.live],[COPY,original.copy]]){
  const after=records.get(key);
@@ -157,14 +160,63 @@ assert.equal(r.status,200);assert.equal(r.body.generationChanged,true);
 assert.equal(JSON.stringify(records.get(COPY)),beforeGeneration.copy,'the old generation copy is untouched');
 assert.equal(JSON.stringify(records.get(LIVE)),beforeGeneration.live,'the live catalog is untouched');
 assert.equal(records.has('epg/generations/'+G2+'/discovered-films.json'),false,'no copy of the new generation is created');
-assert.equal(r.body.outcomes.filter(item=>item.outcome==='generation_changed').length,2);assert.equal(r.body.nextCursor,null);assert.equal(r.body.remainingAfterCursor,5,'the batch is repeated on the next call');
+assert.equal(r.body.outcomes.filter(item=>item.outcome==='generation_changed').length,2);
+assert.equal(r.body.done,false);assert.equal(r.body.nextCursor,'','the sweep restarts from the first record, and null stays reserved for completion');assert.equal(r.body.remainingAfterCursor,5,'the batch is repeated on the next call');
+assert.deepEqual(Array.from(r.body.writes.map(write=>[write.key,write.written,write.reason])),[[COPY,false,'generation_changed'],[LIVE,false,'generation_changed']]);
 assert.deepEqual(puts.filter(key=>key!==LEASE),[]);
+
+// 11b. The generation flips between the two writes: the generation copy is already written, the live catalog is not, and the
+// response says so per copy and per record. The written poster is a correct asset of the verified id; the next call completes.
+seed();let flipped=0;
+const flip=async key=>{if(key!==COPY)return;flipped++;const originalPutFlip=bucket.put;bucket.put=async(k,v,o)=>{const saved=await originalPutFlip(k,v,o);if(k===COPY&&saved){records.set(POINTER,{programmeRunId:G2,phase:'published'});etags.set(POINTER,'p2');bucket.put=originalPutFlip;}return saved;};};
+r=await post({dryRun:false,limit:5},{CATALOG_POSTER_HYDRATION:'on',beforeCatalogPosterWrite:flip});
+assert.equal(flipped,1);assert.equal(r.status,200);assert.equal(r.body.generationChanged,true);
+assert.deepEqual(Array.from(r.body.writes.map(write=>[write.key,write.written,write.reason,write.records])),[[COPY,true,null,2],[LIVE,false,'generation_changed',0]]);
+assert.equal(records.get(COPY).tmdb_1.poster,POSTER+'/one.jpg','the first copy keeps the written poster');
+assert.equal(records.get(LIVE).tmdb_1.poster,null,'the live catalog is not written after the generation changed');
+assert.equal(outcomeOf(r,'tmdb_1').outcome,'generation_changed');assert.deepEqual(Array.from(outcomeOf(r,'tmdb_1').writtenTo),[COPY]);
+assert.equal(r.body.done,false);assert.equal(r.body.nextCursor,'');assert.equal(r.body.retryable.includes('tmdb_1'),true);
+// Recovery: the next call (on the new generation) re-reads the live catalog and completes the missing copy.
+records.set('epg/generations/'+G2+'/discovered-films.json',structuredClone(records.get(LIVE)));etags.set('epg/generations/'+G2+'/discovered-films.json','g2');
+r=await post({dryRun:false,limit:5},{CATALOG_POSTER_HYDRATION:'on'});
+assert.equal(r.body.programmeRunId,G2);assert.equal(outcomeOf(r,'tmdb_1').outcome,'hydrated');assert.equal(records.get(LIVE).tmdb_1.poster,POSTER+'/one.jpg');
+
+// 11c. The guard runs again after a lost compare-and-swap: a generation published during the race stops the retry.
+seed();const raceFlip=async key=>{if(key!==COPY)return;const current=structuredClone(records.get(COPY));current.tmdb_9=film('tmdb_9',9);records.set(COPY,current);etags.set(COPY,'raced');records.set(POINTER,{programmeRunId:G2,phase:'published'});etags.set(POINTER,'p2');};
+r=await post({dryRun:false,limit:5},{CATALOG_POSTER_HYDRATION:'on',beforeCatalogPosterWrite:raceFlip});
+assert.deepEqual(Array.from(r.body.writes.map(write=>[write.key,write.written,write.reason])),[[COPY,false,'generation_changed'],[LIVE,false,'generation_changed']]);
+assert.equal(records.get(COPY).tmdb_1.poster,null);assert.equal(records.get(LIVE).tmdb_1.poster,null);
 
 // 12. A lease lost before the write refuses the write.
 seed();tmdb[1]=()=>{records.set(LEASE,{id:'stolen',expiresAt:Date.now()+60000});etags.set(LEASE,'stolen');return new Response(JSON.stringify({id:1,poster_path:'/one.jpg'}),{status:200});};
 r=await post({dryRun:false,limit:5},{CATALOG_POSTER_HYDRATION:'on'});
-assert.equal(r.status,409);assert.equal(r.body.error,'Resolver lease lost before the write');assert.deepEqual(puts.filter(key=>key!==LEASE),[]);
+assert.equal(r.status,409);assert.equal(r.body.leaseLost,true);assert.match(r.body.error,/lease lost/);assert.deepEqual(puts.filter(key=>key!==LEASE),[]);
+assert.deepEqual(Array.from(r.body.writes.map(write=>[write.key,write.written,write.reason])),[[COPY,false,'lease_lost'],[LIVE,false,'lease_lost']]);
 assert.equal(records.get(LEASE).id,'stolen','the other holder keeps its lease');
+// A lease lost between the two writes leaves the first copy written and reports it.
+seed();const steal=async key=>{if(key!==COPY)return;const originalPutSteal=bucket.put;bucket.put=async(k,v,o)=>{const saved=await originalPutSteal(k,v,o);if(k===COPY&&saved){records.set(LEASE,{id:'stolen',expiresAt:Date.now()+60000});etags.set(LEASE,'stolen');bucket.put=originalPutSteal;}return saved;};};
+r=await post({dryRun:false,limit:5},{CATALOG_POSTER_HYDRATION:'on',beforeCatalogPosterWrite:steal});
+assert.equal(r.status,409);assert.deepEqual(Array.from(r.body.writes.map(write=>[write.key,write.written,write.reason])),[[COPY,true,null],[LIVE,false,'lease_lost']]);
+assert.equal(outcomeOf(r,'tmdb_1').outcome,'lease_lost');assert.deepEqual(Array.from(outcomeOf(r,'tmdb_1').writtenTo),[COPY]);
+assert.equal(records.get(LIVE).tmdb_1.poster,null);
+
+// 12b. A transient TMDB failure for one id, with records after it: nothing is reported done while it is outstanding, and the
+// retry on the next call hydrates it. Terminal outcomes after it are not lost either.
+seed();let flaky=0;tmdb[4]=()=>{flaky++;return flaky<=2?new Response('busy',{status:503}):new Response(JSON.stringify({id:4,poster_path:'/four.jpg'}),{status:200});};
+tmdb[6]={id:6,poster_path:'/six.jpg'};
+r=await post({dryRun:false,limit:20},{CATALOG_POSTER_HYDRATION:'on'});
+assert.equal(outcomeOf(r,'tmdb_4').outcome,'tmdb_failed');assert.equal(outcomeOf(r,'tmdb_6').outcome,'hydrated','a record after the failure is still handled');
+assert.equal(r.body.done,false);assert.equal(r.body.nextCursor,'tmdb_3');assert.deepEqual(Array.from(r.body.retryable),['tmdb_4']);
+r=await post({dryRun:false,limit:20,cursor:r.body.nextCursor},{CATALOG_POSTER_HYDRATION:'on'});
+assert.equal(outcomeOf(r,'tmdb_4').outcome,'hydrated','the retry hydrates the failed record');assert.equal(records.get(LIVE).tmdb_4.poster,POSTER+'/four.jpg');
+assert.equal(r.body.done,true);assert.equal(r.body.nextCursor,null);assert.deepEqual(Array.from(r.body.retryable),[]);
+// A fresh sweep after completion only meets terminal records, and reports done again.
+r=await post({dryRun:false,limit:20},{CATALOG_POSTER_HYDRATION:'on'});
+assert.equal(r.body.hydrated,0);assert.equal(r.body.done,true);assert.deepEqual(Array.from(r.body.outcomes.map(item=>item.outcome)),['no_poster_on_tmdb']);
+// A record that keeps failing never lets the sweep report done, however often it is called.
+seed();tmdb[4]=()=>new Response('down',{status:503});tmdb[6]={id:6,poster_path:'/six.jpg'};
+let cursorChain=null;for(let call=0;call<3;call++){r=await post({dryRun:false,limit:20,...(cursorChain===null?{}:{cursor:cursorChain})},{CATALOG_POSTER_HYDRATION:'on'});assert.equal(r.body.done,false);assert.equal(r.body.nextCursor,'tmdb_3');cursorChain=r.body.nextCursor;}
+assert.deepEqual(Array.from(r.body.retryable),['tmdb_4']);
 
 // 13. Without a published pointer only the live catalog is read and written.
 seed();records.delete(POINTER);records.delete(COPY);r=await post({},{});assert.equal(r.body.programmeRunId,null);assert.equal(r.body.catalogRecords,7);
@@ -175,4 +227,4 @@ assert.deepEqual(Array.from(r.body.writes.map(write=>write.key)),[LIVE]);assert.
 const get=await worker.fetch(new Request('https://iptv.example/api/enrichment/catalog/posters'),{...baseEnv,CATALOG_POSTER_HYDRATION:'on'},{waitUntil(){}});
 assert.equal(get.status,404);
 
-console.log('Catalog posters: read-only dry run, exact on flag, origin and input checks, resolver lease, verified ids only, poster-only writes in both copies, bounded retry and rate limit, cursor, ETag races without overwrite, generation change and lease loss write nothing');
+console.log('Catalog posters: read-only dry run, exact on flag, origin and input checks, resolver lease, verified ids only, poster-only writes in both copies, bounded retry and rate limit, a cursor that never passes a retryable record and a truthful done, ETag races without overwrite, generation and lease re-checked at every write with partial writes reported');

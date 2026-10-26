@@ -256,7 +256,7 @@ async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
 }
 // Owner-triggered poster hydration for catalog records that were stored without a poster. It touches only the `poster`
 // field of records with a verified TMDB identity, takes the asset from TMDB movie detail by that id (the same w342 form the
-// discovery writer stores), and writes under the resolver lease with a compare-and-swap on both catalog copies. A dry run
+// discovery writer stores), and writes under the resolver lease with a separate compare-and-swap on each catalog copy. A dry run
 // reads and counts only. Identity, aliases, shows, decisions, the generation pointer and every other key stay untouched.
 const CATALOG_POSTER_LIMIT=20,CATALOG_POSTER_DEFAULT_LIMIT=10,CATALOG_POSTER_ID_SAMPLE=50;
 const catalogPosterHydrationEnabled=env=>env?.CATALOG_POSTER_HYDRATION==='on';
@@ -278,25 +278,49 @@ async function catalogPosterDetail(env,tmdbId){
  }
  return {error:String(lastError?.message||lastError||'TMDB request failed')};
 }
-// Applies the fetched posters to one catalog copy: re-read, set only `poster` where the record is still the same verified
-// identity and still has no poster, compare-and-swap on the ETag. A lost race re-reads once; a second loss writes nothing.
-async function catalogPosterApply(env,key,found,lease){
+// Outcomes that end a record's turn in a sweep. Every other outcome is retryable, and the cursor never moves past it.
+const CATALOG_POSTER_TERMINAL=new Set(['hydrated','already_present','no_poster_on_tmdb','tmdb_id_mismatch']);
+// The two catalog copies are separate R2 objects: each write is its own compare-and-swap, and nothing makes them atomic together.
+// The guard runs immediately before every write attempt, including after a lost compare-and-swap: the published generation must
+// still be the one the call started from, and the resolver lease must still be ours (renewed). A failed guard stops all writes.
+async function catalogPosterGuard(env,programmeRunId,lease){
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const current=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
+ if(current!==programmeRunId)return 'generation_changed';
+ if(!await renewDiscoveryLease(env,lease))return 'lease_lost';
+ return null;
+}
+// Applies the fetched posters to one copy. Per record: `written` (set now), `present` (the copy already has a poster),
+// `changed` (absent, or no longer the same verified id: never written), or the stop reason. Only `poster` is set; a lost
+// compare-and-swap re-reads and retries once, and a second loss leaves the copy unwritten (`catalog_changed`).
+async function catalogPosterApply(env,key,found,guard){
+ let status={};
  for(let attempt=0;attempt<2;attempt++){
+  status={};
   const current=await catalogPosterObject(env,key);
-  if(!current.films)return {key,written:false,reason:'absent',applied:[]};
+  if(!current.films){for(const row of found)status[row.id]='changed';return {key,written:false,reason:'absent',status};}
   const next={...current.films},applied=[];
   for(const row of found){
    const film=next[row.id];
-   if(!catalogPosterVerified(film)||String(film.tmdbId)!==row.tmdbId||catalogPosterPresent(film.poster))continue;
-   next[row.id]={...film,poster:row.poster};applied.push(row.id);
+   if(!catalogPosterVerified(film)||String(film.tmdbId)!==row.tmdbId)status[row.id]='changed';
+   else if(catalogPosterPresent(film.poster))status[row.id]='present';
+   else{next[row.id]={...film,poster:row.poster};applied.push(row.id);}
   }
-  if(!applied.length)return {key,written:false,reason:'nothing_to_apply',applied};
-  if(!await renewDiscoveryLease(env,lease))throw leaseLostError();
+  if(!applied.length)return {key,written:false,reason:'nothing_to_apply',status};
+  const stop=await guard();
+  if(stop){for(const id of applied)status[id]=stop;return {key,written:false,reason:stop,status};}
   if(typeof env.beforeCatalogPosterWrite==='function'){const hook=env.beforeCatalogPosterWrite;env.beforeCatalogPosterWrite=null;await hook(key);}
   const saved=await env.BUCKET.put(key,JSON.stringify(next),{onlyIf:{etagMatches:current.etag},httpMetadata:{contentType:'application/json'}});
-  if(saved!==null)return {key,written:true,reason:null,applied};
+  if(saved!==null){for(const id of applied)status[id]='written';return {key,written:true,reason:null,status};}
+  for(const id of applied)status[id]='catalog_changed';
  }
- return {key,written:false,reason:'catalog_changed',applied:[]};
+ return {key,written:false,reason:'catalog_changed',status};
+}
+function catalogPosterOutcome(id,writes){
+ const states=writes.map(write=>write.status[id]),writtenTo=writes.filter(write=>write.status[id]==='written').map(write=>write.key);
+ if(states.includes('changed'))return {outcome:'skipped_changed',writtenTo};
+ if(states.every(state=>state==='written'||state==='present'))return {outcome:writtenTo.length?'hydrated':'already_present',writtenTo};
+ return {outcome:states.find(state=>state&&state!=='written'&&state!=='present')||'not_written',writtenTo};
 }
 async function catalogPosterHydration(env,body={}){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
@@ -328,27 +352,33 @@ async function catalogPosterHydration(env,body={}){
    if(!poster){outcomes.push({id:row.id,tmdbId,outcome:'no_poster_on_tmdb'});continue;}
    found.push({id:row.id,tmdbId,poster});outcomes.push({id:row.id,tmdbId,outcome:'pending',poster});
   }
-  const writes=[];let generationChanged=false;
+  // Generation copy first, then the live catalog. A stop before either write leaves both unwritten; a stop between them leaves
+  // the generation copy written and the live catalog not, which the response reports per copy and per record.
+  const writes=[];
   if(found.length){
-   // A generation published while the details were fetched makes this call write nothing, so no copy of another generation is touched.
-   if(!await publishedGenerationMatches(env,programmeRunId)||(programmeRunId===null&&(await env.BUCKET.get(EPG_GENERATION_KEY))))generationChanged=true;
-   else{
-    if(programmeRunId)writes.push(await catalogPosterApply(env,epgGenerationKey(programmeRunId,'discovered-films.json'),found,lease));
-    writes.push(await catalogPosterApply(env,'epg/discovered-films.json',found,lease));
+   const guard=()=>catalogPosterGuard(env,programmeRunId,lease);
+   let stopped=null;
+   for(const key of programmeRunId?[epgGenerationKey(programmeRunId,'discovered-films.json'),'epg/discovered-films.json']:['epg/discovered-films.json']){
+    if(stopped){writes.push({key,written:false,reason:stopped,status:Object.fromEntries(found.map(row=>[row.id,stopped]))});continue;}
+    const result=await catalogPosterApply(env,key,found,guard);writes.push(result);
+    if(result.reason==='generation_changed'||result.reason==='lease_lost')stopped=result.reason;
    }
   }
-  const appliedAnywhere=new Set(writes.flatMap(write=>write.applied));
-  for(const item of outcomes)if(item.outcome==='pending'){item.outcome=generationChanged?'generation_changed':appliedAnywhere.has(item.id)?'hydrated':'skipped_changed';if(item.outcome!=='hydrated')delete item.poster;}
-  // The cursor advances past every record that reached a final outcome. A rate limit stops before the limited record, and a
-  // generation change repeats the whole batch on the next call, so nothing is skipped by the cursor that was not answered.
-  const limited=outcomes.findIndex(item=>item.outcome==='rate_limited');
-  const settled=generationChanged?0:limited>=0?limited:batch.length;
-  const nextCursor=settled>0?batch[settled-1].id:cursor;
-  const remainingAfterCursor=Math.max(0,queue.length-settled);
-  return json({dryRun:false,enabled:true,...summary,requested:limit,processed:outcomes.filter(item=>item.outcome!=='not_attempted').length,hydrated:outcomes.filter(item=>item.outcome==='hydrated').length,outcomes,writes:writes.map(write=>({key:write.key,written:write.written,reason:write.reason,records:write.applied.length})),generationChanged,retryAt,nextCursor:remainingAfterCursor?nextCursor:null,remainingAfterCursor});
- }catch(error){
-  if(error?.name==='LeaseLostError')return json({dryRun:false,enabled:true,error:'Resolver lease lost before the write',...summary},409);
-  throw error;
+  for(const item of outcomes)if(item.outcome==='pending'){const result=catalogPosterOutcome(item.id,writes);item.outcome=result.outcome;if(result.writtenTo.length)item.writtenTo=result.writtenTo;if(result.outcome!=='hydrated'&&!result.writtenTo.length)delete item.poster;}
+  // Completion invariant: the cursor moves only past records whose outcome is terminal, so following `nextCursor` from no
+  // cursor visits every verified record without a poster until each one is hydrated or terminally settled. `done` is true only
+  // when this batch reached the end of that queue and every outcome in it is terminal.
+  const firstOpen=outcomes.findIndex(item=>!CATALOG_POSTER_TERMINAL.has(item.outcome));
+  const settled=firstOpen<0?batch.length:firstOpen;
+  const done=batch.length===queue.length&&firstOpen<0;
+  // `null` is reserved for completion; a sweep that has to restart from the first record gets the empty cursor instead.
+  const nextCursor=done?null:settled>0?batch[settled-1].id:(cursor||'');
+  const generationChanged=writes.some(write=>write.reason==='generation_changed'),leaseLost=writes.some(write=>write.reason==='lease_lost');
+  const payload={dryRun:false,enabled:true,...summary,requested:limit,processed:outcomes.filter(item=>item.outcome!=='not_attempted').length,hydrated:outcomes.filter(item=>item.outcome==='hydrated').length,outcomes,
+   writes:writes.map(write=>({key:write.key,written:write.written,reason:write.reason,records:Object.values(write.status).filter(state=>state==='written').length})),
+   retryable:outcomes.filter(item=>!CATALOG_POSTER_TERMINAL.has(item.outcome)).map(item=>item.id),generationChanged,leaseLost,retryAt,done,nextCursor,remainingAfterCursor:Math.max(0,queue.length-settled)};
+  if(leaseLost)return json({...payload,error:'Resolver lease lost; see writes for the copies already written'},409);
+  return json(payload);
  }finally{await releaseDiscoveryLease(env,lease);}
 }
 async function attachWatchlistShowing(env,seenRunId,filmId,candidate,fence=null){
