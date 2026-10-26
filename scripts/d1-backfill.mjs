@@ -49,7 +49,7 @@ export function readTarget(env=process.env){
  return {accountId,apiToken,databaseId,scratchDatabaseId,databaseName,endpoint,endpointOverride:!!String(env.D1_BACKFILL_ENDPOINT||'').trim(),maxBatchStatements,maxBatchBytes};
 }
 function bounded(value,fallback){if(value==null||value==='')return fallback;const number=Number(value);if(!Number.isInteger(number)||number<1)throw new ExportError('configuration','Batch limits must be positive integers');return number;}
-function endpointFor(override){
+export function endpointFor(override){
  const value=String(override||'').trim();
  if(!value)return DEFAULT_ENDPOINT;
  let url;try{url=new URL(value);}catch{throw new ExportError('configuration','D1_BACKFILL_ENDPOINT is not a URL');}
