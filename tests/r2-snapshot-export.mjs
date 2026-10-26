@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import {gzipSync} from 'node:zlib';
 import {ExportError} from '../scripts/migration-export.mjs';
 import {FENCE_KEYS,NoGo,STATUS_CONSISTENT,STATUS_NO_GO,createReadOnlyClient,exportProductionSnapshot,inventoryDelta,parseListing,plan,readCredentials,signRequest,verifyProductionSnapshot} from '../scripts/r2-snapshot-export.mjs';
 
@@ -77,8 +78,8 @@ function fakeBucket(initial,{pageSize=3}={}){
   const url=new URL(request.url,'http://127.0.0.1');
   const [,bucketName,...rest]=url.pathname.split('/');
   const key=rest.length?rest.map(decodeURIComponent).join('/'):null;
-  let etagOverride=null;
-  for(const hook of hooks){const result=await hook({method:request.method,key,url,calls,put,items,request});if(result==='drop'){request.socket.destroy();return;}if(typeof result==='number'){response.writeHead(result);response.end();return;}if(result&&typeof result==='object'&&result.etag)etagOverride=result.etag;}
+  let etagOverride=null,compress=false;
+  for(const hook of hooks){const result=await hook({method:request.method,key,url,calls,put,items,request});if(result==='drop'){request.socket.destroy();return;}if(typeof result==='number'){response.writeHead(result);response.end();return;}if(result&&typeof result==='object'&&result.etag)etagOverride=result.etag;if(result&&typeof result==='object'&&result.compress)compress=true;}
   if(!verify(request,url)){calls.badSignature++;response.writeHead(403);response.end('<Error><Code>SignatureDoesNotMatch</Code></Error>');return;}
   if(bucketName!=='iptv'){response.writeHead(404);response.end();return;}
   if(request.method!=='GET'&&request.method!=='HEAD'){calls.writes++;response.writeHead(403);response.end('<Error><Code>AccessDenied</Code></Error>');return;}
@@ -94,6 +95,14 @@ function fakeBucket(initial,{pageSize=3}={}){
   const object=items.get(key);
   if(!object){response.writeHead(404);response.end();return;}
   const ifMatch=request.headers['if-match'];
+  // Like Cloudflare's edge: unless the client asks for identity, the object is compressed on the fly, its ETag becomes weak,
+  // Content-Length disappears and If-Match (a strong comparison) can never succeed.
+  if(compress||request.headers['accept-encoding']!=='identity'){
+   if(ifMatch){response.writeHead(412);response.end();return;}
+   const body=gzipSync(object.bytes);
+   response.writeHead(200,{ETag:'W/"'+object.etag+'"','Content-Encoding':'gzip','Last-Modified':object.lastModified,'Content-Type':'application/octet-stream'});
+   if(request.method==='HEAD')response.end();else response.end(body);return;
+  }
   if(!etagOverride&&ifMatch&&ifMatch.replace(/^"(.*)"$/,'$1')!==object.etag){response.writeHead(412);response.end();return;}
   response.writeHead(200,{ETag:'"'+(etagOverride||object.etag)+'"','Content-Length':object.bytes.length,'Last-Modified':object.lastModified,'Content-Type':'application/octet-stream'});
   if(request.method==='HEAD')response.end();else response.end(object.bytes);
@@ -315,5 +324,19 @@ try{
   assert.equal(bucket.calls.writes,0);
   await bucket.stop();
  }
+ // Content encoding: every request asks for identity under the signature; an encoded or weak-ETag response is refused, never hashed.
+ {
+  const bucket=fakeBucket(fixture());const endpoint=await bucket.start();const credentials=readCredentials(envFor(endpoint));
+  const seen=[];bucket.hooks.push(({request})=>{seen.push({accept:request.headers['accept-encoding'],signed:/SignedHeaders=[^,]*\baccept-encoding\b/.test(request.headers.authorization||'')});});
+  const client=createReadOnlyClient({credentials,sleep:noSleep});
+  await client.list(null);await client.head('watchlist.json');await (await client.get('watchlist.json')).body.cancel();
+  assert.deepEqual(seen,Array(3).fill({accept:'identity',signed:true}));
+  bucket.hooks.push(()=>({compress:true}));
+  await expectKind(client.head('watchlist.json'),'protocol');
+  await expectKind(client.get('watchlist.json'),'protocol');
+  await expectKind(client.head('watchlist.json',{ifMatch:bucket.items.get('watchlist.json').etag}),'source_changed');
+  assert.equal(bucket.calls.writes,0);
+  await bucket.stop();
+ }
 }finally{for(const directory of directories)await rm(directory,{recursive:true,force:true});}
-console.log('R2 snapshot export: SigV4 known answer, environment-only credentials, read-only client, fenced consistent cut, concurrent writer, inventory delta, ETag drift, fence and lease changes, bounded retries, resume and aggregate verification passed');
+console.log('R2 snapshot export: SigV4 known answer, environment-only credentials, read-only client, fenced consistent cut, concurrent writer, inventory delta, ETag drift, identity encoding, fence and lease changes, bounded retries, resume and aggregate verification passed');
