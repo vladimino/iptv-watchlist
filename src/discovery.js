@@ -630,15 +630,24 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
 }
 const busyOutcome=(record,trace,nextCatchUp)=>({stage:'busy',checked:0,remaining:null,discovery:discoveryContract(record,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUp||nextCatchUpAt()}),diagnostic:trace});
 // Opens the discovery series for a committed generation. The record names that generation so that a later
-// call can tell a checkpoint of the published generation from one left behind by an earlier generation. A
-// live writer keeps its record (its own checkpoint pins the generation it read), and the write is a
-// compare-and-swap against the record read here; a concurrent writer wins.
+// call can tell a checkpoint of the published generation from one left behind by an earlier generation.
+// The write is fenced three ways: a request for a generation that is no longer the published one is
+// refused (a commit that paused after its programme write and resumed after a newer publication must
+// not roll the newer series back); a stored series of the same generation is kept with its progress (a
+// re-entered commit is idempotent, only its `programme_changed` artefact is replaced); a live writer keeps
+// its `running` record (its own checkpoint pins the generation it read). The write itself is a
+// compare-and-swap against the record read here; a concurrent writer wins. The returned contract is
+// always that of the record left in place.
 async function queueDiscovery(env,reason,programmeRunId=null){
  const now=Date.now(),record={stage:'paused',reason,at:new Date(now).toISOString(),hopId:null,remainingChunks:DISCOVERY_CHUNK_BUDGET,nextCatchUpAt:null,retryAt:null,programmeRunId:programmeRunId||null};
- const stored=await readContinuation(env),lease=await loadJSON(env,DISCOVERY_LEASE_KEY);
- if(stored.record?.stage==='running'&&lease?.expiresAt>now)return discoveryContract(stored.record,runningOverride(continuationHealth(stored.record,lease,null,now,programmeRunId||null)));
+ const [stored,lease,generation]=await Promise.all([readContinuation(env),loadJSON(env,DISCOVERY_LEASE_KEY),loadJSON(env,EPG_GENERATION_KEY)]);
+ const published=generation?.phase==='published'?generation.programmeRunId||null:null,current=stored.record;
+ const kept=()=>current?discoveryContract(current,current.stage==='running'?runningOverride(continuationHealth(current,lease,null,now,published)):{}):discoveryContract(record,{nextAction:'continue'});
+ if(programmeRunId&&published&&programmeRunId!==published)return kept();
+ if(current?.stage==='running'&&lease?.expiresAt>now)return kept();
+ if(programmeRunId&&current?.programmeRunId===programmeRunId&&current.reason!=='programme_changed')return kept();
  if(await replaceContinuation(env,record,stored.etag))return discoveryContract(record,{nextAction:'continue'});
- const current=(await readContinuation(env)).record;return current?discoveryContract(current):discoveryContract(record,{nextAction:'continue'});
+ const after=(await readContinuation(env)).record;return after?discoveryContract(after):discoveryContract(record,{nextAction:'continue'});
 }
 // Whether the stored checkpoint belongs to the published generation. A record pinned to another generation
 // (an orphan, a finished or paused series, a programme-changed stop) or a `programme_changed` record of the

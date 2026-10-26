@@ -311,6 +311,26 @@ let stoleOnce=false;bucket.put=async(key,value,options)=>{if(key==='epg/resolver
 queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));bucket.put=originalPut;
 assert.equal(continuation().hopId,'22222222-3333-4444-8555-666666666666','the concurrent writer\'s record stands');assert.equal(queued.state,'running');
 
+// 15b. Out-of-order commits: a G1 commit that paused after its programme write and resumes after G2 was published,
+//      queued and advanced must not roll the G2 series back; a re-entered G2 commit keeps G2's progress; only the
+//      mid-publication `programme_changed` artefact of G2 is replaced.
+seedCommitted({stage:'paused',reason:null,at:iso(now-60000),hopId:'44444444-5555-4666-8777-888888888888',remainingChunks:9,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+const g2Record=plain(continuation()),g2Etag=etags.get('epg/resolver-continuation.json');
+for(const lateReason of ['epg_committed','scan_committed']){
+ queued=plain(await call('queueDiscovery')(env,lateReason,OLD));
+ assert.deepEqual(plain(continuation()),g2Record,'a late '+lateReason+' of the earlier generation writes nothing');assert.equal(etags.get('epg/resolver-continuation.json'),g2Etag);
+ assert.equal(queued.programmeRunId,GENERATION);assert.equal(queued.remainingChunks,9);assert.equal(queued.nextAction,'continue','the contract is that of the record left in place');
+}
+queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));
+assert.deepEqual(plain(continuation()),g2Record,'a re-entered commit of the same generation keeps its progress');assert.equal(queued.remainingChunks,9);
+r=await step();assert.equal(r.data.diagnostic.recovery,null,'no handoff follows');assert.equal(r.data.discovery.remainingChunks,8);assert.equal(verified(),2+CHUNK);
+seedCommitted({stage:'paused',reason:'programme_changed',at:iso(now-60000),hopId:'44444444-5555-4666-8777-888888888888',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));
+assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().remainingChunks,12);assert.equal(queued.nextAction,'continue');
+// Without a published pointer there is no generation to check against, so a record of another generation is replaced as requested.
+seedCommitted({stage:'complete',reason:null,at:iso(now-60000),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:'11111111-2222-4333-8444-555555555555'});records.delete('epg/published-generation.json');
+queued=plain(await call('queueDiscovery')(env,'epg_committed',OLD));assert.equal(continuation().programmeRunId,OLD);assert.equal(queued.remainingChunks,12);
+
 // 16. Regression C: concurrency around the handoff. Two steps on one stale record: one supersedes and runs the chunk,
 //     the other waits; a conflicting write between read and supersede is reported, not forced; and an old-generation
 //     hop that stalls past its lease while the new generation is published and recovered cannot write late.
@@ -350,4 +370,4 @@ const entries=records.get('epg/resolver-continuation-diagnostics.json').recent;
 for(const entry of entries){assert.ok(['idle','settled','live','orphaned'].includes(entry.diagnostic.health.status));if(entry.diagnostic.recovery)assert.ok(['settled','resumed','generation_recovered','generation_pending'].includes(entry.diagnostic.recovery.action));if(entry.diagnostic.saved)assert.ok(['saved','other_hop','write_conflict'].includes(entry.diagnostic.saved.write));}
 assert.doesNotMatch(JSON.stringify(entries),SECRET);assert.doesNotMatch(logs.join('\n'),SECRET);
 assert.ok(call('DIAGNOSTIC_VOCABULARY').reason.includes('orphaned'));
-console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation handoff (orphaned, terminal and mid-publication records, pending copy, live writer, concurrent and stalled hops), concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out (before its first write, between two helper writes and inside the queue refresh) and sanitized diagnostics passed');
+console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation handoff (orphaned, terminal and mid-publication records, pending copy, live writer, concurrent and stalled hops, out-of-order commits), concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out (before its first write, between two helper writes and inside the queue refresh) and sanitized diagnostics passed');
