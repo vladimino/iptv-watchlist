@@ -9,14 +9,15 @@ import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {actualUnit,catalogMetadata,classifyObject,creditRoster,fingerprintUnit,generationUnit,importBatch,inventory,predictionUnits,profileUnit,projectSource,readDiscovery} from '../src/offline-importer.js';
+import {actualUnit,catalogMetadata,classifyObject,creditRoster,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,profileUnit,projectSource,readDiscovery,refusal} from '../src/offline-importer.js';
 import {ExportError} from './migration-export.mjs';
 import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
 
 const root=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
-const note='Historical snapshot. Absent families and records that cannot be carried are listed and are not counted as matches. This command does not write production R2 or a production D1 database.';
+const note='Historical snapshot. Absent families and records that cannot be carried are listed and are not counted as matches. Class A is mapped-domain parity, class B the declared R2-only keys, class C unresolved identity and source-quality records kept in the source. This command does not write production R2 or a production D1 database.';
 
-export async function prepareImport(directory){
+export async function prepareImport(directory,{limit=null}={}){
+ const rules=loadDomainRules();
  const loaded=await loadLifecycleSnapshot(directory);
  const absolute=path.resolve(directory);
  const manifest=JSON.parse(await readFile(path.join(absolute,'manifest.json'),'utf8'));
@@ -32,6 +33,8 @@ export async function prepareImport(directory){
  const snapshotInventory=inventory({finishedAt:manifest.finishedAt||null,aggregateSha256:manifest.totals?.aggregateSha256||null,keys});
  const store=scopedStore(loaded.store,byKey);
  const view=readLifecycle(store,Date.parse(manifest.finishedAt));
+ const identity=identityResolver({canonicalize:rules.canonicalFilmId,films:view.films});
+ const blockers=[];
  const sha=key=>byKey.get(key)?.sha256||'';
  const rosters={},listedIds={};
  const peopleKey=byKey.has('people.json')?'people.json':byKey.has('programme.json')?'programme.json':'watchlist.json';
@@ -54,37 +57,48 @@ export async function prepareImport(directory){
    else units.push(record('watchlist','link',sourceKey,sha(sourceKey),'film_redirect',redirect.from,{survivor:film,redirect}));
   }
  }
+ // Dependency order: profile versions before the predictions that reference them, fingerprints before predictions, ratings last.
  for(const entry of manifest.objects){
   if(/^enrichment\/profile\/versions\/\d+\.json$/.test(entry.key))units.push(profileUnit(entry,bodies.get(entry.key)));
   if(entry.key==='enrichment/profile/current.json'&&!byKey.has('enrichment/profile/versions/'+bodies.get(entry.key)?.version+'.json'))units.push(profileUnit(entry,bodies.get(entry.key)));
-  if(/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(entry.key))units.push(fingerprintUnit(entry,bodies.get(entry.key)));
-  if(/^enrichment\/films\/[^/]+\/predictions\.json$/.test(entry.key))units.push(...predictionUnits(entry,bodies.get(entry.key)));
-  if(/^enrichment\/films\/[^/]+\/actual\.json$/.test(entry.key))units.push(actualUnit(entry,bodies.get(entry.key)));
  }
- const discovery=byKey.has('epg/discovery-latest.json')?readDiscovery(byKey.get('epg/discovery-latest.json'),bodies.get('epg/discovery-latest.json')):{candidates:[],units:[]};
+ for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(entry.key))units.push(fingerprintUnit(entry,bodies.get(entry.key),identity));
+ for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/predictions\.json$/.test(entry.key))units.push(...predictionUnits(entry,bodies.get(entry.key),identity));
+ for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/actual\.json$/.test(entry.key))units.push(actualUnit(entry,bodies.get(entry.key),identity));
+ const discovery=byKey.has('epg/discovery-latest.json')?readDiscovery(byKey.get('epg/discovery-latest.json'),bodies.get('epg/discovery-latest.json'),{deriveEvidence:rules.candidateEvidence}):{candidates:[],units:[],blockers:[]};
  units.push(...discovery.units);
+ blockers.push(...discovery.blockers);
  if(byKey.has('programme.json')){
   const pointer=bodies.get('epg/published-generation.json')||{programmeRunId:bodies.get('programme.json')?.runId||null,phase:'published'};
   const portableDiscovery=discovery.units.length===0;
   if(byKey.has('epg/discovery-latest.json')&&!portableDiscovery)units.push(unportable('programme.json',sha('programme.json'),'programme_generation',pointer.programmeRunId||'programme.json','observation_fields_missing','programme'));
   else{
-   const generation=generationUnit(pointer,bodies.get('programme.json'),sha('programme.json'),portableDiscovery?discovery.candidates.map(candidate=>({...candidate,lastSeenProgrammeRunId:candidate.lastSeenProgrammeRunId||pointer.programmeRunId,seenInLatest:true})) : []);
+   const generation=generationUnit(pointer,bodies.get('programme.json'),sha('programme.json'),portableDiscovery?discovery.candidates.map(candidate=>({...candidate,lastSeenProgrammeRunId:candidate.lastSeenProgrammeRunId||pointer.programmeRunId,seenInLatest:true})) : [],identity);
    units.push(generation);
-   if(!generation.unportable&&byKey.has('epg/discovery-resolution.json'))units.push(...decisionUnits(byKey.get('epg/discovery-resolution.json'),bodies.get('epg/discovery-resolution.json'),pointer.programmeRunId));
-   if(generation.unportable&&byKey.has('epg/discovery-resolution.json'))units.push(unportable('epg/discovery-resolution.json',sha('epg/discovery-resolution.json'),'candidate_decision','epg/discovery-resolution.json','generation_not_imported','discovery'));
+   if(!generation.unportable&&!generation.unresolved&&byKey.has('epg/discovery-resolution.json')){
+    const decisions=decisionUnits(byKey.get('epg/discovery-resolution.json'),bodies.get('epg/discovery-resolution.json'),pointer.programmeRunId,{candidates:discovery.candidates,identity});
+    units.push(...decisions.units);
+    blockers.push(...decisions.blockers);
+   }
+   if((generation.unportable||generation.unresolved)&&byKey.has('epg/discovery-resolution.json'))units.push(unportable('epg/discovery-resolution.json',sha('epg/discovery-resolution.json'),'candidate_decision','epg/discovery-resolution.json','generation_not_imported','discovery'));
   }
  }
- const expected=projectSource({keys,bodies:Object.fromEntries(bodies),films:view.films,people:view.people,rosters,listed:listedIds,shas:Object.fromEntries([...byKey].map(([key,entry])=>[key,entry.sha256]))});
- return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected};
+ const shas=Object.fromEntries([...byKey].map(([key,entry])=>[key,entry.sha256]));
+ const expected=projectSource({keys,bodies:Object.fromEntries(bodies),films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence});
+ for(const blocker of expected.blockers||[])if(!blockers.some(item=>item.reason===blocker.reason&&item.targetTable===blocker.targetTable&&item.targetId===blocker.targetId))blockers.push(blocker);
+ return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit};
 }
 
-function decisionUnits(entry,body,programmeRunId){
- const entries=Object.entries(body||{}).filter(([key,value])=>key!=='__canonicalizedAt'&&value&&typeof value==='object');
- if(!entries.length)return [unportable(entry.key,entry.sha256,'candidate_decision',entry.key,'observation_fields_missing','discovery')];
- return entries.map(([key,value])=>{
-  if(!value.evidenceKey||!value.status||!value.checkedAt)return unportable(entry.key,entry.sha256,'candidate_decision',key,'observation_fields_missing','discovery');
-  return record('discovery','decision',entry.key,entry.sha256,'candidate_decision',key,{observationKey:key,programmeRunId,status:value.status,reason:value.reason??null,evidenceKey:value.evidenceKey,checkedAt:value.checkedAt,attempts:value.attempts??0,filmId:value.filmId??null,tmdbId:value.tmdbId??null,terminalReason:value.terminalReason??null,retryAt:value.retryAt??null});
- });
+// The shared rules come from the production sources themselves: canonicalFilmId from the domain model and candidateEvidence from the resolver.
+// They are evaluated in a bare context with no network, storage or Worker bindings, so the importer carries no second copy of either rule.
+export function loadDomainRules(){
+ const domain=fs.readFileSync(path.join(root,'src/domain/film-person.js'),'utf8');
+ const resolver=fs.readFileSync(path.join(root,'src/discovery.js'),'utf8');
+ const context=vm.createContext({Date,Map,Set,JSON,Object,Number,String,Array,Math,encodeURIComponent,decodeURIComponent});
+ vm.runInContext(domain+'\nglobalThis.domainApi={canonicalFilmId};',context);
+ vm.runInContext(resolver+'\nglobalThis.resolverApi={candidateEvidence};',context);
+ const {canonicalFilmId}=context.domainApi,{candidateEvidence}=context.resolverApi;
+ return {canonicalFilmId:id=>canonicalFilmId(id),candidateEvidence:candidate=>candidateEvidence(candidate)};
 }
 
 function scopedStore(store,byKey){
@@ -154,14 +168,19 @@ function literal(value){if(value==null)return 'NULL';if(typeof value==='number')
 async function main(){
  const snapshotAt=process.argv.indexOf('--snapshot');
  const databaseAt=process.argv.indexOf('--database');
+ const limitAt=process.argv.indexOf('--limit');
  const snapshot=snapshotAt>=0?process.argv[snapshotAt+1]:'';
  const database=databaseAt>=0?process.argv[databaseAt+1]:'';
- if(!snapshot||!database){console.error('Usage: node scripts/offline-import.mjs --snapshot /absolute/private/snapshot-directory --database /absolute/private/import.sqlite');process.exit(2);}
+ const limit=limitAt>=0?Number(process.argv[limitAt+1]):null;
+ if(!snapshot||!database||(limit!=null&&!(Number.isInteger(limit)&&limit>0))){console.error('Usage: node scripts/offline-import.mjs --snapshot /absolute/private/snapshot-directory --database /absolute/private/import.sqlite [--limit <units>]');process.exit(2);}
  const databasePath=path.resolve(database);
  if(databasePath===root||databasePath.startsWith(root+path.sep)){console.error('Database path must be outside the Git repository');process.exit(2);}
  let batch;
- try{batch=await prepareImport(snapshot);}
+ try{batch=await prepareImport(snapshot,{limit});}
  catch(error){console.error(error instanceof ExportError||error instanceof SnapshotError?error.message:'Snapshot could not be checked');process.exit(error.exitCode||1);}
+ // Fail closed: an unknown key or a stored decision that disagrees with the derived evidence stops the run before the database is touched.
+ const refused=refusal(batch);
+ if(refused){console.log(JSON.stringify({...batch.inventory,...refused,note}));process.exit(3);}
  if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,fs.readFileSync(path.join(root,'migrations/0001_schema_v1.sql'),'utf8'));}
  const db=openSqlite(databasePath);
  const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};

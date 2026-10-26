@@ -1,5 +1,7 @@
-// AIR-73. Offline importer from a verified historical snapshot into a caller-supplied database.
+// Offline importer from a verified historical snapshot into a caller-supplied database.
 // The Worker does not import this file. It does not read R2, call a model, or apply the schema to production.
+// Identity follows the shared canonicalFilmId rule and evidence keys follow the resolver's candidateEvidence rule;
+// both are supplied by the caller, so this module never carries a second copy of either rule.
 
 const FAMILIES=[
  ['watchlist',key=>key==='watchlist.json'],
@@ -9,6 +11,17 @@ const FAMILIES=[
  ['fingerprint',key=>/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(key)],
  ['prediction',key=>/^enrichment\/films\/[^/]+\/predictions\.json$/.test(key)],
  ['actual',key=>/^enrichment\/films\/[^/]+\/actual\.json$/.test(key)],
+];
+const MANDATORY_FAMILIES=['prediction'];
+
+// Declared R2-only prefixes. Each family names the stage that must decide its disposition before the keys may be left behind.
+// A key outside these families and outside every mapped family is unknown and fails closed.
+const R2_ONLY=[
+ {family:'derived_projection',decideBy:'read_cutover',decisionRequired:false,matches:key=>['enrichment/view-index.json','enrichment/prediction-queue.json','epg/discovery-score-preview.json','enrichment/diagnostics/moods.json','uncertain.json'].includes(key)||/^enrichment\/films\/[^/]+\/mood-facet\.json$/.test(key)},
+ {family:'runtime_coordination',decideBy:'write_cutover',decisionRequired:false,matches:key=>['epg/resolver-lease.json','enrichment/writer-lease.json','enrichment/runner-lease.json','epg/resolver-continuation.json','epg/resolver-continuation-diagnostics.json','epg/discovery-status.json','epg/discovery-variant-pending.json','sync.json','watchlist-ingest.json','enrichment/ratings/status.json','enrichment/ratings/pending.json','enrichment/ratings/lease.json'].includes(key)},
+ {family:'run_record',decideBy:'legacy_retirement',decisionRequired:false,matches:key=>/^enrichment\/(?:runs|sources|run-diagnostics|diagnostics|stop-events|start-events|benchmarks|ratings\/generations)\//.test(key)||key==='enrichment/latest-run.json'||key==='enrichment/ratings/published.json'},
+ {family:'user_state',decideBy:'read_cutover',decisionRequired:true,matches:key=>key.startsWith('started/')||key.startsWith('events/')||key==='ui/filter-presets.json'},
+ {family:'archive',decideBy:'none',decisionRequired:false,matches:key=>/^epg\/generations\/[^/]+\//.test(key)||key==='epg/discovery-before-canonical.json'||key==='epg/discovery-resolution-before-canonical.json'},
 ];
 
 const KNOWN_CONFLICTS=new Set([
@@ -22,24 +35,84 @@ const KNOWN_CONFLICTS=new Set([
  'Redirected film has EPG history',
  'Score record conflicts with the stored score',
 ]);
+// Source-quality reasons: the record itself cannot be carried without inventing a value. Everything else is a mapped-domain gap.
+const SOURCE_QUALITY=/_fields_missing$|^json_invalid$|^decision_without_candidate$/;
+const CLASS_A_BLOCKERS={prediction_absent:'prediction_family_absent',prediction_unportable:'prediction_family_unportable'};
 
+// Excluded is one declared prefix: raw EPG dumps under epg/raw/ are archive by the publication ADR and are counted, never parsed.
+// No current writer produces XML or an archive/ prefix, so any other XML-shaped or archive-shaped key is unknown and fails closed.
 export function classifyObject(key){
  if(typeof key!=='string')return 'unmapped';
- if(/\.xml($|\.)/.test(key)||key.startsWith('epg/raw/')||key.startsWith('archive/'))return 'excluded';
+ if(key.startsWith('epg/raw/'))return 'excluded';
  if(isMappedKey(key))return 'mapped';
+ if(r2OnlyFamily(key))return 'r2_only';
  return 'unmapped';
 }
+export function r2OnlyFamily(key){return R2_ONLY.find(item=>item.matches(key))||null;}
 
 export function inventory({finishedAt=null,aggregateSha256=null,keys=[]}={}){
  const families={};
  for(const [id,matches] of FAMILIES){
   const found=keys.filter(matches).sort();
-  families[id]={status:found.length?'present':'absent',keys:found};
+  families[id]={status:found.length?'present':'absent',keys:found,mandatory:MANDATORY_FAMILIES.includes(id)};
  }
  const absent=Object.entries(families).filter(([,family])=>family.status==='absent').map(([id])=>id);
- const coverage={denominator:keys.length,mapped:[],excluded:[],unmapped:[]};
- for(const key of [...keys].sort())coverage[classifyObject(key)].push(key);
+ const coverage={denominator:keys.length,mapped:[],r2_only:[],excluded:[],unmapped:[],r2OnlyFamilies:R2_ONLY.map(item=>({family:item.family,decideBy:item.decideBy,decisionRequired:item.decisionRequired,count:0}))};
+ for(const key of [...keys].sort()){
+  const kind=classifyObject(key);
+  coverage[kind].push(key);
+  if(kind==='r2_only')coverage.r2OnlyFamilies.find(item=>item.family===r2OnlyFamily(key).family).count++;
+ }
  return {scope:'historical-snapshot',production:false,finishedAt,aggregateSha256,objectCount:keys.length,families,absent,complete:absent.length===0,coverage};
+}
+
+// The caller supplies the shared canonicalFilmId rule and the stored Films (survivors with their redirects). Resolution never mints an id.
+export function identityResolver({canonicalize,films=[]}={}){
+ if(typeof canonicalize!=='function')throw new Error('The shared canonicalFilmId rule is required');
+ const ids=new Set(),survivors=new Map(),holders=new Map(),conflicting=new Set();
+ for(const film of films){
+  if(!film?.id)continue;
+  ids.add(film.id);
+  for(const redirect of film.redirects||[]){
+   if(!redirect?.from)continue;
+   const list=survivors.get(redirect.from)||[];
+   if(!list.includes(film.id))list.push(film.id);
+   survivors.set(redirect.from,list);
+  }
+  for(const item of film.externalIds||[]){
+   if(item?.scheme!=='tmdb'||item.value==null)continue;
+   const value=String(item.value),list=holders.get(value)||[];
+   if(!list.includes(film.id))list.push(film.id);
+   holders.set(value,list);
+   if(item.conflicting)conflicting.add(value);
+  }
+  const conflict=film.id.match(/^film:conflict:(.+)$/);
+  if(conflict)for(const value of conflict[1].split('+'))conflicting.add(value);
+ }
+ // Conflicts are checked before either fast path: a canonical id that is stored while another Film or a conflict record also
+ // claims its TMDB id, or that is itself the retired side of a redirect, is a conflict, never a silent direct hit.
+ const resolve=storedId=>{
+  const source=storedId==null?null:String(storedId);
+  const canonical=canonicalize(storedId);
+  if(!canonical)return {source,canonical:null,filmId:null,via:null,reason:'identity_unreadable'};
+  const conflict={source,canonical,filmId:null,via:null,reason:'identity_conflict'};
+  const tmdb=canonical.match(/^film:tmdb:(\d+)$/)?.[1]||null;
+  const claimants=tmdb?(holders.get(tmdb)||[]):[];
+  const targets=(survivors.get(canonical)||[]).filter(id=>id!==canonical);
+  if(tmdb&&conflicting.has(tmdb))return conflict;
+  if(ids.has(canonical)){
+   if(targets.length||claimants.some(id=>id!==canonical))return conflict;
+   return {source,canonical,filmId:canonical,via:'direct',reason:null};
+  }
+  if(targets.length>1)return conflict;
+  if(targets.length===1&&ids.has(targets[0])){
+   if(claimants.some(id=>id!==targets[0]))return conflict;
+   return {source,canonical,filmId:targets[0],via:'redirect',reason:null};
+  }
+  if(claimants.length)return claimants.length>1?conflict:{source,canonical,filmId:null,via:null,reason:'identity_unlinked'};
+  return {source,canonical,filmId:null,via:null,reason:'film_unresolved'};
+ };
+ return {canonical:storedId=>canonicalize(storedId),resolve};
 }
 
 export function creditRoster(records){
@@ -64,16 +137,34 @@ export function creditRoster(records){
  return {credits,unmatched};
 }
 
+// A batch is refused before any write when the snapshot has an unknown key or a stored decision disagrees with the derived evidence.
+export function refusal(batch){
+ const blockers=[];
+ for(const key of batch?.inventory?.coverage?.unmapped||[])blockers.push({reason:'unknown_key',class:'C',sourceKey:key,sourceSha256:batch?.shas?.[key]??null,targetTable:null,targetId:key});
+ for(const blocker of batch?.blockers||[])blockers.push({class:'C',...blocker});
+ if(!blockers.length)return null;
+ const coverage=batch?.inventory?.coverage||emptyCoverage();
+ return {stopped:true,stopReasons:[...new Set(blockers.map(item=>item.reason))],blockers,applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,partial:0,uncheckpointed:0,pending:0,ledger:[],coverage,parity:{ok:false,missing:[],extra:[],mismatched:[],denominator:0,unprojected:[],records:[],reason:'import_stopped'},receipts:null,classes:acceptanceClasses({inventory:batch?.inventory,coverage,counts:{},ledger:[],stopped:true}),claimsFullParity:false};
+}
+
 export async function importBatch(db,repositories,batch){
  const importedAt=batch?.importedAt;
  if(!importedAt)throw new Error('importedAt is required');
+ const refused=refusal(batch);
+ if(refused)return refused;
  const units=batch.units||[];
  const limit=batch.limit??null;
  const ledger=[];
- const counts={applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,partial:0,uncheckpointed:0,pending:0};
+ const counts={applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,partial:0,uncheckpointed:0,pending:0};
+ const appliedByFamily={};
  let started=0;
  for(const unit of units){
   if(limit!=null&&started>=limit){counts.pending++;continue;}
+  if(unit.unresolved){
+   counts.unresolved++;
+   ledger.push(entry(unit,'unresolved',unit.reason||'film_unresolved'));
+   continue;
+  }
   if(await receiptExists(db,unit)){counts.resumed++;continue;}
   started++;
   if(unit.unportable){
@@ -115,10 +206,54 @@ export async function importBatch(db,repositories,batch){
   const receipt=await checkpoint(db,unit,importedAt);
   if(!receipt.ok){counts.uncheckpointed++;ledger.push(entry(unit,'uncheckpointed','receipt_failed'));continue;}
   counts.applied++;
+  appliedByFamily[unit.family]=(appliedByFamily[unit.family]||0)+1;
  }
  const parity=batch.expected?await verifyParity(db,batch.expected):{ok:false,missing:[],extra:[],mismatched:[],denominator:0,unprojected:[],records:[],reason:'no_source_projection'};
- const coverage=batch.inventory?.coverage||{denominator:0,mapped:[],excluded:[],unmapped:[]};
- return {...counts,ledger,coverage,parity,claimsFullParity:parityClaim({coverage,parity,counts,ledger,inventory:batch.inventory})};
+ const coverage=batch.inventory?.coverage||emptyCoverage();
+ const receipts=batch.shas?await receiptAudit(db,batch.shas):null;
+ const classes=acceptanceClasses({inventory:batch.inventory,coverage,counts,ledger,appliedByFamily,parity,receipts,stopped:false});
+ const provenance=provenanceSummary(units);
+ return {stopped:false,stopReasons:[],blockers:[],...counts,ledger,coverage,parity,receipts,provenance,classes,claimsFullParity:parityClaim({coverage,parity,counts,ledger,inventory:batch.inventory,classes,receipts})};
+}
+
+// Receipts are keyed by source checksum and reconciled against this manifest, the baseline identity of the run.
+// matching: the receipt names the manifest checksum. superseded: an older checksum of a source key whose same target also carries
+// a receipt with the manifest checksum, so the revision landed and was read back. stale: an older checksum with no such receipt,
+// so the revised object did not land (unportable, unresolved, conflicting or not yet run). foreign: a source key this manifest does not list.
+// Stale and foreign receipts block acceptance: the database then carries rows this baseline cannot vouch for.
+export async function receiptAudit(db,shas){
+ const rows=await db.all('SELECT source_key,source_sha256,target_table,target_id FROM import_receipt ORDER BY source_key,target_table,target_id');
+ const current=new Set(rows.filter(row=>shas[row.source_key]===row.source_sha256).map(row=>row.source_key+'\n'+row.target_table+'\n'+row.target_id));
+ const audit={total:rows.length,matching:0,superseded:[],stale:[],foreign:[],blocking:false};
+ for(const row of rows){
+  const item={sourceKey:row.source_key,sourceSha256:row.source_sha256,targetTable:row.target_table,targetId:row.target_id};
+  if(!Object.prototype.hasOwnProperty.call(shas,row.source_key)){audit.foreign.push(item);continue;}
+  if(shas[row.source_key]===row.source_sha256){audit.matching++;continue;}
+  const revised={...item,manifestSha256:shas[row.source_key]};
+  if(current.has(row.source_key+'\n'+row.target_table+'\n'+row.target_id))audit.superseded.push(revised);
+  else audit.stale.push(revised);
+ }
+ audit.blocking=audit.stale.length+audit.foreign.length>0;
+ return audit;
+}
+
+// Three classes that are never merged into one verdict: A mapped-domain parity, B declared R2-only artifacts, C unresolved identity and source-quality records.
+export function acceptanceClasses({inventory,coverage,counts={},ledger=[],appliedByFamily={},parity=null,receipts=null,stopped=false}={}){
+ const prediction=inventory?.families?.prediction||{status:'unknown',keys:[]};
+ const predictionUnportable=ledger.filter(item=>item.family==='prediction'&&item.outcome==='unportable').length;
+ const blockers=[];
+ if(prediction.status==='absent')blockers.push(CLASS_A_BLOCKERS.prediction_absent);
+ if(predictionUnportable>0)blockers.push(CLASS_A_BLOCKERS.prediction_unportable);
+ if((receipts?.stale||[]).length)blockers.push('receipts_stale');
+ if((receipts?.foreign||[]).length)blockers.push('receipts_foreign');
+ if(stopped)blockers.push('import_stopped');
+ const open=(counts.conflicts||0)+(counts.explained||0)+(counts.partial||0)+(counts.uncheckpointed||0)+ledger.filter(item=>item.class==='A'&&item.outcome==='unportable').length;
+ const records=ledger.filter(item=>item.class==='C');
+ return {
+  A:{blocking:blockers.length>0||open>0||!(parity?.ok===true),blockers,open,mandatory:{prediction:{status:prediction.status,keys:prediction.keys.length,applied:appliedByFamily.prediction||0,unportable:predictionUnportable,portable:prediction.status==='present'&&predictionUnportable===0}}},
+  B:{keys:(coverage?.r2_only||[]).length,families:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0),decisionRequired:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0&&item.decisionRequired).map(item=>item.family)},
+  C:{count:records.length,acknowledgementRequired:records.length>0,reasons:Object.fromEntries([...new Set(records.map(item=>item.reason))].sort().map(reason=>[reason,records.filter(item=>item.reason===reason).length])),records},
+ };
 }
 
 export async function verifyParity(db,spec){
@@ -135,39 +270,49 @@ export async function verifyParity(db,spec){
  if(spec.candidates)await verifyCandidates(db,spec.candidates,missing,extra,mismatched);
  if(spec.decisions)await verifyDecisions(db,spec.decisions,missing,extra,mismatched);
  const denominator=['films','persons','redirects','fingerprints','ratings','predictions','profiles','generations','candidates','decisions'].reduce((sum,key)=>sum+(spec[key]?.length||0),0);
- return {ok:missing.length+extra.length+mismatched.length===0,missing,extra,mismatched,denominator,unprojected:spec.unprojected||[],records:spec.records||[]};
+ return {ok:missing.length+extra.length+mismatched.length===0,missing,extra,mismatched,denominator,unprojected:spec.unprojected||[],records:spec.records||[],r2Only:spec.r2Only||[]};
 }
 
-export function parityClaim({coverage,parity,counts,ledger,inventory}={}){
+// The lossless claim. It is never true with a class C record, a stale or foreign receipt, or a class A blocker; an owner acknowledgement
+// of the class C list is recorded elsewhere and does not change this verdict.
+export function parityClaim({coverage,parity,counts,ledger,inventory,classes,receipts}={}){
  const uncovered=(coverage?.unmapped||[]).length>0;
  const incomplete=inventory?.complete!==true;
  const vacuous=!(parity?.denominator>0);
  const unprojected=(parity?.unprojected||[]).length>0;
  const openRecords=(parity?.records||[]).some(record=>record.disposition!=='mapped');
- const open=(counts?.pending||0)+(counts?.unportable||0)+(counts?.conflicts||0)+(counts?.explained||0)+(counts?.partial||0)+(counts?.uncheckpointed||0);
- return !uncovered&&!incomplete&&!vacuous&&!unprojected&&!openRecords&&!!parity?.ok&&open===0&&(ledger||[]).length===0;
+ const open=(counts?.pending||0)+(counts?.unportable||0)+(counts?.unresolved||0)+(counts?.conflicts||0)+(counts?.explained||0)+(counts?.partial||0)+(counts?.uncheckpointed||0);
+ const blocked=classes?.A?.blocking===true;
+ const unreconciled=(receipts?.stale||[]).length+(receipts?.foreign||[]).length>0;
+ return !uncovered&&!incomplete&&!vacuous&&!unprojected&&!openRecords&&!blocked&&!unreconciled&&!!parity?.ok&&open===0&&(ledger||[]).length===0;
 }
 
-export function fingerprintUnit(entry,body){
- const filmId=filmIdFromEnrichmentKey(entry.key);
- if(!filmId||!body?.fingerprintHash||!(body.fingerprintSchemaVersion!=null||body.schemaVersion!=null))return unportable(entry,'fingerprint_payload',filmId||entry.key,'fingerprint_fields_missing','fingerprint');
- return unit({family:'fingerprint',kind:'fingerprint',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'fingerprint_payload',targetId:filmId,input:{filmId,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,fingerprintHash:body.fingerprintHash,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:entry.key,contentSha256:entry.sha256}});
+export function fingerprintUnit(entry,body,identity){
+ const resolved=enrichmentIdentity(entry.key,identity);
+ if(!resolved.filmId)return unresolved(entry,'fingerprint_payload',resolved.canonical||entry.key,resolved.reason,'fingerprint',resolved);
+ const filmId=resolved.filmId;
+ if(!body?.fingerprintHash||!(body.fingerprintSchemaVersion!=null||body.schemaVersion!=null))return unportable(entry,'fingerprint_payload',filmId,'fingerprint_fields_missing','fingerprint');
+ return unit({family:'fingerprint',kind:'fingerprint',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'fingerprint_payload',targetId:filmId,identity:provenanceOf(resolved),input:{filmId,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,fingerprintHash:body.fingerprintHash,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:entry.key,contentSha256:entry.sha256}});
 }
 
-export function predictionUnits(entry,body){
- const filmId=filmIdFromEnrichmentKey(entry.key);
+export function predictionUnits(entry,body,identity){
+ const resolved=enrichmentIdentity(entry.key,identity);
+ if(!resolved.filmId)return [unresolved(entry,'prediction_current',resolved.canonical||entry.key,resolved.reason,'prediction',resolved)];
+ const filmId=resolved.filmId;
  const units=[];
  const history=Array.isArray(body?.history)?body.history:[];
- history.forEach((item,index)=>units.push(versionUnit(entry,filmId,item,'prediction_history',filmId?filmId+'#'+index:entry.key+'#'+index)));
- units.push(versionUnit(entry,filmId,body?.current,'prediction_current',filmId||entry.key));
+ history.forEach((item,index)=>units.push(versionUnit(entry,filmId,item,'prediction_history',filmId+'#'+index,resolved)));
+ units.push(versionUnit(entry,filmId,body?.current,'prediction_current',filmId,resolved));
  return units;
 }
 
-export function actualUnit(entry,body){
- const filmId=filmIdFromEnrichmentKey(entry.key);
+export function actualUnit(entry,body,identity){
+ const resolved=enrichmentIdentity(entry.key,identity);
+ if(!resolved.filmId)return unresolved(entry,'actual_rating',resolved.canonical||entry.key,resolved.reason,'actual',resolved);
+ const filmId=resolved.filmId;
  const recordedAt=body?.recordedAt||body?.updatedAt||null;
- if(!filmId||typeof body?.rating!=='number'||!body.source||!recordedAt)return unportable(entry,'actual_rating',filmId||entry.key,'rating_fields_missing','actual');
- return unit({family:'actual',kind:'rating',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'actual_rating',targetId:filmId,input:{filmId,rating:body.rating,source:body.source,recordedAt}});
+ if(typeof body?.rating!=='number'||!body.source||!recordedAt)return unportable(entry,'actual_rating',filmId,'rating_fields_missing','actual');
+ return unit({family:'actual',kind:'rating',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'actual_rating',targetId:filmId,identity:provenanceOf(resolved),input:{filmId,rating:body.rating,source:body.source,recordedAt}});
 }
 
 export function profileUnit(entry,body){
@@ -176,53 +321,90 @@ export function profileUnit(entry,body){
  return unit({family:'profile',kind:'profile',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'profile_version',targetId:String(body.version),input:{version:body.version,profileHash:body.profileHash,createdAt:body.createdAt||body.updatedAt,r2Key:entry.key,contentSha256:entry.sha256}});
 }
 
-export function generationUnit(pointer,programme,pointerSha,candidates=[]){
+export function generationUnit(pointer,programme,pointerSha,candidates=[],identity){
+ requireIdentity(identity);
+ const source={key:'programme.json',sha256:pointerSha};
  const programmeRunId=pointer?.programmeRunId||programme?.runId||null;
- if(!programmeRunId||!Array.isArray(programme?.films))return unportable({key:'programme.json',sha256:pointerSha},'programme_generation',programmeRunId||'programme.json','generation_fields_missing','programme');
- const films=[];
+ if(!programmeRunId||!Array.isArray(programme?.films))return unportable(source,'programme_generation',programmeRunId||'programme.json','generation_fields_missing','programme');
+ const films=[],unresolvedIds=[];
  for(const film of programme.films){
-  if(!film||!Object.prototype.hasOwnProperty.call(film,'shows')||!Array.isArray(film.shows))return unportable({key:'programme.json',sha256:pointerSha},'programme_generation',programmeRunId,'show_fields_missing','programme');
+  if(!film||!Object.prototype.hasOwnProperty.call(film,'shows')||!Array.isArray(film.shows))return unportable(source,'programme_generation',programmeRunId,'show_fields_missing','programme');
   const shows=[];
   for(const show of film.shows){
    const startMs=show?.startMs??show?.start;
-   if(!show?.channelId||typeof startMs!=='number')return unportable({key:'programme.json',sha256:pointerSha},'programme_generation',programmeRunId,'show_fields_missing','programme');
+   if(!show?.channelId||typeof startMs!=='number')return unportable(source,'programme_generation',programmeRunId,'show_fields_missing','programme');
    shows.push({channelId:show.channelId,channel:show.channel??null,startMs,endMs:show.endMs??show.end??null,epgTitle:show.epgTitle??show.title??null,basis:show.basis??null,matchReason:show.matchReason??null});
   }
-  const filmId=String(film.filmId||(String(film.id).startsWith('film:')?film.id:'film:'+film.id));
-  films.push({filmId,shows});
+  const resolved=identity.resolve(film.filmId||film.id);
+  if(!resolved.filmId){unresolvedIds.push(provenanceOf(resolved));continue;}
+  films.push({filmId:resolved.filmId,shows});
  }
+ if(unresolvedIds.length)return {...unresolved(source,'programme_generation',programmeRunId,unresolvedIds[0].reason,'programme',unresolvedIds[0]),unresolvedFilms:unresolvedIds};
  const phase=pointer?.phase==='withheld'?'withheld':'published';
  const input={programmeRunId,phase,publishedAt:pointer?.publishedAt??programme?.updatedAt??null,films,candidates};
  if(phase==='published')input.expectedProgrammeRunId=pointer?.expectedProgrammeRunId??null;
  return unit({family:'programme',kind:'generation',sourceKey:'programme.json',sourceSha256:pointerSha,targetTable:'programme_generation',targetId:programmeRunId,input});
 }
 
-export function readDiscovery(entry,body){
+// Items carry no evidence key of their own: the key is derived by the resolver's rule from the observation's fields.
+// An item that does carry one must agree with the derived key; a disagreement is a blocker that stops the import.
+export function readDiscovery(entry,body,{deriveEvidence}={}){
+ requireEvidence(deriveEvidence);
  const items=Array.isArray(body?.items)?body.items:[];
- if(!items.length)return {candidates:[],units:[unportable(entry,'candidate',entry.key,'observation_fields_missing','discovery')]};
- const candidates=[],units=[];
+ if(!items.length)return {candidates:[],units:[unportable(entry,'candidate',entry.key,'observation_fields_missing','discovery')],blockers:[]};
+ const candidates=[],units=[],blockers=[];
  items.forEach((item,index)=>{
   const observationKey=item?.observationKey||item?.key||null;
   const targetId=observationKey||entry.key+'#'+index;
-  if(!observationKey||!item?.evidenceKey||!item?.title||!item?.normalizedTitle){units.push(unportable(entry,'candidate',targetId,'observation_fields_missing','discovery'));return;}
+  if(!observationKey||!item?.title||!item?.normalizedTitle){units.push(unportable(entry,'candidate',targetId,'observation_fields_missing','discovery'));return;}
   const shows=[];
   for(const show of item.shows||[]){
    const startMs=show?.startMs??show?.start;
    if(!show?.channelId||typeof startMs!=='number'){units.push(unportable(entry,'candidate',targetId,'show_fields_missing','discovery'));return;}
    shows.push({channelId:show.channelId,channel:show.channel??null,startMs,endMs:show.endMs??show.end??null,epgTitle:show.epgTitle??show.title??null});
   }
-  candidates.push({observationKey,title:item.title,normalizedTitle:item.normalizedTitle,year:item.year??null,rawTitles:item.rawTitles||[item.title],durations:item.durations||[],description:item.description??null,evidenceKey:item.evidenceKey,shows,activity:item.activity||'current',lastSeenProgrammeRunId:item.lastSeenProgrammeRunId??null,confirmedTmdbId:item.confirmedTmdbId??null});
+  const evidence=evidenceFor(item,deriveEvidence);
+  if(evidence.mismatch){blockers.push({reason:'evidence_mismatch',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'candidate',targetId,stored:evidence.stored,derived:evidence.derived});return;}
+  candidates.push({observationKey,title:item.title,normalizedTitle:item.normalizedTitle,year:item.year??null,rawTitles:item.rawTitles||[item.title],durations:item.durations||[],description:item.description??null,evidenceKey:evidence.key,evidenceProvenance:evidence.provenance,shows,activity:item.activity||'current',lastSeenProgrammeRunId:item.lastSeenProgrammeRunId??null,confirmedTmdbId:item.confirmedTmdbId??null});
  });
- return {candidates,units};
+ return {candidates,units,blockers};
 }
 
-function versionUnit(entry,filmId,item,table,targetId){
- if(!filmId||!item||typeof item!=='object')return unportable(entry,table,targetId,'prediction_fields_missing','prediction');
+// A stored decision is imported only against the candidate it belongs to. Its stored key must equal the key derived from that candidate;
+// a decision with no stored key takes the derived key and says so in its provenance; a disagreement stops the import.
+export function decisionUnits(entry,body,programmeRunId,{candidates=[],identity}={}){
+ requireIdentity(identity);
+ const byKey=new Map(candidates.map(candidate=>[candidate.observationKey,candidate]));
+ const entries=Object.entries(body||{}).filter(([key,value])=>key!=='__canonicalizedAt'&&value&&typeof value==='object');
+ if(!entries.length)return {units:[unportable(entry,'candidate_decision',entry.key,'observation_fields_missing','discovery')],blockers:[]};
+ const units=[],blockers=[];
+ for(const [key,value] of entries){
+  if(!value.status||!value.checkedAt){units.push(unportable(entry,'candidate_decision',key,'observation_fields_missing','discovery'));continue;}
+  const candidate=byKey.get(key);
+  if(!candidate){units.push(unresolved(entry,'candidate_decision',key,'decision_without_candidate','discovery',null));continue;}
+  const stored=value.evidenceKey||null;
+  if(stored&&stored!==candidate.evidenceKey){blockers.push({reason:'evidence_mismatch',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'candidate_decision',targetId:key,stored,derived:candidate.evidenceKey});continue;}
+  const evidenceProvenance=stored?'stored':'derived';
+  let filmId=null,identityProvenance=null;
+  if(value.filmId!=null){
+   const resolved=identity.resolve(value.filmId);
+   if(!resolved.filmId){units.push(unresolved(entry,'candidate_decision',key,resolved.reason,'discovery',resolved));continue;}
+   filmId=resolved.filmId;
+   identityProvenance=provenanceOf(resolved);
+  }
+  const provenance={...(value.provenance&&typeof value.provenance==='object'?value.provenance:{}),importEvidence:evidenceProvenance,importIdentity:identityProvenance?.via??null};
+  units.push({...unit({family:'discovery',kind:'decision',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'candidate_decision',targetId:key,input:{observationKey:key,programmeRunId,status:value.status,reason:value.reason??null,evidenceKey:candidate.evidenceKey,checkedAt:value.checkedAt,attempts:value.attempts??0,filmId,tmdbId:value.tmdbId??null,canonicalIdentity:value.canonicalIdentity??null,identitySource:value.identitySource??null,terminalReason:value.terminalReason??null,retryAt:value.retryAt??null,provenance}}),evidence:evidenceProvenance,identity:identityProvenance});
+ }
+ return {units,blockers};
+}
+
+function versionUnit(entry,filmId,item,table,targetId,resolved){
+ if(!item||typeof item!=='object')return unportable(entry,table,targetId,'prediction_fields_missing','prediction');
  if(!item.r2Key||!item.contentSha256)return unportable(entry,table,targetId,'prediction_version_object_missing','prediction');
  if(item.r2Key===entry.key)return unportable(entry,table,targetId,'mutable_bundle_is_not_a_version_object','prediction');
  const updatedAt=item.updatedAt||item.generatedAt||null;
  if(typeof item.tasteProfileVersion!=='number'||!item.tasteProfileHash||!item.fingerprintHash||typeof item.fingerprintSchemaVersion!=='number'||typeof item.predictionPromptVersion!=='number'||typeof item.predictedRating!=='number'||!updatedAt)return unportable(entry,table,targetId,'prediction_fields_missing','prediction');
- return unit({family:'prediction',kind:'prediction',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:table,targetId,input:{filmId,tasteProfileVersion:item.tasteProfileVersion,tasteProfileHash:item.tasteProfileHash,fingerprintHash:item.fingerprintHash,fingerprintSchemaVersion:item.fingerprintSchemaVersion,predictionPromptVersion:item.predictionPromptVersion,predictedRating:item.predictedRating,r2Key:item.r2Key,contentSha256:item.contentSha256,updatedAt}});
+ return unit({family:'prediction',kind:'prediction',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:table,targetId,identity:provenanceOf(resolved),input:{filmId,tasteProfileVersion:item.tasteProfileVersion,tasteProfileHash:item.tasteProfileHash,fingerprintHash:item.fingerprintHash,fingerprintSchemaVersion:item.fingerprintSchemaVersion,predictionPromptVersion:item.predictionPromptVersion,predictedRating:item.predictedRating,r2Key:item.r2Key,contentSha256:item.contentSha256,updatedAt}});
 }
 
 async function applyUnit(repositories,unit){
@@ -272,17 +454,54 @@ function knownReason(error){
  if(/FOREIGN KEY/i.test(message))return 'reference_missing';
  return 'unapplied';
 }
-function entry(unit,outcome,reason){return {family:unit.family,sourceKey:unit.sourceKey,targetTable:unit.targetTable,targetId:unit.targetId,outcome,reason};}
-function unit(fields){return {...fields,unportable:false};}
-function unportable(entry,targetTable,targetId,reason,family){return {family,kind:'unportable',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:true,reason};}
-function filmIdFromEnrichmentKey(key){
+function classOf(unit,outcome,reason){
+ if(outcome==='unresolved')return 'C';
+ if(outcome==='unportable')return SOURCE_QUALITY.test(String(reason||''))?'C':'A';
+ return 'A';
+}
+function entry(unit,outcome,reason){
+ const row={family:unit.family,sourceKey:unit.sourceKey,sourceSha256:unit.sourceSha256??null,targetTable:unit.targetTable,targetId:unit.targetId,outcome,reason,class:classOf(unit,outcome,reason)};
+ if(unit.identity)row.identity=unit.identity;
+ if(unit.evidence)row.evidence=unit.evidence;
+ if(unit.unresolvedFilms)row.unresolvedFilms=unit.unresolvedFilms;
+ return row;
+}
+function unit(fields){return {...fields,unportable:false,unresolved:false};}
+function unportable(entry,targetTable,targetId,reason,family){return {family,kind:'unportable',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:true,unresolved:false,reason};}
+// An unresolved unit names a source record the importer refuses to turn into a row. The object stays in the source and no id is minted.
+function unresolved(entry,targetTable,targetId,reason,family,resolution){return {family,kind:'unresolved',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:false,unresolved:true,reason,identity:resolution?provenanceOf(resolution):null};}
+function provenanceOf(resolution){return resolution?{source:resolution.source??null,canonical:resolution.canonical??null,filmId:resolution.filmId??null,via:resolution.via??null,reason:resolution.reason??null}:null;}
+function requireIdentity(identity){if(typeof identity?.resolve!=='function')throw new Error('The shared identity resolver is required');}
+function requireEvidence(derive){if(typeof derive!=='function')throw new Error('The shared candidateEvidence rule is required');}
+function enrichmentStoredId(key){
  const match=String(key).match(/^enrichment\/films\/([^/]+)\/(?:fingerprint|predictions|actual)\.json$/);
  if(!match)return null;
- const id=decodeURIComponent(match[1]);
- return id.startsWith('film:')?id:'film:'+id;
+ try{return decodeURIComponent(match[1]);}catch{return match[1];}
+}
+function enrichmentIdentity(key,identity){
+ requireIdentity(identity);
+ const stored=enrichmentStoredId(key);
+ if(!stored)return {source:null,canonical:null,filmId:null,via:null,reason:'identity_unreadable'};
+ return identity.resolve(stored);
+}
+function evidenceFor(item,deriveEvidence){
+ const derived=deriveEvidence(item);
+ const stored=item?.evidenceKey||null;
+ if(stored&&stored!==derived)return {key:null,provenance:null,mismatch:true,stored,derived};
+ return {key:derived,provenance:stored?'stored':'derived',mismatch:false,stored,derived};
+}
+function emptyCoverage(){return {denominator:0,mapped:[],r2_only:[],excluded:[],unmapped:[],r2OnlyFamilies:[]};}
+function provenanceSummary(units){
+ const summary={identity:{direct:0,redirect:0},evidence:{stored:0,derived:0}};
+ for(const unit of units){
+  if(unit.identity?.via&&summary.identity[unit.identity.via]!=null)summary.identity[unit.identity.via]++;
+  if(unit.kind==='decision'&&unit.evidence&&summary.evidence[unit.evidence]!=null)summary.evidence[unit.evidence]++;
+  if(unit.kind==='generation')for(const candidate of unit.input?.candidates||[])if(candidate.evidenceProvenance&&summary.evidence[candidate.evidenceProvenance]!=null)summary.evidence[candidate.evidenceProvenance]++;
+ }
+ return summary;
 }
 function isMappedKey(key){
- if(['watchlist.json','programme.json','metadata.json','titles.json','people.json','sync.json','epg/published-generation.json','epg/discovery-latest.json','epg/discovery-resolution.json','epg/discovered-films.json','enrichment/profile/current.json'].includes(key))return true;
+ if(['watchlist.json','programme.json','metadata.json','titles.json','people.json','epg/published-generation.json','epg/discovery-latest.json','epg/discovery-resolution.json','epg/discovered-films.json','enrichment/profile/current.json'].includes(key))return true;
  return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key);
 }
 function personIdFor(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
@@ -342,66 +561,87 @@ async function personStored(repositories,unit){
  return true;
 }
 
-export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={}}={}){
- const expected={films:[],persons:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[],generations:[],profiles:[],records:[],unprojected:[]};
- const filmByLetterboxd=new Map();
+// The source projection is independent of the write list: every mapped object is projected to the rows it must produce,
+// through the same identity and evidence rules, and the read-back is compared against that projection.
+export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence}={}){
+ requireIdentity(identity);
+ const expected={films:[],persons:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[],generations:[],profiles:[],records:[],unprojected:[],r2Only:[],blockers:[]};
  for(const film of films){
   const roster=rosters[film.id]||{credits:[],unmatched:0};
-  const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||film.id.replace(/^film:/,'');
-  filmByLetterboxd.set(String(letterboxd),film.id);
   expected.films.push({id:film.id,originalTitle:film.originalTitle??null,canonicalIdentity:film.canonicalIdentity??null,contractVersion:film.contractVersion,watchlist:!!listed[film.id],localization:film.localization?.value??null,localizationStatus:film.localization?.status??null,localizationAuthority:film.localization?.provenance?.authority??null,credits:roster.credits||[],externalIds:(film.externalIds||[]).map(identityView),aliases:(film.aliases||[]).map(aliasView),metadata:null});
   for(const redirect of film.redirects||[])if(redirect?.from&&redirect?.to&&redirect?.at)expected.redirects.push({id:redirect.from,toFilmId:redirect.to,at:redirect.at});
  }
  for(const person of people)expected.persons.push({id:person.id,roleId:person.roleId,contractVersion:person.contractVersion,localization:person.localization?.value??null,localizationStatus:person.localization?.status??null,externalIds:(person.externalIds||[]).map(identityView),aliases:(person.aliases||[]).map(aliasView)});
  const filmRow=id=>expected.films.find(film=>film.id===id);
  const accounted=new Set();
- const note=(key,disposition,id)=>expected.records.push({key,disposition,id});
+ const note=(key,disposition,id,extra)=>expected.records.push({key,disposition,id,...(extra||{})});
+ const recordIdentity=(key,storedId)=>{
+  const resolved=identity.resolve(storedId);
+  if(resolved.filmId)return resolved;
+  note(key,'unresolved',resolved.canonical||String(storedId??key),{reason:resolved.reason,identity:provenanceOf(resolved)});
+  return null;
+ };
  for(const key of keys){
   const kind=classifyObject(key);
   if(kind==='excluded')continue;
+  if(kind==='r2_only'){expected.r2Only.push(key);continue;}
   if(kind==='unmapped'){expected.unprojected.push(key);continue;}
   accounted.add(key);
   const body=bodies[key];
-  if(key==='watchlist.json'){for(const record of body?.films||[])note(key,filmByLetterboxd.has(String(record?.id))?'mapped':'unportable',String(record?.id??key));continue;}
+  if(key==='watchlist.json'){for(const record of body?.films||[]){const resolved=recordIdentity(key,record?.id);if(resolved)note(key,'mapped',resolved.filmId,{identity:provenanceOf(resolved)});}continue;}
   if(key==='programme.json'||key==='epg/published-generation.json')continue;
-  if(key==='metadata.json'){for(const [id,record] of Object.entries(body||{})){const filmId=filmByLetterboxd.get(id)||filmByLetterboxd.get(String(record?.id));const metadata=filmId?catalogMetadata(record,key,shas[key]||null):null;if(filmId&&metadata){filmRow(filmId).metadata=metadataView(metadata);note(key,'mapped',filmId);}else note(key,'unportable',filmId||id);}continue;}
+  if(key==='metadata.json'){for(const [id,record] of Object.entries(body||{})){const resolved=recordIdentity(key,record?.id??id);if(!resolved)continue;const metadata=catalogMetadata(record,key,shas[key]||null);if(metadata){filmRow(resolved.filmId).metadata=metadataView(metadata);note(key,'mapped',resolved.filmId,{identity:provenanceOf(resolved)});}else note(key,'unportable',resolved.filmId,{reason:'metadata_fields_missing'});}continue;}
   if(key==='people.json'){for(const record of peopleRecords(body))note(key,expected.persons.some(person=>person.roleId===record?.id||person.id==='person:'+record?.id)?'mapped':'unportable',String(record?.id??key));continue;}
   if(key==='titles.json'){for(const [id,value] of Object.entries(body||{}))note(key,expected.films.some(film=>film.localization===value||film.aliases.some(alias=>alias.value===value))?'mapped':'unportable',id);continue;}
-  if(key==='sync.json'){note(key,'unportable',key);continue;}
-  if(key==='epg/discovered-films.json'){for(const record of Array.isArray(body)?body:Object.values(body||{}))note(key,filmByLetterboxd.has(String(record?.id))?'mapped':'unportable',String(record?.id??key));continue;}
+  if(key==='epg/discovered-films.json'){for(const record of Array.isArray(body)?body:Object.values(body||{})){const resolved=recordIdentity(key,record?.id);if(resolved)note(key,'mapped',resolved.filmId,{identity:provenanceOf(resolved)});}continue;}
   if(key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json')continue;
   if(key==='enrichment/profile/current.json'){const version='enrichment/profile/versions/'+body?.version+'.json';note(key,keys.includes(version)?'mapped':'unportable',String(body?.version??key));continue;}
   if(/^enrichment\/profile\/versions\/\d+\.json$/.test(key)){if(typeof body?.version==='number'&&body.profileHash&&(body.createdAt||body.updatedAt)){expected.profiles.push({id:body.version,profileHash:body.profileHash,createdAt:body.createdAt||body.updatedAt,r2Key:key,contentSha256:shas[key]||null});note(key,'mapped',String(body.version));}else note(key,'unportable',String(body?.version??key));continue;}
-  if(/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(key)){const filmId=filmIdFromEnrichmentKey(key);if(filmId&&body?.fingerprintHash){expected.fingerprints.push({id:filmId,fingerprintHash:body.fingerprintHash,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:key,contentSha256:shas[key]||null});note(key,'mapped',filmId);}else note(key,'unportable',filmId||key);continue;}
-  if(/^enrichment\/films\/[^/]+\/actual\.json$/.test(key)){const filmId=filmIdFromEnrichmentKey(key);const recordedAt=body?.recordedAt||body?.updatedAt||null;if(filmId&&typeof body?.rating==='number'&&body.source&&recordedAt){expected.ratings.push({id:filmId,rating:body.rating,source:body.source,recordedAt});note(key,'mapped',filmId);}else note(key,'unportable',filmId||key);continue;}
-  if(/^enrichment\/films\/[^/]+\/predictions\.json$/.test(key)){const filmId=filmIdFromEnrichmentKey(key);const current=predictionExpectation(key,filmId,body);if(current){expected.predictions.push(current);note(key,'mapped',filmId);}else note(key,'unportable',filmId||key);continue;}
+  if(/^enrichment\/films\/[^/]+\/(?:fingerprint|actual|predictions)\.json$/.test(key)){
+   const resolved=recordIdentity(key,enrichmentStoredId(key));
+   if(!resolved)continue;
+   const filmId=resolved.filmId,provenance={identity:provenanceOf(resolved)};
+   if(key.endsWith('/fingerprint.json')){if(body?.fingerprintHash){expected.fingerprints.push({id:filmId,fingerprintHash:body.fingerprintHash,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:key,contentSha256:shas[key]||null});note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'fingerprint_fields_missing'});continue;}
+   if(key.endsWith('/actual.json')){const recordedAt=body?.recordedAt||body?.updatedAt||null;if(typeof body?.rating==='number'&&body.source&&recordedAt){expected.ratings.push({id:filmId,rating:body.rating,source:body.source,recordedAt});note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'rating_fields_missing'});continue;}
+   const current=predictionExpectation(key,filmId,body);
+   if(current){expected.predictions.push(current);note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'prediction_version_object_missing'});
+   continue;
+  }
   note(key,'unportable',key);
  }
  const programmeKey=keys.includes('programme.json')?'programme.json':null;
- const discoveryPortable=!keys.includes('epg/discovery-latest.json')||discoveryRecords(bodies['epg/discovery-latest.json']).portable;
+ const discovery=keys.includes('epg/discovery-latest.json')?discoveryRecords(bodies['epg/discovery-latest.json'],deriveEvidence):{portable:true,items:[],blockers:[]};
+ expected.blockers.push(...discovery.blockers.map(blocker=>({...blocker,sourceKey:'epg/discovery-latest.json',sourceSha256:shas['epg/discovery-latest.json']||null})));
+ const discoveryPortable=discovery.portable&&discovery.blockers.length===0;
  if(programmeKey){
   const programme=bodies[programmeKey];
   const pointer=bodies['epg/published-generation.json']||{programmeRunId:programme?.runId||null,phase:'published'};
-  const generation=discoveryPortable?generationExpectation(pointer,programme):null;
-  if(generation){expected.generations.push(generation);if(generation.phase==='published')expected.publishedPointer=generation.id;note(programmeKey,'mapped',generation.id);if(keys.includes('epg/published-generation.json'))note('epg/published-generation.json','mapped',generation.id);}
-  else{note(programmeKey,'unportable',pointer?.programmeRunId||programmeKey);if(keys.includes('epg/published-generation.json'))note('epg/published-generation.json','unportable',pointer?.programmeRunId||'epg/published-generation.json');}
+  const generation=discoveryPortable?generationExpectation(pointer,programme,identity):null;
+  if(generation&&!generation.unresolved){expected.generations.push(generation);if(generation.phase==='published')expected.publishedPointer=generation.id;note(programmeKey,'mapped',generation.id);if(keys.includes('epg/published-generation.json'))note('epg/published-generation.json','mapped',generation.id);}
+  else{const disposition=generation?.unresolved?'unresolved':'unportable';note(programmeKey,disposition,pointer?.programmeRunId||programmeKey,generation?.unresolved?{reason:generation.reason,unresolvedFilms:generation.unresolvedFilms}:undefined);if(keys.includes('epg/published-generation.json'))note('epg/published-generation.json',disposition,pointer?.programmeRunId||'epg/published-generation.json');}
  }
  if(keys.includes('epg/discovery-latest.json')){
-  const discovery=discoveryRecords(bodies['epg/discovery-latest.json']);
   const runId=expected.generations[0]?.id||null;
   for(const item of discovery.items){
    if(!discoveryPortable||!runId)note('epg/discovery-latest.json','unportable',item.id);
-   else{expected.candidates.push({id:item.id,programmeRunId:runId,evidenceKey:item.evidenceKey,title:item.title,normalizedTitle:item.normalizedTitle});note('epg/discovery-latest.json','mapped',item.id);}
+   else{expected.candidates.push({id:item.id,programmeRunId:runId,evidenceKey:item.evidenceKey,title:item.title,normalizedTitle:item.normalizedTitle});note('epg/discovery-latest.json','mapped',item.id,{evidence:item.evidenceProvenance});}
   }
   if(!discovery.items.length)note('epg/discovery-latest.json','unportable','epg/discovery-latest.json');
  }
  if(keys.includes('epg/discovery-resolution.json')){
   const entries=Object.entries(bodies['epg/discovery-resolution.json']||{}).filter(([id,value])=>id!=='__canonicalizedAt'&&value&&typeof value==='object');
   const runId=expected.generations[0]?.id||null;
+  const byKey=new Map(discovery.items.map(item=>[item.id,item]));
   if(!entries.length)note('epg/discovery-resolution.json','unportable','epg/discovery-resolution.json');
   for(const [id,value] of entries){
-   if(!runId||!value.evidenceKey||!value.status||!value.checkedAt)note('epg/discovery-resolution.json','unportable',id);
-   else{expected.decisions.push({id,status:value.status,evidenceKey:value.evidenceKey,terminalReason:value.terminalReason??null,filmId:value.filmId??null});note('epg/discovery-resolution.json','mapped',id);}
+   const candidate=byKey.get(id);
+   if(!runId||!value.status||!value.checkedAt){note('epg/discovery-resolution.json','unportable',id);continue;}
+   if(!candidate){note('epg/discovery-resolution.json','unresolved',id,{reason:'decision_without_candidate'});continue;}
+   if(value.evidenceKey&&value.evidenceKey!==candidate.evidenceKey){expected.blockers.push({reason:'evidence_mismatch',sourceKey:'epg/discovery-resolution.json',sourceSha256:shas['epg/discovery-resolution.json']||null,targetTable:'candidate_decision',targetId:id,stored:value.evidenceKey,derived:candidate.evidenceKey});continue;}
+   let filmId=null;
+   if(value.filmId!=null){const resolved=identity.resolve(value.filmId);if(!resolved.filmId){note('epg/discovery-resolution.json','unresolved',id,{reason:resolved.reason,identity:provenanceOf(resolved)});continue;}filmId=resolved.filmId;}
+   expected.decisions.push({id,status:value.status,evidenceKey:candidate.evidenceKey,terminalReason:value.terminalReason??null,filmId});
+   note('epg/discovery-resolution.json','mapped',id,{evidence:value.evidenceKey?'stored':'derived'});
   }
  }
  for(const key of keys)if(classifyObject(key)==='mapped'&&!accounted.has(key)&&!expected.records.some(record=>record.key===key))expected.unprojected.push(key);
@@ -529,13 +769,15 @@ async function verifyDecisions(db,decisions,missing,extra,mismatched){
  for(const row of rows)if(!wanted.has(row.id))extra.push({table:'candidate_decision',id:row.id});
  for(const row of decisions){const stored=rows.find(item=>item.id===row.id);if(stored&&(stored.status!==row.status||stored.evidence_key!==row.evidenceKey||(stored.terminal_reason??null)!==(row.terminalReason??null)||('filmId' in row&&(stored.film_id??null)!==(row.filmId??null))))mismatched.push({table:'candidate_decision',id:row.id,field:'decision'});}
 }
-function generationExpectation(pointer,programme){
+function generationExpectation(pointer,programme,identity){
  const programmeRunId=pointer?.programmeRunId||programme?.runId||null;
  if(!programmeRunId||!Array.isArray(programme?.films))return null;
- const films=[];
+ const films=[],unresolvedFilms=[];
  for(const film of programme.films){
   if(!film||!Array.isArray(film.shows))return null;
-  const filmId=String(film.filmId||(String(film.id).startsWith('film:')?film.id:'film:'+film.id));
+  const resolved=identity.resolve(film.filmId||film.id);
+  if(!resolved.filmId){unresolvedFilms.push(provenanceOf(resolved));continue;}
+  const filmId=resolved.filmId;
   const shows=[];
   for(const show of film.shows){
    const startMs=show?.startMs??show?.start;
@@ -544,16 +786,20 @@ function generationExpectation(pointer,programme){
   }
   films.push({filmId,shows});
  }
+ if(unresolvedFilms.length)return {id:programmeRunId,unresolved:true,reason:unresolvedFilms[0].reason,unresolvedFilms};
  return {id:programmeRunId,phase:pointer?.phase==='withheld'?'withheld':'published',films,shows:films.flatMap(film=>film.shows)};
 }
-function discoveryRecords(body){
- const items=[];
+function discoveryRecords(body,deriveEvidence){
+ requireEvidence(deriveEvidence);
+ const items=[],blockers=[];
  for(const item of Array.isArray(body?.items)?body.items:[]){
   const observationKey=item?.observationKey||item?.key||null;
-  if(!observationKey||!item?.evidenceKey||!item?.title||!item?.normalizedTitle)return {portable:false,items:[{id:observationKey||'discovery'}]};
-  items.push({id:observationKey,evidenceKey:item.evidenceKey,title:item.title,normalizedTitle:item.normalizedTitle});
+  if(!observationKey||!item?.title||!item?.normalizedTitle)return {portable:false,items:[{id:observationKey||'discovery'}],blockers};
+  const evidence=evidenceFor(item,deriveEvidence);
+  if(evidence.mismatch){blockers.push({reason:'evidence_mismatch',targetTable:'candidate',targetId:observationKey,stored:evidence.stored,derived:evidence.derived});continue;}
+  items.push({id:observationKey,evidenceKey:evidence.key,evidenceProvenance:evidence.provenance,title:item.title,normalizedTitle:item.normalizedTitle});
  }
- return {portable:items.length>0,items};
+ return {portable:items.length>0,items,blockers};
 }
 function predictionExpectation(key,filmId,body){
  const current=versionedPrediction(body?.current,key);

@@ -33,11 +33,11 @@
 | Frozen schema v1 and its test | `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs` | Ready; applied only to a local SQLite in CI |
 | Write-only buffered transactions in every repository | `src/canonical-repository.js`, `src/epg-repository.js`, `src/prediction-repository.js`; the offline adapter rejects a read inside a transaction (`openSqlite` in `scripts/offline-import.mjs`) | Ready in shape: every write is a statement list that a D1 batch can execute atomically; no adapter for D1 exists yet |
 | Unit model, receipts by source key and checksum, resume, `uncheckpointed → readback → reconciled` | `importBatch`, `checkpoint`, `storedMatches` in `src/offline-importer.js` | Ready; receipts are the restart fence the live run needs |
-| Independent source projection and read-back parity with denominators | `projectSource`, `verifyParity`, `parityClaim` | Ready; the full-parity claim does not yet distinguish unmapped-by-design keys |
+| Independent source projection and read-back parity with denominators | `projectSource`, `verifyParity`, `parityClaim` | Ready; since the importer-rules PR the claim distinguishes declared `r2_only` keys from unknown keys and requires class A to have no blocker |
 | Manifest with per-object SHA-256, two bracketing listings, resumable download, `verifySnapshot` | `scripts/migration-export.mjs` | Pinned to the legacy Site origin and its export route; refuses the Worker origin; the Worker route itself is disabled unless Site-only variables are set |
 | Snapshot loader and lifecycle reader | `scripts/snapshot-store.mjs`, `src/domain/film-person-reader.js` | Checks the legacy source identity in the manifest; a production baseline needs a new source identity field |
-| Identity spellings | `film-person-reader.js:12` emits `tmdb_<n>`; `film-person.js:44` mints `film:tmdb:<n>`; `catalogId` in `film-person-diagnostics.js:17` maps back | The rule exists in production code but is not exported as one function and not used by the importer |
-| Evidence key | `candidateEvidence` in `src/discovery.js:12`, stored on decisions | Not exported to the importer; `readDiscovery` requires an `evidenceKey` field the items do not carry |
+| Identity spellings | `film-person-reader.js:12` emits `tmdb_<n>`; `film-person.js:44` mints `film:tmdb:<n>`; `catalogId` in `film-person-diagnostics.js:17` maps back | Closed by the importer-rules PR: `canonicalFilmId()` in `src/domain/film-person.js` is loaded by the importer, redirects are followed, unresolved ids are class C |
+| Evidence key | `candidateEvidence` in `src/discovery.js:12`, stored on decisions | Closed by the importer-rules PR: the importer evaluates `src/discovery.js` and derives the key; a stored decision that disagrees stops the run |
 
 ## Gaps between the AIR-73 result and the AIR-74 acceptance
 
@@ -67,6 +67,13 @@ R2-only means "no D1 table in schema v1 and not imported by this backfill". It i
 | User-visible state without a table: `started/*` markers, `events/*` | No table in schema v1 | **Must** get a D1 home or an explicit "stays in R2" decision before any reader serves from D1; a read cutover that drops them is a regression | [AIR-77](https://trello.com/c/f3QzcNYf), new ADR |
 | Caches with a provisional mapping: `titles.json`, `people.json`, `metadata.json` beyond `film_metadata` | Name caches, mapped only as provisional dimensions | Confirm the provisional-dimension mapping covers what readers need | [AIR-76](https://trello.com/c/HHrDozK6) |
 | Archive: raw EPG XML, `epg/generations/<runId>/*` copies, export archives | Archive by ADR-0008 and the schema | None; stays in R2 | none |
+| Ratings runner state found in the Worker source after the first table: `enrichment/ratings/status.json`, `pending.json`, `lease.json` | State of the ratings refresh writer | Redesigned, not migrated | [AIR-78](https://trello.com/c/COdMTjqU) |
+| Ratings run history: `enrichment/ratings/published.json`, `enrichment/ratings/generations/*` | Operational history of the ratings refresh; actual ratings themselves are the mapped `actual.json` objects | Keep as R2 history or give them a table before legacy retirement | [AIR-79](https://trello.com/c/485tlGLA) |
+| Diagnostics: `enrichment/diagnostics/*`, `enrichment/run-diagnostics/*`, `enrichment/latest-run.json`, `enrichment/start-events/*`, `uncertain.json` | Diagnostics and run pointers of the R2 runner; `uncertain.json` is recomputed on every EPG sync | Same as run records (diagnostics) or derived projections (`uncertain.json`) | [AIR-79](https://trello.com/c/485tlGLA) / [AIR-77](https://trello.com/c/f3QzcNYf) |
+| User-visible state without a table, additional key: `ui/filter-presets.json` | No table in schema v1 | Same disposition requirement as `started/*` and `events/*` | [AIR-77](https://trello.com/c/f3QzcNYf), new ADR |
+| Archive copies written before canonicalization: `epg/discovery-before-canonical.json`, `epg/discovery-resolution-before-canonical.json` | One-time archive copies of the discovery ledger | None; stays in R2 | none |
+
+The importer's `R2_ONLY` table in `src/offline-importer.js` encodes exactly these families with the stage names `read_cutover`, `write_cutover`, `legacy_retirement` and `none`; `started/*`, `events/*` and `ui/filter-presets.json` are flagged `decisionRequired`. Any key outside the table and outside the mapped families fails closed.
 
 ## Acceptance classes and what blocks which stage
 
@@ -94,9 +101,9 @@ An authoritative family is never excluded to reach Done: the prediction family i
 | Gate | Condition | Status |
 | --- | --- | --- |
 | G0 | ADR-0019 accepted; design choices decided | **decided 2026-10-26** (owner comment on the card): database `iptv`, no Worker binding; prediction family mandatory with immutable versions as a separate task and materialization under separate approval; metadata-only and slug-only residuals preserved as unresolved with a ledger gating later reads; R2-only principle with per-prefix justification, `events/` and `started/` decided before AIR-77, unexpected keys fail closed; scoped read-only R2 token with a local S3-compatible exporter, no Worker route or Access change; a short Task freeze only as a future fallback under its own approval. Still to confirm before the dry-run: the concrete prefix list with dispositions |
-| G1 | Importer rules merged with regressions; CI green | open |
+| G1 | Importer rules merged with regressions; CI green | PR open for independent review ([AIR-162](https://trello.com/c/lLEO4B6I)): shared `canonicalFilmId()` with redirects and unresolved classes, derived `candidateEvidence()` with stop on disagreement, declared `r2_only` families with fail-closed unknown keys, classes A/B/C in the report, receipt audit, bounded `--limit`; regressions for legacy ids, redirects, collisions, inconsistent evidence, unknown keys, incomplete families, idempotent reruns and interrupted imports |
 | G2 | Live exporter merged; read-only credential created and verified read-only by scope | open (owner approval) |
-| G3 | Dry-run report reviewed in the four classes: class A equal, `unmapped` empty, class C complete and acknowledged, class D stated, two local reruns apply zero rows | open |
+| G3 | Dry-run report reviewed in the three classes: class A equal with the prediction family portable, `unmapped` empty, class B listed with dispositions, class C complete and acknowledged, two local reruns apply zero rows | open |
 | G4 | D1 database created, schema applied, scratch atomicity demonstrated | open (owner approval) |
 | G5 | Production backfill window approved; the baseline carries its consistency proof (or the approved alternative gate); executed; class A parity against the baseline manifest; reruns apply zero rows; rollback procedure (backup, identity fence, drop, re-import) written and approved before the first row | open (owner approval) |
 | G6 | Acceptance report merged; `wrangler.jsonc` still without D1; Scheduled Tasks unchanged | open |

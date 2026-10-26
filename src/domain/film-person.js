@@ -44,6 +44,16 @@ function localFilmId({letterboxdId,tmdbId,conflictingTmdbIds}={}){
  if(tmdbId)return 'film:tmdb:'+String(tmdbId);
  return null;
 }
+// One rule for every stored spelling of a Film id. The catalog form tmdb_<n> written by the lifecycle reader is the canonical film:tmdb:<n>;
+// a Letterboxd slug is film:<slug>; a canonical id is returned as written. The rule never mints an id: a result that names no stored Film stays unresolved.
+function canonicalFilmId(storedId){
+ if(storedId==null)return null;
+ const id=String(storedId).trim();
+ if(!id)return null;
+ if(id.startsWith('film:'))return id;
+ const tmdb=id.match(/^tmdb_(\d+)$/);
+ return tmdb?'film:tmdb:'+tmdb[1]:'film:'+id;
+}
 function localPersonId(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
 function externalIds({letterboxdId,tmdbId,conflictingTmdbIds,tmdbTrusted,provenance}={}){
  const ids=[];

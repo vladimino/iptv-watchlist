@@ -16,8 +16,8 @@ assert.match(bundle,/src\/domain\/film-person\.js/);
 assert.doesNotMatch(bundle,/film-person-reader|film-person-backfill/);
 
 const ctx=vm.createContext({Date,Map,Set,JSON});
-vm.runInContext(source+'\nglobalThis.contract={DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases};',ctx);
-const {DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases}=ctx.contract;
+vm.runInContext(source+'\nglobalThis.contract={DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,canonicalFilmId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases};',ctx);
+const {DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,canonicalFilmId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases}=ctx.contract;
 
 const NOW=Date.parse('2026-10-20T12:00:00.000Z');
 const DAY=86400000;
@@ -338,6 +338,16 @@ assert.equal(actor.localization.value,'Крис Прэтт');
 assert.equal(actor.identity.provenance.dedupe,'deferred');
 assert.equal(actor.aliases.some(alias=>alias.value==='Крис Пратт'&&alias.provenance.source==='dictionary'),true);
 assert.notEqual(actor.id,director.id);
+// One shared rule turns every stored spelling of a Film id into the canonical id; it never mints an id.
+assert.equal(canonicalFilmId('tmdb_1656'),'film:tmdb:1656');
+assert.equal(canonicalFilmId('heat-1995'),'film:heat-1995');
+assert.equal(canonicalFilmId('film:tmdb:1656'),'film:tmdb:1656');
+assert.equal(canonicalFilmId('film:conflict:1+2'),'film:conflict:1+2');
+assert.equal(canonicalFilmId(' tmdb_7 '),'film:tmdb:7');
+assert.equal(canonicalFilmId('tmdb_x'),'film:tmdb_x');
+assert.equal(canonicalFilmId(''),null);
+assert.equal(canonicalFilmId(null),null);
+assert.equal(canonicalFilmId(localFilmId({tmdbId:'1656'})),localFilmId({tmdbId:'1656'}));
 assert.equal(localPersonId('role/Chris Pratt'),'person:role/Chris Pratt');
 assert.equal(localPersonId('tmdb_actor/10'),'person:tmdb_actor/10');
 assert.equal(localPersonId('tmdb_director/10'),'person:tmdb_director/10');
