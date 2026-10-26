@@ -249,10 +249,10 @@ const validateSealed={BUCKET:{async get(){validateDenied.push('get');},async put
 fetches.length=0;
 const preflightBad=await tool(validateSealed,'prediction_validate',{fingerprint:{...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']},prediction:{...prediction,predictedRating:4.2}});
 assert.equal(preflightBad.body.result.isError,undefined,JSON.stringify(preflightBad.body));
-assert.deepEqual(preflightBad.body.result.structuredContent,{valid:false,contractVersion:1,fingerprint:{checked:true,issues:[{path:'fingerprint.execution.payoff',code:'invalid_enum'},{path:'fingerprint.moodLabels',code:'required'}]},prediction:{checked:true,issues:[{path:'prediction.predictedRating',code:'invalid_step'}]},storage:'not_accessed',sideEffects:'none'});
+assert.deepEqual(preflightBad.body.result.structuredContent,{success:false,valid:false,contractVersion:1,fingerprint:{checked:true,issues:[{path:'fingerprint.execution.payoff',code:'invalid_enum'},{path:'fingerprint.moodLabels',code:'required'}]},prediction:{checked:true,issues:[{path:'prediction.predictedRating',code:'invalid_step'}]},storage:'not_accessed',sideEffects:'none'});
 assert.doesNotMatch(JSON.stringify(preflightBad.body),/PAYLOAD-CANARY/);
 const preflightGood=await tool(validateSealed,'prediction_validate',{fingerprint,prediction});
-assert.deepEqual(preflightGood.body.result.structuredContent,{valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:true,issues:[]},storage:'not_accessed',sideEffects:'none'});
+assert.deepEqual(preflightGood.body.result.structuredContent,{success:true,valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:true,issues:[]},storage:'not_accessed',sideEffects:'none'});
 const preflightOne=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_validate',{prediction});
 assert.deepEqual(preflightOne.body.result.structuredContent.fingerprint,{checked:false,issues:[]});assert.equal(preflightOne.body.result.structuredContent.valid,true,'answers without a bucket binding');
 assert.deepEqual(validateDenied,[]);
@@ -261,6 +261,31 @@ assert.equal((await tool(validateSealed,'prediction_validate',{fingerprint},{ass
 assert.deepEqual(validateDenied,[]);
 // The preflight verdict and the submit verdict agree on the same payload.
 assert.deepEqual(preflightBad.body.result.structuredContent.fingerprint.issues,rejectedItem.validation.issues);
+// The caller contract reads success: it names the same verdict as valid, in structuredContent and in the
+// text content alike, and it is true only when every supplied object was checked without an issue.
+for(const outcome of [preflightBad,preflightGood,preflightOne]){
+ const report=outcome.body.result.structuredContent,text=JSON.parse(outcome.body.result.content[0].text);
+ assert.equal(typeof report.success,'boolean');
+ assert.equal(report.success,report.valid);
+ assert.equal(report.success,!report.fingerprint.issues.length&&!report.prediction.issues.length);
+ assert.deepEqual(text,report,'text content carries the same report');
+ assert.equal(report.contractVersion,1);
+}
+assert.equal(preflightOne.body.result.structuredContent.success,true,'prediction_only preflight succeeds with the fingerprint unchecked');
+// A real schema violation still fails the preflight: success false, valid false, the issue named, no error flag.
+const preflightOneBad=await tool(validateSealed,'prediction_validate',{prediction:{...prediction,predictedRating:4.2}});
+assert.equal(preflightOneBad.body.result.isError,undefined);
+assert.deepEqual(preflightOneBad.body.result.structuredContent,{success:false,valid:false,contractVersion:1,fingerprint:{checked:false,issues:[]},prediction:{checked:true,issues:[{path:'prediction.predictedRating',code:'invalid_step'}]},storage:'not_accessed',sideEffects:'none'});
+const preflightFingerprintBad=await tool(validateSealed,'prediction_validate',{fingerprint:{...fingerprint,execution:{...fingerprint.execution,payoff:'medium'}},prediction});
+assert.equal(preflightFingerprintBad.body.result.structuredContent.success,false,'one invalid object fails the whole preflight');
+assert.equal(preflightFingerprintBad.body.result.structuredContent.valid,false);
+assert.deepEqual(preflightFingerprintBad.body.result.structuredContent.prediction,{checked:true,issues:[]});
+assert.deepEqual(preflightFingerprintBad.body.result.structuredContent.fingerprint.issues,[{path:'fingerprint.execution.payoff',code:'invalid_enum'}]);
+// A malformed call is a tool error without a report: neither success nor valid is present, nothing is stored.
+const preflightMalformed=await tool(validateSealed,'prediction_validate',{fingerprint:'text'});
+assert.equal(preflightMalformed.body.result.isError,true);
+assert.equal(preflightMalformed.body.result.structuredContent,undefined);
+assert.deepEqual(validateDenied,[]);
 
 const conflicts=store();
 conflicts.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
