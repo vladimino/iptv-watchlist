@@ -132,17 +132,38 @@ assert.equal(r.data.diagnostic.branch,'orphan_settled');assert.equal(r.data.disc
 seedOrphan();records.get('epg/discovery-status.json').programmeChanged=true;
 r=await step();assert.equal(r.data.discovery.reason,'programme_changed');assert.equal(r.data.discovery.nextAction,'stop');assert.equal(verified(),2);
 
-// 7. Generation fence: the orphan belongs to another published generation, so it is closed, not resumed.
-seedOrphan({programmeRunId:'00000000-0000-4000-8000-000000000000'});
+// 7. Generation handoff (regression A): the orphan belongs to an earlier generation while a newer one is published
+//    and in place. The step supersedes it with a fresh series for the published generation, runs one chunk under a
+//    new hop, and leaves the old hop's ledger alone.
+const OLD='00000000-0000-4000-8000-000000000000';
+seedOrphan({programmeRunId:OLD});
+const oldStatus=plain(records.get('epg/discovery-status.json')),oldDecisions=plain(records.get('epg/discovery-resolution.json'));
+pipeline=await status();assert.equal(pipeline.continuationHealth.generationConflict,true);
 r=await step();
-assert.equal(r.data.stage,'complete','the sync run stage is unchanged');assert.equal(r.data.diagnostic.branch,'generation_conflict');assert.equal(r.data.diagnostic.health.generationConflict,true);
-assert.deepEqual(r.data.diagnostic.recovery,{orphanHopId:ORPHAN,action:'generation_conflict',chunkCompleted:false,budget:0,settled:true},'a status from another generation is not this hop\'s chunk');
-assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,'programme_changed');assert.equal(r.data.discovery.nextAction,'stop');assert.equal(r.data.discovery.remainingChunks,0);
-assert.equal(continuation().reason,'programme_changed');assert.equal(continuation().programmeRunId,'00000000-0000-4000-8000-000000000000');assert.equal(verified(),2);assert.deepEqual(fetches,[]);
-pipeline=await status();assert.equal(pipeline.continuationHealth.status,'settled');
-// Without a published generation pointer there is nothing to fence against.
-seedOrphan({published:null,programmeRunId:'00000000-0000-4000-8000-000000000000'});
-r=await step();assert.equal(r.data.diagnostic.health.generationConflict,false);assert.equal(r.data.diagnostic.branch,'chunk');
+assert.equal(r.data.stage,'complete','the sync run stage is unchanged');assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(r.data.diagnostic.health.generationConflict,true);
+assert.deepEqual(r.data.diagnostic.recovery,{orphanHopId:ORPHAN,action:'generation_recovered',chunkCompleted:false,budget:12,settled:true,superseded:OLD});
+assert.equal(r.data.diagnostic.decision.budget,12,'the new series starts with the full budget');assert.notEqual(r.data.diagnostic.hopId,ORPHAN);
+assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,null);assert.equal(r.data.discovery.remainingChunks,11);assert.equal(r.data.discovery.nextAction,'continue');assert.equal(r.data.discovery.programmeRunId,GENERATION);
+assert.equal(continuation().programmeRunId,GENERATION);assert.equal(continuation().hopId,r.data.diagnostic.hopId);assert.equal(continuation().remainingChunks,11);
+assert.equal(verified(),2+CHUNK);assert.deepEqual(fetches,[]);assert.equal(records.get('epg/discovery-status.json').hopId,r.data.diagnostic.hopId);assert.equal(records.get('epg/discovery-status.json').programmeRunId,GENERATION);
+for(const key of Object.keys(oldDecisions))assert.deepEqual(plain(records.get('epg/discovery-resolution.json')[key]),oldDecisions[key],'the old generation\'s decisions are untouched');
+assert.notEqual(records.get('epg/discovery-status.json').startedAt,oldStatus.startedAt);
+pipeline=await status();assert.equal(pipeline.continuationHealth.status,'settled');assert.equal(pipeline.continuationHealth.generationConflict,null);
+// The handoff is one-off: the next step is an ordinary continuation of the published generation.
+r=await step();assert.equal(r.data.diagnostic.recovery,null);assert.equal(r.data.discovery.remainingChunks,10);assert.equal(verified(),2+2*CHUNK);
+// The published generation is not yet in place (the shared programme still carries the old one): nothing is replaced, wait.
+seedOrphan({programmeRunId:OLD});records.get('programme.json').runId=OLD;etags.set('programme.json',String(++revision));
+const pendingBefore=plain(continuation());
+r=await step();
+assert.equal(r.data.diagnostic.branch,'generation_pending');assert.equal(r.data.diagnostic.recovery.action,'generation_pending');assert.equal(r.data.diagnostic.recovery.superseded,OLD);
+assert.equal(r.data.discovery.nextAction,'wait');assert.ok(r.data.discovery.nextCatchUpAt);assert.deepEqual(plain(continuation()),pendingBefore);assert.equal(verified(),2);
+assert.deepEqual(puts.filter(key=>!key.includes('continuation-diagnostics')),[],'a pending publication writes nothing');
+// Without a published generation pointer there is nothing to hand off to.
+seedOrphan({published:null,programmeRunId:OLD});
+r=await step();assert.equal(r.data.diagnostic.health.generationConflict,false);assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(r.data.diagnostic.recovery.action,'resumed');
+// A live old-generation writer is not superseded: busy / wait until its lease expires.
+seedOrphan({programmeRunId:OLD,lease:'live'});
+r=await step();assert.equal(r.data.diagnostic.branch,'lease_live');assert.equal(r.data.discovery.state,'busy');assert.equal(continuation().programmeRunId,OLD);
 
 // 8. Two concurrent explicit steps on one orphan: exactly one owns the continuation, the other waits, and the
 //    budget moves by one chunk only.
@@ -247,10 +268,106 @@ assert.equal(records.get('epg/discovery-status.json').hopId,fenced.replacementHo
 assert.equal(continuation().hopId,fenced.replacementHop);assert.equal(verified(),2+2*CHUNK,'the stalled hop\'s decisions landed before it stalled; the replacement added one more chunk');
 assert.equal(records.get('epg/resolver-lease.json').id,fenced.replacementHop);
 
+// 14. Regression B: the publication finished (pointer and shared programme name the new generation, the sync run is
+//     `complete`) but the invocation ended before the discovery checkpoint was queued. The checkpoint still holds the
+//     previous generation's terminal record, or a `programme_changed` record the mid-publication chunk wrote for the
+//     new generation. The next ordinary step restores the series for the published generation without publishing
+//     anything again, and a second step continues it.
+function seedCommitted(record){seedOrphan();set('epg/resolver-continuation.json',record);records.delete('epg/resolver-lease.json');}
+const publishedKeys=()=>[...records.keys()].filter(key=>key.startsWith('epg/generations/')||key==='epg/published-generation.json'||key==='programme.json'||key==='sync.json');
+for(const stale of [
+ {stage:'complete',reason:null,at:iso(now-7200000),hopId:'33333333-4444-4555-8666-777777777777',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OLD},
+ {stage:'paused',reason:'chunk_budget',at:iso(now-7200000),hopId:'33333333-4444-4555-8666-777777777777',remainingChunks:0,nextCatchUpAt:iso(now+3600000),retryAt:null,programmeRunId:OLD},
+ {stage:'paused',reason:'programme_changed',at:iso(now-60000),hopId:'33333333-4444-4555-8666-777777777777',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OLD},
+ {stage:'paused',reason:'programme_changed',at:iso(now-60000),hopId:'33333333-4444-4555-8666-777777777777',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION},
+]){
+ seedCommitted(stale);const before=publishedKeys().map(key=>[key,etags.get(key)]),syncBefore=plain(records.get('sync.json'));
+ r=await step();
+ assert.equal(r.data.diagnostic.health.status,'settled',JSON.stringify(stale));assert.equal(r.data.diagnostic.recovery.action,'generation_recovered');assert.equal(r.data.diagnostic.recovery.superseded,stale.programmeRunId);assert.equal(r.data.diagnostic.recovery.orphanHopId,stale.hopId,'the superseded record\'s hop is named');
+ assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(r.data.discovery.remainingChunks,11);assert.equal(r.data.discovery.nextAction,'continue');assert.equal(continuation().programmeRunId,GENERATION);assert.equal(verified(),2+CHUNK);
+ assert.deepEqual(publishedKeys().map(key=>[key,etags.get(key)]),before,'nothing was published again');assert.deepEqual(plain(records.get('sync.json')),syncBefore);
+ r=await step();assert.equal(r.data.diagnostic.recovery,null);assert.equal(r.data.discovery.remainingChunks,10);assert.equal(verified(),2+2*CHUNK);
+}
+// A finished series of the published generation stays finished, and a paused one of the published generation is simply
+// continued: neither is a handoff.
+seedCommitted({stage:'complete',reason:null,at:iso(now-60000),hopId:'33333333-4444-4555-8666-777777777777',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+r=await step();assert.equal(r.data.diagnostic.recovery,null);assert.equal(r.data.discovery.state,'complete');assert.equal(r.data.discovery.nextAction,'stop');assert.equal(verified(),2);
+seedCommitted({stage:'paused',reason:'epg_committed',at:iso(now-60000),hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+r=await step();assert.equal(r.data.diagnostic.recovery,null);assert.equal(r.data.discovery.remainingChunks,11);
+// A legacy record without a generation pin cannot be judged and is continued as before.
+seedCommitted({stage:'paused',reason:'epg_committed',at:iso(now-60000),hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId:null});
+r=await step();assert.equal(r.data.diagnostic.recovery,null);assert.equal(r.data.discovery.remainingChunks,11);assert.equal(continuation().programmeRunId,GENERATION,'the chunk pins the generation it read');
+
+// 15. The commit itself pins the generation it queues, keeps a live writer's record, and loses a concurrent write.
+seedCommitted({stage:'complete',reason:null,at:iso(now-60000),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OLD});
+let queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));
+assert.deepEqual({state:queued.state,reason:queued.reason,remainingChunks:queued.remainingChunks,nextAction:queued.nextAction,programmeRunId:queued.programmeRunId},{state:'paused',reason:'epg_committed',remainingChunks:12,nextAction:'continue',programmeRunId:GENERATION});
+assert.equal(continuation().programmeRunId,GENERATION);
+seedOrphan({lease:'live'});const liveRecord=plain(continuation());
+queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));
+assert.equal(queued.state,'running');assert.equal(queued.reason,'busy');assert.equal(queued.nextAction,'wait');assert.deepEqual(plain(continuation()),liveRecord,'a live writer keeps its record');
+seedCommitted({stage:'complete',reason:null,at:iso(now-60000),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OLD});
+let stoleOnce=false;bucket.put=async(key,value,options)=>{if(key==='epg/resolver-continuation.json'&&!stoleOnce){stoleOnce=true;await originalPut(key,JSON.stringify({stage:'running',reason:null,at:iso(now),hopId:'22222222-3333-4444-8555-666666666666',remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}));}return originalPut(key,value,options);};
+queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));bucket.put=originalPut;
+assert.equal(continuation().hopId,'22222222-3333-4444-8555-666666666666','the concurrent writer\'s record stands');assert.equal(queued.state,'running');
+
+// 15b. Out-of-order commits: a G1 commit that paused after its programme write and resumes after G2 was published,
+//      queued and advanced must not roll the G2 series back; a re-entered G2 commit keeps G2's progress; only the
+//      mid-publication `programme_changed` artefact of G2 is replaced.
+seedCommitted({stage:'paused',reason:null,at:iso(now-60000),hopId:'44444444-5555-4666-8777-888888888888',remainingChunks:9,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+const g2Record=plain(continuation()),g2Etag=etags.get('epg/resolver-continuation.json');
+for(const lateReason of ['epg_committed','scan_committed']){
+ queued=plain(await call('queueDiscovery')(env,lateReason,OLD));
+ assert.deepEqual(plain(continuation()),g2Record,'a late '+lateReason+' of the earlier generation writes nothing');assert.equal(etags.get('epg/resolver-continuation.json'),g2Etag);
+ assert.equal(queued.programmeRunId,GENERATION);assert.equal(queued.remainingChunks,9);assert.equal(queued.nextAction,'continue','the contract is that of the record left in place');
+}
+queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));
+assert.deepEqual(plain(continuation()),g2Record,'a re-entered commit of the same generation keeps its progress');assert.equal(queued.remainingChunks,9);
+r=await step();assert.equal(r.data.diagnostic.recovery,null,'no handoff follows');assert.equal(r.data.discovery.remainingChunks,8);assert.equal(verified(),2+CHUNK);
+seedCommitted({stage:'paused',reason:'programme_changed',at:iso(now-60000),hopId:'44444444-5555-4666-8777-888888888888',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+queued=plain(await call('queueDiscovery')(env,'epg_committed',GENERATION));
+assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().remainingChunks,12);assert.equal(queued.nextAction,'continue');
+// Without a published pointer there is no generation to check against, so a record of another generation is replaced as requested.
+seedCommitted({stage:'complete',reason:null,at:iso(now-60000),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:'11111111-2222-4333-8444-555555555555'});records.delete('epg/published-generation.json');
+queued=plain(await call('queueDiscovery')(env,'epg_committed',OLD));assert.equal(continuation().programmeRunId,OLD);assert.equal(queued.remainingChunks,12);
+
+// 16. Regression C: concurrency around the handoff. Two steps on one stale record: one supersedes and runs the chunk,
+//     the other waits; a conflicting write between read and supersede is reported, not forced; and an old-generation
+//     hop that stalls past its lease while the new generation is published and recovered cannot write late.
+seedOrphan({programmeRunId:OLD});
+let holdHandoff,handoffHeld=false;const handoffGate=new Promise(resolve=>{holdHandoff=resolve;});
+bucket.get=async key=>{if(key==='epg/discovery-latest.json'&&!handoffHeld){handoffHeld=true;await handoffGate;}return originalGet(key);};
+const firstHandoff=step();
+for(let i=0;i<50&&!(continuation()?.stage==='running'&&continuation().programmeRunId===GENERATION);i++)await new Promise(resolve=>setTimeout(resolve,0));
+assert.equal(continuation().stage,'running');assert.equal(continuation().programmeRunId,GENERATION);
+const secondHandoff=await step();assert.equal(secondHandoff.data.discovery.state,'busy');assert.equal(secondHandoff.data.diagnostic.branch,'lease_live');
+holdHandoff();const firstDone=await firstHandoff;bucket.get=originalGet;
+assert.equal(firstDone.data.diagnostic.recovery.action,'generation_recovered');assert.equal(firstDone.data.discovery.remainingChunks,11);assert.equal(verified(),2+CHUNK);
+seedOrphan({programmeRunId:OLD});
+let stolenHandoff=false;bucket.put=async(key,value,options)=>{if(key==='epg/resolver-continuation.json'&&!stolenHandoff){stolenHandoff=true;await originalPut(key,JSON.stringify({stage:'paused',reason:'epg_committed',at:iso(now),hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}));}return originalPut(key,value,options);};
+r=await step();bucket.put=originalPut;
+assert.equal(r.data.diagnostic.branch,'record_changed');assert.equal(r.data.diagnostic.recovery.action,'generation_recovered');assert.equal(r.data.diagnostic.recovery.settled,false);assert.equal(r.data.discovery.state,'busy');assert.equal(verified(),2);assert.equal(continuation().remainingChunks,12);
+// The stalled old-generation hop: it opened `running` on OLD, stalled before its first write; meanwhile the new
+// generation is published and the next step recovers it. The old hop's late writes are refused.
+seedOrphan({programmeRunId:OLD,published:null});records.get('programme.json').runId=OLD;etags.set('programme.json',String(++revision));
+let holdStale,staleHeld=false;const staleGate=new Promise(resolve=>{holdStale=resolve;});
+bucket.get=async key=>{if(key==='epg/discovery-latest.json'&&!staleHeld){staleHeld=true;await staleGate;}return originalGet(key);};
+const staleHop=step();
+for(let i=0;i<50&&!(continuation()?.stage==='running'&&continuation().hopId!==ORPHAN);i++)await new Promise(resolve=>setTimeout(resolve,0));
+const staleHopId=continuation().hopId;bucket.get=originalGet;assert.equal(continuation().programmeRunId,OLD);
+records.get('epg/resolver-lease.json').expiresAt=now-1;
+set('epg/published-generation.json',{phase:'published',programmeRunId:GENERATION});records.get('programme.json').runId=GENERATION;etags.set('programme.json',String(++revision));records.get('epg/discovery-latest.json').programmeRunId=GENERATION;etags.set('epg/discovery-latest.json',String(++revision));
+const recovered=await step();
+assert.equal(recovered.data.diagnostic.recovery.action,'generation_recovered');assert.equal(recovered.data.diagnostic.recovery.superseded,OLD);assert.equal(recovered.data.diagnostic.branch,'chunk');
+const recoveredRecord=plain(continuation()),recoveredStatus=plain(records.get('epg/discovery-status.json')),recoveredDecisions=verified();
+holdStale();const lateStale=await staleHop;
+assert.equal(lateStale.data.diagnostic.hopId,staleHopId);assert.equal(lateStale.data.diagnostic.chunk.stage,'error');assert.equal(lateStale.data.diagnostic.chunk.error,'resolver_busy');assert.equal(lateStale.data.diagnostic.saved.write,'other_hop');
+assert.deepEqual(plain(continuation()),recoveredRecord,'the recovered checkpoint stands');assert.deepEqual(plain(records.get('epg/discovery-status.json')),recoveredStatus);assert.equal(verified(),recoveredDecisions);assert.equal(records.get('epg/resolver-lease.json').id,recovered.data.diagnostic.hopId);
+
 // 13. Every reported value is from the closed vocabulary; nothing from the payload leaks into the ring or the log.
 seedOrphan();await step();
 const entries=records.get('epg/resolver-continuation-diagnostics.json').recent;
-for(const entry of entries){assert.ok(['idle','settled','live','orphaned'].includes(entry.diagnostic.health.status));if(entry.diagnostic.recovery)assert.ok(['settled','resumed','generation_conflict'].includes(entry.diagnostic.recovery.action));if(entry.diagnostic.saved)assert.ok(['saved','other_hop','write_conflict'].includes(entry.diagnostic.saved.write));}
+for(const entry of entries){assert.ok(['idle','settled','live','orphaned'].includes(entry.diagnostic.health.status));if(entry.diagnostic.recovery)assert.ok(['settled','resumed','generation_recovered','generation_pending'].includes(entry.diagnostic.recovery.action));if(entry.diagnostic.saved)assert.ok(['saved','other_hop','write_conflict'].includes(entry.diagnostic.saved.write));}
 assert.doesNotMatch(JSON.stringify(entries),SECRET);assert.doesNotMatch(logs.join('\n'),SECRET);
 assert.ok(call('DIAGNOSTIC_VOCABULARY').reason.includes('orphaned'));
-console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation fence, concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out (before its first write, between two helper writes and inside the queue refresh) and sanitized diagnostics passed');
+console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation handoff (orphaned, terminal and mid-publication records, pending copy, live writer, concurrent and stalled hops, out-of-order commits), concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out (before its first write, between two helper writes and inside the queue refresh) and sanitized diagnostics passed');

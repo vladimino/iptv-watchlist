@@ -619,7 +619,7 @@ function runningOverride(health){
 // The checkpoint a hop writes after its chunk, from the chunk result and the budget the hop had.
 function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
  if(result.stage==='programme_changed')return {stage:'paused',reason:'programme_changed',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId||null};
- if(result.stage==='awaiting_epg_discovery')return {stage:'paused',reason:'idle',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
+ if(result.stage==='awaiting_epg_discovery')return {stage:'paused',reason:'idle',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:programmeRunId??null};
  if(result.stage==='error')return {stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null};
  if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
@@ -629,9 +629,37 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
  return {stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
 }
 const busyOutcome=(record,trace,nextCatchUp)=>({stage:'busy',checked:0,remaining:null,discovery:discoveryContract(record,{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:nextCatchUp||nextCatchUpAt()}),diagnostic:trace});
-async function queueDiscovery(env,reason){
- const record={stage:'paused',reason,at:new Date().toISOString(),hopId:null,remainingChunks:DISCOVERY_CHUNK_BUDGET,nextCatchUpAt:null,retryAt:null,programmeRunId:null};
- await saveJSON(env,CONTINUATION_KEY,record);return discoveryContract(record,{nextAction:'continue'});
+// Opens the discovery series for a committed generation. The record names that generation so that a later
+// call can tell a checkpoint of the published generation from one left behind by an earlier generation.
+// The write is fenced three ways: a request for a generation that is no longer the published one is
+// refused (a commit that paused after its programme write and resumed after a newer publication must
+// not roll the newer series back); a stored series of the same generation is kept with its progress (a
+// re-entered commit is idempotent, only its `programme_changed` artefact is replaced); a live writer keeps
+// its `running` record (its own checkpoint pins the generation it read). The write itself is a
+// compare-and-swap against the record read here; a concurrent writer wins. The returned contract is
+// always that of the record left in place.
+async function queueDiscovery(env,reason,programmeRunId=null){
+ const now=Date.now(),record={stage:'paused',reason,at:new Date(now).toISOString(),hopId:null,remainingChunks:DISCOVERY_CHUNK_BUDGET,nextCatchUpAt:null,retryAt:null,programmeRunId:programmeRunId||null};
+ const [stored,lease,generation]=await Promise.all([readContinuation(env),loadJSON(env,DISCOVERY_LEASE_KEY),loadJSON(env,EPG_GENERATION_KEY)]);
+ const published=generation?.phase==='published'?generation.programmeRunId||null:null,current=stored.record;
+ const kept=()=>current?discoveryContract(current,current.stage==='running'?runningOverride(continuationHealth(current,lease,null,now,published)):{}):discoveryContract(record,{nextAction:'continue'});
+ if(programmeRunId&&published&&programmeRunId!==published)return kept();
+ if(current?.stage==='running'&&lease?.expiresAt>now)return kept();
+ if(programmeRunId&&current?.programmeRunId===programmeRunId&&current.reason!=='programme_changed')return kept();
+ if(await replaceContinuation(env,record,stored.etag))return discoveryContract(record,{nextAction:'continue'});
+ const after=(await readContinuation(env)).record;return after?discoveryContract(after):discoveryContract(record,{nextAction:'continue'});
+}
+// Whether the stored checkpoint belongs to the published generation. A record pinned to another generation
+// (an orphan, a finished or paused series, a programme-changed stop) or a `programme_changed` record of the
+// published generation itself (written while the publication was still copying) is superseded by a new
+// series for the published generation once that generation is in place: the pointer names it and the shared
+// programme already carries it (`recover`). Until the copy has landed nothing is replaced (`pending`). A live
+// writer is never superseded, and a record without a generation pin cannot be judged and is left alone.
+function generationHandoff(record,health,published,report){
+ if(!published||!record||health.status==='live')return null;
+ const other=!!record.programmeRunId&&record.programmeRunId!==published,contradictory=record.reason==='programme_changed'&&record.programmeRunId===published;
+ if(!other&&!contradictory)return null;
+ return report?.runId===published?'recover':'pending';
 }
 // `body.trace`, when a caller passes an object, is filled with the branch taken and every intermediate
 // outcome (AIR-151). The same object is returned as `diagnostic`. It changes no decision.
@@ -643,24 +671,33 @@ async function advanceDiscovery(env,body={}){
  const leaseObject=await env.BUCKET.get(DISCOVERY_LEASE_KEY),lease=leaseObject?await leaseObject.json():null;
  trace.lease=lease?.expiresAt>now?'live':lease?'expired':'none';
  const running=current?.stage==='running';
- const [last,generation]=await Promise.all([running?loadJSON(env,'epg/discovery-status.json'):null,loadJSON(env,EPG_GENERATION_KEY)]);
+ const [last,generation,report]=await Promise.all([running?loadJSON(env,'epg/discovery-status.json'):null,loadJSON(env,EPG_GENERATION_KEY),loadJSON(env,'programme.json')]);
  const published=generation?.phase==='published'?generation.programmeRunId||null:null;
- const health=continuationHealth(current,lease,last,now,published);
+ let health=continuationHealth(current,lease,last,now,published);
  trace.health=healthSummary(health);
  if(body.chunks===0){trace.branch='report_only';return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current,runningOverride(health)),diagnostic:trace};}
  if(lease?.expiresAt>now){trace.branch='lease_live';return busyOutcome(current,trace,health.leaseExpiresAt);}
+ // Generation handoff: a checkpoint that does not belong to the published generation is superseded by a new
+ // series for that generation (the checkpoint the commit would have queued), atomically against the record
+ // read above. The superseded record's hop is never resumed and its decisions and statuses stay as written.
+ const handoff=generationHandoff(current,health,published,report);
+ if(handoff==='pending'){
+  trace.branch='generation_pending';
+  trace.recovery={orphanHopId:health.hopId,action:'generation_pending',chunkCompleted:health.chunkCompleted,budget:0,settled:false,superseded:diagnosticId(current.programmeRunId)};
+  return {stage:current.stage,checked:0,remaining:null,discovery:discoveryContract(current,{state:current.stage==='running'?'running':current.stage,nextAction:'wait',nextCatchUpAt:nextCatchUpAt()}),diagnostic:trace};
+ }
+ if(handoff==='recover'){
+  trace.branch='generation_handoff';
+  const record={stage:'paused',reason:'epg_committed',at:new Date().toISOString(),hopId:null,remainingChunks:DISCOVERY_CHUNK_BUDGET,nextCatchUpAt:null,retryAt:null,programmeRunId:published};
+  const replaced=await replaceContinuation(env,record,stored.etag);
+  trace.recovery={orphanHopId:health.hopId,action:'generation_recovered',chunkCompleted:health.chunkCompleted,budget:DISCOVERY_CHUNK_BUDGET,settled:replaced,superseded:diagnosticId(current.programmeRunId)};
+  if(!replaced){trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false,write:'other_hop'};return busyOutcome(after,trace);}
+  trace.saved={...continuationSummary(record),owned:true,write:'saved'};
+  stored=await readContinuation(env);current=stored.record;health=continuationHealth(current,lease,null,now,published);
+ }
  if(health.status==='orphaned'){
   // AIR-154: settle the orphan atomically against the record we read; a concurrent writer wins and we wait.
   const at=new Date().toISOString(),budget=Math.min(DISCOVERY_CHUNK_BUDGET,Math.max(1,Number.isInteger(current.remainingChunks)?current.remainingChunks:1));
-  if(health.generationConflict){
-   trace.branch='generation_conflict';
-   const record={stage:'paused',reason:'programme_changed',at,hopId:current.hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current.programmeRunId};
-   const settled=await replaceContinuation(env,record,stored.etag);
-   const after=settled?record:(await readContinuation(env)).record;
-   trace.recovery={orphanHopId:health.hopId,action:'generation_conflict',chunkCompleted:health.chunkCompleted,budget:0,settled};
-   trace.saved={...continuationSummary(after),owned:settled,write:settled?'saved':'other_hop'};
-   return {stage:'programme_changed',checked:0,remaining:null,discovery:discoveryContract(after,settled?{nextAction:'stop'}:{}),diagnostic:trace};
-  }
   if(health.chunkCompleted){
    const record=continuationAfterChunk(last.programmeChanged?{...last,stage:'programme_changed'}:last,budget,current.hopId,at,current.programmeRunId);
    const settled=await replaceContinuation(env,record,stored.etag);
@@ -674,7 +711,7 @@ async function advanceDiscovery(env,body={}){
  const decision=continuationDecision(current,now);
  const hardWait=current&&(['chunk_budget','backoff'].includes(current.reason)||current.stage==='error'||current.retryAt)&&Date.parse(current.retryAt||current.nextCatchUpAt||0)>now;
  trace.decision={run:decision.run,budget:decision.run?decision.budget:null,force:!!body.force,hardWait:!!hardWait,nextAction:decision.run?null:decision.contract.nextAction};
- if(!decision.run&&(!body.force||hardWait)){trace.branch=trace.recovery?.settled?'orphan_settled':'contract';return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract,diagnostic:trace};}
+ if(!decision.run&&(!body.force||hardWait)){trace.branch=trace.recovery?.settled&&trace.recovery.action==='settled'?'orphan_settled':'contract';return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract,diagnostic:trace};}
  if(!env.TMDB_API_READ_ACCESS_TOKEN){
   trace.branch='missing_secret';
   const record={stage:'error',reason:'missing_secret',at:new Date().toISOString(),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null};
@@ -694,7 +731,6 @@ async function advanceDiscovery(env,body={}){
  if(!opened){await releaseDiscoveryLease(env,acquired);trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false,write:'other_hop'};return busyOutcome(after,trace);}
  let result;
  try{
-  const report=await loadJSON(env,'programme.json');
   result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
  }catch(e){result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};}
  finally{await releaseDiscoveryLease(env,acquired);}
