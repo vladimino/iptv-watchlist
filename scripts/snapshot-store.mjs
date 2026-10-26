@@ -28,9 +28,17 @@ export async function loadLifecycleSnapshot(directory,{asOf}={}){
  try{manifest=JSON.parse(await readFile(path.join(absolute,'manifest.json'),'utf8'));}
  catch{throw new SnapshotError('Manifest is not JSON');}
  if(!manifest||manifest.schemaVersion!==1)throw new SnapshotError('Manifest schema is not 1');
- if(manifest.status!=='provisional_no_change_detected')throw new SnapshotError('Snapshot is not a complete provisional export');
  if(!Array.isArray(manifest.changes)||manifest.changes.length!==0)throw new SnapshotError('Snapshot recorded listing changes');
- if(manifest.sourceSiteId!==SOURCE_SITE_ID||manifest.sourceOrigin!==SOURCE_ORIGIN)throw new SnapshotError('Snapshot source identity does not match the exporter');
+ // Two accepted source identities: the historical Site archive, or a production baseline whose manifest carries its consistency proof.
+ const production=manifest.source?.kind==='cloudflare-r2-s3';
+ if(production){
+  if(manifest.sourceSiteId!==null||manifest.sourceOrigin!==null)throw new SnapshotError('Production manifest must not carry the historical source identity');
+  if(manifest.status!=='consistent_fenced'||!Array.isArray(manifest.noGoReasons)||manifest.noGoReasons.length!==0||manifest.fence?.ok!==true)throw new SnapshotError('Production snapshot is not a fenced consistent cut',3);
+  if(typeof manifest.source.bucket!=='string'||typeof manifest.source.accountId!=='string'||manifest.source.readOnly!==true)throw new SnapshotError('Production manifest lacks its source identity');
+ }else{
+  if(manifest.status!=='provisional_no_change_detected')throw new SnapshotError('Snapshot is not a complete provisional export');
+  if(manifest.sourceSiteId!==SOURCE_SITE_ID||manifest.sourceOrigin!==SOURCE_ORIGIN)throw new SnapshotError('Snapshot source identity does not match the exporter');
+ }
  const clockSource=asOf!==undefined?asOf:manifest.finishedAt;
  const now=Date.parse(clockSource||'');
  if(!Number.isFinite(now))throw new SnapshotError('Snapshot needs finishedAt or --as-of');
@@ -88,5 +96,5 @@ export async function loadLifecycleSnapshot(directory,{asOf}={}){
   personNames:JSON.parse(await readFile(path.join(root,'data/person-names.json'),'utf8')),
   personOverrides:personOverridesFromSource(await readFile(path.join(root,'src/sources.js'),'utf8'))
  };
- return {store,now,finishedAt:manifest.finishedAt||null,loaded,manifest:{schemaVersion:1,status:manifest.status,objects:manifest.objects.length},historical:true,production:false};
+ return {store,now,finishedAt:manifest.finishedAt||null,loaded,manifest:{schemaVersion:1,status:manifest.status,objects:manifest.objects.length,aggregateSha256:manifest.totals?.aggregateSha256??null},historical:!production,production,source:production?manifest.source:null,baselineIdentity:production?manifest.baselineIdentity??null:null};
 }

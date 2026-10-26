@@ -52,7 +52,7 @@ export function classifyObject(key){
 }
 export function r2OnlyFamily(key){return R2_ONLY.find(item=>item.matches(key))||null;}
 
-export function inventory({finishedAt=null,aggregateSha256=null,keys=[]}={}){
+export function inventory({finishedAt=null,aggregateSha256=null,keys=[],production=false}={}){
  const families={};
  for(const [id,matches] of FAMILIES){
   const found=keys.filter(matches).sort();
@@ -65,7 +65,7 @@ export function inventory({finishedAt=null,aggregateSha256=null,keys=[]}={}){
   coverage[kind].push(key);
   if(kind==='r2_only')coverage.r2OnlyFamilies.find(item=>item.family===r2OnlyFamily(key).family).count++;
  }
- return {scope:'historical-snapshot',production:false,finishedAt,aggregateSha256,objectCount:keys.length,families,absent,complete:absent.length===0,coverage};
+ return {scope:production?'production-baseline':'historical-snapshot',production:!!production,finishedAt,aggregateSha256,objectCount:keys.length,families,absent,complete:absent.length===0,coverage};
 }
 
 // The caller supplies the shared canonicalFilmId rule and the stored Films (survivors with their redirects). Resolution never mints an id.
@@ -156,11 +156,17 @@ export async function importBatch(db,repositories,batch){
  if(refused)return refused;
  const units=batch.units||[];
  const limit=batch.limit??null;
- const ledger=[];
+ const ledgerRows=[];
+ const ledger={push(row){ledgerRows.push(row);const reason=fatal(row);if(reason&&!stopInfo)stopInfo={reason,entry:row};return ledgerRows.length;},get length(){return ledgerRows.length;},filter:(...args)=>ledgerRows.filter(...args),some:(...args)=>ledgerRows.some(...args),find:(...args)=>ledgerRows.find(...args),map:(...args)=>ledgerRows.map(...args),[Symbol.iterator](){return ledgerRows[Symbol.iterator]();}};
  const counts={applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,partial:0,uncheckpointed:0,pending:0};
  const appliedByFamily={};
- let started=0;
+ // stopOn makes a run fail closed: a class A conflict or uncheckpointed unit, or any record outside the acknowledged class C list,
+ // ends the run before the next unit is written. The acknowledged list names class C records only; class A is never acknowledgeable.
+ const stopOn=batch.stopOn||null;
+ const acknowledged=new Set((batch.acknowledged||[]).map(acknowledgementKey));
+ let stopInfo=null,started=0;
  for(const unit of units){
+  if(stopInfo){counts.pending++;continue;}
   if(limit!=null&&started>=limit){counts.pending++;continue;}
   if(unit.unresolved){
    counts.unresolved++;
@@ -186,6 +192,8 @@ export async function importBatch(db,repositories,batch){
   let outcome;
   try{outcome=await applyUnit(repositories,working);}
   catch(error){
+   // A transport-level failure of the database adapter is not a data conflict: the run stops and the next run reconciles.
+   if(error?.fatal===true)throw error;
    counts.conflicts++;
    ledger.push(entry(unit,'conflict',knownReason(error)));
    continue;
@@ -210,12 +218,22 @@ export async function importBatch(db,repositories,batch){
   counts.applied++;
   appliedByFamily[unit.family]=(appliedByFamily[unit.family]||0)+1;
  }
+ function fatal(row){
+  if(!stopOn)return null;
+  if(stopOn.conflicts!==false&&(row.outcome==='conflict'||row.outcome==='uncheckpointed'))return 'unexpected_conflict';
+  if(stopOn.unacknowledged!==false&&row.outcome!=='applied'){
+   if(row.class==='C'&&acknowledged.has(acknowledgementKey(row)))return null;
+   return row.class==='C'?'unacknowledged_record':'class_a_blocker';
+  }
+  return null;
+ }
  const parity=batch.expected?await verifyParity(db,batch.expected):{ok:false,missing:[],extra:[],mismatched:[],denominator:0,unprojected:[],records:[],reason:'no_source_projection'};
  const coverage=batch.inventory?.coverage||emptyCoverage();
  const receipts=batch.shas?await receiptAudit(db,batch.shas):null;
- const classes=acceptanceClasses({inventory:batch.inventory,coverage,counts,ledger,appliedByFamily,parity,receipts,stopped:false});
+ const stopped=!!stopInfo;
+ const classes=acceptanceClasses({inventory:batch.inventory,coverage,counts,ledger:ledgerRows,appliedByFamily,parity,receipts,stopped});
  const provenance=provenanceSummary(units);
- return {stopped:false,stopReasons:[],blockers:[],...counts,ledger,coverage,parity,receipts,provenance,classes,claimsFullParity:parityClaim({coverage,parity,counts,ledger,inventory:batch.inventory,classes,receipts})};
+ return {stopped,stopReasons:stopped?[stopInfo.reason]:[],blockers:stopped?[{reason:stopInfo.reason,...stopInfo.entry}]:[],...counts,ledger:ledgerRows,coverage,parity,receipts,provenance,classes,claimsFullParity:!stopped&&parityClaim({coverage,parity,counts,ledger:ledgerRows,inventory:batch.inventory,classes,receipts})};
 }
 
 // Receipts are keyed by source checksum and reconciled against this manifest, the baseline identity of the run.
@@ -473,6 +491,7 @@ function knownReason(error){
  if(/FOREIGN KEY/i.test(message))return 'reference_missing';
  return 'unapplied';
 }
+export function acknowledgementKey(row){return [row.sourceKey,row.targetTable,row.targetId,row.reason].map(part=>String(part??'')).join('\n');}
 function classOf(unit,outcome,reason){
  if(outcome==='unresolved')return 'C';
  if(outcome==='unportable')return SOURCE_QUALITY.test(String(reason||''))?'C':'A';
