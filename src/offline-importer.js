@@ -298,7 +298,9 @@ export function fingerprintUnit(entry,body,identity){
 }
 
 // links (optional) checks a version pointer against the snapshot: linked(record,storedId) is the shared rule for a well-formed pointer,
-// exists(key) and sha(key) come from the manifest. Without links only the shape of the pointer is checked.
+// exists(key) and sha(key) come from the manifest, and bodyHash(record) is the SHA-256 of the exact bytes the shared rule derives from
+// the bundle record. Record body hash, pointer checksum and manifest checksum of the object bytes must all be one value; otherwise the
+// object does not hold this record. Without links only the shape of the pointer is checked.
 export function predictionUnits(entry,body,identity,links=null){
  const resolved=enrichmentIdentity(entry.key,identity);
  if(!resolved.filmId)return [unresolved(entry,'prediction_current',resolved.canonical||entry.key,resolved.reason,'prediction',resolved)];
@@ -319,6 +321,7 @@ export function versionPointerProblem(item,bundleKey,storedId,links){
  if(!wellFormed)return 'prediction_version_pointer_malformed';
  if(links?.exists&&!links.exists(item.r2Key))return 'prediction_version_object_absent';
  if(links?.sha){const sha=links.sha(item.r2Key);if(sha!=null&&sha!==item.contentSha256)return 'prediction_version_checksum_mismatch';}
+ if(links?.bodyHash){const sha=links.bodyHash(item);if(sha!=null&&sha!==item.contentSha256)return 'prediction_version_body_mismatch';}
  return null;
 }
 

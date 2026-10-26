@@ -717,7 +717,8 @@ const RATINGS_LEASE_MS=120000;
 const ratingsGenerationKey=id=>ENRICHMENT_KEY+'ratings/generations/'+encodeURIComponent(id)+'.json';
 const ratingsEnabled=env=>env.RATINGS_REFRESH==='on';
 // Immutable prediction versions are written only when the owner has enabled the flag; the bundle stays the runtime record either way.
-const predictionVersionsEnabled=env=>typeof env?.PREDICTION_VERSION_OBJECTS==='string'&&env.PREDICTION_VERSION_OBJECTS.trim()==='on';
+// Strict: only the exact string 'on'. No trimming, no case folding, no non-string truthiness: this flag is a production write-authority boundary.
+const predictionVersionsEnabled=env=>env?.PREDICTION_VERSION_OBJECTS==='on';
 // Write-once: the key carries the checksum, so an existing object must hold the same bytes. Anything else is a storage conflict and the bundle is left unchanged.
 async function writePredictionVersion(env,filmId,prediction){
  const text=predictionVersionText(prediction),sha256=await contentHash(predictionVersionBody(prediction)),key=predictionVersionKey(filmId,sha256);

@@ -1,6 +1,7 @@
 // Import one verified historical snapshot into a local SQLite file.
 // The snapshot and the database stay outside this repository. This command does not read production R2.
 import {spawn,spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
@@ -34,7 +35,7 @@ export async function prepareImport(directory,{limit=null}={}){
  const store=scopedStore(loaded.store,byKey);
  const view=readLifecycle(store,Date.parse(manifest.finishedAt));
  const identity=identityResolver({canonicalize:rules.canonicalFilmId,films:view.films});
- const links={linked:(record,storedId)=>rules.predictionVersionLinked(record,storedId),exists:key=>byKey.has(key),sha:key=>byKey.get(key)?.sha256??null};
+ const links={linked:(record,storedId)=>rules.predictionVersionLinked(record,storedId),exists:key=>byKey.has(key),sha:key=>byKey.get(key)?.sha256??null,bodyHash:record=>{const text=rules.predictionVersionText(record);return text==null?null:createHash('sha256').update(Buffer.from(text,'utf8')).digest('hex');}};
  const blockers=[];
  const sha=key=>byKey.get(key)?.sha256||'';
  const rosters={},listedIds={};

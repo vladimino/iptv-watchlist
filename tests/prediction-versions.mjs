@@ -39,9 +39,13 @@ const sha256=text=>createHash('sha256').update(Buffer.from(text,'utf8')).digest(
 const versionKeys=id=>[...records.keys()].filter(key=>key.startsWith('enrichment/films/'+id+'/predictions/versions/'));
 
 // Flag parsing: only the literal 'on' enables the writer.
+// Flag parsing is strict: the exact string 'on' and nothing else; whitespace, case and non-string values stay off.
 assert.equal(ctx.testApi.predictionVersionsEnabled({}),false);
-assert.equal(ctx.testApi.predictionVersionsEnabled({PREDICTION_VERSION_OBJECTS:'shadow'}),false);
-assert.equal(ctx.testApi.predictionVersionsEnabled({PREDICTION_VERSION_OBJECTS:' on '}),true);
+assert.equal(ctx.testApi.predictionVersionsEnabled(undefined),false);
+assert.equal(ctx.testApi.predictionVersionsEnabled({PREDICTION_VERSION_OBJECTS:'on'}),true);
+for(const value of ['shadow',' on ','on ',' on','ON','On','yes','true','1',1,true,['on'],{value:'on'},null,undefined,''])assert.equal(ctx.testApi.predictionVersionsEnabled({PREDICTION_VERSION_OBJECTS:value}),false,JSON.stringify(value));
+// The runner path honours the same strictness: a padded value writes no version object.
+env.PREDICTION_VERSION_OBJECTS=' on ';
 
 // Pure rules: canonical body, key shape, linkage.
 {
@@ -86,12 +90,14 @@ const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',mat
 async function startRun(){const started=await api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'});assert.equal(started.status,200);return started.data.runId;}
 async function submit(runId,filmId,extra={}){const result=await api('enrichment/submit','POST',{runId,items:[{filmId,fingerprint,prediction:{...prediction,...extra}}]});assert.equal(result.status,200);return result.data.results[0];}
 
-// Flag off: the bundle keeps its shape, no version object is written.
+// Flag not exactly 'on': the bundle keeps its shape, no version object is written.
 let runId=await startRun();
 assert.equal((await submit(runId,'film000')).status,'created');
 assert.equal(read('enrichment/films/film000/predictions.json').current.r2Key,undefined);
 assert.equal(versionKeys('film000').length,0);
+assert.equal([...records.keys()].some(key=>key.includes('/predictions/versions/')),false);
 await api('enrichment/complete','POST',{runId,reason:'model_error'});
+delete env.PREDICTION_VERSION_OBJECTS;
 
 // Flag on: a version object is written first, the bundle current points at it, the view index carries the same record.
 env.PREDICTION_VERSION_OBJECTS='on';
@@ -100,7 +106,10 @@ assert.equal((await submit(runId,'film001')).status,'created');
 const bundle1=read('enrichment/films/film001/predictions.json');
 assert.equal(versionKeys('film001').length,1);
 assert.equal(bundle1.current.r2Key,versionKeys('film001')[0]);
+// Byte-hash invariant end to end: the pointer checksum is the SHA-256 of the exact stored bytes, the key names it, and the bundle record derives those same bytes.
 assert.equal(sha256(records.get(bundle1.current.r2Key)),bundle1.current.contentSha256);
+assert.equal(bundle1.current.r2Key.endsWith('/'+bundle1.current.contentSha256+'.json'),true);
+assert.equal(sha256(ctx.testApi.predictionVersionText(bundle1.current)),bundle1.current.contentSha256);
 assert.equal(ctx.testApi.predictionVersionLinked(bundle1.current,'film001'),true);
 assert.equal(records.get(bundle1.current.r2Key),JSON.stringify(ctx.testApi.predictionVersionBody(bundle1.current)));
 assert.equal(bundle1.current.predictedRating,4);

@@ -294,15 +294,27 @@ for(const bad of [{r2Key:'r2/prediction/new',contentSha256:SHA_NEW},{r2Key:'enri
 }
 // With a manifest: a pointer at an object the snapshot lacks, or whose checksum differs, is unportable; a referenced object is mapped and an unreferenced one is listed, not hidden.
 {
- const linksFor=shas=>({linked:(record,storedId)=>rules.predictionVersionLinked(record,storedId),exists:key=>Object.prototype.hasOwnProperty.call(shas,key),sha:key=>shas[key]??null});
+ const bodyHash=record=>{const text=rules.predictionVersionText(record);return text==null?null:createHash('sha256').update(Buffer.from(text,'utf8')).digest('hex');};
+ const linksFor=shas=>({linked:(record,storedId)=>rules.predictionVersionLinked(record,storedId),exists:key=>Object.prototype.hasOwnProperty.call(shas,key),sha:key=>shas[key]??null,bodyHash});
  const bundle={current:{...predictionBody,predictedRating:4,r2Key:versionKey('zz-hash',SHA_NEW),contentSha256:SHA_NEW,updatedAt:later},history:[]};
  const absent=projectSource({keys:['enrichment/films/zz-hash/predictions.json'],bodies:{'enrichment/films/zz-hash/predictions.json':bundle},films:[film('film:zz-hash','Hash Title',at)],people:[],identity:identityFor([film('film:zz-hash','Hash Title',at)]),deriveEvidence:rules.candidateEvidence,links:linksFor({})});
  assert.equal(absent.records[0].reason,'prediction_version_object_absent');
  const corrupt=projectSource({keys:['enrichment/films/zz-hash/predictions.json',versionKey('zz-hash',SHA_NEW)],bodies:{'enrichment/films/zz-hash/predictions.json':bundle},films:[film('film:zz-hash','Hash Title',at)],people:[],identity:identityFor([film('film:zz-hash','Hash Title',at)]),deriveEvidence:rules.candidateEvidence,links:linksFor({[versionKey('zz-hash',SHA_NEW)]:'c'.repeat(64)})});
  assert.equal(corrupt.records.find(record=>record.key.endsWith('predictions.json')).reason,'prediction_version_checksum_mismatch');
  const linked=projectSource({keys:['enrichment/films/zz-hash/predictions.json',versionKey('zz-hash',SHA_NEW),versionKey('zz-hash',SHA_OLD)],bodies:{'enrichment/films/zz-hash/predictions.json':bundle},films:[film('film:zz-hash','Hash Title',at)],people:[],identity:identityFor([film('film:zz-hash','Hash Title',at)]),deriveEvidence:rules.candidateEvidence,links:linksFor({[versionKey('zz-hash',SHA_NEW)]:SHA_NEW,[versionKey('zz-hash',SHA_OLD)]:SHA_OLD})});
- assert.equal(linked.predictions.length,1);
- assert.equal(linked.records.find(record=>record.key===versionKey('zz-hash',SHA_NEW)).disposition,'mapped');
+ assert.equal(linked.predictions.length,0,'a pointer whose key and manifest checksum agree but whose bundle record does not hash to them is not carried');
+ assert.equal(linked.records.find(record=>record.key.endsWith('predictions.json')).reason,'prediction_version_body_mismatch');
+ // The honest case: the record body hashes to the pointer, the manifest holds that object with that checksum.
+ const honestRecord={...predictionBody,filmId:'zz-hash',predictedRating:4,updatedAt:later};
+ const honestSha=bodyHash(honestRecord),honestKey=versionKey('zz-hash',honestSha);
+ const honest=projectSource({keys:['enrichment/films/zz-hash/predictions.json',honestKey,versionKey('zz-hash',SHA_OLD)],bodies:{'enrichment/films/zz-hash/predictions.json':{current:{...honestRecord,r2Key:honestKey,contentSha256:honestSha},history:[]}},films:[film('film:zz-hash','Hash Title',at)],people:[],identity:identityFor([film('film:zz-hash','Hash Title',at)]),deriveEvidence:rules.candidateEvidence,links:linksFor({[honestKey]:honestSha,[versionKey('zz-hash',SHA_OLD)]:SHA_OLD})});
+ assert.equal(honest.predictions.length,1);
+ assert.equal(honest.records.find(record=>record.key===honestKey).disposition,'mapped');
+ assert.equal(honest.records.find(record=>record.key===versionKey('zz-hash',SHA_OLD)).disposition,'unreferenced');
+ // A tampered bundle record (object bytes and manifest intact, record changed) is rejected by the body hash alone.
+ const tampered=projectSource({keys:['enrichment/films/zz-hash/predictions.json',honestKey],bodies:{'enrichment/films/zz-hash/predictions.json':{current:{...honestRecord,predictedRating:4.5,r2Key:honestKey,contentSha256:honestSha},history:[]}},films:[film('film:zz-hash','Hash Title',at)],people:[],identity:identityFor([film('film:zz-hash','Hash Title',at)]),deriveEvidence:rules.candidateEvidence,links:linksFor({[honestKey]:honestSha})});
+ assert.equal(tampered.predictions.length,0);
+ assert.equal(tampered.records.find(record=>record.key.endsWith('predictions.json')).reason,'prediction_version_body_mismatch');
  assert.equal(linked.records.find(record=>record.key===versionKey('zz-hash',SHA_OLD)).disposition,'unreferenced');
  assert.equal(linked.unprojected.length,0);
  assert.equal(classifyObject(versionKey('zz-hash',SHA_OLD)),'mapped');
@@ -492,6 +504,8 @@ const legacyBodies={
  'enrichment/films/tmdb_9/actual.json':{rating:4,source:'letterboxd',updatedAt:at},
  'enrichment/films/tmdb_9/predictions.json':{current:{...roninVersion.record,...roninVersion.pointer},history:[]},
  [roninVersion.pointer.r2Key]:Buffer.from(roninVersion.text,'utf8'),
+ // The same object and pointer reused by another film's bundle record: key, manifest checksum and pointer agree, the record does not.
+ 'enrichment/films/heat-1995/predictions.json':{current:{...roninVersion.record,filmId:'heat-1995',predictedRating:3,...roninVersion.pointer},history:[]},
  'enrichment/films/tmdb_404/fingerprint.json':{fingerprintSchemaVersion:1,fingerprintHash:'print-ghost',generatedAt:at,invalidatedAt:null},
 };
 const legacy=path.join(root,'legacy');
@@ -513,6 +527,11 @@ assert.equal((await legacyHandle.get("SELECT film_id FROM fingerprint_payload WH
 assert.equal((await legacyHandle.get("SELECT rating FROM actual_rating WHERE film_id='film:tmdb:9'")).rating,4);
 assert.equal((await legacyHandle.get('SELECT film_id,content_sha256 FROM prediction_current WHERE r2_key=?',[roninVersion.pointer.r2Key])).content_sha256,roninVersion.pointer.contentSha256);
 assert.equal(legacyRun.parity.records.some(record=>record.key===roninVersion.pointer.r2Key&&record.disposition==='mapped'),true);
+const heatPrediction=legacyRun.ledger.find(item=>item.sourceKey==='enrichment/films/heat-1995/predictions.json');
+assert.equal(heatPrediction.outcome,'unportable');
+assert.equal(heatPrediction.reason,'prediction_version_pointer_malformed','the pointer names another film\'s object');
+assert.equal(await count(legacyHandle,"SELECT COUNT(*) AS n FROM prediction_current WHERE film_id='film:heat-1995'"),0);
+assert.equal(legacyRun.classes.A.mandatory.prediction.portable,false,'one unportable bundle keeps the mandatory family blocking');
 assert.equal((await legacyHandle.get("SELECT to_film_id FROM film_redirect WHERE from_id='film:tmdb:7'")).to_film_id,'film:heat-1995');
 assert.equal(await count(legacyHandle,"SELECT COUNT(*) AS n FROM import_receipt WHERE source_key='enrichment/films/tmdb_7/fingerprint.json' AND target_id='film:heat-1995'"),1);
 assert.equal(await count(legacyHandle,"SELECT COUNT(*) AS n FROM film WHERE id LIKE 'film:tmdb:404%' OR id LIKE 'film:tmdb:12%'"),0);
@@ -539,8 +558,8 @@ assert.equal(legacyRun.provenance.identity.redirect>=1,true);
 assert.equal(legacyRun.provenance.identity.direct>=1,true);
 assert.equal(legacyRun.provenance.evidence.derived>=2,true);
 assert.equal(legacyRun.provenance.evidence.stored>=1,true);
-assert.equal(legacyRun.classes.A.mandatory.prediction.portable,true);
 assert.equal(legacyRun.classes.A.mandatory.prediction.applied,1);
+assert.equal(legacyRun.classes.A.blockers.includes('prediction_family_unportable'),true);
 assert.equal(legacyRun.parity.ok,true,JSON.stringify({missing:legacyRun.parity.missing,extra:legacyRun.parity.extra,mismatched:legacyRun.parity.mismatched}));
 assert.equal(legacyRun.parity.records.some(record=>record.key==='enrichment/films/tmdb_7/fingerprint.json'&&record.disposition==='mapped'&&record.identity.via==='redirect'),true);
 assert.equal(legacyRun.parity.records.some(record=>record.key==='enrichment/films/tmdb_404/fingerprint.json'&&record.disposition==='unresolved'),true);
