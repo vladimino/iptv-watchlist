@@ -33,6 +33,42 @@ Outputs go to an absolute directory outside the repository: `report.json` (statu
 
 Only under an explicit owner approval naming the scratch database: apply `0001` and `0002` to the scratch database (never to `iptv` in this step); stage a synthetic generation at 1.25× the production candidates (27,749 candidates, 2,300 films, two shows each) in chunks at the probe-proven size; interrupt after an arbitrary chunk and resume; validate, read back and commit; repeat the commit and commit a stale stage (both must change nothing); fail and discard a stage in bounded batches. Record requests, bytes, durations, any `429`/`5xx`, and the commit duration. GO for the generation unit in the production run needs every chunk accepted, an equal read-back after resume, and a commit of at most 10 seconds at 1.25×; otherwise NO-GO and no production write. No production payload is used in this step.
 
+`scripts/d1-scratch-g4.mjs` ([AIR-174](https://trello.com/c/331Cq6IJ)) runs this verification. It uses synthetic data only and never reads R2.
+
+**Target fence.** It talks only to the scratch database named in the environment:
+- `D1_BACKFILL_ACCOUNT_ID`, `D1_BACKFILL_API_TOKEN` and `D1_BACKFILL_SCRATCH_DATABASE_ID`;
+- `D1_G4_SCRATCH_DATABASE_NAME`, default `iptv-atomicity-scratch`.
+
+It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command checks the live uuid and name before anything else.
+
+**Commands.** Each command is a separate step under its own owner approval. Outputs go to `--output`, an absolute directory outside the repository:
+- `report.json`: steps, verdict, the commit's client and D1 server time, parity per final table, and request counts and timings by kind.
+- `requests.jsonl`: one line per HTTP request with its kind, statement count, bytes, status and timings. It holds no SQL values and no credential.
+
+| Command | Approval | Effect |
+| --- | --- | --- |
+| `--plan [--scale full]` | none | Prints generation sizes, chunk counts, commands and GO criteria. Reads no credential and sends nothing |
+| `--preflight` | scratch access, read-only | Identity, `sqlite_master` objects (objects outside the migrations are listed, never touched), `PRAGMA foreign_keys`, schema version, claim columns, harness stage states, final table counts |
+| `--apply-schema --approved-scratch-writes` | apply `0001` and `0002` to the scratch database | Applies each migration as one request, and only if none of its objects exists. A migration already complete is skipped. A partial schema, or a name taken by another object type, is `no_go: schema_partial` with no write |
+| `--run --approved-scratch-writes` | synthetic writes to the scratch database | Runs the scenario below. The verdict is `GO`, `NO-GO`, or `INCOMPLETE` when the 1.25× generation was already committed by an earlier run |
+| `--cleanup --approved-cleanup` | deleting staging rows, a separate approval | Discards the failed or superseded harness stages (`g4-prior`, `g4-rival`) in batches of 500. It never touches the published stage, the final tables or foreign objects |
+
+**Scenario.** `--run` takes these steps in order (`--scale full` by default):
+1. Seed 2,300 synthetic films.
+2. Stage and commit `g4-prior`: 22,199 candidates.
+3. Send the first chunk of the 1.25× `g4-scaled` (27,749 candidates, two shows each) with a failing last statement. It must leave no staged row and no receipt.
+4. A second executor of the same baseline must be refused (`stage_claimed_elsewhere`).
+5. After the claim expires (the TTL is 60 s), an executor takes over and is interrupted before the middle chunk.
+6. After the next expiry, a further executor takes over and resumes after the receipts.
+7. Just before that executor's commit, the interrupted executor's fail must change nothing and its commit must be refused.
+8. The timed commit runs (≤10 s).
+9. A repeated commit must be refused.
+10. The stale-pointer stage `g4-rival` must fail with `pointer_moved` and write nothing final.
+11. A rerun must be a replay.
+12. Every final table must equal, row for row, what the legacy `publishGeneration` writes into a local SQLite reference for the same two generations.
+
+**What stops a run.** A real uncertain write (lost response, `429`/`5xx`) or a D1 failure stops the run with status `stopped`. Nothing is retried; read the report before any rerun. `tests/d1-scratch-g4.mjs` rehearses every command against a fake D1 HTTP API.
+
 ## Procedure
 
 1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. Repeat the dry-run twice more: `applied` must be 0.
