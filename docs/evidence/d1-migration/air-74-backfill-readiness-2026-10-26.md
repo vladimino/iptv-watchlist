@@ -46,7 +46,7 @@ The AIR-73 counts are the archive's; production has grown since, but every class
 | # | Gap | AIR-73 evidence | Root cause in the code | Proposed closure (ADR-0019 item) | Needs |
 | --- | --- | --- | --- | --- | --- |
 | 1 | No read path to a current production baseline | The 19 October archive is the only snapshot | `exportSnapshot` requires the Site origin; `migrationExportRoute` returns 404 on the Worker origin and needs Site-only variables | Read-only R2 API token and a local S3-API exporter writing the same manifest shape, or the Worker route opened on the Worker origin behind Access with a service token (1) | Owner choice; token or Access approval; code PR |
-| 2 | Listing is not atomic while writers run hourly | Archive status `provisional_no_change_detected` with the scheduled job stopped by hand | Hourly and daily Tasks write `epg/*`, `enrichment/*`, `events/*`, `started/*`, leases | Window between hourly runs; acceptance predicates on pointer, `sync.json`, continuation and runner lease; bounded re-download rounds; high-water mark in the manifest; delta export later (2) | Code PR (exporter predicates); no Task change |
+| 2 | Listing is paged and not atomic while writers run hourly; two equal listings do not prove one cut | Archive status `provisional_no_change_detected` with the scheduled job stopped by hand | Hourly and daily Tasks write `epg/*`, `enrichment/*`, `events/*`, `started/*`, leases; every multi-object write runs under a lease object or an EPG run, and the Worker never deletes a key | Per-object conditional reads of the listed version; a final fence after the closing listing on the lease objects, the pointer, `sync.json`, the continuation record and the profile (unchanged ETags prove a quiescent interval); `missing_after` keys stop the attempt; delta = complete fresh inventory diffed by key and checksum, deletions listed never applied; owner-approved writer freeze or the AIR-75 change journal as the alternative gate when the proof fails (2) | Code PR (exporter proof and fence); Task freeze only under its own approval |
 | 3 | 1,576 fingerprint and 2 rating conflicts from the `tmdb_<n>` versus `film:tmdb:<n>` spelling, plus 1 redirect source | `reference_missing`, films stored under the canonical id | `filmIdFromEnrichmentKey` prefixes `film:` without translating the catalog spelling; redirects are not followed for enrichment keys | One exported identity rule shared with the reader and used by the importer; redirect followed to the survivor; source key kept on the receipt (3) | Code PR with legacy-spelling and redirect regressions |
 | 4 | 10 metadata-only films and 1 slug-only fingerprint and 2 ratings on them | `reference_missing` with no stored row | The reader does not mint a Film from `metadata.json` alone, by design | Stay conflicts; owner accepts them as the residual list or asks for a separate identity decision (3, 8) | Owner decision |
 | 5 | 1,986 prediction bundles unportable | `prediction_version_object_missing` | `enrichment.js` writes one mutable `predictions.json` bundle; the schema and ADR-0001 require an immutable object per version | Worker writes each new version as its own object; existing versions are materialized once under approval, or the family is excluded from this backfill (4) | Separate card: Worker PR, ADR-0014 compatibility note, approval for the one-time R2 write |
@@ -55,31 +55,56 @@ The AIR-73 counts are the archive's; production has grown since, but every class
 | 8 | No D1 database, binding, or write adapter | None | `wrangler.jsonc` has no `d1_databases`; the repositories only ever met SQLite | Owner creates the database and applies `0001_schema_v1.sql`; a local backfill command with an atomic-batch adapter; no Worker binding in this stage (7) | Owner approvals; code PR; scratch-database atomicity demonstration |
 | 9 | No execution runbook or GO/NO-GO record | None | The only procedures are archived Site procedures | `docs/runbooks/` page for export, dry-run, backfill, parity, stop, rollback; this report's checklist filled in with dates and results | Docs PR after the tooling exists |
 
+## R2-only families and what a later stage must decide
+
+R2-only means "no D1 table in schema v1 and not imported by this backfill". It is a dated classification, not a permanent one: the last column names the stage that must decide before the keys can be left behind.
+
+| Family (keys) | Why it is not imported now | Later D1 requirement | Decide by |
+| --- | --- | --- | --- |
+| Derived projections: `enrichment/view-index.json`, `enrichment/prediction-queue.json`, `enrichment/films/*/mood-facet.json`, `epg/discovery-score-preview.json` | ADR-0001 derives view and queue values from rows; facets and previews are recomputed | Readers must recompute them from D1 rows at the read cutover; parity of the recomputation is a cutover test | [AIR-76](https://trello.com/c/HHrDozK6) / [AIR-77](https://trello.com/c/f3QzcNYf) |
+| Runtime coordination: `epg/resolver-lease.json`, `enrichment/writer-lease.json`, `enrichment/runner-lease.json`, `epg/resolver-continuation.json`, `epg/resolver-continuation-diagnostics.json`, `epg/discovery-status.json`, `epg/discovery-variant-pending.json`, `sync.json`, `watchlist-ingest.json` | State of the R2 writers themselves | Redesigned, not migrated, when writes move to D1 | [AIR-78](https://trello.com/c/COdMTjqU) |
+| Run and stop records: `enrichment/runs/*`, `enrichment/sources/*`, run diagnostics, stop events, `enrichment/benchmarks/*` | Operational history of the R2 runner | Keep as R2 history or give them a table before legacy retirement | [AIR-79](https://trello.com/c/485tlGLA) |
+| User-visible state without a table: `started/*` markers, `events/*` | No table in schema v1 | **Must** get a D1 home or an explicit "stays in R2" decision before any reader serves from D1; a read cutover that drops them is a regression | [AIR-77](https://trello.com/c/f3QzcNYf), new ADR |
+| Caches with a provisional mapping: `titles.json`, `people.json`, `metadata.json` beyond `film_metadata` | Name caches, mapped only as provisional dimensions | Confirm the provisional-dimension mapping covers what readers need | [AIR-76](https://trello.com/c/HHrDozK6) |
+| Archive: raw EPG XML, `epg/generations/<runId>/*` copies, export archives | Archive by ADR-0008 and the schema | None; stays in R2 | none |
+
+## Acceptance classes and what blocks which stage
+
+| Class | Content | AIR-74 Done | Later stages |
+| --- | --- | --- | --- |
+| A — mapped-domain parity | Every mapped family (film, person, credits, metadata, external ids, redirects, generation membership and shows, candidates and decisions, fingerprint pointers, profile versions, actual ratings) read back equal to the baseline manifest | **Blocker**: required | Required for all |
+| B — R2-only operational artifacts | The dated allowlist above, with counts | Not a blocker; listed in the report | Each family's "decide by" stage must close it |
+| C — identity and source-quality exceptions | Rows the importer refuses to invent: the 10 metadata-only films, the slug-only fingerprint and the 2 ratings on them, a decision whose stored evidence key disagrees with the derived one, any new case | **Blocker until complete, explained and acknowledged**; acknowledged rows stay open in the ledger | **Blocker for the read cutover** ([AIR-77](https://trello.com/c/f3QzcNYf)) until resolved or retired by an identity decision |
+| D — excluded authoritative family | The prediction family if the owner excludes it instead of materializing versions | AIR-74 Done becomes "mapped scope without predictions", stated in those words | **Blocker for shadow writes of that family** ([AIR-75](https://trello.com/c/AXPYIVCa)) and every later stage |
+
+An owner acknowledgement of a class C list or a class D exclusion records a known gap. It does not make the backfill a lossless migration or a completed operational state, and the report must say so.
+
 ## Proposed sequence (each step its own PR or approval)
 
 1. **Plan accepted.** [ADR-0019](../../adr/0019-live-d1-backfill-boundaries.md) accepted or amended by the owner; the open items below answered.
 2. **Importer rules.** Shared identity rule, derived evidence key, `r2_only` allowlist, parity claim on mapped families; synthetic regressions for legacy spellings, redirects, derived evidence equal to stored decisions, allowlisted keys. No production access.
-3. **Live baseline exporter.** Local command producing the manifest shape `verifySnapshot` already checks, with a production source identity, bracketing listings, the acceptance predicates and the high-water mark; read-only credentials from outside the repository. Tested against a fake S3 listing; the first production read is an owner-approved step.
+3. **Live baseline exporter.** Local command producing the manifest shape `verifySnapshot` already checks, with a production source identity, per-object conditional reads of the listed version, the opening and closing listings, the final fence on the lease objects, pointer, `sync.json`, continuation and profile, the baseline identity, and the delta mode (complete fresh inventory diffed by key and checksum, anomalies listed); read-only credentials from outside the repository. Tested against a fake S3 listing including a writer that acquires a lease mid-window (attempt discarded) and a key that disappears (attempt stopped); the first production read is an owner-approved step.
 4. **Prediction versions.** Separate card: Worker writes immutable version objects; one-time materialization approved separately; or the family is excluded and the exclusion is recorded.
 5. **Dry-run.** Approved production export → local SQLite import with the new rules → parity report → owner review. Expected: conflicts reduced to the accepted residual list, `unmapped` empty, prediction family per step 4.
 6. **D1 resource.** Owner creates the database and applies the schema; a scratch database proves batch atomicity with a failing last statement.
-7. **Backfill.** Bounded batches with receipts into the production D1; stop on any conflict outside the residual list; parity against the baseline manifest; second and third runs apply zero rows; a delta export imports only changed checksums.
+7. **Backfill.** Bounded batches with receipts into the production D1; stop on any conflict outside the acknowledged class C list; parity against the baseline manifest; second and third runs apply zero rows; a delta export (fresh inventory with its own proof) re-imports changed checksums and lists anomalies. The database identifier is recorded in the manifest and in every receipt before the first row is written.
 8. **Acceptance report.** Dated execution report in this folder with the manifest identity, counts, residual conflicts, rerun results and rollback readiness; `docs/reference/data/d1-schema.md` and the persistence diagram updated; runtime still on R2.
 
 ## GO/NO-GO checklist (to be filled in with dates)
 
 | Gate | Condition | Status |
 | --- | --- | --- |
-| G0 | ADR-0019 accepted; open items decided (database name, prediction family in or out, residual conflicts, R2-only allowlist, export mechanism) | open |
+| G0 | ADR-0019 accepted; open items decided (database name, prediction family in or out, acknowledged class C exceptions, R2-only allowlist with per-family decisions, export mechanism, alternative gate when the consistency proof fails) | open |
 | G1 | Importer rules merged with regressions; CI green | open |
 | G2 | Live exporter merged; read-only credential created and verified read-only by scope | open (owner approval) |
-| G3 | Dry-run report reviewed: `unmapped` empty, conflicts only in the residual list, two local reruns apply zero rows | open |
+| G3 | Dry-run report reviewed in the four classes: class A equal, `unmapped` empty, class C complete and acknowledged, class D stated, two local reruns apply zero rows | open |
 | G4 | D1 database created, schema applied, scratch atomicity demonstrated | open (owner approval) |
-| G5 | Production backfill window approved and executed; parity against the baseline manifest; reruns apply zero rows | open (owner approval) |
+| G5 | Production backfill window approved; the baseline carries its consistency proof (or the approved alternative gate); executed; class A parity against the baseline manifest; reruns apply zero rows; rollback procedure (backup, identity fence, drop, re-import) written and approved before the first row | open (owner approval) |
 | G6 | Acceptance report merged; `wrangler.jsonc` still without D1; Scheduled Tasks unchanged | open |
 
 ## What this report does not establish
 
 - The production key inventory and sizes: they are inferred from the Worker's storage code and the archive, not from a listing.
 - That a multi-statement batch is atomic on the chosen D1 access path.
+- That the consistency proof can be produced in practice between hourly runs; if it cannot, the writer freeze or the change journal becomes the gate.
 - Any permission: reading production R2 in full, creating a token or a database, materializing prediction objects and writing D1 rows are each separate owner approvals.
