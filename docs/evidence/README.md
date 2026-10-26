@@ -10,7 +10,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | [Scored resolver](scored-resolver/README.md) | Eleven dated shadow/parity/replay/rollout reports, separate verdicts; [AIR-68](https://trello.com/c/qbLDc6Ql) later authorized scored-only on |
 | [Prediction](prediction/README.md) | AIR-82 partial queue RCA; exact original per-film cause unknown |
 | [Taxonomy](taxonomy/README.md) | AIR-47 accepted future v2 specification, separate from AIR-108 implementation |
-| [D1](d1-migration/README.md) | AIR-73 offline replay against 19 October snapshot; AIR-74 live backfill readiness assessment (NO-GO for execution, plan only); AIR-167 synthetic generation unit size and staged rehearsal; AIR-168 staged import local rehearsal at 1.25×; AIR-174 scratch D1 G4 (GO, synthetic); not a live cutover |
+| [D1](d1-migration/README.md) | AIR-73 offline replay against 19 October snapshot; AIR-74 live backfill readiness assessment (NO-GO for execution, plan only); AIR-167 synthetic generation unit size and staged rehearsal; AIR-168 staged import local rehearsal at 1.25×; AIR-174 scratch D1 G4 (GO, synthetic); AIR-175 production R2 snapshot attempt 1 (NO-GO, `source_changed`); not a live cutover |
 | [Film/Person](film-person/README.md) | AIR-42 Phase 0–3 audit and rollout, not production D1 authority |
 | [Legacy R2](legacy-r2/README.md) | Archived old Sites export and R2 import evidence, not active restore instructions |
 
