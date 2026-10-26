@@ -1,9 +1,9 @@
 # ADR 0020: Owner-triggered, bounded poster hydration for verified catalog records
 
-**Status:** Proposed  
-**Original decision date:** 2026-10-26 (proposed; accepted on owner review)  
+**Status:** Accepted  
+**Original decision date:** 2026-10-26  
 **Recorded at:** 2026-10-26  
-**Approval source:** not yet; owner review of the delivering PR  
+**Approval source:** owner explicitly approved the rendered architecture diagram and ADR decision on 2026-10-26, in the AIR-15 delivery conversation  
 **Related work:** [AIR-15](https://trello.com/c/Yz6SGd3R), [AIR-102](https://trello.com/c/8wKyN4c7), [PR #122](https://github.com/vladimino/iptv-watchlist/pull/122)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -25,7 +25,7 @@ Add a separate, owner-triggered writer, `POST /api/enrichment/catalog/posters`, 
 - **Retry and cursor semantics.** Outcomes are terminal (`hydrated`, `already_present`, `no_poster_on_tmdb`, `tmdb_id_mismatch`) or retryable (`tmdb_failed`, `rate_limited`, `not_attempted`, `skipped_changed`, `generation_changed`, `lease_lost`, `catalog_changed`). The cursor never moves past a retryable record. **Completion invariant:** `done: true` (with `nextCursor: null`) is reported only when the batch reached the end of the queue and every outcome in it is terminal, so a cursor chain started without a cursor and followed until `done` leaves every verified record without a poster hydrated or terminally settled.
 - **Owner gates.** Setting the flag, every execution call and any rollback write are separate owner approvals. The procedure is the [poster hydration runbook](../runbooks/catalog-poster-hydration.md). The route does not run on a schedule.
 
-Delivered: code, tests and documentation behind the unset flag. Not deployed-and-activated, not executed, not production verified by this ADR.
+Accepted design: code, tests and documentation remain behind the unset flag. Acceptance does not approve activation, execution or production writes.
 
 ## Alternatives considered
 
