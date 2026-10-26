@@ -31,8 +31,26 @@ async function loadEpgSnapshot(env){
 const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
 function catalogShowStatus(show,now){return Number(show.start)>now?'future':Number(show.end)>now?'on_air':'archive';}
 function catalogPerson(person){return {id:String(person.id),name:person.name||person.original||null};}
-function catalogAvailable({catalog,programme,watchlist,index,profile,programmeRunId,pinned,now}){
- const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set();
+// Poster fallback from the stored Letterboxd metadata cache (`metadata.json`): a record is reused only for the same stored id with the
+// same TMDB id (or none recorded), or for the same TMDB id when every cached record for it agrees. Nothing is fetched or invented.
+function storedPoster(value){return typeof value==='string'&&value.startsWith('https://')?value:null;}
+function catalogPosters(metadata){
+ const byId=new Map(),byTmdb=new Map();
+ for(const [id,record] of Object.entries(metadata||{})){
+  const poster=storedPoster(record?.poster);if(!poster)continue;
+  const tmdbId=record.tmdbId==null||record.tmdbId===''?null:String(record.tmdbId);
+  byId.set(String(record.id??id),{poster,tmdbId});
+  if(tmdbId)byTmdb.set(tmdbId,byTmdb.has(tmdbId)&&byTmdb.get(tmdbId)!==poster?null:poster);
+ }
+ return film=>{
+  const own=storedPoster(film.poster);if(own)return own;
+  const tmdbId=String(film.tmdbId),same=byId.get(String(film.id));
+  if(same&&(same.tmdbId===null||same.tmdbId===tmdbId))return same.poster;
+  return byTmdb.get(tmdbId)||null;
+ };
+}
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now}){
+ const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata);
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const byIdentity=new Map();
  for(const film of Object.values(catalog||{})){
@@ -47,7 +65,7 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,programmeRu
   if(!shows.length)continue;
   const latest=Math.max(...shows.map(show=>Number(show.start))),availableUntil=latest+CATALOG_ARCHIVE_MS,future=shows.filter(show=>Number(show.start)>now);
   const prediction=item.prediction,fingerprint=item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=canonicalMoodFacet(fingerprint,prediction);
-  const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:film.poster||null,url:film.url||null,
+  const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:posterFor(film),url:film.url||null,
    directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
    shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
    availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),
@@ -67,13 +85,13 @@ async function catalogAvailableRoute(env){
  // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
  // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
  const generationCopy=async name=>{const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;};
- const [programme,catalog,watchlist,index,profile]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey)]);
+ const [programme,catalog,watchlist,index,profile,metadata]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json')]);
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
  const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now:Date.now()}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now:Date.now()}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){

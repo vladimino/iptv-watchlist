@@ -11,7 +11,14 @@ assert.match(html,/<h2 id="finds-title">Находки<\/h2>/);
 assert.match(html,/NEW означает фильм вне твоего watchlist, а не новинку проката/);
 assert(css.includes('.finds-badge{position:absolute;top:-6px;left:-6px'),'NEW badge sits at the top left of the poster');
 assert(css.includes('.finds-card{position:relative;display:flex;flex-direction:column;min-width:0;border:1px solid #3f7a52;border-radius:12px;background:#1a2d21'),'finds card has its own soft green frame');
-assert(css.includes('.finds{margin-bottom:24px;padding:18px;border:1px solid #3b6346'),'finds section is a separate container');
+assert(css.includes('.finds{margin-top:28px;padding:18px;border:1px solid #3b6346'),'finds section is a separate container below the grid');
+// DOM order: the watchlist grid and its empty state come first, the finds section follows them inside the results column.
+const orderOf=marker=>{const at=html.indexOf(marker);assert(at>=0,marker);return at;};
+assert(orderOf('id="shortlist"')<orderOf('id="movies"'),'shortlist stays above the grid');
+assert(orderOf('id="movies"')<orderOf('id="empty"'),'the grid comes before its empty state');
+assert(orderOf('id="empty"')<orderOf('id="finds"'),'the finds section follows the grid and its empty state');
+assert(orderOf('id="finds"')<orderOf('class="status-footer"'),'the finds section stays inside the results column above the footer');
+assert.match(html.slice(orderOf('id="finds"'),orderOf('class="status-footer"')),/<\/section>\s*<\/section>\s*<\/div>\s*<footer/,'the finds section is the last block of the results column');
 assert.equal((app.match(/fetch\('\/api\/catalog\/available'\)/g)||[]).length,1,'the section reads the catalog route once');
 assert.match(app,/loadEnrichment\(\{quiet:true\}\),\n\s+loadCatalog\(\),/,'the catalog refreshes with the other live loaders');
 assert.doesNotMatch(app,/finds-card[^`]*film-open/,'a find never opens the watchlist film route');
