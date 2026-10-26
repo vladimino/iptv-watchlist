@@ -19,7 +19,7 @@ const fetches=[],logs=[];
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,ASSETS:{},
  console:{...console,log:line=>{logs.push(String(line));}},
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 const worker=context.worker,call=code=>vm.runInContext(code,context),plain=value=>JSON.parse(JSON.stringify(value));
 const execution={waitUntil(){}};
 const origin='https://iptv.vladimino.workers.dev',headers={'Content-Type':'application/json'};
@@ -364,10 +364,74 @@ holdStale();const lateStale=await staleHop;
 assert.equal(lateStale.data.diagnostic.hopId,staleHopId);assert.equal(lateStale.data.diagnostic.chunk.stage,'error');assert.equal(lateStale.data.diagnostic.chunk.error,'resolver_busy');assert.equal(lateStale.data.diagnostic.saved.write,'other_hop');
 assert.deepEqual(plain(continuation()),recoveredRecord,'the recovered checkpoint stands');assert.deepEqual(plain(records.get('epg/discovery-status.json')),recoveredStatus);assert.equal(verified(),recoveredDecisions);assert.equal(records.get('epg/resolver-lease.json').id,recovered.data.diagnostic.hopId);
 
+// 17. The checkpoint is the first write after the hop-marked status. Regression: a hop finished its chunk (status
+//     saved, lease renewed by the trailing writes), then the invocation ended before the checkpoint, the lease
+//     release and the response; the record stayed `running` and the client saw a transport error. Now an
+//     invocation that ends during the trailing writes, or whose response is lost on the way to the client, leaves
+//     a settled `paused` record: pipeline status says settled, the diagnostics entry stays at `entered` while the
+//     checkpoint is later than it (the response was lost, the step was not), and the next ordinary step continues
+//     the series without repeating the chunk or losing budget.
+const DIAGNOSTICS='epg/resolver-continuation-diagnostics.json';
+const seedPaused=(remainingChunks=10)=>{seedOrphan();set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso(now-60000),hopId:ORPHAN,remainingChunks,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});};
+const isRelease=(key,value)=>key==='epg/resolver-lease.json'&&JSON.parse(value).expiresAt===0;
+seedPaused();
+bucket.put=async(key,value,options)=>isRelease(key,value)?new Promise(()=>{}):realPut(key,value,options);
+const ended=await Promise.race([step().then(()=>'answered'),new Promise(resolve=>setTimeout(()=>resolve('ended'),300))]);
+bucket.put=realPut;
+assert.equal(ended,'ended','the invocation ended at the lease release, before any response');
+const statusIndex=puts.lastIndexOf('epg/discovery-status.json'),checkpointIndex=puts.lastIndexOf('epg/resolver-continuation.json');
+assert.ok(statusIndex>-1&&checkpointIndex===statusIndex+1,'the checkpoint is the very next write after the final status: '+puts.slice(statusIndex-1).join(','));
+assert.equal(continuation().stage,'paused');assert.equal(continuation().reason,null);assert.equal(continuation().remainingChunks,9);assert.notEqual(continuation().hopId,ORPHAN);assert.equal(continuation().programmeRunId,GENERATION);
+assert.equal(records.get('epg/discovery-status.json').hopId,continuation().hopId,'lastBatch names the hop whose checkpoint is stored');
+assert.equal(verified(),2+CHUNK);
+assert.ok(records.get('epg/resolver-lease.json').expiresAt>now,'the lease release was lost with the invocation');
+let interruptedStatus=await status();
+assert.equal(interruptedStatus.continuationHealth.status,'settled','a committed step is not an orphan, whatever happened to its response');
+assert.equal(interruptedStatus.continuationDiagnostics.recent[0].phase,'entered');
+assert.ok(Date.parse(continuation().at)>=Date.parse(interruptedStatus.continuationDiagnostics.recent[0].at),'the checkpoint is later than the entry that never got its outcome');
+// While the unreleased lease lasts, the next step waits and writes nothing.
+r=await step();
+assert.equal(r.data.diagnostic.branch,'lease_live');assert.equal(r.data.discovery.nextAction,'wait');assert.equal(continuation().remainingChunks,9);assert.equal(verified(),2+CHUNK);
+// After it expires, the next step is an ordinary continuation: no recovery, 9 -> 8, the interrupted chunk is not repeated.
+set('epg/resolver-lease.json',{...records.get('epg/resolver-lease.json'),expiresAt:now-1000});
+r=await step();d=r.data.diagnostic;
+assert.equal(d.health.status,'settled');assert.equal(d.recovery,null);assert.equal(d.branch,'chunk');assert.equal(d.decision.budget,9);
+assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.remainingChunks,8);assert.equal(r.data.discovery.nextAction,'continue');
+assert.equal(verified(),2+2*CHUNK,'the interrupted step\'s chunk is not repeated');
+assert.equal(d.leaseReleased,true);assert.equal(d.trailingError,null);assert.equal(records.get('epg/resolver-lease.json').expiresAt,0);
+assert.deepEqual(fetches,[]);
+
+// 18. A failed lease release after the checkpoint is a trailing failure, not an orphan and not a failed step: the
+//     checkpoint stands, the response reports leaseReleased false, the entry completes, and the next step after the
+//     lease expires continues the series.
+seedPaused();
+bucket.put=async(key,value,options)=>{if(isRelease(key,value))throw new Error('r2 put failed');return realPut(key,value,options);};
+r=await step();bucket.put=realPut;
+assert.equal(r.status,200);d=r.data.diagnostic;
+assert.equal(d.branch,'chunk');assert.equal(d.saved.write,'saved');assert.equal(d.saved.owned,true);assert.equal(d.leaseReleased,false);assert.equal(d.trailingError,null);assert.equal(d.chunk.error,null);
+assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.nextAction,'continue');assert.equal(r.data.discovery.remainingChunks,9);
+assert.equal(continuation().stage,'paused');assert.equal(continuation().remainingChunks,9);assert.equal(verified(),2+CHUNK);
+assert.equal(records.get(DIAGNOSTICS).recent[0].phase,'completed');assert.equal(records.get(DIAGNOSTICS).recent[0].diagnostic.leaseReleased,false);
+assert.equal((await status()).continuationHealth.status,'settled');
+set('epg/resolver-lease.json',{...records.get('epg/resolver-lease.json'),expiresAt:now-1000});
+r=await step();assert.equal(r.data.diagnostic.recovery,null);assert.equal(r.data.discovery.remainingChunks,8);assert.equal(verified(),2+2*CHUNK);
+
+// 19. A trailing write inside the chunk that fails after the checkpoint (the score preview) is classified, not
+//     turned into an error record: the step stays committed with its real chunk result.
+seedPaused();env.SCORED_RESOLUTION='shadow';
+bucket.put=async(key,value,options)=>{if(key==='epg/discovery-score-preview.json')throw new Error('r2 put failed');return realPut(key,value,options);};
+r=await step();bucket.put=realPut;delete env.SCORED_RESOLUTION;
+assert.equal(r.status,200);d=r.data.diagnostic;
+assert.equal(d.branch,'chunk');assert.equal(d.saved.write,'saved');assert.equal(d.trailingError,'storage');assert.equal(d.leaseReleased,true);assert.equal(d.chunk.error,null);
+assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.remainingChunks,9);assert.equal(r.data.discovery.nextAction,'continue');
+assert.equal(continuation().stage,'paused');assert.equal(continuation().remainingChunks,9);assert.equal(records.get('epg/discovery-status.json').hopId,continuation().hopId);
+assert.equal(records.get(DIAGNOSTICS).recent[0].phase,'completed');
+fetches.length=0;
+
 // 13. Every reported value is from the closed vocabulary; nothing from the payload leaks into the ring or the log.
 seedOrphan();await step();
 const entries=records.get('epg/resolver-continuation-diagnostics.json').recent;
 for(const entry of entries){assert.ok(['idle','settled','live','orphaned'].includes(entry.diagnostic.health.status));if(entry.diagnostic.recovery)assert.ok(['settled','resumed','generation_recovered','generation_pending'].includes(entry.diagnostic.recovery.action));if(entry.diagnostic.saved)assert.ok(['saved','other_hop','write_conflict'].includes(entry.diagnostic.saved.write));}
 assert.doesNotMatch(JSON.stringify(entries),SECRET);assert.doesNotMatch(logs.join('\n'),SECRET);
 assert.ok(call('DIAGNOSTIC_VOCABULARY').reason.includes('orphaned'));
-console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation handoff (orphaned, terminal and mid-publication records, pending copy, live writer, concurrent and stalled hops, out-of-order commits), concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, a stalled old hop fenced out (before its first write, between two helper writes and inside the queue refresh) and sanitized diagnostics passed');
+console.log('Orphaned continuation: settle after a completed chunk, one-off recovery, live lease (same/other hop), unfinished chunk resumed, exhausted budget, finished backlog, programme change, generation handoff (orphaned, terminal and mid-publication records, pending copy, live writer, concurrent and stalled hops, out-of-order commits), concurrent steps, stale-read fence, conflicting settle, hop-marked attribution, rejected checkpoint writes, checkpoint before the trailing writes (interrupted invocation, lost lease release, failed score preview), a stalled old hop fenced out (before its first write, between two helper writes and inside the queue refresh) and sanitized diagnostics passed');
