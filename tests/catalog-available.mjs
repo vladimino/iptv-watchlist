@@ -163,4 +163,35 @@ assert.equal(posterOf(r.body,'tmdb_15'),'https://a.ltrbxd.com/resized/fifteen.jp
 assert.deepEqual(Object.keys(r.body.films[1]).sort(),['actors','availableNow','availableUntil','canonicalIdentity','directors','fingerprint','genres','id','nextStart','original','poster','prediction','runtime','shows','title','tmdbId','url','year'],'the DTO shape is unchanged');
 assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 
+// A conflict is sticky: once two cached records for one TMDB id disagree, no later record and no insertion order restores a poster.
+const A='https://a.ltrbxd.com/resized/a.jpg',B='https://a.ltrbxd.com/resized/b.jpg';
+const cacheFor=posters=>Object.fromEntries(posters.map((poster,index)=>['lid-'+index,{id:'lid-'+index,tmdbId:'7',poster}]));
+for(const [order,expected] of [[[A,B,A],null],[[B,A,A],null],[[A,A,B],null],[[B,B,A,A],null],[[A,B,B,B],null],[[A,A,A],A],[[B],B]]){
+ seed();posterless();records.set('metadata.json',cacheFor(order));r=await get();
+ assert.equal(posterOf(r.body,'tmdb_7'),expected,'TMDB id order '+order.map(p=>p===A?'A':'B').join('/'));
+}
+// The same rule holds for the stored-id key: two cached records naming the same stored id with different posters stay conflicted.
+for(const [order,expected] of [[[A,B,A],null],[[B,A,A],null],[[A,A],A]]){
+ seed();posterless();records.set('metadata.json',Object.fromEntries(order.map((poster,index)=>['key-'+index,{id:'tmdb_18',tmdbId:null,poster}])));r=await get();
+ assert.equal(posterOf(r.body,'tmdb_18'),expected,'stored id order '+order.map(p=>p===A?'A':'B').join('/'));
+}
+// A conflicted TMDB identity also blocks the stored-id path: a disagreement anywhere for the film's identity yields no poster.
+seed();posterless();records.set('metadata.json',{tmdb_7:{id:'tmdb_7',tmdbId:'7',poster:A},x:{id:'x',tmdbId:'7',poster:B}});r=await get();
+assert.equal(posterOf(r.body,'tmdb_7'),null,'the same stored id does not override a conflicted TMDB identity');
+// Records without an https poster never take part in the agreement.
+seed();posterless();records.set('metadata.json',{a:{id:'a',tmdbId:'7',poster:A},b:{id:'b',tmdbId:'7',poster:null},c:{id:'c',tmdbId:'7',poster:'http://insecure.example/b.jpg'}});r=await get();
+assert.equal(posterOf(r.body,'tmdb_7'),A);
+
+// Coverage summary: where each returned poster came from, counted over the returned films only.
+seed();r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:3,metadataCache:0,missing:0},'every returned film has its own catalog poster');
+seed();posterless();r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:0,metadataCache:0,missing:3});
+seed();posterless();records.set('metadata.json',{'heat-1995':{id:'heat-1995',tmdbId:'7',poster:A}});r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:0,metadataCache:1,missing:2});
+assert.equal(r.body.posterCoverage.catalog+r.body.posterCoverage.metadataCache+r.body.posterCoverage.missing,r.body.total);
+seed();for(const key of CATALOG_KEYS)records.get(key).tmdb_15.poster=null;r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:2,metadataCache:0,missing:1},'a duplicate identity that is not returned is not counted');
+assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+
 console.log('Catalog available: pinned generation, verified catalog-only identity, real shows inside the 72h/24h window with statuses, current prediction for the current profile, watchlist/rating/seed exclusions, one entry per identity, deterministic order, channel summary, generation pin and no side effects passed');

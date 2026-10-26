@@ -14,7 +14,7 @@ The route does not change `GET /api/programme` or `GET /api/watchlist`, which ke
 | `watchlist.json` | Further watchlist ids and TMDB identities to exclude, including films without a programme show |
 | `enrichment/view-index.json` | The stored current prediction, the fingerprint facet and the actual rating per film |
 | `enrichment/profile/current.json` | The profile version and hash a prediction must match to be current |
-| `metadata.json` | The Letterboxd metadata cache of films that are or were on the watchlist, read only for a poster fallback: a catalog record without its own TMDB poster takes the cached poster of the record with the same stored id (whose cached TMDB id is the same or absent), or of the same TMDB id when every cached record for that id carries the same poster. No other field is taken from it and nothing is fetched |
+| `metadata.json` | The Letterboxd metadata cache of films that are or were on the watchlist, read only for a poster fallback: a catalog record without its own TMDB poster takes the cached `https://` poster of the record with the same stored id (whose cached TMDB id is the same or absent), or of the same TMDB id. Every cached record for that stored id, and every cached record for that TMDB id, must carry the same poster: once two disagree the key stays conflicted regardless of further records or their order, and a conflicted TMDB identity yields no poster even through the stored-id match. No other field is taken from it and nothing is fetched |
 
 The ratings seed compiled into the Worker is applied to an in-memory copy of the view index. Unlike `GET /api/enrichment/view`, this route never writes that seed back. `started/` markers are not consulted: they belong to the watchlist UI and are not a watched signal for catalog films.
 
@@ -41,6 +41,7 @@ One entry per canonical identity: when two records share a TMDB identity, the on
   "window": {"from": "2026-06-12T10:00:00.000Z", "to": "2026-06-16T10:00:00.000Z"},
   "profile": {"version": 1},
   "total": 1,
+  "posterCoverage": {"catalog": 1, "metadataCache": 0, "missing": 0},
   "films": [{
     "id": "tmdb_7", "tmdbId": "7", "canonicalIdentity": "tmdb:7",
     "title": "…", "original": "…", "year": 2020, "runtime": 100, "genres": ["Драма"], "poster": "https://…", "url": "https://www.themoviedb.org/movie/7",
@@ -56,6 +57,7 @@ One entry per canonical identity: when two records share a TMDB identity, the on
 
 | Field | Meaning |
 | --- | --- |
+| `posterCoverage` | Where the `poster` of each returned film came from, counted over `films` only: `catalog` (the record's own TMDB poster), `metadataCache` (the `metadata.json` fallback), `missing` (`poster` is `null`). The three add up to `total`. It lets a plain read show how many available films still have no stored asset; it is not a per-film field, and `films[]` is unchanged |
 | `programmeRunId`, `pinned` | The generation the response is derived from. `pinned: false` means no published pointer existed and the programme's own run id was used |
 | `generatedAt`, `window` | The clock the statuses were derived with and the availability envelope `(now − 72h, now + 24h)` |
 | `profile` | The profile version predictions were checked against, or `null` |
