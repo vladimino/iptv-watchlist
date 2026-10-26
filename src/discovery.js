@@ -281,7 +281,10 @@ async function resolveDiscoveryBatch(env,report,limit=24){
  const lease=await acquireDiscoveryLease(env);if(!lease)return {stage:'busy',checked:0,remaining:null};
  try{return await resolveDiscoveryChunk(env,report,limit,lease);}finally{await releaseDiscoveryLease(env,lease);}
 }
-async function resolveDiscoveryChunk(env,report,limit,lease=null){
+// `checkpoint`, when given, is called with the chunk's summary immediately after the hop-marked final status is
+// saved and before any trailing write (score preview, variant plan), so that the continuation checkpoint is the
+// very next durable write after the status; see advanceDiscovery.
+async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
  // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
@@ -453,11 +456,12 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null){
  const currentReport=await loadJSON(env,'programme.json');
  if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
   const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,programmeChanged:true,...variantDiagnostic(variantMeter)};
-  await fence();await saveJSON(env,'epg/discovery-status.json',changed);await saveScorePreview(env,mode,source,preview,fence);return {...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
+  const changedOutcome={...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
+  await fence();await saveJSON(env,'epg/discovery-status.json',changed);if(checkpoint)await checkpoint(changedOutcome);await saveScorePreview(env,mode,source,preview,fence);return changedOutcome;
  }
  try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint',fence);}catch(e){if(e?.name==='LeaseLostError')throw e;error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
  const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),variantPending=deferred.length,summary={schemaVersion:2,stage:error?'partial':ready.length||variantPending?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:ready.length,variantPending,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,...variantDiagnostic(variantMeter)};
- await fence();await saveJSON(env,'epg/discovery-status.json',summary);await saveScorePreview(env,mode,source,preview,fence);return summary;
+ await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);await saveScorePreview(env,mode,source,preview,fence);return summary;
  }finally{if(shadowPlans){await fence();await saveJSON(env,VARIANT_PENDING_KEY,{schemaVersion:1,programmeRunId:source.programmeRunId||null,jobs:deferred});}}
 }
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
@@ -588,9 +592,11 @@ async function saveOwnedContinuation(env,hopId,record){
 }
 // A `running` record is a live writer only while the resolver lease it named is unexpired. Afterwards it
 // is an orphan: its hop did not reach its checkpoint. The most likely cause is an interrupted invocation
-// (a thrown handler normally leaves an `error` record), but a failure in the lease release, in the
-// checkpoint write itself or in the best-effort diagnostics write leaves the same picture, so the cause
-// of any one orphan is an inference, not a proven fact. Whether the hop's chunk finished is read from
+// (a thrown handler normally leaves an `error` record) between the status write and the checkpoint write,
+// which is the very next write; a failure of the checkpoint write itself leaves the same picture, so the
+// cause of any one orphan is an inference, not a proven fact. The lease release, the score preview, the
+// variant plan, the diagnostics ring and the response all come after the checkpoint, so an end during them
+// leaves a settled record, not an orphan. Whether the hop's chunk finished is read from
 // the persisted discovery status, and only when that status names the same hop (`hopId`), the same
 // programme generation and a start after the record was opened: the status object is shared, so a
 // newer status from another hop or an unmarked status must not be attributed to this hop. In that case
@@ -729,15 +735,26 @@ async function advanceDiscovery(env,body={}){
  const programmeRunId=current?.programmeRunId??published??null;
  const opened=await replaceContinuation(env,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId},fresh.etag);
  if(!opened){await releaseDiscoveryLease(env,acquired);trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false,write:'other_hop'};return busyOutcome(after,trace);}
- let result;
+ // The hop's checkpoint is the first durable write after its hop-marked status: the chunk calls `checkpoint`
+ // right after saving that status, before the score preview, the variant plan, the lease release and the
+ // diagnostics ring. An invocation that ends during those trailing writes, or whose response is lost on the way
+ // to the client, therefore leaves a settled record rather than an orphan; the orphan settle remains the repair
+ // for an end between the status write and the checkpoint write. A failure after the checkpoint is a trailing
+ // failure: the step stays committed and the error is classified in `trailingError`. The lease is released after
+ // the checkpoint; a failed release cannot undo it and only makes the next hop wait until the lease expires.
+ let result,committed=null;trace.leaseReleased=null;trace.trailingError=null;
+ const checkpoint=async summary=>{const record=continuationAfterChunk(summary,budget,hopId,new Date().toISOString(),programmeRunId);committed={summary,record,outcome:await saveOwnedContinuation(env,hopId,record)};};
+ const release=async()=>{try{await releaseDiscoveryLease(env,acquired);trace.leaseReleased=true;}catch{trace.leaseReleased=false;}};
  try{
-  result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
- }catch(e){result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};}
- finally{await releaseDiscoveryLease(env,acquired);}
+  result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
+ }catch(e){
+  if(committed){result=committed.summary;trace.trailingError=diagnosticErrorCode(e);}
+  else result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};
+ }
  trace.chunk=chunkSummary(result);
- const record=continuationAfterChunk(result,budget,hopId,new Date().toISOString(),programmeRunId);
- const outcome=await saveOwnedContinuation(env,hopId,record);
- const kept=outcome.saved?record:outcome.record;
+ if(!committed){try{await checkpoint(result);}catch(e){await release();throw e;}}
+ await release();
+ const {record,outcome}=committed,kept=outcome.saved?record:outcome.record;
  trace.saved={...continuationSummary(kept),owned:outcome.saved,write:outcome.saved?'saved':outcome.reason};
  // An unsaved checkpoint of a record that still names this hop is an orphan the next call settles from the
  // hop-marked status; the contract says so instead of claiming the checkpoint was stored.
