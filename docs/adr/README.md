@@ -30,7 +30,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
-| [0020 — Owner-triggered, bounded poster hydration for verified catalog records](0020-owner-triggered-catalog-poster-hydration.md) | Proposed 2026-10-26 (accepted on owner review; no flag change or execution authorized) | [AIR-15](https://trello.com/c/Yz6SGd3R), [PR #122](https://github.com/vladimino/iptv-watchlist/pull/122) |
+| [0020 — Owner-triggered, bounded poster hydration for verified catalog records](0020-owner-triggered-catalog-poster-hydration.md) | Accepted 2026-10-26 (accepted on owner review; no flag change or execution authorized) | [AIR-15](https://trello.com/c/Yz6SGd3R), [PR #122](https://github.com/vladimino/iptv-watchlist/pull/122) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
