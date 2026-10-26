@@ -571,27 +571,37 @@ function shortlistAvailabilityText(item){const a=item.availability;if(!a.availab
 function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const list=valid?buildShortlist(visible):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card${item.availability.available?'':' is-unavailable'}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':!ratingsLoaded?'Загружаем оценки и прогнозы…':'Нет подходящих вариантов с оценкой или прогнозом. Измени фильтры или выбери «Сегодня». Границы фильтров сохранены.';$('#shortlist-caption').textContent=state.includeUnscheduled&&state.shortlistMode==='today'?'Из твоей выборки · варианты без показа отмечены отдельно':'Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===state.shortlistMode)));}
 
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
+// With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
+// effective viewing window count, so a film airing only on another channel, outside the period or in the black zone is not a find.
 const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5;
 let findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false},findsLoading=false;
-function findsShows(film,now){const from=now-72*3600000,to=now+24*3600000;return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&show.start>from&&show.start<to).sort((a,b)=>a.start-b.start);}
-function findsUntil(film,now){const shows=findsShows(film,now);return shows.length?Math.max(...shows.map(show=>show.start))+72*3600000:null;}
+function findsScope(){return state.channels?.size?{channels:new Set(state.channels),period:state.period}:null;}
+function findsOnChannel(show,channels){const name=typeof show?.channel==='string'?show.channel:'';return !!name&&(channels.has(name)||channels.has(name.trim()));}
+function findsInPeriod(model,show,period){return period==='archive'?inArchive(model,show):period==='future'?inFuture(model,show):inArchive(model,show)||inFuture(model,show);}
+function findsShows(film,now,scope=findsScope()){
+ const from=now-72*3600000,to=now+24*3600000;
+ let shows=(film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&show.start>from&&show.start<to);
+ if(scope){const model=viewingWindow(now);shows=shows.filter(show=>findsOnChannel(show,scope.channels)&&findsInPeriod(model,show,scope.period));}
+ return shows.sort((a,b)=>a.start-b.start);
+}
+function findsUntil(film,now,scope=findsScope()){const shows=findsShows(film,now,scope);return shows.length?Math.max(...shows.map(show=>show.start))+72*3600000:null;}
 function findsIdentity(film){return String(film.canonicalIdentity||(film.tmdbId?'tmdb:'+film.tmdbId:'')||film.id);}
 function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film of films||[]){ids.add(String(film.id));if(film.tmdbId)tmdb.add(String(film.tmdbId));}return {ids,tmdb};}
 function findsStrong(prediction){return !!prediction&&!prediction.stale&&Number.isFinite(prediction.predictedRating)&&prediction.predictedRating>=FINDS_MIN_RATING&&Number.isFinite(prediction.probability4Plus)&&prediction.probability4Plus>=FINDS_MIN_PROBABILITY&&typeof prediction.confidence==='string'&&prediction.confidence!==''&&prediction.confidence!=='low';}
-function findsEligible(film,now=nowMs(),known=watchlistIdentities()){
+function findsEligible(film,now=nowMs(),known=watchlistIdentities(),scope=findsScope()){
  if(!film||film.id===undefined||film.id===null)return false;
  if(known.ids.has(String(film.id))||(film.tmdbId&&known.tmdb.has(String(film.tmdbId))))return false;
  const local=enrichment.films?.[String(film.id)];
  if(local&&local.actualRating!==null&&local.actualRating!==undefined)return false;
  if(!findsStrong(film.prediction))return false;
- return findsShows(film,now).length>0;
+ return findsShows(film,now,scope).length>0;
 }
 function franchiseKey(film){const base=String(film.original||film.title||'').normalize('NFKC').toLocaleLowerCase('ru').replace(/[:\-–—]/g,' ');return base.replace(/(?:^|\s)(?:part|часть|глава|chapter|episode|эпизод|vol\.?|том)\s*[\divxlc]+(?=\s|$)/gu,' ').replace(/\s(?:\d|[ivxlc]{1,5})\s*$/,' ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();}
 function findsSignal(film){return `${film.prediction.predictedRating.toFixed(1)}|${film.prediction.probability4Plus.toFixed(2)}`;}
-function findsCompare(a,b,now){return b.prediction.predictedRating-a.prediction.predictedRating||b.prediction.probability4Plus-a.prediction.probability4Plus||(findsUntil(a,now)??Infinity)-(findsUntil(b,now)??Infinity)||String(a.title||'').localeCompare(String(b.title||''),'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
-function buildFinds(input=findsSource.films,now=nowMs()){
+function findsCompare(a,b,now,scope=findsScope()){return b.prediction.predictedRating-a.prediction.predictedRating||b.prediction.probability4Plus-a.prediction.probability4Plus||(findsUntil(a,now,scope)??Infinity)-(findsUntil(b,now,scope)??Infinity)||String(a.title||'').localeCompare(String(b.title||''),'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
+function buildFinds(input=findsSource.films,now=nowMs(),scope=findsScope()){
  const known=watchlistIdentities();
- const candidates=(input||[]).filter(film=>findsEligible(film,now,known)).sort((a,b)=>findsCompare(a,b,now));
+ const candidates=(input||[]).filter(film=>findsEligible(film,now,known,scope)).sort((a,b)=>findsCompare(a,b,now,scope));
  const picked=[],identities=new Set(),franchises=new Map();
  for(const film of candidates){
   if(picked.length>=FINDS_LIMIT)break;
@@ -604,15 +614,15 @@ function buildFinds(input=findsSource.films,now=nowMs()){
  return picked;
 }
 function findsChannel(show){return typeof show?.channel==='string'&&show.channel.trim()?show.channel.trim():'Канал не указан';}
-function findsAiring(film,now=nowMs()){
- const shows=findsShows(film,now);
+function findsAiring(film,now=nowMs(),scope=findsScope()){
+ const shows=findsShows(film,now,scope);
  const live=shows.find(show=>show.start<=now&&finiteTime(show.end)!==null&&finiteTime(show.end)>now);
  if(live)return {kind:'live',text:`Сейчас в эфире · ${findsChannel(live)}`,show:live};
  const next=shows.find(show=>show.start>now);
  if(next)return {kind:'next',text:`${madridStamp(next.start)} · ${findsChannel(next)}`,show:next};
  const last=shows.filter(show=>show.start<=now).pop();
  if(!last)return {kind:'none',text:'Нет показов в текущем окне',show:null};
- return {kind:'catchup',text:`Архив · ${findsChannel(last)} · до ${madridStamp(findsUntil(film,now))}`,show:last};
+ return {kind:'catchup',text:`Архив · ${findsChannel(last)} · до ${madridStamp(findsUntil(film,now,scope))}`,show:last};
 }
 function findsLabels(film){
  const mechanics=(film.fingerprint?.plotMechanics||[]).filter(id=>MECHANIC_LABELS[id]).map(id=>MECHANIC_LABELS[id]);
@@ -620,8 +630,8 @@ function findsLabels(film){
  const out=[];if(mechanics[0])out.push(mechanics[0]);if(moods[0])out.push(moods[0]);if(out.length<2&&mechanics[1])out.push(mechanics[1]);if(out.length<2&&moods[1])out.push(moods[1]);
  return out.slice(0,2);
 }
-function findsCard(film,now=nowMs()){
- const p=film.prediction,airing=findsAiring(film,now),labels=findsLabels(film),chance=Math.round(p.probability4Plus*100),original=film.original&&film.original!==film.title?film.original:'';
+function findsCard(film,now=nowMs(),scope=findsScope()){
+ const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),chance=Math.round(p.probability4Plus*100),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
  const title=film.url?`<a class="finds-title-link" href="${escapeHTML(film.url)}" target="_blank" rel="noopener noreferrer" title="Открыть на TMDB">${escapeHTML(film.title||film.original||'')}</a>`:escapeHTML(film.title||film.original||'');
  return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${poster}</div><div class="film-info"><h3>${title}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p></article>`;
@@ -629,12 +639,31 @@ function findsCard(film,now=nowMs()){
 // The cached catalog answer is usable only for the generation the loaded programme is on. A generation change with no catalog
 // answer for it yet (or a 409 while the new generation is still copying) hides the section instead of showing the old shows.
 function findsFresh(){const run=report?.runId??null;return !!findsSource.ready&&!!findsSource.programmeRunId&&!!run&&findsSource.programmeRunId===run;}
+const FINDS_PERIOD_LABELS={archive:'архив',future:'следующие сутки'};
+function findsTitle(scope){return !scope?'Находки':scope.channels.size>1?'Находки на выбранных каналах':'Находки на выбранном канале';}
+function findsCaption(count,scope){
+ if(!count)return '';
+ if(!scope)return `${count} ${filmWord(count)} вне watchlist: сильный прогноз и реальный показ`;
+ const channels=[...scope.channels].sort((a,b)=>a.localeCompare(b,'ru')).join(', '),period=FINDS_PERIOD_LABELS[scope.period];
+ return `${count} ${filmWord(count)} вне watchlist с показом на ${scope.channels.size>1?'каналах':'канале'} ${channels}${period?` · ${period}`:''}`;
+}
+// With a channel filter the watchlist grid and the finds are two sections of one channel and period scope: the grid gets its own heading,
+// an empty section is not shown, and the shared empty state appears only when both sections are empty.
+let resultsView={visible:0,valid:true};
+function syncResultSections(findsCount){
+ const scoped=!!state.channels?.size;
+ const heading=$('#watchlist-title');if(heading)heading.hidden=!(scoped&&resultsView.valid&&resultsView.visible>0);
+ const empty=$('#empty');if(empty)empty.hidden=resultsView.visible>0||!resultsView.valid||scoped&&findsCount>0;
+}
 function renderFinds(now=nowMs()){
- const node=$('#finds');if(!node)return [];
- const list=findsFresh()?buildFinds(findsSource.films,now):[];
+ const node=$('#finds');if(!node){syncResultSections(0);return [];}
+ const scope=findsScope();
+ const list=findsFresh()?buildFinds(findsSource.films,now,scope):[];
  node.hidden=list.length===0;
- const cards=$('#finds-cards');if(cards)cards.innerHTML=list.map(film=>findsCard(film,now)).join('');
- const caption=$('#finds-caption');if(caption)caption.textContent=list.length?`${list.length} ${filmWord(list.length)} вне watchlist: сильный прогноз и реальный показ`:'';
+ const title=$('#finds-title');if(title)title.textContent=findsTitle(scope);
+ const cards=$('#finds-cards');if(cards)cards.innerHTML=list.map(film=>findsCard(film,now,scope)).join('');
+ const caption=$('#finds-caption');if(caption)caption.textContent=findsCaption(list.length,scope);
+ syncResultSections(list.length);
  return list;
 }
 async function loadCatalog(){
@@ -676,8 +705,8 @@ function render(){
   const visible=valid?visibleFilms():[];
   $('#movies').innerHTML=visible.map(card).join('');
   renderShortlist(visible,valid);
+  resultsView={visible:visible.length,valid};
   renderFinds();
-  $('#empty').hidden=visible.length>0||!valid;
   const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
   updateProgrammeStatus();
   const shows=visible.reduce((n,f)=>n+periodShows(f).length,0);
