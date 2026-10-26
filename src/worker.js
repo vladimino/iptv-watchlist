@@ -31,8 +31,32 @@ async function loadEpgSnapshot(env){
 const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
 function catalogShowStatus(show,now){return Number(show.start)>now?'future':Number(show.end)>now?'on_air':'archive';}
 function catalogPerson(person){return {id:String(person.id),name:person.name||person.original||null};}
-function catalogAvailable({catalog,programme,watchlist,index,profile,programmeRunId,pinned,now}){
- const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set();
+// Poster fallback from the stored Letterboxd metadata cache (`metadata.json`). Nothing is fetched or invented. A cached poster is
+// reused for the same stored id (cached TMDB id equal or absent) or for the same TMDB id, and only while every cached record for that
+// key agrees: once two records disagree the key is conflicted for good, whatever records follow and in whatever order. A conflicted
+// TMDB identity also blocks the stored-id path, so a disagreement anywhere for the film's identity yields no poster.
+function storedPoster(value){return typeof value==='string'&&value.startsWith('https://')?value:null;}
+function catalogPosters(metadata){
+ const byId=new Map(),byTmdb=new Map(),conflictedIds=new Set(),conflictedTmdb=new Set();
+ const agree=(map,conflicted,key,value,same)=>{if(conflicted.has(key))return;if(!map.has(key)){map.set(key,value);return;}if(!same(map.get(key),value)){map.delete(key);conflicted.add(key);}};
+ for(const [id,record] of Object.entries(metadata||{})){
+  const poster=storedPoster(record?.poster);if(!poster)continue;
+  const tmdbId=record.tmdbId==null||record.tmdbId===''?null:String(record.tmdbId);
+  agree(byId,conflictedIds,String(record.id??id),{poster,tmdbId},(a,b)=>a.poster===b.poster&&a.tmdbId===b.tmdbId);
+  if(tmdbId)agree(byTmdb,conflictedTmdb,tmdbId,poster,(a,b)=>a===b);
+ }
+ return film=>{
+  const own=storedPoster(film.poster);if(own)return {poster:own,source:'catalog'};
+  const tmdbId=String(film.tmdbId);
+  if(conflictedTmdb.has(tmdbId))return {poster:null,source:null};
+  const same=byId.get(String(film.id));
+  if(same&&(same.tmdbId===null||same.tmdbId===tmdbId))return {poster:same.poster,source:'metadata_cache'};
+  const shared=byTmdb.get(tmdbId);
+  return shared?{poster:shared,source:'metadata_cache'}:{poster:null,source:null};
+ };
+}
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now}){
+ const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const byIdentity=new Map();
  for(const film of Object.values(catalog||{})){
@@ -47,19 +71,24 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,programmeRu
   if(!shows.length)continue;
   const latest=Math.max(...shows.map(show=>Number(show.start))),availableUntil=latest+CATALOG_ARCHIVE_MS,future=shows.filter(show=>Number(show.start)>now);
   const prediction=item.prediction,fingerprint=item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=canonicalMoodFacet(fingerprint,prediction);
-  const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:film.poster||null,url:film.url||null,
+  const artwork=posterFor(film);
+  const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,
    directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
    shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
    availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),
    prediction:{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds},
    fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
+  posterSource.set(entry,artwork.source);
   const kept=byIdentity.get(identity);
   if(!kept||Date.parse(entry.availableUntil)>Date.parse(kept.availableUntil)||(entry.availableUntil===kept.availableUntil&&id<kept.id))byIdentity.set(identity,entry);
  }
  const films=[...byIdentity.values()].sort((a,b)=>Date.parse(a.availableUntil)-Date.parse(b.availableUntil)||a.id.localeCompare(b.id,'en'));
  const channels=new Map();
  for(const film of films)for(const channelId of new Set(film.shows.map(show=>show.channelId))){const show=film.shows.find(item=>item.channelId===channelId),entry=channels.get(channelId)||{channelId,channel:show.channel,films:0};entry.films++;channels.set(channelId,entry);}
- return {programmeRunId,pinned,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
+ // Where each returned poster came from, counted over the returned films only, so a plain GET shows how many still lack an asset.
+ const posterCoverage={catalog:0,metadataCache:0,missing:0};
+ for(const film of films){const source=posterSource.get(film);if(source==='catalog')posterCoverage.catalog++;else if(source==='metadata_cache')posterCoverage.metadataCache++;else posterCoverage.missing++;}
+ return {programmeRunId,pinned,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
 }
 async function catalogAvailableRoute(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
@@ -67,13 +96,13 @@ async function catalogAvailableRoute(env){
  // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
  // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
  const generationCopy=async name=>{const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;};
- const [programme,catalog,watchlist,index,profile]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey)]);
+ const [programme,catalog,watchlist,index,profile,metadata]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json')]);
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
  const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now:Date.now()}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now:Date.now()}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){

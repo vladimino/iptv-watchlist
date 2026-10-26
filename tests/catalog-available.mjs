@@ -136,4 +136,62 @@ seed();records.delete(constant('ENRICHMENT_KEY')+'view-index.json');r=await get(
 seed();records.get('epg/discovered-films.json').tmdb_9.shows=[show(now-hour)];r=await get();assert.ok(!r.body.films.some(f=>f.id==='tmdb_9'),'the public copy is not consulted while a pointer is published');
 assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 
+// Poster fallback: a catalog record without its own TMDB poster reuses the stored Letterboxd poster of the same identity from metadata.json, never a constructed URL.
+const posterless=()=>{for(const key of CATALOG_KEYS){records.get(key).tmdb_7.poster=null;records.get(key).tmdb_18.poster=null;records.get(key).tmdb_15.poster=null;}};
+const posterOf=(body,id)=>body.films.find(f=>f.id===id).poster;
+seed();posterless();r=await get();assert.equal(r.status,200);assert.equal(posterOf(r.body,'tmdb_7'),null,'without a metadata cache a missing poster stays null');assert.equal(posterOf(r.body,'tmdb_18'),null);
+seed();posterless();records.set('metadata.json',{
+ 'heat-1995':{id:'heat-1995',tmdbId:'7',poster:'https://a.ltrbxd.com/resized/heat.jpg',title:'Heat'},          // same TMDB identity under a Letterboxd id
+ tmdb_18:{id:'tmdb_18',tmdbId:null,poster:'https://a.ltrbxd.com/resized/eighteen.jpg'},                       // same stored id, no TMDB id recorded
+ tmdb_15:{id:'tmdb_15',tmdbId:'99',poster:'https://a.ltrbxd.com/resized/other.jpg'},                          // same stored id but another TMDB identity
+});
+r=await get();
+assert.equal(posterOf(r.body,'tmdb_7'),'https://a.ltrbxd.com/resized/heat.jpg','the cached poster of the same TMDB identity is reused');
+assert.equal(posterOf(r.body,'tmdb_18'),'https://a.ltrbxd.com/resized/eighteen.jpg','the cached poster of the same stored id is reused when no TMDB id contradicts it');
+assert.equal(posterOf(r.body,'tmdb_15'),null,'a cached record of the same id but another TMDB identity is not reused');
+seed();records.set('metadata.json',{'heat-1995':{id:'heat-1995',tmdbId:'7',poster:'https://a.ltrbxd.com/resized/heat.jpg'}});
+r=await get();assert.equal(posterOf(r.body,'tmdb_7'),'https://image.tmdb.org/t/p/w342/tmdb_7.jpg','the record\'s own TMDB poster wins over the cache');
+seed();posterless();records.set('metadata.json',{
+ a:{id:'a',tmdbId:'7',poster:'https://a.ltrbxd.com/resized/one.jpg'},b:{id:'b',tmdbId:'7',poster:'https://a.ltrbxd.com/resized/two.jpg'},   // two cached records disagree on the same TMDB id
+ c:{id:'c',tmdbId:'18',poster:'http://insecure.example/18.jpg'},                                                                            // not an https asset
+ d:{id:'d',tmdbId:'15',poster:'https://a.ltrbxd.com/resized/fifteen.jpg'},e:{id:'e',tmdbId:'15',poster:'https://a.ltrbxd.com/resized/fifteen.jpg'}, // two cached records agree
+});
+r=await get();
+assert.equal(posterOf(r.body,'tmdb_7'),null,'disagreeing cached posters for one TMDB id are not used');
+assert.equal(posterOf(r.body,'tmdb_18'),null,'a non-https cached value is not a poster');
+assert.equal(posterOf(r.body,'tmdb_15'),'https://a.ltrbxd.com/resized/fifteen.jpg','agreeing cached posters for one TMDB id are reused');
+assert.deepEqual(Object.keys(r.body.films[1]).sort(),['actors','availableNow','availableUntil','canonicalIdentity','directors','fingerprint','genres','id','nextStart','original','poster','prediction','runtime','shows','title','tmdbId','url','year'],'the DTO shape is unchanged');
+assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+
+// A conflict is sticky: once two cached records for one TMDB id disagree, no later record and no insertion order restores a poster.
+const A='https://a.ltrbxd.com/resized/a.jpg',B='https://a.ltrbxd.com/resized/b.jpg';
+const cacheFor=posters=>Object.fromEntries(posters.map((poster,index)=>['lid-'+index,{id:'lid-'+index,tmdbId:'7',poster}]));
+for(const [order,expected] of [[[A,B,A],null],[[B,A,A],null],[[A,A,B],null],[[B,B,A,A],null],[[A,B,B,B],null],[[A,A,A],A],[[B],B]]){
+ seed();posterless();records.set('metadata.json',cacheFor(order));r=await get();
+ assert.equal(posterOf(r.body,'tmdb_7'),expected,'TMDB id order '+order.map(p=>p===A?'A':'B').join('/'));
+}
+// The same rule holds for the stored-id key: two cached records naming the same stored id with different posters stay conflicted.
+for(const [order,expected] of [[[A,B,A],null],[[B,A,A],null],[[A,A],A]]){
+ seed();posterless();records.set('metadata.json',Object.fromEntries(order.map((poster,index)=>['key-'+index,{id:'tmdb_18',tmdbId:null,poster}])));r=await get();
+ assert.equal(posterOf(r.body,'tmdb_18'),expected,'stored id order '+order.map(p=>p===A?'A':'B').join('/'));
+}
+// A conflicted TMDB identity also blocks the stored-id path: a disagreement anywhere for the film's identity yields no poster.
+seed();posterless();records.set('metadata.json',{tmdb_7:{id:'tmdb_7',tmdbId:'7',poster:A},x:{id:'x',tmdbId:'7',poster:B}});r=await get();
+assert.equal(posterOf(r.body,'tmdb_7'),null,'the same stored id does not override a conflicted TMDB identity');
+// Records without an https poster never take part in the agreement.
+seed();posterless();records.set('metadata.json',{a:{id:'a',tmdbId:'7',poster:A},b:{id:'b',tmdbId:'7',poster:null},c:{id:'c',tmdbId:'7',poster:'http://insecure.example/b.jpg'}});r=await get();
+assert.equal(posterOf(r.body,'tmdb_7'),A);
+
+// Coverage summary: where each returned poster came from, counted over the returned films only.
+seed();r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:3,metadataCache:0,missing:0},'every returned film has its own catalog poster');
+seed();posterless();r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:0,metadataCache:0,missing:3});
+seed();posterless();records.set('metadata.json',{'heat-1995':{id:'heat-1995',tmdbId:'7',poster:A}});r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:0,metadataCache:1,missing:2});
+assert.equal(r.body.posterCoverage.catalog+r.body.posterCoverage.metadataCache+r.body.posterCoverage.missing,r.body.total);
+seed();for(const key of CATALOG_KEYS)records.get(key).tmdb_15.poster=null;r=await get();
+assert.deepEqual(r.body.posterCoverage,{catalog:2,metadataCache:0,missing:1},'a duplicate identity that is not returned is not counted');
+assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+
 console.log('Catalog available: pinned generation, verified catalog-only identity, real shows inside the 72h/24h window with statuses, current prediction for the current profile, watchlist/rating/seed exclusions, one entry per identity, deterministic order, channel summary, generation pin and no side effects passed');
