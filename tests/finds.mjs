@@ -109,6 +109,7 @@ assert.match(bare,/<span class="film-year">2020<\/span>/);
 assert.match(run('findsCard(input,now)',film('tmdb_73',73,'<Опасный>',4.5,.9,'high',[show(-1)],{original:'<b>x</b>'})),/&lt;Опасный&gt;/);
 
 // Rendering: hidden before the catalog loads, hidden at zero, visible with cards, and gone again once the source excludes the film.
+vm.runInContext("report={runId:'run',films:[]}",ui);
 assert.equal(run('renderFinds(now).length',null),0);
 assert.equal(nodes['#finds'].hidden,true,'hidden before the catalog is loaded');
 vm.runInContext('findsSource={films:[],ready:true,error:false,programmeRunId:"run",generatedAt:null}',ui);
@@ -131,4 +132,53 @@ assert.equal(run('renderFinds(now).length',null),1);
 assert.equal(nodes['#finds-caption'].textContent,'1 фильм вне watchlist: сильный прогноз и реальный показ');
 assert.equal(run(`renderFinds(now+200*${hour}).length`,null),0,'an expired catch-up hides the section without a new fetch');
 assert.equal(nodes['#finds'].hidden,true);
-console.log('Finds: thresholds, window, watchlist and watched exclusions, ranking, limit, no filler, dedupe, franchise, airing, NEW card and hidden empty section passed');
+
+// Generation freshness: the cached catalog answer is shown only while the loaded programme is on the generation it was computed for.
+const queue=[];
+ui.fetch=async()=>{const next=queue.shift();if(!next)throw new Error('no response queued');if(next.error)throw new Error('network');return {ok:next.ok,status:next.status,json:async()=>next.body};};
+const answer=(run,films)=>({ok:true,status:200,body:{programmeRunId:run,pinned:true,generatedAt:null,films}});
+const shown=()=>(nodes['#finds-cards'].innerHTML.match(/class="finds-card"/g)||[]).length;
+vm.runInContext("films=[];enrichment={profile:null,films:{}};report={runId:'G1',films:[]};findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false};",ui);
+queue.push(answer('G1',ranked));
+assert.equal(await run('loadCatalog()',null),true);
+assert.equal(nodes['#finds'].hidden,false,'a G1 programme with a G1 catalog shows the finds');
+assert.equal(shown(),5);
+// Programme first: it moves to G2 while the catalog for G2 is still copying and answers 409.
+vm.runInContext("report={runId:'G2',films:[]};renderFinds(now)",ui);
+assert.equal(nodes['#finds'].hidden,true,'a generation change hides the old-generation finds before the catalog answers');
+assert.equal(shown(),0);
+queue.push({ok:false,status:409});
+assert.equal(await run('loadCatalog()',null),false);
+assert.equal(nodes['#finds'].hidden,true,'a 409 for the new generation keeps the section hidden');
+assert.equal(run('findsSource.programmeRunId',null),'G1','the failed refresh does not relabel the cached answer');
+assert.equal(run('findsSource.error',null),true);
+queue.push(answer('G2',ranked));
+assert.equal(await run('loadCatalog()',null),true);
+assert.equal(nodes['#finds'].hidden,false,'a successful G2 answer restores the section');
+assert.equal(shown(),5);
+// Same-generation transient failures keep the eligible finds.
+queue.push({ok:false,status:503});
+assert.equal(await run('loadCatalog()',null),false);
+assert.equal(nodes['#finds'].hidden,false,'a 503 while the programme stays on G2 keeps the finds');
+queue.push({error:true});
+assert.equal(await run('loadCatalog()',null),false);
+assert.equal(nodes['#finds'].hidden,false,'a network error while the programme stays on G2 keeps the finds');
+assert.equal(shown(),5);
+assert.deepEqual(ids(run('renderFinds(now)',null)),['tmdb_32','tmdb_31','tmdb_34','tmdb_33','tmdb_35']);
+// Catalog first: a G3 answer arrives while the programme is still on G2, then the programme reaches G3.
+queue.push(answer('G3',ranked));
+assert.equal(await run('loadCatalog()',null),true);
+assert.equal(nodes['#finds'].hidden,true,'a catalog answer for a generation the programme has not reached is not shown');
+vm.runInContext("report={runId:'G3',films:[]};renderFinds(now)",ui);
+assert.equal(nodes['#finds'].hidden,false,'the programme reaching that generation shows it');
+assert.equal(shown(),5);
+// Freshness cannot be justified without both generation ids.
+vm.runInContext("findsSource={...findsSource,programmeRunId:null};renderFinds(now)",ui);
+assert.equal(nodes['#finds'].hidden,true,'a catalog answer without a generation is not shown');
+vm.runInContext("findsSource={...findsSource,programmeRunId:'G3'};report={films:[]};renderFinds(now)",ui);
+assert.equal(nodes['#finds'].hidden,true,'a programme without a run id cannot vouch for the catalog');
+vm.runInContext("report={runId:'G3',films:[]};renderFinds(now)",ui);
+assert.equal(nodes['#finds'].hidden,false);
+assert.match(app,/else updateSourceInfo\(\);\n\s+renderFinds\(\);/,'every programme refresh re-evaluates the section');
+assert.match(app,/findsSource=\{\.\.\.findsSource,error:true\};\n\s+renderFinds\(\);/,'a failed catalog refresh re-evaluates the section');
+console.log('Finds: thresholds, window, watchlist and watched exclusions, ranking, limit, no filler, dedupe, franchise, airing, NEW card, hidden empty section and generation freshness passed');

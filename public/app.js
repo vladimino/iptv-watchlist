@@ -626,9 +626,12 @@ function findsCard(film,now=nowMs()){
  const title=film.url?`<a class="finds-title-link" href="${escapeHTML(film.url)}" target="_blank" rel="noopener noreferrer" title="Открыть на TMDB">${escapeHTML(film.title||film.original||'')}</a>`:escapeHTML(film.title||film.original||'');
  return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${poster}</div><div class="film-info"><h3>${title}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p></article>`;
 }
+// The cached catalog answer is usable only for the generation the loaded programme is on. A generation change with no catalog
+// answer for it yet (or a 409 while the new generation is still copying) hides the section instead of showing the old shows.
+function findsFresh(){const run=report?.runId??null;return !!findsSource.ready&&!!findsSource.programmeRunId&&!!run&&findsSource.programmeRunId===run;}
 function renderFinds(now=nowMs()){
  const node=$('#finds');if(!node)return [];
- const list=findsSource.ready?buildFinds(findsSource.films,now):[];
+ const list=findsFresh()?buildFinds(findsSource.films,now):[];
  node.hidden=list.length===0;
  const cards=$('#finds-cards');if(cards)cards.innerHTML=list.map(film=>findsCard(film,now)).join('');
  const caption=$('#finds-caption');if(caption)caption.textContent=list.length?`${list.length} ${filmWord(list.length)} вне watchlist: сильный прогноз и реальный показ`:'';
@@ -646,8 +649,9 @@ async function loadCatalog(){
   renderFinds();
   return true;
  }catch{
-  // The previous list stays and is re-checked against the clock and the loaded watchlist on every render; eligibility is never invented on the client.
+  // A failed refresh keeps the previous answer only while the programme stays on that answer's generation (findsFresh); eligibility is never invented on the client.
   findsSource={...findsSource,error:true};
+  renderFinds();
   return false;
  }finally{findsLoading=false;}
 }
@@ -955,6 +959,7 @@ async function loadProgramme({quiet}={}){
   if(!programmeReady)await finishProgrammeUi();
   else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();if(filmScreen)renderFilmShell();}
   else updateSourceInfo();
+  renderFinds();
   return true;
  }catch(error){
   programmeRefreshError=true;
