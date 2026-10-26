@@ -103,23 +103,32 @@ const matches=matchExport(parsed.films,index),by=Object.fromEntries(matches.map(
 assert.deepEqual(matches.map(row=>row.code),[...matches.map(row=>row.code)].sort());
 assert.equal(by.Q7a1.status,'accepted');assert.equal(by.Q7a1.method,'lid_exact');assert.equal(by.Q7a1.evidence.titleYear,'agree');assert.equal(by.Q7a1.evidence.rating,'agree');
 assert.equal(by.Q7b2.method,'tmdb_verified');assert.deepEqual(by.Q7b2.catalogIds,['tmdb_500']);assert.equal(by.Q7b2.tmdbId,'500');
-assert.equal(by.Q7i9.method,'lid_exact');assert.equal(by.Q7i9.evidence.rating,'unknown');
+// A code that equals a stored id carrying no title is not corroborated: provisional, never accepted.
+assert.equal(by.Q7i9.status,'provisional');assert.equal(by.Q7i9.method,'lid_exact');assert.equal(by.Q7i9.reason,'code_uncorroborated');assert.equal(by.Q7i9.evidence.rating,'unknown');
 assert.equal(by.Q7j0.status,'conflict');assert.equal(by.Q7j0.reason,'stored_year_disagrees');
-assert.equal(by.Q7c3.status,'accepted');assert.equal(by.Q7c3.method,'title_year');assert.deepEqual(by.Q7c3.catalogIds,['tmdb_602']);assert.deepEqual(by.Q7c3.evidence.signals,['rating_agrees']);
+// Title and year are never accepted, not even with an agreeing rating or with both watchlists naming the title.
+assert.equal(by.Q7c3.status,'candidate');assert.equal(by.Q7c3.method,'title_year');assert.equal(by.Q7c3.reason,'identity_unverified');assert.deepEqual(by.Q7c3.catalogIds,['tmdb_602']);assert.deepEqual(by.Q7c3.evidence.signals,['rating_agrees']);
 assert.equal(by.Q7d4.status,'ambiguous');assert.equal(by.Q7d4.reason,'missing_year_multiple_targets');assert.deepEqual(by.Q7d4.candidates,['catalog:tmdb_601','catalog:tmdb_602']);
-assert.equal(by.Q7e5.status,'candidate');assert.equal(by.Q7e5.reason,'no_second_signal');assert.equal(by.Q7e5.evidence.yearDelta,1);
-assert.equal(by.Q7f6.status,'accepted');assert.equal(by.Q7f6.evidence.yearDelta,1);
+assert.equal(by.Q7e5.status,'candidate');assert.equal(by.Q7e5.reason,'identity_unverified');assert.equal(by.Q7e5.evidence.yearDelta,1);
+assert.equal(by.Q7f6.status,'candidate');assert.equal(by.Q7f6.evidence.yearDelta,1);
 assert.equal(by.Q7g7.status,'ambiguous');assert.equal(by.Q7g7.reason,'multiple_targets');
 assert.equal(by.Q7h8.status,'unmatched');assert.equal(by.Q7h8.reason,'no_stored_title');
 assert.equal(by.Q7k1.status,'unmatched');
-assert.equal(by.Q7n4.status,'accepted');assert.equal(by.Q7n4.filmId,'zz9');assert.deepEqual(by.Q7n4.evidence.signals,['watchlist_member']);
+// A unique title and year present on both watchlists is still an unverified identity.
+assert.equal(by.Q7n4.status,'candidate');assert.equal(by.Q7n4.reason,'identity_unverified');assert.equal(by.Q7n4.filmId,'zz9');assert.deepEqual(by.Q7n4.evidence.signals,['watchlist_member']);
 assert.equal(by.Q7n4.basis,'title');
 // Title and year alone never accept, even with an exact year.
 const lone=matchExport([{code:'Q7p6',name:'Near Year Film',year:2011,inWatched:true,inRatings:false,inWatchlist:false}],index)[0];
 assert.equal(lone.status,'candidate');
-// A different stored rating blocks acceptance.
 const disagree=matchExport([{code:'Q7p7',name:'Near Year Second',year:2014,rating:1,inWatched:true,inRatings:true,inWatchlist:false}],index)[0];
-assert.equal(disagree.status,'candidate');assert.equal(disagree.reason,'rating_disagrees');
+assert.equal(disagree.status,'candidate');assert.equal(disagree.evidence.rating,'disagree');
+// Code collisions: a code equal to a stored id whose stored title or year names another film is a conflict, and an id known
+// only from a year is provisional. A changed rating alone never vetoes a corroborated code match.
+const collisions=buildIndex({watchlist:{films:[{id:'Q7t1',title:'Stored Film',year:2010},{id:'Q7t3',title:'Rerated Film',year:2012}]},metadata:{Q7t2:{id:'Q7t2',year:2011}},ratings:{ratings:{Q7t3:2}}});
+const [titleCollision,yearOnly,rerated]=matchExport([{code:'Q7t1',name:'Completely Different',year:2010},{code:'Q7t2',name:'Year Only Film',year:2011},{code:'Q7t3',name:'Rerated Film',year:2012,rating:4.5}],collisions);
+assert.equal(titleCollision.status,'conflict');assert.equal(titleCollision.reason,'stored_title_differs');
+assert.equal(yearOnly.status,'provisional');assert.equal(yearOnly.evidence.titleYear,'year_only');
+assert.equal(rerated.status,'accepted');assert.equal(rerated.method,'lid_exact');assert.equal(rerated.evidence.rating,'disagree');
 // A stored id with two TMDB ids is a conflict, not a match.
 const conflicted=buildIndex({watchlist:{films:[{id:'Q7q8',title:'Two Ids',year:2000,tmdbId:'1'}]},metadata:{Q7q8:{id:'Q7q8',title:'Two Ids',year:2000,tmdbId:'2'}}});
 assert.equal(matchExport([{code:'Q7q8',name:'Two Ids',year:2000}],conflicted)[0].reason,'stored_tmdb_conflict');
@@ -157,9 +166,9 @@ assertPrivate(reportText);
 const report=JSON.parse(reportText);
 assert.equal(report.matching.blocked,null);
 assert.deepEqual(report.export.sets,{watched:11,rated:10,watchedUnrated:1,ratedNotWatched:0,watchlist:2,watchlistWatched:1});
-assert.deepEqual(report.matching.byStatus,{accepted:6,candidate:1,ambiguous:2,conflict:1,unmatched:2});
-assert.deepEqual(report.matching.acceptedByMethod,{lid_exact:2,tmdb_verified:1,title_year:3});
-assert.equal(report.matching.bySet.watchedUnrated.acceptedByMethod.lid_exact,1);
+assert.deepEqual(report.matching.byStatus,{accepted:2,provisional:1,candidate:4,ambiguous:2,conflict:1,unmatched:2});
+assert.deepEqual(report.matching.acceptedByMethod,{lid_exact:1,tmdb_verified:1,title_year:0});
+assert.equal(report.matching.bySet.watchedUnrated.byStatus.provisional,1);
 assert.equal(report.matching.bySet.watchlistWatched.total,1);
 assert.equal(report.matching.lidHypothesis.verdict,'mixed');
 assert.deepEqual(report.matching.snapshot.missingKeys,[]);

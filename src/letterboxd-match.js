@@ -1,9 +1,11 @@
 // Strict matcher of Letterboxd export rows against films stored in an R2 snapshot.
 // Pure: it receives already loaded objects and returns match records; no storage, network or clock.
-// Identity follows ADR-0009: only a stored Letterboxd id or a trusted TMDB identity can accept a match.
-// A title and year agreement is a candidate unless an independent stored signal confirms it.
+// Identity follows ADR-0009: only a stored Letterboxd id or a trusted TMDB identity can accept a match. Equality of the export
+// code with a stored id is accepted only when the stored title and year corroborate it, because code = LID is a hypothesis this
+// tool measures, not a proven contract. A title and year agreement is never accepted: no stored signal independently proves
+// that the export row and the stored film are the same Letterboxd film, so it stays a candidate for manual review.
 export const METHODS=Object.freeze(['lid_exact','tmdb_verified','title_year']);
-export const STATUSES=Object.freeze(['accepted','candidate','ambiguous','conflict','unmatched']);
+export const STATUSES=Object.freeze(['accepted','provisional','candidate','ambiguous','conflict','unmatched']);
 export const normTitle=value=>String(value??'').normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 const LID=/^[A-Za-z0-9_-]{1,40}$/;
 const isLid=id=>LID.test(id)&&!id.startsWith('tmdb_');
@@ -53,7 +55,8 @@ export function buildIndex(snapshot={}){
 const identityOf=entry=>entry.tmdbIds.size===1?'tmdb:'+[...entry.tmdbIds][0]:entry.tmdbIds.size>1?'conflict:'+entry.key:entry.key;
 const nearYear=(entry,year)=>[...entry.years].some(value=>Math.abs(value-year)<=1);
 
-// Title/year consistency of an exact id match: disagree when the stored year is more than one year away.
+// Title/year consistency of an exact id match: disagree when the stored year is more than one year away; agree when the export
+// name is a stored title, original title or alias and the year does not disagree.
 function consistency(film,entry){
  const year=film.year&&entry.years.size?nearYear(entry,film.year):null,title=entry.titles.size?entry.titles.has(normTitle(film.name)):null;
  if(year===false)return 'disagree';
@@ -61,6 +64,7 @@ function consistency(film,entry){
  if(title===false)return 'title_differs';
  return year===true?'year_only':'unknown';
 }
+// A different rating is recorded, never decisive: the owner may have re-rated the film since the stored value.
 function ratingCheck(film,entries){
  const stored=new Set(entries.flatMap(entry=>[...entry.ratings]));
  if(film.rating===undefined||!stored.size)return 'unknown';
@@ -74,8 +78,12 @@ function byCode(film,index){
  const base={filmId:entry.id,tmdbId:null,catalogIds:[],candidates:[],evidence};
  if(entry.tmdbIds.size>1)return {...base,status:'conflict',method:null,reason:'stored_tmdb_conflict'};
  if(evidence.titleYear==='disagree')return {...base,status:'conflict',method:'lid_exact',reason:'stored_year_disagrees'};
+ if(evidence.titleYear==='title_differs')return {...base,status:'conflict',method:'lid_exact',reason:'stored_title_differs'};
  const tmdbId=[...entry.tmdbIds][0]||null,catalogIds=tmdbId?sortedStrings(index.catalogByTmdb.get(tmdbId)||[]):[];
- return {...base,tmdbId,catalogIds,status:'accepted',method:catalogIds.length?'tmdb_verified':'lid_exact',reason:null};
+ const method=catalogIds.length?'tmdb_verified':'lid_exact';
+ // The stored id carries no title, or only a year: the code equality alone is not corroborated.
+ if(evidence.titleYear!=='agree')return {...base,tmdbId,catalogIds,status:'provisional',method,reason:'code_uncorroborated'};
+ return {...base,tmdbId,catalogIds,status:'accepted',method,reason:null};
 }
 
 function byTitle(film,index){
@@ -92,15 +100,14 @@ function byTitle(film,index){
  const catalogIds=sortedStrings(new Set([...entries.filter(entry=>entry.kind==='catalog').map(entry=>entry.id),...(tmdbId?index.catalogByTmdb.get(tmdbId)||[]:[])]));
  const yearDelta=film.year?Math.min(...entries.flatMap(entry=>[...entry.years].map(year=>Math.abs(year-film.year)))):null;
  const rating=ratingCheck(film,entries),signals=[];
+ // Recorded for the manual review only: neither proves that the stored film is the same Letterboxd film.
  if(rating==='agree')signals.push('rating_agrees');
  if(film.inWatchlist&&entries.some(entry=>entry.sources.has('watchlist')))signals.push('watchlist_member');
  const evidence={titleMatch:'exact_normalized',yearDelta,rating,signals,sources:sortedStrings(new Set(entries.flatMap(entry=>[...entry.sources])))};
  const result={filmId:lid?.id||null,tmdbId,catalogIds,candidates,evidence,method:'title_year'};
  if(identity.startsWith('conflict:'))return {...result,method:null,status:'conflict',reason:'stored_tmdb_conflict'};
  if(!film.year)return {...result,status:'candidate',reason:'missing_year'};
- if(rating==='disagree')return {...result,status:'candidate',reason:'rating_disagrees'};
- if(!signals.length)return {...result,status:'candidate',reason:'no_second_signal'};
- return {...result,status:'accepted',reason:null};
+ return {...result,status:'candidate',reason:'identity_unverified'};
 }
 
 // films: parseExport().films. Returns one record per film, ordered by export code.

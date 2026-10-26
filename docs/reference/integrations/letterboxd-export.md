@@ -40,15 +40,15 @@ Every film gets exactly one record, ordered by code.
 
 | Status | Method | When |
 | --- | --- | --- |
-| `accepted` | `lid_exact` | The export code equals a stored Letterboxd id, and the stored year (if any) is within one year of the export year |
+| `accepted` | `lid_exact` | The export code equals a stored Letterboxd id **and** the stored data corroborates it: the export name equals a stored title, original title or alias of that id, and the stored year (if any) is within one year of the export year |
 | `accepted` | `tmdb_verified` | As `lid_exact`, and that id carries exactly one stored TMDB id that equals a verified catalog record; the record lists the catalog id `tmdb_<n>` |
-| `accepted` | `title_year` | The code is not a stored id; the normalized name equals a stored title, original title or alias of exactly one film whose year is within one year, **and** an independent stored signal agrees: the stored Letterboxd rating equals the export rating (`rating_agrees`), or the film is on both the export watchlist and the stored watchlist (`watchlist_member`) |
-| `candidate` | `title_year` | The same single title and year agreement without a second signal, with a missing export year, or with a stored rating that differs. Never accepted |
+| `provisional` | `lid_exact` or `tmdb_verified` | The export code equals a stored id that carries no stored title (for example an id known only from a ratings generation, or only a year): code equality alone is not corroborated (`code_uncorroborated`). Never accepted; manual review |
+| `candidate` | `title_year` | The code is not a stored id, and the normalized name equals a stored title, original title or alias of exactly one film within one year (`identity_unverified`), or the export year is missing (`missing_year`). An agreeing rating (`rating_agrees`) or the title on both watchlists (`watchlist_member`) is recorded as evidence but proves nothing about the Letterboxd identity. Never accepted |
 | `ambiguous` | none | More than one film fits the title within the year window (remakes in adjacent years, shared aliases), or the export year is missing and the title names several films. Never accepted |
-| `conflict` | `lid_exact` or none | The code equals a stored id whose stored year is more than one year away, or the stored id carries two different TMDB ids |
+| `conflict` | `lid_exact` or none | The code equals a stored id whose stored year is more than one year away (`stored_year_disagrees`) or whose stored titles do not include the export name (`stored_title_differs`), or the stored id carries two different TMDB ids |
 | `unmatched` | none | No stored id and no stored title fits |
 
-Title normalization is Unicode NFKC, lower case, `ё` as `е`, and every run of non-letters and non-digits as one space. Two stored records with the same TMDB identity are one film, so a watchlist film and its catalog record never make a title ambiguous. A rating difference on an exact id match does not block it (the owner may have re-rated since the generation) but is counted.
+Title normalization is Unicode NFKC, lower case, `ё` as `е`, and every run of non-letters and non-digits as one space. Two stored records with the same TMDB identity are one film, so a watchlist film and its catalog record never make a title ambiguous. A rating difference never decides a status: on a corroborated id match it does not block acceptance (the owner may have re-rated since the generation) but is counted. Only `accepted` records are fit for a later import; `provisional`, `candidate`, `ambiguous` and `conflict` records need the owner's manual review.
 
 ## Whether the export code is the stored Letterboxd id
 
