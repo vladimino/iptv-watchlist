@@ -21,19 +21,23 @@ const get=async()=>{const response=await worker.fetch(new Request('https://iptv.
 
 const hour=3600000,now=Date.now(),G0='11111111-1111-4111-8111-111111111111',G1='22222222-2222-4222-8222-222222222222',G2='33333333-3333-4333-8333-333333333333';
 const profile={version:1,profileHash:'p1'};
-const prediction=(extra={})=>({predictedRating:4.2,probability4Plus:.74,confidence:'high',matchSignals:['Investigation'],mainRisk:'Slow start',moodLabels:['мрачный','напряжённый'],tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1,...extra});
+const prediction=(extra={})=>({predictedRating:4.5,probability4Plus:.74,confidence:'high',matchSignals:['Investigation'],mainRisk:'Slow start',moodLabels:['мрачный','напряжённый'],tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1,...extra});
 const fingerprint={fingerprintHash:'f',plotMechanics:['investigation'],moodLabels:['мрачный'],execution:{payoff:'strong',pacing:'unknown'}};
 const current=(extra={})=>({prediction:prediction(extra),fingerprintHash:'f',fingerprint});
 const show=(start,extra={})=>({channelId:'c1',channel:'One',start,end:start+2*hour,...extra});
 const film=(id,tmdbId,shows,extra={})=>({id,tmdbId:String(tmdbId),canonicalIdentity:'tmdb:'+tmdbId,title:'Film '+id,original:'Original '+id,year:2020,runtime:100,genres:['Драма'],poster:'https://image.tmdb.org/t/p/w342/'+id+'.jpg',url:'https://www.themoviedb.org/movie/'+tmdbId,synopsis:'SYNOPSIS-'+id,aliases:['ALIAS-'+id],directors:[{id:'tmdb_director/1',name:'Director',original:'Director'}],actors:[{id:'tmdb_actor/2',name:'Actor',original:'Actor'}],shows,showsProgrammeRunId:G1,discoveredAt:new Date(now-86400000).toISOString(),...extra});
 
+const CATALOG_KEYS=['epg/discovered-films.json','epg/generations/'+G1+'/discovered-films.json'],PROGRAMME_KEYS=['programme.json','epg/generations/'+G1+'/programme.json'];
+const setCatalog=value=>{for(const key of CATALOG_KEYS)records.set(key,structuredClone(value));};
+const catalogRecord=id=>records.get('epg/generations/'+G1+'/discovered-films.json')[id];
+const setCatalogShows=(id,shows)=>{for(const key of CATALOG_KEYS)records.get(key)[id].shows=structuredClone(shows);};
 function seed(){
  records.clear();puts=[];fetches.length=0;
  records.set('epg/published-generation.json',{phase:'published',programmeRunId:G1});
- records.set('programme.json',{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[{id:'w1',tmdbId:'42',title:'Watchlist Film',shows:[show(now-hour)]}],stats:{}});
+ for(const key of PROGRAMME_KEYS)records.set(key,{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[{id:'w1',tmdbId:'42',title:'Watchlist Film',shows:[show(now-hour)]}],stats:{}});
  records.set('watchlist.json',{updatedAt:new Date(now).toISOString(),films:[{id:'w1',tmdbId:'42',title:'Watchlist Film'},{id:'w2',tmdbId:'43',title:'Unscheduled watchlist film'}]});
  records.set(constant('profileKey'),profile);
- records.set('epg/discovered-films.json',{
+ setCatalog({
   tmdb_42:film('tmdb_42',42,[show(now-hour)]),                                   // watchlist identity by tmdb id
   tmdb_43:film('tmdb_43',43,[show(now-hour)]),                                   // watchlist identity without a programme show
   tmdb_7:film('tmdb_7',7,[show(now-3*hour),show(now+2*hour,{channelId:'c2',channel:'Two'}),show(now-3*hour)]),
@@ -67,7 +71,7 @@ assert.deepEqual(Object.keys(seven).sort(),['actors','availableNow','availableUn
 assert.doesNotMatch(JSON.stringify(r.body),/SYNOPSIS-|ALIAS-|tasteProfileHash|moodLabels/,'minimal display DTO: no synopsis, aliases or raw prediction internals');
 assert.deepEqual(seven.shows.map(s=>[s.channelId,s.status]),[['c1','archive'],['c2','future']],'duplicate show collapsed, statuses derived from the clock');
 assert.equal(seven.availableNow,true);assert.equal(seven.nextStart,now+2*hour);assert.equal(seven.availableUntil,new Date(now+2*hour+72*hour).toISOString());
-assert.deepEqual(seven.prediction,{predictedRating:4.2,probability4Plus:.74,confidence:'high',matchSignals:['Investigation'],mainRisk:'Slow start',moodIds:seven.prediction.moodIds});
+assert.deepEqual(seven.prediction,{predictedRating:4.5,probability4Plus:.74,confidence:'high',matchSignals:['Investigation'],mainRisk:'Slow start',moodIds:seven.prediction.moodIds});
 assert.ok(seven.prediction.moodIds.length>0,'mood ids come from the canonical mood facet');
 assert.deepEqual(seven.fingerprint,{plotMechanics:['investigation'],moodIds:seven.prediction.moodIds,execution:{payoff:'strong'}},'fingerprint facet omits unknown execution values');
 assert.deepEqual(seven.directors,[{id:'tmdb_director/1',name:'Director'}]);assert.deepEqual(seven.actors,[{id:'tmdb_actor/2',name:'Actor'}]);
@@ -83,16 +87,16 @@ assert.equal(records.get(constant('ENRICHMENT_KEY')+'view-index.json').tmdb_17.a
 // 2. The exclusions, one by one: each excluded film is absent for exactly its reason.
 for(const [id,reason] of [['tmdb_42','watchlist identity'],['tmdb_43','watchlist identity without a programme show'],['tmdb_8','stale prediction'],['tmdb_9','no shows'],['tmdb_10','shows of an earlier generation'],['tmdb_11','rated'],['tmdb_13','shows outside the window'],['tmdb_14','duplicate identity with earlier availability'],['tmdb_16','unverified identity'],['tmdb_17','seeded rating'],['tmdb_19','no prediction']])assert.ok(!r.body.films.some(f=>f.id===id),id+' excluded: '+reason);
 // The duplicate identity keeps the entry with the later availability, whichever id it has.
-seed();records.get('epg/discovered-films.json').tmdb_14.shows=[show(now+5*hour)];
+seed();setCatalogShows('tmdb_14',[show(now+5*hour)]);
 r=await get();assert.deepEqual(r.body.films.filter(f=>f.canonicalIdentity==='tmdb:7').map(f=>f.id),['tmdb_14']);
 // An archive show that expires moves the film out without any storage change.
-seed();records.get('epg/discovered-films.json').tmdb_7.shows=[show(now-71*hour-59*60000)];records.get('epg/discovered-films.json').tmdb_14.shows=[];records.get('epg/discovered-films.json').tmdb_15.shows=[];
+seed();setCatalogShows('tmdb_7',[show(now-71*hour-59*60000)]);setCatalogShows('tmdb_14',[]);setCatalogShows('tmdb_15',[]);
 r=await get();assert.ok(r.body.films.some(f=>f.id==='tmdb_7'),'one minute before the 72h boundary the film is still available');
-records.get('epg/discovered-films.json').tmdb_7.shows=[show(now-72*hour-60000)];
+setCatalogShows('tmdb_7',[show(now-72*hour-60000)]);
 r=await get();assert.ok(!r.body.films.some(f=>f.id==='tmdb_7'),'one minute after the 72h boundary it is gone');
-records.get('epg/discovered-films.json').tmdb_7.shows=[show(now+23*hour+59*60000)];
+setCatalogShows('tmdb_7',[show(now+23*hour+59*60000)]);
 r=await get();assert.ok(r.body.films.some(f=>f.id==='tmdb_7'),'one minute before the 24h horizon the film is offered as future');
-records.get('epg/discovered-films.json').tmdb_7.shows=[show(now+24*hour+60000)];
+setCatalogShows('tmdb_7',[show(now+24*hour+60000)]);
 r=await get();assert.ok(!r.body.films.some(f=>f.id==='tmdb_7'),'one minute past the 24h horizon it is not');
 
 // 3. Profile freshness: a new profile version makes every stored prediction stale, so nothing is offered.
@@ -101,9 +105,17 @@ r=await get();assert.equal(r.status,200);assert.deepEqual(r.body.films,[]);asser
 seed();records.delete(constant('profileKey'));
 r=await get();assert.equal(r.status,200);assert.deepEqual(r.body.films,[]);assert.equal(r.body.profile,null,'without a profile no prediction is current');
 
-// 4. Generation pin: the pointer names a generation whose programme is not in place yet, nothing is served from the older programme.
+// 4. Generation pin, strict: the pointer names a generation whose programme copy is not in place yet; nothing is served
+//    from the older programme, and the shared public keys are not a fallback even when they claim the new run id.
 seed();records.set('epg/published-generation.json',{phase:'published',programmeRunId:G2});
 r=await get();assert.equal(r.status,409);assert.deepEqual(r.body,{error:'Programme generation is not in place'});
+seed();records.set('epg/published-generation.json',{phase:'published',programmeRunId:G2});records.get('programme.json').runId=G2;
+r=await get();assert.equal(r.status,409,'a public programme.json that already carries the new run id is not the pinned copy');assert.deepEqual(r.body,{error:'Programme generation is not in place'});
+seed();records.set('epg/published-generation.json',{phase:'published',programmeRunId:G2});
+records.set('epg/generations/'+G2+'/programme.json',{runId:G2,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[{id:'w1',tmdbId:'42',shows:[]}],stats:{}});
+for(const key of Object.keys(records.get('epg/discovered-films.json')))records.get('epg/discovered-films.json')[key].showsProgrammeRunId=G2;
+r=await get();assert.equal(r.status,409,'a missing catalog copy fails closed even though the public catalog claims the new generation');assert.deepEqual(r.body,{error:'Catalog generation copy is not in place'});
+assert.deepEqual(puts,[]);
 // The generation copies are read through the pin, so a generation that is in place is served from its own files.
 seed();records.set('epg/published-generation.json',{phase:'published',programmeRunId:G2});
 records.set('epg/generations/'+G2+'/programme.json',{runId:G2,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[{id:'w1',tmdbId:'42',shows:[]}],stats:{}});
@@ -112,12 +124,16 @@ r=await get();assert.equal(r.status,200);assert.equal(r.body.programmeRunId,G2);
 // Without a published pointer the programme's own run id is the generation, and the response says it is not pinned.
 seed();records.delete('epg/published-generation.json');
 r=await get();assert.equal(r.status,200);assert.equal(r.body.pinned,false);assert.equal(r.body.programmeRunId,G1);assert.deepEqual(r.body.films.map(f=>f.id),['tmdb_18','tmdb_7','tmdb_15']);
-// No programme at all.
-seed();records.delete('programme.json');
+// No programme at all: pinned, the generation copy is required (409); unpinned, 503.
+seed();for(const key of PROGRAMME_KEYS)records.delete(key);
+r=await get();assert.equal(r.status,409);assert.deepEqual(r.body,{error:'Programme generation is not in place'});
+seed();records.delete('epg/published-generation.json');for(const key of PROGRAMME_KEYS)records.delete(key);
 r=await get();assert.equal(r.status,503);assert.deepEqual(r.body,{error:'No published programme'});
-// A missing catalog or view index is an empty result, not an error.
-seed();records.delete('epg/discovered-films.json');r=await get();assert.equal(r.status,200);assert.deepEqual(r.body.films,[]);
+// Unpinned, a missing catalog is an empty result; pinned, a missing catalog copy is a 409 (above). A missing view index is empty either way.
+seed();records.delete('epg/published-generation.json');records.delete('epg/discovered-films.json');r=await get();assert.equal(r.status,200);assert.deepEqual(r.body.films,[]);
 seed();records.delete(constant('ENRICHMENT_KEY')+'view-index.json');r=await get();assert.equal(r.status,200);assert.deepEqual(r.body.films,[]);
+// The generation copies are what is read: a public catalog that differs from the pinned copy does not leak in.
+seed();records.get('epg/discovered-films.json').tmdb_9.shows=[show(now-hour)];r=await get();assert.ok(!r.body.films.some(f=>f.id==='tmdb_9'),'the public copy is not consulted while a pointer is published');
 assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 
 console.log('Catalog available: pinned generation, verified catalog-only identity, real shows inside the 72h/24h window with statuses, current prediction for the current profile, watchlist/rating/seed exclusions, one entry per identity, deterministic order, channel summary, generation pin and no side effects passed');

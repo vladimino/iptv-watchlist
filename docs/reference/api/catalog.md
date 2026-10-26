@@ -8,7 +8,7 @@ The route does not change `GET /api/programme` or `GET /api/watchlist`, which ke
 
 | Object | Use |
 | --- | --- |
-| `epg/published-generation.json` | The generation pin. When the pointer names a published generation, the programme and the catalog are read from that generation's copies |
+| `epg/published-generation.json` | The generation pin. When the pointer names a published generation, the programme and the catalog are read **only** from that generation's copies (`epg/generations/<runId>/…`); an absent copy fails closed with `409` instead of falling back to the shared public keys, even when those keys already carry the new run id |
 | `programme.json` | The watchlist films of that generation (exclusion by id and TMDB identity) and the run id the response is pinned to |
 | `epg/discovered-films.json` | The catalog records: identity, display fields, credits, the shows of the generation that last confirmed them |
 | `watchlist.json` | Further watchlist ids and TMDB identities to exclude, including films without a programme show |
@@ -46,7 +46,7 @@ One entry per canonical identity: when two records share a TMDB identity, the on
     "directors": [{"id": "tmdb_director/1", "name": "…"}], "actors": [{"id": "tmdb_actor/2", "name": "…"}],
     "shows": [{"channelId": "c1", "channel": "One", "start": 1760000000000, "end": 1760007200000, "status": "archive"}],
     "availableNow": true, "nextStart": 1760100000000, "availableUntil": "2026-06-18T12:00:00.000Z",
-    "prediction": {"predictedRating": 4.2, "probability4Plus": 0.74, "confidence": "high", "matchSignals": ["…"], "mainRisk": "…", "moodIds": ["dark"]},
+    "prediction": {"predictedRating": 4.5, "probability4Plus": 0.74, "confidence": "high", "matchSignals": ["…"], "mainRisk": "…", "moodIds": ["dark"]},
     "fingerprint": {"plotMechanics": ["investigation"], "moodIds": ["dark"], "execution": {"payoff": "strong"}}
   }],
   "channels": [{"channelId": "c1", "channel": "One", "films": 1}]
@@ -73,9 +73,10 @@ Not included on purpose: synopsis, aliases, the raw prediction and fingerprint o
 | Status | Body | When |
 | --- | --- | --- |
 | `503` | `{"error":"No published programme"}` | No programme has been published yet |
-| `409` | `{"error":"Programme generation is not in place"}` | The pointer names a generation whose programme copy is not readable yet (publication still copying); call again later rather than serving the previous generation |
+| `409` | `{"error":"Programme generation is not in place"}` | The pointer names a generation whose programme copy is absent or carries another run id (publication still copying); call again later rather than serving the previous generation or the shared public key |
+| `409` | `{"error":"Catalog generation copy is not in place"}` | The pointer names a generation whose catalog copy is absent; the shared public catalog is not used as a substitute |
 
-A missing catalog, view index or profile is not an error: the list is empty.
+Without a published pointer the shared public keys are read and `pinned` is `false`. A missing view index or profile is not an error: the list is empty; a missing catalog is empty only when unpinned.
 
 ## Size and freshness
 

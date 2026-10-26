@@ -64,10 +64,13 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,programmeRu
 async function catalogAvailableRoute(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  const pinnedRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
- const pinned=pinnedRunId?{...env,epgPin:{programmeRunId:pinnedRunId}}:env;
- const [programme,catalog,watchlist,index,profile]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey)]);
+ // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
+ // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
+ const generationCopy=async name=>{const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;};
+ const [programme,catalog,watchlist,index,profile]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey)]);
+ if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
+ if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
- if(pinnedRunId&&programme.runId!==pinnedRunId)return json({error:'Programme generation is not in place'},409);
  // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
  const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
  return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now:Date.now()}));
