@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {createEpgRepository} from '../src/epg-repository.js';
-import {DEFAULT_CHUNK_BYTES,DEFAULT_CHUNK_STATEMENTS,MAX_ROW_STATEMENT_BYTES,STAGE_TABLES,StageStop,chunkStatements,commitStage,discardStage,openStage,planGeneration,publishStaged,readStage,renderedBytes,stageChunk,validateStage} from '../src/generation-stage.js';
+import {DEFAULT_CHUNK_BYTES,DEFAULT_CHUNK_STATEMENTS,MAX_ROW_STATEMENT_BYTES,STAGE_CLAIM_TTL_MS,STAGE_TABLES,StageStop,chunkStatements,claimStage,commitStage,discardStage,failStage,openStage,planGeneration,publishStaged,readStage,renderedBytes,stageChunk,validateStage} from '../src/generation-stage.js';
 import {D1Error} from '../scripts/d1-backfill.mjs';
 import {expectedStatements,measureGenerationUnit,syntheticGeneration} from '../scripts/d1-generation-size.mjs';
 import {openSqlite} from '../scripts/offline-import.mjs';
@@ -33,8 +33,9 @@ function database(name,{films=100,staged=true}={}){
 }
 // The dry-run SQLite adapter with injected faults. A write request is buffered by the caller and sent as one sqlite3 batch;
 // 'lost' drops it unsent with an uncertain-write error, 'after500' executes it and then reports an uncertain write,
-// 'failLast' appends a failing last statement. Every write request is counted, so a retry would be visible.
-function adapter(file,faults={}){
+// 'failLast' appends a failing last statement. Every write request is counted, so a retry would be visible. hooks[index] runs
+// before write request index is sent, so another execution can act in between two requests of this one.
+function adapter(file,faults={},hooks={}){
  const base=openSqlite(file),log={writes:0,attempts:[]};
  let buffer=null;
  return {log,
@@ -47,6 +48,7 @@ function adapter(file,faults={}){
    let statements;
    try{await fn();statements=buffer;}finally{buffer=null;}
    const index=log.writes++,fault=faults[index]||(typeof faults.match==='function'?faults.match(statements,index):null);
+   if(hooks[index])await hooks[index]();
    log.attempts.push({index,first:statements[0]?.[0].slice(0,40),fault:fault||null});
    if(fault==='lost')throw new D1Error('write_uncertain','injected lost response');
    await base.transaction(async()=>{for(const [sql,params] of statements)await base.run(sql,params);if(fault==='failLast')await base.run('INSERT INTO stage_missing_table VALUES (1)');});
@@ -54,7 +56,11 @@ function adapter(file,faults={}){
   },
  };
 }
-const context=(owner='owner-a',baseline='baseline-a')=>({owner,baseline,sha256,now:()=>'2026-10-26T02:00:00.000Z'});
+// Each context is a later execution: its clock starts a day after the previous one, past any earlier claim's expiry, so a rerun
+// after an interruption takes the abandoned claim over. at() pins a time, to run two executions while a claim is live.
+const DAY=24*60*60*1000;let executions=0;
+const at=offset=>()=>new Date(Date.UTC(2026,9,26,2)+offset).toISOString();
+const context=(owner='owner-a',baseline='baseline-a',{execution=executions++,nonce='nonce-'+execution,fence=1,now=at(DAY*execution)}={})=>({owner,baseline,sha256,nonce,fence,now});
 const withPrior=generation=>({...generation,candidates:generation.candidates.map((candidate,index)=>index<5?{...candidate,evidenceKey:candidate.evidenceKey+'|changed'}:candidate)});
 const seedAttempts=file=>ok(file,"UPDATE candidate SET attempts=3,last_attempt_at='2026-10-26T01:30:00.000Z',retry_at='2026-10-27T00:00:00.000Z',terminal_reason='repeated_uncertain_match' WHERE observation_key IN (SELECT observation_key FROM candidate ORDER BY observation_key LIMIT 10);");
 const stopReason=async promise=>{try{await promise;return null;}catch(error){return error instanceof StageStop?error.reason:'error:'+error.message;}};
@@ -304,13 +310,109 @@ try{
  {
   const file=database('guards');
   const guards=planGeneration(syntheticGeneration({films:2,candidates:3,runId:'run-g'}),{sha256});
-  await assert.rejects(stageChunk(openSqlite(file),guards,guards.chunks[0],context()));
-  await openStage(openSqlite(file),guards,context());
-  await assert.rejects(stageChunk(openSqlite(file),guards,guards.chunks[0],context('owner-z')));
-  await assert.rejects(commitStage(openSqlite(file),guards,context()),'an unvalidated stage cannot commit');
-  await stageChunk(openSqlite(file),guards,guards.chunks[0],context());
-  await validateStage(openSqlite(file),guards,context());
+  const own=context();
+  await assert.rejects(stageChunk(openSqlite(file),guards,guards.chunks[0],own));
+  await openStage(openSqlite(file),guards,own);
+  await assert.rejects(stageChunk(openSqlite(file),guards,guards.chunks[0],{...own,owner:'owner-z'}));
+  await assert.rejects(stageChunk(openSqlite(file),guards,guards.chunks[0],{...own,nonce:'nonce-other'}),'another nonce cannot write');
+  await assert.rejects(stageChunk(openSqlite(file),guards,guards.chunks[0],{...own,fence:2}),'another claim generation cannot write');
+  await assert.rejects(commitStage(openSqlite(file),guards,own),'an unvalidated stage cannot commit');
+  await stageChunk(openSqlite(file),guards,guards.chunks[0],own);
+  await validateStage(openSqlite(file),guards,own);
   assert.equal(one(file,"SELECT state FROM generation_stage WHERE programme_run_id='run-g';").state,'validated');
  }
+
+ // 13. One claimant at a time. Two executions of the same baseline share the owner token, so the claim (nonce and claim
+ // generation) is what makes one of them the only writer; a claim is taken over only after it expired, and a replaced claimant
+ // is refused at its next write. Uncertain writes stay read-back based: nothing is retried.
+ {
+  const n=smallPlan.chunks.length,TTL=STAGE_CLAIM_TTL_MS,stageOf=file=>one(file,"SELECT state,claim_nonce,claim_generation FROM generation_stage WHERE programme_run_id='run-2';");
+  const staged=file=>one(file,"SELECT (SELECT COUNT(*) FROM generation_stage_chunk)+0 AS receipts,(SELECT COUNT(*) FROM stage_film_generation)+(SELECT COUNT(*) FROM stage_film_show)+(SELECT COUNT(*) FROM stage_candidate)+(SELECT COUNT(*) FROM stage_candidate_show) AS rows;");
+  const execution=(file,ctx,faults={},hooks={})=>{const db=adapter(file,faults,hooks),report=[];return {db,report,ctx,run:()=>publishStaged(db,small,{...ctx,limits,report})};};
+  // a) While A holds a live claim, B of the same baseline is refused after one claim request that changes nothing.
+  {
+   const file=await fresh('claim-live'),T=DAY*executions;
+   let b=null;
+   const a=execution(file,context(undefined,undefined,{now:at(T)}),{},{3:async()=>{b=execution(file,context(undefined,undefined,{now:at(T+60000)}));b.reason=await stopReason(b.run());}});
+   await a.run();
+   assert.equal(b.reason,'stage_claimed_elsewhere');
+   assert.equal(b.db.log.writes,1,'the refused claim is the only request B sent');
+   assert.deepEqual(dump(file),expected);
+   assert.deepEqual(staged(file),{receipts:n,rows:smallPlan.rows.length});
+   assert.equal(stageOf(file).claim_generation,1);
+  }
+  // b) A stops sending mid-load; once its claim expired B takes it over, resumes after A's receipts and commits. A is then
+  // refused at its very next chunk and sends nothing more. A foreign baseline stays NO-GO without a write meanwhile.
+  {
+   const file=await fresh('claim-takeover'),T=DAY*executions;
+   let b=null,foreign=null;
+   const a=execution(file,context(undefined,undefined,{now:at(T)}),{},{4:async()=>{
+    const other=adapter(file);foreign=await stopReason(publishStaged(other,small,{...context('owner-a','baseline-b',{now:at(T)}),limits}));assert.equal(other.log.writes,0);
+    b=execution(file,context(undefined,undefined,{now:at(T+TTL+1000)}));await b.run();}});
+   assert.equal(await stopReason(a.run()),'stage_claim_lost');
+   assert.equal(foreign,'stage_baseline_changed');
+   assert.equal(b.report[0].outcome,'committed');
+   assert.deepEqual(b.report[0].claim,{generation:2,takenOver:true,previous:{generation:1,expiresAt:new Date(Date.parse(at(T)())+TTL).toISOString()}});
+   assert.equal(b.report[0].chunks.alreadyReceived,3,'B resumes after the chunks A sent');
+   assert.equal(a.db.log.writes,5,'A sent the refused chunk and nothing after it');
+   assert.deepEqual(staged(file),{receipts:n,rows:smallPlan.rows.length},'no chunk landed twice');
+   assert.deepEqual(dump(file),expected);
+  }
+  // c) A is validated and about to commit when B takes over and loses its own commit response. A's commit is refused, and A can
+  // no longer chunk, validate, commit or fail the stage; B's claim is live, so A cannot take it back either. C commits later.
+  {
+   const file=await fresh('claim-commit'),before=dump(file),T=DAY*executions;
+   const actx=context(undefined,undefined,{now:at(T)});
+   let b=null;
+   const a=execution(file,actx,{},{[n+2]:async()=>{b=execution(file,context(undefined,undefined,{now:at(T+TTL+1000)}),{1:'lost'});b.reason=await stopReason(b.run());}});
+   assert.equal(await stopReason(a.run()),'stage_claim_lost');
+   assert.equal(b.reason,'error:injected lost response');
+   assert.deepEqual(dump(file),before,'the stale claimant committed nothing');
+   const stale={...actx,fence:1,now:at(T+TTL+2000)};
+   for(const write of [()=>stageChunk(openSqlite(file),smallPlan,smallPlan.chunks[0],stale),()=>validateStage(openSqlite(file),smallPlan,stale),()=>commitStage(openSqlite(file),smallPlan,stale)])await assert.rejects(write());
+   await failStage(openSqlite(file),'run-2',{...stale,reason:'stale'});
+   await claimStage(openSqlite(file),smallPlan,stale);
+   assert.deepEqual(stageOf(file),{state:'validated',claim_nonce:b.ctx.nonce,claim_generation:2});
+   assert.deepEqual(dump(file),before);
+   const c=execution(file,context());await c.run();
+   assert.equal(c.report[0].claim.generation,3);
+   assert.deepEqual(dump(file),expected);
+  }
+  // d) A validation request from a replaced claimant is refused as a lost claim, not booked as a count mismatch.
+  {
+   const file=await fresh('claim-validate'),T=DAY*executions;
+   let b=null;
+   const a=execution(file,context(undefined,undefined,{now:at(T)}),{},{[n+1]:async()=>{b=execution(file,context(undefined,undefined,{now:at(T+TTL+1000)}),{1:'lost'});b.reason=await stopReason(b.run());}});
+   assert.equal(await stopReason(a.run()),'stage_claim_lost');
+   assert.equal(b.reason,'error:injected lost response');
+   assert.equal(stageOf(file).state,'loading');
+   const c=execution(file,context());await c.run();
+   assert.deepEqual(dump(file),expected);
+  }
+  // e) An uncertain claim request is not retried: if it landed, the claim belongs to the stopped execution until it expires.
+  {
+   const file=await fresh('claim-uncertain'),T=DAY*executions;
+   assert.equal(await stopReason(execution(file,context(undefined,undefined,{now:at(T)}),{2:'lost'}).run()),'error:injected lost response');
+   const b=execution(file,context(undefined,undefined,{now:at(T+TTL+1000)}),{0:'after500'});
+   assert.equal(await stopReason(b.run()),'error:injected HTTP 500 after commit');
+   assert.equal(b.db.log.writes,1);
+   assert.equal(stageOf(file).claim_nonce,b.ctx.nonce);
+   assert.equal(await stopReason(execution(file,context(undefined,undefined,{now:at(T+TTL+2000)})).run()),'stage_claimed_elsewhere');
+   const d=execution(file,context(undefined,undefined,{now:at(T+2*TTL+2000)}));await d.run();
+   assert.equal(d.report[0].claim.generation,3);
+   assert.deepEqual(dump(file),expected);
+  }
+  // f) Two executions open the same stage at once: the second insert is refused by the primary key and B owns the stage.
+  {
+   const file=await fresh('claim-open'),T=DAY*executions;
+   let b=null;
+   const a=execution(file,context(undefined,undefined,{now:at(T)}),{},{0:async()=>{b=execution(file,context(undefined,undefined,{now:at(T)}),{3:'lost'});b.reason=await stopReason(b.run());}});
+   assert.equal(await stopReason(a.run()),'stage_claimed_elsewhere');
+   assert.equal(b.reason,'error:injected lost response');
+   assert.deepEqual(stageOf(file),{state:'loading',claim_nonce:b.ctx.nonce,claim_generation:1});
+  }
+  // The claim TTL is bounded.
+  for(const claimTtlMs of [1000,2*DAY])assert.match(await stopReason(publishStaged(adapter(database('ttl-'+claimTtlMs)),small,{...context(),limits,claimTtlMs})),/Stage claim TTL out of bounds/);
+ }
 }finally{fs.rmSync(root,{recursive:true,force:true});}
-console.log('Generation stage: 1.25x published and withheld equality with publishGeneration, bounded deterministic chunks, interruption at every chunk (lost and 500), failing last statement, commit-then-500 and lost commit, stale pointer, double publish, baseline/owner/plan fences, receipt conflicts and gaps, mutated/extra/missing staged rows, oversized and repeated rows, bounded cleanup and concurrent commits passed');
+console.log('Generation stage: 1.25x published and withheld equality with publishGeneration, bounded deterministic chunks, interruption at every chunk (lost and 500), failing last statement, commit-then-500 and lost commit, stale pointer, double publish, baseline/owner/plan fences, receipt conflicts and gaps, mutated/extra/missing staged rows, oversized and repeated rows, bounded cleanup, concurrent commits and exclusive fenced stage claims passed');

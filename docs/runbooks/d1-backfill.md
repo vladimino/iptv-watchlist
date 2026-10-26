@@ -61,6 +61,8 @@ Only under an explicit owner approval naming the scratch database: apply `0001` 
 | `no_go: schema_missing` / `schema_version_mismatch` (staged) | the database lacks migration `0002` or schema version 2 | the owner applies `0002` under its own approval; nothing was written |
 | `no_go: stage_row_too_large` | one staged row would exceed 90,000 bytes | stop; the row is never split; investigate the source record |
 | `no_go: stage_baseline_changed` / `stage_owned_elsewhere` | the run's stage was opened by another baseline or token | abandon and discard that stage under the cleanup approval, then rerun |
+| `no_go: stage_claimed_elsewhere` | another execution of this baseline holds a live claim on the stage (`claimExpiresAt` in the details) | do not run two executors; if the other one is gone, rerun after `claimExpiresAt`, which takes the claim over; never edit the claim by hand |
+| `no_go: stage_claim_lost` | another execution took this run's expired claim over; this run wrote nothing after that | let the other execution finish, or rerun after its claim expired; the stage and its receipts are intact |
 | `no_go: stage_plan_changed` / `chunk_conflict` / `chunk_receipts_out_of_order` | the stage does not describe this plan (limits, counts, rows) | do not force; restore the limits of the earlier run, or abandon and discard the stage |
 | `no_go: stage_validation_failed` / `stage_parity_mismatch` | staged rows differ from the plan; the stage is now `failed` | discard the stage under the cleanup approval and rerun; the final tables are unchanged |
 | `no_go: pointer_moved` | another generation was published after this stage was planned; the stage is now `failed` | discard it; re-export a fresh baseline if the published generation is newer |

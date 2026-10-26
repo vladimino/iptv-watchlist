@@ -12,6 +12,10 @@ export const DEFAULT_CHUNK_BYTES=1000000;
 export const MAX_ROW_STATEMENT_BYTES=90000;
 // ADR-0021 GO/NO-GO: the commit at 1.25x production size within a third of the 30-second D1 bound.
 export const PUBLISH_BUDGET_MS=10000;
+// An execution's claim on its stage lasts this long after its last write; only then may another execution take it over. The
+// claim's correctness does not rest on clocks: every write is fenced by the claimant's nonce and claim generation.
+export const STAGE_CLAIM_TTL_MS=15*60*1000;
+export const STAGE_CLAIM_TTL_BOUNDS=[60*1000,60*60*1000];
 const CONTROL_STATEMENTS=3,CONTROL_BYTES=4096;
 
 // Every stop is fatal to the run: the importer rethrows it instead of booking a conflict, and the executor reports it as NO-GO.
@@ -25,26 +29,37 @@ export const STAGE_COLUMNS={
 };
 const STAGE_KEYS={stage_film_generation:['film_id'],stage_film_show:['film_id','channel_id','start_ms'],stage_candidate:['observation_key'],stage_candidate_show:['observation_key','channel_id','start_ms']};
 
+// A guard statement aborts its whole request (its row breaks the state CHECK) unless the stage is in one of the given states and
+// still claimed by this execution: same owner, baseline, nonce and claim generation.
+const CLAIMED="programme_run_id=:run AND owner_token=:owner AND baseline_sha256=:baseline AND claim_nonce=:nonce AND claim_generation=:fence";
+const guard=states=>`INSERT INTO generation_stage (programme_run_id,baseline_sha256,phase,owner_token,state,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,created_at,updated_at)
+SELECT 'guard:'||:run,'-','published','-','refused',0,0,0,0,0,:now,:now
+WHERE NOT EXISTS (SELECT 1 FROM generation_stage WHERE ${CLAIMED} AND state IN (${states}))`;
+
 // The statements ADR-0021 accepted, by name; :name placeholders are bound in order by bind().
 export const STAGE_SQL={
  open_stage:[
-  `INSERT INTO generation_stage (programme_run_id,baseline_sha256,phase,published_at,expected_programme_run_id,state,owner_token,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,created_at,updated_at)
-VALUES (:run,:baseline,:phase,:published_at,:expected,'new',:owner,:chunk_count,:film_count,:film_show_count,:candidate_count,:candidate_show_count,:now,:now)`,
+  `INSERT INTO generation_stage (programme_run_id,baseline_sha256,phase,published_at,expected_programme_run_id,state,owner_token,claim_nonce,claim_generation,claim_expires_at,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,created_at,updated_at)
+VALUES (:run,:baseline,:phase,:published_at,:expected,'new',:owner,:nonce,1,:expires,:chunk_count,:film_count,:film_show_count,:candidate_count,:candidate_show_count,:now,:now)`,
  ],
- chunk_guard:[
-  `INSERT INTO generation_stage (programme_run_id,baseline_sha256,phase,owner_token,state,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,created_at,updated_at)
-SELECT 'guard:'||:run,'-','published','-','refused',0,0,0,0,0,:now,:now
-WHERE NOT EXISTS (SELECT 1 FROM generation_stage WHERE programme_run_id=:run AND owner_token=:owner AND baseline_sha256=:baseline AND state IN ('new','loading'))`,
+ // Takes over a stage of this owner and baseline whose claim was released or has expired, raising the claim generation so the
+ // previous claimant's next write is refused. A live claim is left alone: the statement then changes nothing.
+ claim_stage:[
+  `UPDATE generation_stage SET claim_nonce=:nonce,claim_generation=claim_generation+1,claim_expires_at=:expires,updated_at=:now
+WHERE programme_run_id=:run AND owner_token=:owner AND baseline_sha256=:baseline AND state IN ('new','loading','validated')
+ AND (claim_nonce IS NULL OR claim_expires_at IS NULL OR claim_expires_at<=:now)`,
  ],
+ chunk_guard:[guard("'new','loading'")],
  chunk_state:[
-  `UPDATE generation_stage SET state='loading',updated_at=:now WHERE programme_run_id=:run AND owner_token=:owner AND state IN ('new','loading')`,
+  `UPDATE generation_stage SET state='loading',claim_expires_at=:expires,updated_at=:now WHERE ${CLAIMED} AND state IN ('new','loading')`,
  ],
  chunk_receipt:[
   `INSERT INTO generation_stage_chunk (programme_run_id,chunk_index,row_count,content_sha256,received_at) VALUES (:run,:chunk,:row_count,:sha,:now)`,
  ],
  validate:[
-  `UPDATE generation_stage SET state='validated',updated_at=:now
-WHERE programme_run_id=:run AND owner_token=:owner AND state IN ('new','loading')
+  guard("'new','loading'"),
+  `UPDATE generation_stage SET state='validated',claim_expires_at=:expires,updated_at=:now
+WHERE ${CLAIMED} AND state IN ('new','loading')
  AND (SELECT COUNT(*) FROM generation_stage_chunk WHERE programme_run_id=:run)=chunk_count
  AND (SELECT COALESCE(MIN(chunk_index),0) FROM generation_stage_chunk WHERE programme_run_id=:run)=0
  AND (SELECT COALESCE(MAX(chunk_index),-1) FROM generation_stage_chunk WHERE programme_run_id=:run)=chunk_count-1
@@ -57,7 +72,7 @@ WHERE programme_run_id=:run AND owner_token=:owner AND state IN ('new','loading'
   `INSERT INTO programme_generation (programme_run_id,phase,published_at)
 SELECT :run,'stale',NULL
 WHERE NOT (
- EXISTS (SELECT 1 FROM generation_stage WHERE programme_run_id=:run AND owner_token=:owner AND state='validated' AND phase='published')
+ EXISTS (SELECT 1 FROM generation_stage WHERE ${CLAIMED} AND state='validated' AND phase='published')
  AND ((:expected IS NULL AND NOT EXISTS (SELECT 1 FROM published_generation WHERE id=1)) OR EXISTS (SELECT 1 FROM published_generation WHERE id=1 AND programme_run_id IS :expected))
 )`,
   `INSERT INTO programme_generation (programme_run_id,phase,published_at) SELECT programme_run_id,'published',published_at FROM generation_stage WHERE programme_run_id=:run`,
@@ -91,7 +106,7 @@ WHERE NOT EXISTS (SELECT 1 FROM stage_candidate s WHERE s.programme_run_id=:run 
  commit_withheld:[
   `INSERT INTO programme_generation (programme_run_id,phase,published_at)
 SELECT :run,'stale',NULL
-WHERE NOT EXISTS (SELECT 1 FROM generation_stage WHERE programme_run_id=:run AND owner_token=:owner AND state='validated' AND phase='withheld')`,
+WHERE NOT EXISTS (SELECT 1 FROM generation_stage WHERE ${CLAIMED} AND state='validated' AND phase='withheld')`,
   `INSERT INTO programme_generation (programme_run_id,phase,published_at) SELECT programme_run_id,'withheld',published_at FROM generation_stage WHERE programme_run_id=:run`,
   `INSERT INTO film_generation (programme_run_id,film_id) SELECT programme_run_id,film_id FROM stage_film_generation WHERE programme_run_id=:run`,
   `INSERT INTO film_show (programme_run_id,film_id,channel_id,channel,start_ms,end_ms,epg_title,basis,match_reason)
@@ -107,7 +122,7 @@ SELECT programme_run_id,observation_key,channel_id,channel,start_ms,end_ms,epg_t
   `UPDATE generation_stage SET state='published',updated_at=:now WHERE programme_run_id=:run`,
  ],
  fail_stage:[
-  `UPDATE generation_stage SET state='failed',failure_reason=:reason,updated_at=:now WHERE programme_run_id=:run AND owner_token=:owner AND state IN ('new','loading','validated')`,
+  `UPDATE generation_stage SET state='failed',failure_reason=:reason,updated_at=:now WHERE ${CLAIMED} AND state IN ('new','loading','validated')`,
  ],
  abandon_stage:[
   `UPDATE generation_stage SET state='failed',failure_reason='abandoned_by_owner',updated_at=:now WHERE programme_run_id=:run AND state IN ('new','loading','validated')`,
@@ -187,15 +202,17 @@ export function planGeneration(input,{sha256,maxStatements=DEFAULT_CHUNK_STATEME
 
 async function send(db,statements){await db.transaction(async()=>{for(const statement of statements)await db.run(statement.sql,statement.params);});}
 
-export async function readStage(db,run){return await db.get('SELECT programme_run_id,baseline_sha256,phase,published_at,expected_programme_run_id,state,owner_token,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,failure_reason FROM generation_stage WHERE programme_run_id=?',[run]);}
+export async function readStage(db,run){return await db.get('SELECT programme_run_id,baseline_sha256,phase,published_at,expected_programme_run_id,state,owner_token,claim_nonce,claim_generation,claim_expires_at,chunk_count,film_count,film_show_count,candidate_count,candidate_show_count,failure_reason FROM generation_stage WHERE programme_run_id=?',[run]);}
 export async function readReceipts(db,run){return await pagedAll(db,'SELECT chunk_index,row_count,content_sha256 FROM generation_stage_chunk WHERE programme_run_id=? ORDER BY chunk_index',[run]);}
 
+// context carries the execution's claim: its nonce, and the claim generation (fence) it holds once the claim is confirmed.
 function values(plan,context){
- const {projection,counts,chunks}=plan;
- return {run:projection.programmeRunId,baseline:context.baseline,phase:projection.phase,published_at:projection.publishedAt,expected:projection.expectedProgrammeRunId,owner:context.owner,now:context.now(),chunk_count:chunks.length,...counts};
+ const {projection,counts,chunks}=plan,now=context.now();
+ return {run:projection.programmeRunId,baseline:context.baseline,phase:projection.phase,published_at:projection.publishedAt,expected:projection.expectedProgrammeRunId,owner:context.owner,nonce:context.nonce??null,fence:context.fence??null,now,expires:new Date(Date.parse(now)+(context.claimTtlMs??STAGE_CLAIM_TTL_MS)).toISOString(),chunk_count:chunks.length,...counts};
 }
 
 export async function openStage(db,plan,context){await send(db,bind(STAGE_SQL.open_stage,values(plan,context)));}
+export async function claimStage(db,plan,context){await send(db,bind(STAGE_SQL.claim_stage,values(plan,context)));}
 export function chunkStatements(plan,chunk,context){
  const bound=values(plan,context);
  return [...bind(STAGE_SQL.chunk_guard,bound),...bind(STAGE_SQL.chunk_state,bound),...chunk.statements,...bind(STAGE_SQL.chunk_receipt,{...bound,chunk:chunk.index,row_count:chunk.rows.length,sha:chunk.sha256})];
@@ -204,7 +221,7 @@ export async function stageChunk(db,plan,chunk,context){await send(db,chunkState
 export async function validateStage(db,plan,context){await send(db,bind(STAGE_SQL.validate,values(plan,context)));}
 export function commitStatements(plan,context){return bind(plan.projection.current?STAGE_SQL.commit_published:STAGE_SQL.commit_withheld,values(plan,context));}
 export async function commitStage(db,plan,context){await send(db,commitStatements(plan,context));}
-export async function failStage(db,run,{owner,reason,now}){await send(db,bind(STAGE_SQL.fail_stage,{run,owner,reason,now:now()}));}
+export async function failStage(db,run,{owner,baseline,nonce,fence,reason,now}){await send(db,bind(STAGE_SQL.fail_stage,{run,owner,baseline,nonce,fence,reason,now:now()}));}
 
 // Bounded, staging-only cleanup of a failed or superseded stage, repeated until nothing is left. It never touches a final table.
 // abandon first fails a stage that never committed (one left by another baseline, for instance); a published stage never is.
@@ -292,13 +309,23 @@ async function committedParity(db,plan,input){
  return problems;
 }
 
+// The stage is claimed by this execution when it carries this nonce; the claim generation it carries is then the fence.
+function confirmClaim(stage,context,reason){
+ if(stage?.claim_nonce!==context.nonce)throw new StageStop(reason,{programmeRunId:stage?.programme_run_id??null,claimGeneration:stage?.claim_generation??null,claimExpiresAt:stage?.claim_expires_at??null,state:stage?.state??null});
+ return stage.claim_generation;
+}
+
 // One generation unit through the stage. Each write request is sent once; a fatal adapter error (an uncertain write) propagates
-// unchanged and the next run resolves it by reading the stage, its receipts and the final tables.
-export async function publishStaged(db,input,{owner,baseline,sha256,now=()=>new Date().toISOString(),clock=()=>Date.now(),limits={},pageRows,report=null}={}){
+// unchanged and the next run resolves it by reading the stage, its receipts and the final tables. One execution at a time holds
+// the stage: it opens the stage with its claim or takes over a released or expired one, and every later write is fenced by that
+// claim, so an execution whose claim was taken over is refused before it writes again (stage_claim_lost).
+export async function publishStaged(db,input,{owner,baseline,sha256,nonce=crypto.randomUUID(),claimTtlMs=STAGE_CLAIM_TTL_MS,now=()=>new Date().toISOString(),clock=()=>Date.now(),limits={},pageRows,report=null}={}){
  if(!owner||!baseline)throw new Error('Stage owner and baseline are required');
+ if(!nonce)throw new Error('A stage claim nonce is required');
+ if(!(Number.isInteger(claimTtlMs)&&claimTtlMs>=STAGE_CLAIM_TTL_BOUNDS[0]&&claimTtlMs<=STAGE_CLAIM_TTL_BOUNDS[1]))throw new Error('Stage claim TTL out of bounds');
  const plan=planGeneration(input,{sha256,...limits});
- const run=plan.projection.programmeRunId,context={owner,baseline,now};
- const entry={programmeRunId:run,phase:plan.projection.phase,outcome:null,chunks:{planned:plan.chunks.length,sent:0,alreadyReceived:0},rows:plan.rows.length,bytes:plan.chunks.reduce((sum,chunk)=>sum+chunk.bytes,0),largestChunkBytes:Math.max(0,...plan.chunks.map(chunk=>chunk.bytes)),largestRowBytes:plan.largestRowBytes,requests:{writes:0,reads:0},durations:{},commit:null};
+ const run=plan.projection.programmeRunId,context={owner,baseline,now,nonce,fence:null,claimTtlMs};
+ const entry={programmeRunId:run,phase:plan.projection.phase,outcome:null,claim:null,chunks:{planned:plan.chunks.length,sent:0,alreadyReceived:0},rows:plan.rows.length,bytes:plan.chunks.reduce((sum,chunk)=>sum+chunk.bytes,0),largestChunkBytes:Math.max(0,...plan.chunks.map(chunk=>chunk.bytes)),largestRowBytes:plan.largestRowBytes,requests:{writes:0,reads:0},durations:{},commit:null};
  if(report)report.push(entry);
  const timed=async(name,fn)=>{const started=clock();try{return await fn();}finally{entry.durations[name]=(entry.durations[name]||0)+(clock()-started);}};
  const read=async fn=>{entry.requests.reads++;return await fn();};
@@ -306,15 +333,24 @@ export async function publishStaged(db,input,{owner,baseline,sha256,now=()=>new 
  const replayed=await read(()=>replayGeneration(db,input));
  if(replayed){entry.outcome='replay';return replayed;}
  requireExpected(input);
- let stage=await read(()=>readStage(db,run));
+ let stage=await read(()=>readStage(db,run)),opened=false;
  if(!stage){
-  try{await write(()=>openStage(db,plan,context));}
+  try{await write(()=>openStage(db,plan,context));opened=true;}
   catch(error){if(error?.fatal)throw error;}
   stage=await read(()=>readStage(db,run));
   if(!stage)throw new StageStop('stage_open_refused',{programmeRunId:run});
  }
  checkStage(stage,plan,context);
  if(stage.state==='published')throw new StageStop('stage_inconsistent',{programmeRunId:run,state:stage.state});
+ if(stage.claim_nonce!==nonce){
+  const previous={generation:stage.claim_generation,expiresAt:stage.claim_expires_at};
+  await write(()=>claimStage(db,plan,context));
+  stage=await read(()=>readStage(db,run));
+  context.fence=confirmClaim(stage,context,'stage_claimed_elsewhere');
+  entry.claim={generation:context.fence,takenOver:previous.generation>0,previous};
+ }else{context.fence=confirmClaim(stage,context,'stage_claimed_elsewhere');entry.claim={generation:context.fence,takenOver:false,opened};}
+ // Read the stage again after a refused write: a claim taken over by another execution explains the refusal.
+ const claimLost=async()=>{const current=await read(()=>readStage(db,run));if(current?.claim_nonce!==nonce||current?.claim_generation!==context.fence)throw new StageStop('stage_claim_lost',{programmeRunId:run,claimGeneration:context.fence,currentGeneration:current?.claim_generation??null,state:current?.state??null});return current;};
  if(stage.state==='new'||stage.state==='loading'){
   let next=receivedChunks(await read(()=>readReceipts(db,run)),plan);
   entry.chunks.alreadyReceived=next;
@@ -324,7 +360,9 @@ export async function publishStaged(db,input,{owner,baseline,sha256,now=()=>new 
     try{await write(()=>stageChunk(db,plan,chunk,context));entry.chunks.sent++;}
     catch(error){
      if(error?.fatal)throw error;
-     // The chunk was refused as a whole. A receipt with the planned checksum means another run of this baseline sent it.
+     await claimLost();
+     // The chunk was refused as a whole while this execution held the claim. A receipt with the planned checksum means an
+     // earlier execution of this baseline sent it.
      const receipt=await read(()=>db.get('SELECT chunk_index,row_count,content_sha256 FROM generation_stage_chunk WHERE programme_run_id=? AND chunk_index=?',[run,chunk.index]));
      if(receipt){
       if(receipt.content_sha256!==chunk.sha256||receipt.row_count!==chunk.rows.length)throw new StageStop('chunk_conflict',{chunk:chunk.index,stored:receipt.content_sha256,planned:chunk.sha256});
@@ -339,11 +377,11 @@ export async function publishStaged(db,input,{owner,baseline,sha256,now=()=>new 
     }
    }
   });
-  await timed('validateMs',()=>write(()=>validateStage(db,plan,context)));
+  await timed('validateMs',async()=>{try{await write(()=>validateStage(db,plan,context));}catch(error){if(error?.fatal)throw error;await claimLost();throw error;}});
   stage=await read(()=>readStage(db,run));
   if(stage?.state!=='validated'){
    const counts=await read(()=>db.get('SELECT (SELECT COUNT(*) FROM generation_stage_chunk WHERE programme_run_id=?) AS chunks,(SELECT COUNT(*) FROM stage_film_generation WHERE programme_run_id=?) AS films,(SELECT COUNT(*) FROM stage_film_show WHERE programme_run_id=?) AS film_shows,(SELECT COUNT(*) FROM stage_candidate WHERE programme_run_id=?) AS candidates,(SELECT COUNT(*) FROM stage_candidate_show WHERE programme_run_id=?) AS candidate_shows',[run,run,run,run,run]));
-   await write(()=>failStage(db,run,{owner,reason:'stage_counts_mismatch',now}));
+   await write(()=>failStage(db,run,{...context,reason:'stage_counts_mismatch'}));
    throw new StageStop('stage_validation_failed',{programmeRunId:run,stored:counts,planned:{chunks:plan.chunks.length,...plan.counts}});
   }
  }
@@ -351,7 +389,7 @@ export async function publishStaged(db,input,{owner,baseline,sha256,now=()=>new 
  entry.requests.reads+=Math.max(1,Math.ceil(parity.rows/(pageRows||5000)));
  entry.readback={rows:parity.rows,ok:parity.ok};
  if(!parity.ok){
-  await write(()=>failStage(db,run,{owner,reason:'stage_parity_mismatch',now}));
+  await write(()=>failStage(db,run,{...context,reason:'stage_parity_mismatch'}));
   throw new StageStop('stage_parity_mismatch',{programmeRunId:run,missing:parity.missing.slice(0,20),extra:parity.extra.slice(0,20),mismatched:parity.mismatched.slice(0,20),counts:{missing:parity.missing.length,extra:parity.extra.length,mismatched:parity.mismatched.length}});
  }
  const statements=commitStatements(plan,context);
@@ -361,10 +399,11 @@ export async function publishStaged(db,input,{owner,baseline,sha256,now=()=>new 
  catch(error){
   entry.commit.ms=clock()-started;
   if(error?.fatal)throw error;
+  await claimLost();
   const pointer=await read(()=>db.get('SELECT programme_run_id FROM published_generation WHERE id=1'));
   if(plan.projection.current&&(pointer?.programme_run_id??null)!==(plan.projection.expectedProgrammeRunId??null)){
    // Another generation was published meanwhile: this stage can never commit, so it is failed and left for an approved cleanup.
-   await write(()=>failStage(db,run,{owner,reason:'pointer_moved',now}));
+   await write(()=>failStage(db,run,{...context,reason:'pointer_moved'}));
    throw new StageStop('pointer_moved',{programmeRunId:run,expected:plan.projection.expectedProgrammeRunId,actual:pointer?.programme_run_id??null});
   }
   throw new StageStop('commit_refused',{programmeRunId:run,message:String(error?.message||'').slice(0,300)});
