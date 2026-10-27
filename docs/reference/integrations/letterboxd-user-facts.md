@@ -7,7 +7,7 @@ This page specifies how watched, rating and watchlist facts are stored and merge
 One object per film: `letterboxd/facts/films/<factKey>.json`.
 
 - **Key choice is deterministic and made once, at creation:** `tmdb-<n>` when the film has a trusted TMDB id (the export contract's `tmdb_verified`, or a stored `tmdbId` on the accepted Letterboxd id); otherwise `lb-<lid>`. A key is never reused for another film.
-- **Link index:** `letterboxd/facts/links.json` maps every trusted alias to exactly one fact key: `{"letterboxd:<lid>": "<factKey>", "tmdb:<n>": "<factKey>"}`. An alias appears once. It is the only lookup path: a reader holding `<lid>`, `tmdb_<n>` or `film:tmdb:<n>` makes one read of the index and one of the record, never a scan of `letterboxd/facts/films/`. Every change to the index is a compare-and-swap; a write that would point an existing alias at another key is refused (`alias_conflict`) and goes to the identity review, never merged automatically.
+- **Link index:** `letterboxd/facts/links.json` maps every trusted alias to exactly one fact key: `{"letterboxd:<lid>": "<factKey>", "tmdb:<n>": "<factKey>"}`. An alias appears once. It is the only lookup path: a reader holding `<lid>`, `tmdb_<n>` or `film:tmdb:<n>` makes one read of the index and one of the record, never a scan of `letterboxd/facts/films/`. Every change to the index is a compare-and-swap. A write that would point an existing alias at another key is refused (`alias_conflict`) and goes to the identity review, **except** the alias move of an authorized convergence (below), which is allowed only while the source record carries the matching migration fence.
 
 ```json
 {
@@ -15,6 +15,7 @@ One object per film: `letterboxd/facts/films/<factKey>.json`.
   "factKey": "tmdb-603",
   "links": {"letterboxd": "<lid>", "tmdb": "603"},
   "redirectTo": null,
+  "migrating": null,
   "watched":   {"value": true, "effectiveOn": "2024-05-01", "observedAt": "2026-10-26T13:48:00.000Z", "source": "letterboxd_export", "sourceRef": "<export sha256>", "observationId": "<sha256>", "replaced": null},
   "rating":    {"value": 4.5,  "effectiveOn": "2024-05-02", "observedAt": "...", "source": "letterboxd_films_list", "sourceRef": "<generation id>", "observationId": "<sha256>",
                 "replaced": {"value": 4, "observedAt": "...", "source": "letterboxd_export", "sourceRef": "<export sha256>", "observationId": "<sha256>"}},
@@ -41,9 +42,21 @@ Observations of one fact are totally ordered by the tuple **(`observedAt`, sourc
 | `letterboxd_films_list` | Worker time when the **first** page of the complete scan was requested. A page can only show a state at least that new, so the scan never claims a time later than what it saw, and an owner edit made while the scan runs (a later time) is never overwritten by it |
 | `letterboxd_film_page` | Worker time of the request |
 | `letterboxd_watchlist` | Worker time when the first page of the complete watchlist was requested |
-| `letterboxd_export` | The export's generation time from Letterboxd's archive name `letterboxd-<user>-YYYY-MM-DD-HH-MM-utc`, which Letterboxd sets when it builds the export. The importer refuses an archive without that name, and a time later than the import's start |
+| `letterboxd_export` | The export's generation time, bound to the archive as described in [Export origin](#export-origin) |
 
 `effectiveOn` (the export's `Date` / `Watched Date`) is informative and never used for ordering.
+
+### Export origin
+
+The importer takes the **ZIP archive itself**, not an extracted directory, so the time, the checksum and the rows come from one input:
+
+1. It computes the SHA-256 of the archive bytes; that checksum is the export's `sourceRef` and the import's identity.
+2. It reads the generation time from the archive's file name, `letterboxd-<user>-YYYY-MM-DD-HH-MM-utc.zip`, the name Letterboxd gives the export when it builds it.
+3. It reads `watched.csv`, `ratings.csv`, `watchlist.csv` and `diary.csv` from inside that same archive, in memory, and records each file's SHA-256 next to the archive checksum in a private origin manifest in the output directory (`origin.json`: archive name, archive SHA-256, generation time, per-file SHA-256). Validate and commit both re-read the archive and refuse to continue if any checksum differs from `origin.json`.
+4. **A renamed or nonstandard archive is refused.** The owner may instead pass `--generated-at <UTC time>` explicitly; the time is recorded in `origin.json` as `owner_declared`, and validation reports it prominently.
+5. In both cases a generation time later than the import's start is refused, and the validation report shows, before any commit, how many facts the baseline would replace (`replaces`) and how many newer stored values it leaves alone (`older`).
+
+The offline reconciliation command, which only reports and never writes, may keep reading an extracted directory.
 
 ## Merge table
 
@@ -64,12 +77,15 @@ Observations of one fact are totally ordered by the tuple **(`observedAt`, sourc
 
 - Every record write is a compare-and-swap on its ETag with bounded retries; each retry re-reads and re-applies the order, so a writer that read earlier never restores an older value.
 - A writer that finds `redirectTo` set follows it once and writes to the target; a chain longer than one hop is an error.
-- **Converging two records** happens only when an `lb-<lid>` record gains a trusted TMDB id whose `tmdb-<n>` record already exists (or the reverse is discovered by the identity review). It is a recoverable sequence, each step idempotent and checked before it is taken:
-  1. CAS the target `tmdb-<n>` record: merge each fact of the source record by the order above, and add the `letterboxd` link.
-  2. CAS the link index: point `letterboxd:<lid>` at `tmdb-<n>`.
-  3. CAS the source record to `{redirectTo: "tmdb-<n>"}` with its facts cleared.
+- **Converging two records** happens only when the identity review has verified that an `lb-<lid>` record and an existing `tmdb-<n>` record are the same film (a trusted TMDB link for that `lid`). It is a fenced, journaled migration; every step is a compare-and-swap and is idempotent:
+  0. **Journal.** Create `letterboxd/facts/migrations/<sourceKey>.json` = `{source, target, token, state: "started"}` (create-only). The migrations prefix is small and is the reconciler's discovery path, so a migration is found even after the source is no longer in the link index.
+  1. **Fence the source.** CAS the source record to set `migrating: {to: target, token}`, without touching its facts. From this version on no writer changes the source's facts: a writer that reads a source with `migrating` set writes its observation to the target instead, and a writer that read the source before the fence fails its CAS (the ETag changed), re-reads, sees the fence and goes to the target. Call the fenced version `F`.
+  2. **Merge.** CAS the target: merge every fact of source version `F` by the order above and add the `letterboxd` link. Repeating it is a no-op (same observation ids).
+  3. **Move the alias.** CAS the link index: point `letterboxd:<lid>` at the target. This is the authorized exception to `alias_conflict`: it is accepted only if the source record currently carries `migrating.to = target` with the journal's `token`.
+  4. **Retire the source.** CAS the source **conditioned on ETag `F`** to `{redirectTo: target, migrating: null}` with its facts cleared. Because the fence stops fact writes, `F` is still current; if the CAS fails anyway, re-read, merge the newer source version into the target again (step 2) and retry, so a write the target has not seen is never cleared.
+  5. **Close.** Set the journal's `state: "done"`.
 
-  A process that stops between steps leaves either both records reachable with the index still on the source (step 1 merged facts idempotently, a rerun repeats it as a no-op) or the index already moved (step 3 still pending; readers reach the target, writers that hit the source write the old record, and the rerun of step 1 carries those writes over before step 3). A reconciler finds unfinished convergences from the index: any record whose `links` alias the index points elsewhere.
+  The reconciler lists `letterboxd/facts/migrations/` and resumes every journal not `done` from the first step whose postcondition does not hold. Readers that still reach the source follow `redirectTo` (one hop) or, while it is fenced, read the target.
 - No generic key-write endpoint is added. The per-film lookup addresses Letterboxd by the film's slug from metadata, never by treating a `lid` as a slug.
 
 ## Projections
@@ -79,7 +95,7 @@ Observations of one fact are totally ordered by the tuple **(`observedAt`, sourc
 
 ## Baseline import protocol
 
-Owner-only and typed; inputs are the export directory, a verified snapshot for identity, and an output directory.
+Owner-only and typed; inputs are the export ZIP (see [Export origin](#export-origin)), a verified `consistent_fenced` production R2 snapshot for identity ([snapshot export](../../runbooks/r2-snapshot-export.md)), and an output directory.
 
 1. **Validate** (no write): parse with the export contract, match against the snapshot, plan the observations of every `accepted` film, and report counts by fact and by outcome (`new`, `replaces`, `older`, `tie`, `unchanged`) and the unresolved list. The report is aggregate; per-film rows stay private.
 2. **Commit** in chunks of at most 200 films. Before a chunk, write `letterboxd/imports/<exportSha256>/chunks/<n>.intent.json` listing its film keys. Each film is one CAS that applies the order and stores `replaced`. After every film of the chunk reads back, write `<n>.receipt.json` with each film's outcome.
