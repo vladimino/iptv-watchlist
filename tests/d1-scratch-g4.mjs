@@ -91,6 +91,16 @@ try{
  assert.equal(partialFake.calls.filter(call=>call.write&&!/^\s*PRAGMA/i.test(call.sql)).length,0);
  await partialFake.stop();
 
+ // A scratch database already on schema v2 (as after AIR-174) gets only 0003, and its rows survive the rebuild.
+ const v2=file('v2'),v2Sql=['0001_schema_v1.sql','0002_generation_stage.sql'].map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
+ assert.equal(sqlite(v2,v2Sql+"\nINSERT INTO programme_generation (programme_run_id,phase) VALUES ('old','published');INSERT INTO candidate (observation_key,title,normalized_title,raw_titles_json,durations_json,observation_schema_version,observation_json,seen_in_latest,attempts,evidence_key) VALUES ('k','T','t','[]','[]',1,'{}',1,0,'e');INSERT INTO candidate_generation (programme_run_id,observation_key,observation_schema_version,observation_json,evidence_key) VALUES ('old','k',1,'{}','e');INSERT INTO candidate_show (programme_run_id,observation_key,channel_id,start_ms) VALUES ('old','k','c',1);").status,0);
+ const v2Fake=fakeD1({[SCRATCH]:{file:v2,name:SCRATCH_DATABASE_NAME}}),v2Endpoint=await v2Fake.start();
+ const v2Schema=await runG4({command:'apply-schema',scale:'small',output:out('v2-schema'),env:env(v2Endpoint),now,approvedWrites:true});
+ assert.equal(v2Schema.status,'completed',JSON.stringify(v2Schema.stop));
+ assert.deepEqual(v2Schema.result.applied,['migrations/0003_candidate_show_identity.sql']);
+ assert.equal(count(v2,'SELECT COUNT(*) AS n FROM candidate_show'),1);assert.equal(count(v2,'SELECT version AS n FROM schema_contract'),3);
+ await v2Fake.stop();
+
  // The whole scenario at the small scale: every step passes and the verdict is GO.
  const run=await g4('run','run',{approvedWrites:true});
  assert.equal(run.status,'GO',JSON.stringify(run.result?.steps?.filter(step=>!step.ok)));
@@ -121,6 +131,17 @@ try{
  assert.equal(count(scratch,`SELECT COUNT(*) AS n FROM stage_candidate WHERE programme_run_id IN ('${RUN_IDS.prior}','${RUN_IDS.rival}')`),0);
  assert.equal(sqlite(scratch,'SELECT COUNT(*) FROM candidate; SELECT programme_run_id FROM published_generation;').stdout,finalBefore);
  assert.equal(count(scratch,'SELECT COUNT(*) AS n FROM atomicity_probe'),1);
+
+ // AIR-178's flow at the small size: a second scale with its own run ids runs after the first on the same database. Its prior
+ // replaces the first scale's pointer, slots with a second EPG title are stored (schema v3), and the legacy reference writes the
+ // whole history, so every final table still matches row for row.
+ const real=await g4('run','small-real',{approvedWrites:true,scale:'small_real'});
+ assert.equal(real.status,'GO',JSON.stringify(real.result?.steps?.filter(step=>!step.ok)));
+ assert.ok(Object.values(real.result.parity.tables).every(table=>table.equal&&table.rows===table.referenceRows));
+ assert.equal(real.result.parity.tables.candidate.rows,88);
+ assert.match(sqlite(scratch,'SELECT programme_run_id FROM published_generation;').stdout,/g4r-scaled/);
+ assert.equal(count(scratch,"SELECT COUNT(*) AS n FROM (SELECT 1 FROM candidate_show WHERE programme_run_id='g4r-scaled' GROUP BY observation_key,channel_id,start_ms HAVING COUNT(*)>1)"),3,'three slots keep both titles');
+ assert.equal((await g4('run','small-real-rerun',{approvedWrites:true,scale:'small_real'})).status,'INCOMPLETE');
  await fake.stop();
 
  // A real uncertain write (HTTP 500 to a chunk) stops the scenario without a retry; the report says so.
