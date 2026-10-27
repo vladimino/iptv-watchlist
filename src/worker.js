@@ -145,7 +145,7 @@ function findsTitleSuppressor({keys,catalog,metadata,watchlist,programme}){
   return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId);
  };
 }
-function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'off',keys:null}}){
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'off',keys:null},watchedMarkEnabled=false}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const consumedTmdb=catalogConsumedTmdb({index,metadata,watchlist,programme,catalog});
@@ -184,7 +184,37 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  const posterCoverage={catalog:0,metadataCache:0,missing:0};
  for(const film of films){const source=posterSource.get(film);if(source==='catalog')posterCoverage.catalog++;else if(source==='metadata_cache')posterCoverage.metadataCache++;else posterCoverage.missing++;}
  const displayExclusion={state:titleExclusion.state,excluded:[...hiddenIdentities].filter(identity=>!byIdentity.has(identity)).length};
- return {programmeRunId,pinned,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,displayExclusion,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
+ return {programmeRunId,pinned,watchedMarkEnabled,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,displayExclusion,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
+}
+// The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
+// It writes the owner's `watched` fact through the fact records and nothing else, so it needs LETTERBOXD_FACTS as well as its own
+// switch. The request guard is stricter than the shared one: a same-origin Origin is required, the body must be JSON and hold
+// exactly `tmdbId` and `watched`; a title, year or Letterboxd id is never read.
+const findsWatchedMarkEnabled=env=>env?.FINDS_WATCHED_MARK==='on'&&env?.LETTERBOXD_FACTS==='on';
+const FINDS_WATCHED_TMDB=/^[1-9]\d{0,11}$/;
+async function catalogWatchedRoute(request,env,url){
+ if(request.method!=='POST')return json({error:'Method not allowed'},405);
+ if(env.FINDS_WATCHED_MARK!=='on')return json({error:'Watched mark is disabled',code:'mark_disabled'},409);
+ if(env.LETTERBOXD_FACTS!=='on')return json({error:'Letterboxd facts are disabled',code:'facts_disabled'},409);
+ if(request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
+ if(!/^application\/json(\s*;|$)/i.test(request.headers.get('Content-Type')||''))return json({error:'Expected application/json'},415);
+ const text=await request.text();
+ if(text.length>512)return json({error:'Request too large'},400);
+ let body;try{body=JSON.parse(text);}catch{return json({error:'Invalid JSON'},400);}
+ const keys=body&&typeof body==='object'&&!Array.isArray(body)?Object.keys(body).sort():[];
+ if(keys.join()!=='tmdbId,watched'||typeof body.tmdbId!=='string'||!FINDS_WATCHED_TMDB.test(body.tmdbId)||typeof body.watched!=='boolean')return json({error:'Expected exactly tmdbId (digits) and watched (boolean)',code:'invalid_request'},400);
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const runId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
+ const object=runId?await env.BUCKET.get(epgGenerationKey(runId,'discovered-films.json')):null,catalog=object?await object.json():null;
+ const film=Object.values(catalog||{}).find(item=>item&&String(item.tmdbId)===body.tmdbId&&item.canonicalIdentity==='tmdb:'+body.tmdbId);
+ if(!film)return json({error:'Film is not a verified record of the published catalog',code:'film_not_in_catalog'},409);
+ try{
+  const result=await LetterboxdFacts.recordOwnerWatchedMark(env,body.tmdbId,body.watched,{observedAt:new Date().toISOString()});
+  return json({outcome:result.outcome,watched:result.watched});
+ }catch(error){
+  if(error instanceof LetterboxdFacts.FactsError)return json({error:'Could not record the mark; try again',code:error.code},409);
+  throw error;
+ }
 }
 async function catalogAvailableRoute(env){
  const now=Date.now();
@@ -199,7 +229,7 @@ async function catalogAvailableRoute(env){
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
  const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,watchedMarkEnabled:findsWatchedMarkEnabled(env)}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
@@ -394,6 +424,7 @@ export default {async fetch(request,env,execution){
   if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const mode=lifecycleMode(env,'programme');const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,mode);return localizationResponse(presented.data,mode,presented,'programme');}
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};const mode=lifecycleMode(env,'watchlist');const presented=presentLocalized(data,titles,mode);return localizationResponse(presented.data,mode,presented,'watchlist');}
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
+  if(url.pathname==='/api/catalog/watched')return await catalogWatchedRoute(request,env,url);
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
   if(url.pathname==='/api/integrations/tmdb/status'&&request.method==='GET'){
    if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({connected:false,stage:'missing_secret'},503);
