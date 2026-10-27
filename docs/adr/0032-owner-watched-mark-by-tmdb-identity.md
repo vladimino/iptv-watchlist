@@ -127,7 +127,7 @@ Today's facts code cannot record that statement. `linkFilm` refuses a record wit
 ## Evidence
 
 - **Original decision:** owner proposal, 2026-10-27, on [AIR-198](https://trello.com/c/9xpmq2fc); scope on [AIR-213](https://trello.com/c/VbE31Rzj).
-- **Implementation:** none; planned in [AIR-214](https://trello.com/c/dX5YZlFY).
+- **Implementation:** [AIR-214](https://trello.com/c/dX5YZlFY): `POST /api/catalog/watched` (`catalogWatchedRoute` in `src/worker.js`), `linkTmdbOnly` and `recordOwnerWatchedMark` in `src/letterboxd-facts.js`, the Finds button in `public/app.js`, tests `tests/finds-watched-mark.mjs`; the switch is named `FINDS_WATCHED_MARK` and stays unset (off) until a separate owner approval.
 - **Dated verification:** [AIR-198 rollout evidence](../evidence/letterboxd/air-198-finds-exclusion-rollout-2026-10-27.md) (five watched films remaining in Finds); code reading at `main` `0591589` (`linkFilm` refuses a record without a Letterboxd id; the owner rating route takes a stored id).
 - **Uncertainty:** how often a later Letterboxd link will meet an existing `lb-<lid>` record and need convergence; the expected number of marks is small (cards the owner sees).
 
