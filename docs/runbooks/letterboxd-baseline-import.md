@@ -24,10 +24,10 @@
 
 1. **Rehearse.** `node tests/letterboxd-baseline-import.mjs` runs the ZIP reader, the plan, the tamper checks and every route outcome against invented data and an in-memory bucket.
 2. **Plan (offline).** `node scripts/letterboxd-baseline-import.mjs plan --zip <zip> --snapshot <snapshot> --output <dir>`. Check `report.json`: `planned` (films, chunks, watched, rated, not rated, watchlist), `matchStatus` and `unresolved` against the [reconciliation evidence](../evidence/letterboxd/README.md).
-3. **Gate and token (owner).** The owner sets `LETTERBOXD_BASELINE_IMPORT=on` and issues the Access service token; the facts gate `LETTERBOXD_FACTS` should already be on, or the next sync would clear imported ratings by absence.
+3. **Gates and token (owner).** The route works only when **both** `LETTERBOXD_FACTS=on` and `LETTERBOXD_BASELINE_IMPORT=on`; with only the import gate it answers 409 `facts_disabled`, because legacy sync would clear imported ratings by absence. Set the facts gate first, then the import gate, and issue the Access service token.
 4. **Validate (no write).** `… validate --zip <zip> --output <dir> --endpoint https://<worker>`. Every chunk reports what a commit would do now: `new`, `replaces`, `older` (a newer stored or scanned observation wins), `unchanged`, `tie`, and `films.conflict`. Review before committing.
 5. **Commit.** `… commit --zip <zip> --output <dir> --endpoint https://<worker>` sends chunks of at most 200 films in order and stops at the first failure. Each chunk writes an intent (with the view before-image), the facts, the projection and a receipt. Re-running the same command is safe: committed chunks answer `replay`, an interrupted chunk is completed from its intent. `--from-chunk`/`--to-chunk` bound a run.
-6. **Rollback (if needed).** `… rollback --zip <zip> --output <dir> --endpoint https://<worker>` walks the committed chunks in reverse. Per fact it restores the value the import replaced only if the import's observation is still current; a later observation (an owner edit, a newer scan) is reported `superseded` and kept. A fact the import created is removed and the view field it projected returns to its before-image. A repeated rollback is a replay.
+6. **Rollback (if needed).** `… rollback --zip <zip> --output <dir> --endpoint https://<worker>` walks the committed chunks in reverse. Per fact it restores the value the import replaced only if the import's observation is still current; a later observation (an owner edit, a newer scan) is reported `superseded` and kept. A fact the import created is removed and the view field it projected returns to its before-image. Each chunk's rollback first writes a rollback intent; an interrupted rollback is completed by running the same command again, which converges on the same result without touching values written after the import. A completed rollback is a replay.
 7. **Turn the gate off** after the import (owner).
 
 Each remote step first re-reads the archive and refuses to continue if the archive, any CSV inside it or `plan.jsonl` differs from `origin.json` (exit code 3).
@@ -39,11 +39,12 @@ Each remote step first re-reads the archive and refuses to continue if the archi
 | `plan` exit 0 | plan written | review `report.json` |
 | exit 2 | usage, a path inside the repository, a missing `watched.csv`, a renamed archive without `--generated-at`, a future export time | fix the input |
 | exit 3 | archive or plan differs from `origin.json` | re-plan from the original archive |
-| HTTP 409 `Letterboxd baseline import is disabled` | the gate is off | owner decision |
+| HTTP 409 `import_disabled` | the import gate is off | owner decision |
+| HTTP 409 `facts_disabled` | the import gate is on but `LETTERBOXD_FACTS` is off | turn the facts gate on first (owner decision), or turn the import gate off |
 | HTTP 400 `invalid_request` | a request outside the contract (bad checksum, future time, `watched: false`, a rating without watched, duplicate film, more than 200 films) | do not retry; the plan is wrong |
 | HTTP 409 `chunk_conflict` | the chunk number was opened or committed with other items | do not force; re-plan, or roll back the earlier commit first |
 | HTTP 409 `not_committed` | rollback of a chunk without a receipt | nothing to roll back |
-| HTTP 500 `readback_failed` or `write_contention` | a fact did not read back, or writers raced past the retries | rerun the same command; the intent completes the chunk |
+| HTTP 500 `readback_failed`, `write_contention` or a storage error | a fact did not read back, writers raced past the retries, or a write failed | rerun the same command; the commit or rollback intent completes the chunk |
 | `films.conflict` / `conflicts` > 0 | ids that would join a record holding another id of the same kind | listed in `letterboxd/facts/conflicts.json` for the identity review; not written |
 
 ## Rollback of the tool

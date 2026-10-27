@@ -375,29 +375,57 @@ const LetterboxdFacts=(()=>{
 
  // Rollback of one committed chunk: restore each fact's before-image only while this export's observation is current,
  // and the projection's before-image only for fields this rollback left without a fact.
+ // Rollback of one committed chunk, crash-recoverable: a create-only rollback intent first fixes the plan, per fact, from the
+ // receipt (the export's observation and the view fields it projected). Each step then converges to that plan and is safe to
+ // repeat: a fact whose export observation is still current is restored to its before-image (or removed when the import created
+ // it); one already restored by an earlier attempt counts as restored; one a later writer replaced is superseded and kept.
+ // View fields of a removed fact return to the commit's before-image unless the record holds that fact again.
  async function rollbackBaselineChunk(env,body){
   const {origin,chunk}=validateBaselineRequest(body,{needItems:false}),sha=origin.archiveSha256;
   const {value:done}=await readJSON(env,importKey(sha,chunk,'rollback'));if(done)return {...done,replay:true};
   const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
   if(!receipt)throw new FactsError('not_committed','This chunk has no receipt');
-  const counts={restored:0,superseded:0},records=[],cleared=[];
-  for(const entry of receipt.entries.filter(entry=>!entry.conflict)){
-   const ids=entry.observations;
-   const {value:record}=await casJSON(env,recordKey(entry.factKey),null,current=>{
+  let plan=null;
+  await casJSON(env,importKey(sha,chunk,'rollback-intent'),null,current=>{
+   if(current){plan=current;return null;}
+   plan={schemaVersion:1,archiveSha256:sha,chunk,openedAt:new Date().toISOString(),viewBefore:receipt.viewBefore||{},
+    facts:receipt.entries.filter(entry=>!entry.conflict).flatMap(entry=>entry.observations.map(({fact,observationId})=>({factKey:entry.factKey,fact,observationId})))};
+   return plan;
+  });
+  const counts={restored:0,superseded:0},records=new Map(),removed=[];
+  for(const factKey of [...new Set(plan.facts.map(item=>item.factKey))]){
+   const items=plan.facts.filter(item=>item.factKey===factKey),outcome=new Map();
+   const {value:record}=await casJSON(env,recordKey(factKey),null,current=>{
     if(!current)return null;
-    let changed=false;
-    for(const {fact,observationId} of ids){const outcome=rollbackFact(current,fact,observationId);counts[outcome]++;if(outcome==='restored'){changed=true;if(!current[fact])cleared.push({links:current.links,fact});}}
+    outcome.clear();let changed=false;
+    for(const {fact,observationId} of items){
+     const now=current[fact];
+     if(now?.observationId===observationId){
+      // Roll back now, and leave a marker so a repeated attempt recognizes this fact as already rolled back.
+      rollbackFact(current,fact,observationId);changed=true;
+      if(current[fact]){current[fact].rolledBackFrom=observationId;outcome.set(fact,'restored');}
+      else{current.rolledBack={...(current.rolledBack||{}),[fact]:observationId};outcome.set(fact,'removed');}
+     }
+     else if(now&&now.rolledBackFrom===observationId)outcome.set(fact,'restored');
+     else if(!now&&current.rolledBack?.[fact]===observationId)outcome.set(fact,'removed');
+     else outcome.set(fact,'superseded');
+    }
     return changed?current:null;
    });
-   if(record)records.push(record);
+   if(!record)continue;
+   records.set(factKey,record);
+   for(const [fact,result] of outcome){if(result==='superseded')counts.superseded++;else{counts.restored++;if(result==='removed')removed.push({factKey,fact,links:record.links});}}
   }
-  await projectRecords(env,records);
-  if(cleared.length)await casJSON(env,FACTS_KEYS.viewIndex,{},view=>{
+  await projectRecords(env,[...records.values()]);
+  if(removed.length)await casJSON(env,FACTS_KEYS.viewIndex,{},view=>{
    let changed=false;
-   for(const {links,fact} of cleared)for(const id of projectionIds(links)){
-    const field=VIEW_FIELDS[fact],prior=receipt.viewBefore?.[id]||{},item={...(view[id]||{})};
-    if(Object.hasOwn(prior,field))item[field]=prior[field];else delete item[field];
-    if(JSON.stringify(item)!==JSON.stringify(view[id]||{})){view[id]=item;changed=true;}
+   for(const {factKey,fact,links} of removed){
+    if(records.get(factKey)?.[fact])continue;
+    for(const id of projectionIds(links)){
+     const field=VIEW_FIELDS[fact],prior=plan.viewBefore?.[id]||{},item={...(view[id]||{})};
+     if(Object.hasOwn(prior,field))item[field]=prior[field];else delete item[field];
+     if(JSON.stringify(item)!==JSON.stringify(view[id]||{})){view[id]=item;changed=true;}
+    }
    }
    return changed?view:null;
   });
@@ -409,7 +437,9 @@ const LetterboxdFacts=(()=>{
  // Owner-only route (the whole Worker is behind Cloudflare Access); the gate keeps it inert until the owner enables it.
  async function handleBaselineRequest(request,env,pathname){
   const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
-  if(!baselineEnabled(env))return json({error:'Letterboxd baseline import is disabled'},409);
+  // Fail closed unless the routine writers record facts too: otherwise the next sync would clear imported ratings by absence.
+  if(!baselineEnabled(env))return json({error:'Letterboxd baseline import is disabled',code:'import_disabled'},409);
+  if(!factsEnabled(env))return json({error:'Letterboxd baseline import requires LETTERBOXD_FACTS=on',code:'facts_disabled'},409);
   if(request.method!=='POST')return json({error:'Method not allowed'},405);
   if(!/^application\/json\b/i.test(request.headers.get('Content-Type')||''))return json({error:'Expected application/json'},415);
   let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}
