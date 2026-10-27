@@ -40,10 +40,10 @@ const endpoint='https://site.example',now=Date.parse('2026-10-27T00:00:00Z');
 const scratch=await mkdtemp(path.join(os.tmpdir(),'iptv-lb-chunks-'));
 try{
  // n invented films, all watched, every third rated and every fourth on the watchlist; ids equal codes and the stored title
- // and year corroborate them, so every film is accepted.
+ // and year corroborate them, so every film is accepted. A snapshot storing fewer films (stored < n) accepts fewer.
  const lid=i=>'F'+String(i).padStart(4,'0');
- async function fixture(n){
-  const dir=path.join(scratch,'fixture-'+n);await mkdir(path.join(dir,'snapshot','objects'),{recursive:true});
+ async function fixture(n,stored=n){
+  const dir=path.join(scratch,'fixture-'+n+'-'+stored);await mkdir(path.join(dir,'snapshot','objects'),{recursive:true});
   const csv=(header,rows)=>header+'\n'+rows.map(row=>row.join(',')).join('\n')+'\n',films=Array.from({length:n},(_,i)=>i);
   const files={
    'watched.csv':csv('Date,Name,Year,Letterboxd URI',films.map(i=>['2024-05-01','Invented Film '+i,'2000','https://boxd.it/'+lid(i)])),
@@ -52,7 +52,7 @@ try{
    'diary.csv':csv('Date,Name,Year,Letterboxd URI,Rating,Watched Date',[]),
   };
   const zipPath=path.join(dir,'letterboxd-demo-user-2026-10-26-13-48-utc.zip');await writeFile(zipPath,zip(files));
-  const watchlist={films:films.map(i=>({id:lid(i),title:'Invented Film '+i,original:'Invented Film '+i,year:2000}))},bytes=Buffer.from(JSON.stringify(watchlist)),file='objects/'+sha256(Buffer.from('watchlist.json'))+'.bin';
+  const watchlist={films:films.slice(0,stored).map(i=>({id:lid(i),title:'Invented Film '+i,original:'Invented Film '+i,year:2000}))},bytes=Buffer.from(JSON.stringify(watchlist)),file='objects/'+sha256(Buffer.from('watchlist.json'))+'.bin';
   await writeFile(path.join(dir,'snapshot',file),bytes);
   await writeFile(path.join(dir,'snapshot','manifest.json'),JSON.stringify({schemaVersion:1,source:{kind:'cloudflare-r2-s3',bucket:'iptv',readOnly:true},status:'consistent_fenced',noGoReasons:[],fence:{ok:true,keys:[]},changes:[],baselineIdentity:{programmeRunId:'run-test'},objects:[{key:'watchlist.json',file,size:bytes.length,sha256:sha256(bytes)}]}));
   return {zip:zipPath,snapshot:path.join(dir,'snapshot')};
@@ -84,13 +84,29 @@ try{
  }
  // The default size: 2·50 and 2·50 + 1 films.
  for(const [n,expected] of [[100,[50,50]],[101,[50,50,1]]]){fx=await fixture(n);await plan({...fx,output:out('default-'+n),now});assert.deepEqual(await chunkSizes(out('default-'+n)),expected);}
- // A plan is deterministic: the same archive, snapshot and size give the same plan; another size in the same directory is refused.
+ // A plan is deterministic: the same archive, snapshot and size give the same files in two new empty directories.
  fx=await fixture(7);
- await plan({...fx,output:out('again'),chunkSize:3,now});const firstPlan=fs.readFileSync(path.join(out('again'),'plan.jsonl'),'utf8');
- await plan({...fx,output:out('again'),chunkSize:3,now});assert.equal(fs.readFileSync(path.join(out('again'),'plan.jsonl'),'utf8'),firstPlan);
- await assert.rejects(plan({...fx,output:out('again'),chunkSize:4,now}),/another archive or chunk size/);
- await assert.rejects(plan({...(await fixture(6)),output:out('again'),chunkSize:3,now}),/another archive or chunk size/);
- assert.equal(fs.readFileSync(path.join(out('again'),'plan.jsonl'),'utf8'),firstPlan,'the refused re-plan left the plan alone');
+ await plan({...fx,output:out('again-1'),chunkSize:3,now});await plan({...fx,output:out('again-2'),chunkSize:3,now});
+ for(const name of ['origin.json','plan.jsonl','report.json'])assert.equal(fs.readFileSync(path.join(out('again-2'),name),'utf8'),fs.readFileSync(path.join(out('again-1'),name),'utf8'),name);
+ // A directory holds one plan for good: no re-plan over it, whatever the archive, size or snapshot, and whatever it holds.
+ {
+  const output=out('occupied'),b=bucket(),env=gates(b);await plan({...fx,output,chunkSize:3,now});
+  await remote({mode:'commit',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now});
+  await remote({mode:'rollback',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now,fromChunk:2});
+  const names=['origin.json','plan.jsonl','report.json','commit.json','rollback.json'],before=Object.fromEntries(names.map(name=>[name,fs.readFileSync(path.join(output,name),'utf8')]));
+  const fewer=await fixture(7,5);// the same archive bytes, a snapshot that accepts five films
+  assert.equal(sha256(fs.readFileSync(fewer.zip)),sha256(fs.readFileSync(fx.zip)));
+  for(const attempt of [{...fewer,chunkSize:3},{...fx,chunkSize:3},{...fx,chunkSize:4},{...(await fixture(6)),chunkSize:3}])
+   await assert.rejects(plan({...attempt,output,now}),/already holds a plan or its results \(origin\.json\)/);
+  for(const name of names)assert.equal(fs.readFileSync(path.join(output,name),'utf8'),before[name],name+' is untouched');
+  assert.deepEqual(await chunkSizes(output),[3,3,1],'the original plan still loads');
+  // The plan of the other snapshot goes to its own new directory and differs.
+  await plan({...fewer,output:out('fewer'),chunkSize:3,now});assert.deepEqual((await loadVerifiedPlan({zip:fewer.zip,output:out('fewer'),now})).chunks.map(items=>items.length),[3,2]);
+  // A directory holding only a result file, or a stray plan file, is occupied too.
+  for(const name of ['validate.json','plan.jsonl']){const dir=out('stray-'+name);await mkdir(dir);await writeFile(path.join(dir,name),'{}');await assert.rejects(plan({...fx,output:dir,chunkSize:3,now}),new RegExp('\\('+name.replace('.','\\.')+'\\)'));assert.equal(fs.existsSync(path.join(dir,'origin.json')),false);}
+  run=cli(['plan','--zip',fewer.zip,'--snapshot',fewer.snapshot,'--output',output,'--chunk-size','3']);
+  assert.equal(run.status,2);assert.match(run.stderr,/plan into a new empty directory/);
+ }
 
  // One plan never mixes sizes: lines moved to other chunks (with a matching plan hash) or a forged size are refused.
  {
@@ -185,7 +201,7 @@ try{
   assert.equal(summary.failed,null);assert.deepEqual(seen,[0,1,2]);
   const putsBefore=b.puts;summary=await remote({mode:'commit',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now});
   assert.equal(b.puts,putsBefore,'a legacy rerun is a replay');
-  await assert.rejects(plan({...fx,output,now}),/another archive or chunk size/);
+  await assert.rejects(plan({...fx,output,now}),/already holds a plan/);
   const fresh=out('legacy-resized');await plan({...fx,output:fresh,now});
   summary=await remote({mode:'commit',zip:fx.zip,output:fresh,endpoint,fetchImpl:workerFetch(env),env:{},now});
   assert.deepEqual([summary.failed.chunk,summary.failed.status,summary.failed.error],[0,409,'chunk_conflict']);assert.equal(b.puts,putsBefore);
@@ -193,4 +209,4 @@ try{
   assert.equal(summary.failed,null);assert.deepEqual(summary.totals,{restored:facts(401),superseded:0});
  }
 }finally{await rm(scratch,{recursive:true,force:true});}
-console.log('Letterboxd baseline chunks: bounded plan chunk size, CLI size rules, chunk boundaries, one size per plan and directory, network error and unreadable answer reported without a crash, timeout mid-chunk resumed from the intent, replay and unchanged reruns, bounded runs, resumable reverse rollback, legacy 200-film plans kept and not mixed passed');
+console.log('Letterboxd baseline chunks: bounded plan chunk size, CLI size rules, chunk boundaries, one size per plan, one plan per directory with nothing overwritten, network error and unreadable answer reported without a crash, timeout mid-chunk resumed from the intent, replay and unchanged reruns, bounded runs, resumable reverse rollback, legacy 200-film plans kept and not mixed passed');

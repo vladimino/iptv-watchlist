@@ -4,7 +4,7 @@
 // route; each first re-checks the archive and the plan against origin.json. Film names, codes and ratings stay in the
 // private output directory; standard output carries counts only.
 import {createHash} from 'node:crypto';
-import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {access,mkdir,readFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {EXPORT_FILES,parseExport} from '../src/letterboxd-export.js';
@@ -48,6 +48,8 @@ export function checkChunkSize(value){
  if(!Number.isInteger(value)||value<1||value>MAX_CHUNK_SIZE)throw new ImportError('--chunk-size must be an integer 1..'+MAX_CHUNK_SIZE,2);
  return value;
 }
+// Every file a plan's directory can hold: the plan itself and the results of the remote steps.
+const OUTPUT_FILES=['origin.json','plan.jsonl','report.json','validate.json','commit.json','rollback.json'];
 async function readOrigin(outputPath){
  let text;try{text=await readFile(path.join(outputPath,'origin.json'),'utf8');}catch{return null;}
  try{return JSON.parse(text);}catch{throw new ImportError('origin.json is not valid JSON',3);}
@@ -63,10 +65,9 @@ export async function plan({zip,snapshot,output,generatedAt=null,chunkSize=DEFAU
  checkChunkSize(chunkSize);
  const zipPath=await assertOutsideRepository(zip,'--zip'),snapshotPath=await assertOutsideRepository(snapshot,'--snapshot'),outputPath=await assertOutsideRepository(output,'--output');
  const archive=await readArchive(zipPath,generatedAt,now);
- // A directory holds one plan: re-planning over another archive or another chunk size would orphan the receipts the
- // earlier plan can still validate, replay or roll back.
- const previous=await readOrigin(outputPath);
- if(previous&&(previous.archiveSha256!==archive.archiveSha256||originChunkSize(previous)!==chunkSize))throw new ImportError('--output already holds a plan of another archive or chunk size; plan into a new directory',2);
+ // A directory holds one plan for good. Re-planning over it, even with the same archive and size, can change the accepted
+ // films (another snapshot, other matching) and would destroy the only copy of the plan its receipts were made from.
+ for(const name of OUTPUT_FILES)if(await access(path.join(outputPath,name)).then(()=>true,()=>false))throw new ImportError('--output already holds a plan or its results ('+name+'); plan into a new empty directory',2);
  const texts=Object.fromEntries(Object.entries(EXPORT_FILES).map(([kind,name])=>[kind,archive.files[name]?.text??null]));
  const parsed=parseExport(texts),loaded=await loadSnapshot(snapshotPath),matches=matchExport(parsed.films,buildIndex(loaded.objects));
  const films=new Map(parsed.films.map(film=>[film.code,film])),byStatus={},items=[];
@@ -77,9 +78,10 @@ export async function plan({zip,snapshot,output,generatedAt=null,chunkSize=DEFAU
  const count=predicate=>items.filter(predicate).length;
  const report={schemaVersion:1,tool:'letterboxd-baseline-import',privacy:'Aggregate counts only. Per-film rows are in the private plan.jsonl next to this file.',generatedAtSource:origin.generatedAtSource,chunkSize,invalidRows:parsed.invalidRows.length,matchStatus:byStatus,planned:{films:items.length,chunks:origin.chunks,watched:count(item=>item.facts.watched),rated:count(item=>typeof item.facts.rating==='number'),notRated:count(item=>item.facts.rating===null),watchlist:count(item=>item.facts.watchlist)},unresolved:matches.length-items.length};
  await mkdir(outputPath,{recursive:true,mode:0o700});
- await writeFile(path.join(outputPath,'origin.json'),JSON.stringify(origin,null,1)+'\n',{mode:0o600});
- await writeFile(path.join(outputPath,'plan.jsonl'),planText,{mode:0o600});
- await writeFile(path.join(outputPath,'report.json'),JSON.stringify(report,null,1)+'\n',{mode:0o600});
+ // Create-only, so a concurrent plan into the same directory cannot overwrite either.
+ await writeFile(path.join(outputPath,'plan.jsonl'),planText,{mode:0o600,flag:'wx'});
+ await writeFile(path.join(outputPath,'report.json'),JSON.stringify(report,null,1)+'\n',{mode:0o600,flag:'wx'});
+ await writeFile(path.join(outputPath,'origin.json'),JSON.stringify(origin,null,1)+'\n',{mode:0o600,flag:'wx'});
  return report;
 }
 
