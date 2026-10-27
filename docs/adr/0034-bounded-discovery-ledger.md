@@ -1,9 +1,9 @@
 # ADR 0034: Bound the active discovery ledger and keep history in a segmented archive
 
-**Status:** Proposed  
-**Original decision date:** 2026-10-27 (proposed)  
+**Status:** Accepted  
+**Original decision date:** 2026-10-27  
 **Recorded at:** 2026-10-27  
-**Approval source:** pending owner review of this ADR ([AIR-219](https://trello.com/c/AKHjmhXR)); the [AIR-211 review](https://github.com/vladimino/iptv-watchlist/pull/164) asked for a bounded active ledger that keeps resolution and history and lets earlier candidates return safely, without automatic pruning  
+**Approval source:** explicit owner acceptance on 2026-10-27 after independent technical review and merge of [AIR-219](https://trello.com/c/AKHjmhXR); the [AIR-211 review](https://github.com/vladimino/iptv-watchlist/pull/164) asked for a bounded active ledger that keeps resolution and history and lets earlier candidates return safely, without automatic pruning  
 **Related work:** [AIR-211](https://trello.com/c/UHYcomzg) ([evidence](../evidence/epg-memory-pressure-2026-10-27.md)), [AIR-199](https://trello.com/c/GCfptxao), [AIR-212](https://trello.com/c/c1NQNHRa) ([ADR 0030](0030-discovery-queued-at-publication.md)), implementation [AIR-220](https://trello.com/c/uPvMc5ww), rehearsal [AIR-221](https://trello.com/c/9ZiVygrd), rollout [AIR-222](https://trello.com/c/9Y4G9DG6)  
 **Supersedes:** None. Refines [ADR 0007](0007-persistent-discovery-evidence.md) (persistent observations) without removing any of its guarantees.  
 **Superseded by:** None
@@ -232,7 +232,7 @@ The size budget for the active ledger (10–15 MB was the working hypothesis) is
 
 ## Evidence
 
-- **Original decision:** pending owner approval on the AIR-219 delivery. The first independent review ([PR #167](https://github.com/vladimino/iptv-watchlist/pull/167)) raised the crash consistency, payload parity and unique counts, rollback, fencing and snapshot consistency points addressed above. A re-review raised the duplicate count after an aborted archive write, addressed by reconciling `alsoArchived` against the fenced starting manifest.
+- **Original decision:** explicit owner acceptance on 2026-10-27, following [AIR-219](https://trello.com/c/AKHjmhXR) delivery. The first independent review ([PR #167](https://github.com/vladimino/iptv-watchlist/pull/167)) raised the crash consistency, payload parity and unique counts, rollback, fencing and snapshot consistency points addressed above. A re-review raised the duplicate count after an aborted archive write, addressed by reconciling `alsoArchived` against the fenced starting manifest.
 - **Implementation:** not started ([AIR-220](https://trello.com/c/uPvMc5ww))
 - **Dated verification:** the [AIR-211 report](../evidence/epg-memory-pressure-2026-10-27.md) (sizes and growth on 27 October 2026, offline replay). No implementation has been measured.
 - **Uncertainty:**
