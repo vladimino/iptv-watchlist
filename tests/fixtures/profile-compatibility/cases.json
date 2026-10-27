@@ -1,0 +1,181 @@
+{
+ "specVersion": 1,
+ "decision": "docs/adr/0031-selective-prediction-profile-compatibility.md",
+ "note": "Pure specification fixtures. Synthetic hashes and features only; no production record. They state expected outcomes for the shared compatibility evaluator and the publication validator; they are not an implementation.",
+ "vocabulary": {
+  "scopes": ["identity","selective","global"],
+  "selectorKinds": ["mechanic","execution","genre"],
+  "modes": ["strict","selective"],
+  "outcomes": ["current","compatible","stale"],
+  "reasons": {"current":["exact"],"compatible":["profile_unaffected","content_identical"],"stale":["fingerprint_not_current","fingerprint_changed","prompt_changed","profile_changed","profile_provenance_mismatch","profile_ahead","profile_outside_lineage","profile_chain_broken","profile_impact_unknown","profile_global_change","profile_impacted","film_features_unknown"]},
+  "publication": {"decisions":["accept","reject"],"codes":["impact_missing","impact_schema_unknown","from_mismatch","scope_unknown","selector_kind_unknown","selector_invalid","changed_fields_mismatch","global_field_requires_global","field_not_covered","genre_floor_missing","identity_requires_same_hash","selective_requires_selectors","selective_requires_owner_approval","approval_mismatch"]},
+  "genres": ["action","adventure","animation","comedy","crime","documentary","drama","family","fantasy","history","horror","music","mystery","romance","science_fiction","thriller","tv_movie","war","western"],
+  "genreAliases": {"боевик":"action","приключения":"adventure","мультфильм":"animation","комедия":"comedy","криминал":"crime","документальный":"documentary","драма":"drama","семейный":"family","фэнтези":"fantasy","история":"history","исторический":"history","ужасы":"horror","музыка":"music","музыкальный":"music","детектив":"mystery","мелодрама":"romance","фантастика":"science_fiction","триллер":"thriller","телевизионный фильм":"tv_movie","телефильм":"tv_movie","военный":"war","вестерн":"western"},
+  "genreDomains": {"comedy_stupidity_for_gags":["comedy"],"comedy_gross_out":["comedy"],"horror_rule_consistency":["horror"],"horror_threat_causality":["horror"],"scifi_plot_driven_concept":["science_fiction"],"adventure_discovery_strength":["adventure"],"action_readability":["action"],"hero_vulnerability":["action"]}
+ },
+ "fieldRules": {
+  "ratingScale": {"scope":"global"},
+  "calibration": {"scope":"global"},
+  "anchorFilms": {"scope":"global"},
+  "genrePreferences": {"kinds":["genre"]},
+  "comedyPreferences": {"kinds":["genre","execution"],"dimensions":["comedy_stupidity_for_gags","comedy_gross_out"],"genreFloor":["comedy"]},
+  "horrorPreferences": {"kinds":["genre","execution"],"dimensions":["horror_rule_consistency","horror_threat_causality"],"genreFloor":["horror"]},
+  "scifiAdventurePreferences": {"kinds":["genre","execution"],"dimensions":["scifi_plot_driven_concept","adventure_discovery_strength"],"genreFloor":["science_fiction","adventure"]},
+  "actionPreferences": {"kinds":["genre","execution"],"dimensions":["action_readability","hero_vulnerability"],"genreFloor":["action"]},
+  "characterLogic": {"kinds":["execution"],"dimensions":["decision_logic","protagonist_competence","opposition_competence","problem_solving"]},
+  "pace": {"kinds":["execution"],"dimensions":["pace","plot_engine"]},
+  "payoffEnding": {"kinds":["execution"],"dimensions":["payoff","ending_quality"]},
+  "positiveSignals": {"kinds":["mechanic","execution","genre"]},
+  "negativeSignals": {"kinds":["mechanic","execution","genre"]},
+  "hardSkips": {"kinds":["mechanic","execution","genre"]}
+ },
+ "lineages": {
+  "mechanic": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist","scam"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-1","declarationSha256":"01591c88b63040e3b7dfb3f28262a6f6afaaf47e04d2354c0bd18f88c92a3b9e"}}}
+  ],
+  "execution": [
+   {"version":4,"profileHash":"h4","changeImpact":null},
+   {"version":5,"profileHash":"h5","changeImpact":{"impactSchemaVersion":1,"from":{"version":4,"profileHash":"h4"},"scope":"selective","changedFields":["pace","characterLogic"],"selectors":[{"kind":"execution","dimension":"pace","values":["slow"]},{"kind":"execution","dimension":"opposition_competence","values":["low"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-2","declarationSha256":"47c40ca596ad287effdf8a3ed5eab1d3d94d84b89bdc513b9fea07e4093510be"}}}
+  ],
+  "genre": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2g","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["horrorPreferences"],"selectors":[{"kind":"genre","values":["horror"]},{"kind":"execution","dimension":"horror_rule_consistency","values":["weak","mixed"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-3","declarationSha256":"5481138dce1d04c730103bae5641e7d851ab4cd1260bfdaf8f60d669653b246b"}}}
+  ],
+  "global": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2c","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"global","changedFields":["calibration"],"selectors":[]}}
+  ],
+  "legacy": [
+   {"version":6,"profileHash":"h6","changeImpact":null},
+   {"version":7,"profileHash":"h7","changeImpact":null}
+  ],
+  "unknownKind": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2m","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mood","values":["tense"]}]}}
+  ],
+  "unknownSchema": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2s","changeImpact":{"impactSchemaVersion":2,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist"]}]}}
+  ],
+  "transitive": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist","scam"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-4","declarationSha256":"01591c88b63040e3b7dfb3f28262a6f6afaaf47e04d2354c0bd18f88c92a3b9e"}}},
+   {"version":4,"profileHash":"h4t","changeImpact":{"impactSchemaVersion":1,"from":{"version":2,"profileHash":"h2"},"scope":"selective","changedFields":["horrorPreferences"],"selectors":[{"kind":"genre","values":["horror"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-5","declarationSha256":"913dc0701661c2993087a2dda5922d1b78b4bdccdbeede1e30e48e2bfd72d16a"}}},
+   {"version":5,"profileHash":"h4t","changeImpact":{"impactSchemaVersion":1,"from":{"version":4,"profileHash":"h4t"},"scope":"identity","changedFields":[],"selectors":[]}}
+  ],
+  "transitiveGlobal": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist","scam"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-6","declarationSha256":"01591c88b63040e3b7dfb3f28262a6f6afaaf47e04d2354c0bd18f88c92a3b9e"}}},
+   {"version":3,"profileHash":"h3x","changeImpact":{"impactSchemaVersion":1,"from":{"version":2,"profileHash":"h2"},"scope":"global","changedFields":["anchorFilms"],"selectors":[]}},
+   {"version":4,"profileHash":"h4x","changeImpact":{"impactSchemaVersion":1,"from":{"version":3,"profileHash":"h3x"},"scope":"selective","changedFields":["horrorPreferences"],"selectors":[{"kind":"genre","values":["horror"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-7","declarationSha256":"7af4a127cc99d8048bfc239f504ed95f971025a04a883805e2e1e174c5cdc8ab"}}}
+  ],
+  "broken": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-8","declarationSha256":"6c09395ea640e25f070e64496a40a1506644ecc74918602a3a0a557a1b223aa0"}}},
+   {"version":3,"profileHash":"h3b","changeImpact":{"impactSchemaVersion":1,"from":{"version":2,"profileHash":"h2-other"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["scam"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-9","declarationSha256":"fd20c65f419d0f21072db83d437ee1810656512a920b6da98e918138a1791275"}}}
+  ],
+  "rollback": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2g","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["horrorPreferences"],"selectors":[{"kind":"genre","values":["horror"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-10","declarationSha256":"fe077769fbe4195db2691773922b3dae9e5d909331a841bdd66a3f39b453c3ef"}}},
+   {"version":3,"profileHash":"h1","changeImpact":{"impactSchemaVersion":1,"from":{"version":2,"profileHash":"h2g"},"scope":"selective","changedFields":["horrorPreferences"],"selectors":[{"kind":"genre","values":["horror"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-11","declarationSha256":"06e50dd46c71fecabc26c0bf561b92004d045cb87091a60e6b4c7304b5658c64"}}}
+  ],
+  "positiveSignalsHorrorRule": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2p","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"execution","dimension":"horror_rule_consistency","values":["weak"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-12","declarationSha256":"f61252c0398e93cc08ea5e6ee53c88d6066ff8e33634efe7cc913f7657b1d535"}}}
+  ],
+  "unapproved": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2u","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist"]}]}}
+  ],
+  "approvalMismatch": [
+   {"version":1,"profileHash":"h1","changeImpact":null},
+   {"version":2,"profileHash":"h2w","changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist","scam"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-13","declarationSha256":"932af7d91bfc2a8aed098062ad2b31260c8e72a464b2556a7f7805767e04e37f"}}}
+  ]
+ },
+ "features": {
+  "investigationDrama": {"plotMechanics":["investigation"],"execution":{"pace":"medium","opposition_competence":"high"},"genres":["Драма"]},
+  "heistThriller": {"plotMechanics":["heist","mystery"],"execution":{"pace":"fast","opposition_competence":"mixed"},"genres":["Триллер"]},
+  "noMechanicsField": {"execution":{"pace":"fast"},"genres":["Драма"]},
+  "slowDrama": {"plotMechanics":[],"execution":{"pace":"slow","opposition_competence":"high"},"genres":["Драма"]},
+  "paceUnknown": {"plotMechanics":[],"execution":{"pace":"unknown","opposition_competence":"high"},"genres":["Драма"]},
+  "oppositionNotApplicable": {"plotMechanics":["survival"],"execution":{"pace":"fast","opposition_competence":"not_applicable"},"genres":["Приключения"]},
+  "horrorFilm": {"plotMechanics":["survival"],"execution":{"pace":"medium","horror_rule_consistency":"strong"},"genres":["ужасы","Триллер"]},
+  "noGenres": {"plotMechanics":[],"execution":{"pace":"medium"},"genres":[]},
+  "unmappedGenre": {"plotMechanics":[],"execution":{"pace":"medium"},"genres":["Аниме"]},
+  "dramaWeakHorrorRule": {"plotMechanics":[],"execution":{"pace":"medium","horror_rule_consistency":"weak"},"genres":["Драма"]},
+  "horrorWithoutHorrorDimension": {"plotMechanics":["survival"],"execution":{"pace":"medium"},"genres":["Ужасы"]},
+  "dramaWithoutHorrorDimension": {"plotMechanics":[],"execution":{"pace":"medium"},"genres":["Драма"]},
+  "noGenresWithoutHorrorDimension": {"plotMechanics":[],"execution":{"pace":"medium"},"genres":[]},
+  "unmappedGenreWithoutHorrorDimension": {"plotMechanics":[],"execution":{"pace":"medium"},"genres":["Аниме"]}
+ },
+ "cases": [
+  {"id":"exact-current","category":"exact","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":2,"tasteProfileHash":"h2"},"features":"heistThriller","expected":{"outcome":"current","reason":"exact","links":0}},
+  {"id":"mechanic-unaffected","category":"mechanic","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"compatible","reason":"profile_unaffected","links":1}},
+  {"id":"mechanic-affected","category":"mechanic","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"heistThriller","expected":{"outcome":"stale","reason":"profile_impacted","links":1}},
+  {"id":"mechanic-field-missing","category":"unknown","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"noMechanicsField","expected":{"outcome":"stale","reason":"film_features_unknown","links":1}},
+  {"id":"execution-affected","category":"execution","mode":"selective","lineage":"execution","prediction":{"tasteProfileVersion":4,"tasteProfileHash":"h4"},"features":"slowDrama","expected":{"outcome":"stale","reason":"profile_impacted","links":1}},
+  {"id":"execution-unaffected","category":"execution","mode":"selective","lineage":"execution","prediction":{"tasteProfileVersion":4,"tasteProfileHash":"h4"},"features":"investigationDrama","expected":{"outcome":"compatible","reason":"profile_unaffected","links":1}},
+  {"id":"execution-value-unknown","category":"unknown","mode":"selective","lineage":"execution","prediction":{"tasteProfileVersion":4,"tasteProfileHash":"h4"},"features":"paceUnknown","expected":{"outcome":"stale","reason":"film_features_unknown","links":1}},
+  {"id":"execution-not-applicable","category":"execution","mode":"selective","lineage":"execution","prediction":{"tasteProfileVersion":4,"tasteProfileHash":"h4"},"features":"oppositionNotApplicable","expected":{"outcome":"compatible","reason":"profile_unaffected","links":1}},
+  {"id":"genre-dimension-absent-non-genre-film","category":"genre","mode":"selective","lineage":"genre","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"compatible","reason":"profile_unaffected","links":1}},
+  {"id":"genre-affected","category":"genre","mode":"selective","lineage":"genre","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"horrorFilm","expected":{"outcome":"stale","reason":"profile_impacted","links":1}},
+  {"id":"genre-dimension-value-affected","category":"genre","mode":"selective","lineage":"genre","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"dramaWeakHorrorRule","expected":{"outcome":"stale","reason":"profile_impacted","links":1}},
+  {"id":"genre-list-empty","category":"unknown","mode":"selective","lineage":"genre","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"noGenres","expected":{"outcome":"stale","reason":"film_features_unknown","links":1}},
+  {"id":"genre-unmapped","category":"unknown","mode":"selective","lineage":"genre","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"unmappedGenre","expected":{"outcome":"stale","reason":"film_features_unknown","links":1}},
+  {"id":"global-change","category":"global","mode":"selective","lineage":"global","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_global_change","links":1}},
+  {"id":"legacy-version-without-impact","category":"unknown","mode":"selective","lineage":"legacy","prediction":{"tasteProfileVersion":6,"tasteProfileHash":"h6"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_impact_unknown","links":1}},
+  {"id":"unknown-selector-kind","category":"unknown","mode":"selective","lineage":"unknownKind","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_impact_unknown","links":1}},
+  {"id":"unknown-impact-schema","category":"unknown","mode":"selective","lineage":"unknownSchema","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_impact_unknown","links":1}},
+  {"id":"transitive-unaffected","category":"transitive","mode":"selective","lineage":"transitive","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"compatible","reason":"profile_unaffected","links":3}},
+  {"id":"transitive-second-link-affects","category":"transitive","mode":"selective","lineage":"transitive","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"horrorFilm","expected":{"outcome":"stale","reason":"profile_impacted","links":3}},
+  {"id":"transitive-from-middle","category":"transitive","mode":"selective","lineage":"transitive","prediction":{"tasteProfileVersion":2,"tasteProfileHash":"h2"},"features":"heistThriller","expected":{"outcome":"compatible","reason":"profile_unaffected","links":2}},
+  {"id":"transitive-global-in-middle","category":"global","mode":"selective","lineage":"transitiveGlobal","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_global_change","links":3}},
+  {"id":"transitive-after-global","category":"transitive","mode":"selective","lineage":"transitiveGlobal","prediction":{"tasteProfileVersion":3,"tasteProfileHash":"h3x"},"features":"investigationDrama","expected":{"outcome":"compatible","reason":"profile_unaffected","links":1}},
+  {"id":"chain-broken","category":"unknown","mode":"selective","lineage":"broken","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_chain_broken","links":2}},
+  {"id":"rollback-content-identical","category":"rollback","mode":"selective","lineage":"rollback","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"horrorFilm","expected":{"outcome":"compatible","reason":"content_identical","links":2}},
+  {"id":"rollback-prediction-under-reverted-rules","category":"rollback","mode":"selective","lineage":"rollback","prediction":{"tasteProfileVersion":2,"tasteProfileHash":"h2g"},"features":"horrorFilm","expected":{"outcome":"stale","reason":"profile_impacted","links":1}},
+  {"id":"rollback-unaffected-film","category":"rollback","mode":"selective","lineage":"rollback","prediction":{"tasteProfileVersion":2,"tasteProfileHash":"h2g"},"features":"investigationDrama","expected":{"outcome":"compatible","reason":"profile_unaffected","links":1}},
+  {"id":"strict-mode","category":"rollback","mode":"strict","lineage":"mechanic","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_changed","links":0}},
+  {"id":"strict-mode-exact","category":"exact","mode":"strict","lineage":"mechanic","prediction":{"tasteProfileVersion":2,"tasteProfileHash":"h2"},"features":"investigationDrama","expected":{"outcome":"current","reason":"exact","links":0}},
+  {"id":"provenance-mismatch","category":"unknown","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1-forged"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_provenance_mismatch","links":0}},
+  {"id":"same-version-other-hash","category":"unknown","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":2,"tasteProfileHash":"h2-other"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_provenance_mismatch","links":0}},
+  {"id":"outside-lineage","category":"unknown","mode":"selective","lineage":"transitive","prediction":{"tasteProfileVersion":3,"tasteProfileHash":"h3"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_outside_lineage","links":0}},
+  {"id":"prediction-ahead","category":"unknown","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":9,"tasteProfileHash":"h9"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_ahead","links":0}},
+  {"id":"fingerprint-changed","category":"non-profile","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1","fingerprintHash":"f-old"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"fingerprint_changed","links":0}},
+  {"id":"fingerprint-not-current","category":"non-profile","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":2,"tasteProfileHash":"h2"},"fingerprint":{"invalidatedAt":"2026-10-27T00:00:00.000Z"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"fingerprint_not_current","links":0}},
+  {"id":"prompt-changed","category":"non-profile","mode":"selective","lineage":"mechanic","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1","predictionPromptVersion":0},"features":"investigationDrama","expected":{"outcome":"stale","reason":"prompt_changed","links":0}},
+  {"id":"absent-genre-dimension-in-domain","category":"unknown","mode":"selective","lineage":"positiveSignalsHorrorRule","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"horrorWithoutHorrorDimension","expected":{"outcome":"stale","reason":"film_features_unknown","links":1}},
+  {"id":"absent-genre-dimension-proved-outside-domain","category":"genre","mode":"selective","lineage":"positiveSignalsHorrorRule","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"dramaWithoutHorrorDimension","expected":{"outcome":"compatible","reason":"profile_unaffected","links":1}},
+  {"id":"absent-genre-dimension-genres-unknown","category":"unknown","mode":"selective","lineage":"positiveSignalsHorrorRule","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"noGenresWithoutHorrorDimension","expected":{"outcome":"stale","reason":"film_features_unknown","links":1}},
+  {"id":"absent-genre-dimension-genre-unmapped","category":"unknown","mode":"selective","lineage":"positiveSignalsHorrorRule","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"unmappedGenreWithoutHorrorDimension","expected":{"outcome":"stale","reason":"film_features_unknown","links":1}},
+  {"id":"present-genre-dimension-reached-without-genre-selector","category":"genre","mode":"selective","lineage":"positiveSignalsHorrorRule","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"dramaWeakHorrorRule","expected":{"outcome":"stale","reason":"profile_impacted","links":1}},
+  {"id":"selective-link-without-approval","category":"unknown","mode":"selective","lineage":"unapproved","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_impact_unknown","links":1}},
+  {"id":"selective-link-approval-mismatch","category":"unknown","mode":"selective","lineage":"approvalMismatch","prediction":{"tasteProfileVersion":1,"tasteProfileHash":"h1"},"features":"investigationDrama","expected":{"outcome":"stale","reason":"profile_impact_unknown","links":1}}
+ ],
+ "defaults": {"prediction":{"fingerprintHash":"f1","fingerprintSchemaVersion":1,"predictionPromptVersion":1},"fingerprint":{"fingerprintHash":"f1","fingerprintSchemaVersion":1,"invalidatedAt":null}},
+ "publications": [
+  {"id":"accept-mechanic","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["positiveSignals"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-14","declarationSha256":"6c09395ea640e25f070e64496a40a1506644ecc74918602a3a0a557a1b223aa0"}},"expected":{"decision":"accept"}},
+  {"id":"accept-horror","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2g"},"actualChangedFields":["horrorPreferences"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["horrorPreferences"],"selectors":[{"kind":"genre","values":["horror"]},{"kind":"execution","dimension":"horror_rule_consistency","values":["weak"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-15","declarationSha256":"83e592bb7ce13f509cc653be17dcae9b4ba0093767cb2d3dcd1cde8f95ba3e97"}},"expected":{"decision":"accept"}},
+  {"id":"accept-global-declared-for-selective-field","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"global","changedFields":["pace"],"selectors":[]},"expected":{"decision":"accept"}},
+  {"id":"accept-identity","previous":{"version":4,"profileHash":"h4"},"next":{"version":5,"profileHash":"h4"},"actualChangedFields":[],"changeImpact":{"impactSchemaVersion":1,"from":{"version":4,"profileHash":"h4"},"scope":"identity","changedFields":[],"selectors":[]},"expected":{"decision":"accept"}},
+  {"id":"reject-missing-impact","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":null,"expected":{"decision":"reject","code":"impact_missing"}},
+  {"id":"reject-unknown-schema","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":2,"from":{"version":1,"profileHash":"h1"},"scope":"global","changedFields":["pace"],"selectors":[]},"expected":{"decision":"reject","code":"impact_schema_unknown"}},
+  {"id":"reject-from-mismatch","previous":{"version":3,"profileHash":"h3"},"next":{"version":4,"profileHash":"h4"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":2,"profileHash":"h2"},"scope":"global","changedFields":["pace"],"selectors":[]},"expected":{"decision":"reject","code":"from_mismatch"}},
+  {"id":"reject-unknown-scope","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"partial","changedFields":["pace"],"selectors":[]},"expected":{"decision":"reject","code":"scope_unknown"}},
+  {"id":"reject-unknown-kind","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["positiveSignals"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mood","values":["tense"]}]},"expected":{"decision":"reject","code":"selector_kind_unknown"}},
+  {"id":"reject-unknown-mechanic-value","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["positiveSignals"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["car_chase"]}]},"expected":{"decision":"reject","code":"selector_invalid"}},
+  {"id":"reject-unknown-value-in-execution","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["pace"],"selectors":[{"kind":"execution","dimension":"pace","values":["unknown"]}]},"expected":{"decision":"reject","code":"selector_invalid"}},
+  {"id":"reject-changed-fields-mismatch","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace","calibration"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["pace"],"selectors":[{"kind":"execution","dimension":"pace","values":["slow"]}]},"expected":{"decision":"reject","code":"changed_fields_mismatch"}},
+  {"id":"reject-global-field-as-selective","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["calibration"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["calibration"],"selectors":[{"kind":"mechanic","values":["heist"]}]},"expected":{"decision":"reject","code":"global_field_requires_global"}},
+  {"id":"reject-field-not-covered","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["pace"],"selectors":[{"kind":"mechanic","values":["heist"]}]},"expected":{"decision":"reject","code":"field_not_covered"}},
+  {"id":"reject-dimension-not-permitted-for-field","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["pace"],"selectors":[{"kind":"execution","dimension":"payoff","values":["weak"]}]},"expected":{"decision":"reject","code":"field_not_covered"}},
+  {"id":"reject-genre-floor-missing","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["horrorPreferences"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["horrorPreferences"],"selectors":[{"kind":"execution","dimension":"horror_threat_causality","values":["weak"]}]},"expected":{"decision":"reject","code":"genre_floor_missing"}},
+  {"id":"reject-identity-with-change","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"identity","changedFields":[],"selectors":[]},"expected":{"decision":"reject","code":"identity_requires_same_hash"}},
+  {"id":"reject-selective-without-selectors","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["pace"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["pace"],"selectors":[]},"expected":{"decision":"reject","code":"selective_requires_selectors"}},
+  {"id":"reject-selective-without-approval","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["positiveSignals"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist"]}]},"expected":{"decision":"reject","code":"selective_requires_owner_approval"}},
+  {"id":"reject-approval-for-other-declaration","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["positiveSignals"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist","scam"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-16","declarationSha256":"6c09395ea640e25f070e64496a40a1506644ecc74918602a3a0a557a1b223aa0"}},"expected":{"decision":"reject","code":"approval_mismatch"}},
+  {"id":"reject-approval-without-review-ref","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2"},"actualChangedFields":["positiveSignals"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"mechanic","values":["heist"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"","declarationSha256":"6c09395ea640e25f070e64496a40a1506644ecc74918602a3a0a557a1b223aa0"}},"expected":{"decision":"reject","code":"selective_requires_owner_approval"}},
+  {"id":"accept-signals-with-genre-dimension-only","previous":{"version":1,"profileHash":"h1"},"next":{"version":2,"profileHash":"h2p"},"actualChangedFields":["positiveSignals"],"changeImpact":{"impactSchemaVersion":1,"from":{"version":1,"profileHash":"h1"},"scope":"selective","changedFields":["positiveSignals"],"selectors":[{"kind":"execution","dimension":"horror_rule_consistency","values":["weak"]}],"approval":{"approvedBy":"owner","approvedAt":"2026-10-27T12:00:00.000Z","reviewRef":"trello-comment:fixture-17","declarationSha256":"f61252c0398e93cc08ea5e6ee53c88d6066ff8e33634efe7cc913f7657b1d535"}},"expected":{"decision":"accept"}}
+ ]
+}
