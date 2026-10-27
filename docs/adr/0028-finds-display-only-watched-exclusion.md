@@ -110,7 +110,7 @@ Fully reversible. Setting `FINDS_TITLE_EXCLUSION` to anything other than `on` re
 ## Evidence
 
 - **Original decision:** owner approval of the strict strategy on [AIR-196](https://trello.com/c/cvVor8KO), 2026-10-27. **ADR acceptance:** explicit owner approval following the positive independent re-review of [PR #155](https://github.com/vladimino/iptv-watchlist/pull/155), 2026-10-27.
-- **Implementation:** none; planned in [AIR-197](https://trello.com/c/4lY20BgM) behind the off-by-default switch.
+- **Implementation:** [AIR-197](https://trello.com/c/4lY20BgM): offline builder `scripts/letterboxd-display-exclusion.mjs`, read path in `src/worker.js`, synthetic tests `tests/finds-title-exclusion.mjs`; the switch stays unset (off) until a separate owner approval. The list's `counts` also report `droppedNoName` (an export name that normalizes to nothing).
 - **Dated verification:** offline estimate in the [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026-10-27.md) (private snapshot, not production).
 - **Uncertainty:** the effect on the current Finds and the false-suppression rate on fresh production data are not measured; uniqueness outside the export and the catalog is not checked; the export does not say whether an entry is a film or a series.
 
