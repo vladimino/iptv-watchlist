@@ -13,10 +13,11 @@ function storedFilmId(film){
 }
 function sidecarKey(key){return key.endsWith('.json')?key.slice(0,-5)+LIFECYCLE_SIDECAR:key+LIFECYCLE_SIDECAR;}
 function fingerprintFacts(file){if(!file)return {present:false};return {present:true,schemaVersion:file.fingerprintSchemaVersion,invalidatedAt:file.invalidatedAt||null,generatedAt:file.generatedAt||null};}
-function predictionFacts(file,failure){
+// `compatible` is the shared evaluator's verdict (ADR-0031) when the store supplies one; without it the strict rule applies.
+function predictionFacts(file,failure,compatible){
  const current=file?.current;
  if(!current)return {present:false,failure};
- return {present:true,tasteProfileVersion:current.tasteProfileVersion,tasteProfileHash:current.tasteProfileHash,fingerprintHash:current.fingerprintHash,fingerprintSchemaVersion:current.fingerprintSchemaVersion,predictionPromptVersion:current.predictionPromptVersion,failure};
+ return {present:true,tasteProfileVersion:current.tasteProfileVersion,tasteProfileHash:current.tasteProfileHash,fingerprintHash:current.fingerprintHash,fingerprintSchemaVersion:current.fingerprintSchemaVersion,predictionPromptVersion:current.predictionPromptVersion,failure,...(typeof compatible==='boolean'?{compatible}:{})};
 }
 function resolutionEntries(resolution){return Object.entries(resolution||{}).filter(([key,value])=>key!=='__canonicalizedAt'&&value&&typeof value==='object');}
 function decisionForFilm(film,resolution){
@@ -59,7 +60,7 @@ function filmFacts(record,store,resolution,now){
  const evidence=identityEvidence([loaded.programme,metadata,loaded.watchlist,record]);
  const translation=reviewedTranslation([metadata,loaded.programme,loaded.watchlist,record]);
  const decision=decisionForFilm(record,resolution);
- return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id)),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
+ return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id),typeof store.predictionCompatible==='function'?store.predictionCompatible(id):undefined),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
 }
 function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,showsProgrammeRunId:facts.showsProgrammeRunId,publishedProgrammeRunId:facts.publishedProgrammeRunId,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
 function lifecycleBody(film){return {contractVersion:film.contractVersion,id:film.id,storedId:storedFilmId(film),canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds,redirects:film.redirects||[],aliases:film.aliases,identity:film.identity,metadata:film.metadata,localization:film.localization,fingerprint:film.fingerprint,prediction:film.prediction,availability:film.availability||null};}
@@ -108,6 +109,8 @@ function legacyPredictionStatus(store,storedId){
  const current=store.predictions?.[storedId]?.current;
  if(!current)return 'missing';
  const fingerprint=store.fingerprints?.[storedId],profile=store.profile;
+ const verdict=typeof store.predictionCompatible==='function'?store.predictionCompatible(storedId):undefined;
+ if(typeof verdict==='boolean')return legacyFingerprintStatus(fingerprint)==='current'&&verdict?'current':'stale';
  const aligned=legacyFingerprintStatus(fingerprint)==='current'&&profile&&fingerprint.fingerprintHash!=null&&current.tasteProfileVersion===profile.version&&current.tasteProfileHash===profile.profileHash&&current.fingerprintHash===fingerprint.fingerprintHash&&current.fingerprintSchemaVersion===DOMAIN_FINGERPRINT_SCHEMA_VERSION&&current.predictionPromptVersion===DOMAIN_PREDICTION_PROMPT_VERSION;
  return aligned?'current':'stale';
 }

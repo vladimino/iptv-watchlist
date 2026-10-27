@@ -159,7 +159,7 @@ function findsTitleSuppressor({keys,rule,catalog,metadata,watchlist,programme}){
   return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId)&&(!relaxed||aliasFar(key,tmdbId,film.year));
  };
 }
-function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'off',keys:null}}){
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'off',keys:null},freshness=strictFreshness(profile)}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const consumedTmdb=catalogConsumedTmdb({index,metadata,watchlist,programme,catalog});
@@ -172,7 +172,8 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
   const item=index?.[id];
   // Watched or rated, under this id or any id of the same TMDB film: never offered, so a prediction never stands in for a rating.
   if(catalogConsumed(item)||consumedTmdb.has(String(film.tmdbId)))continue;
-  if(!profile||!indexedPredictionCurrent(item,profile))continue;
+  // The same freshness rule as the queue and the view, for the same profile snapshot.
+  if(!profile||!freshness.indexed(item,film))continue;
   if(!Array.isArray(film.shows)||film.showsProgrammeRunId!==programmeRunId)continue;
   const shows=dedupeShows(film.shows).filter(show=>Number(show.start)>from&&Number(show.start)<to).sort((a,b)=>Number(a.start)-Number(b.start)||String(a.channelId||'').localeCompare(String(b.channelId||''),'en'));
   if(!shows.length)continue;
@@ -213,7 +214,7 @@ async function catalogAvailableRoute(env){
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
  const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile)}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
