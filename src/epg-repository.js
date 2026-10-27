@@ -17,6 +17,18 @@ export function createEpgRepository(db){
 
 // The rows one generation writes, shared by publishGeneration and the staged import (ADR-0021) so both write the same values.
 // Films and candidates keep the input order; each film carries the latest start of its shows for film_epg_last_airing.
+// A candidate show is the whole EPG entry: channel, start, end and EPG title (ADR-0025). The EPG can list two entries for one
+// slot with different titles; both are kept. An exact repeat of the same entry is kept once, deterministically: entries are
+// ordered by channel, start, end, title and then channel display name, and the first of each identity wins.
+const nullFirst=(a,b)=>a===b?0:a==null?-1:b==null?1:a<b?-1:1;
+export function compareCandidateShows(a,b){return nullFirst(a.channelId,b.channelId)||nullFirst(a.startMs,b.startMs)||nullFirst(a.endMs??null,b.endMs??null)||nullFirst(a.epgTitle??null,b.epgTitle??null)||nullFirst(a.channel??null,b.channel??null);}
+export function candidateShowIdentity(show){return JSON.stringify([show.channelId,show.startMs,show.endMs??null,show.epgTitle??null]);}
+export function distinctCandidateShows(shows){
+ const seen=new Set(),kept=[];
+ for(const show of [...(shows||[])].sort(compareCandidateShows)){const key=candidateShowIdentity(show);if(seen.has(key))continue;seen.add(key);kept.push(show);}
+ return kept;
+}
+
 export function generationProjection(input){
  const programmeRunId=required(input?.programmeRunId,'programmeRunId');
  if(input.phase!=='published'&&input.phase!=='withheld')throw new Error('Generation phase must be published or withheld');
@@ -31,7 +43,7 @@ export function generationProjection(input){
  const candidates=(input.candidates||[]).map(candidate=>{
   validateCandidate(candidate);
   const row={observation_key:candidate.observationKey,title:candidate.title,normalized_title:candidate.normalizedTitle,year:candidate.year??null,raw_titles_json:JSON.stringify(candidate.rawTitles||[]),durations_json:JSON.stringify(candidate.durations||[]),description:candidate.description??null,first_airing_ms:candidate.firstAiringMs??null,last_airing_ms:candidate.lastAiringMs??null,airings:candidate.airings??null,confirmed_tmdb_id:candidate.confirmedTmdbId??null,observation_json:observationJson(candidate),activity:candidate.activity??null,last_seen_at:candidate.lastSeenAt??null,last_seen_programme_run_id:candidate.lastSeenProgrammeRunId??null,seen_in_latest:candidate.seenInLatest?1:0,evidence_key:candidate.evidenceKey};
-  const shows=(candidate.shows||[]).map(show=>({observation_key:candidate.observationKey,channel_id:show.channelId,channel:show.channel??null,start_ms:show.startMs,end_ms:show.endMs??null,epg_title:show.epgTitle??null}));
+  const shows=distinctCandidateShows(candidate.shows).map(show=>({observation_key:candidate.observationKey,channel_id:show.channelId,channel:show.channel??null,start_ms:show.startMs,end_ms:show.endMs??null,epg_title:show.epgTitle??null}));
   return {row,shows};
  });
  return {programmeRunId,phase:input.phase,current,publishedAt:input.publishedAt||null,expectedProgrammeRunId:current?input.expectedProgrammeRunId??null:null,films,candidates};
@@ -196,7 +208,7 @@ async function readGeneration(db,programmeRunId){
  const membership=await pagedAll(db,'SELECT film_id FROM film_generation WHERE programme_run_id=? ORDER BY film_id',[programmeRunId]);
  const filmShows=await pagedAll(db,'SELECT film_id,channel_id,channel,start_ms,end_ms,epg_title,basis,match_reason FROM film_show WHERE programme_run_id=? ORDER BY film_id,channel_id,start_ms',[programmeRunId]);
  const observations=await pagedAll(db,'SELECT observation_key,observation_schema_version,observation_json,evidence_key FROM candidate_generation WHERE programme_run_id=? ORDER BY observation_key',[programmeRunId]);
- const candidateShows=await pagedAll(db,'SELECT observation_key,channel_id,channel,start_ms,end_ms,epg_title FROM candidate_show WHERE programme_run_id=? ORDER BY observation_key,channel_id,start_ms',[programmeRunId]);
+ const candidateShows=await pagedAll(db,'SELECT observation_key,channel_id,channel,start_ms,end_ms,epg_title FROM candidate_show WHERE programme_run_id=? ORDER BY observation_key,channel_id,start_ms,end_ms,epg_title,channel',[programmeRunId]);
  const group=(rows,key)=>{const map=new Map();for(const row of rows){if(!map.has(row[key]))map.set(row[key],[]);map.get(row[key]).push(row);}return map;};
  const showsByFilm=group(filmShows,'film_id'),showsByKey=group(candidateShows,'observation_key');
  return {
@@ -204,7 +216,7 @@ async function readGeneration(db,programmeRunId){
   phase:generation.phase,
   publishedAt:generation.published_at,
   films:membership.map(row=>({filmId:row.film_id,shows:(showsByFilm.get(row.film_id)||[]).sort((a,b)=>a.start_ms-b.start_ms).map(showRow)})),
-  candidates:observations.map(row=>({observationKey:row.observation_key,schemaVersion:row.observation_schema_version,evidenceKey:row.evidence_key,observation:JSON.parse(row.observation_json),shows:(showsByKey.get(row.observation_key)||[]).sort((a,b)=>a.start_ms-b.start_ms).map(candidateShowRow)})),
+  candidates:observations.map(row=>({observationKey:row.observation_key,schemaVersion:row.observation_schema_version,evidenceKey:row.evidence_key,observation:JSON.parse(row.observation_json),shows:(showsByKey.get(row.observation_key)||[]).map(candidateShowRow).sort(compareCandidateShows)})),
  };
 }
 
@@ -249,11 +261,11 @@ function observationJson(candidate){
 }
 
 function incomingGeneration(input){
- return {phase:input.phase,publishedAt:input.publishedAt||null,films:[...(input.films||[])].map(film=>({filmId:film.filmId,shows:[...(film.shows||[])].map(filmShowPayload).sort(byShow)})).sort(byFilm),candidates:[...(input.candidates||[])].map(candidate=>({observationKey:candidate.observationKey,evidenceKey:candidate.evidenceKey,observation:JSON.parse(observationJson(candidate)),shows:[...(candidate.shows||[])].map(candidateShowPayload).sort(byShow)})).sort(byObservation)};
+ return {phase:input.phase,publishedAt:input.publishedAt||null,films:[...(input.films||[])].map(film=>({filmId:film.filmId,shows:[...(film.shows||[])].map(filmShowPayload).sort(byShow)})).sort(byFilm),candidates:[...(input.candidates||[])].map(candidate=>({observationKey:candidate.observationKey,evidenceKey:candidate.evidenceKey,observation:JSON.parse(observationJson(candidate)),shows:distinctCandidateShows(candidate.shows).map(candidateShowPayload)})).sort(byObservation)};
 }
 
 function storedGeneration(generation){
- return {phase:generation.phase,publishedAt:generation.publishedAt||null,films:generation.films.map(film=>({filmId:film.filmId,shows:film.shows.map(filmShowPayload).sort(byShow)})).sort(byFilm),candidates:generation.candidates.map(candidate=>({observationKey:candidate.observationKey,evidenceKey:candidate.evidenceKey,observation:candidate.observation,shows:candidate.shows.map(candidateShowPayload).sort(byShow)})).sort(byObservation)};
+ return {phase:generation.phase,publishedAt:generation.publishedAt||null,films:generation.films.map(film=>({filmId:film.filmId,shows:film.shows.map(filmShowPayload).sort(byShow)})).sort(byFilm),candidates:generation.candidates.map(candidate=>({observationKey:candidate.observationKey,evidenceKey:candidate.evidenceKey,observation:candidate.observation,shows:candidate.shows.map(candidateShowPayload).sort(compareCandidateShows)})).sort(byObservation)};
 }
 
 function filmShowPayload(show){

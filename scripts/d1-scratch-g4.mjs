@@ -19,7 +19,7 @@ import {openSqlite} from './offline-import.mjs';
 export const SCRATCH_DATABASE_NAME='iptv-atomicity-scratch';
 export const RUN_IDS=Object.freeze({prior:'g4-prior',scaled:'g4-scaled',rival:'g4-rival'});
 export const FINAL_TABLES=['programme_generation','published_generation','film_generation','film_show','film_epg_last_airing','candidate','candidate_generation','candidate_show'];
-export const MIGRATIONS=['migrations/0001_schema_v1.sql','migrations/0002_generation_stage.sql'];
+export const MIGRATIONS=['migrations/0001_schema_v1.sql','migrations/0002_generation_stage.sql','migrations/0003_candidate_show_identity.sql'];
 // The claim TTL is the minimum the stage accepts, so the planned takeovers wait about a minute each.
 export const CLAIM_TTL_MS=60000;
 // full: the ADR-0021 GO/NO-GO size (prior at today's 22,199 candidates, then 1.25x). small: the same scenario for tests.
@@ -59,7 +59,8 @@ export function migrationStatements(file){
  const text=fs.readFileSync(path.join(REPO_ROOT,file),'utf8').split('\n').filter(line=>!line.trim().startsWith('--')).join('\n');
  return text.split(/;\s*$/m).map(statement=>statement.trim()).filter(Boolean);
 }
-export function migrationObjects(file){return [...fs.readFileSync(path.join(REPO_ROOT,file),'utf8').matchAll(/CREATE (TABLE|INDEX) ([a-z_]+)/g)].map(match=>({type:match[1].toLowerCase(),name:match[2]}));}
+// A table a migration creates only to rename it over an older one is not one of its objects (0003 rebuilds candidate shows).
+export function migrationObjects(file){const text=fs.readFileSync(path.join(REPO_ROOT,file),'utf8'),renamed=new Set([...text.matchAll(/ALTER TABLE ([a-z_0-9]+) RENAME TO/g)].map(match=>match[1]));return [...text.matchAll(/CREATE (TABLE|(?:UNIQUE )?INDEX) ([a-z_0-9]+)/g)].map(match=>({type:match[1].endsWith('INDEX')?'index':'table',name:match[2]})).filter(item=>!renamed.has(item.name));}
 
 // Which kind of stage request a statement list is; only statement shapes are logged, never values.
 export function requestKind(statements){
@@ -140,14 +141,14 @@ export async function applySchema(db,target,current){
  for(const [index,migration] of before.migrations.entries()){
   if(migration.typeConflicts.length||(migration.present&&migration.present!==migration.objects))throw new StageStop('schema_partial',{file:migration.file,present:migration.present,objects:migration.objects,typeConflicts:migration.typeConflicts});
   if(migration.present===migration.objects)continue;
-  if(index===1){const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;if(version!==1)throw new StageStop('schema_version_unexpected',{file:migration.file,version});}
+  if(index>0){const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;if(version!==index)throw new StageStop('schema_version_unexpected',{file:migration.file,version});}
   const statements=migrationStatements(migration.file);
   Object.assign(current,{kind:'schema',statements:statements.length});
   try{await db.transaction(async()=>{for(const statement of statements)await db.run(statement);});}finally{Object.assign(current,{kind:null,statements:null});}
   applied.push(migration.file);
  }
  const after=await preflight(db,target);
- if(after.schemaVersion!==2||after.claimColumns!==true||after.migrations.some(item=>item.present!==item.objects))throw new StageStop('schema_not_ready',{after});
+ if(after.schemaVersion!==MIGRATIONS.length||after.claimColumns!==true||after.migrations.some(item=>item.present!==item.objects))throw new StageStop('schema_not_ready',{after});
  return {applied,before,after};
 }
 
@@ -306,7 +307,7 @@ export async function runG4({command,output,scale='full',approvedWrites=false,ap
   else{
    const checked=await preflight(db,target);
    if(command==='apply-schema')report.result=await applySchema(db,target,current);
-   else if(checked.schemaVersion!==2||checked.claimColumns!==true)throw new StageStop('schema_not_ready',{schemaVersion:checked.schemaVersion,claimColumns:checked.claimColumns});
+   else if(checked.schemaVersion!==MIGRATIONS.length||checked.claimColumns!==true)throw new StageStop('schema_not_ready',{schemaVersion:checked.schemaVersion,claimColumns:checked.claimColumns});
    else if(command==='run')report.result=await runScenario(db,target,current,{scale,now,clock,sleep,...(referenceDigestFn?{referenceDigestFn}:{})});
    else report.result={preflight:checked,discarded:await cleanupStages(db)};
   }

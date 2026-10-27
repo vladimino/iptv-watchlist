@@ -18,7 +18,9 @@ assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/d1_databases/);
 const rules=loadDomainRules();
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-backfill-'));
-const migration=fs.readFileSync('migrations/0001_schema_v1.sql','utf8');
+// Every run needs schema v3: 0001, the staging tables of 0002 and the candidate show identity of 0003.
+const v1Migration=fs.readFileSync('migrations/0001_schema_v1.sql','utf8');
+const migration=['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n');
 const ACCOUNT='0123456789abcdef0123456789abcdef',TOKEN='test-d1-token';
 const TARGET='11111111-1111-4111-8111-111111111111',SCRATCH='22222222-2222-4222-8222-222222222222';
 const at='2026-10-26T01:00:00.000Z',later='2026-10-26T05:00:00.000Z';
@@ -353,7 +355,7 @@ try{
  // Staged generation (ADR-0021, schema v2): opt-in, fenced on schema version, reported with perf counters and the commit gate,
  // and its cleanup needs an explicit approval and touches staging rows only.
  {
-  const stagedSchema=migration+'\n'+fs.readFileSync('migrations/0002_generation_stage.sql','utf8');
+  const stagedSchema=migration;
   const stagedDatabase=name=>{const file=path.join(root,name+'.sqlite');fs.rmSync(file,{force:true});const result=sqlite(file,'PRAGMA foreign_keys=ON;\n'+stagedSchema);assert.equal(result.status,0,result.stderr);return file;};
   const STAGED_TARGET='33333333-3333-4333-8333-333333333333',STAGED_SCRATCH='44444444-4444-4444-8444-444444444444';
   const stagedFile=stagedDatabase('staged-target');
@@ -377,12 +379,13 @@ try{
   assert.equal(rerun.staged.generations.length,0,'a receipted generation is not staged again');
   await stagedFake.stop();
 
-  // Schema fence: the staged path needs migration 0002 and schema version 2.
-  const v1Only=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:freshDatabase('staged-v1'),output:output('staged-v1'),sleep:noSleep,stagedGeneration:true});
+  // Schema fence: every run needs migrations 0002 and 0003 and schema version 3.
+  const v1File=path.join(root,'staged-v1.sqlite');fs.rmSync(v1File,{force:true});assert.equal(sqlite(v1File,'PRAGMA foreign_keys=ON;\n'+v1Migration).status,0);
+  const v1Only=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:v1File,output:output('staged-v1'),sleep:noSleep,stagedGeneration:true});
   assert.deepEqual(v1Only.stopReasons,['schema_missing']);
   assert.ok(v1Only.noGo.details.missing.includes('generation_stage'));
   const wrongVersion=stagedDatabase('staged-version');
-  assert.equal(sqlite(wrongVersion,'UPDATE schema_contract SET version=1;').status,0);
+  assert.equal(sqlite(wrongVersion,'UPDATE schema_contract SET version=2;').status,0);
   const versionReport=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:wrongVersion,output:output('staged-version'),sleep:noSleep,stagedGeneration:true});
   assert.deepEqual(versionReport.stopReasons,['schema_version_mismatch']);
   assert.equal(count(wrongVersion,'SELECT COUNT(*) AS n FROM import_receipt'),0,'nothing is written before the fence passes');
