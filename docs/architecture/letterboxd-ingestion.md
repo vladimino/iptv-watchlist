@@ -42,18 +42,19 @@ For operational truth, check the current `RATINGS_REFRESH` binding before claimi
 
 ## Proposed: watched, rating and watchlist as separate facts
 
-**Not implemented; proposed by [ADR-0023](../adr/0023-letterboxd-user-facts.md) and pending owner approval.** Today the films-list scan writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. Under the proposal every source writes observations into one fact record per canonical film, a newer observation is the only thing that replaces a value, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
+**Not implemented; proposed by [ADR-0023](../adr/0023-letterboxd-user-facts.md) and pending owner approval.** Today the films-list scan writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. Under the proposal every source writes observations into one fact record per canonical film, only a greater observation (by time, then source rank, then observation id) replaces a value, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
 
 ```mermaid
 flowchart TD
     subgraph sources["Observations"]
         export["Owner's account export<br/>accepted identities only"]
         films["Complete public films list"]
+        watchlist["Complete watchlist"]
         page["Per-film page lookup"]
         owner["Owner edit"]
     end
     gaps["403, partial scan,<br/>film absent from list"]
-    merge{"Newer than the<br/>stored value?"}
+    merge{"Greater than the stored<br/>observation (time, source, id)?"}
     facts[("R2 fact record per film:<br/>watched, rating, watchlist,<br/>provenance")]
     keep["Keep stored value"]
     index[("view-index.json: actualRating, watched<br/>under lid and tmdb_n")]
