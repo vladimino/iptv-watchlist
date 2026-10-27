@@ -31,4 +31,4 @@ This is the maintained architecture navigation. All thirteen pages describe the 
 
 Each page should identify the authoritative code/ref at review time; label deployed versus planned transitions; explain data ownership, trust boundaries, retry/error paths and rollback implications where relevant; and link the source ADR and maintained reference. When Mermaid is added, check rendering in GitHub and confirm arrows do not imply a non-existent D1 writer, internal credential-forwarding hop or autonomous discovery recursion.
 
-The diagrams were delivered across AIR-140–143. Future changes to the depicted architecture must revise the relevant pages along with implementation and ADRs. [Contributor and agent instructions](../../AGENTS.md) provide the required review and safety rules; the root README is a separate navigation entrypoint.
+Future changes to the depicted architecture must revise the relevant pages along with implementation and ADRs. [Contributor and agent instructions](../../AGENTS.md) provide the required review and safety rules; the root README is a separate navigation entrypoint.
