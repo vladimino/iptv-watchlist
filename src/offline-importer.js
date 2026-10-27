@@ -117,6 +117,48 @@ export function identityResolver({canonicalize,films=[]}={}){
  return {canonical:storedId=>canonicalize(storedId),resolve};
 }
 
+// ADR-0027: an owner rating whose stored Letterboxd id resolves to no Film may resolve through the TMDB id of its own metadata.json
+// record, and only to exactly one Film that holds that TMDB id trusted and without conflict, claims no other Letterboxd id, and gets
+// no other rating. Everything else keeps the shared resolver's answer. Ratings only; no title matching and no new Film.
+export function ratingIdentity({identity,films=[],metadata=null,metadataSha256=null,ratings=[]}={}){
+ requireIdentity(identity);
+ const holders=new Map(),conflicting=new Set(),letterboxdOf=new Map(),byTmdb=new Map();
+ for(const film of films){
+  if(!film?.id)continue;
+  for(const item of film.externalIds||[]){
+   if(item?.scheme==='letterboxd'&&item.value!=null){const list=letterboxdOf.get(film.id)||[];list.push(String(item.value));letterboxdOf.set(film.id,list);}
+   if(item?.scheme!=='tmdb'||item.value==null)continue;
+   const value=String(item.value),list=holders.get(value)||[];
+   list.push({filmId:film.id,trusted:!!item.trusted&&!item.conflicting});holders.set(value,list);
+   if(item.conflicting)conflicting.add(value);
+  }
+  const conflict=film.id.match(/^film:conflict:(.+)$/);
+  if(conflict)for(const value of conflict[1].split('+'))conflicting.add(value);
+ }
+ const records=metadata&&typeof metadata==='object'&&!Array.isArray(metadata)?metadata:{};
+ const tmdbOf=id=>{const record=records[id];if(!record||typeof record!=='object'||String(record.id)!==id)return null;const value=record.tmdbId==null?'':String(record.tmdbId).trim();return /^\d+$/.test(value)?value:null;};
+ for(const id of Object.keys(records)){const value=tmdbOf(id);if(value){const list=byTmdb.get(value)||[];list.push(id);byTmdb.set(value,list);}}
+ const direct=new Map(),proposed=new Map();
+ for(const rating of ratings){
+  const stored=enrichmentStoredId(rating.key),resolved=stored?identity.resolve(stored):{source:null,canonical:null,filmId:null,via:null,reason:'identity_unreadable'};
+  direct.set(rating.key,resolved);
+  if(resolved.filmId||resolved.reason!=='film_unresolved')continue;
+  const tmdb=tmdbOf(stored);
+  if(!tmdb)continue;
+  const claims=holders.get(tmdb)||[],refuse=reason=>proposed.set(rating.key,{...resolved,reason,tmdbId:tmdb});
+  if(!claims.length)continue;
+  if(conflicting.has(tmdb)||new Set(claims.map(item=>item.filmId)).size>1||(byTmdb.get(tmdb)||[]).length>1){refuse('identity_conflict');continue;}
+  if(!claims[0].trusted){refuse('identity_unlinked');continue;}
+  if((letterboxdOf.get(claims[0].filmId)||[]).some(value=>value!==stored)){refuse('identity_conflict');continue;}
+  proposed.set(rating.key,{source:resolved.source,canonical:resolved.canonical,filmId:claims[0].filmId,via:'metadata_tmdb',reason:null,tmdbId:tmdb,metadataSha256});
+ }
+ // A Film gets at most one rating: a mapped rating never joins or replaces another rating of the same Film, equal or not.
+ const targets=new Map();
+ for(const [key,resolved] of [...direct,...proposed])if(resolved.filmId){const list=targets.get(resolved.filmId)||[];list.push(key);targets.set(resolved.filmId,list);}
+ for(const [key,resolved] of proposed)if(resolved.filmId&&targets.get(resolved.filmId).length>1)proposed.set(key,{...resolved,filmId:null,via:null,reason:'rating_conflict'});
+ return {resolve:key=>proposed.get(key)||direct.get(key)||(()=>{const stored=enrichmentStoredId(key);return stored?identity.resolve(stored):{source:null,canonical:null,filmId:null,via:null,reason:'identity_unreadable'};})()};
+}
+
 export function creditRoster(records){
  const credits=[],unmatched=[];
  const seen=new Set();
@@ -343,8 +385,8 @@ export function versionPointerProblem(item,bundleKey,storedId,links){
  return null;
 }
 
-export function actualUnit(entry,body,identity){
- const resolved=enrichmentIdentity(entry.key,identity);
+export function actualUnit(entry,body,identity,ratings=null){
+ const resolved=ratings?ratings.resolve(entry.key):enrichmentIdentity(entry.key,identity);
  if(!resolved.filmId)return unresolved(entry,'actual_rating',resolved.canonical||entry.key,resolved.reason,'actual',resolved);
  const filmId=resolved.filmId;
  const recordedAt=body?.recordedAt||body?.updatedAt||null;
@@ -508,7 +550,7 @@ function unit(fields){return {...fields,unportable:false,unresolved:false};}
 function unportable(entry,targetTable,targetId,reason,family){return {family,kind:'unportable',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:true,unresolved:false,reason};}
 // An unresolved unit names a source record the importer refuses to turn into a row. The object stays in the source and no id is minted.
 function unresolved(entry,targetTable,targetId,reason,family,resolution){return {family,kind:'unresolved',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:false,unresolved:true,reason,identity:resolution?provenanceOf(resolution):null};}
-function provenanceOf(resolution){return resolution?{source:resolution.source??null,canonical:resolution.canonical??null,filmId:resolution.filmId??null,via:resolution.via??null,reason:resolution.reason??null}:null;}
+function provenanceOf(resolution){return resolution?{source:resolution.source??null,canonical:resolution.canonical??null,filmId:resolution.filmId??null,via:resolution.via??null,reason:resolution.reason??null,...(resolution.tmdbId?{tmdbId:resolution.tmdbId}:{}),...(resolution.metadataSha256?{metadataSha256:resolution.metadataSha256}:{})}:null;}
 function requireIdentity(identity){if(typeof identity?.resolve!=='function')throw new Error('The shared identity resolver is required');}
 function requireEvidence(derive){if(typeof derive!=='function')throw new Error('The shared candidateEvidence rule is required');}
 function enrichmentStoredId(key){
@@ -530,7 +572,7 @@ function evidenceFor(item,deriveEvidence){
 }
 function emptyCoverage(){return {denominator:0,mapped:[],r2_only:[],excluded:[],unmapped:[],r2OnlyFamilies:[]};}
 function provenanceSummary(units){
- const summary={identity:{direct:0,redirect:0},evidence:{stored:0,derived:0,stale_evidence:0}};
+ const summary={identity:{direct:0,redirect:0,metadata_tmdb:0},evidence:{stored:0,derived:0,stale_evidence:0}};
  for(const unit of units){
   if(unit.identity?.via&&summary.identity[unit.identity.via]!=null)summary.identity[unit.identity.via]++;
   if(unit.kind==='decision'&&unit.evidence&&summary.evidence[unit.evidence]!=null)summary.evidence[unit.evidence]++;
@@ -601,7 +643,7 @@ async function personStored(repositories,unit){
 
 // The source projection is independent of the write list: every mapped object is projected to the rows it must produce,
 // through the same identity and evidence rules, and the read-back is compared against that projection.
-export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence,links=null}={}){
+export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence,links=null,ratings=null}={}){
  requireIdentity(identity);
  const expected={films:[],persons:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[],generations:[],profiles:[],records:[],unprojected:[],r2Only:[],blockers:[]};
  for(const film of films){
@@ -614,7 +656,7 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
  const accounted=new Set();
  const note=(key,disposition,id,extra)=>expected.records.push({key,disposition,id,...(extra||{})});
  const recordIdentity=(key,storedId)=>{
-  const resolved=identity.resolve(storedId);
+  const resolved=ratings&&key.endsWith('/actual.json')?ratings.resolve(key):identity.resolve(storedId);
   if(resolved.filmId)return resolved;
   note(key,'unresolved',resolved.canonical||String(storedId??key),{reason:resolved.reason,identity:provenanceOf(resolved)});
   return null;

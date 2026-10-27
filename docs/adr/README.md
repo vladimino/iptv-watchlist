@@ -32,6 +32,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0024 — A complete Letterboxd scan is stored once as a summary observation, and film records are rewritten only when a value changes](0024-letterboxd-scan-summary.md) | Accepted 2026-10-27 (owner decision; no write or flag change authorized); supersedes ADR-0023 decision 4 in part | [AIR-171](https://trello.com/c/uvGt48sq) |
 | [0025 — A candidate show is identified by its whole EPG entry, and every differing entry is kept](0025-candidate-show-identity.md) | Accepted 2026-10-27 (owner decision; no D1 migration or write authorized); schema v3 by a new migration | [AIR-177](https://trello.com/c/9wYN9k58); [AIR-74 dry-runs](../evidence/d1-migration/air-74-real-baseline-dry-run-2026-10-27.md) |
 | [0026 — Historical prediction versions are materialized by a bounded, gated Worker operation from a fenced snapshot plan](0026-historical-prediction-version-materialization.md) | Proposed 2026-10-27 (no production write, flag or Task change authorized) | [AIR-179](https://trello.com/c/vdLts7tJ); [rehearsal](../evidence/prediction/air-179-materialization-rehearsal-2026-10-27.md) |
+| [0027 — An owner rating of a departed watchlist film resolves through its own metadata TMDB id to exactly one trusted Film](0027-owner-rating-tmdb-identity.md) | Proposed 2026-10-27 (owner decision G2-A; offline contract only, no write authorized) | [AIR-190](https://trello.com/c/jLOxHfLp); [AIR-180 audit](../evidence/d1-migration/air-180-class-c-audit-2026-10-27.md) |
 
 ## Proposed records
 
