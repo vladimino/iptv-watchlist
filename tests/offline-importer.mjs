@@ -170,6 +170,9 @@ assert.equal(rejectedDecision.ledger[0].reason,'terminal_evidence_unchanged');
 assert.equal(rejectedDecision.applied,0);
 assert.equal(await count(db,"SELECT COUNT(*) AS n FROM import_receipt WHERE target_id='heat|1995'"),0);
 assert.equal((await repositories.epg.readDecision('heat|1995')).current.status,'ambiguous');
+// fenceEvidenceKey names the candidate's current evidence; a decision fenced on any other key is refused and nothing is written.
+await assert.rejects(repositories.epg.recordDecision({observationKey:'heat|1995',programmeRunId:'run-b',status:'verified',reason:'verified',checkedAt:later,evidenceKey:'evidence-old',fenceEvidenceKey:'evidence-other',filmId:'film:zz-film'}),/not in the published generation/);
+assert.equal((await repositories.epg.readDecision('heat|1995')).current.status,'ambiguous');
 
 const partFile=path.join(root,'partial.sqlite');
 exec(partFile,fs.readFileSync('migrations/0001_schema_v1.sql','utf8'));
@@ -609,19 +612,22 @@ assert.equal(foreign.claimsFullParity,false);
 assert.equal(foreign.classes.C.acknowledgementRequired,true);
 assert.equal(foreign.parity.ok,true,JSON.stringify({missing:foreign.parity.missing,extra:foreign.parity.extra,mismatched:foreign.parity.mismatched}));
 
-// A stored decision whose key disagrees with the derived key stops the run before the database exists.
+// A stored decision taken against earlier airings keeps its own key with provenance stale_evidence, as the runtime keeps it;
+// the candidate fence still requires the candidate in the published generation. A rerun changes nothing.
 const mismatch=path.join(root,'mismatch');
 writeSnapshot(mismatch,{...legacyBodies,'epg/discovery-resolution.json':{...legacyBodies['epg/discovery-resolution.json'],'ronin|1998':{...legacyBodies['epg/discovery-resolution.json']['ronin|1998'],evidenceKey:'stale-evidence'}}});
 const mismatchDb=path.join(root,'mismatch.sqlite');
-const stoppedRun=runImport(mismatch,mismatchDb,{status:3});
-assert.equal(stoppedRun.stopped,true);
-assert.deepEqual(stoppedRun.stopReasons,['evidence_mismatch']);
-assert.equal(stoppedRun.blockers[0].targetId,'ronin|1998');
-assert.equal(stoppedRun.blockers[0].stored,'stale-evidence');
-assert.equal(stoppedRun.blockers[0].class,'C');
-assert.equal(stoppedRun.applied,0);
-assert.equal(stoppedRun.claimsFullParity,false);
-assert.equal(fs.existsSync(mismatchDb),false);
+const staleRun=runImport(mismatch,mismatchDb);
+assert.equal(staleRun.stopped,false);
+assert.deepEqual(staleRun.blockers,[]);
+assert.equal(staleRun.parity.ok,true,JSON.stringify(staleRun.parity.mismatched));
+assert.equal(staleRun.provenance.evidence.stale_evidence,1);
+assert.equal(staleRun.parity.records.find(record=>record.key==='epg/discovery-resolution.json'&&record.id==='ronin|1998').evidence,'stale_evidence');
+const staleDecision=await snapshotSqlite(mismatchDb).get("SELECT evidence_key,status,provenance_json FROM candidate_decision WHERE observation_key='ronin|1998'");
+assert.equal(staleDecision.evidence_key,'stale-evidence');
+assert.equal(staleDecision.status,'verified');
+assert.equal(JSON.parse(staleDecision.provenance_json).importEvidence,'stale_evidence');
+assert.equal(runImport(mismatch,mismatchDb).applied,0,'a rerun with a stale decision writes nothing');
 const itemMismatch=path.join(root,'item-mismatch');
 writeSnapshot(itemMismatch,{...legacyBodies,'epg/discovery-latest.json':{...legacyBodies['epg/discovery-latest.json'],items:[{...legacyBodies['epg/discovery-latest.json'].items[0],evidenceKey:'stale-evidence'}]}});
 const itemStopped=runImport(itemMismatch,path.join(root,'item-mismatch.sqlite'),{status:3});

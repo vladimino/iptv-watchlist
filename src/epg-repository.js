@@ -109,7 +109,9 @@ async function recordDecision(db,input){
  const programmeRunId=required(input.programmeRunId,'programmeRunId');
  const provenance=input.provenance==null?null:JSON.stringify(input.provenance);
  const fence=`EXISTS (SELECT 1 FROM published_generation p JOIN candidate_generation g ON g.programme_run_id=p.programme_run_id JOIN programme_generation gen ON gen.programme_run_id=p.programme_run_id AND gen.phase='published' WHERE p.id=1 AND p.programme_run_id=? AND g.observation_key=? AND g.evidence_key=?)`;
- const fenceParams=[programmeRunId,observationKey,evidenceKey];
+ // The fence names the candidate's current evidence. An imported decision taken against older airings keeps its own key in
+ // evidence_key (fenceEvidenceKey is then the candidate's key), as the R2 runtime keeps it.
+ const fenceParams=[programmeRunId,observationKey,input.fenceEvidenceKey??evidenceKey];
  const decisionValues=[observationKey,input.status,input.reason??null,input.catalogFilmId??null,input.filmId??null,input.tmdbId??null,input.canonicalIdentity??null,input.identitySource??null,checkedAt,evidenceKey,input.attempts??0,input.lastAttemptAt??null,input.retryAt??null,input.terminalReason??null,provenance];
  await db.transaction(async()=>{
   await db.run(`INSERT INTO candidate_decision_history (observation_key,checked_at,status,reason,catalog_film_id,film_id,tmdb_id,canonical_identity,identity_source,evidence_key,attempts,last_attempt_at,retry_at,terminal_reason,provenance_json,replaced_at)
