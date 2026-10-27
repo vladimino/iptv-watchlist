@@ -135,5 +135,39 @@ set('epg/resolver-continuation.json',newer);
 await call('queueCommittedDiscovery')(env,{runId});
 assert.deepEqual(continuation(),newer,'a superseded generation is never queued over the published one');
 
+// 7. Hourly stage A gate (docs/reference/scheduled-tasks.md, ADR 0030): the hourly task steps only when
+//    `epg_status.stage` is `complete`, on top of the generation, lease and wait guards. The model below is that
+//    contract applied to the Worker's own read-only views. An early-queued series while the commit tail has not
+//    finished (`stage: epg`) is refused, because a step there would be a commit retry; a complete run's
+//    current-generation series and the AIR-159 handoff of a stranded earlier-generation record stay allowed.
+function hourlyStageA(status,pipeline,now=Date.now()){
+ if(status.stage!=='complete')return {step:false,reason:'sync_not_complete'};
+ const published=pipeline.programmeRunId,c=pipeline.continuation,health=pipeline.continuationHealth;
+ if(!published||published!==status.runId||!c)return {step:false,reason:'ambiguous'};
+ if(health?.status==='live')return {step:false,reason:'live'};
+ if(c.programmeRunId!==published)return c.stage==='running'?{step:false,reason:'running_other_generation'}:{step:true,reason:'generation_handoff'};
+ if(c.retryAt&&Date.parse(c.retryAt)>now||c.nextCatchUpAt&&Date.parse(c.nextCatchUpAt)>now)return {step:false,reason:'wait'};
+ return c.stage==='paused'&&c.remainingChunks>0?{step:true,reason:'continue'}:{step:false,reason:'nothing_outstanding'};
+}
+const views=async()=>[await read('/api/status'),await read('/api/enrichment/pipeline/status')];
+runId=await readyToCommit();
+killFrom((key,value)=>key==='sync.json'&&value?.stage==='complete');
+step(runId);await settle();hang=null;
+let [status,view]=await views();
+assert.equal(status.stage,'epg');assert.equal(view.continuation.programmeRunId,runId);assert.equal(view.continuation.remainingChunks,12);
+assert.deepEqual(hourlyStageA(status,view),{step:false,reason:'sync_not_complete'},'an EPG-stage series is not hourly work');
+// What the gate prevents: a step in this state takes the commit branch, not a discovery chunk.
+r=await step(runId);
+const retried=records.get('epg/resolver-continuation-diagnostics.json').recent[0];
+assert.equal(retried.phase,'completed');
+assert.equal(retried.branch,'epg_commit');assert.equal(retried.runStage,'epg');
+[status,view]=await views();
+assert.equal(status.stage,'complete');assert.deepEqual(hourlyStageA(status,view),{step:true,reason:'continue'},'a complete run continues its own series');
+set('epg/resolver-continuation.json',STALE);
+[status,view]=await views();
+assert.deepEqual(hourlyStageA(status,view),{step:true,reason:'generation_handoff'},'a stranded earlier-generation record is handed over');
+r=await step(runId);
+assert.equal(r.data.diagnostic.recovery.action,'generation_recovered');assert.equal(continuation().programmeRunId,runId);
+
 assert.deepEqual(fetches.filter(href=>href.includes('themoviedb')),[],'no TMDB request was made');
-console.log('AIR-212 durable discovery enqueue: kill before complete, publish/queue window, repeat of the same run, kept progress, live writer, simultaneous retries and generation fence passed');
+console.log('AIR-212 durable discovery enqueue: kill before complete, publish/queue window, repeat of the same run, kept progress, live writer, simultaneous retries, generation fence and the hourly stage A gate passed');
