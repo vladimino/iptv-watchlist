@@ -1,10 +1,10 @@
-# Selective prediction compatibility: impact facet backfill pilot (stage S1, one page)
+# Selective prediction compatibility: impact facet backfill (stage S1, pilot and remaining pages)
 
 **Executed:** 2026-10-27, 23:22:30.576–23:22:33.163 UTC, by the owner in a browser session behind Cloudflare Access (DevTools console, same-origin `fetch`)
 **Verified:** 2026-10-27, about 23:23 UTC, owner-only IPTV MCP read tools only (`enrichment_queue`, `prediction_queue_overview`, `prediction_film_diagnostics`)
 **Code:** `main` `da71772`
 **Approval:** owner's explicit approval of exactly one pilot page, recorded on [AIR-206](https://trello.com/c/87mg3VNi) on 28 October 2026 (board time); no further pages, flags, Tasks, profile publication, model or sync
-**Verdict:** **GO for the owner decision on the remaining pages.** The single call succeeded, every observable control value is unchanged, and the result shows that impact facets were absent from every entry of the page before the call
+**Verdict:** pilot **GO**, then the owner approved the remaining pages in the AIR-206 conversation and ran them. **S1 complete:** the backfill reached the end of the id list (`nextCursor: null`), and every observable control value is unchanged. See [Remaining pages](#remaining-pages)
 
 ## The call
 
@@ -42,3 +42,30 @@ The route walks the view-index and catalog ids in sorted order. For each id whos
 ## Limits
 
 One page; the response is the owner's console output (screenshot), not a server log. The Worker version and flag bindings were not read.
+
+## Remaining pages
+
+After the pilot report the owner approved the remaining pages in the AIR-206 conversation and ran them in the same browser session. A console script walked `nextCursor` from `1Y52`, one page of `limit` 80 at a time with a one-second pause. It would stop at the first non-200, non-JSON or non-advancing response, with a 40-page guard.
+
+| Item | Value |
+| --- | --- |
+| Finished | 2026-10-27T23:29:41.737Z |
+| Stop reason | `done (nextCursor null)`; no error, no guard hit |
+| Pages / checked / added / updated | 34 / 2,688 / 0 / 2,268 |
+| Pilot plus remaining pages | 35 pages, 2,768 ids checked, 2,348 entries updated |
+
+- **Ids checked but not updated: 420.** These are ids without a current fingerprint (for example rating-only index entries or catalog films not yet fingerprinted). The route skips them by design.
+- **2,348 updated entries exceed the 2,333 queue films.** The id list also contains index entries outside the current queue.
+- **Pages: 35, against an estimate of about 30.** The id list is the union of index and catalog ids, not only queue films.
+
+Controls read about 23:30 UTC with the same read-only IPTV MCP tools:
+
+| Control | Value |
+| --- | --- |
+| Queue `refreshedAt` | 2026-10-27T23:26:24.932Z (a scheduled no-op run, while the backfill was running) |
+| `compatibility` | mode `strict`, 2,333 films, all `exact`; `wouldKeep` / `wouldRequeue` / `strictDisagreements` 0 / 0 / 0; missing 0 |
+| Queue | drained, consistent, no reasons; coverage 2,333 / 2,333, window 1,888 / 1,888 |
+| Film diagnostics `2Eao`, `w0e6`, `d2hI` | fingerprint current, prediction current, `mode: strict`, index `agreed` |
+
+The scheduled run at 23:26 refreshed the queue between pages without any error or contention reported by the script. Facet coverage itself still cannot be read with read-only tools while every prediction is exact. The next measurable point is the first selective evaluation after a change-impact publication (S4).
+
