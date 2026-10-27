@@ -35,7 +35,7 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 
 ## Production configuration evidence ledger
 
-**Current live snapshot (2026-10-25): not independently read.** No authorized Cloudflare settings read was performed for this documentation task. The values below are **last documented observations**, not asserted live settings. Consult latest card comments and the deployed Worker binding before using them.
+**Current live snapshot (2026-10-25): not independently read**, except the two prediction-version flags, read on 2026-10-27 16:48 UTC as noted in their rows. No authorized Cloudflare settings read was performed for this documentation task. The values below are **last documented observations**, not asserted live settings. Consult latest card comments and the deployed Worker binding before using them.
 
 | Flag | Last documented effective value | Observed/recorded (UTC) | Evidence and limitations |
 | --- | --- | --- | --- |
@@ -43,8 +43,8 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 | `CANDIDATE_DISCOVERY` | unset (effective `off`) | 2026-10-24 10:23 | [AIR-68](https://trello.com/c/qbLDc6Ql) explicitly left the independent optional search unset; [AIR-69](https://trello.com/c/FlcWZX7W) cites the same baseline. |
 | `LIFECYCLE_LOCALIZATION` | `on:programme,on:watchlist,on:epg`; `metadata` off | 2026-10-23 15:49, reconfirmed in 2026-10-24 AIR-69 baseline | [AIR-42](https://trello.com/c/drLBuWjl) recorded ordinary EPG `on:epg` write path with published generation; [AIR-69](https://trello.com/c/FlcWZX7W) lists the complete binding. |
 | `RATINGS_REFRESH` | unset (effective `off`) | 2026-10-23 (AIR-64 review); no newer verified binding in this audit | [AIR-64](https://trello.com/c/WTnyO8bX) records disabled production state and no authorized ratings-only run; [ratings reference](integrations/letterboxd-ratings.md) also warns that this is a dated observation. |
-| `PREDICTION_VERSION_OBJECTS` | unset (effective `off`) | 2026-10-26 (code delivery; no settings read) | Introduced behind an off-by-default gate; no activation approval recorded at the time of this entry. |
-| `PREDICTION_MATERIALIZATION` | unset (effective `off`) | 2026-10-27 (code delivery; no settings read) | Introduced behind an off-by-default gate in [AIR-179](https://trello.com/c/vdLts7tJ); no activation approval recorded. |
+| `PREDICTION_VERSION_OBJECTS` | unset (effective `off`) | 2026-10-27 16:48 (read-only Cloudflare settings read) | Binding absent on Worker `iptv` (deployed version `a8761df3-f1bf-4c2b-9c51-80df71473ae0`); no activation approval recorded. [AIR-195 readiness packet](../evidence/prediction/air-195-writer-activation-readiness-2026-10-27.md). |
+| `PREDICTION_MATERIALIZATION` | unset (effective `off`) | 2026-10-27 16:48 (read-only Cloudflare settings read) | Binding absent on Worker `iptv`, same read as above; introduced behind an off-by-default gate in [AIR-179](https://trello.com/c/vdLts7tJ); no activation approval recorded. |
 | `CATALOG_POSTER_HYDRATION` | unset (effective `off`) | 2026-10-26 (code delivery; no settings read) | Introduced behind an off-by-default gate; no activation or execution approval recorded at the time of this entry. |
 | `LETTERBOXD_FACTS` | unset (effective `off`) | 2026-10-27 (code delivery; no settings read) | Introduced behind an off-by-default gate in [AIR-171](https://trello.com/c/uvGt48sq); no activation approval recorded. |
 | `LETTERBOXD_BASELINE_IMPORT` | unset (effective `off`) | 2026-10-27 (code delivery; no settings read) | Introduced behind an off-by-default gate in [AIR-171](https://trello.com/c/uvGt48sq); no activation approval recorded. |
