@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {actualUnit,catalogMetadata,classifyObject,creditRoster,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,profileUnit,projectSource,readDiscovery,refusal} from '../src/offline-importer.js';
+import {actualUnit,catalogMetadata,classifyObject,creditRoster,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,ratingIdentity,profileUnit,projectSource,readDiscovery,refusal} from '../src/offline-importer.js';
 import {ExportError} from './migration-export.mjs';
 import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
 
@@ -35,6 +35,7 @@ export async function prepareImport(directory,{limit=null}={}){
  const store=scopedStore(loaded.store,byKey);
  const view=readLifecycle(store,Date.parse(manifest.finishedAt));
  const identity=identityResolver({canonicalize:rules.canonicalFilmId,films:view.films});
+ const ratings=ratingIdentity({identity,films:view.films,metadata:bodies.get('metadata.json')??null,metadataSha256:byKey.get('metadata.json')?.sha256??null,ratings:manifest.objects.filter(entry=>/^enrichment\/films\/[^/]+\/actual\.json$/.test(entry.key)).map(entry=>({key:entry.key}))});
  const links={linked:(record,storedId)=>rules.predictionVersionLinked(record,storedId),exists:key=>byKey.has(key),sha:key=>byKey.get(key)?.sha256??null,bodyHash:record=>{const text=rules.predictionVersionText(record);return text==null?null:createHash('sha256').update(Buffer.from(text,'utf8')).digest('hex');}};
  const blockers=[];
  const sha=key=>byKey.get(key)?.sha256||'';
@@ -66,7 +67,7 @@ export async function prepareImport(directory,{limit=null}={}){
  }
  for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(entry.key))units.push(fingerprintUnit(entry,bodies.get(entry.key),identity));
  for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/predictions\.json$/.test(entry.key))units.push(...predictionUnits(entry,bodies.get(entry.key),identity,links));
- for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/actual\.json$/.test(entry.key))units.push(actualUnit(entry,bodies.get(entry.key),identity));
+ for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/actual\.json$/.test(entry.key))units.push(actualUnit(entry,bodies.get(entry.key),identity,ratings));
  const discovery=byKey.has('epg/discovery-latest.json')?readDiscovery(byKey.get('epg/discovery-latest.json'),bodies.get('epg/discovery-latest.json'),{deriveEvidence:rules.candidateEvidence}):{candidates:[],units:[],blockers:[]};
  units.push(...discovery.units);
  blockers.push(...discovery.blockers);
@@ -86,7 +87,7 @@ export async function prepareImport(directory,{limit=null}={}){
   }
  }
  const shas=Object.fromEntries([...byKey].map(([key,entry])=>[key,entry.sha256]));
- const expected=projectSource({keys,bodies:Object.fromEntries(bodies),films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence,links});
+ const expected=projectSource({keys,bodies:Object.fromEntries(bodies),films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence,links,ratings});
  for(const blocker of expected.blockers||[])if(!blockers.some(item=>item.reason===blocker.reason&&item.targetTable===blocker.targetTable&&item.targetId===blocker.targetId))blockers.push(blocker);
  return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit,production:loaded.production===true,source:loaded.source,baselineIdentity:loaded.baselineIdentity,aggregateSha256:manifest.totals?.aggregateSha256??null};
 }
