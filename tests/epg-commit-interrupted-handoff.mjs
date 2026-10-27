@@ -1,11 +1,11 @@
 // AIR-199: the production shape of 27 Oct 2026. The EPG commit published a new generation (pointer and generation
 // files) and the invocation then ended (Workers `exceededMemory`) before `queueDiscovery`. A retry of the same commit
-// took the resume path, saved the sync run as `complete` and ended the same way, still before `queueDiscovery` (case
-// 7). The continuation still holds the previous generation's terminal `chunk_budget` record with no chunks left. These
-// tests pin down what the Worker does in that state today: which reads show the mismatch, why the AIR-159 generation
-// handoff is not reached while the sync run is still in the `epg` stage, that a retry which completes restores the
-// series through the commit's own `queueDiscovery`, and that once the run is `complete` only a continuation step,
-// which no scheduled caller makes from this state, reaches the handoff.
+// took the resume path, saved the sync run as `complete` and ended the same way, still before `queueDiscovery`. The
+// continuation was left on the previous generation's terminal `chunk_budget` record with no chunks left.
+// Since AIR-212 the commit opens the series of the published generation before its memory-heavy tail, so the same
+// interruptions now leave a checkpoint of the new generation (cases 2, 3 and 7). The stranded state can still exist in
+// storage written by an earlier Worker; cases 1, 4 and 5 pin down how it reads and that a continuation step reaches the
+// AIR-159 handoff from it. See tests/epg-commit-durable-enqueue.mjs for the full commit flow.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -65,8 +65,9 @@ assert.equal((await read('/api/status')).stage,'epg');
 assert.deepEqual(continuation(),STALE,'reads write nothing to the continuation');
 
 // 2. Two retries of the commit that end inside the commit's trailing work (here: the first read of finishSync never
-//    returns, as an invocation killed for memory never returns) leave exactly what production showed: two `entered`
-//    ring entries for /api/sync/epg with no terminal outcome, the published pointer on NEW, and the stale OLD record.
+//    returns, as an invocation killed for memory never returns) leave two `entered` ring entries for /api/sync/epg with
+//    no terminal outcome and the published pointer on NEW. Since AIR-212 the series of NEW is already open: the resume
+//    path queues it before finishSync.
 const originalGet=bucket.get.bind(bucket);
 bucket.get=async key=>{if(key==='watchlist.json')return new Promise(()=>{});return originalGet(key);};
 step();await settle();step();await settle();
@@ -74,12 +75,12 @@ bucket.get=originalGet;
 const entries=ring().filter(entry=>entry.route==='/api/sync/epg');
 assert.equal(entries.length,2);for(const entry of entries){assert.equal(entry.phase,'entered');assert.equal(entry.httpStatus,null);}
 assert.equal(records.get('epg/published-generation.json').programmeRunId,NEW);
-assert.deepEqual(continuation(),STALE,'no checkpoint was queued for NEW');
+assert.equal(continuation().programmeRunId,NEW,'the checkpoint of NEW is queued before the tail');assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().remainingChunks,12);
 assert.equal(records.get('sync.json').stage,'epg');
 
 // 3. While the run is in the `epg` stage, a step is a commit retry, not a continuation step: the AIR-159 handoff in
-//    advanceDiscovery is never consulted. When the retry completes, the commit's own queueDiscovery replaces the stale
-//    record with a fresh series for NEW (full budget, `epg_committed`), and nothing else is republished.
+//    advanceDiscovery is never consulted. When the retry completes, the series of NEW queued by the earlier attempt is
+//    kept as it is (full budget, `epg_committed`), and nothing else is republished.
 let r=await step();
 assert.equal(r.status,200);assert.equal(r.data.stage,'complete');
 assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,'epg_committed');assert.equal(r.data.discovery.remainingChunks,12);assert.equal(r.data.discovery.nextAction,'continue');assert.equal(r.data.discovery.programmeRunId,NEW);
@@ -121,11 +122,10 @@ const before=structuredClone(continuation());
 const late=JSON.parse(JSON.stringify(await call('queueDiscovery')(env,'epg_committed',OLD)));
 assert.equal(late.programmeRunId,NEW);assert.deepEqual(continuation(),before);
 
-// 7. The observed end state: the retry saves the run as `complete` in finishSync and then ends (here: every read after
-//    that save never returns) before refreshPredictionQueue, the ratings refresh and queueDiscovery finish. The run is
-//    `complete`, the published pointer names NEW, the continuation is still the spent OLD record, and the read-only
-//    views show `settled` with no generation conflict, so the hourly stage A makes no step. The next step that is made
-//    is a continuation step and the AIR-159 handoff recovers NEW.
+// 7. The 27 Oct end state is no longer reachable: the retry saves the run as `complete` in finishSync and then ends
+//    (here: every read after that save never returns) before refreshPredictionQueue, the ratings refresh and the final
+//    queueDiscovery finish. Since AIR-212 the series of NEW was opened before finishSync, so the read-only views show
+//    outstanding chunks for the published generation and the next step runs a chunk of NEW without a handoff.
 seedInterruptedCommit();
 let savedComplete=false;const originalPut=bucket.put.bind(bucket);
 bucket.put=async(key,value,options)=>{const saved=await originalPut(key,value,options);if(key==='sync.json'&&JSON.parse(value).stage==='complete')savedComplete=true;return saved;};
@@ -133,14 +133,13 @@ bucket.get=async key=>{if(savedComplete)return new Promise(()=>{});return origin
 step();await settle();
 bucket.get=originalGet;bucket.put=originalPut;
 assert.equal(records.get('sync.json').stage,'complete');assert.equal(records.get('sync.json').runId,NEW);
-assert.deepEqual(continuation(),STALE,'the retry ended before queueDiscovery');
+assert.equal(continuation().programmeRunId,NEW,'the series was opened before the tail');assert.equal(continuation().remainingChunks,12);
 assert.equal(ring().filter(entry=>entry.route==='/api/sync/epg'&&entry.phase==='completed').length,0);
 pipeline=await read('/api/enrichment/pipeline/status');
-assert.equal(pipeline.continuation.programmeRunId,OLD);assert.equal(pipeline.continuation.remainingChunks,0);
-assert.equal(pipeline.continuationHealth.status,'settled');assert.equal(pipeline.continuationHealth.generationConflict,null);
+assert.equal(pipeline.continuation.programmeRunId,NEW);assert.equal(pipeline.continuation.remainingChunks,12);
 assert.equal((await read('/api/status')).stage,'complete');
 r=await step();
-assert.equal(r.data.diagnostic.recovery.action,'generation_recovered');assert.equal(r.data.diagnostic.recovery.superseded,OLD);assert.equal(continuation().programmeRunId,NEW);
+assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(r.data.diagnostic.recovery,null);assert.equal(r.data.discovery.remainingChunks,11);assert.equal(continuation().programmeRunId,NEW);
 
 assert.deepEqual(fetches.filter(url=>!url.includes('letterboxd.com')),[],'no TMDB or EPG request was made');
-console.log('AIR-199 interrupted EPG commit: read-only views, two entered without outcome, commit retry versus AIR-159 handoff, competing callers, generation fence and the observed complete-but-unqueued end state passed');
+console.log('AIR-199 interrupted EPG commit: read-only views, two entered without outcome, commit retry versus AIR-159 handoff, competing callers, generation fence and the AIR-212 early enqueue passed');
