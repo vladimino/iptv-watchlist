@@ -1,9 +1,9 @@
 # ADR 0023: Watched, rating and watchlist are separate Letterboxd facts with provenance, and only a newer observation replaces one
 
-**Status:** Proposed (needs the owner's architecture approval and rendered-diagram approval before merge; it authorizes no import, R2 or D1 write, flag or Task change)  
-**Original decision date:** not yet decided  
+**Status:** Accepted (owner architecture and rendered Mermaid diagram approved 2026-10-27; no import, R2 or D1 write, flag or Task change authorized)  
+**Original decision date:** 2026-10-27  
 **Recorded at:** 2026-10-27  
-**Approval source:** pending owner review of this PR  
+**Approval source:** explicit owner acceptance of ADR-0023 and visual QA of the GitHub-rendered Mermaid diagram, 2026-10-27 (AIR-170; PR #137)  
 **Related work:** [AIR-170](https://trello.com/c/UaOFSsF9), [AIR-169 reconciliation](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md), [AIR-171 importer](https://trello.com/c/uvGt48sq), [AIR-172 finds](https://trello.com/c/FvqqJ8H0), [AIR-173 production import](https://trello.com/c/w2bVRb72), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0018](0018-letterboxd-last-good-ratings.md), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0002](0002-cloudflare-worker-r2-authority.md), [ADR-0019](0019-live-d1-backfill-boundaries.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -48,7 +48,7 @@ This ADR is design only. Implementation is AIR-171 (importer and writer changes,
 
 ## Evidence
 
-- **Original decision:** pending (this PR)
+- **Original decision:** owner accepted ADR-0023 and the rendered diagram on 2026-10-27 (PR #137)
 - **Implementation:** none yet
 - **Dated verification:** [AIR-169 reconciliation, 26 October 2026](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md); code reading at `main` `29fc0d1`
 - **Uncertainty:** whether the public films list reliably shows every watched film (the generation's `watched` count is the only cross-check); whether Letterboxd's export `Date` in `watched.csv` is the watch date or the log date
