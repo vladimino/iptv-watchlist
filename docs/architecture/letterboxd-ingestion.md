@@ -39,3 +39,32 @@ sequenceDiagram
 The **separately flagged** `POST /api/enrichment/ratings/refresh` is not automatically scheduled. The pending generation and last-success pointer allow a safe continuation of an interrupted projection without repeating Letterboxd reads. Its lease and ETag retry protect concurrent writers to `enrichment/view-index.json`. A per-film repair is distinct from a complete scan; it does not move `lastSuccessAt`.
 
 For operational truth, check the current `RATINGS_REFRESH` binding before claiming that manual refresh is enabled; the source default is not evidence of current production configuration. No retrieval, bypass, ratings repair, or refresh is performed by this documentation change.
+
+## Proposed: watched, rating and watchlist as separate facts
+
+**Not implemented; proposed by [ADR-0023](../adr/0023-letterboxd-user-facts.md) and pending owner approval.** Today the films-list scan writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. Under the proposal every source writes observations into one fact record per canonical film, only a greater observation (by time, then source rank, then observation id) replaces a value, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
+
+```mermaid
+flowchart TD
+    subgraph sources["Observations"]
+        export["Owner's account export<br/>accepted identities only"]
+        films["Complete public films list"]
+        watchlist["Complete watchlist"]
+        page["Per-film page lookup"]
+        owner["Owner edit"]
+    end
+    gaps["403, partial scan,<br/>film absent from list"]
+    merge{"Greater than the stored<br/>observation (time, source, id)?"}
+    facts[("R2 fact record per film:<br/>watched, rating, watchlist,<br/>provenance")]
+    keep["Keep stored value"]
+    index[("view-index.json: actualRating, watched<br/>under lid and tmdb_n")]
+    finds["Finds: exclude watched or rated;<br/>actual rating over prediction"]
+    sources --> merge
+    merge -->|yes: compare-and-swap| facts
+    merge -->|no| keep
+    gaps -.->|not an observation| keep
+    facts -->|projection| index
+    index --> finds
+```
+
+Unresolved export rows (no accepted identity) never reach the merge; they stay in the importer's private report until a separate identity verification.
