@@ -4,7 +4,7 @@ This document is the durable collaboration policy for the IPTV Watchlist project
 
 ## ADR pre-merge decision gate
 
-An ADR must not be merged with `Status: Proposed`. Before the ADR PR is merged, the owner explicitly decides `Accepted` or `Declined`; the ADR file and register must reflect that decision in the same PR, with an identifiable approval source. Independent technical review or the merge of a design proposal does **not** constitute owner acceptance. A `Declined` ADR is recorded as a rejected decision and does not authorize implementation. This gate applies even when the code/documentation changes are otherwise green. An administrative correction to a previously merged Proposed ADR is separate from ongoing authorized implementation and must not block unrelated or owner-authorized successor work.
+An ADR must not be merged with `Status: Proposed`. Before the ADR PR is merged, the owner explicitly decides `Accepted` or `Declined`; the ADR file and register must reflect that decision in the same PR, with an identifiable approval source. Independent technical review or the merge of a design proposal does **not** constitute owner acceptance. A `Declined` ADR is recorded as a rejected decision and does not authorize implementation. Accepting an ADR approves its documented architecture only; it does not authorize production flags, data writes, migration, task edits, or cutover. This gate applies even when the code/documentation changes are otherwise green. An administrative correction to a previously merged Proposed ADR is separate from ongoing authorized implementation and must not block unrelated or owner-authorized successor work.
 
 ## Roles and sources of truth
 
