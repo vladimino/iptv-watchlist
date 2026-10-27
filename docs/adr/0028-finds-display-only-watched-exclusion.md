@@ -26,7 +26,7 @@ The [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026
      "kind": "letterboxd_display_exclusion",
      "rule": "strict_original_exact_year",
      "normalization": "normTitle_v1",
-     "source": {"type": "letterboxd_export", "archiveSha256": "<64 hex>", "exportedAt": "<ISO date>"},
+     "source": {"type": "letterboxd_export", "archiveSha256": "<64 hex>", "exportedAt": "<ISO date>", "baselinePlanSha256": "<64 hex>"},
      "builtAt": "<ISO time>",
      "counts": {"exportFilms": 0, "withIdentity": 0, "droppedNoYear": 0, "droppedExportNamesake": 0, "entries": 0},
      "entries": [{"title": "<normalized name>", "year": 2000}],
@@ -34,7 +34,7 @@ The [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026
    }
    ```
 
-   The builder includes a watched or rated export film only when it has **no** accepted identity (no stored fact for its code), a year, and a normalized name that no other film of the same export carries in any year. It drops codes, ratings, dates, URIs and review text. Because identified films are left out, the list is rebuilt after every import that adds identities. `normTitle_v1` is `normTitle` of [`src/letterboxd-match.js`](../../src/letterboxd-match.js); changing that function requires a new normalization tag, and the reader refuses a tag it does not know.
+   The builder includes a watched or rated export film only when it has **no** accepted identity, a year, and a normalized name that no other film of the same export carries in any year. It drops codes, ratings, dates, URIs and review text. Accepted identities are read from one verified baseline plan, the committed import plan whose hash `source.baselinePlanSha256` records; the builder refuses to run without it, so it cannot silently fall back to an empty identity set and put identified films back into the list. Because identified films are left out, the list is rebuilt from the newer plan after every import that adds identities. `normTitle_v1` is `normTitle` of [`src/letterboxd-match.js`](../../src/letterboxd-match.js); changing that function requires a new normalization tag, and the reader refuses a tag it does not know.
 
 3. **The strict rule.** With the switch on and a valid list, a catalog record is excluded when all of the following hold, evaluated on every request against the pinned generation's catalog copy:
    1. The record has a verified identity (`canonicalIdentity` equals `tmdb:<tmdbId>`) and an integer `year`.
@@ -47,9 +47,9 @@ The [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026
 
 4. **Generation scope.** Nothing is precomputed or stored: matching runs per request on the pinned generation. A new generation is evaluated afresh, so a film can be hidden in one generation and shown in the next when a namesake enters or leaves the catalog. The list is not bound to a generation; the guards are.
 
-5. **Switch and fail-open.** A Worker environment variable `FINDS_TITLE_EXCLUSION` enables the rule only with the exact string `on` (no trimming, case-sensitive; absent, any other value or a non-string is `off`), like the other gates in the [flag register](../reference/feature-flags.md). With the switch off the object is not read. With the switch on, a missing, unreadable, oversized or invalid list (unknown `schemaVersion`, `kind`, `rule` or `normalization`, an entry without a non-empty title or an integer year in 1870–2100, more than 20,000 entries, or a `contentSha256` that does not match) disables the rule for that request: every film is shown and the route still answers `200`. Unknown provenance means show, never hide.
+5. **Switch and fail-open.** A Worker environment variable `FINDS_TITLE_EXCLUSION` enables the rule only with the exact string `on` (no trimming, case-sensitive; absent, any other value or a non-string is `off`), like the other gates in the [flag register](../reference/feature-flags.md). With the switch off the object is not read. With the switch on, a missing, unreadable, oversized or invalid list disables the rule for that request. Invalid means any of: an object larger than 2 MiB, checked from the R2 object size before the body is read or parsed; JSON that does not parse; an unknown `schemaVersion`, `kind`, `rule` or `normalization`; a `source` that is not exactly `letterboxd_export` with a 64-hex `archiveSha256`, a 64-hex `baselinePlanSha256` and a valid `exportedAt` date; an invalid `builtAt`; an entry without a non-empty title or an integer year in 1870–2100; two entries with the same title and year; more than 20,000 entries; `counts.entries` different from the number of entries; or a `contentSha256` that does not match. Then every film is shown and the route still answers `200`. Unknown provenance means show, never hide.
 
-6. **Observable effect without private data.** The response gains one aggregate, `displayExclusion`: `{"state": "off" | "applied" | "unavailable", "excluded": <count>, "listSha256": <contentSha256 or null>}`. It carries no title, code or id of an excluded film. Logs follow the same rule. Per-film samples for owner acceptance come from a separately approved preflight, not from this route.
+6. **Observable effect without private data.** The response gains one aggregate, `displayExclusion`: `{"state": "off" | "applied" | "unavailable", "excluded": <count>}`. It carries no title, code or id of an excluded film, and no hash of the list or of its source: an unkeyed hash of a private list is a stable fingerprint of the owner's watch history that could be correlated across deployments or checked against guessed datasets. `contentSha256` is used only inside the Worker for the integrity check and in the owner-approved preflight. Logs follow the same rule. Per-film samples for owner acceptance come from a separately approved preflight, not from this route.
 
 7. **No writer.** The Worker only reads the list. There is no Worker route, MCP tool or scheduled task that writes it. Placing, replacing or deleting the object is an owner-approved, out-of-band R2 operation under its own runbook; the switch is changed only with separate owner approval.
 
@@ -78,6 +78,9 @@ A false suppression remains possible for an unseen catalog film that shares its 
 | List missing, unreadable, unknown version or tag, bad checksum, oversized | `state: "unavailable"`, every film shown, `200` |
 | Switch off with a valid list present | `state: "off"`, object not read, every film shown |
 | Excluded film | Absent from `films`; counted in `displayExclusion.excluded`; no R2 write |
+| Any state | The response and logs carry no title, code, list hash or source hash |
+| Object above 2 MiB | `unavailable` without reading or parsing the body |
+| Duplicate entry, wrong `counts.entries`, malformed `source` or `builtAt` | `unavailable`, every film shown |
 
 ## Alternatives considered
 
@@ -95,7 +98,7 @@ A false suppression remains possible for an unseen catalog film that shares its 
 
 - Finds stop offering most seen films that have a unique original title, without touching identity, facts, ratings, the watchlist or predictions.
 - Finds gain a second, weaker exclusion source. It must stay visibly separate from identity in code, tests, the API contract and the [Letterboxd ingestion diagram](../architecture/letterboxd-ingestion.md), which the implementation updates.
-- One more R2 read and an integrity check per request while the switch is on; the list is bounded at 20,000 entries.
+- One more R2 read and an integrity check per request while the switch is on; the list is bounded at 2 MiB and 20,000 entries.
 - A false suppression is invisible to the owner on the page. The aggregate count, the rollout preflight and the switch are the controls.
 - The list must be rebuilt after each export or identity import; a stale list misses films watched after its export and keeps hiding what it already matches.
 - Films matched only through an alias or with a different year stay in Finds until identity is proven.
