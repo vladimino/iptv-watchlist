@@ -18,6 +18,10 @@ import {openSqlite} from './offline-import.mjs';
 
 export const SCRATCH_DATABASE_NAME='iptv-atomicity-scratch';
 export const RUN_IDS=Object.freeze({prior:'g4-prior',scaled:'g4-scaled',rival:'g4-rival'});
+// The real scale runs on a scratch database that already holds the 1.25x run of the full scale, so it has run ids of its own.
+const REAL_RUN_IDS=Object.freeze({prior:'g4r-prior',scaled:'g4r-scaled',rival:'g4r-rival'});
+export const RUN_IDS_BY_SCALE=Object.freeze({full:RUN_IDS,small:RUN_IDS,real:REAL_RUN_IDS,small_real:REAL_RUN_IDS});
+const runIdsFor=scale=>RUN_IDS_BY_SCALE[scale]||RUN_IDS;
 export const FINAL_TABLES=['programme_generation','published_generation','film_generation','film_show','film_epg_last_airing','candidate','candidate_generation','candidate_show'];
 export const MIGRATIONS=['migrations/0001_schema_v1.sql','migrations/0002_generation_stage.sql','migrations/0003_candidate_show_identity.sql'];
 // The claim TTL is the minimum the stage accepts, so the planned takeovers wait about a minute each.
@@ -25,6 +29,11 @@ export const CLAIM_TTL_MS=60000;
 // full: the ADR-0021 GO/NO-GO size (prior at today's 22,199 candidates, then 1.25x). small: the same scenario for tests.
 export const SCALES=Object.freeze({
  full:{prior:{films:2300,candidates:22199},scaled:{films:2300,candidates:27749},rival:{films:4,candidates:40},showsPerFilm:2,showsPerCandidate:2,limits:{}},
+ // AIR-178: 1.25x the 51,643 candidates of the AIR-175 production generation. One show per candidate (production has 0.63), and
+ // a few candidates whose slot carries a second EPG title (schema v3). It follows the full-scale history already on the scratch.
+ real:{prior:{films:2300,candidates:51643},scaled:{films:2300,candidates:64554},rival:{films:4,candidates:40},showsPerFilm:2,showsPerCandidate:1,overlaps:8,history:'full',limits:{}},
+ // The real scale's shape at the small size, after the small scale's run: the local rehearsal of the AIR-178 flow.
+ small_real:{prior:{films:12,candidates:70},scaled:{films:12,candidates:88},rival:{films:2,candidates:5},showsPerFilm:2,showsPerCandidate:1,overlaps:3,history:'small',limits:{maxStatements:25,maxBytes:DEFAULT_CHUNK_BYTES}},
  small:{prior:{films:12,candidates:50},scaled:{films:12,candidates:60},rival:{films:2,candidates:5},showsPerFilm:2,showsPerCandidate:2,limits:{maxStatements:25,maxBytes:DEFAULT_CHUNK_BYTES}},
 });
 const REPO_ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
@@ -44,14 +53,18 @@ export function readScratchTarget(env=process.env){
 }
 
 // The deterministic synthetic generations. The 1.25x generation changes five evidence keys of the prior one, as the tests do.
+// A scale with a history runs after that scale's generations on the same database: its prior replaces their pointer, and the
+// legacy reference writes the history first. Overlapping candidates get a second show on the same slot with another title.
 export function generations(scale='full'){
  const size=SCALES[scale];if(!size)throw new ExportError('configuration','Unknown scale '+scale);
+ const ids=runIdsFor(scale),history=size.history?generations(size.history):null,after=history?history.runIds.scaled:null;
  const shape={showsPerFilm:size.showsPerFilm,showsPerCandidate:size.showsPerCandidate};
- const prior=syntheticGeneration({...size.prior,...shape,runId:RUN_IDS.prior,previousRunId:null});
- const raw=syntheticGeneration({...size.scaled,...shape,runId:RUN_IDS.scaled,previousRunId:RUN_IDS.prior});
+ const overlap=generation=>({...generation,candidates:generation.candidates.map((candidate,index)=>index<(size.overlaps||0)&&candidate.shows.length?{...candidate,shows:[...candidate.shows,{...candidate.shows[0],epgTitle:(candidate.shows[0].epgTitle||'')+' (second title)'}]}:candidate)});
+ const prior=overlap(syntheticGeneration({...size.prior,...shape,runId:ids.prior,previousRunId:after}));
+ const raw=overlap(syntheticGeneration({...size.scaled,...shape,runId:ids.scaled,previousRunId:ids.prior}));
  const scaled={...raw,candidates:raw.candidates.map((candidate,index)=>index<5?{...candidate,evidenceKey:candidate.evidenceKey+'|changed'}:candidate)};
- const rival=syntheticGeneration({...size.rival,...shape,runId:RUN_IDS.rival,previousRunId:RUN_IDS.prior});
- return {prior,scaled,rival,films:Math.max(size.prior.films,size.scaled.films,size.rival.films),limits:size.limits,baseline:sha256('air-174-g4-synthetic-v1:'+scale)};
+ const rival=syntheticGeneration({...size.rival,...shape,runId:ids.rival,previousRunId:ids.prior});
+ return {prior,scaled,rival,runIds:ids,history:history?[...history.history,history.prior,history.scaled]:[],films:Math.max(size.prior.films,size.scaled.films,size.rival.films,history?.films||0),limits:size.limits,baseline:sha256('air-174-g4-synthetic-v1:'+scale)};
 }
 
 // Every statement of a migration file, comments removed; the files contain no ';' other than statement terminators.
@@ -128,7 +141,7 @@ export async function preflight(db,target){
  if(names.get('schema_contract')==='table')result.schemaVersion=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
  if(names.get('generation_stage')==='table'){
   result.claimColumns=/claim_nonce/.test((await db.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='generation_stage'"))?.sql||'');
-  for(const run of Object.values(RUN_IDS)){const stage=await db.get('SELECT state,claim_generation,failure_reason FROM generation_stage WHERE programme_run_id=?',[run]);result.stages[run]=stage?{state:stage.state,claimGeneration:stage.claim_generation,failureReason:stage.failure_reason}:null;}
+  for(const run of [...new Set(Object.values(RUN_IDS_BY_SCALE).flatMap(ids=>Object.values(ids)))]){const stage=await db.get('SELECT state,claim_generation,failure_reason FROM generation_stage WHERE programme_run_id=?',[run]);result.stages[run]=stage?{state:stage.state,claimGeneration:stage.claim_generation,failureReason:stage.failure_reason}:null;}
  }
  if(FINAL_TABLES.every(table=>names.get(table)==='table')){result.finalRows={};for(const table of FINAL_TABLES)result.finalRows[table]=(await db.get('SELECT COUNT(*) AS n FROM '+table)).n;}
  return result;
@@ -171,14 +184,14 @@ async function digestTables(db,tables=FINAL_TABLES){
  return out;
 }
 // The independent reference: the legacy publishGeneration writes the same two generations into a local SQLite database.
-async function referenceDigest(input){
+export async function referenceDigest(input){
  const directory=await mkdtemp(path.join(os.tmpdir(),'iptv-g4-reference-')),file=path.join(directory,'reference.sqlite');
  try{
   const local=openSqlite(file);
-  for(const statement of migrationStatements(MIGRATIONS[0]))await local.run(statement);
+  for(const file of MIGRATIONS)for(const statement of migrationStatements(file))await local.run(statement);
   for(let start=0;start<input.films;start+=500){const count=Math.min(500,input.films-start);await local.run('INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES '+Array.from({length:count},(_,offset)=>"('"+('film:'+('f'+(start+offset)+'-'.repeat(24)).slice(0,24))+"',1,NULL,'G4 synthetic film','2026-10-26T00:00:00.000Z')").join(','));}
   const repository=createEpgRepository(local);
-  await repository.publishGeneration(input.prior);await repository.publishGeneration(input.scaled);
+  for(const generation of [...(input.history||[]),input.prior,input.scaled])await repository.publishGeneration(generation);
   return await digestTables(local);
  }finally{await rm(directory,{recursive:true,force:true});}
 }
@@ -194,10 +207,10 @@ export async function runScenario(db,target,current,{scale='full',sha256:hash=sh
    if(error instanceof D1Error&&error.fatal&&!error.details?.simulated)throw error;
    return {outcome:error instanceof StageStop?'stop':error instanceof D1Error?error.kind:'error',reason:error.reason??null,message:String(error?.message||'').slice(0,200),entry:entries[0],nonce,kinds:adapter.state.kinds};}
  };
- const waitForExpiry=async()=>{const stage=await readStage(db,RUN_IDS.scaled);const until=Date.parse(stage?.claim_expires_at||'')-Date.parse(now());if(until>0){await sleep(Math.min(until+1500,CLAIM_TTL_MS+5000));}return Math.max(0,until);};
+ const waitForExpiry=async()=>{const stage=await readStage(db,input.runIds.scaled);const until=Date.parse(stage?.claim_expires_at||'')-Date.parse(now());if(until>0){await sleep(Math.min(until+1500,CLAIM_TTL_MS+5000));}return Math.max(0,until);};
  const scaledPlan=planGeneration(input.scaled,{sha256:hash,...input.limits}),middle=Math.floor(scaledPlan.chunks.length/2);
- const receipts=async()=>(await db.get('SELECT COUNT(*) AS n FROM generation_stage_chunk WHERE programme_run_id=?',[RUN_IDS.scaled])).n;
- const chunkRows=async chunk=>(await db.get('SELECT '+['stage_film_generation','stage_film_show','stage_candidate','stage_candidate_show'].map(table=>'(SELECT COUNT(*) FROM '+table+' WHERE programme_run_id=? AND chunk_index=?)').join('+')+' AS n',Array(4).fill([RUN_IDS.scaled,chunk]).flat())).n;
+ const receipts=async()=>(await db.get('SELECT COUNT(*) AS n FROM generation_stage_chunk WHERE programme_run_id=?',[input.runIds.scaled])).n;
+ const chunkRows=async chunk=>(await db.get('SELECT '+['stage_film_generation','stage_film_show','stage_candidate','stage_candidate_show'].map(table=>'(SELECT COUNT(*) FROM '+table+' WHERE programme_run_id=? AND chunk_index=?)').join('+')+' AS n',Array(4).fill([input.runIds.scaled,chunk]).flat())).n;
  const result={scale,plan:{priorChunks:planGeneration(input.prior,{sha256:hash,...input.limits}).chunks.length,scaledChunks:scaledPlan.chunks.length,scaledRows:scaledPlan.rows.length,interruptAtChunk:middle},steps,executions:{},commit:null,parity:null,verdict:null};
 
  check('seed_films',true,{films:await seedFilms(db,input.films,current)});
@@ -226,10 +239,10 @@ export async function runScenario(db,target,current,{scale='full',sha256:hash=sh
  const fence={};
  const resumed=await execute(input.scaled,{hooks:[async({kind})=>{
   if(kind!=='commit'||fence.tried)return;fence.tried=true;
-  await failStage(db,RUN_IDS.scaled,{...staleContext,reason:'g4_stale_fail'});
-  fence.failIgnored=(await readStage(db,RUN_IDS.scaled))?.state==='validated';
+  await failStage(db,input.runIds.scaled,{...staleContext,reason:'g4_stale_fail'});
+  fence.failIgnored=(await readStage(db,input.runIds.scaled))?.state==='validated';
   try{await commitStage(db,scaledPlan,staleContext);fence.commitRefused=false;}catch(error){fence.commitRefused=error?.kind==='statement';}
-  fence.pointerUnchanged=(await db.get('SELECT programme_run_id FROM published_generation WHERE id=1'))?.programme_run_id===RUN_IDS.prior;
+  fence.pointerUnchanged=(await db.get('SELECT programme_run_id FROM published_generation WHERE id=1'))?.programme_run_id===input.runIds.prior;
  }]});
  result.executions.resumed=resumed.entry;
  check('takeover_resumes_after_receipts',resumed.outcome==='committed'&&resumed.entry?.claim?.takenOver===true&&resumed.entry?.chunks?.alreadyReceived===middle,{outcome:resumed.outcome,reason:resumed.reason,claim:resumed.entry?.claim??null,chunks:resumed.entry?.chunks??null});
@@ -244,7 +257,7 @@ export async function runScenario(db,target,current,{scale='full',sha256:hash=sh
  check('repeated_commit_refused',repeatRefused&&JSON.stringify(await digestTables(db))===JSON.stringify(beforeRepeat));
  // 6. A stage planned against the previous pointer is refused at its commit with nothing written, and failed.
  const stale=await execute(input.rival);
- check('stale_pointer_refused',stale.outcome==='stop'&&stale.reason==='pointer_moved'&&(await readStage(db,RUN_IDS.rival))?.state==='failed'&&JSON.stringify(await digestTables(db))===JSON.stringify(beforeRepeat),{outcome:stale.outcome,reason:stale.reason});
+ check('stale_pointer_refused',stale.outcome==='stop'&&stale.reason==='pointer_moved'&&(await readStage(db,input.runIds.rival))?.state==='failed'&&JSON.stringify(await digestTables(db))===JSON.stringify(beforeRepeat),{outcome:stale.outcome,reason:stale.reason});
  // 7. The same 1.25x generation again is a replay.
  const replay=await execute(input.scaled);
  check('rerun_is_replay',replay.outcome==='replay',{outcome:replay.outcome});
@@ -258,9 +271,9 @@ export async function runScenario(db,target,current,{scale='full',sha256:hash=sh
 function finishScenario(result,verdict){result.verdict=verdict;return result;}
 
 // Approved cleanup: bounded discard of the harness's failed or superseded stages; staging rows only, never a final table.
-export async function cleanupStages(db){
+export async function cleanupStages(db,scale='full'){
  const results={};
- for(const run of Object.values(RUN_IDS)){
+ for(const run of Object.values(runIdsFor(scale))){
   const stage=await readStage(db,run);
   if(!stage||!['failed','superseded'].includes(stage.state)){results[run]={skipped:stage?.state??'absent'};continue;}
   results[run]=await discardStage(db,run,{limit:500});
@@ -274,11 +287,11 @@ export function plan(scale='full'){
  const migrations=MIGRATIONS.map(file=>({file,statements:migrationStatements(file).length,objects:migrationObjects(file).length}));
  return {scale,database:SCRATCH_DATABASE_NAME,refuses:['any database whose live uuid or name differs from the configured scratch database','the database name iptv and the D1_BACKFILL_DATABASE_ID uuid','any R2 access (none is implemented)'],
   environment:['D1_BACKFILL_ACCOUNT_ID','D1_BACKFILL_API_TOKEN (scoped to the scratch database)','D1_BACKFILL_SCRATCH_DATABASE_ID','D1_G4_SCRATCH_DATABASE_NAME (default '+SCRATCH_DATABASE_NAME+')'],
-  generations:{prior:{runId:RUN_IDS.prior,films:input.prior.films.length,candidates:input.prior.candidates.length,rows:prior.rows.length,chunks:prior.chunks.length,largestChunkBytes:Math.max(...prior.chunks.map(chunk=>chunk.bytes))},scaled:{runId:RUN_IDS.scaled,films:input.scaled.films.length,candidates:input.scaled.candidates.length,rows:scaled.rows.length,chunks:scaled.chunks.length,largestChunkBytes:Math.max(...scaled.chunks.map(chunk=>chunk.bytes))},rival:{runId:RUN_IDS.rival,candidates:input.rival.candidates.length,chunks:rival.chunks.length}},
+  generations:{prior:{runId:input.runIds.prior,films:input.prior.films.length,candidates:input.prior.candidates.length,rows:prior.rows.length,chunks:prior.chunks.length,largestChunkBytes:Math.max(...prior.chunks.map(chunk=>chunk.bytes))},scaled:{runId:input.runIds.scaled,films:input.scaled.films.length,candidates:input.scaled.candidates.length,rows:scaled.rows.length,chunks:scaled.chunks.length,largestChunkBytes:Math.max(...scaled.chunks.map(chunk=>chunk.bytes))},rival:{runId:input.runIds.rival,candidates:input.rival.candidates.length,chunks:rival.chunks.length}},
   commands:[
    {command:'--preflight',approval:'scratch access (read-only)',writes:'none',reads:'database uuid and name, sqlite_master, schema_contract, harness stage rows, final table counts'},
-   {command:'--apply-schema --approved-scratch-writes',approval:'apply 0001 and 0002 to the scratch database',writes:migrations.map(item=>item.file+': one request of '+item.statements+' statements, only if none of its '+item.objects+' objects exists; any partial schema stops'),reads:'preflight before and after'},
-   {command:'--run --approved-scratch-writes',approval:'synthetic writes to the scratch database',writes:['seed '+input.films+' synthetic films (ON CONFLICT DO NOTHING)','stage and commit '+RUN_IDS.prior+' ('+prior.chunks.length+' chunks)','1.25x '+RUN_IDS.scaled+' ('+scaled.chunks.length+' chunks): failing last statement, refused second executor, interruption before chunk '+Math.floor(scaled.chunks.length/2)+', takeover after claim expiry (two waits of about '+CLAIM_TTL_MS/1000+' s), stale-claimant fail and commit, timed commit, repeated commit','stale-pointer stage '+RUN_IDS.rival+' (failed at commit)','replay of '+RUN_IDS.scaled],reads:'stage read-back, receipts, final tables digested for parity with a local legacy reference'},
+   {command:'--apply-schema --approved-scratch-writes',approval:'apply the missing migrations ('+MIGRATIONS.map(file=>path.basename(file).slice(0,4)).join(', ')+') to the scratch database',writes:migrations.map(item=>item.file+': one request of '+item.statements+' statements, only if none of its '+item.objects+' objects exists; any partial schema stops'),reads:'preflight before and after'},
+   {command:'--run --approved-scratch-writes',approval:'synthetic writes to the scratch database',writes:['seed '+input.films+' synthetic films (ON CONFLICT DO NOTHING)','stage and commit '+input.runIds.prior+' ('+prior.chunks.length+' chunks)','1.25x '+input.runIds.scaled+' ('+scaled.chunks.length+' chunks): failing last statement, refused second executor, interruption before chunk '+Math.floor(scaled.chunks.length/2)+', takeover after claim expiry (two waits of about '+CLAIM_TTL_MS/1000+' s), stale-claimant fail and commit, timed commit, repeated commit','stale-pointer stage '+input.runIds.rival+' (failed at commit)','replay of '+input.runIds.scaled],reads:'stage read-back, receipts, final tables digested for parity with a local legacy reference'},
    {command:'--cleanup --approved-cleanup',approval:'deleting staging rows (separate)',writes:'discard of failed or superseded harness stages in batches of 500 rows; final tables, the published stage and objects outside the harness are never touched',reads:'stage rows'},
   ],
   go:['commit of the 1.25x stage within '+PUBLISH_BUDGET_MS+' ms client time (D1 server time recorded)','every final table equal to the legacy reference','failing last statement rolled back whole','second executor refused; stale claimant cannot fail or commit','interrupted run resumed after its receipts by a takeover','repeated and stale-pointer commits refused with nothing written','rerun is a replay'],
@@ -309,7 +322,7 @@ export async function runG4({command,output,scale='full',approvedWrites=false,ap
    if(command==='apply-schema')report.result=await applySchema(db,target,current);
    else if(checked.schemaVersion!==MIGRATIONS.length||checked.claimColumns!==true)throw new StageStop('schema_not_ready',{schemaVersion:checked.schemaVersion,claimColumns:checked.claimColumns});
    else if(command==='run')report.result=await runScenario(db,target,current,{scale,now,clock,sleep,...(referenceDigestFn?{referenceDigestFn}:{})});
-   else report.result={preflight:checked,discarded:await cleanupStages(db)};
+   else report.result={preflight:checked,discarded:await cleanupStages(db,scale)};
   }
   report.status=command==='run'?report.result.verdict:'completed';
  }catch(error){
@@ -332,7 +345,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  const args=process.argv.slice(2),value=flag=>{const index=args.indexOf(flag);return index<0?null:args[index+1];};
  const commands=['plan','preflight','apply-schema','run','cleanup'].filter(name=>args.includes('--'+name));
  const scale=value('--scale')||'full';
- if(commands.length!==1||!SCALES[scale]){console.error('Usage: node scripts/d1-scratch-g4.mjs --plan | --preflight | --apply-schema --approved-scratch-writes | --run --approved-scratch-writes | --cleanup --approved-cleanup  --output /absolute/private/dir [--scale full|small]');process.exit(2);}
+ if(commands.length!==1||!SCALES[scale]){console.error('Usage: node scripts/d1-scratch-g4.mjs --plan | --preflight | --apply-schema --approved-scratch-writes | --run --approved-scratch-writes | --cleanup --approved-cleanup  --output /absolute/private/dir [--scale full|real|small|small_real]');process.exit(2);}
  try{
   const report=await runG4({command:commands[0],output:value('--output'),scale,approvedWrites:args.includes('--approved-scratch-writes'),approvedCleanup:args.includes('--approved-cleanup')});
   console.log(JSON.stringify(commands[0]==='plan'?report:{status:report.status,stop:report.stop,verdict:report.result?.verdict??null,commit:report.result?.commit??null,requests:report.requests},null,commands[0]==='plan'?1:0));

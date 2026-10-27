@@ -47,11 +47,13 @@ It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command
 
 | Command | Approval | Effect |
 | --- | --- | --- |
-| `--plan [--scale full]` | none | Prints generation sizes, chunk counts, commands and GO criteria. Reads no credential and sends nothing |
+| `--plan [--scale full\|real]` | none | Prints generation sizes, chunk counts, commands and GO criteria. Reads no credential and sends nothing |
 | `--preflight` | scratch access, read-only | Identity, `sqlite_master` objects (objects outside the migrations are listed, never touched), `PRAGMA foreign_keys`, schema version, claim columns, harness stage states, final table counts |
 | `--apply-schema --approved-scratch-writes` | apply `0001`, `0002` and `0003` to the scratch database (a database already on schema v2 gets `0003` only) | Applies each migration as one request, and only if none of its objects exists. A migration already complete is skipped. A partial schema, or a name taken by another object type, is `no_go: schema_partial` with no write |
 | `--run --approved-scratch-writes` | synthetic writes to the scratch database | Runs the scenario below. The verdict is `GO`, `NO-GO`, or `INCOMPLETE` when the 1.25× generation was already committed by an earlier run |
 | `--cleanup --approved-cleanup` | deleting staging rows, a separate approval | Discards the failed or superseded harness stages (`g4-prior`, `g4-rival`) in batches of 500. It never touches the published stage, the final tables or foreign objects |
+
+**Scales.** `full` (the default) is the AIR-174 shape: 22,199 then 27,749 candidates (1.25× the production order of magnitude assumed then), two shows per candidate, run ids `g4-prior`, `g4-scaled`, `g4-rival`. `real` is 1.25× the AIR-175 production generation: 51,643 then **64,554** candidates, 2,300 films, one show per candidate (production has 0.63) and eight candidates whose slot carries a second EPG title (schema v3), run ids `g4r-prior`, `g4r-scaled`, `g4r-rival`. `real` runs on a scratch database that already holds the `full` run: its prior replaces the `full` pointer, and the legacy reference writes the `full` history first, so every final table is still compared row for row. `small` and `small_real` are the same two shapes at test size.
 
 **Scenario.** `--run` takes these steps in order (`--scale full` by default):
 1. Seed 2,300 synthetic films.
