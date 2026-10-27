@@ -241,6 +241,12 @@ The size budget for the active ledger (10–15 MB was the working hypothesis) is
   - tests `tests/discovery-ledger-archive.mjs`;
   - offline benchmark `scripts/discovery-ledger-benchmark.mjs`;
   - [runbook](../runbooks/discovery-ledger.md).
+- **Split rehearsal:** [AIR-221](https://trello.com/c/9ZiVygrd). `scripts/discovery-ledger-split.mjs` plans the initial split offline from a verified snapshot:
+  - departures move verbatim;
+  - the archive pointer is set before the active ledger;
+  - the generation copy stays the rollback copy.
+
+  `rehearse` proves the invariants above on a copy of the snapshot ([evidence](../evidence/discovery-ledger-split-rehearsal-2026-10-27.md)). It also found that `canonicalDiscoveryCandidate` is not idempotent for some titles; the plan reports such keys per side.
 - **Dated verification:** the [AIR-211 report](../evidence/epg-memory-pressure-2026-10-27.md) (sizes and growth on 27 October 2026, offline replay). No implementation has been measured.
 - **Uncertainty:**
   - the real share of the ledger that is in the latest scan, and so the active size (the item composition was not read);
