@@ -2,10 +2,11 @@ import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:asser
 
 // A CAS bucket that can be told to lose the next conditional write to a concurrent writer.
 function bucket(){
- const records=new Map(),etags=new Map();let revision=0,puts=0,contend=null;
- return {records,get puts(){return puts;},contendOnce(key,mutate){contend={key,mutate};},
+ const records=new Map(),etags=new Map();let revision=0,puts=0,contend=null,fail=null;
+ return {records,get puts(){return puts;},contendOnce(key,mutate){contend={key,mutate};},failOnce(predicate){fail=predicate;},
   async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},
   async put(key,value,options={}){
+   if(fail&&fail(key)){fail=null;throw new Error('injected failure: '+key);}
    if(contend&&contend.key===key){const c=contend;contend=null;records.set(key,c.mutate(structuredClone(records.get(key))));etags.set(key,String(++revision));}
    const condition=options.onlyIf||{};
    if(condition.etagDoesNotMatch==='*'&&records.has(key)||condition.etagMatches&&condition.etagMatches!==etags.get(key))return null;
@@ -21,6 +22,7 @@ const obs=(fact,value,hours,source='letterboxd_export',ref='x')=>F.observation({
 assert.equal(F.factKeyFor({letterboxd:'abc',tmdb:'603'}),'tmdb-603');
 assert.equal(F.factKeyFor({letterboxd:'abc'}),'lb-abc');
 assert.throws(()=>F.factKeyFor({}),/no trusted id/);
+await assert.rejects(F.linkFilm({BUCKET:bucket()},{tmdb:'5'}),error=>error.code==='invalid_identity','no record without a Letterboxd id');
 assert.throws(()=>F.factKeyFor({tmdb:'0x1'}),/Invalid TMDB/);
 await assert.rejects(F.observation({factKey:'k',fact:'rating',value:4.3,observedAt:at(0),source:'owner'}),/Invalid rating/);
 await assert.rejects(F.observation({factKey:'k',fact:'rating',value:4,observedAt:'2026-10-26',source:'owner'}),/ISO UTC/);
@@ -106,7 +108,7 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal((await F.applyFilmsListScan(env,{scanId:'s0',observedAt:at(1),films:{heat:1},total:1},{watchlistFilms})).stored,false);
  // A newer scan with the same values rewrites no record.
  const before=b.puts;result=await F.applyFilmsListScan(env,{scanId:'s2',observedAt:at(2),films:{alien:null,stranger:4.5},total:2},{watchlistFilms});
- assert.equal(result.written,0);assert.equal(b.puts-before,1,'only the summary is written');
+ assert.equal(result.written,0);assert.equal(b.puts-before,3,'stage, summary and stage closure only; no record');
  // The summary is the floor: a per-film lookup older than the latest scan does not override it.
  const stale=await F.recordFilmFacts(env,'alien',{watched:true,rating:3},{observedAt:at(1.5),source:'letterboxd_film_page',sourceRef:'page'});
  assert.equal(stale.outcomes.find(o=>o.fact==='rating').outcome,'older');assert.equal(b.records.get(F.recordKey('tmdb-348')).rating.value,null);
@@ -133,7 +135,7 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  const before=b.puts;await F.applyWatchlistScan(env,{scanId:'w2',observedAt:at(1),films:[{id:'heat',tmdbId:'949'}]});
  assert.equal(b.records.get(F.recordKey('tmdb-348')).watchlist.value,false);assert.equal(b.records.get(F.recordKey('tmdb-949')).watchlist.observedAt,at(0));
  assert.equal(b.records.get('enrichment/view-index.json').tmdb_348.watchlist,false);
- assert.ok(b.puts-before<=3,'summary, one record and the projection');
+ assert.ok(b.puts-before<=5,'stage, summary, stage closure, one record and the projection');
 }
 
 // Worker writers behind LETTERBOXD_FACTS: the EPG films scan no longer clears ratings by absence; off keeps the old path.
@@ -155,4 +157,51 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal(records.get('enrichment/view-index.json').kept.actualRating,null,'with the gate off the legacy path is unchanged');
  assert.equal(records.has('letterboxd/facts/scans/films-list.json'),false);
 }
-console.log('Letterboxd facts: order and ties, null and before-image, rollback and overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, gated writers passed');
+// Staged publication: a crash between the stage and the facts keeps the old summary published and resumes on retry.
+{
+ const b=bucket(),env={BUCKET:b},watchlistFilms=[{id:'heat',tmdbId:'949'},{id:'alien',tmdbId:'348'}];
+ await F.applyFilmsListScan(env,{scanId:'s1',observedAt:at(1),films:{heat:4,alien:3},total:2},{watchlistFilms});
+ b.failOnce(key=>key===F.recordKey('tmdb-348'));
+ await assert.rejects(F.applyFilmsListScan(env,{scanId:'s2',observedAt:at(2),films:{alien:2.5},total:1},{watchlistFilms}),/injected/);
+ assert.equal(b.records.get('letterboxd/facts/scans/films-list.json').scanId,'s1','the summary is not published before its facts');
+ const stage=b.records.get('letterboxd/facts/scans/films-list.pending.json');assert.equal(stage.done,false);assert.equal(stage.previous.scanId,'s1');
+ const resumed=await F.applyFilmsListScan(env,{scanId:'s2',observedAt:at(2),films:{alien:2.5},total:1},{watchlistFilms});
+ assert.equal(resumed.stored,true);assert.equal(b.records.get('letterboxd/facts/scans/films-list.json').scanId,'s2');
+ assert.equal(b.records.get('letterboxd/facts/scans/films-list.pending.json').done,true);
+ assert.equal(b.records.get(F.recordKey('tmdb-348')).rating.value,2.5);
+ assert.equal(b.records.get(F.recordKey('tmdb-949')).rating.observedAt,at(1),'the film that dropped out keeps the s1 observation after the crash');
+ // A crash before the projection is repaired by the retry even though the record already holds the value.
+ b.failOnce(key=>key==='enrichment/view-index.json');
+ await assert.rejects(F.applyFilmsListScan(env,{scanId:'s3',observedAt:at(3),films:{alien:2},total:1},{watchlistFilms}),/injected/);
+ assert.equal(b.records.get('enrichment/view-index.json').alien.actualRating,2.5);
+ await F.applyFilmsListScan(env,{scanId:'s3',observedAt:at(3),films:{alien:2},total:1},{watchlistFilms});
+ assert.equal(b.records.get('enrichment/view-index.json').alien.actualRating,2);assert.equal(b.records.get('enrichment/view-index.json').tmdb_348.actualRating,2);
+ // A newer scan finishes an unfinished older stage first.
+ b.failOnce(key=>key===F.recordKey('tmdb-348'));
+ await assert.rejects(F.applyFilmsListScan(env,{scanId:'s4',observedAt:at(4),films:{alien:1.5},total:1},{watchlistFilms}),/injected/);
+ await F.applyFilmsListScan(env,{scanId:'s5',observedAt:at(5),films:{alien:1},total:1},{watchlistFilms});
+ assert.equal(b.records.get(F.recordKey('tmdb-348')).rating.value,1);assert.equal(b.records.get(F.recordKey('tmdb-348')).rating.replaced.observedAt,at(4),'s4 was applied before s5');
+ assert.equal(b.records.get('letterboxd/facts/scans/films-list.json').scanId,'s5');
+ // Alias conflicts are recorded for review, not written.
+ await F.linkFilm(env,{letterboxd:'other',tmdb:'111'});
+ const conflicted=await F.applyFilmsListScan(env,{scanId:'s6',observedAt:at(6),films:{newfilm:3},total:1},{watchlistFilms:[{id:'newfilm',tmdbId:'111'}]});
+ assert.equal(conflicted.conflicts,1);assert.equal(b.records.get('letterboxd/facts/conflicts.json')['letterboxd:newfilm tmdb:111'].reason,'alias_conflict');
+ assert.equal(b.records.has(F.recordKey('lb-newfilm')),false);
+}
+
+// Owner rating edit with the gate on: facts first; a rejected observation leaves actual.json alone and says so.
+{
+ const b=bucket(),records=b.records;
+ const ctx3=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout:fn=>fn(),fetch:async()=>{throw new Error('no network');},ASSETS:{},INITIAL_PERSONAL_RATINGS:{}});
+ vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx3);
+ for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx3);
+ const env={BUCKET:b,LETTERBOXD_FACTS:'on',LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml'};
+ const put=async items=>{const r=await ctx3.worker.fetch(new Request('https://site.example/api/enrichment/actual-ratings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})}),env);return (await r.json()).results;};
+ let results=await put([{filmId:'heat',rating:4}]);assert.equal(results[0].status,'saved');
+ assert.equal(records.get('enrichment/films/heat/actual.json').rating,4);assert.equal(records.get('enrichment/view-index.json').heat.actualRating,4);
+ const future=new Date(Date.now()+86400000).toISOString();
+ await b.put('letterboxd/facts/scans/films-list.json',JSON.stringify({schemaVersion:1,scanId:'later',observedAt:future,total:1,films:{heat:2}}));
+ results=await put([{filmId:'heat',rating:5}]);
+ assert.equal(results[0].status,'older');assert.equal(records.get('enrichment/films/heat/actual.json').rating,4,'a rejected edit does not touch actual.json');
+}
+console.log('Letterboxd facts: order and ties, null and before-image, rollback and overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, staged publication and crash resume, conflict registry, facts-first owner edit, gated writers passed');
