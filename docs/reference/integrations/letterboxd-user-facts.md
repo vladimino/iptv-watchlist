@@ -1,6 +1,6 @@
-# Letterboxd user facts — storage contract (design, not implemented)
+# Letterboxd user facts — storage contract
 
-This page specifies how watched, rating and watchlist facts are stored and merged under [ADR-0023](../../adr/0023-letterboxd-user-facts.md). **Nothing here is implemented yet**: no route, key or writer described below exists until the importer and writer changes land, and the production baseline import is a separately approved operation. Current behaviour is in [Letterboxd ratings](letterboxd-ratings.md) and the [enrichment API](../api/enrichment.md); export parsing and matching are in the [export contract](letterboxd-export.md).
+This page specifies how watched, rating and watchlist facts are stored and merged under [ADR-0023](../../adr/0023-letterboxd-user-facts.md). **Implementation status:** the fact records, link index, scan summaries, merge order, projection and the routine writers (films-list scan in the EPG commit and in the ratings-generation projection, per-film lookup, owner rating edit, completed watchlist sync) are implemented in [`src/letterboxd-facts.js`](../../../src/letterboxd-facts.js) behind the `LETTERBOXD_FACTS` gate ([feature flags](../feature-flags.md)), off by default. Not implemented yet: the baseline importer and its origin, chunk and rollback protocol, the convergence migration, and finds reading facts by identity. The production baseline import is a separately approved operation. Current behaviour is in [Letterboxd ratings](letterboxd-ratings.md) and the [enrichment API](../api/enrichment.md); export parsing and matching are in the [export contract](letterboxd-export.md).
 
 ## Fact record and its key
 
@@ -72,6 +72,16 @@ The offline reconciliation command, which only reports and never writes, may kee
 | Export baseline | `watched: true`; `rating: <value>` for rated rows, `rating: null` for watched-unrated rows; `watchlist: true` for watchlist rows |
 
 `watched` is set to `false` only by an owner edit. Clearing a rating never clears `watched`.
+
+## Scan summaries
+
+A complete films list or watchlist is one observation of every film it shows. It is stored once, not copied into every record ([ADR-0024](../../adr/0024-letterboxd-scan-summary.md)):
+
+- `letterboxd/facts/scans/films-list.json` = `{schemaVersion, scanId, observedAt, total, films: {<lid>: <rating or null>}}` and `letterboxd/facts/scans/watchlist.json` = `{schemaVersion, scanId, observedAt, films: [<lid>, …]}`. Each is replaced by compare-and-swap only by a complete scan with a greater `observedAt`; an incomplete scan or HTTP 403 writes nothing.
+- **Effective observation.** For a film whose `links.letterboxd` is `<lid>`, the scan summary is an observation of its facts at the summary's `observedAt` (films list: `watched: true` and `rating`; watchlist: `watchlist: true` if listed). Every merge compares an incoming observation with the **greater** of the stored record value and the summary's observation; readers keep reading records.
+- **Records are rewritten only when a value changes.** After a new summary is stored, the scan writes the records whose stored value differs from what the scan saw, by the merge rule; a record whose value already equals the scan's keeps its older `observedAt`, because the summary now carries the newer observation of the same value. It writes records only for films that already have a record or are in the current watchlist; any other `lid` stays an observation in the summary until a record is created (by the importer or the identity review), which then starts from the summary's value.
+- **Replacing a summary.** Before a summary is replaced, every film the old summary lists and the new one does not keeps its observation: its record (if any) is written with the old summary's observation when that is greater than the record's. Absence from the new scan is still not an observation.
+- `watchlist: false` is written to a record when a complete watchlist does not show a film whose effective `watchlist` value is `true`.
 
 ## Writes and convergence
 
