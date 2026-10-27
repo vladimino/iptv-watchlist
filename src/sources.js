@@ -75,6 +75,69 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
  }
  return [...merged.values()];
 }
+// AIR-211: parses a JSON body from a byte stream without materializing the whole text. The root container and its
+// direct container members are rebuilt here; every value one level deeper (and every key and scalar) is parsed on its
+// own with JSON.parse, so the largest string ever held is one such value instead of the whole object. The result
+// equals JSON.parse of the full text, including key order, duplicate keys (last wins) and a "__proto__" key.
+async function readJsonStream(stream){
+ const decoder=new TextDecoder('utf-8'),stack=[];let root,done=false,parts=[],cap=null;
+ // cap: the value being captured. kind 's' string, 'c' container (nesting counts brackets), 'v' scalar.
+ const parseParts=()=>{const size=parts.reduce((n,p)=>n+p.length,0),bytes=new Uint8Array(size);let o=0;for(const p of parts){bytes.set(p,o);o+=p.length;}parts=[];return JSON.parse(decoder.decode(bytes));};
+ const own=(target,key,value)=>{Object.defineProperty(target,key,{value,writable:true,enumerable:true,configurable:true});};
+ const attach=value=>{
+  const frame=stack.at(-1);
+  if(!frame){if(root!==undefined||done)throw new SyntaxError('Unexpected data after JSON value');root=value;done=true;return;}
+  if(frame.array){if(frame.expect!=='value')throw new SyntaxError('Unexpected value in array');frame.value.push(value);frame.expect='comma';return;}
+  if(frame.expect==='key'){if(typeof value!=='string')throw new SyntaxError('Expected property name');frame.key=value;frame.expect='colon';return;}
+  if(frame.expect!=='value')throw new SyntaxError('Unexpected value in object');own(frame.value,frame.key,value);frame.expect='comma';
+ };
+ const open=array=>{const frame=stack.at(-1);if(frame&&frame.expect!=='value')throw new SyntaxError('Unexpected container');stack.push({array,value:array?[]:{},expect:array?'value':'key',empty:true});};
+ const close=array=>{const frame=stack.pop();if(!frame||frame.array!==array)throw new SyntaxError('Mismatched bracket');if(frame.expect==='comma'||frame.empty&&(frame.expect==='value'||frame.expect==='key'))attach(frame.value);else throw new SyntaxError('Trailing comma');};
+ const reader=stream.getReader();
+ for(;;){
+  const {value:chunk,done:end}=await reader.read();if(end)break;
+  let start=cap?0:-1;
+  for(let i=0;i<chunk.length;i++){
+   const b=chunk[i];
+   if(cap){
+    if(cap.kind==='v'&&(b===44||b===93||b===125||b===32||b===10||b===13||b===9)){parts.push(chunk.subarray(start,i));cap=null;start=-1;attach(parseParts());i--;continue;}
+    if(cap.esc){cap.esc=false;continue;}
+    if(cap.str){if(b===92)cap.esc=true;else if(b===34){cap.str=false;if(cap.kind==='s'){parts.push(chunk.subarray(start,i+1));cap=null;start=-1;attach(parseParts());}}continue;}
+    if(b===34){cap.str=true;continue;}
+    if(cap.kind==='c'){if(b===123||b===91)cap.depth++;else if((b===125||b===93)&&--cap.depth===0){parts.push(chunk.subarray(start,i+1));cap=null;start=-1;attach(parseParts());}}
+    continue;
+   }
+   if(b===32||b===10||b===13||b===9)continue;
+   const frame=stack.at(-1);
+   if(b===58){if(!frame||frame.array||frame.expect!=='colon')throw new SyntaxError('Unexpected colon');frame.expect='value';continue;}
+   if(b===44){if(!frame||frame.expect!=='comma')throw new SyntaxError('Unexpected comma');frame.expect=frame.array?'value':'key';frame.empty=false;continue;}
+   if(b===125||b===93){close(b===93);continue;}
+   if(done)throw new SyntaxError('Unexpected data after JSON value');
+   if(frame)frame.empty=false;
+   if((b===123||b===91)&&stack.length<2){open(b===91);continue;}
+   start=i;
+   if(b===34)cap={kind:'s',str:true,esc:false};
+   else if(b===123||b===91)cap={kind:'c',depth:1,str:false,esc:false};
+   else cap={kind:'v',str:false,esc:false};
+  }
+  if(cap)parts.push(chunk.slice(start));
+ }
+ if(cap){if(cap.kind!=='v')throw new SyntaxError('Unexpected end of JSON input');cap=null;attach(parseParts());}
+ if(stack.length||!done)throw new SyntaxError('Unexpected end of JSON input');
+ return root;
+}
+// AIR-211: an R2 object larger than this is parsed from its byte stream (readJsonStream) instead of Body.json(), which
+// first decodes the whole body into one string; for the discovery ledger that string alone is about twice its size in
+// UTF-16. Smaller objects, and stores without a readable body stream (the test doubles), keep Body.json().
+const STREAMED_JSON_BYTES=1048576;
+function readObjectJSON(object){return typeof object.body?.getReader==='function'&&Number(object.size)>STREAMED_JSON_BYTES?readJsonStream(object.body):object.json();}
+// Copies an R2 object's bytes to another key without parsing them. The source was written by JSON.stringify, so the copy
+// is byte-identical to re-serializing its parsed value. Without a body stream or FixedLengthStream (the test doubles) it
+// parses and saves.
+async function copyJSONObject(env,object,key){
+ if(typeof object.body?.pipeTo==='function'&&Number.isInteger(object.size)&&typeof FixedLengthStream==='function'){const {readable,writable}=new FixedLengthStream(object.size);await Promise.all([object.body.pipeTo(writable),env.BUCKET.put(key,readable,{httpMetadata:{contentType:'application/json'}})]);return;}
+ await env.BUCKET.put(key,JSON.stringify(await object.json()),{httpMetadata:{contentType:'application/json'}});
+}
 function mergeCatalogIdentity(incoming,live,programmeRunId){
  const next={...(incoming||{})};
  for(const [key,film] of Object.entries(live||{})){
