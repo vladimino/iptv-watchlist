@@ -18,8 +18,10 @@ function candidateActivity(candidate,now=Date.now()){
  return Number.isFinite(last)&&last<from?'expired':'historical';
 }
 function resolutionActionability(candidate,decision,now=Date.now()){
- if(candidateActivity(candidate,now)!=='current'||nonFilmEPGReason(candidate.title))return false;
- if(!decision||!['verified','excluded_nonfilm'].includes(decision.status)){
+ if(candidateActivity(candidate,now)!=='current'||screenedNonfilmReason(candidate,decision))return false;
+ // A stored exclusion that the current screening rules no longer reproduce is re-checked in the normal cycle.
+ if(decision?.status==='excluded_nonfilm')return true;
+ if(!decision||decision.status!=='verified'){
   if(!decision)return true;
   const same=!decision.evidenceKey||decision.evidenceKey===candidateEvidence(candidate);
   if(decision.terminalReason&&same)return false;
@@ -37,7 +39,7 @@ function discoveryCounts(items,decisions,now=Date.now()){
  const counts={ledgerTotal:items.length,currentUnresolved:0,readyNow:0,retryBackoff:0,historicalUnresolved:0,ambiguous:0,terminalNoMatch:0,rejectedNonfilm:0,expiredInactive:0};
  for(const candidate of items){
   const decision=decisions?.[candidate.key],activity=candidateActivity(candidate,now);
-  if(nonFilmEPGReason(candidate.title)||decision?.status==='excluded_nonfilm'){counts.rejectedNonfilm++;continue;}
+  if(screenedNonfilmReason(candidate,decision)){counts.rejectedNonfilm++;continue;}
   if(decision?.status==='verified')continue;
   if(activity==='expired'){counts.expiredInactive++;continue;}
   if(activity!=='current'){counts.historicalUnresolved++;continue;}
@@ -423,8 +425,8 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  for(const film of [...Object.values(films),...watchlist])indexFilm(film);
  let screenedOut=0,knownAliases=0,touched=0,migrated=0;for(const film of Object.values(films))if(film.tmdbId&&film.canonicalIdentity!=='tmdb:'+film.tmdbId){film.canonicalIdentity='tmdb:'+film.tmdbId;migrated++;}
  // Cheap pass updates availability for known identities even though no new lookup is needed.
- for(const candidate of source.items){const reason=nonFilmEPGReason(candidate.title),decision=decisions[candidate.key];if(reason){if(decision?.status!=='excluded_nonfilm'){decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:startedAt};screenedOut++;}continue;}
-  if(candidate.confirmedTmdbId&&!decision){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
+ for(const candidate of source.items){const decision=decisions[candidate.key],reason=screenedNonfilmReason(candidate,decision);if(reason){if(decision?.status!=='excluded_nonfilm'){decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:startedAt};screenedOut++;}continue;}
+  if(candidate.confirmedTmdbId&&(!decision||decision.status==='excluded_nonfilm')){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
   const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate,source.programmeRunId);indexFilm(films[key]);touched++;}}
  }
  if(touched||migrated){if(!await saveDiscoveredFilms(env,films,source.programmeRunId,fence))return {schemaVersion:2,stage:'programme_changed',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,currentProgrammeRunId:null};}if(screenedOut||knownAliases){await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);}
@@ -582,7 +584,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  }
  const currentReport=await loadJSON(env,'programme.json');
  if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
-  const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>!nonFilmEPGReason(c.title)&&discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,programmeChanged:true,...variantDiagnostic(variantMeter)};
+  const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:reused+knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,programmeChanged:true,...variantDiagnostic(variantMeter)};
   const changedOutcome={...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
   await fence();await saveJSON(env,'epg/discovery-status.json',changed);if(checkpoint)await checkpoint(changedOutcome);await saveScorePreview(env,mode,source,preview,fence);return changedOutcome;
  }

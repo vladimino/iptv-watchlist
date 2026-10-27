@@ -18,14 +18,38 @@ function epgTitleParts(raw){
  let year=null;if(match){const base=title.slice(0,match.index).replace(/[\s:.,;!?–—-]+$/u,'').trim();if(norm(base).length>=2){title=base;year=Number(match[1]||match[2]);}}
  return {title:title||plain(raw),year,normalizedTitle:norm(title||raw)};
 }
-function nonFilmEPGReason(title){
- const value=String(title||'');
- if(/^(?:tv\s*(?:series|show)|series|show|теле(?:шоу|передача)|передача|телепрограма|серіал)(?:\s|[.:,-])/iu.test(value))return 'show_label';
- if(/^(?:т\/с|м\/с|телесериал|мультсериал|сериал)(?:\s|[.:,-])/i.test(value))return 'series_label';
- if(/(?:\bseason\s*\d+|\bepisode\s*\d+|сезон\s*\d+|\d+\s*серія|серія\s*\d+|\bep\.?\s*\d+|\bs\d{1,2}e\d{1,3}\b|сезон\s*\d+|\d+\s*(?:серия|серии|серий)|(?:серия|серии|эпизод)\s*\d+)/i.test(value))return 'episode_label';
- if(/[-–]\s*\d{1,2}\s*[-–]\s*\d{1,3}(?:\s*(?:серия|серии|с))?\s*$/i.test(value))return 'season_episode_suffix';
- if(/(?:выпуск\s*[№#]?\s*\d+|\d+\s*[-–]\s*\d+\s*серии)/i.test(value))return 'broadcast_episode';
+// Screening only removes high-confidence serialized forms. A bare "Episode 3", "Season 2" or "Show ..."
+// can be part of a feature title (Star Wars: Episode 3, Open Season 2, Show Me the Picture), so it stays a candidate.
+const NONFILM_EPISODE_CODE=/(?<![\p{L}\p{N}])s\d{1,2}\s*[.,]?\s*e(?:p\.?\s*)?\d{1,3}(?![\p{L}\p{N}])/iu;
+const NONFILM_SEASON=/(?<![\p{L}])(?:season|series|сезон)\s*\d+|\d+\s*(?:-\s*)?(?:й\s+)?(?:сезон|с-н)(?![\p{L}])/iu;
+const NONFILM_EPISODE=/(?<![\p{L}])(?:episode|ep\.?|серия|серии|серій|серія|эпизод)\s*\d+|\d+\s*(?:-\s*)?(?:я\s+)?(?:серия|серии|серий|серія|серії)(?![\p{L}])/iu;
+// "N серия" alone keeps its long-standing exclusion; "N-я серия"/"N-серия" (multi-part films such as
+// "Золотой телёнок (1968) 1-серия") and "Эпизод N" (Star Wars) are excluded only together with a season.
+const NONFILM_RU_EPISODE=/(?<![\p{L}])(?:серия|серии|серія)\s*\d+|\d+\s*(?:серия|серии|серий|серія)(?![\p{L}])/iu;
+// Ordinal season labels ("Сезон 4-й", "4-й сезон") and three-digit episode numbers do not occur in feature titles.
+const NONFILM_ORDINAL_SEASON=/(?<![\p{L}])сезон\s*\d+\s*-\s*й(?![\p{L}])|\d+\s*-\s*й\s+сезон(?![\p{L}])/iu;
+const NONFILM_LONG_EPISODE=/(?<![\p{L}])episode\s*\d{3,}(?![\p{N}])/iu;
+function xmltvEpisodeReason(episodeNum){
+ for(const [,attrs,text] of String(episodeNum||'').matchAll(/<episode-num\b([^>]*)>([^<]*)<\/episode-num>/g)){
+  const system=attrs.match(/\bsystem=["']([^"']+)["']/)?.[1]||'';
+  if(system==='xmltv_ns'&&/\d/.test(text.split('.')[1]||''))return 'xmltv_episode_num';
+  if(system==='onscreen'&&(NONFILM_EPISODE_CODE.test(text)||NONFILM_SEASON.test(text)&&NONFILM_EPISODE.test(text)))return 'xmltv_episode_num';
+ }
  return null;
+}
+function nonFilmEPGReason(title,programmeXml){
+ const value=String(title||'');
+ if(/^(?:tv\s*(?:series|show)|теле(?:шоу|передача)|передача|телепрограма|серіал)(?:\s|[.:,-])|^(?:series|show)\s*:/iu.test(value))return 'show_label';
+ if(/^(?:т\/с|м\/с|телесериал|мультсериал|сериал)(?:\s|[.:,-])/iu.test(value))return 'series_label';
+ if(NONFILM_EPISODE_CODE.test(value)||NONFILM_SEASON.test(value)&&NONFILM_EPISODE.test(value)||NONFILM_RU_EPISODE.test(value)||NONFILM_ORDINAL_SEASON.test(value)||NONFILM_LONG_EPISODE.test(value)||/[.,:;|]\s*ep\.?\s*\d+\s*(?:[.,:;|]|$)/iu.test(value))return 'episode_label';
+ if(/\p{L}.*[-–]\s*\d{1,2}\s*[-–]\s*\d{1,3}(?:\s*(?:серия|серии|с))?\s*$/iu.test(value))return 'season_episode_suffix';
+ if(/(?<![\p{L}])(?:спец)?выпуск\s*[№#]?\s*\d+|\d+\s*[-–]\s*\d+\s*серии/iu.test(value))return 'broadcast_episode';
+ return xmltvEpisodeReason(programmeXml);
+}
+// A reliably matched watchlist/catalog identity or a verified decision outranks title screening.
+function screenedNonfilmReason(candidate,decision){
+ if(decision?.status==='verified'||candidate?.confirmedTmdbId)return null;
+ return nonFilmEPGReason(candidate?.title);
 }
 function canonicalDiscoveryCandidate(item){
  const parts=epgTitleParts(item.title),year=item.year||parts.year||null;
@@ -81,7 +105,7 @@ function canonicalizeDiscoveryLedger(source,decisions){
  for(const item of items){const keys=groups.get(item.key),states=keys.map(key=>decisions?.[key]).filter(Boolean),verified=states.filter(s=>s.status==='verified'),ids=new Set(verified.map(s=>s.tmdbId));
   if(ids.size>1)throw new Error('Conflicting verified TMDB identities for '+item.key);
   if(verified.length){next[item.key]=verified[0];carriedVerified++;continue;}
-  if(nonFilmEPGReason(item.title)){next[item.key]={status:'excluded_nonfilm',reason:nonFilmEPGReason(item.title),checkedAt:states[0]?.checkedAt||new Date().toISOString()};continue;}
+  const reason=screenedNonfilmReason(item);if(reason){next[item.key]={status:'excluded_nonfilm',reason,checkedAt:states[0]?.checkedAt||new Date().toISOString()};continue;}
   if(states.length)retried++;
  }
  return {items,decisions:next,duplicatesRemoved:(source.items||[]).length-items.length,carriedVerified,retried};
@@ -118,8 +142,9 @@ async function scanEPG(stream,watchlist,now){
  scanned++;const startAt=xmlTime(attr(xml,'start')),endAt=xmlTime(attr(xml,'stop'));if(!Number.isFinite(startAt)||!Number.isFinite(endAt)||endAt<=startAt)continue;min=Math.min(min,startAt);max=Math.max(max,startAt);const channelId=attr(xml,'channel'),channel=channels.get(channelId)||channelId;if(/^[A-Z]{2}:/.test(channel))continue;const c=coverage.get(channelId)||{name:channel,min:startAt,max:endAt};c.min=Math.min(c.min,startAt);c.max=Math.max(c.max,endAt);coverage.set(channelId,c);
  if(startAt<now-72*3600000||startAt>=now+24*3600000)continue;kept++;
  const title=field(xml,'title'),parts=epgTitleParts(title),titleYear=parts.year,key=parts.normalizedTitle,candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
- if(duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(nonFilmEPGReason(title)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}
  const valid=candidates.filter(f=>titleYear?f.year&&Math.abs(f.year-titleYear)<=1:f.runtime&&f.runtime>=55&&Math.abs(duration-f.runtime)<=Math.max(8,f.runtime*.12));
+ // A single reliable watchlist/catalog match is a known Film and is never screened out by its title.
+ if(duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(valid.length!==1&&nonFilmEPGReason(title,xml)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}
  if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc');if(previous){previous.shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title});previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[{channelId,channel,start:startAt,end:endAt,epgTitle:title}]});}continue;}
  const f=valid[0];if(!matched.has(f.id))matched.set(f.id,{...f,title:/[а-яё]/i.test(title)?cleanTitle(title):f.original,shows:[]});if(!/[а-яё]/i.test(matched.get(f.id).title)&&/[а-яё]/i.test(title))matched.get(f.id).title=cleanTitle(title);const hint=showMatchBasis(titleYear,{key,title:parts.title,normalizedTitle:key,year:titleYear,duration:Math.round(duration),durations:[Math.round(duration)]},candidates.filter(film=>film?.tmdbId).map(film=>({tmdbId:film.tmdbId,title:film.title,original:film.original,aliases:film.aliases,year:film.year,runtime:film.runtime,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId})));matched.get(f.id).shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title,basis:hint.basis,matchReason:hint.hint?hint.reason:null});
  }
