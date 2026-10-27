@@ -6,10 +6,10 @@ const loadJSON=async(env,key)=>{
  const staged=key==='programme.json'?'programme.json':key==='epg/discovery-latest.json'?'discovery-latest.json':key==='epg/discovered-films.json'?'discovered-films.json':null;
  if(staged){
   const pinned=env.epgPin?.programmeRunId;
-  if(pinned){const object=await env.BUCKET.get(epgGenerationKey(pinned,staged));if(object)return readObjectJSON(object);}
-  else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return readObjectJSON(object);}}}
+  if(pinned){const object=await env.BUCKET.get(epgGenerationKey(pinned,staged));if(object)return object.json();}
+  else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return object.json();}}}
  }
- const o=await env.BUCKET.get(key);return o?readObjectJSON(o):null;
+ const o=await env.BUCKET.get(key);return o?o.json():null;
 };
 async function pinEpg(env){
  if(env.epgPin?.programmeRunId)return env;
@@ -303,7 +303,7 @@ async function finishSync(env,run,report){const list=await loadJSON(env,'watchli
  // A complete watchlist is one observation of every listed film (ADR-0024); gated by LETTERBOXD_FACTS.
  if(env.LETTERBOXD_FACTS==='on'&&report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 async function copyEpgGeneration(env,runId){
- for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(staged)await copyJSONObject(env,staged,name==='programme.json'?name:'epg/'+name);}
+ for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(staged)await saveJSON(env,name==='programme.json'?name:'epg/'+name,await staged.json());}
 }
 async function publishEpgGeneration(env,runId,files){
  const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
@@ -365,10 +365,7 @@ async function epgSync(env,run){
  const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
  if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];await saveJSON(env,'sync.json',run);}
- try{
-  // AIR-211: the previous ledger is released once merged, so it is not held while the new one is serialized and published.
-  let old=await loadJSON(env,'epg/discovery-latest.json');const items=mergeDiscoveryCandidates(old?.items,result.discovery,{replaceShows:true,programmeRunId:run.runId});old=null;
-  const replaced=replaceCatalogAvailability(cache,result.discovery,run.runId);await publishEpgGeneration(env,run.runId,{'discovery-latest.json':{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items},'discovered-films.json':replaced.catalog,'programme.json':report});}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
+ try{const old=await loadJSON(env,'epg/discovery-latest.json');const replaced=replaceCatalogAvailability(cache,result.discovery,run.runId);await publishEpgGeneration(env,run.runId,{'discovery-latest.json':{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items:mergeDiscoveryCandidates(old?.items,result.discovery,{replaceShows:true,programmeRunId:run.runId})},'discovered-films.json':replaced.catalog,'programme.json':report});}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
 export default {async fetch(request,env,execution){
