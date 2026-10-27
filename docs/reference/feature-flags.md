@@ -50,7 +50,7 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 | `CATALOG_POSTER_HYDRATION` | unset (effective `off`) | 2026-10-26 (code delivery; no settings read) | Introduced behind an off-by-default gate; no activation or execution approval recorded at the time of this entry. |
 | `LETTERBOXD_FACTS` | unset (effective `off`) | 2026-10-27 (code delivery; no settings read) | Introduced behind an off-by-default gate in [AIR-171](https://trello.com/c/uvGt48sq); no activation approval recorded. |
 | `LETTERBOXD_BASELINE_IMPORT` | unset (effective `off`) | 2026-10-27 (code delivery; no settings read) | Introduced behind an off-by-default gate in [AIR-171](https://trello.com/c/uvGt48sq); no activation approval recorded. |
-| `FINDS_TITLE_EXCLUSION` | unset (effective `off`) | 2026-10-27 (code delivery; no settings read) | Introduced behind an off-by-default gate in [AIR-197](https://trello.com/c/4lY20BgM); no activation approval recorded. |
+| `FINDS_TITLE_EXCLUSION` | `on` | 2026-10-27 20:30 UTC (production `GET /api/catalog/available` answered `displayExclusion.state: applied`) | Set by the owner in the Worker settings under [AIR-198](https://trello.com/c/9xpmq2fc) after the list was placed and verified; the value itself was not read from the Cloudflare settings. [Rollout evidence](../evidence/letterboxd/air-198-finds-exclusion-rollout-2026-10-27.md). |
 
 ### Historical state transitions
 
@@ -67,6 +67,7 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 | 2026-10-27 | `LETTERBOXD_FACTS` introduced in code, unset in production (effective `off`); setting it changes routine sync writes and requires a separate owner approval. | [AIR-171](https://trello.com/c/uvGt48sq) |
 | 2026-10-27 | `LETTERBOXD_BASELINE_IMPORT` introduced in code, unset in production (effective `off`); setting it and every commit or rollback require separate owner approval. | [AIR-171](https://trello.com/c/uvGt48sq) |
 | 2026-10-27 | `FINDS_TITLE_EXCLUSION` introduced in code, unset in production (effective `off`); placing the list and setting the switch each require separate owner approval. | [AIR-197](https://trello.com/c/4lY20BgM) |
+| 2026-10-27 by 20:30 UTC | `FINDS_TITLE_EXCLUSION`: unset → `on`, after the owner placed `letterboxd/display-exclusion.json`; the route answered `applied`. | [AIR-198](https://trello.com/c/9xpmq2fc) owner approvals; [rollout evidence](../evidence/letterboxd/air-198-finds-exclusion-rollout-2026-10-27.md). The exact settings-change timestamp is not established. |
 
 ## Updating this register
 
