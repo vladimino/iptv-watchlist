@@ -27,7 +27,7 @@ export const STAGE_COLUMNS={
  stage_candidate:['observation_key','title','normalized_title','year','raw_titles_json','durations_json','description','first_airing_ms','last_airing_ms','airings','confirmed_tmdb_id','observation_json','activity','last_seen_at','last_seen_programme_run_id','seen_in_latest','evidence_key'],
  stage_candidate_show:['observation_key','channel_id','channel','start_ms','end_ms','epg_title'],
 };
-const STAGE_KEYS={stage_film_generation:['film_id'],stage_film_show:['film_id','channel_id','start_ms'],stage_candidate:['observation_key'],stage_candidate_show:['observation_key','channel_id','start_ms']};
+const STAGE_KEYS={stage_film_generation:['film_id'],stage_film_show:['film_id','channel_id','start_ms'],stage_candidate:['observation_key'],stage_candidate_show:['observation_key','channel_id','start_ms','end_ms','epg_title']};
 
 // A guard statement aborts its whole request (its row breaks the state CHECK) unless the stage is in one of the given states and
 // still claimed by this execution: same owner, baseline, nonce and claim generation.
@@ -155,7 +155,8 @@ export function renderedBytes(sql,params){let index=0;const text=sql.replace(/\?
 function literal(value){if(value==null)return 'NULL';if(typeof value==='number')return String(value);if(typeof value==='boolean')return value?'1':'0';return "'"+String(value).replaceAll("'","''")+"'";}
 function utf8Length(text){let bytes=0;for(const char of text){const code=char.codePointAt(0);bytes+=code<0x80?1:code<0x800?2:code<0x10000?3:4;}return bytes;}
 function compareBy(columns){return (a,b)=>{for(const column of columns){const left=a[column],right=b[column];if(left===right)continue;if(left==null)return -1;if(right==null)return 1;return left<right?-1:1;}return 0;};}
-function keyOf(table,values){return STAGE_KEYS[table].map(column=>String(values[column])).join('\u0000');}
+// JSON keeps a missing value apart from the text "null".
+function keyOf(table,values){return JSON.stringify(STAGE_KEYS[table].map(column=>values[column]??null));}
 
 // The staged rows of one generation in a deterministic order: films by id, each followed by its shows; then candidates by key,
 // each followed by its shows. A repeated key is refused before any write, as the final tables' primary keys would refuse it.
@@ -168,7 +169,7 @@ export function stageRows(projection){
  }
  for(const candidate of [...projection.candidates].sort((a,b)=>compareBy(['observation_key'])(a.row,b.row))){
   push('stage_candidate',candidate.row);
-  for(const show of [...candidate.shows].sort(compareBy(['channel_id','start_ms'])))push('stage_candidate_show',show);
+  for(const show of [...candidate.shows].sort(compareBy(['channel_id','start_ms','end_ms','epg_title','channel'])))push('stage_candidate_show',show);
  }
  return rows;
 }

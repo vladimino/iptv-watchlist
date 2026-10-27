@@ -673,7 +673,7 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   const runId=expected.generations[0]?.id||null;
   for(const item of discovery.items){
    if(!discoveryPortable||!runId)note('epg/discovery-latest.json','unportable',item.id);
-   else{expected.candidates.push({id:item.id,programmeRunId:runId,evidenceKey:item.evidenceKey,title:item.title,normalizedTitle:item.normalizedTitle});note('epg/discovery-latest.json','mapped',item.id,{evidence:item.evidenceProvenance});}
+   else{expected.candidates.push({id:item.id,programmeRunId:runId,evidenceKey:item.evidenceKey,title:item.title,normalizedTitle:item.normalizedTitle,...(item.shows?{shows:item.shows}:{})});note('epg/discovery-latest.json','mapped',item.id,{evidence:item.evidenceProvenance});}
   }
   if(!discovery.items.length)note('epg/discovery-latest.json','unportable','epg/discovery-latest.json');
  }
@@ -809,6 +809,15 @@ async function verifyCandidates(db,candidates,missing,extra,mismatched){
   const title=titles.find(item=>item.id===row.id);
   if(stored&&(stored.evidence_key!==row.evidenceKey||title?.title!==row.title||title?.normalized_title!==row.normalizedTitle))mismatched.push({table:'candidate_generation',id:row.id,field:'candidate'});
  }
+ // Every distinct EPG entry of a candidate is stored once: two entries for one slot with different titles are both kept.
+ const shows=await db.all('SELECT programme_run_id,observation_key,channel_id,start_ms,end_ms,epg_title FROM candidate_show');
+ const byCandidate=new Map();
+ for(const show of shows){const key=show.programme_run_id+'/'+show.observation_key;if(!byCandidate.has(key))byCandidate.set(key,[]);byCandidate.get(key).push(JSON.stringify([show.channel_id,show.start_ms,show.end_ms,show.epg_title]));}
+ for(const row of candidates){
+  if(!('shows' in row)||!rows.some(stored=>stored.programme_run_id===row.programmeRunId&&stored.id===row.id))continue;
+  const got=(byCandidate.get(row.programmeRunId+'/'+row.id)||[]).sort();
+  if(JSON.stringify(got)!==JSON.stringify(row.shows))mismatched.push({table:'candidate_show',id:row.id,field:'shows'});
+ }
 }
 async function verifyDecisions(db,decisions,missing,extra,mismatched){
  const rows=await db.all('SELECT observation_key AS id,status,evidence_key,terminal_reason,film_id FROM candidate_decision ORDER BY observation_key');
@@ -837,6 +846,17 @@ function generationExpectation(pointer,programme,identity){
  if(unresolvedFilms.length)return {id:programmeRunId,unresolved:true,reason:unresolvedFilms[0].reason,unresolvedFilms};
  return {id:programmeRunId,phase:pointer?.phase==='withheld'?'withheld':'published',films,shows:films.flatMap(film=>film.shows)};
 }
+// Parity's own reading of a candidate's shows, independent of the repository: every distinct EPG entry (channel, start, end,
+// title) once, as sorted identity strings. A malformed show leaves the candidate unportable, so its shows are not compared.
+function expectedCandidateShows(shows){
+ const identities=new Set();
+ for(const show of Array.isArray(shows)?shows:[]){
+  const startMs=show?.startMs??show?.start;
+  if(!show?.channelId||typeof startMs!=='number')return null;
+  identities.add(JSON.stringify([show.channelId,startMs,show.endMs??show.end??null,show.epgTitle??show.title??null]));
+ }
+ return [...identities].sort();
+}
 function discoveryRecords(body,deriveEvidence){
  requireEvidence(deriveEvidence);
  const items=[],blockers=[];
@@ -845,7 +865,7 @@ function discoveryRecords(body,deriveEvidence){
   if(!observationKey||!item?.title||!item?.normalizedTitle)return {portable:false,items:[{id:observationKey||'discovery'}],blockers};
   const evidence=evidenceFor(item,deriveEvidence);
   if(evidence.mismatch){blockers.push({reason:'evidence_mismatch',targetTable:'candidate',targetId:observationKey,stored:evidence.stored,derived:evidence.derived});continue;}
-  items.push({id:observationKey,evidenceKey:evidence.key,evidenceProvenance:evidence.provenance,title:item.title,normalizedTitle:item.normalizedTitle});
+  items.push({id:observationKey,evidenceKey:evidence.key,evidenceProvenance:evidence.provenance,title:item.title,normalizedTitle:item.normalizedTitle,shows:expectedCandidateShows(item.shows)});
  }
  return {portable:items.length>0,items,blockers};
 }

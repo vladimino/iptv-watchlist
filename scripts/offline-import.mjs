@@ -185,7 +185,7 @@ async function main(){
  // Fail closed: an unknown key or a stored decision that disagrees with the derived evidence stops the run before the database is touched.
  const refused=refusal(batch);
  if(refused){console.log(JSON.stringify({...batch.inventory,...refused,note}));process.exit(3);}
- if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,fs.readFileSync(path.join(root,'migrations/0001_schema_v1.sql'),'utf8'));}
+ if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync(path.join(root,'migrations',file),'utf8')).join('\n'));}
  const db=openSqlite(databasePath);
  const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
  const result=await importBatch(db,repositories,{...batch,importedAt:batch.finishedAt});

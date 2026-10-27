@@ -147,12 +147,14 @@ export async function probeAtomicity(adapter,{statements=DEFAULT_MAX_BATCH_STATE
  return {statements:rows+1,approxBytes:rows*(pad.length+60),multiStatement:applied===rows,lastStatementFailed:failed,rowsAfterFailure:remaining,atomic:applied===rows&&failed&&remaining===0};
 }
 
-export function schemaTables({staged=false}={}){
- const files=['migrations/0001_schema_v1.sql',...(staged?['migrations/0002_generation_stage.sql']:[])];
- return files.flatMap(file=>[...fs.readFileSync(path.join(REPO_ROOT,file),'utf8').matchAll(/CREATE TABLE ([a-z_]+)/g)].map(match=>match[1])).sort();
+// Every run needs the whole schema: 0001, the staging tables of 0002 and the candidate show identity of 0003 (ADR-0025). A table a
+// migration creates only to rename it over an older one is not one of its objects.
+export const SCHEMA_MIGRATIONS=['migrations/0001_schema_v1.sql','migrations/0002_generation_stage.sql','migrations/0003_candidate_show_identity.sql'];
+export function schemaTables(){
+ return [...new Set(SCHEMA_MIGRATIONS.flatMap(file=>{const text=fs.readFileSync(path.join(REPO_ROOT,file),'utf8'),renamed=new Set([...text.matchAll(/ALTER TABLE ([a-z_0-9]+) RENAME TO/g)].map(match=>match[1]));return [...text.matchAll(/CREATE TABLE ([a-z_0-9]+)/g)].map(match=>match[1]).filter(name=>!renamed.has(name));}))].sort();
 }
-// Schema v2 (migration 0002) adds the staging tables the staged generation import writes.
-export const STAGED_SCHEMA_VERSION=2;
+export const SCHEMA_VERSION=3;
+export const STAGED_SCHEMA_VERSION=SCHEMA_VERSION;
 
 // The database identity fence: the live database must be the configured one by uuid and name, carry the frozen schema, and its
 // identity receipts must belong to this baseline lineage. A receipt from another database id is a conflict. The lineage only moves
@@ -168,14 +170,12 @@ export async function verifyTargetIdentity(adapter,{databaseId,databaseName,aggr
   if(described.uuid!==databaseId||described.name!==databaseName)throw new BackfillStop('target_identity_mismatch',{expected:{databaseId,databaseName},actual:described});
  }
  const tables=(await adapter.all("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")).map(row=>row.name);
- const missing=schemaTables({staged}).filter(name=>!tables.includes(name));
+ const missing=schemaTables().filter(name=>!tables.includes(name));
  findings.schema={tables:tables.length,missing};
  if(missing.length)throw new BackfillStop('schema_missing',{missing});
- if(staged){
-  const version=(await adapter.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
-  findings.schema.version=version;
-  if(version!==STAGED_SCHEMA_VERSION)throw new BackfillStop('schema_version_mismatch',{expected:STAGED_SCHEMA_VERSION,actual:version});
- }
+ const version=(await adapter.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
+ findings.schema.version=version;
+ if(version!==SCHEMA_VERSION)throw new BackfillStop('schema_version_mismatch',{expected:SCHEMA_VERSION,actual:version});
  const receipts=await adapter.all('SELECT source_key,source_sha256,target_id,imported_at FROM import_receipt WHERE target_table=? ORDER BY imported_at',[IDENTITY_TARGET_TABLE]);
  findings.identityReceipts=receipts.map(row=>({sourceSha256:row.source_sha256,targetId:row.target_id,importedAt:row.imported_at}));
  const foreign=receipts.filter(row=>row.target_id!==databaseId);

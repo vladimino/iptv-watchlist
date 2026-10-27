@@ -79,9 +79,9 @@ try{
  assert.equal(early.status,'no_go');assert.equal(early.stop.reason,'schema_not_ready');
 
  const schema=await g4('apply-schema','schema',{approvedWrites:true});
- assert.equal(schema.status,'completed');
- assert.deepEqual(schema.result.applied,['migrations/0001_schema_v1.sql','migrations/0002_generation_stage.sql']);
- assert.equal(schema.requests.byKind.schema.count,2,'each migration is one request');
+ assert.equal(schema.status,'completed',JSON.stringify(schema.stop));
+ assert.deepEqual(schema.result.applied,['migrations/0001_schema_v1.sql','migrations/0002_generation_stage.sql','migrations/0003_candidate_show_identity.sql']);
+ assert.equal(schema.requests.byKind.schema.count,3,'each migration is one request');
  assert.equal((await g4('apply-schema','schema-again',{approvedWrites:true})).result.applied.length,0,'an applied schema is left alone');
 
  // A partial schema stops without a write.

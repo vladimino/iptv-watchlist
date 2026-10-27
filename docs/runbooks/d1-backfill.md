@@ -12,7 +12,7 @@
 | Credential | `D1_BACKFILL_API_TOKEN` in the environment only, scoped to D1 edit on the two databases | never written to a report, ledger or the repository |
 | Acknowledged class C list | owner-reviewed JSON file, `--acknowledged` | only class C records; class A is never acknowledgeable |
 | Batch limits | `D1_BACKFILL_MAX_BATCH_STATEMENTS` (default 1,000), `D1_BACKFILL_MAX_BATCH_BYTES` (default 1 MiB) | proven by the probe; larger units stop with `batch_too_large` |
-| Staged generation | `--staged-generation`; the target and dry-run database carry `migrations/0002_generation_stage.sql` (schema version 2) | `schema_missing` or `schema_version_mismatch` before any write; chunks at most 950 statements and 1,000,000 bytes, never above the batch limits |
+| Schema | every target and dry-run database carries `0001`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql` (schema version 3, [ADR-0025](../adr/0025-candidate-show-identity.md)) | `schema_missing` or `schema_version_mismatch` before any write; with `--staged-generation`, chunks at most 950 statements and 1,000,000 bytes, never above the batch limits |
 
 Outputs go to an absolute directory outside the repository: `report.json` (status, stop reasons, probe, identity findings, counts, parity, receipt audit, classes A/B/C, adapter statistics; with `--staged-generation`, the `staged` section: per generation chunks planned/sent/already received, rows, bytes, largest chunk and row, requests, phase durations, commit statements/bytes/duration, and `staged.gate` against the 10-second commit budget) and `ledger.json` (every ledger row and the class C list with source key, checksum and reason). Exit code 0 is `completed`; 3 is `partial`, `stopped` or `no_go`; 2 is usage or configuration; 1 is an error.
 
@@ -31,7 +31,7 @@ Outputs go to an absolute directory outside the repository: `report.json` (statu
 
 ## Scratch verification of the staged generation import (separate owner approval)
 
-Only under an explicit owner approval naming the scratch database: apply `0001` and `0002` to the scratch database (never to `iptv` in this step); stage a synthetic generation at 1.25× the production candidates (27,749 candidates, 2,300 films, two shows each) in chunks at the probe-proven size; interrupt after an arbitrary chunk and resume; validate, read back and commit; repeat the commit and commit a stale stage (both must change nothing); fail and discard a stage in bounded batches. Record requests, bytes, durations, any `429`/`5xx`, and the commit duration. GO for the generation unit in the production run needs every chunk accepted, an equal read-back after resume, and a commit of at most 10 seconds at 1.25×; otherwise NO-GO and no production write. No production payload is used in this step.
+Only under an explicit owner approval naming the scratch database: apply `0001`, `0002` and `0003` to the scratch database (never to `iptv` in this step); stage a synthetic generation at 1.25× the production candidates (27,749 candidates, 2,300 films, two shows each) in chunks at the probe-proven size; interrupt after an arbitrary chunk and resume; validate, read back and commit; repeat the commit and commit a stale stage (both must change nothing); fail and discard a stage in bounded batches. Record requests, bytes, durations, any `429`/`5xx`, and the commit duration. GO for the generation unit in the production run needs every chunk accepted, an equal read-back after resume, and a commit of at most 10 seconds at 1.25×; otherwise NO-GO and no production write. No production payload is used in this step.
 
 `scripts/d1-scratch-g4.mjs` ([AIR-174](https://trello.com/c/331Cq6IJ)) runs this verification. It uses synthetic data only and never reads R2.
 
@@ -49,7 +49,7 @@ It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command
 | --- | --- | --- |
 | `--plan [--scale full]` | none | Prints generation sizes, chunk counts, commands and GO criteria. Reads no credential and sends nothing |
 | `--preflight` | scratch access, read-only | Identity, `sqlite_master` objects (objects outside the migrations are listed, never touched), `PRAGMA foreign_keys`, schema version, claim columns, harness stage states, final table counts |
-| `--apply-schema --approved-scratch-writes` | apply `0001` and `0002` to the scratch database | Applies each migration as one request, and only if none of its objects exists. A migration already complete is skipped. A partial schema, or a name taken by another object type, is `no_go: schema_partial` with no write |
+| `--apply-schema --approved-scratch-writes` | apply `0001`, `0002` and `0003` to the scratch database (a database already on schema v2 gets `0003` only) | Applies each migration as one request, and only if none of its objects exists. A migration already complete is skipped. A partial schema, or a name taken by another object type, is `no_go: schema_partial` with no write |
 | `--run --approved-scratch-writes` | synthetic writes to the scratch database | Runs the scenario below. The verdict is `GO`, `NO-GO`, or `INCOMPLETE` when the 1.25× generation was already committed by an earlier run |
 | `--cleanup --approved-cleanup` | deleting staging rows, a separate approval | Discards the failed or superseded harness stages (`g4-prior`, `g4-rival`) in batches of 500. It never touches the published stage, the final tables or foreign objects |
 
@@ -71,9 +71,9 @@ It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command
 
 ## Procedure
 
-1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. Repeat the dry-run twice more: `applied` must be 0.
+1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. Repeat the dry-run twice more: `applied` must be 0.
 2. **Owner acknowledges the class C list** by producing the JSON file of `{sourceKey,targetTable,targetId,reason}` records from `ledger.json` after review. The acknowledgement records a known gap; it is not lossless parity.
-3. **Create the databases** (owner, separate approval): `iptv` and a scratch database; apply the frozen schema to `iptv` only.
+3. **Create the databases** (owner, separate approval): `iptv` and a scratch database; apply migrations `0001`–`0003` to `iptv` only.
 4. **Back up before the first write.** Record the D1 bookmark of the empty target (Time Travel) and an export of it in the evidence; the bookmark is the restore point.
 5. **Run in bounded batches.** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-N --target d1 --limit 5000 --acknowledged /abs/class-c.json`, repeated until `completed`. The first command of each run is the probe on the scratch database; a run that does not pass it never reads the target.
 6. **Rerun twice on the same baseline.** Both runs must report `applied: 0` and the same parity.
@@ -94,7 +94,7 @@ It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command
 | `no_go: baseline_rollback` | the snapshot is older than the newest baseline the target holds, or was imported before a newer one | export a fresh baseline; going back needs the recovery below, not a flag |
 | `no_go: baseline_ambiguous` | two baselines are recorded at the same newest instant | stop; the owner decides from the evidence which lineage is real |
 | `no_go: write_uncertain` | a write response was lost | rerun; the read-back reconciles |
-| `no_go: schema_missing` / `schema_version_mismatch` (staged) | the database lacks migration `0002` or schema version 2 | the owner applies `0002` under its own approval; nothing was written |
+| `no_go: schema_missing` / `schema_version_mismatch` | the database lacks migration `0002` or `0003`, or is not on schema version 3 | the owner applies the missing migration under its own approval; nothing was written |
 | `no_go: stage_row_too_large` | one staged row would exceed 90,000 bytes | stop; the row is never split; investigate the source record |
 | `no_go: stage_baseline_changed` / `stage_owned_elsewhere` | the run's stage was opened by another baseline or token | abandon and discard that stage under the cleanup approval, then rerun |
 | `no_go: stage_claimed_elsewhere` | another execution of this baseline holds a live claim on the stage (`claimExpiresAt` in the details) | do not run two executors; if the other one is gone, rerun after `claimExpiresAt`, which takes the claim over; never edit the claim by hand |
@@ -126,7 +126,7 @@ Record in a dated file under `docs/evidence/d1-migration/`:
 
 - Approvals: snapshot read, credential, database creation and schema, each run window, any recovery (who, when, what).
 - Baseline: manifest aggregate SHA-256, `finishedAt`, baseline identity, exporter status and fence result.
-- Target: database uuid and name, schema migrations applied (`0001`, and `0002` for the staged path), restore bookmark, scratch database uuid.
+- Target: database uuid and name, schema migrations applied (`0001`, `0002`, `0003`), restore bookmark, scratch database uuid.
 - Probe: statements and bytes probed, `atomic`, `rowsAfterFailure`.
 - Runs: for each run, command (without secrets), status, applied, resumed, reconciled, pending, stop reason, adapter statistics, and with `--staged-generation` the `staged` section and its gate.
 - Result: parity (denominator, missing, extra, mismatched), receipts audit, class A blockers (must be empty), class B families with dispositions, class C list with the acknowledgement reference, two empty reruns, delta result.
