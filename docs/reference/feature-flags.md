@@ -35,7 +35,7 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 
 ## Production configuration evidence ledger
 
-**Current live snapshot (2026-10-25): not independently read**, except the two prediction-version flags, read on 2026-10-27 16:48 UTC as noted in their rows. No authorized Cloudflare settings read was performed for this documentation task. The values below are **last documented observations**, not asserted live settings. Consult latest card comments and the deployed Worker binding before using them.
+**Verified read (2026-10-27 16:48 UTC): only `PREDICTION_VERSION_OBJECTS` and `PREDICTION_MATERIALIZATION`.** A read-only Cloudflare settings read of Worker `iptv` established both as absent (effective `off`) at that time; their rows say so. **All other rows are historical observations:** the 2026-10-25 audit of this register did not read Cloudflare settings, and their values are last documented observations, not asserted live settings. For any flag, consult the latest card comments and the deployed Worker binding before relying on a value.
 
 | Flag | Last documented effective value | Observed/recorded (UTC) | Evidence and limitations |
 | --- | --- | --- | --- |
