@@ -1,6 +1,6 @@
 # Catalog of available films outside the watchlist
 
-`GET /api/catalog/available` is a read-only query over the published EPG generation. It returns the verified catalog films that are **not** on the watchlist and that the owner has neither watched nor rated, are available now, in the 72-hour catch-up or within the next 24 hours, and carry a prediction that is current for the current taste profile. It is the shared source for discovery surfaces such as a "finds" section or similar-film suggestions; those consumers rank and present, this route only decides eligibility and returns a minimal display record.
+`GET /api/catalog/available` is a read-only query over the published EPG generation. It returns the verified catalog films that are **not** on the watchlist and that the owner has neither watched nor rated (and, with the [display-only title exclusion](#display-only-title-exclusion) switched on, that do not match a private list of watched films without a proven identity), are available now, in the 72-hour catch-up or within the next 24 hours, and carry a prediction that is current for the current taste profile. It is the shared source for discovery surfaces such as a "finds" section or similar-film suggestions; those consumers rank and present, this route only decides eligibility and returns a minimal display record.
 
 The route does not change `GET /api/programme` or `GET /api/watchlist`, which keep serving the watchlist catalogue. It performs no R2 write, no model call, no TMDB call and no sync; the [GET side-effect test](../../../tests/get-side-effects.mjs) covers it like every other read.
 
@@ -14,6 +14,7 @@ The route does not change `GET /api/programme` or `GET /api/watchlist`, which ke
 | `watchlist.json` | Further watchlist ids and TMDB identities to exclude, including films without a programme show |
 | `enrichment/view-index.json` | The stored current prediction and fingerprint facet, and the owner's `watched` and `actualRating` per id (see [Watched and rated films](#watched-and-rated-films)) |
 | `enrichment/profile/current.json` | The profile version and hash a prediction must match to be current |
+| `letterboxd/display-exclusion.json` | Only while `FINDS_TITLE_EXCLUSION` is exactly `on`: the private list of normalized names and years for the [display-only title exclusion](#display-only-title-exclusion). With the switch off it is not read |
 | `metadata.json` | The Letterboxd metadata cache of films that are or were on the watchlist, read for the stored TMDB id of a Letterboxd id (see [Watched and rated films](#watched-and-rated-films)) and for a poster fallback: a catalog record without its own TMDB poster takes the cached `https://` poster of the record with the same stored id (whose cached TMDB id is the same or absent), or of the same TMDB id. Every cached record for that stored id, and every cached record for that TMDB id, must carry the same poster: once two disagree the key stays conflicted regardless of further records or their order, and a conflicted TMDB identity yields no poster even through the stored-id match. No other field is taken from it and nothing is fetched |
 
 The ratings seed compiled into the Worker is applied to an in-memory copy of the view index. Unlike `GET /api/enrichment/view`, this route never writes that seed back. `started/` markers are not consulted: they belong to the watchlist UI and are not a watched signal for catalog films.
@@ -28,6 +29,7 @@ A catalog record is returned only when every rule holds:
 4. **Current prediction.** The stored prediction matches the current profile version and hash, the stored fingerprint hash, fingerprint schema version 1 and prediction prompt version 1. Without a profile nothing is current and the list is empty.
 5. **Real shows of the pinned generation.** The record's `shows` were written by the pinned generation (`showsProgrammeRunId` equals the response's `programmeRunId`). Shows carried over from an earlier generation are not availability in the new one. `epgLastAiring` alone is not a show.
 6. **Inside the window.** At least one show starts strictly after `now − 72h` and strictly before `now + 24h`. A start exactly 72 hours ago has expired; a start exactly 24 hours ahead is outside the horizon. Only shows inside the window are returned.
+7. **Not hidden by the display-only title exclusion**, when it is switched on and its list is valid. See [Display-only title exclusion](#display-only-title-exclusion).
 
 ### Watched and rated films
 
@@ -38,9 +40,45 @@ A catalog record is excluded when its own entry is consumed, or when any consume
 - an entry keyed `tmdb_<n>` belongs to TMDB id `n`;
 - an entry keyed by a Letterboxd id belongs to the TMDB id stored for that Letterboxd id in `metadata.json`, in `watchlist.json`, in the programme or on a verified catalog record with that id, and only while every one of those stored values is the same. A Letterboxd id with two different stored TMDB ids, or with none, excludes only a catalog record with that very id.
 
-Titles, years and aliases are never compared, so a remake or a namesake of a watched film is still offered. The same reading works with either value of `LETTERBOXD_FACTS`: with the gate on, the [fact projection](../integrations/letterboxd-user-facts.md#projections) writes `watched` and `actualRating` under every trusted alias of a film (its Letterboxd id and `tmdb_<n>`), and the stored TMDB id covers a record that has only its Letterboxd id; with the gate off, the legacy index holds ratings under the Letterboxd id and the stored TMDB id carries them to the `tmdb_<n>` record. The route reads neither the fact records nor the link index, so it stays a bounded read of fixed keys. Watchlist exclusions are unchanged and independent of these facts: a watched film that is on the watchlist again (a rewatch) stays on the watchlist and is excluded as a watchlist film.
+Titles, years and aliases are never compared, so a remake or a namesake of a watched film is still offered. A watched export film without an accepted identity is therefore not excluded by this rule; the separate [display-only title exclusion](#display-only-title-exclusion) covers part of those films and never counts as identity. The same reading works with either value of `LETTERBOXD_FACTS`: with the gate on, the [fact projection](../integrations/letterboxd-user-facts.md#projections) writes `watched` and `actualRating` under every trusted alias of a film (its Letterboxd id and `tmdb_<n>`), and the stored TMDB id covers a record that has only its Letterboxd id; with the gate off, the legacy index holds ratings under the Letterboxd id and the stored TMDB id carries them to the `tmdb_<n>` record. The route reads neither the fact records nor the link index, so it stays a bounded read of fixed keys. Watchlist exclusions are unchanged and independent of these facts: a watched film that is on the watchlist again (a rewatch) stays on the watchlist and is excluded as a watchlist film.
 
 One entry per canonical identity: when two records share a TMDB identity, the one whose availability ends later is kept, then the smaller id. The list is ordered by `availableUntil`, then id, so the same stored state always produces the same order.
+
+### Display-only title exclusion
+
+A separate, weaker rule hides a catalog film that matches a watched or rated Letterboxd export film which has no accepted identity ([ADR-0028](../../adr/0028-finds-display-only-watched-exclusion.md)). It only removes the film from this response: it writes nothing, links no Letterboxd id to a TMDB id, records no fact or rating, and no other route reads it. The watchlist, the programme, predictions and the taste profile are unaffected.
+
+**Switch.** `FINDS_TITLE_EXCLUSION` enables it only with the exact string `on` (see the [flag register](../feature-flags.md)). Any other value leaves `letterboxd/display-exclusion.json` unread.
+
+**The list.** One private R2 object, replaced only as a whole, built offline by `scripts/letterboxd-display-exclusion.mjs` and placed by a separately approved operation ([runbook](../../runbooks/finds-display-exclusion.md)); the Worker has no writer for it.
+
+```json
+{"schemaVersion": 1, "kind": "letterboxd_display_exclusion", "rule": "strict_original_exact_year", "normalization": "normTitle_v1",
+ "source": {"type": "letterboxd_export", "archiveSha256": "<64 hex>", "exportedAt": "<ISO time>", "baselinePlanSha256": "<64 hex>"},
+ "builtAt": "<ISO time>", "counts": {"exportFilms": 0, "withIdentity": 0, "droppedNoYear": 0, "droppedNoName": 0, "droppedExportNamesake": 0, "entries": 0},
+ "entries": [{"title": "<normalized name>", "year": 2000}], "contentSha256": "<sha256 of JSON.stringify(entries)>"}
+```
+
+The list is used only when every check passes; otherwise the rule is `unavailable` for that request, every film is shown and the route still answers `200`:
+
+- the R2 object size is at most 2 MiB, checked before the body is read or parsed, and the body is valid JSON;
+- exactly the keys above at the top level and in `source`; the four tags have exactly the values above; `source.type` is `letterboxd_export` with lowercase 64-hex `archiveSha256` and `baselinePlanSha256`;
+- `exportedAt` and `builtAt` are ISO dates, `exportedAt` is not after `builtAt`, and `builtAt` is not more than five minutes in the future;
+- `counts` holds non-negative integers and `counts.entries` equals the number of entries; at most 20,000 entries;
+- every entry has exactly `title` and `year`; `title` is a non-empty string of at most 300 characters that is already normalized; `year` is an integer from 1870 to 2100; entries are strictly ascending by `title`, then `year`, so a duplicate is invalid;
+- `contentSha256` is the SHA-256 of `JSON.stringify(entries)`.
+
+There is no age limit: a list older than the latest export only misses films watched since, which Finds would show anyway.
+
+**Normalization.** `normTitle_v1`: NFKC, lower case, `ё` as `е`, every run of characters that are not letters or digits as one space, trimmed. It is `normTitle` of `src/letterboxd-match.js`; the Worker carries an identical copy, and a test keeps them equal.
+
+**The rule.** Evaluated on every request against the pinned generation's catalog copy, after rules 1–6, so only films the response would otherwise offer are counted. A verified record is hidden when all hold:
+
+1. it has an integer `year`, and its normalized **original** title and that year equal an entry exactly; the localized title and aliases never match;
+2. no verified record of another TMDB film in the same catalog copy has that normalized key as its original title, localized title or alias, in any year;
+3. its TMDB id has no stored Letterboxd id in `metadata.json`, `watchlist.json`, the programme or a verified catalog record keyed by a Letterboxd id; such a film is decided by identity alone.
+
+Nothing is stored: a new generation is evaluated afresh, so a film can be hidden in one generation and shown in the next when a namesake enters or leaves the catalog. Entries are unique by title and year, and a record has one original title and year, so at most one entry matches a record.
 
 ## Response
 
@@ -53,6 +91,7 @@ One entry per canonical identity: when two records share a TMDB identity, the on
   "profile": {"version": 1},
   "total": 1,
   "posterCoverage": {"catalog": 1, "metadataCache": 0, "missing": 0},
+  "displayExclusion": {"state": "off", "excluded": 0},
   "films": [{
     "id": "tmdb_7", "tmdbId": "7", "canonicalIdentity": "tmdb:7",
     "title": "…", "original": "…", "year": 2020, "runtime": 100, "genres": ["Драма"], "poster": "https://…", "url": "https://www.themoviedb.org/movie/7",
@@ -69,6 +108,7 @@ One entry per canonical identity: when two records share a TMDB identity, the on
 | Field | Meaning |
 | --- | --- |
 | `posterCoverage` | Where the `poster` of each returned film came from, counted over `films` only: `catalog` (the record's own TMDB poster), `metadataCache` (the `metadata.json` fallback), `missing` (`poster` is `null`). The three add up to `total`. It lets a plain read show how many available films still have no stored asset; it is not a per-film field, and `films[]` is unchanged |
+| `displayExclusion` | The [display-only title exclusion](#display-only-title-exclusion): `state` is `off` (switch not `on`; list not read), `applied` (valid list used) or `unavailable` (switch on, list missing, unreadable or invalid; nothing hidden); `excluded` counts the canonical identities hidden from `films` by it. It never carries a title, id, code or any hash of the list or its source |
 | `programmeRunId`, `pinned` | The generation the response is derived from. `pinned: false` means no published pointer existed and the programme's own run id was used |
 | `generatedAt`, `window` | The clock the statuses were derived with and the availability envelope `(now − 72h, now + 24h)` |
 | `profile` | The profile version predictions were checked against, or `null` |

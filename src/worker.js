@@ -76,10 +76,80 @@ function catalogConsumedTmdb({index,metadata,watchlist,programme,catalog}){
  for(const [id,item] of Object.entries(index||{})){if(!catalogConsumed(item))continue;const tmdb=CATALOG_TMDB_ID.exec(id)?.[1]||byLid.get(id);if(tmdb)consumed.add(tmdb);}
  return consumed;
 }
-function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now}){
+// Display-only exclusion of watched export films without a proven identity (ADR-0028). It reads one private list of normalized
+// export names and years, only while FINDS_TITLE_EXCLUSION is exactly `on`, and removes a catalog film from this response only:
+// it writes nothing and is never identity, a fact or a rating. A missing, oversized or invalid list hides nothing, and the
+// response says only `state` and a count, never a title, an id or a hash of the list.
+const FINDS_TITLE_EXCLUSION_KEY='letterboxd/display-exclusion.json',FINDS_TITLE_EXCLUSION_MAX_BYTES=2*1024*1024,FINDS_TITLE_EXCLUSION_MAX_ENTRIES=20000;
+const findsTitleExclusionEnabled=env=>env?.FINDS_TITLE_EXCLUSION==='on';
+// normTitle_v1: must stay identical to normTitle in src/letterboxd-match.js, which the offline builder uses; a test compares them.
+const findsTitleKey=value=>String(value??'').normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+const FINDS_HEX64=/^[0-9a-f]{64}$/,FINDS_ISO=/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{3})?)?Z)?$/;
+const findsPlain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+const findsExactKeys=(value,keys)=>findsPlain(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
+const findsTime=value=>typeof value==='string'&&FINDS_ISO.test(value)&&Number.isFinite(Date.parse(value))?Date.parse(value):null;
+// The matching keys of a valid list, or null. Entries are canonical (already normalized, strictly ascending by title then year,
+// so a duplicate is invalid) and their JSON must hash to contentSha256.
+async function findsTitleExclusionKeys(list,now){
+ if(!findsExactKeys(list,['schemaVersion','kind','rule','normalization','source','builtAt','counts','entries','contentSha256']))return null;
+ if(list.schemaVersion!==1||list.kind!=='letterboxd_display_exclusion'||list.rule!=='strict_original_exact_year'||list.normalization!=='normTitle_v1')return null;
+ const source=list.source;
+ if(!findsExactKeys(source,['type','archiveSha256','exportedAt','baselinePlanSha256'])||source.type!=='letterboxd_export'||!FINDS_HEX64.test(source.archiveSha256)||!FINDS_HEX64.test(source.baselinePlanSha256))return null;
+ const exportedAt=findsTime(source.exportedAt),builtAt=findsTime(list.builtAt);
+ // A list built before its export or in the future has dates nobody can vouch for.
+ if(exportedAt===null||builtAt===null||exportedAt>builtAt||builtAt>now+5*60*1000)return null;
+ const entries=list.entries;
+ if(!Array.isArray(entries)||entries.length>FINDS_TITLE_EXCLUSION_MAX_ENTRIES)return null;
+ if(!findsPlain(list.counts)||!Object.values(list.counts).every(value=>Number.isInteger(value)&&value>=0)||list.counts.entries!==entries.length)return null;
+ const keys=new Set();let previous=null;
+ for(const entry of entries){
+  if(!findsExactKeys(entry,['title','year'])||typeof entry.title!=='string'||!entry.title||entry.title.length>300||findsTitleKey(entry.title)!==entry.title)return null;
+  if(!Number.isInteger(entry.year)||entry.year<1870||entry.year>2100)return null;
+  if(previous&&!(previous.title<entry.title||previous.title===entry.title&&previous.year<entry.year))return null;
+  keys.add(entry.title+'\u0000'+entry.year);previous=entry;
+ }
+ if(typeof list.contentSha256!=='string'||!FINDS_HEX64.test(list.contentSha256))return null;
+ const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(entries)));
+ if([...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,'0')).join('')!==list.contentSha256)return null;
+ return keys;
+}
+// With the switch off the object is not read. The size check uses the R2 object size before the body is read or parsed.
+async function loadFindsTitleExclusion(env,now){
+ if(!findsTitleExclusionEnabled(env))return {state:'off',keys:null};
+ const unavailable={state:'unavailable',keys:null};
+ try{
+  const object=await env.BUCKET.get(FINDS_TITLE_EXCLUSION_KEY);
+  if(!object)return unavailable;
+  if(!Number.isInteger(object.size)||object.size>FINDS_TITLE_EXCLUSION_MAX_BYTES){await object.body?.cancel?.();return unavailable;}
+  const text=await object.text();
+  if(new TextEncoder().encode(text).length>FINDS_TITLE_EXCLUSION_MAX_BYTES)return unavailable;
+  const keys=await findsTitleExclusionKeys(JSON.parse(text),now);
+  return keys?{state:'applied',keys}:unavailable;
+ }catch{return unavailable;}
+}
+// Whether a verified catalog record is hidden. Original title only, exact year; no other verified TMDB film of this catalog
+// carries the key as its original title, localized title or alias in any year; and a TMDB film with a stored Letterboxd id is
+// left to identity (metadata cache, watchlist, programme, a verified catalog record keyed by a Letterboxd id).
+function findsTitleSuppressor({keys,catalog,metadata,watchlist,programme}){
+ const verified=Object.values(catalog||{}).filter(film=>film&&film.tmdbId&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId));
+ const namesakes=new Map(),linked=new Set();
+ for(const film of verified)for(const title of [film.original,film.title,...(Array.isArray(film.aliases)?film.aliases:[])]){const key=findsTitleKey(title);if(!key)continue;if(!namesakes.has(key))namesakes.set(key,new Set());namesakes.get(key).add(String(film.tmdbId));}
+ const link=(id,tmdbId)=>{if(id==null||tmdbId==null||tmdbId==='')return;if(!CATALOG_TMDB_ID.test(String(id)))linked.add(String(tmdbId));};
+ for(const [id,record] of Object.entries(metadata||{}))link(record?.id??id,record?.tmdbId);
+ for(const film of [...(watchlist?.films||[]),...(programme?.films||[]),...verified])link(film?.id,film?.tmdbId);
+ return film=>{
+  if(!Number.isInteger(film.year))return false;
+  const key=findsTitleKey(film.original),tmdbId=String(film.tmdbId);
+  if(!key||!keys.has(key+'\u0000'+film.year))return false;
+  const owners=namesakes.get(key);
+  return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId);
+ };
+}
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'off',keys:null}}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const consumedTmdb=catalogConsumedTmdb({index,metadata,watchlist,programme,catalog});
+ const hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
  const byIdentity=new Map();
  for(const film of Object.values(catalog||{})){
   if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
@@ -92,6 +162,8 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
   if(!Array.isArray(film.shows)||film.showsProgrammeRunId!==programmeRunId)continue;
   const shows=dedupeShows(film.shows).filter(show=>Number(show.start)>from&&Number(show.start)<to).sort((a,b)=>Number(a.start)-Number(b.start)||String(a.channelId||'').localeCompare(String(b.channelId||''),'en'));
   if(!shows.length)continue;
+  // Checked last, so the count covers only films the response would otherwise offer.
+  if(hidden?.(film)){hiddenIdentities.add(identity);continue;}
   const latest=Math.max(...shows.map(show=>Number(show.start))),availableUntil=latest+CATALOG_ARCHIVE_MS,future=shows.filter(show=>Number(show.start)>now);
   const prediction=item.prediction,fingerprint=item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=canonicalMoodFacet(fingerprint,prediction);
   const artwork=posterFor(film);
@@ -111,21 +183,23 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  // Where each returned poster came from, counted over the returned films only, so a plain GET shows how many still lack an asset.
  const posterCoverage={catalog:0,metadataCache:0,missing:0};
  for(const film of films){const source=posterSource.get(film);if(source==='catalog')posterCoverage.catalog++;else if(source==='metadata_cache')posterCoverage.metadataCache++;else posterCoverage.missing++;}
- return {programmeRunId,pinned,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
+ const displayExclusion={state:titleExclusion.state,excluded:[...hiddenIdentities].filter(identity=>!byIdentity.has(identity)).length};
+ return {programmeRunId,pinned,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,displayExclusion,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
 }
 async function catalogAvailableRoute(env){
+ const now=Date.now();
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  const pinnedRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
  // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
  // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
  const generationCopy=async name=>{const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;};
- const [programme,catalog,watchlist,index,profile,metadata]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json')]);
+ const [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
  const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now:Date.now()}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){

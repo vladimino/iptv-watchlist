@@ -42,12 +42,12 @@ For operational truth, check the current `RATINGS_REFRESH` binding before claimi
 
 ## Watched, rating and watchlist as separate facts (behind `LETTERBOXD_FACTS`)
 
-**Accepted ([ADR-0023](../adr/0023-letterboxd-user-facts.md), [ADR-0024](../adr/0024-letterboxd-scan-summary.md)); the routine writers and the baseline importer are implemented behind `LETTERBOXD_FACTS` and `LETTERBOXD_BASELINE_IMPORT`, off by default; finds exclude watched and rated films by TMDB identity with either value of the gate ([catalog API](../reference/api/catalog.md#watched-and-rated-films)).** With the gate off, the films-list scan still writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. With it on, every source writes observations into one fact record per film, only a greater observation (by time, then source rank, then observation id) replaces a value, a complete scan is stored once as a summary observation, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
+**Accepted ([ADR-0023](../adr/0023-letterboxd-user-facts.md), [ADR-0024](../adr/0024-letterboxd-scan-summary.md)); the routine writers and the baseline importer are implemented behind `LETTERBOXD_FACTS` and `LETTERBOXD_BASELINE_IMPORT`, off by default; finds exclude watched and rated films by TMDB identity with either value of the gate ([catalog API](../reference/api/catalog.md#watched-and-rated-films)); a separate display-only title exclusion ([ADR-0028](../adr/0028-finds-display-only-watched-exclusion.md)) is implemented behind `FINDS_TITLE_EXCLUSION`, off by default.** With the gate off, the films-list scan still writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. With it on, every source writes observations into one fact record per film, only a greater observation (by time, then source rank, then observation id) replaces a value, a complete scan is stored once as a summary observation, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
 
 ```mermaid
 flowchart TD
     subgraph sources["Observations"]
-        export["Owner's account export<br/>accepted identities only"]
+        export["Owner's account export<br/>accepted identities to the merge"]
         films["Complete public films list"]
         watchlist["Complete watchlist"]
         page["Per-film page lookup"]
@@ -59,12 +59,17 @@ flowchart TD
     keep["Keep stored value"]
     index[("view-index.json: actualRating, watched<br/>under lid and tmdb_n")]
     finds["Finds: exclude watched or rated;<br/>actual rating over prediction"]
+    builder["Offline builder: watched films<br/>without accepted identity,<br/>unique name and year"]
+    list[("R2 display-exclusion list<br/>private, placed by the owner")]
     sources --> merge
     merge -->|yes: compare-and-swap| facts
     merge -->|no| keep
     gaps -.->|not an observation| keep
     facts -->|projection| index
     index --> finds
+    export -.->|no accepted identity| builder
+    builder --> list
+    list -.->|"FINDS_TITLE_EXCLUSION=on:<br/>hide only, never a fact"| finds
 ```
 
-Unresolved export rows (no accepted identity) never reach the merge; they stay in the importer's private report until a separate identity verification.
+Unresolved export rows (no accepted identity) never reach the merge; they stay in the importer's private report until a separate identity verification. The dashed path is display-only: the offline builder writes their normalized names and years to a private list, and with the switch on Finds hide a catalog film whose original title and year match it uniquely. Finds read that list without writing anything, and the match never becomes a fact, a rating or an identity link ([catalog API](../reference/api/catalog.md#display-only-title-exclusion), [runbook](../runbooks/finds-display-exclusion.md)).
