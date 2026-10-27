@@ -6,7 +6,7 @@
 **Approval source:** owner accepted ADR-0028 explicitly on 2026-10-27 after independent review of PR #155 at commit `0907ed4`; this acceptance authorizes the architectural decision, not production operations or implementation activation  
 **Related work:** [AIR-196](https://trello.com/c/cvVor8KO), [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026-10-27.md), [AIR-197](https://trello.com/c/4lY20BgM) (implementation), [AIR-198](https://trello.com/c/9xpmq2fc) (rollout), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0011](0011-bounded-title-variants.md), [ADR-0023](0023-letterboxd-user-facts.md), [catalog API](../reference/api/catalog.md#watched-and-rated-films)  
 **Supersedes:** None (it adds one display rule to the Finds read path; identity, facts and ratings keep their accepted rules)  
-**Superseded by:** None. [ADR-0033](0033-finds-exclusion-namesake-relaxation.md) (Proposed) would supersede the export-namesake clause of decision 2 and the alias part of decision 3.3 in part, only for lists tagged `strict_original_exact_year_v2`
+**Superseded by:** [ADR-0033](0033-finds-exclusion-namesake-relaxation.md) (Accepted) in part: the export-namesake clause of decision 2 and the alias part of decision 3.3, only for lists tagged `strict_original_exact_year_v2`
 
 ## Context
 
