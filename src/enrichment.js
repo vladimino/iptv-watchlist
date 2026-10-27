@@ -733,6 +733,88 @@ async function writePredictionVersion(env,filmId,prediction){
  }
  return predictionVersionPointer(filmId,sha256);
 }
+// One-time materialization of historical prediction versions (ADR-0026, runbook prediction-versions.md): an owner-only,
+// gated, bounded operation. Each item names a film's bundle exactly as the verified snapshot saw it (ETag and SHA-256 of its
+// bytes). Under the prediction writer lease, every pending record's version object is written create-only, then the bundle
+// is rewritten once by compare-and-swap with the pointers and a `materialized` provenance block. No prediction value is
+// recomputed or edited; a bundle that changed since the snapshot is skipped for a new plan.
+const predictionMaterializationEnabled=env=>env?.PREDICTION_MATERIALIZATION==='on';
+const MATERIALIZATION_RECEIPTS=ENRICHMENT_KEY+'predictions-materialization/';
+const MATERIALIZATION_MAX_ITEMS=50;
+async function textSha256(text){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');}
+function materializationRequest(body){
+ const hex=/^[0-9a-f]{64}$/,fail=message=>{throw Object.assign(new Error(message),{status:400});};
+ if(!body||typeof body!=='object')fail('Expected a JSON object');
+ if(!hex.test(String(body.planId||'')))fail('planId must be the snapshot aggregate SHA-256');
+ if(!Number.isInteger(body.batch)||body.batch<0||body.batch>100000)fail('batch must be a non-negative integer');
+ if(!Array.isArray(body.items)||!body.items.length||body.items.length>MATERIALIZATION_MAX_ITEMS)fail('items must hold 1..'+MATERIALIZATION_MAX_ITEMS+' films');
+ const seen=new Set();
+ const items=body.items.map(item=>{
+  const filmId=String(item?.filmId||'');
+  if(!/^[^/]{1,200}$/.test(filmId))fail('Invalid film id');
+  if(seen.has(filmId))fail('A film appears twice in one batch');seen.add(filmId);
+  if(typeof item.expectedEtag!=='string'||!item.expectedEtag||item.expectedEtag.length>200)fail('expectedEtag is required');
+  if(!hex.test(String(item.expectedSha256||'')))fail('expectedSha256 must be a SHA-256');
+  return {filmId,expectedEtag:item.expectedEtag.replace(/^"(.*)"$/,'$1'),expectedSha256:item.expectedSha256};
+ });
+ return {planId:body.planId,batch:body.batch,dryRun:body.dryRun===true,items};
+}
+const unquoteEtag=etag=>String(etag||'').replace(/^"(.*)"$/,'$1');
+async function materializeFilm(env,item,{planId,dryRun,at}){
+ const bundleKey=filmKey(item.filmId)+'predictions.json',object=await env.BUCKET.get(bundleKey);
+ if(!object)return {filmId:item.filmId,outcome:'bundle_missing'};
+ const text=await object.text(),etag=unquoteEtag(object.etag),sha=await textSha256(text);
+ let bundle;try{bundle=JSON.parse(text);}catch{return {filmId:item.filmId,outcome:'bundle_unreadable'};}
+ if(etag!==item.expectedEtag||sha!==item.expectedSha256){
+  // After a lost response the bundle is already the one this plan wrote: recognized, not repeated.
+  const done=bundle?.materialized,plan=predictionMaterializationPlan(item.filmId,bundle);
+  if(done?.planId===planId&&done.previousEtag===item.expectedEtag&&done.previousSha256===item.expectedSha256&&!plan.pending.length&&!plan.malformed.length)return {filmId:item.filmId,outcome:'already_materialized',records:plan.linked.length};
+  return {filmId:item.filmId,outcome:'bundle_changed'};
+ }
+ const plan=predictionMaterializationPlan(item.filmId,bundle);
+ if(plan.malformed.length)return {filmId:item.filmId,outcome:'malformed_pointer'};
+ if(!plan.pending.length)return {filmId:item.filmId,outcome:'nothing_pending',records:plan.linked.length};
+ const objects=[];
+ for(const pending of plan.pending){
+  const objectSha=await textSha256(pending.text),key=predictionVersionKey(item.filmId,objectSha),existing=await env.BUCKET.get(key);
+  if(existing){if(await existing.text()!==pending.text)return {filmId:item.filmId,outcome:'checksum_mismatch'};objects.push({...pending,sha:objectSha,key,present:true});}
+  else objects.push({...pending,sha:objectSha,key,present:false});
+ }
+ if(dryRun)return {filmId:item.filmId,outcome:'would_materialize',objects:objects.length,objectsPresent:objects.filter(o=>o.present).length};
+ for(const o of objects)if(!o.present){
+  const saved=await env.BUCKET.put(o.key,o.text,{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+  if(saved===null){const stored=await env.BUCKET.get(o.key);if(!stored||await stored.text()!==o.text)return {filmId:item.filmId,outcome:'checksum_mismatch'};}
+ }
+ const pointer=o=>predictionVersionPointer(item.filmId,o.sha),next={...bundle};
+ for(const o of objects){if(o.role==='current')next.current={...bundle.current,...pointer(o)};}
+ if(Array.isArray(bundle.history))next.history=bundle.history.map((record,index)=>{const o=objects.find(x=>x.role==='history'&&x.index===index);return o?{...record,...pointer(o)}:record;});
+ next.materialized={at,from:'predictions.json',planId,previousEtag:etag,previousSha256:sha};
+ const saved=await env.BUCKET.put(bundleKey,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:object.etag}});
+ if(saved===null)return {filmId:item.filmId,outcome:'bundle_changed',objectsWritten:objects.filter(o=>!o.present).length};
+ // Read back: every record links to an object that holds exactly its body.
+ const check=predictionMaterializationPlan(item.filmId,JSON.parse(await (await env.BUCKET.get(bundleKey)).text()));
+ if(check.pending.length||check.malformed.length)return {filmId:item.filmId,outcome:'readback_failed'};
+ for(const o of objects){const stored=await env.BUCKET.get(o.key);if(!stored||await stored.text()!==o.text)return {filmId:item.filmId,outcome:'readback_failed'};}
+ return {filmId:item.filmId,outcome:'materialized',objects:objects.length,objectsPresent:objects.filter(o=>o.present).length};
+}
+async function materializePredictionVersions(env,body){
+ let request;try{request=materializationRequest(body);}catch(error){return json({error:error.message},error.status||400);}
+ // Writing also needs the version writer on: otherwise the next submit would put an unlinked record back into the bundle.
+ if(!request.dryRun&&!predictionMaterializationEnabled(env))return json({error:'Prediction version materialization is off',reason:'materialization_off'},409);
+ if(!request.dryRun&&!predictionVersionsEnabled(env))return json({error:'Prediction version objects are off',reason:'version_objects_off'},409);
+ const receiptKey=MATERIALIZATION_RECEIPTS+request.planId+'/'+request.batch+'.json';
+ if(!request.dryRun){const prior=await loadJSON(env,receiptKey);if(prior)return json({...prior,replay:true});}
+ // A dry run reads only, so it takes no lease; a write batch runs under the prediction writer lease that every submit takes.
+ const run=async()=>{
+  const at=new Date().toISOString(),results=[];
+  for(const item of request.items)results.push(await materializeFilm(env,item,{planId:request.planId,dryRun:request.dryRun,at}));
+  const outcomes={};for(const result of results)outcomes[result.outcome]=(outcomes[result.outcome]||0)+1;
+  const receipt={schemaVersion:1,planId:request.planId,batch:request.batch,dryRun:request.dryRun,at,films:results.length,outcomes,results};
+  if(!request.dryRun)await env.BUCKET.put(receiptKey,JSON.stringify(receipt),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+  return json({...receipt,replay:false});
+ };
+ return request.dryRun?run():predictionWriter(env,run);
+}
 function ratingsStatusView(stored,enabled){
  const empty={schemaVersion:1,state:'idle',lastSuccessAt:null,lastFailureAt:null,nextRetryAt:null,generationId:null,pages:null,watched:null,attempt:null,diary:{state:'unchecked',cause:null,error:null}};
  return {...(stored||empty),enabled:!!enabled};
@@ -924,6 +1006,7 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
  if(path==='/api/enrichment/ratings/status'&&request.method==='GET'){const stored=await loadJSON(env,RATINGS_STATUS_KEY),readable=await readableRatings(env);return json({...ratingsStatusView(stored,ratingsEnabled(env)),generationId:readable.generationId??stored?.generationId??null,pendingGenerationId:readable.pendingGenerationId});}
  if(path==='/api/enrichment/ratings/refresh'&&request.method==='POST')return ratingsRefresh(env,body);
  if(path==='/api/enrichment/catalog/posters'&&request.method==='POST')return await catalogPosterHydration(env,body);
+ if(path==='/api/enrichment/predictions/materialize'&&request.method==='POST')return await materializePredictionVersions(env,body);
  if(path==='/api/enrichment/discovery/reconcile'&&request.method==='POST'){
   const pinned=await pinEpg(env);
   let [source,decisions]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')]);if(!source?.items)return json({error:'No discovery catalog'},409);

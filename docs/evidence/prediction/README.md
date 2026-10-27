@@ -3,5 +3,6 @@
 | Report | Capture and scope | Verdict | Used by | Later / authority |
 | --- | --- | --- | --- | --- |
 | [AIR-82 queue RCA](air-82-prediction-rca.md) | 24 Oct 2026, 09:06:33 UTC, owner-only read-only MCP; five films current in snapshot | **PARTIAL RCA** — original per-film failure kind unproven | [AIR-82](https://trello.com/c/Oa33pTQK); [AIR-98](https://trello.com/c/JQEa1aK7) read-only diagnostics; [AIR-88](https://trello.com/c/xWA4evuk) provenance | Preserved historical sample, no claim of present queue health |
+| [AIR-179 materialization plan and rehearsal](air-179-materialization-rehearsal-2026-10-27.md) | 27 Oct 2026, offline on the AIR-175 snapshot; Worker code in vm with an in-memory bucket; no network | **GO for review, offline only** — 2,335 records in 47 batches materialized, 0 mismatches, 0 changed bodies, 47 replays | [AIR-179](https://trello.com/c/vdLts7tJ), [ADR-0026](../../adr/0026-historical-prediction-version-materialization.md) | Production flags, `apply` and the reconciling snapshot are separate owner approvals |
 
 [Registry](../README.md). No production write is authorized.

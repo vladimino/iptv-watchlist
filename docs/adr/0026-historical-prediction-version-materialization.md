@@ -1,0 +1,42 @@
+# ADR 0026: Historical prediction versions are materialized by a bounded, gated Worker operation from a fenced snapshot plan
+
+**Status:** Proposed (design and code only; it authorizes no production write, flag change, Task change or D1 action)  
+**Original decision date:** 2026-10-27  
+**Recorded at:** 2026-10-27  
+**Approval source:** pending owner and coordinator review of [AIR-179](https://trello.com/c/vdLts7tJ)  
+**Related work:** [AIR-179](https://trello.com/c/vdLts7tJ), [AIR-164](https://trello.com/c/iZzON44A), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0019](0019-live-d1-backfill-boundaries.md) item 4, [prediction versions runbook](../runbooks/prediction-versions.md), [AIR-74 dry-runs after ADR-0022](../evidence/d1-migration/air-74-real-baseline-dry-run-2026-10-27.md)  
+**Supersedes:** None (it implements the design in section 2 of the runbook)  
+**Superseded by:** None
+
+## Context
+
+The backfill's mandatory prediction family is unportable: in the AIR-175 snapshot every one of 2,335 bundles holds records without `r2Key`/`contentSha256`, because `PREDICTION_VERSION_OBJECTS` has stayed off. ADR-0019 requires an approved materialization of immutable version objects before that family can be imported. The objects must hold the historical bodies byte for byte; nothing may be re-predicted, and the bundle (`predictions.json`) is written by the prediction submit path at any time, without a version precondition of its own.
+
+## Decision
+
+1. **The plan comes from a fenced snapshot, not from live listing.** `scripts/prediction-versions-materialize.mjs plan` reads a `consistent_fenced` snapshot, applies the shared rules of `src/domain/prediction-versions.js` and writes, outside the repository, `origin.json` (plan id = the snapshot's aggregate SHA-256, plan SHA-256, counts), `plan.jsonl` (per film: stored film id, the bundle's ETag and SHA-256 in the snapshot) and an aggregate `report.json`. Films with a malformed pointer, an unreadable bundle or an existing object whose bytes differ are left out of the plan and counted as stops. Batches hold at most 50 films. Every later step rejects a `plan.jsonl` whose SHA-256 differs from `origin.json`.
+2. **Writes happen inside the Worker, never from the operator's machine.** `POST /api/enrichment/predictions/materialize` takes `{planId, batch, items:[{filmId, expectedEtag, expectedSha256}], dryRun}`, validated strictly (HTTP 400 otherwise). It is behind the Worker's Cloudflare Access like every `/api` route. The bucket is never reachable with operator credentials, so the operator cannot write arbitrary keys.
+3. **Two gates.** A write batch needs `PREDICTION_MATERIALIZATION=on` **and** `PREDICTION_VERSION_OBJECTS=on` (otherwise HTTP 409, `materialization_off` / `version_objects_off`, nothing written). The second gate is required because a submit with the writer off would put an unlinked record back into a materialized bundle. A dry run works with any value, reads only, and takes no lease.
+4. **Per film, under the prediction writer lease** (the lease every submit takes, so no submit interleaves): the bundle is read; its ETag **and** the SHA-256 of its bytes must equal the plan's (`bundle_changed` otherwise, film skipped, nothing written). Each pending record's object is written create-only; an existing object with the same bytes is linked, one with other bytes stops the film (`checksum_mismatch`). Then the bundle is rewritten once, compare-and-swap on the ETag just read, adding only `r2Key` and `contentSha256` to each record and a `materialized` block `{at, from:'predictions.json', planId, previousEtag, previousSha256}`. Values, `replacedAt` and history order are untouched. The result is read back and checked against the shared rule (`readback_failed` otherwise).
+5. **Idempotency and recovery.** Each completed write batch leaves a create-only receipt `enrichment/predictions-materialization/<planId>/<batch>.json`; repeating the batch returns it with `replay: true` and writes nothing. A film whose bundle already carries this plan's `materialized` block with the planned previous ETag and SHA-256 and no pending record reports `already_materialized` (the lost-response case). A failure inside a batch (HTTP 5xx) leaves no receipt; objects already written are additive and re-linked by the retry; a bundle is never written without its objects existing.
+6. **Offline rehearsal is mandatory before any production step.** `rehearse` runs the real Worker code (vm) against an in-memory copy of the snapshot's bundles and objects with both gates on: a dry run and an apply per batch, then a replay of every batch, then a check that no record is pending or malformed, every linked object equals its body, no body changed, and every bundle carries the provenance block. A non-`ok` rehearsal exits 3.
+7. **Remote steps.** `validate` (dry runs) and `apply` call the endpoint batch by batch, HTTPS only, Access service-token headers from the environment only, stop at the first non-2xx answer and record per-batch results privately; `--from-batch` resumes.
+
+## Alternatives considered
+
+- **Writing objects with Wrangler or the S3 API from the operator's machine.** Rejected: it bypasses the writer lease, so a submit could interleave between object and bundle writes, and it needs broad bucket credentials.
+- **Re-running predictions with the writer on.** Rejected: it changes predicted values and loses history.
+- **Planning from a live listing at execution time.** Rejected: the snapshot is the verified recovery source; the ETag/SHA-256 precondition already detects any later change.
+- **One gate (`PREDICTION_VERSION_OBJECTS`) for both.** Rejected: activating the writer and running a one-time rewrite are separate approvals.
+
+## Consequences
+
+The prediction family becomes portable for exactly the films whose bundle has not changed since the snapshot; changed films are reported and need a new plan from a new fenced snapshot. The operation is bounded (50 films per request, one lease per request) and resumable. Receipts are run records (`run_record` in the offline importer). Production use needs, separately: setting `PREDICTION_VERSION_OBJECTS=on`, setting `PREDICTION_MATERIALIZATION=on`, the `apply` run itself, and a new fenced snapshot to reconcile the result.
+
+## Recovery and migration boundary
+
+Version objects and receipts are additive and stay; the Worker deletes nothing. A bundle can be restored from the input snapshot (key, bytes, checksum in its manifest) under a separate approval; the `materialized` block names the ETag and SHA-256 it replaced. Code rollback removes the route only. R2 stays authoritative; no D1 write is part of this decision.
+
+## Evidence
+
+- [AIR-179 plan and offline rehearsal on the AIR-175 snapshot](../evidence/prediction/air-179-materialization-rehearsal-2026-10-27.md)
