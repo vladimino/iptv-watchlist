@@ -73,6 +73,8 @@ It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command
 
 ## Procedure
 
+**Discovery archive (planned).** A snapshot taken after the [ADR 0032](../adr/0032-bounded-discovery-ledger.md) bounded ledger is activated contains `epg/discovery-archive/v1/` (manifest and segments). Until the importer maps that prefix as a second `candidate` source, it is unmapped. The snapshot must then be treated as NO-GO for the discovery family, not imported with the active ledger alone. Snapshots of the current full ledger, such as AIR-175, are not affected.
+
 1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. Repeat the dry-run twice more: `applied` must be 0.
 2. **Owner acknowledges the class C list** by producing the JSON file of `{sourceKey,targetTable,targetId,reason}` records from `ledger.json` after review. The acknowledgement records a known gap; it is not lossless parity.
 3. **Create the databases** (owner, separate approval): `iptv` and a scratch database; apply migrations `0001`–`0003` to `iptv` only.
