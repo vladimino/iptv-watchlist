@@ -41,5 +41,5 @@ const tasks=[],dispatched=[];context.execution={waitUntil:p=>tasks.push(p),expor
 env.EPG_SITE_SERVICE_TOKEN='legacy-secret';const queued=await vm.runInContext('queueDiscovery(env,"epg_committed")',context);await Promise.all(tasks);delete env.EPG_SITE_SERVICE_TOKEN;
 assert.equal(queued.state,'paused');assert.equal(queued.reason,'epg_committed');assert.equal(queued.remainingChunks,12);assert.equal(queued.nextAction,'continue');
 assert.equal(calls.length,0);assert.deepEqual(dispatched,[]);assert.equal(records.get('epg/resolver-continuation.json').remainingChunks,12);assert(!JSON.stringify([...records]).includes('legacy-secret'));
-assert.equal(vm.runInContext("nonFilmEPGReason('TV series Example')",context),'show_label');assert.equal(vm.runInContext("nonFilmEPGReason('Example episode 4')",context),'episode_label');
+assert.equal(vm.runInContext("nonFilmEPGReason('TV series Example')",context),'show_label');assert.equal(vm.runInContext("nonFilmEPGReason('Example episode 4')",context),null);assert.equal(vm.runInContext("nonFilmEPGReason('Example season 2 episode 4')",context),'episode_label');
 console.log('Discovery pipeline: hot priority, alias/yearless reuse, canonical identity, cold deferral, promotion, leases, restart checkpoints, 429 backoff and queued continuation passed');
