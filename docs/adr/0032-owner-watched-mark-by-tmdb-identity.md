@@ -1,9 +1,9 @@
 # ADR 0032: The owner's "watched" mark on a verified catalog film is an owner fact keyed by that film's TMDB identity, with no Letterboxd id and no title matching
 
-**Status:** Proposed (design only; it authorizes no route, button, flag, R2 or D1 write, and no Letterboxd or TMDB request)  
+**Status:** Accepted 2026-10-27 (owner-approved design only; it authorizes no route, button, flag, R2 or D1 write, and no Letterboxd or TMDB request)  
 **Original decision date:** 2026-10-27  
 **Recorded at:** 2026-10-27  
-**Approval source:** owner proposal of a manual «Смотрел» mark after the AIR-198 rollout, recorded on [AIR-198](https://trello.com/c/9xpmq2fc) and scoped as [AIR-213](https://trello.com/c/VbE31Rzj); this record awaits owner acceptance  
+**Approval source:** owner proposal of a manual «Смотрел» mark after the AIR-198 rollout, recorded on [AIR-198](https://trello.com/c/9xpmq2fc) and scoped as [AIR-213](https://trello.com/c/VbE31Rzj); owner explicitly accepted this design on 2026-10-27  
 **Related work:**
 - [AIR-213](https://trello.com/c/VbE31Rzj) (this decision), [AIR-214](https://trello.com/c/dX5YZlFY) (implementation), [AIR-198 rollout evidence](../evidence/letterboxd/air-198-finds-exclusion-rollout-2026-10-27.md)
 - [ADR-0023](0023-letterboxd-user-facts.md), [ADR-0024](0024-letterboxd-scan-summary.md), [ADR-0028](0028-finds-display-only-watched-exclusion.md), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0027](0027-owner-rating-tmdb-identity.md)
