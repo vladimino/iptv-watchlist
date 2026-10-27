@@ -1,4 +1,4 @@
-# ADR 0032: Bound the active discovery ledger and keep history in a segmented archive
+# ADR 0034: Bound the active discovery ledger and keep history in a segmented archive
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-27 (proposed)  

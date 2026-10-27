@@ -11,7 +11,7 @@
 
 ## The consistency proof
 
-**Planned ([ADR 0032](../adr/0032-bounded-discovery-ledger.md), not implemented):** once the bounded discovery ledger is active, the fence must also include `epg/discovery-archive/v1/current.json`. The archive's manifest and segment versions are write-once, so the listing proof covers them as ordinary objects.
+**Planned ([ADR 0034](../adr/0034-bounded-discovery-ledger.md), not implemented):** once the bounded discovery ledger is active, the fence must also include `epg/discovery-archive/v1/current.json`. The archive's manifest and segment versions are write-once, so the listing proof covers them as ordinary objects.
 
 1. **Opening listing.** A complete paged `ListObjectsV2` inventory, checkpointed page by page so an interrupted run resumes from the last durable cursor.
 2. **Conditional reads of the listed version.** Every request sends a signed `Accept-Encoding: identity`, so the response carries the stored bytes, the strong ETag and the `Content-Length`; without it Cloudflare compresses JSON on the fly, weakens the ETag and every `If-Match` fails with `412`. A content-encoded response or a weak ETag is refused as a `protocol` error (exit 1), never hashed. For every key: `HeadObject` with `If-Match` on the listed ETag, `GetObject` with the same `If-Match` whose response ETag and length must equal the listing, a raw SHA-256 of the streamed bytes, then `HeadObject` with `If-Match` again. A `412`, a missing key or a differing ETag is `source_changed`: the attempt is NO-GO.

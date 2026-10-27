@@ -30,7 +30,7 @@ const store={
 };
 const env={TMDB_REQUEST_INTERVAL_MS:0,BUCKET:store};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/prediction-versions.js','utf8'),ctx);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/prediction-versions.js','utf8')+'\n'+fs.readFileSync('src/domain/profile-impact.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 vm.runInContext('globalThis.testApi={writePredictionVersion,contentHash,predictionVersionBody,predictionVersionText,predictionVersionKey,predictionVersionLinked,parsePredictionVersionKey,predictionMaterializationPlan,predictionVersionsEnabled};',ctx);
 const api=async(path,method='GET',body)=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};
@@ -124,7 +124,7 @@ assert.equal((await api('enrichment/view')).status,200);
 await api('enrichment/complete','POST',{runId,reason:'model_error'});
 
 // Recalculation after a profile change: the replaced record keeps its pointer in history, the new current has its own object.
-assert.equal((await api('enrichment/profile','PUT',{version:2,schemaVersion:1,profile:{...profile,pace:'Slower is fine'}})).status,200);
+assert.equal((await api('enrichment/profile','PUT',{version:2,schemaVersion:1,profile:{...profile,pace:'Slower is fine'},changeImpact:{impactSchemaVersion:1,from:{version:1,profileHash:JSON.parse(records.get('enrichment/profile/current.json')).profileHash},scope:'global',changedFields:['pace'],selectors:[]}})).status,200);
 runId=await startRun();
 assert.equal((await submit(runId,'film001',{predictedRating:3.5})).status,'recalculated');
 const bundle2=read('enrichment/films/film001/predictions.json');

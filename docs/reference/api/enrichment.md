@@ -15,6 +15,35 @@ This subsystem uses a separate `enrichment/` R2 namespace. It does not write pro
 - [Obsolete v3 batch instructions](../../archive/superseded/enrichment-v3-batch.md) — historical only, never run against production.
 - [Current prediction runner](prediction-runner.md) and [MCP interface](mcp.md).
 
+## Taste-profile publication
+
+`PUT /api/enrichment/profile` publishes a new immutable taste-profile version under the change-impact model of [ADR-0031](../../adr/0031-selective-prediction-profile-compatibility.md). Publishing is a separate owner-approved operation ([procedure](../../runbooks/taste-profile-publication.md)); the scheduled runner only reads the profile.
+
+Body: `{version, schemaVersion: 1, profile, changeImpact, dryRun}`. `version` is an integer greater than the current one; `profile` passes the same field validation as before; `dryRun` is optional and boolean. `changeImpact` is required for every version after the first and refused on the first (HTTP 409 `from_mismatch`, there is no predecessor):
+
+```json
+{"impactSchemaVersion": 1,
+ "from": {"version": 4, "profileHash": "<profileHash of the current version>"},
+ "scope": "identity | selective | global",
+ "changedFields": ["horrorPreferences"],
+ "selectors": [{"kind": "genre", "values": ["horror"]},
+               {"kind": "execution", "dimension": "horror_rule_consistency", "values": ["weak", "mixed"]}],
+ "rationale": "optional text, at most 2000 characters",
+ "approval": {"approvedBy": "owner", "approvedAt": "<ISO time>", "reviewRef": "<owner decision reference>",
+              "declarationSha256": "<64 hex>"}}
+```
+
+- The Worker computes the changed top-level profile fields itself; `changedFields` must list exactly those. `identity` needs the same `profileHash` as `from` and no changed field; `global` and `identity` carry no selectors and need no approval.
+- `selective` needs at least one selector covering every changed field under the field table of ADR-0031 section 4 (`ratingScale`, `calibration`, `anchorFilms` are global only; the genre sections need their genre selector), and a complete owner `approval`. Selector kinds are `mechanic` (values from the fingerprint mechanics), `execution` (one dimension and its concrete values, never `unknown` or `not_applicable`) and `genre` (the canonical genres of the ADR). Values in one selector are distinct; unknown keys anywhere in the impact or a selector are refused.
+- `declarationSha256` is the SHA-256 of the UTF-8 bytes of `JSON.stringify` of `[from.version, from.profileHash, version, profileHash, scope, changedFields sorted, selectors]` with every object's keys sorted, where `version` and `profileHash` are the new version's. The new `profileHash` is computed by the Worker, so the hash is obtained from a dry run.
+- A dry run validates everything and writes nothing. It answers `{dryRun: true, valid: true, version, profileHash, changedFields, declarationSha256, from}`. A selective impact without its approval is refused like a real publication, but the refusal also carries `declarationSha256` and `profileHash`: that is the hash the owner approves.
+
+Refusals write nothing and leave `current.json` unchanged. They answer `{error, code, changedFields, profileHash, declarationSha256}` with HTTP 400 for `impact_missing`, `impact_schema_unknown`, `scope_unknown`, `identity_requires_same_hash`, `changed_fields_mismatch`, `global_field_requires_global`, `selective_requires_selectors`, `selector_kind_unknown`, `selector_invalid`, `field_not_covered`, `genre_floor_missing`, `selective_requires_owner_approval` and `approval_mismatch`, and HTTP 409 for `from_mismatch` (the current version moved since the impact was written) and `version_not_increasing`. A body or profile that fails the field validation is HTTP 400 without a code, as before.
+
+Write order: the version record `enrichment/profile/versions/<n>.json` (`{version, schemaVersion, updatedAt, profileHash, profile, changeImpact}`, `changeImpact` null on the first version) is written create-only; then `current.json` is replaced by compare-and-swap on the ETag read at the start (create-only when there is none). `current.json` holds the same record plus `lineage`: the `(version, profileHash, changeImpact)` of up to the 32 most recent versions, oldest first; a current record written before lineage existed starts it with its own link. When the version record already exists, a retry with the same `profileHash` and `changeImpact` reuses it (a crash between the two writes is completed by sending the same request again); a different record under that number answers HTTP 409 `version_exists` and is never overwritten. When `current.json` changed between the read and the swap, the answer is HTTP 409 `profile_changed`: read the current profile and publish again. After a successful swap the prediction queue is refreshed as before. The answer is the new `current.json`. `GET /api/enrichment/profile` and the MCP tool `enrichment_profile` return that record, including `changeImpact` and `lineage`.
+
+Freshness is unchanged by this contract: every consumer still compares the profile version and hash strictly, so any new version makes every prediction stale until the selective evaluator of ADR-0031 is implemented and activated.
+
 ## Actual ratings
 
 Actual Letterboxd ratings are stored separately with `PUT /api/enrichment/actual-ratings`:
@@ -125,7 +154,7 @@ Since [AIR-151](https://trello.com/c/iZ7TR7y0) a continuation response from `POS
 
 `GET /api/enrichment/pipeline/status` separates normalized EPG candidate titles, excluded non-movies, unresolved candidates, unique confirmed TMDB films, hot/cold cached films, queued predictions, hot predictions and cold deferred work. These populations differ; candidate counts must never be presented as film counts.
 
-**Bounded ledger (decided in [ADR 0032](../../adr/0032-bounded-discovery-ledger.md), proposed; not implemented).** Today `epg/discovery-latest.json` holds every candidate ever seen. In the bounded mode, behind `DISCOVERY_LEDGER_MODE=bounded` (default `full`; `frozen` stops archiving without a rebuild), it holds only the latest scan's candidates. Candidates that left the EPG move losslessly to the archive `epg/discovery-archive/v1/`: write-once hash-segment and manifest versions behind one compare-and-swap pointer. The writer fences on the published pointer etag it read and on the discovery lease. On re-entry the commit merges them back. Decisions in `epg/discovery-resolution.json` are never touched by archiving. Pipeline status would then report `ledgerTotal` as the unique keys of active ∪ archive, with per-activity counters over the active ledger and a new `archive` block (`manifestId`, segments, bytes, `uniqueArchivedItems`); it never reads segments. `POST /api/enrichment/discovery/reconcile` would return `409` in bounded mode until it is archive-aware. Until AIR-220 is delivered and AIR-222 is approved, the current full-ledger behaviour above applies. `GET /api/enrichment/queue/status` additionally exposes `hotCount`, `hotPredicted`, `coldCount`, `coldWithoutPrediction`, and hot `priorityCount`.
+**Bounded ledger (decided in [ADR 0034](../../adr/0034-bounded-discovery-ledger.md), proposed; not implemented).** Today `epg/discovery-latest.json` holds every candidate ever seen. In the bounded mode, behind `DISCOVERY_LEDGER_MODE=bounded` (default `full`; `frozen` stops archiving without a rebuild), it holds only the latest scan's candidates. Candidates that left the EPG move losslessly to the archive `epg/discovery-archive/v1/`: write-once hash-segment and manifest versions behind one compare-and-swap pointer. The writer fences on the published pointer etag it read and on the discovery lease. On re-entry the commit merges them back. Decisions in `epg/discovery-resolution.json` are never touched by archiving. Pipeline status would then report `ledgerTotal` as the unique keys of active ∪ archive, with per-activity counters over the active ledger and a new `archive` block (`manifestId`, segments, bytes, `uniqueArchivedItems`); it never reads segments. `POST /api/enrichment/discovery/reconcile` would return `409` in bounded mode until it is archive-aware. Until AIR-220 is delivered and AIR-222 is approved, the current full-ledger behaviour above applies. `GET /api/enrichment/queue/status` additionally exposes `hotCount`, `hotPredicted`, `coldCount`, `coldWithoutPrediction`, and hot `priorityCount`.
 
 ## Throughput v3
 

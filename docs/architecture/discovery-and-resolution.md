@@ -47,4 +47,4 @@ The catalogue upsert above is the only writer that creates or re-identifies cata
 
 R2 remains authoritative. The separately planned D1 candidate tables are not active production authority.
 
-**Planned, not implemented:** [ADR 0032](../adr/0032-bounded-discovery-ledger.md) (proposed) bounds the "persistent candidate ledger" node above to the latest scan's candidates. History moves to a segmented archive that the commit reads only for re-entering keys; chunks and status never read it. The diagram shows the current full ledger and changes only when the implementation is delivered, under its own visual review.
+**Planned, not implemented:** [ADR 0034](../adr/0034-bounded-discovery-ledger.md) (proposed) bounds the "persistent candidate ledger" node above to the latest scan's candidates. History moves to a segmented archive that the commit reads only for re-entering keys; chunks and status never read it. The diagram shows the current full ledger and changes only when the implementation is delivered, under its own visual review.
