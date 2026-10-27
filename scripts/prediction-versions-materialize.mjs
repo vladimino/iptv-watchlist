@@ -73,7 +73,7 @@ function snapshotBucket(snapshotPath,manifest){
 }
 export function workerContext(){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{}});
- vm.runInContext(['src/domain/film-person.js','src/domain/prediction-versions.js'].map(file=>fs.readFileSync(path.join(ROOT,file),'utf8')).join('\n'),ctx);
+ vm.runInContext(['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js'].map(file=>fs.readFileSync(path.join(ROOT,file),'utf8')).join('\n'),ctx);
  for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(path.join(ROOT,file),'utf8').replace('export default','globalThis.worker='),ctx);
  return ctx;
 }
