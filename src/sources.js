@@ -75,6 +75,24 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
  }
  return [...merged.values()];
 }
+// AIR-220 / ADR 0034: bounded discovery ledger. The active ledger holds the latest scan's candidates; candidates that left
+// the EPG move losslessly into a write-once segmented archive behind one compare-and-swap pointer.
+const LEDGER_ARCHIVE_PREFIX='epg/discovery-archive/v1/',LEDGER_ARCHIVE_POINTER=LEDGER_ARCHIVE_PREFIX+'current.json',LEDGER_ARCHIVE_SEGMENTS=64,LEDGER_ARCHIVE_CHAIN_LIMIT=8;
+// `full` (default) keeps today's single growing ledger; `bounded` archives departures; `frozen` stops archiving but keeps the
+// archive as history. Only the exact strings are accepted.
+function discoveryLedgerMode(env){const value=env?.DISCOVERY_LEDGER_MODE;return value==='bounded'||value==='frozen'?value:'full';}
+function fnv1a32(text){let hash=0x811c9dc5;for(const byte of new TextEncoder().encode(String(text))){hash^=byte;hash=Math.imul(hash,0x01000193)>>>0;}return hash>>>0;}
+function ledgerArchiveSegment(key,count=LEDGER_ARCHIVE_SEGMENTS){return fnv1a32(key)%count;}
+const ledgerArchiveSegmentKey=(segment,writeId)=>LEDGER_ARCHIVE_PREFIX+'segments/'+String(segment).padStart(3,'0')+'/'+writeId+'.json';
+const ledgerArchiveManifestKey=manifestId=>LEDGER_ARCHIVE_PREFIX+'manifests/'+manifestId+'.json';
+// Of two archived payloads of one key, the later observation wins: later lastSeenAt, then later lastSeenProgrammeRunId order.
+function archivedPayloadNewer(next,current){
+ if(!current)return true;
+ const a=Number(next?.lastSeenAt??next?.lastAiring),b=Number(current?.lastSeenAt??current?.lastAiring);
+ if(Number.isFinite(a)&&Number.isFinite(b)&&a!==b)return a>b;
+ if(Number.isFinite(a)!==Number.isFinite(b))return Number.isFinite(a);
+ return String(next?.lastSeenProgrammeRunId||'')>=String(current?.lastSeenProgrammeRunId||'');
+}
 function mergeCatalogIdentity(incoming,live,programmeRunId){
  const next={...(incoming||{})};
  for(const [key,film] of Object.entries(live||{})){

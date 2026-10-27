@@ -581,7 +581,7 @@ async function footerStatus(env){
  const coverage=canonicalCoverageSummary(report,catalog,index,profile),items=source?.items||[],queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
  const recognized=new Set();
  for(const candidate of items){const decision=decisions?.[candidate.key];if(decision?.status==='verified'&&decision.tmdbId)recognized.add(String(decision.tmdbId));}
- const counts=discoveryCounts(items,decisions||{},Date.now());
+ const counts=ledgerCounts(source,decisions||{},Date.now());
  const pendingRecognition=counts.currentUnresolved,historicalUnresolved=counts.historicalUnresolved+counts.expiredInactive;
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
@@ -1056,6 +1056,8 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
  if(path==='/api/enrichment/catalog/posters'&&request.method==='POST')return await catalogPosterHydration(env,body);
  if(path==='/api/enrichment/predictions/materialize'&&request.method==='POST')return await materializePredictionVersions(env,body);
  if(path==='/api/enrichment/discovery/reconcile'&&request.method==='POST'){
+  // AIR-220 / ADR 0034: these routes rewrite the whole ledger and are not archive-aware yet.
+  if(discoveryLedgerMode(env)!=='full'||await env.BUCKET.get(LEDGER_ARCHIVE_POINTER))return json({error:'Discovery ledger is bounded; this route is not archive-aware'},409);
   const pinned=await pinEpg(env);
   let [source,decisions]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json')]);if(!source?.items)return json({error:'No discovery catalog'},409);
   if(source.canonicalizedAt&&source.canonicalizedAt!==decisions?.__canonicalizedAt){[source,decisions]=await Promise.all([loadJSON(env,'epg/discovery-before-canonical.json'),loadJSON(env,'epg/discovery-resolution-before-canonical.json')]);if(!source?.items)return json({error:'Canonicalization backup missing'},409);}
@@ -1067,6 +1069,8 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
  }
  if(path==='/api/enrichment/discovery/resolve'&&request.method==='POST')return await resolveDiscoveryRequest(env,execution,body);
  if(path==='/api/enrichment/discovery/scan'&&request.method==='POST'){
+  // AIR-220 / ADR 0034: these routes rewrite the whole ledger and are not archive-aware yet.
+  if(discoveryLedgerMode(env)!=='full'||await env.BUCKET.get(LEDGER_ARCHIVE_POINTER))return json({error:'Discovery ledger is bounded; this route is not archive-aware'},409);
   const pinned=await pinEpg(env);
   const report=await loadJSON(pinned,'programme.json');if(!report?.films)return json({error:'No programme'},409);
   const now=Date.now(),response=await fetch(sourceConfig(env).epg,{signal:AbortSignal.timeout(110000)});if(!response.ok)return json({error:'EPG HTTP '+response.status},502);
