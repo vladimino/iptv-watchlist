@@ -210,6 +210,7 @@ assert.equal(projected.unprojected.includes('epg/generations/run-old/programme.j
 assert.equal(projected.r2Only.includes('epg/generations/run-old/programme.json'),true);
 assert.equal(classifyObject('epg/generations/run-old/programme.json'),'r2_only');
 assert.equal(classifyObject('started/zz.json'),'r2_only');
+assert.equal(classifyObject('letterboxd/facts/films/tmdb-1.json'),'r2_only');
 assert.equal(classifyObject('sync.json'),'r2_only');
 assert.equal(classifyObject('mystery/zz.json'),'unmapped');
 assert.equal(classifyObject('epg/raw/guide.xml'),'excluded');

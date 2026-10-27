@@ -40,9 +40,9 @@ The **separately flagged** `POST /api/enrichment/ratings/refresh` is not automat
 
 For operational truth, check the current `RATINGS_REFRESH` binding before claiming that manual refresh is enabled; the source default is not evidence of current production configuration. No retrieval, bypass, ratings repair, or refresh is performed by this documentation change.
 
-## Proposed: watched, rating and watchlist as separate facts
+## Watched, rating and watchlist as separate facts (behind `LETTERBOXD_FACTS`)
 
-**Not implemented; proposed by [ADR-0023](../adr/0023-letterboxd-user-facts.md) and pending owner approval.** Today the films-list scan writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. Under the proposal every source writes observations into one fact record per canonical film, only a greater observation (by time, then source rank, then observation id) replaces a value, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
+**Accepted ([ADR-0023](../adr/0023-letterboxd-user-facts.md), [ADR-0024](../adr/0024-letterboxd-scan-summary.md)); the routine writers are implemented behind `LETTERBOXD_FACTS`, off by default; the baseline importer and finds reading facts are not implemented yet.** With the gate off, the films-list scan still writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. With it on, every source writes observations into one fact record per film, only a greater observation (by time, then source rank, then observation id) replaces a value, a complete scan is stored once as a summary observation, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
 
 ```mermaid
 flowchart TD
