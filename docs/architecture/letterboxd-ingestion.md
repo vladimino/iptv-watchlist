@@ -45,24 +45,23 @@ For operational truth, check the current `RATINGS_REFRESH` binding before claimi
 **Not implemented; proposed by [ADR-0023](../adr/0023-letterboxd-user-facts.md) and pending owner approval.** Today the films-list scan writes `actualRating` straight into the view index and assigns `null` to watchlist films it does not see. Under the proposal every source writes observations into one fact record per canonical film, a newer observation is the only thing that replaces a value, and the view index is rebuilt from the records. Contract: [Letterboxd user facts](../reference/integrations/letterboxd-user-facts.md).
 
 ```mermaid
-flowchart LR
-    export["Owner's account export<br/>validated, accepted identities only"]
-    films["Complete public films list<br/>EPG commit or ratings refresh"]
-    page["Per-film page lookup"]
-    owner["Owner edit"]
+flowchart TD
+    subgraph sources["Observations"]
+        export["Owner's account export<br/>accepted identities only"]
+        films["Complete public films list"]
+        page["Per-film page lookup"]
+        owner["Owner edit"]
+    end
     gaps["403, partial scan,<br/>film absent from list"]
-    merge{"Observation newer<br/>than stored value?"}
-    facts[("R2 fact record per film:<br/>watched · rating · watchlist<br/>with provenance")]
+    merge{"Newer than the<br/>stored value?"}
+    facts[("R2 fact record per film:<br/>watched, rating, watchlist,<br/>provenance")]
     keep["Keep stored value"]
-    index[("view-index.json<br/>actualRating · watched<br/>under lid and tmdb_n")]
+    index[("view-index.json: actualRating, watched<br/>under lid and tmdb_n")]
     finds["Finds: exclude watched or rated;<br/>actual rating over prediction"]
-    export --> merge
-    films --> merge
-    page --> merge
-    owner --> merge
-    gaps -.->|not an observation| keep
-    merge -->|yes, compare-and-swap| facts
+    sources --> merge
+    merge -->|yes: compare-and-swap| facts
     merge -->|no| keep
+    gaps -.->|not an observation| keep
     facts -->|projection| index
     index --> finds
 ```
