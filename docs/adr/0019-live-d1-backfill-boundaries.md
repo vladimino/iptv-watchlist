@@ -6,7 +6,7 @@
 **Approval source:** [AIR-74](https://trello.com/c/5AdAmKPe), owner decision comment of 26 October 2026 ("явное решение владельца по G0/ADR-0019, design approval, не production approval")  
 **Related work:** [AIR-74](https://trello.com/c/5AdAmKPe), [AIR-73 offline parity](../evidence/d1-migration/air-73-offline-run.md), [AIR-74 readiness assessment](../evidence/d1-migration/air-74-backfill-readiness-2026-10-26.md)  
 **Supersedes:** None (extends [ADR-0017](0017-staged-d1-migration.md) at its "separately approved live backfill" stage)  
-**Superseded by:** None
+**Superseded by:** [ADR-0022](0022-stale-decision-evidence-import.md) in part: item 5's last sentence and item 8's decision-evidence example, for discovery decisions only
 
 ## Context
 
