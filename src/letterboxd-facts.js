@@ -271,6 +271,32 @@ const LetterboxdFacts=(()=>{
   return {...result,conflict:false,accepted};
  }
 
+ // The owner's watched mark on a verified catalog film (ADR-0032) is the one writer that may create a record with only a trusted
+ // TMDB alias: the identity is the catalog film the owner marked, never a Letterboxd id, a slug or a title. An existing record
+ // that already holds tmdb:<n> is reused; no record is ever merged here.
+ async function linkTmdbOnly(env,tmdb){
+  if(!TMDB.test(String(tmdb)))throw new FactsError('invalid_identity','Invalid TMDB id');
+  const alias='tmdb:'+tmdb;let factKey=null;
+  await casJSON(env,FACTS_KEYS.links,{},index=>{factKey=index[alias]||factKeyFor({tmdb});if(index[alias])return null;index[alias]=factKey;return index;});
+  return factKey;
+ }
+ // Writes only the `watched` fact from the owner. A value equal to the current effective value (stored, or the films-list scan
+ // summary of a linked Letterboxd id) writes nothing, so a repeated click or a retry is `unchanged`.
+ async function recordOwnerWatchedMark(env,tmdb,watched,{observedAt}){
+  if(typeof watched!=='boolean')throw new FactsError('invalid_observation','watched must be a boolean');
+  let key=await linkTmdbOnly(env,tmdb),{value:record}=await readJSON(env,recordKey(key));
+  const next=record?.redirectTo||record?.migrating?.to;
+  if(next){key=next;({value:record}=await readJSON(env,recordKey(key)));}
+  const lid=record?.links?.letterboxd||null,{value:filmsList}=lid?await readJSON(env,FACTS_KEYS.filmsList):{value:null};
+  const floor=(await summaryObservations('films-list',filmsList,lid,key)).watched||null,effective=greater(record?.watched||null,floor);
+  if(effective&&effective.value===watched)return {factKey:key,outcome:'unchanged',watched};
+  const incoming=await observation({factKey:key,fact:'watched',value:watched,observedAt,source:'owner'});
+  const result=await recordObservations(env,key,{tmdb:String(tmdb)},[{fact:'watched',observation:incoming}],{floors:{watched:floor}});
+  await projectRecords(env,[result.record]);
+  const outcome=result.outcomes[0]?.outcome,current=greater(result.record.watched||null,floor);
+  return {factKey:result.factKey,outcome:outcome==='new'||outcome==='replaces'?'saved':outcome==='older'?'older':'unchanged',watched:current?current.value:null};
+ }
+
  // ---- Baseline import (contract "Baseline import protocol"), owner-only, behind LETTERBOXD_BASELINE_IMPORT.
  const VIEW_FIELDS={rating:'actualRating',watched:'watched',watchlist:'watchlist'};
  const HEX64=/^[0-9a-f]{64}$/,DAY=/^\d{4}-\d{2}-\d{2}$/,MAX_ITEMS=200,MAX_CHUNK=10000;
@@ -454,5 +480,5 @@ const LetterboxdFacts=(()=>{
    throw error;
   }
  }
- return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts};
+ return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
 })();

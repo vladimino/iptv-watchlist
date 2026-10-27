@@ -577,7 +577,10 @@ function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
 // effective viewing window count, so a film airing only on another channel, outside the period or in the black zone is not a find.
 const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5;
-let findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false},findsLoading=false;
+let findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false,watchedMarkEnabled:false},findsLoading=false;
+// The owner's «Смотрел» mark (ADR-0032): POST /api/catalog/watched with the card's TMDB id only. A marked film leaves Finds at once,
+// before the catalog answer is refreshed; the notice offers an undo, which posts watched: false.
+const findsMarks=new Map();let findsNotice=null;
 function findsScope(){return state.channels?.size?{channels:new Set(state.channels),period:state.period}:null;}
 function findsOnChannel(show,channels){const name=typeof show?.channel==='string'?show.channel:'';return !!name&&(channels.has(name)||channels.has(name.trim()));}
 function findsInPeriod(model,show,period){return period==='archive'?inArchive(model,show):period==='future'?inFuture(model,show):inArchive(model,show)||inFuture(model,show);}
@@ -593,6 +596,7 @@ function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film
 function findsStrong(prediction){return !!prediction&&!prediction.stale&&Number.isFinite(prediction.predictedRating)&&prediction.predictedRating>=FINDS_MIN_RATING&&Number.isFinite(prediction.probability4Plus)&&prediction.probability4Plus>=FINDS_MIN_PROBABILITY&&typeof prediction.confidence==='string'&&prediction.confidence!==''&&prediction.confidence!=='low';}
 function findsEligible(film,now=nowMs(),known=watchlistIdentities(),scope=findsScope()){
  if(!film||film.id===undefined||film.id===null)return false;
+ if(film.tmdbId&&findsMarks.get(String(film.tmdbId))?.state==='marked')return false;
  if(known.ids.has(String(film.id))||(film.tmdbId&&known.tmdb.has(String(film.tmdbId))))return false;
  const local=enrichment.films?.[String(film.id)];
  if(local&&local.actualRating!==null&&local.actualRating!==undefined)return false;
@@ -637,7 +641,56 @@ function findsCard(film,now=nowMs(),scope=findsScope()){
  const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),chance=chance4Plus(p),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
  const title=film.url?`<a class="finds-title-link" href="${escapeHTML(film.url)}" target="_blank" rel="noopener noreferrer" title="Открыть на TMDB">${escapeHTML(film.title||film.original||'')}</a>`:escapeHTML(film.title||film.original||'');
- return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${poster}</div><div class="film-info"><h3>${title}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p></article>`;
+ return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${poster}</div><div class="film-info"><h3>${title}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
+}
+function findsMarkAction(film){
+ if(!findsSource.watchedMarkEnabled||!film.tmdbId)return '';
+ const mark=findsMarks.get(String(film.tmdbId)),saving=mark?.state==='saving',title=film.title||film.original||'';
+ return `<div class="finds-actions"><button type="button" class="finds-watched" data-finds-watched="${escapeHTML(String(film.tmdbId))}" ${saving?'disabled aria-busy="true"':''} aria-label="Отметить «${escapeHTML(title)}» как просмотренный">${saving?'Сохраняю…':'Смотрел'}</button>${mark?.state==='error'?`<span class="finds-mark-error" role="alert">${escapeHTML(mark.message)}</span>`:''}</div>`;
+}
+function findsNoticeHTML(){
+ if(!findsNotice)return '';
+ const {tmdbId,title,state,message}=findsNotice;
+ if(state==='error')return `<span role="alert">${escapeHTML(message)}</span>`;
+ if(state==='undone')return `<span>«${escapeHTML(title)}» снова в «Находках».</span>`;
+ return `<span>«${escapeHTML(title)}» отмечен как просмотренный.</span> <button type="button" class="finds-undo" data-finds-undo="${escapeHTML(tmdbId)}" ${state==='saving'?'disabled aria-busy="true"':''}>${state==='saving'?'Отменяю…':'Отменить'}</button>`;
+}
+async function postWatchedMark(tmdbId,watched){
+ const response=await fetch('/api/catalog/watched',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tmdbId,watched})});
+ const data=await response.json().catch(()=>null);
+ if(!response.ok||!data||typeof data.watched!=='boolean')throw new Error(data?.code==='film_not_in_catalog'?'Фильм уже не в каталоге, обновляю «Находки»':'Не удалось сохранить, попробуй ещё раз');
+ return data;
+}
+async function markFindWatched(tmdbId){
+ const film=(findsSource.films||[]).find(item=>String(item.tmdbId)===tmdbId);if(!film||findsMarks.get(tmdbId)?.state==='saving')return;
+ const title=film.title||film.original||'';
+ findsMarks.set(tmdbId,{state:'saving'});renderFinds();
+ try{
+  const data=await postWatchedMark(tmdbId,true);
+  if(!data.watched)throw new Error('Отметка не сохранилась: более новое значение говорит «не смотрел»');
+  findsMarks.set(tmdbId,{state:'marked'});findsNotice={tmdbId,title,state:'marked'};
+ }catch(error){findsMarks.set(tmdbId,{state:'error',message:error.message});}
+ renderFinds();
+ // The marked card is gone, so keyboard focus moves to the undo; after an error it stays on the card's button.
+ (findsMarks.get(tmdbId)?.state==='marked'?$('#finds-notice [data-finds-undo]'):document.querySelector(`[data-finds-watched="${tmdbId}"]`))?.focus();
+ if(findsMarks.get(tmdbId)?.state==='marked'||/каталоге/.test(findsMarks.get(tmdbId)?.message||''))loadCatalog();
+}
+async function undoFindWatched(tmdbId){
+ if(!findsNotice||findsNotice.tmdbId!==tmdbId||findsNotice.state==='saving')return;
+ findsNotice={...findsNotice,state:'saving'};renderFinds();
+ try{
+  const data=await postWatchedMark(tmdbId,false);
+  if(data.watched)throw new Error('Отмена не сохранилась: более новое значение говорит «смотрел»');
+  findsMarks.delete(tmdbId);findsNotice={...findsNotice,state:'undone'};
+ }catch(error){findsNotice={...findsNotice,state:'error',message:error.message};}
+ renderFinds();
+ // The undone film comes back with the next catalog answer; focus follows it there.
+ await loadCatalog();
+ (document.querySelector(`[data-finds-watched="${tmdbId}"]`)||$('#finds-notice [data-finds-undo]'))?.focus();
+}
+function onFindsClick(event){
+ const mark=event.target.closest('[data-finds-watched]');if(mark&&!mark.disabled){markFindWatched(mark.dataset.findsWatched);return;}
+ const undo=event.target.closest('[data-finds-undo]');if(undo&&!undo.disabled)undoFindWatched(undo.dataset.findsUndo);
 }
 // The cached catalog answer is usable only for the generation the loaded programme is on. A generation change with no catalog
 // answer for it yet (or a 409 while the new generation is still copying) hides the section instead of showing the old shows.
@@ -662,11 +715,15 @@ function renderFinds(now=nowMs()){
  const node=$('#finds');if(!node){syncResultSections(0);return [];}
  const scope=findsScope();
  const list=findsFresh()?buildFinds(findsSource.films,now,scope):[];
- node.hidden=list.length===0;
+ // A re-render replaces the buttons; keyboard focus on a mark or undo button is put back on its replacement.
+ const active=document.activeElement,refocus=active?.dataset?.findsWatched?`[data-finds-watched="${active.dataset.findsWatched}"]`:active?.dataset?.findsUndo?`[data-finds-undo="${active.dataset.findsUndo}"]`:null;
+ const notice=$('#finds-notice');if(notice){const html=findsNoticeHTML();if(notice.innerHTML!==html)notice.innerHTML=html;notice.hidden=!findsNotice;}
+ node.hidden=list.length===0&&!findsNotice;
  const title=$('#finds-title');if(title)title.textContent=findsTitle(scope);
  const cards=$('#finds-cards');if(cards)cards.innerHTML=list.map(film=>findsCard(film,now,scope)).join('');
  const caption=$('#finds-caption');if(caption)caption.textContent=findsCaption(list.length,scope);
  syncResultSections(list.length);
+ if(refocus&&document.activeElement!==active)document.querySelector(refocus)?.focus();
  return list;
 }
 async function loadCatalog(){
@@ -677,7 +734,7 @@ async function loadCatalog(){
   if(!response.ok)throw new Error();
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error();
-  findsSource={films:data.films,programmeRunId:data.programmeRunId??null,generatedAt:data.generatedAt??null,ready:true,error:false};
+  findsSource={films:data.films,programmeRunId:data.programmeRunId??null,generatedAt:data.generatedAt??null,ready:true,error:false,watchedMarkEnabled:data.watchedMarkEnabled===true};
   renderFinds();
   return true;
  }catch{
@@ -912,6 +969,7 @@ function bindControls(){
  document.querySelectorAll('[data-min-probability]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minProbability=b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability);render();}}));
  $('#progress-retry').addEventListener('click',()=>loadStarted());
  $('#movies').addEventListener('click',onMovieClick);
+ $('#finds')?.addEventListener('click',onFindsClick);
  $('#film-screen')?.addEventListener('click',onMovieClick);
  document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.addEventListener('click',()=>{state.shortlistMode=button.dataset.shortlistMode;render();}));
  $('#shortlist').addEventListener('click',event=>{const button=event.target.closest('[data-shortlist-film]');if(!button)return;const target=[...document.querySelectorAll('.movie-card')].find(card=>card.dataset.filmId===button.dataset.shortlistFilm);if(target){target.scrollIntoView({behavior:'smooth',block:'start'});target.setAttribute('tabindex','-1');target.focus({preventScroll:true});}});

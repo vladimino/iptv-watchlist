@@ -95,6 +95,7 @@ Nothing is stored: a new generation is evaluated afresh, so a film can be hidden
   "profile": {"version": 1},
   "total": 1,
   "posterCoverage": {"catalog": 1, "metadataCache": 0, "missing": 0},
+  "watchedMarkEnabled": false,
   "displayExclusion": {"state": "off", "excluded": 0},
   "films": [{
     "id": "tmdb_7", "tmdbId": "7", "canonicalIdentity": "tmdb:7",
@@ -112,6 +113,7 @@ Nothing is stored: a new generation is evaluated afresh, so a film can be hidden
 | Field | Meaning |
 | --- | --- |
 | `posterCoverage` | Where the `poster` of each returned film came from, counted over `films` only: `catalog` (the record's own TMDB poster), `metadataCache` (the `metadata.json` fallback), `missing` (`poster` is `null`). The three add up to `total`. It lets a plain read show how many available films still have no stored asset; it is not a per-film field, and `films[]` is unchanged |
+| `watchedMarkEnabled` | `true` only while both `FINDS_WATCHED_MARK` and `LETTERBOXD_FACTS` are exactly `on`, so the client knows the [owner watched mark](#owner-watched-mark) can be offered |
 | `displayExclusion` | The [display-only title exclusion](#display-only-title-exclusion): `state` is `off` (switch not `on`; list not read), `applied` (valid list used) or `unavailable` (switch on, list missing, unreadable or invalid; nothing hidden); `excluded` counts the canonical identities hidden from `films` by it. It never carries a title, id, code or any hash of the list or its source |
 | `programmeRunId`, `pinned` | The generation the response is derived from. `pinned: false` means no published pointer existed and the programme's own run id was used |
 | `generatedAt`, `window` | The clock the statuses were derived with and the availability envelope `(now − 72h, now + 24h)` |
@@ -131,7 +133,39 @@ Not included on purpose: synopsis, aliases, the raw prediction and fingerprint o
 
 The watchlist page's **«Находки»** section (`public/app.js`, `#finds`) is the first consumer. It reads this route on page load and with the other live refreshes and never adds a show or a prediction of its own. A cached answer is shown only while the loaded programme's run id equals the answer's `programmeRunId`: when the programme moves to a new generation the section is hidden until this route answers for that generation (a `409` during publication keeps it hidden), and an answer for a generation the programme has not reached yet waits for the programme; a failed refresh on the same generation keeps the last answer. On every render it re-checks each returned film against the loaded programme and view index (a film that has since entered the watchlist or received an actual rating disappears), re-derives the shows inside `(now − 72h, now + 24h)` with the browser clock (an expired catch-up hides the film without a new request), and keeps only a current prediction with `predictedRating ≥ 4.0`, `probability4Plus ≥ 0.70` and a known `confidence` other than `low`. The remaining films are ordered by `predictedRating`, then `probability4Plus`, then the nearest end of availability; one entry per canonical identity; an adjacent franchise part (same title stem after a trailing sequel number or «часть N») with identical rating and probability is skipped; at most five are shown and the list is never padded with weaker films. The section is hidden entirely when nothing qualifies. Each card carries the `NEW` badge at the top left of the poster, meaning a film outside the watchlist, not a new release; the usual title, year, poster and prediction; up to two mechanic or mood labels from `fingerprint` and `prediction.moodIds`; and the relevant airing (on air now, the next start, or the catch-up deadline). The title links to `url` on TMDB because the film has no page in the watchlist route. Contextual ranking is a separate consumer and does not change this route.
 
+**«Смотрел».** While `watchedMarkEnabled` is `true`, each card has a «Смотрел» button.
+- **Mark.** It posts the card's TMDB id to [`POST /api/catalog/watched`](#owner-watched-mark). While the request runs, the button is disabled and reads «Сохраняю…».
+- **Success.** The card leaves the section at once, before the next catalog answer. A notice above the cards says the film is marked and offers «Отменить», which posts `watched: false` and brings the card back.
+- **Failure.** The card stays with an inline alert, and the button can be pressed again. A `film_not_in_catalog` answer also reloads the section.
+- **Disabled.** Without `watchedMarkEnabled` no button is shown.
+
 **Channel scope.** While the page's channel filter is active, the watchlist grid and the finds become two sections of the same channel and period scope. The grid gets the heading «Из watchlist» and the section is titled «Находки на выбранном канале» (or «…на выбранных каналах»). Only shows on a selected channel count, several channels combine with OR, and the selected period tab is a hard constraint: `archive` keeps shows inside the 72-hour catch-up, `future` keeps upcoming shows, `all` keeps both, each inside the programme's effective viewing window, so the black zone has no finds. A film whose only shows in that scope are on another channel or in another period is not a find. The same thresholds, ordering (with the end of availability taken from the scoped shows), de-duplication and limit apply, and the airing line names a show on the selected channel. An empty section is not shown; the shared «Таких фильмов не найдено» state appears only when both sections are empty. Clearing the channel filter restores the plain section. The URL keeps its existing `channel` and `period` parameters; nothing new is requested from this route.
+
+## Owner watched mark
+
+`POST /api/catalog/watched` records the owner's statement that they have watched, or have not watched, one verified catalog film ([ADR-0032](../../adr/0032-owner-watched-mark-by-tmdb-identity.md)). It writes only the owner's `watched` fact through the [user facts](../integrations/letterboxd-user-facts.md#owner-watched-mark) and its projection. It never writes a rating, the watchlist, a prediction, the catalog or a Film/Person record. It does not link a Letterboxd id and never reads a title or year.
+
+```json
+{"tmdbId": "603", "watched": true}
+```
+
+**Guards**, checked in this order. A refused request writes nothing:
+
+| Check | Refusal |
+| --- | --- |
+| Method is `POST` | `405` |
+| `FINDS_WATCHED_MARK` is exactly `on` | `409`, `code: mark_disabled` |
+| `LETTERBOXD_FACTS` is exactly `on` (the fact records are the only store) | `409`, `code: facts_disabled` |
+| `Origin` header present and equal to the Worker's origin (stricter than the shared check, which lets a request without `Origin` through) | `403` |
+| `Content-Type` is `application/json` | `415` |
+| Body is at most 512 characters of JSON, an object with exactly `tmdbId` (a string of digits) and `watched` (a boolean) | `400`, `code: invalid_request` for a wrong shape |
+| The published generation's catalog copy holds a record with that `tmdbId` and `canonicalIdentity` exactly `tmdb:<tmdbId>` (no published generation, an observation key or a conflicting identity is refused) | `409`, `code: film_not_in_catalog` |
+
+**Response** `200`: `{"outcome": "saved" | "unchanged" | "older", "watched": <current value>}`, and nothing else from the record.
+- `unchanged`: the value already was the current effective value, and nothing was written.
+- `older`: a concurrent, later observation is current.
+
+A write that keeps losing compare-and-swap answers `409` with the facts error code. The route is behind the Worker's owner-only Access application, is not an MCP tool and is not called by any Scheduled Task.
 
 ## Errors
 
