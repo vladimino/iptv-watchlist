@@ -40,6 +40,7 @@ const KNOWN_CONFLICTS=new Set([
 // Source-quality reasons: the record itself cannot be carried without inventing a value. Everything else is a mapped-domain gap.
 const SOURCE_QUALITY=/_fields_missing$|^json_invalid$|^decision_without_candidate$/;
 const CLASS_A_BLOCKERS={prediction_absent:'prediction_family_absent',prediction_unportable:'prediction_family_unportable'};
+const SHA256=/^[0-9a-f]{64}$/;
 
 // Excluded is one declared prefix: raw EPG dumps under epg/raw/ are archive by the publication ADR and are counted, never parsed.
 // No current writer produces XML or an archive/ prefix, so any other XML-shaped or archive-shaped key is unknown and fails closed.
@@ -159,6 +160,57 @@ export function ratingIdentity({identity,films=[],metadata=null,metadataSha256=n
  return {resolve:key=>proposed.get(key)||direct.get(key)||(()=>{const stored=enrichmentStoredId(key);return stored?identity.resolve(stored):{source:null,canonical:null,filmId:null,via:null,reason:'identity_unreadable'};})()};
 }
 
+// ADR-0028: a fingerprint or prediction bundle stored under a retired Film id, which a redirect maps to a survivor Film that holds its
+// own strictly newer payload of the same family, is superseded by that canonical payload. No row is written from it, the object stays in
+// R2, and the ledger keeps it with both checksums. Every other collision keeps the fail-closed path; this never creates a Film.
+// entries are {key,sha256,body} for every fingerprint.json and predictions.json of the snapshot; the same result feeds the write list
+// and the independent projection.
+export function supersededPayloads({identity,entries=[],links=null}={}){
+ requireIdentity(identity);
+ const groups=new Map(),decisions=new Map();
+ for(const item of entries){
+  const family=/\/fingerprint\.json$/.test(String(item?.key))?'fingerprint':/\/predictions\.json$/.test(String(item?.key))?'prediction':null;
+  const stored=family?enrichmentStoredId(item.key):null;
+  if(!stored)continue;
+  const resolved=identity.resolve(stored);
+  if(!resolved.filmId)continue;
+  const group=family+'\n'+resolved.filmId,list=groups.get(group)||[];
+  list.push({...item,family,stored,resolved});
+  groups.set(group,list);
+ }
+ for(const list of groups.values()){
+  if(list.length<2)continue;
+  const direct=list.filter(item=>item.resolved.via==='direct'),retired=list.filter(item=>item.resolved.via==='redirect');
+  const refuse=(item,reason)=>decisions.set(item.key,{superseded:false,reason});
+  if(direct.length!==1){for(const item of retired)refuse(item,direct.length?'canonical_ambiguous':'canonical_missing');continue;}
+  const canonical=direct[0],canonicalAt=payloadAt(canonical,links);
+  for(const item of retired){
+   if(!SHA256.test(String(canonical.sha256??''))||!SHA256.test(String(item.sha256??''))){refuse(item,'checksum_missing');continue;}
+   if(canonicalAt==null){refuse(item,'canonical_unportable');continue;}
+   const sourceAt=payloadAt(item,links);
+   if(sourceAt==null){refuse(item,'source_unportable');continue;}
+   if(!(Date.parse(sourceAt)<Date.parse(canonicalAt))){refuse(item,'canonical_not_newer');continue;}
+   decisions.set(item.key,{superseded:true,reason:'superseded_by_canonical',family:item.family,filmId:canonical.resolved.filmId,identity:provenanceOf(item.resolved),sourceAt,supersededBy:{key:canonical.key,sha256:canonical.sha256,at:canonicalAt},...(item.family==='prediction'?{records:payloadRecords(item.body).length}:{})});
+  }
+ }
+ return {resolve:key=>decisions.get(key)||null,decisions:[...decisions].map(([key,value])=>({key,...value}))};
+}
+// The time a payload was produced, or null when the payload cannot be carried: a fingerprint needs its hash, schema version and
+// generatedAt; a bundle needs a current record and every record must pass the version pointer and field checks of the write path.
+function payloadAt(item,links){
+ const body=item.body;
+ if(item.family==='fingerprint'){
+  if(!body?.fingerprintHash||!(body.fingerprintSchemaVersion!=null||body.schemaVersion!=null))return null;
+  return validTime(body.generatedAt);
+ }
+ if(!body?.current||typeof body.current!=='object')return null;
+ const entry={key:item.key,sha256:item.sha256};
+ if(payloadRecords(body).some((record,index)=>versionUnit(entry,item.resolved.filmId,record,'prediction_history',String(index),item.resolved,links,item.stored).unportable))return null;
+ return validTime(body.current.updatedAt||body.current.generatedAt);
+}
+function payloadRecords(body){return [...(Array.isArray(body?.history)?body.history:[]),body?.current];}
+function validTime(value){return typeof value==='string'&&Number.isFinite(Date.parse(value))?value:null;}
+
 export function creditRoster(records){
  const credits=[],unmatched=[];
  const seen=new Set();
@@ -188,7 +240,7 @@ export function refusal(batch){
  for(const blocker of batch?.blockers||[])blockers.push({class:'C',...blocker});
  if(!blockers.length)return null;
  const coverage=batch?.inventory?.coverage||emptyCoverage();
- return {stopped:true,stopReasons:[...new Set(blockers.map(item=>item.reason))],blockers,applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,partial:0,uncheckpointed:0,pending:0,ledger:[],coverage,parity:{ok:false,missing:[],extra:[],mismatched:[],denominator:0,unprojected:[],records:[],reason:'import_stopped'},receipts:null,classes:acceptanceClasses({inventory:batch?.inventory,coverage,counts:{},ledger:[],stopped:true}),claimsFullParity:false};
+ return {stopped:true,stopReasons:[...new Set(blockers.map(item=>item.reason))],blockers,applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,superseded:0,partial:0,uncheckpointed:0,pending:0,ledger:[],coverage,parity:{ok:false,missing:[],extra:[],mismatched:[],denominator:0,unprojected:[],records:[],reason:'import_stopped'},receipts:null,classes:acceptanceClasses({inventory:batch?.inventory,coverage,counts:{},ledger:[],stopped:true}),claimsFullParity:false};
 }
 
 export async function importBatch(db,repositories,batch){
@@ -200,7 +252,7 @@ export async function importBatch(db,repositories,batch){
  const limit=batch.limit??null;
  const ledgerRows=[];
  const ledger={push(row){ledgerRows.push(row);const reason=fatal(row);if(reason&&!stopInfo)stopInfo={reason,entry:row};return ledgerRows.length;},get length(){return ledgerRows.length;},filter:(...args)=>ledgerRows.filter(...args),some:(...args)=>ledgerRows.some(...args),find:(...args)=>ledgerRows.find(...args),map:(...args)=>ledgerRows.map(...args),[Symbol.iterator](){return ledgerRows[Symbol.iterator]();}};
- const counts={applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,partial:0,uncheckpointed:0,pending:0};
+ const counts={applied:0,resumed:0,reconciled:0,explained:0,conflicts:0,unportable:0,unresolved:0,superseded:0,partial:0,uncheckpointed:0,pending:0};
  const appliedByFamily={};
  // stopOn makes a run fail closed: a class A conflict or uncheckpointed unit, or any record outside the acknowledged class C list,
  // ends the run before the next unit is written. The acknowledged list names class C records only; class A is never acknowledgeable.
@@ -213,6 +265,12 @@ export async function importBatch(db,repositories,batch){
   if(unit.unresolved){
    counts.unresolved++;
    ledger.push(entry(unit,'unresolved',unit.reason||'film_unresolved'));
+   continue;
+  }
+  // ADR-0028: a superseded payload writes nothing and takes no receipt; the canonical payload is imported by its own unit.
+  if(unit.superseded){
+   counts.superseded++;
+   ledger.push(entry(unit,'superseded',unit.reason));
    continue;
   }
   if(await receiptExists(db,unit)){counts.resumed++;continue;}
@@ -262,6 +320,7 @@ export async function importBatch(db,repositories,batch){
  }
  function fatal(row){
   if(!stopOn)return null;
+  if(row.outcome==='superseded')return null;
   if(stopOn.conflicts!==false&&(row.outcome==='conflict'||row.outcome==='uncheckpointed'))return 'unexpected_conflict';
   if(stopOn.unacknowledged!==false&&row.outcome!=='applied'){
    if(row.class==='C'&&acknowledged.has(acknowledgementKey(row)))return null;
@@ -300,6 +359,7 @@ export async function receiptAudit(db,shas){
 }
 
 // Three classes that are never merged into one verdict: A mapped-domain parity, B declared R2-only artifacts, C unresolved identity and source-quality records.
+// S lists the payloads superseded by their canonical Film under ADR-0028: neither a class A gap nor a class C record to acknowledge.
 export function acceptanceClasses({inventory,coverage,counts={},ledger=[],appliedByFamily={},parity=null,receipts=null,stopped=false}={}){
  const prediction=inventory?.families?.prediction||{status:'unknown',keys:[]};
  const predictionUnportable=ledger.filter(item=>item.family==='prediction'&&item.outcome==='unportable').length;
@@ -310,11 +370,12 @@ export function acceptanceClasses({inventory,coverage,counts={},ledger=[],applie
  if((receipts?.foreign||[]).length)blockers.push('receipts_foreign');
  if(stopped)blockers.push('import_stopped');
  const open=(counts.conflicts||0)+(counts.explained||0)+(counts.partial||0)+(counts.uncheckpointed||0)+ledger.filter(item=>item.class==='A'&&item.outcome==='unportable').length;
- const records=ledger.filter(item=>item.class==='C');
+ const records=ledger.filter(item=>item.class==='C'),superseded=ledger.filter(item=>item.class==='S');
  return {
   A:{blocking:blockers.length>0||open>0||!(parity?.ok===true),blockers,open,mandatory:{prediction:{status:prediction.status,keys:prediction.keys.length,applied:appliedByFamily.prediction||0,unportable:predictionUnportable,portable:prediction.status==='present'&&predictionUnportable===0}}},
   B:{keys:(coverage?.r2_only||[]).length,families:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0),decisionRequired:(coverage?.r2OnlyFamilies||[]).filter(item=>item.count>0&&item.decisionRequired).map(item=>item.family),unreferencedVersions:(parity?.records||[]).filter(record=>record.disposition==='unreferenced').map(record=>record.key)},
   C:{count:records.length,acknowledgementRequired:records.length>0,reasons:Object.fromEntries([...new Set(records.map(item=>item.reason))].sort().map(reason=>[reason,records.filter(item=>item.reason===reason).length])),records},
+  S:{count:superseded.length,families:Object.fromEntries([...new Set(superseded.map(item=>item.family))].sort().map(family=>[family,superseded.filter(item=>item.family===family).length])),records:superseded},
  };
 }
 
@@ -343,16 +404,18 @@ export function parityClaim({coverage,parity,counts,ledger,inventory,classes,rec
  const vacuous=!(parity?.denominator>0);
  const unprojected=(parity?.unprojected||[]).length>0;
  const openRecords=(parity?.records||[]).some(record=>record.disposition!=='mapped'&&record.disposition!=='unreferenced');
- const open=(counts?.pending||0)+(counts?.unportable||0)+(counts?.unresolved||0)+(counts?.conflicts||0)+(counts?.explained||0)+(counts?.partial||0)+(counts?.uncheckpointed||0);
+ const open=(counts?.pending||0)+(counts?.unportable||0)+(counts?.unresolved||0)+(counts?.superseded||0)+(counts?.conflicts||0)+(counts?.explained||0)+(counts?.partial||0)+(counts?.uncheckpointed||0);
  const blocked=classes?.A?.blocking===true;
  const unreconciled=(receipts?.stale||[]).length+(receipts?.foreign||[]).length>0;
  return !uncovered&&!incomplete&&!vacuous&&!unprojected&&!openRecords&&!blocked&&!unreconciled&&!!parity?.ok&&open===0&&(ledger||[]).length===0;
 }
 
-export function fingerprintUnit(entry,body,identity){
+export function fingerprintUnit(entry,body,identity,superseded=null){
  const resolved=enrichmentIdentity(entry.key,identity);
  if(!resolved.filmId)return unresolved(entry,'fingerprint_payload',resolved.canonical||entry.key,resolved.reason,'fingerprint',resolved);
  const filmId=resolved.filmId;
+ const replaced=superseded?.resolve(entry.key);
+ if(replaced?.superseded)return supersededUnit(entry,'fingerprint_payload',filmId,'fingerprint',replaced);
  if(!body?.fingerprintHash||!(body.fingerprintSchemaVersion!=null||body.schemaVersion!=null))return unportable(entry,'fingerprint_payload',filmId,'fingerprint_fields_missing','fingerprint');
  return unit({family:'fingerprint',kind:'fingerprint',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable:'fingerprint_payload',targetId:filmId,identity:provenanceOf(resolved),input:{filmId,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,fingerprintHash:body.fingerprintHash,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:entry.key,contentSha256:entry.sha256}});
 }
@@ -361,10 +424,12 @@ export function fingerprintUnit(entry,body,identity){
 // exists(key) and sha(key) come from the manifest, and bodyHash(record) is the SHA-256 of the exact bytes the shared rule derives from
 // the bundle record. Record body hash, pointer checksum and manifest checksum of the object bytes must all be one value; otherwise the
 // object does not hold this record. Without links only the shape of the pointer is checked.
-export function predictionUnits(entry,body,identity,links=null){
+export function predictionUnits(entry,body,identity,links=null,superseded=null){
  const resolved=enrichmentIdentity(entry.key,identity);
  if(!resolved.filmId)return [unresolved(entry,'prediction_current',resolved.canonical||entry.key,resolved.reason,'prediction',resolved)];
  const filmId=resolved.filmId,storedId=enrichmentStoredId(entry.key);
+ const replaced=superseded?.resolve(entry.key);
+ if(replaced?.superseded)return [supersededUnit(entry,'prediction_current',filmId,'prediction',replaced)];
  const units=[];
  const history=Array.isArray(body?.history)?body.history:[];
  history.forEach((item,index)=>units.push(versionUnit(entry,filmId,item,'prediction_history',filmId+'#'+index,resolved,links,storedId)));
@@ -535,6 +600,7 @@ function knownReason(error){
 }
 export function acknowledgementKey(row){return [row.sourceKey,row.targetTable,row.targetId,row.reason].map(part=>String(part??'')).join('\n');}
 function classOf(unit,outcome,reason){
+ if(outcome==='superseded')return 'S';
  if(outcome==='unresolved')return 'C';
  if(outcome==='unportable')return SOURCE_QUALITY.test(String(reason||''))?'C':'A';
  return 'A';
@@ -544,10 +610,12 @@ function entry(unit,outcome,reason){
  if(unit.identity)row.identity=unit.identity;
  if(unit.evidence)row.evidence=unit.evidence;
  if(unit.unresolvedFilms)row.unresolvedFilms=unit.unresolvedFilms;
+ if(unit.supersededBy){row.sourceAt=unit.sourceAt;row.supersededBy=unit.supersededBy;if(unit.records!=null)row.records=unit.records;}
  return row;
 }
 function unit(fields){return {...fields,unportable:false,unresolved:false};}
 function unportable(entry,targetTable,targetId,reason,family){return {family,kind:'unportable',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:true,unresolved:false,reason};}
+function supersededUnit(entry,targetTable,targetId,family,decision){return {family,kind:'superseded',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:false,unresolved:false,superseded:true,reason:decision.reason,identity:decision.identity,sourceAt:decision.sourceAt,supersededBy:decision.supersededBy,...(decision.records!=null?{records:decision.records}:{})};}
 // An unresolved unit names a source record the importer refuses to turn into a row. The object stays in the source and no id is minted.
 function unresolved(entry,targetTable,targetId,reason,family,resolution){return {family,kind:'unresolved',sourceKey:entry.key,sourceSha256:entry.sha256,targetTable,targetId,unportable:false,unresolved:true,reason,identity:resolution?provenanceOf(resolution):null};}
 function provenanceOf(resolution){return resolution?{source:resolution.source??null,canonical:resolution.canonical??null,filmId:resolution.filmId??null,via:resolution.via??null,reason:resolution.reason??null,...(resolution.tmdbId?{tmdbId:resolution.tmdbId}:{}),...(resolution.metadataSha256?{metadataSha256:resolution.metadataSha256}:{})}:null;}
@@ -572,8 +640,9 @@ function evidenceFor(item,deriveEvidence){
 }
 function emptyCoverage(){return {denominator:0,mapped:[],r2_only:[],excluded:[],unmapped:[],r2OnlyFamilies:[]};}
 function provenanceSummary(units){
- const summary={identity:{direct:0,redirect:0,metadata_tmdb:0},evidence:{stored:0,derived:0,stale_evidence:0}};
+ const summary={identity:{direct:0,redirect:0,metadata_tmdb:0},evidence:{stored:0,derived:0,stale_evidence:0},superseded:0};
  for(const unit of units){
+  if(unit.superseded){summary.superseded++;continue;}
   if(unit.identity?.via&&summary.identity[unit.identity.via]!=null)summary.identity[unit.identity.via]++;
   if(unit.kind==='decision'&&unit.evidence&&summary.evidence[unit.evidence]!=null)summary.evidence[unit.evidence]++;
   if(unit.kind==='generation')for(const candidate of unit.input?.candidates||[])if(candidate.evidenceProvenance&&summary.evidence[candidate.evidenceProvenance]!=null)summary.evidence[candidate.evidenceProvenance]++;
@@ -643,7 +712,7 @@ async function personStored(repositories,unit){
 
 // The source projection is independent of the write list: every mapped object is projected to the rows it must produce,
 // through the same identity and evidence rules, and the read-back is compared against that projection.
-export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence,links=null,ratings=null}={}){
+export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence,links=null,ratings=null,superseded=null}={}){
  requireIdentity(identity);
  const expected={films:[],persons:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[],generations:[],profiles:[],records:[],unprojected:[],r2Only:[],blockers:[]};
  for(const film of films){
@@ -692,6 +761,8 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
    const resolved=recordIdentity(key,enrichmentStoredId(key));
    if(!resolved)continue;
    const filmId=resolved.filmId,provenance={identity:provenanceOf(resolved)};
+   const replaced=superseded?.resolve(key);
+   if(replaced?.superseded){note(key,'superseded',filmId,{...provenance,reason:replaced.reason,supersededBy:replaced.supersededBy});continue;}
    if(key.endsWith('/fingerprint.json')){if(body?.fingerprintHash){expected.fingerprints.push({id:filmId,fingerprintHash:body.fingerprintHash,schemaVersion:body.schemaVersion??body.fingerprintSchemaVersion,generatedAt:body.generatedAt??null,invalidatedAt:body.invalidatedAt??null,r2Key:key,contentSha256:shas[key]||null});note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'fingerprint_fields_missing'});continue;}
    if(key.endsWith('/actual.json')){const recordedAt=body?.recordedAt||body?.updatedAt||null;if(typeof body?.rating==='number'&&body.source&&recordedAt){expected.ratings.push({id:filmId,rating:body.rating,source:body.source,recordedAt});note(key,'mapped',filmId,provenance);}else note(key,'unportable',filmId,{...provenance,reason:'rating_fields_missing'});continue;}
    const projection=predictionExpectation(key,filmId,body,enrichmentStoredId(key),links);

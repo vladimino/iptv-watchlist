@@ -14,7 +14,7 @@
 | Batch limits | `D1_BACKFILL_MAX_BATCH_STATEMENTS` (default 1,000), `D1_BACKFILL_MAX_BATCH_BYTES` (default 1 MiB) | proven by the probe; larger units stop with `batch_too_large` |
 | Schema | every target and dry-run database carries `0001`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql` (schema version 3, [ADR-0025](../adr/0025-candidate-show-identity.md)) | `schema_missing` or `schema_version_mismatch` before any write; with `--staged-generation`, chunks at most 950 statements and 1,000,000 bytes, never above the batch limits |
 
-Outputs go to an absolute directory outside the repository: `report.json` (status, stop reasons, probe, identity findings, counts, parity, receipt audit, classes A/B/C, adapter statistics; with `--staged-generation`, the `staged` section: per generation chunks planned/sent/already received, rows, bytes, largest chunk and row, requests, phase durations, commit statements/bytes/duration, and `staged.gate` against the 10-second commit budget) and `ledger.json` (every ledger row and the class C list with source key, checksum and reason). Exit code 0 is `completed`; 3 is `partial`, `stopped` or `no_go`; 2 is usage or configuration; 1 is an error.
+Outputs go to an absolute directory outside the repository: `report.json` (status, stop reasons, probe, identity findings, counts, parity, receipt audit, classes A/B/C and S (superseded payloads, [ADR-0028](../adr/0028-superseded-redirect-payloads.md)), adapter statistics; with `--staged-generation`, the `staged` section: per generation chunks planned/sent/already received, rows, bytes, largest chunk and row, requests, phase durations, commit statements/bytes/duration, and `staged.gate` against the 10-second commit budget) and `ledger.json` (every ledger row, the class C list with source key, checksum and reason, and the `superseded` list with both checksums). Exit code 0 is `completed`; 3 is `partial`, `stopped` or `no_go`; 2 is usage or configuration; 1 is an error.
 
 ## D1 HTTP API requirements
 
@@ -89,6 +89,7 @@ It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command
 | `partial` | `--limit` reached | run again |
 | `stopped: unexpected_conflict` / `class_a_blocker` | a row could not be written as the baseline says | stop the window; investigate the named unit; no manual row edit |
 | `stopped: unacknowledged_record` | a class C record outside the acknowledged list | owner reviews and extends the list, or stops |
+| `classes.S.count` > 0 (not a stop) | a retired Film id's payload superseded by the canonical Film's own newer payload | review the list in `ledger.json` with the acceptance report; the R2 objects stay; never add them to the acknowledged list |
 | `no_go: snapshot_not_consistent` / `snapshot_not_production` | the input is not an accepted baseline | export again |
 | `no_go: batch_not_atomic` / `batch_too_large` | the service did not prove atomicity at this size, or a unit is larger | do not write; adjust limits only with a new probe, or design staging |
 | `no_go: target_identity_mismatch` / `scratch_identity_mismatch` / `schema_missing` / `database_identity_conflict` | wrong database, or not the database this lineage wrote | stop; check the environment and the database |
