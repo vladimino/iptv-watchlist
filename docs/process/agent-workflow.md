@@ -2,6 +2,10 @@
 
 This document is the durable collaboration policy for the IPTV Watchlist project. It does **not** track today's active Trello card, latest PR, deployment version, or production feature flags. Those must be checked live. For code-agent Git preflight and repository safety, also follow [AGENTS.md](../../AGENTS.md); for Trello formatting follow [trello-card-conventions.md](trello-card-conventions.md).
 
+## ADR pre-merge decision gate
+
+An ADR must not be merged with `Status: Proposed`. Before the ADR PR is merged, the owner explicitly decides `Accepted` or `Declined`; the ADR file and register must reflect that decision in the same PR, with an identifiable approval source. Independent technical review or the merge of a design proposal does **not** constitute owner acceptance. A `Declined` ADR is recorded as a rejected decision and does not authorize implementation. This gate applies even when the code/documentation changes are otherwise green. An administrative correction to a previously merged Proposed ADR is separate from ongoing authorized implementation and must not block unrelated or owner-authorized successor work.
+
 ## Roles and sources of truth
 
 - **Owner:** approves goals, non-routine scope and production-risk actions; may have several ChatGPT conversations working on independent streams.
