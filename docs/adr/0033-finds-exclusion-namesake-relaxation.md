@@ -191,7 +191,7 @@ This ADR authorizes none of the following, each of which needs its own owner app
 ## Evidence
 
 - **Original decision:** owner request on [AIR-216](https://trello.com/c/hx6QPPZf), 2026-10-27, after the [AIR-198](https://trello.com/c/9xpmq2fc) visual acceptance.
-- **Implementation:** none yet; [AIR-217](https://trello.com/c/oMmKr9FV) after acceptance.
+- **Implementation:** [AIR-217](https://trello.com/c/oMmKr9FV): `namesakesDistinct` and the `strict_original_exact_year_v2` tag in `scripts/letterboxd-display-exclusion.mjs`, the tag-selected guard in `findsTitleSuppressor` of `src/worker.js`, synthetic cases in `tests/finds-title-exclusion.mjs`. No v2 list is built or placed by it.
 - **Dated verification:** the [AIR-198 rollout evidence](../evidence/letterboxd/air-198-finds-exclusion-rollout-2026-10-27.md) gives the causes of the five remaining false Finds (aggregate, 2026-10-27). This ADR measures nothing new.
 - **Uncertainty:**
   - How many of the two export-namesake films this fixes depends on whether their namesakes are title namesakes in the catalog, or watchlist-only within a year (counterexamples 1 and 4); it is not known publicly.

@@ -1,4 +1,4 @@
-// Finds display-only exclusion (ADR-0028): the offline builder and the read path of GET /api/catalog/available. Strict
+// Finds display-only exclusion (ADR-0028, relaxed by ADR-0033 for the v2 rule tag): the offline builder and the read path of GET /api/catalog/available. Strict
 // original title + exact year, uniqueness in the export and the catalog, identity wins, per-generation evaluation, the
 // FINDS_TITLE_EXCLUSION switch, fail-open on any invalid list, and no per-film data or list hash in the response. Synthetic data only.
 import assert from 'node:assert/strict';
@@ -11,7 +11,7 @@ import vm from 'node:vm';
 import {crc32} from '../src/letterboxd-zip.js';
 import {normTitle} from '../src/letterboxd-match.js';
 import {plan} from '../scripts/letterboxd-baseline-import.mjs';
-import {build} from '../scripts/letterboxd-display-exclusion.mjs';
+import {RULE,build,namesakesDistinct} from '../scripts/letterboxd-display-exclusion.mjs';
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const KEY='letterboxd/display-exclusion.json';
@@ -137,7 +137,71 @@ for(const [name,value] of Object.entries(invalid)){
  const r=await get({FINDS_TITLE_EXCLUSION:'on'});assert.ok(!ids(r.body).includes('tmdb_1'));assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:1});
 }
 
-// 5. Offline builder: bound to a verified baseline plan, only unidentified watched or rated films with a year and a unique name.
+// 5. Rule tag v2 (ADR-0033): title namesakes still block in any year; an alias-only namesake blocks only within a year of the
+// record or without a year, on any of its verified records. The legacy tag keeps the ADR-0028 guard (section 1).
+{
+ const V2_CATALOG={
+  tmdb_30:film(30,'Dark Night',2008),tmdb_31:film(31,'Unrelated',2026,{aliases:['Dark Night']}),          // far alias: hidden
+  tmdb_32:film(32,'Near Alias',2015),tmdb_33:film(33,'Le Near',2016,{aliases:['Near Alias']}),          // alias one year away
+  tmdb_34:film(34,'Same Alias',2015),tmdb_35:film(35,'La Same',2015,{aliases:['Same Alias']}),          // alias same year
+  tmdb_36:film(36,'Yearless Alias',2015),tmdb_37:film(37,'Sans Year',null,{aliases:['Yearless Alias']}),// alias without a year
+  tmdb_38:film(38,'Split Alias',2015),tmdb_39:film(39,'Split One',2000,{aliases:['Split Alias']}),tmdb_39b:film(39,'Split One',2014,{id:'tmdb_39b'}), // one far and one near record
+  tmdb_40:film(40,'Title Clash',2015),tmdb_41:film(41,'Title Clash',1960),                              // original-title namesake, any year
+  tmdb_42:film(42,'Local Clash',2015),tmdb_43:film(43,'Lokal',1950,{title:'Local Clash'}),               // localized-title namesake
+  tmdb_44:film(44,'Mixed Clash',2015),tmdb_45:film(45,'Mixed A',1950,{aliases:['Mixed Clash']}),tmdb_45b:film(45,'Mixed A',1950,{id:'tmdb_45b',title:'Mixed Clash'}), // alias on one record, localized title on another
+  tmdb_46:film(46,'Twin Years',1990),tmdb_47:film(47,'Twin Years',2010),                                // two entries, both in catalog: each blocks the other
+  tmdb_48:film(48,'Solo Twin',2010),                                                                     // two entries, one in catalog: hidden
+  tmdb_49:film(49,'Own Alias',2015,{aliases:['Own Alias Two']}),                                        // the record's own alias never matches
+  tmdb_50:film(50,'Year Drift',2009),                                                                    // list says 2008
+ };
+ const V2_ENTRIES=[['dark night',2008],['local clash',2015],['mixed clash',2015],['near alias',2015],['own alias two',2015],['same alias',2015],['solo twin',1990],['solo twin',2010],['split alias',2015],['title clash',2015],['twin years',1990],['twin years',2010],['year drift',2008],['yearless alias',2015]].map(([title,year])=>({title,year}));
+ const v2=entries=>list(entries,{rule:RULE,counts:{entries:entries.length,keptExportNamesake:4}});
+ seed({catalog:V2_CATALOG,exclusion:v2(V2_ENTRIES)});
+ const r=await get({FINDS_TITLE_EXCLUSION:'on'});
+ assert.equal(r.status,200);
+ // Compared by TMDB identity: two records of one TMDB film come back as one entry.
+ const identities=body=>new Set(body.films.map(item=>item.canonicalIdentity)),hiddenFrom=body=>[...new Set(Object.values(V2_CATALOG).map(item=>item.canonicalIdentity))].filter(identity=>!identities(body).has(identity)).sort();
+ assert.deepEqual(hiddenFrom(r.body),['tmdb:30','tmdb:48'],'v2 hides only the far alias-only case and the single catalog film of a two-year export name');
+ assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2});
+ // The same catalog and entries with the legacy tag: the far alias still blocks, exactly as ADR-0028.
+ seed({catalog:V2_CATALOG,exclusion:list(V2_ENTRIES)});
+ const legacy=await get({FINDS_TITLE_EXCLUSION:'on'});
+ assert.deepEqual(hiddenFrom(legacy.body),['tmdb:48'],'legacy tag: any alias namesake blocks');
+ // A v2 list with the identity rule: a linked film is decided by identity, not by the relaxed guard.
+ seed({catalog:{tmdb_6:film(6,'Linked Film',2006),tmdb_60:film(60,'Far',1950,{aliases:['Linked Film']})},exclusion:v2([{title:'linked film',year:2006}])});
+ assert.deepEqual(ids((await get({FINDS_TITLE_EXCLUSION:'on'})).body),['tmdb_6','tmdb_60']);
+ // Unknown rule tags fail open; the extra count is accepted, a wrong entries count is not.
+ for(const rule of ['strict_original_exact_year_v3','strict_original_exact_year_V2','']){
+  seed({catalog:V2_CATALOG,exclusion:list(V2_ENTRIES,{rule})});const u=await get({FINDS_TITLE_EXCLUSION:'on'});
+  assert.deepEqual(u.body.displayExclusion,{state:'unavailable',excluded:0},rule);assert.deepEqual(hiddenFrom(u.body),[]);
+ }
+ seed({catalog:V2_CATALOG,exclusion:list(V2_ENTRIES,{rule:RULE,counts:{entries:V2_ENTRIES.length+1,keptExportNamesake:4}})});
+ assert.deepEqual((await get({FINDS_TITLE_EXCLUSION:'on'})).body.displayExclusion,{state:'unavailable',excluded:0});
+ const text=JSON.stringify(r.body);for(const secret of ['dark night','solo twin',v2(V2_ENTRIES).contentSha256])assert.ok(!text.includes(secret),'response leaks '+secret);
+ assert.deepEqual(puts,[],'GET writes nothing');
+}
+
+// 6. Export-namesake rule per name (ADR-0033 decision 2), on synthetic export films.
+{
+ const f=(year,list='watched')=>({year,inWatched:list==='watched',inRatings:list==='rated',inWatchlist:list==='watchlist'});
+ const cases=[
+  ['single film',[f(2000)],true],
+  ['two watched, different years',[f(1990),f(2010)],true],
+  ['watched and rated, different years',[f(1990),f(1991,'rated')],true],
+  ['two watched, same year',[f(2014),f(2014)],false],
+  ['watchlist-only one year later',[f(1990),f(1991,'watchlist')],false],
+  ['watchlist-only one year earlier',[f(1990),f(1989,'watchlist')],false],
+  ['watchlist-only same year',[f(1990),f(1990,'watchlist')],false],
+  ['watchlist-only two years away',[f(1990),f(1992,'watchlist')],true],
+  ['watched namesake without a year',[f(1990),f(null)],false],
+  ['watchlist-only namesake without a year',[f(1990),f(undefined,'watchlist')],false],
+  ['three watched, two in one year',[f(1980),f(1990),f(1990)],false],
+  ['watchlist-only near the second watched year',[f(1980),f(2000),f(2001,'watchlist')],false],
+ ];
+ for(const [name,films,expected] of cases)assert.equal(namesakesDistinct(films),expected,name);
+}
+
+// 7. Offline builder: bound to a verified baseline plan, only unidentified watched or rated films with a year and a unique name.
 function zip(files){
  const locals=[],centrals=[];let offset=0;
  for(const [name,text] of Object.entries(files)){
@@ -153,9 +217,9 @@ const scratch=await mkdtemp(path.join(os.tmpdir(),'iptv-display-exclusion-'));
 try{
  const csv=(header,rows)=>header+'\n'+rows.map(row=>row.join(',')).join('\n')+'\n';
  const exportFiles={
-  'watched.csv':csv('Date,Name,Year,Letterboxd URI',[['2024-05-01','Invented Heist','1995','https://boxd.it/Ab1'],['2024-05-02','Unique Seen','2003','https://boxd.it/Gh3'],['2024-05-03','Twin Name','2001','https://boxd.it/Ij4'],['2024-05-04','Twin Name','2011','https://boxd.it/Kl5'],['2024-05-05','No Year Film','','https://boxd.it/Mn6'],['2024-05-06','Shared Wish','2000','https://boxd.it/St9']]),
+  'watched.csv':csv('Date,Name,Year,Letterboxd URI',[['2024-05-01','Invented Heist','1995','https://boxd.it/Ab1'],['2024-05-02','Unique Seen','2003','https://boxd.it/Gh3'],['2024-05-03','Twin Name','2001','https://boxd.it/Ij4'],['2024-05-04','Twin Name','2011','https://boxd.it/Kl5'],['2024-05-05','No Year Film','','https://boxd.it/Mn6'],['2024-05-06','Shared Wish','2000','https://boxd.it/St9'],['2024-05-08','Same Year','2014','https://boxd.it/Uv1'],['2024-05-09','Same Year','2014','https://boxd.it/Wx2'],['2024-05-10','Near Wish','1990','https://boxd.it/Yz3'],['2024-05-11','Year Gap','2005','https://boxd.it/Za4'],['2024-05-12','Year Gap','','https://boxd.it/Zb5'],['2024-05-13','Invented Heist','2015','https://boxd.it/Zd7']]),
   'ratings.csv':csv('Date,Name,Year,Letterboxd URI,Rating',[['2024-05-07','Rated Only','2007','https://boxd.it/Op7','4']]),
-  'watchlist.csv':csv('Date,Name,Year,Letterboxd URI',[['2024-01-01','Shared Wish','2008','https://boxd.it/Qr8']]),
+  'watchlist.csv':csv('Date,Name,Year,Letterboxd URI',[['2024-01-01','Shared Wish','2008','https://boxd.it/Qr8'],['2024-01-02','Near Wish','1991','https://boxd.it/Zc6']]),
   'diary.csv':csv('Date,Name,Year,Letterboxd URI,Rating,Watched Date',[]),
  };
  const zipPath=path.join(scratch,'letterboxd-demo-user-2026-10-26-13-48-utc.zip');await writeFile(zipPath,zip(exportFiles));
@@ -171,16 +235,18 @@ try{
  const origin=JSON.parse(fs.readFileSync(path.join(planDir,'origin.json'),'utf8'));
  const output=path.join(scratch,'display-exclusion.json');
  const report=await build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output,now:buildNow});
- assert.deepEqual(report.counts,{exportFilms:7,withIdentity:1,droppedNoYear:1,droppedNoName:0,droppedExportNamesake:3,entries:2});
- for(const secret of ['Unique','Twin','Rated','Gh3','Op7'])assert.ok(!JSON.stringify(report).includes(secret),'report leaks '+secret);
+ assert.deepEqual(report.counts,{exportFilms:13,withIdentity:1,droppedNoYear:2,droppedNoName:0,droppedExportNamesake:4,keptExportNamesake:4,entries:6});
+ for(const secret of ['Unique','Twin','Rated','Same','Wish','Gh3','Op7'])assert.ok(!JSON.stringify(report).includes(secret),'report leaks '+secret);
  const built=JSON.parse(fs.readFileSync(output,'utf8'));
  assert.equal(fs.statSync(output).mode&0o777,0o600);
- assert.deepEqual(built.entries,[{title:'rated only',year:2007},{title:'unique seen',year:2003}],'identified, no-year, namesake (also watchlist-only) and watchlist-only films are left out');
+ assert.equal(built.rule,RULE);
+ assert.deepEqual(built.entries,[{title:'invented heist',year:2015},{title:'rated only',year:2007},{title:'shared wish',year:2000},{title:'twin name',year:2001},{title:'twin name',year:2011},{title:'unique seen',year:2003}],
+  'distinct-year watched namesakes (one of them identified) and a watchlist-only namesake eight years away are kept; identified, no-year, same-year namesakes, a namesake without a year, a watchlist-only namesake one year away and watchlist-only films are left out');
  assert.deepEqual(built.source,{type:'letterboxd_export',archiveSha256:origin.archiveSha256,exportedAt:origin.generatedAt,baselinePlanSha256:origin.planSha256});
  assert.doesNotMatch(fs.readFileSync(output,'utf8'),/Ab1|Gh3|boxd\.it|"rating"|2024-05/,'no codes, URIs, ratings or dates');
  // The built list is accepted by the Worker as is.
- seed({catalog:{tmdb_20:film(20,'Unique Seen',2003),tmdb_21:film(21,'Rated Only',2008)},exclusion:built});
- const r=await get({FINDS_TITLE_EXCLUSION:'on'});assert.deepEqual(ids(r.body),['tmdb_21']);assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:1});
+ seed({catalog:{tmdb_20:film(20,'Unique Seen',2003),tmdb_21:film(21,'Rated Only',2008),tmdb_22:film(22,'Twin Name',2011),tmdb_23:film(23,'Other',2020,{aliases:['Unique Seen']})},exclusion:built});
+ const r=await get({FINDS_TITLE_EXCLUSION:'on'});assert.deepEqual(ids(r.body),['tmdb_21','tmdb_23']);assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2});
  // Binding: a snapshot that does not reproduce the plan, a tampered plan, an existing or in-repository output are refused.
  const other=await snapshot('other',[]);
  await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:other,output:path.join(scratch,'o1.json'),now:buildNow}),/does not reproduce the baseline plan/);
@@ -191,4 +257,4 @@ try{
  assert.ok(!fs.existsSync(path.join(scratch,'o1.json'))&&!fs.existsSync(path.join(scratch,'o2.json')),'a refused build writes nothing');
 }finally{await rm(scratch,{recursive:true,force:true});}
 
-console.log('Finds title exclusion: strict match, uniqueness, identity wins, generation recompute, switch, fail-open, privacy and the bound offline builder passed');
+console.log('Finds title exclusion: strict match, uniqueness, identity wins, generation recompute, switch, fail-open, privacy, the v2 namesake guards with legacy-tag parity and the bound offline builder passed');
