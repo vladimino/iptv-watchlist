@@ -34,15 +34,21 @@ async function readJsonl(file,label){
  return {rows,sha256:sha256(text)};
 }
 
-// The checkpoint is bound to the exact ledger and plan it was made from. A truncated last line (an interrupted write) is ignored.
+// The checkpoint is bound to the exact ledger and plan it was made from. Every complete line ends with a newline; a trailing
+// fragment without one (an interrupted append) is cut off before anything is appended, so later lines never join it and a
+// later resume never finds it in the middle. A malformed line anywhere else is corruption and is refused.
 async function readCheckpoint(file,binding){
  let text;try{text=await readFile(file,'utf8');}catch(error){if(error.code==='ENOENT')return null;throw new ResolveError('Checkpoint could not be read');}
- const lines=text.split('\n').filter(Boolean),observations=new Map();
- lines.forEach((line,i)=>{
-  let row;try{row=JSON.parse(line);}catch{if(i===lines.length-1)return;throw new ResolveError('Checkpoint is corrupt',3);}
-  if(i===0){if(row.type!=='binding'||row.ledgerSha256!==binding.ledgerSha256||row.importedSha256!==binding.importedSha256)throw new ResolveError('Checkpoint belongs to another ledger or plan',3);return;}
-  if(row.type==='observation'&&typeof row.code==='string')observations.set(row.code,row.observation);
+ const segments=text.split('\n'),complete=segments.slice(0,-1),observations=new Map();
+ let bound=false;
+ complete.forEach((line,i)=>{
+  let row;try{row=JSON.parse(line);}catch{throw new ResolveError('Checkpoint is corrupt',3);}
+  if(i===0){if(row.type!=='binding'||row.ledgerSha256!==binding.ledgerSha256||row.importedSha256!==binding.importedSha256)throw new ResolveError('Checkpoint belongs to another ledger or plan',3);bound=true;return;}
+  if(row.type==='observation'&&typeof row.code==='string'&&row.observation)observations.set(row.code,row.observation);
  });
+ // Only the binding line was being written: nothing is lost by starting the checkpoint again.
+ if(!bound)return null;
+ if(segments.at(-1)!=='')await writeAtomic(file,complete.join('\n')+'\n');
  return observations;
 }
 
@@ -141,7 +147,7 @@ async function main(){
  try{
   const args=parseArgs(process.argv.slice(2));
   const report=await resolve({...args,fetchImpl:args.network?fetch:null,log:line=>console.error(line)});
-  console.log(JSON.stringify({queue:report.queue.queued,byDecision:report.byDecision,complete:report.complete,network:report.network}));
+  console.log(JSON.stringify({queue:report.queue.queued,final:report.final,byDecision:report.byDecision,network:report.network}));
   if(report.network.stopReason)process.exit(4);
  }catch(error){
   const known=error instanceof ResolveError||error instanceof ReconcileError;

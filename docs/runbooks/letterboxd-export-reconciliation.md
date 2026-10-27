@@ -44,13 +44,15 @@ Exit codes: `0` report written (including `blocked: snapshot_missing`); `1` malf
 | `--imported <file>` | `plan.jsonl` of the [baseline import](letterboxd-baseline-import.md) that was committed: its `lid` codes are skipped and its TMDB ids are collisions | Private |
 | `--output <dir>/checkpoint.jsonl` | First line binds the run to the SHA-256 of the ledger and the plan; then one observation per code (landing path, shortlink code, TMDB ids and types, page title, aliases, years, or the page outcome). No HTML | **Private** |
 | `--output <dir>/resolution.jsonl` | One decision per queued code with reasons, the accepted TMDB id and the film path | **Private.** Never commit, attach, paste into Trello or GitHub, or log |
-| `--output <dir>/report.json` | Policy, network counters, stop reason, queue counts and counts per decision, group and reason | Contains no code, name, path or TMDB id |
+| `--output <dir>/report.json` | Policy, network counters, stop reason, `final`, per-group `progress` (`queued`, `observed`, `pending`, `waveObserved`), queue counts and counts per decision, group and reason | Contains no code, name, path or TMDB id |
 
 All paths are absolute and outside the Git repository (a symlink into it is refused). `--limit <n>` observes at most `n` codes in one run.
 
 **Network policy.** One request at a time; request starts at least one second apart, every redirect hop counted; a 15-second timeout per request; a code whose request times out, fails or answers 5xx is retried at most twice, five and ten seconds later, and is then left `pending`; three such codes in a row stop the run. Only `https://boxd.it` and `https://letterboxd.com` are requested, and an off-site redirect is not followed. HTTP 429, HTTP 403 or a challenge page (`cf-mitigated: challenge`, a Cloudflare challenge script or interstitial) stops the run at once with no retry and no attempt to get past it; the stopped code is not recorded. The User-Agent is the Worker's own. Standard error carries progress counts only.
 
-**Resume.** Rerunning with the same ledger and plan continues where the checkpoint ends: observed codes are not fetched again, codes left `pending` by a failed fetch are tried again, and a truncated last checkpoint line is ignored. A checkpoint made from another ledger or plan is refused.
+**Resume.** Rerunning with the same ledger and plan continues where the checkpoint ends: observed codes are not fetched again and codes left `pending` by a failed fetch are tried again. A trailing fragment without a newline (an interrupted append) is cut off before anything is appended, and that code is fetched again; a malformed line anywhere else, or a checkpoint made from another ledger or plan, is refused.
+
+**Waves and finality.** The queue is ordered so that `candidate` and `ambiguous` films come first; `--limit` with their count observes exactly that wave. `progress.<group>.waveObserved` says a wave is fully observed; it is progress, not a decision. While any queued film is `pending` the report has `final: false`, clean results are `provisional` and carry no TMDB id, because a later film may share a TMDB id or a title and year with them. Only `final: true` turns clean results into `accepted`. A code that keeps failing keeps the run from being final; retry it later or leave the decision to the owner, but never treat a provisional result as accepted.
 
 Exit codes: `0` report written (including a run bounded by `--limit`); `2` usage error or a path inside the repository; `3` an input is not JSON Lines or the checkpoint belongs to other inputs; `4` the run stopped on 429, 403, a challenge or repeated failures. After a stop, wait and ask the owner before running again; never change the policy to get past a block.
 
@@ -59,7 +61,7 @@ Procedure:
 1. **Rehearse.** `node tests/letterboxd-identity-resolve.mjs` runs the resolver against invented pages through an injected fetch.
 2. **Prepare inputs** from an approved reconciliation run and the committed import plan, in a private directory outside the repository.
 3. **Approved network run.** `node scripts/letterboxd-identity-resolve.mjs --ledger /absolute/private/letterboxd-report/matches.jsonl --imported /absolute/private/baseline/plan.jsonl --output /absolute/private/letterboxd-identity --network`, optionally with `--limit` for a small first batch.
-4. **Read the report.** Only a report with `complete: true` is final, because duplicate TMDB ids and same title/year pairs are judged across all observed films. `accepted` decisions are proposals for a separately approved import; `owner_review` and `conflict` rows need the owner's manual review in the private file. Only aggregate counts may go to a Trello card or an [evidence](../evidence/README.md) page.
+4. **Read the report.** Only a report with `final: true` is final, because duplicate TMDB ids and same title/year pairs are judged across all queued films; a wave-bounded report is progress only. `accepted` decisions are proposals for a separately approved import; `owner_review` and `conflict` rows need the owner's manual review in the private file. Only aggregate counts may go to a Trello card or an [evidence](../evidence/README.md) page.
 
 ## Rollback
 

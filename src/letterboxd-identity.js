@@ -5,7 +5,7 @@
 // `owner_review` and any contradiction is `conflict`, because a wrong identity is worse than a missing one.
 import {normTitle} from './letterboxd-match.js';
 
-export const DECISIONS=Object.freeze(['accepted','owner_review','conflict','pending']);
+export const DECISIONS=Object.freeze(['accepted','provisional','owner_review','conflict','pending']);
 // Queue order: title/year candidates and ambiguous rows first, then unmatched, then any other unresolved status.
 export const QUEUE_ORDER=Object.freeze(['candidate','ambiguous','unmatched','provisional','conflict']);
 export const CODE=/^[A-Za-z0-9]{1,16}$/;
@@ -99,10 +99,12 @@ function ownChecks(entry,obs){
 }
 
 // queue: buildQueue().queue; observations: Map code -> evidence; imported: buildQueue() result.
-// Cross-film checks run over every observed film, so a decision can change when more films are observed: only a complete run
-// (no pending decision) is final.
+// Cross-film checks (duplicate TMDB id, same title and year) run over every observed film, so a film observed later can turn
+// an earlier clean result into a conflict. A clean result is therefore `accepted` only once every queued film is observed;
+// until then, in a run bounded to a wave or stopped early, it is `provisional` (`queue_incomplete`) and carries no TMDB id.
 export function decide(queue,observations,{importedTmdb}){
  const own=queue.map(entry=>({entry,obs:observations.get(entry.code)??null,...ownChecks(entry,observations.get(entry.code))}));
+ const queueObserved=own.every(item=>item.status!=='pending');
  const tmdbOwners=new Map(),titleYear=new Map();
  for(const item of own){
   const tmdb=item.obs?.kind==='page'&&item.obs.tmdbIds.length===1?item.obs.tmdbIds[0]:null;
@@ -118,17 +120,21 @@ export function decide(queue,observations,{importedTmdb}){
   // Two export films with one normalized title and year (a remake in the same year, a namesake) are never accepted.
   if(titleYear.get(normTitle(entry.name)+'|'+(entry.year??'')).size>1){extra.push('same_title_year');if(final==='accepted')final='owner_review';}
   if(final==='pending')return {code:entry.code,group:entry.group,decision:'pending',reasons,tmdbId:null,filmPath:null};
+  if(final==='accepted'&&!queueObserved)return {code:entry.code,group:entry.group,decision:'provisional',reasons:['queue_incomplete'],tmdbId:null,observedTmdbIds:obs.tmdbIds,filmPath:obs.path,method:null};
   return {code:entry.code,group:entry.group,decision:final,reasons:[...reasons,...extra],tmdbId:final==='accepted'?tmdbId:null,observedTmdbIds:obs?.tmdbIds??[],filmPath:obs?.path??null,method:final==='accepted'?'letterboxd_page':null};
  });
 }
 
-// Aggregate counts only: no code, name, path or TMDB id.
+// Aggregate counts only: no code, name, path or TMDB id. `progress` tells how far each queue group (wave) is observed;
+// `final` is true only when the whole queue is observed, the only state in which decisions are final and `accepted` exists.
 export function summarize(decisions,queueCounts){
  const zero=()=>Object.fromEntries(DECISIONS.map(name=>[name,0]));
- const byDecision=zero(),byGroup={},reasons={};
+ const byDecision=zero(),byGroup={},progress={},reasons={};
  for(const row of decisions){
   byDecision[row.decision]++;(byGroup[row.group]||=zero())[row.decision]++;
+  const wave=progress[row.group]||={queued:0,observed:0,pending:0};wave.queued++;wave[row.decision==='pending'?'pending':'observed']++;
   for(const reason of row.reasons)reasons[reason]=(reasons[reason]||0)+1;
  }
- return {queue:queueCounts,byDecision,byGroup,reasons:Object.fromEntries(Object.entries(reasons).sort(([a],[b])=>a<b?-1:1)),complete:byDecision.pending===0};
+ for(const wave of Object.values(progress))wave.waveObserved=wave.pending===0;
+ return {queue:queueCounts,final:byDecision.pending===0,progress,byDecision,byGroup,reasons:Object.fromEntries(Object.entries(reasons).sort(([a],[b])=>a<b?-1:1))};
 }

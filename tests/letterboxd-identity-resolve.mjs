@@ -122,7 +122,7 @@ assert.equal(decide(built.queue,new Map(),built).every(row=>row.decision==='pend
  const dir=await mkdtemp(path.join(scratch,'offline-')),paths=await files(dir);
  const report=await resolve({...paths,fetchImpl:()=>{throw new Error('network must not be used');}});
  assert.equal(report.network.enabled,false);assert.equal(report.network.requests,0);
- assert.equal(report.byDecision.pending,films.length-1);assert.equal(report.complete,false);
+ assert.equal(report.byDecision.pending,films.length-1);assert.equal(report.final,false);
  await assert.rejects(resolve({...paths,network:true}),error=>error instanceof ResolveError&&error.exitCode===2);
 }
 
@@ -152,7 +152,7 @@ expect('Zq21','owner_review',['page_year_inconsistent']);
 expect('Zq22','conflict',['canonical_mismatch']);
 assert.ok(!rows.has('Zq14')&&!rows.has('Zq00')&&!rows.has('../x'));
 for(const row of rows.values())if(row.decision!=='accepted')assert.equal(row.tmdbId,null);
-assert.equal(report.complete,true);assert.equal(report.byDecision.accepted,1);
+assert.equal(report.final,true);assert.equal(report.byDecision.accepted,1);
 assert.equal(report.byGroup.candidate.accepted,1);
 // Rate and concurrency: one request at a time, request starts at least a second apart, every hop counted.
 assert.equal(net.maxInflight,1);
@@ -198,21 +198,61 @@ for(const [label,spec,reason] of [
  assert.equal(stopped.network.retries,0,'a stop is never retried');
  assert.equal(first.calls.filter(call=>call.url==='https://boxd.it/Zq15').length,1);
  assert.equal(first.calls.at(-1).url,'https://boxd.it/Zq15','nothing is requested after a stop');
- assert.equal(stopped.network.observedThisRun,3);assert.equal(stopped.complete,false);
+ assert.equal(stopped.network.observedThisRun,3);assert.equal(stopped.final,false);
  const checkpoint=await readFile(path.join(stopPaths.output,'checkpoint.jsonl'),'utf8');assert.ok(!checkpoint.includes('Zq15'));
  const resumed=fakeNet(web()),done=await resolve({...stopPaths,network:true,fetchImpl:resumed.fetch,now:resumed.now,sleep:resumed.sleep,tools});
  assert.equal(resumed.calls[0].url,'https://boxd.it/Zq15','resume starts at the stopped code');
  assert.ok(!resumed.calls.some(call=>/Zq0[124]$/.test(call.url)),'observed codes are not fetched again');
- assert.equal(done.complete,true);assert.deepEqual(done.byDecision,report.byDecision);
+ assert.equal(done.final,true);assert.deepEqual(done.byDecision,report.byDecision);
 }
 
-// A truncated last checkpoint line (an interrupted write) is ignored and that code is fetched again.
-{
- const cutDir=await mkdtemp(path.join(scratch,'cut-')),cutPaths=await files(cutDir),first=fakeNet(web());
+// An interrupted append leaves a fragment without a newline. It is cut off before the next append, so two resumes in a row
+// both work and appended lines never join the fragment; the interrupted code is fetched again.
+for(const fragment of ['{"type":"observation","code":"Zq04","obs','{"type":"observation","code":"Zq04","observation":{"kind":"not_found"}}']){
+ const cutDir=await mkdtemp(path.join(scratch,'cut-')),cutPaths=await files(cutDir),first=fakeNet(web()),checkpointFile=path.join(cutPaths.output,'checkpoint.jsonl');
  await resolve({...cutPaths,network:true,limit:2,fetchImpl:first.fetch,now:first.now,sleep:first.sleep,tools});
- await appendFile(path.join(cutPaths.output,'checkpoint.jsonl'),'{"type":"observation","code":"Zq04","obs');
- const next=fakeNet(web()),done=await resolve({...cutPaths,network:true,fetchImpl:next.fetch,now:next.now,sleep:next.sleep,tools});
- assert.equal(next.calls[0].url,'https://boxd.it/Zq04');assert.equal(done.complete,true);
+ await appendFile(checkpointFile,fragment);
+ const one=fakeNet(web());await resolve({...cutPaths,network:true,limit:1,fetchImpl:one.fetch,now:one.now,sleep:one.sleep,tools});
+ assert.equal(one.calls[0].url,'https://boxd.it/Zq04');
+ const text=await readFile(checkpointFile,'utf8'),lines=text.split('\n').filter(Boolean).map(line=>JSON.parse(line));
+ assert.ok(text.endsWith('\n'));assert.deepEqual(lines.slice(1).map(row=>row.code),['Zq01','Zq02','Zq04']);assert.equal(lines.at(-1).observation.kind,'page');
+ const two=fakeNet(web()),done=await resolve({...cutPaths,network:true,fetchImpl:two.fetch,now:two.now,sleep:two.sleep,tools});
+ assert.equal(two.calls[0].url,'https://boxd.it/Zq15');assert.equal(done.final,true);assert.deepEqual(done.byDecision,report.byDecision);
+}
+// A malformed line that is not the trailing fragment is corruption.
+{
+ const badPaths=await files(await mkdtemp(path.join(scratch,'bad-'))),first=fakeNet(web()),checkpointFile=path.join(badPaths.output,'checkpoint.jsonl');
+ await resolve({...badPaths,network:true,limit:1,fetchImpl:first.fetch,now:first.now,sleep:first.sleep,tools});
+ await appendFile(checkpointFile,'{broken\n');
+ await assert.rejects(resolve({...badPaths}),error=>error instanceof ResolveError&&error.exitCode===3);
+}
+// A checkpoint cut inside its binding line starts again.
+{
+ const bindPaths=await files(await mkdtemp(path.join(scratch,'bindcut-')));
+ await mkdir(bindPaths.output);await writeFile(path.join(bindPaths.output,'checkpoint.jsonl'),'{"type":"bind');
+ const net4=fakeNet(web()),done=await resolve({...bindPaths,network:true,fetchImpl:net4.fetch,now:net4.now,sleep:net4.sleep,tools});
+ assert.equal(done.final,true);assert.equal(JSON.parse((await readFile(path.join(bindPaths.output,'checkpoint.jsonl'),'utf8')).split('\n')[0]).type,'binding');
+}
+
+// Waves: a run bounded to the priority wave reports that wave as observed but decides nothing finally. A film of a later wave
+// that lands on the same TMDB id turns the earlier clean result into a conflict, so nothing was accepted before it was seen.
+{
+ const wave=[['Za01','candidate','Wave Alpha',2001,{title:'Wave Alpha',year:2001,tmdb:'910001'}],['Za02','candidate','Wave Beta',2002,{title:'Wave Beta',year:2002,tmdb:'910002'}],
+  ['Za03','unmatched','Wave Gamma',2003,{title:'Wave Gamma',year:2003,tmdb:'910001'}],['Za04','unmatched','Wave Delta',2004,{title:'Wave Delta',year:2004,tmdb:'910004'}]];
+ const map=new Map();
+ for(const [code,,,,film] of wave){map.set('https://boxd.it/'+code,redirect('https://letterboxd.com/film/'+slugOf(code)+'/'));map.set('https://letterboxd.com/film/'+slugOf(code)+'/',ok(page({code,slug:slugOf(code),...film})));}
+ const wavePaths=await files(await mkdtemp(path.join(scratch,'wave-')),wave.map(([code,status,name,year])=>({type:'match',code,status,name,year,tmdbId:null})),[]);
+ const first=fakeNet(map),priority=await resolve({...wavePaths,network:true,limit:2,fetchImpl:first.fetch,now:first.now,sleep:first.sleep,tools});
+ assert.equal(priority.final,false);assert.equal(priority.byDecision.accepted,0);assert.equal(priority.byDecision.provisional,2);
+ assert.deepEqual(priority.progress.candidate,{queued:2,observed:2,pending:0,waveObserved:true});
+ assert.deepEqual(priority.progress.unmatched,{queued:2,observed:0,pending:2,waveObserved:false});
+ const partial=byCode(await readRows(path.join(wavePaths.output,'resolution.jsonl')));
+ for(const code of ['Za01','Za02']){assert.equal(partial.get(code).decision,'provisional');assert.deepEqual(partial.get(code).reasons,['queue_incomplete']);assert.equal(partial.get(code).tmdbId,null);}
+ const rest=fakeNet(map),full=await resolve({...wavePaths,network:true,fetchImpl:rest.fetch,now:rest.now,sleep:rest.sleep,tools});
+ assert.equal(full.final,true);assert.equal(full.byDecision.provisional,0);
+ const all=byCode(await readRows(path.join(wavePaths.output,'resolution.jsonl')));
+ assert.equal(all.get('Za01').decision,'conflict');assert.deepEqual(all.get('Za01').reasons,['duplicate_tmdb']);assert.equal(all.get('Za03').decision,'conflict');
+ assert.equal(all.get('Za02').decision,'accepted');assert.equal(all.get('Za02').tmdbId,'910002');assert.equal(all.get('Za04').decision,'accepted');
 }
 
 // --limit bounds one run.
@@ -223,7 +263,7 @@ for(const [label,spec,reason] of [
 }
 
 // Timeouts and retries are bounded: a hanging request is aborted, retried at most maxRetries times, then left pending; three
-// failing codes in a row stop the run. A transient 5xx followed by success is accepted.
+// failing codes in a row stop the run. A transient 5xx followed by success gives a clean result.
 {
  const hangDir=await mkdtemp(path.join(scratch,'hang-')),hangPaths=await files(hangDir),hang=(init)=>new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(new Error('aborted'))));
  const flaky={count:0};
@@ -233,13 +273,13 @@ for(const [label,spec,reason] of [
  }});
  const result=await resolve({...hangPaths,network:true,fetchImpl:net2.fetch,now:net2.now,sleep:net2.sleep,tools,policy:{timeoutMs:20}});
  const out=byCode(await readRows(path.join(hangPaths.output,'resolution.jsonl')));
- assert.equal(out.get('Zq01').decision,'accepted');
+ assert.equal(out.get('Zq01').decision,'provisional','a clean result of an incomplete run is not accepted');
  for(const code of ['Zq02','Zq04','Zq15']){assert.deepEqual(out.get(code).reasons,['fetch_failed']);assert.equal(net2.calls.filter(call=>call.url==='https://boxd.it/'+code).length,POLICY.maxRetries+1);}
  assert.equal(result.network.stopReason,'consecutive_failures');
  assert.equal(result.network.retries,1+3*POLICY.maxRetries);
  // Failed codes are retried by the next run.
  const net3=fakeNet(web()),later=await resolve({...hangPaths,network:true,fetchImpl:net3.fetch,now:net3.now,sleep:net3.sleep,tools});
- assert.equal(net3.calls[0].url,'https://boxd.it/Zq02');assert.equal(later.complete,true);
+ assert.equal(net3.calls[0].url,'https://boxd.it/Zq02');assert.equal(later.final,true);
 }
 
 // The command line: paths must be absolute and outside the repository; without --network it sends nothing and prints counts.
@@ -250,7 +290,7 @@ for(const [label,spec,reason] of [
  assert.equal(cli(['--ledger',paths.ledger,'--imported',paths.imported,'--output',paths.output,'--limit','0']).status,2);
  const run=cli(['--ledger',paths.ledger,'--imported',paths.imported,'--output',paths.output]);
  assert.equal(run.status,0,run.stderr);
- const printed=JSON.parse(run.stdout);assert.equal(printed.network.enabled,false);assert.equal(printed.complete,true);
+ const printed=JSON.parse(run.stdout);assert.equal(printed.network.enabled,false);assert.equal(printed.final,true);
  for(const [code,,name] of films){assert.ok(!run.stdout.includes(code)&&!run.stderr.includes(code));assert.ok(!run.stdout.includes(name));}
 }
 
