@@ -4,7 +4,7 @@
 // route; each first re-checks the archive and the plan against origin.json. Film names, codes and ratings stay in the
 // private output directory; standard output carries counts only.
 import {createHash} from 'node:crypto';
-import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {access,mkdir,readFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {EXPORT_FILES,parseExport} from '../src/letterboxd-export.js';
@@ -12,7 +12,11 @@ import {buildIndex,matchExport} from '../src/letterboxd-match.js';
 import {archiveGeneratedAt,readZip} from '../src/letterboxd-zip.js';
 import {ReconcileError,assertOutsideRepository,loadSnapshot} from './letterboxd-reconcile.mjs';
 
-export const CHUNK_SIZE=200;
+// A plan fixes its chunk size in origin.json, and every remote step re-derives the chunks from it. The Worker does several
+// sequential R2 operations per film, so a chunk must finish well inside the client's request limits: new plans default to
+// DEFAULT_CHUNK_SIZE and accept at most MAX_CHUNK_SIZE. A schema 1 origin.json has no chunkSize and was planned with
+// LEGACY_CHUNK_SIZE; it keeps that chunking for validate, replay and rollback, since receipts are keyed by archive + chunk.
+export const DEFAULT_CHUNK_SIZE=50,MAX_CHUNK_SIZE=100,LEGACY_CHUNK_SIZE=200;
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{3})?)?Z$/;
 export class ImportError extends Error{constructor(message,exitCode=1){super(message);this.name='ImportError';this.exitCode=exitCode;}}
@@ -40,36 +44,64 @@ export function planItem(film,match){
  return {lid:match.filmId,tmdb:match.tmdbId??null,facts,effectiveOn};
 }
 
-export async function plan({zip,snapshot,output,generatedAt=null,now=Date.now()}){
+export function checkChunkSize(value){
+ if(!Number.isInteger(value)||value<1||value>MAX_CHUNK_SIZE)throw new ImportError('--chunk-size must be an integer 1..'+MAX_CHUNK_SIZE,2);
+ return value;
+}
+// Every file a plan's directory can hold: the plan itself and the results of the remote steps.
+const OUTPUT_FILES=['origin.json','plan.jsonl','report.json','validate.json','commit.json','rollback.json'];
+async function readOrigin(outputPath){
+ let text;try{text=await readFile(path.join(outputPath,'origin.json'),'utf8');}catch{return null;}
+ try{return JSON.parse(text);}catch{throw new ImportError('origin.json is not valid JSON',3);}
+}
+// The chunk size a verified origin.json fixes: schema 1 is the legacy fixed size, schema 2 records its own.
+export function originChunkSize(origin){
+ if(origin?.schemaVersion===1&&origin.chunkSize===undefined)return LEGACY_CHUNK_SIZE;
+ if(origin?.schemaVersion===2&&Number.isInteger(origin.chunkSize)&&origin.chunkSize>=1&&origin.chunkSize<=MAX_CHUNK_SIZE)return origin.chunkSize;
+ throw new ImportError('origin.json has an unknown schema or chunk size',3);
+}
+
+export async function plan({zip,snapshot,output,generatedAt=null,chunkSize=DEFAULT_CHUNK_SIZE,now=Date.now()}){
+ checkChunkSize(chunkSize);
  const zipPath=await assertOutsideRepository(zip,'--zip'),snapshotPath=await assertOutsideRepository(snapshot,'--snapshot'),outputPath=await assertOutsideRepository(output,'--output');
  const archive=await readArchive(zipPath,generatedAt,now);
+ // A directory holds one plan for good. Re-planning over it, even with the same archive and size, can change the accepted
+ // films (another snapshot, other matching) and would destroy the only copy of the plan its receipts were made from.
+ for(const name of OUTPUT_FILES)if(await access(path.join(outputPath,name)).then(()=>true,()=>false))throw new ImportError('--output already holds a plan or its results ('+name+'); plan into a new empty directory',2);
  const texts=Object.fromEntries(Object.entries(EXPORT_FILES).map(([kind,name])=>[kind,archive.files[name]?.text??null]));
  const parsed=parseExport(texts),loaded=await loadSnapshot(snapshotPath),matches=matchExport(parsed.films,buildIndex(loaded.objects));
  const films=new Map(parsed.films.map(film=>[film.code,film])),byStatus={},items=[];
  for(const match of matches){byStatus[match.status]=(byStatus[match.status]||0)+1;if(match.status==='accepted')items.push(planItem(films.get(match.code),match));}
  items.sort((a,b)=>a.lid<b.lid?-1:a.lid>b.lid?1:0);
- const lines=items.map((item,i)=>JSON.stringify({chunk:Math.floor(i/CHUNK_SIZE),item})),planText=lines.join('\n')+(lines.length?'\n':'');
- const origin={schemaVersion:1,archiveName:archive.archiveName,archiveSha256:archive.archiveSha256,generatedAt:archive.generatedAt,generatedAtSource:archive.generatedAtSource,files:Object.fromEntries(Object.entries(archive.files).map(([name,file])=>[name,file.sha256])),planSha256:sha256(planText),chunks:Math.ceil(items.length/CHUNK_SIZE),snapshot:{status:loaded.status,baselineIdentity:loaded.baselineIdentity,missingKeys:loaded.missing}};
+ const lines=items.map((item,i)=>JSON.stringify({chunk:Math.floor(i/chunkSize),item})),planText=lines.join('\n')+(lines.length?'\n':'');
+ const origin={schemaVersion:2,archiveName:archive.archiveName,archiveSha256:archive.archiveSha256,generatedAt:archive.generatedAt,generatedAtSource:archive.generatedAtSource,files:Object.fromEntries(Object.entries(archive.files).map(([name,file])=>[name,file.sha256])),planSha256:sha256(planText),chunkSize,chunks:Math.ceil(items.length/chunkSize),snapshot:{status:loaded.status,baselineIdentity:loaded.baselineIdentity,missingKeys:loaded.missing}};
  const count=predicate=>items.filter(predicate).length;
- const report={schemaVersion:1,tool:'letterboxd-baseline-import',privacy:'Aggregate counts only. Per-film rows are in the private plan.jsonl next to this file.',generatedAtSource:origin.generatedAtSource,invalidRows:parsed.invalidRows.length,matchStatus:byStatus,planned:{films:items.length,chunks:origin.chunks,watched:count(item=>item.facts.watched),rated:count(item=>typeof item.facts.rating==='number'),notRated:count(item=>item.facts.rating===null),watchlist:count(item=>item.facts.watchlist)},unresolved:matches.length-items.length};
+ const report={schemaVersion:1,tool:'letterboxd-baseline-import',privacy:'Aggregate counts only. Per-film rows are in the private plan.jsonl next to this file.',generatedAtSource:origin.generatedAtSource,chunkSize,invalidRows:parsed.invalidRows.length,matchStatus:byStatus,planned:{films:items.length,chunks:origin.chunks,watched:count(item=>item.facts.watched),rated:count(item=>typeof item.facts.rating==='number'),notRated:count(item=>item.facts.rating===null),watchlist:count(item=>item.facts.watchlist)},unresolved:matches.length-items.length};
  await mkdir(outputPath,{recursive:true,mode:0o700});
- await writeFile(path.join(outputPath,'origin.json'),JSON.stringify(origin,null,1)+'\n',{mode:0o600});
- await writeFile(path.join(outputPath,'plan.jsonl'),planText,{mode:0o600});
- await writeFile(path.join(outputPath,'report.json'),JSON.stringify(report,null,1)+'\n',{mode:0o600});
+ // Create-only, so a concurrent plan into the same directory cannot overwrite either.
+ await writeFile(path.join(outputPath,'plan.jsonl'),planText,{mode:0o600,flag:'wx'});
+ await writeFile(path.join(outputPath,'report.json'),JSON.stringify(report,null,1)+'\n',{mode:0o600,flag:'wx'});
+ await writeFile(path.join(outputPath,'origin.json'),JSON.stringify(origin,null,1)+'\n',{mode:0o600,flag:'wx'});
  return report;
 }
 
 // Re-reads the archive and the plan and refuses to continue on any difference from origin.json.
 export async function loadVerifiedPlan({zip,output,now=Date.now()}){
  const zipPath=await assertOutsideRepository(zip,'--zip'),outputPath=await assertOutsideRepository(output,'--output');
- let origin;try{origin=JSON.parse(await readFile(path.join(outputPath,'origin.json'),'utf8'));}catch{throw new ImportError('origin.json is missing; run plan first',2);}
- const declared=origin.generatedAtSource==='owner_declared'?origin.generatedAt:null,archive=await readArchive(zipPath,declared,now);
+ const origin=await readOrigin(outputPath);if(!origin)throw new ImportError('origin.json is missing; run plan first',2);
+ const chunkSize=originChunkSize(origin),declared=origin.generatedAtSource==='owner_declared'?origin.generatedAt:null,archive=await readArchive(zipPath,declared,now);
  if(archive.archiveSha256!==origin.archiveSha256||archive.generatedAt!==origin.generatedAt)throw new ImportError('The archive differs from origin.json',3);
  for(const [name,hash] of Object.entries(origin.files))if(archive.files[name]?.sha256!==hash)throw new ImportError('An export file differs from origin.json',3);
  const planText=await readFile(path.join(outputPath,'plan.jsonl'),'utf8');
  if(sha256(planText)!==origin.planSha256)throw new ImportError('plan.jsonl differs from origin.json',3);
- const chunks=[];for(const line of planText.split('\n').filter(Boolean)){const {chunk,item}=JSON.parse(line);(chunks[chunk]||=[]).push(item);}
- return {origin,chunks,outputPath};
+ // Every line must sit in the chunk its position and the recorded size give: one plan never mixes chunk sizes.
+ const chunks=[];planText.split('\n').filter(Boolean).forEach((line,i)=>{
+  const {chunk,item}=JSON.parse(line);
+  if(chunk!==Math.floor(i/chunkSize))throw new ImportError('plan.jsonl chunking differs from the chunk size in origin.json',3);
+  (chunks[chunk]||=[]).push(item);
+ });
+ if(chunks.length!==origin.chunks)throw new ImportError('plan.jsonl chunk count differs from origin.json',3);
+ return {origin,chunkSize,chunks,outputPath};
 }
 
 function endpointUrl(endpoint,action){
@@ -86,27 +118,43 @@ function accessHeaders(env){
 
 export async function remote({mode,zip,output,endpoint,fromChunk=0,toChunk=null,fetchImpl=fetch,env=process.env,now=Date.now()}){
  if(!['validate','commit','rollback'].includes(mode))throw new ImportError('Unknown mode',2);
- const {origin,chunks,outputPath}=await loadVerifiedPlan({zip,output,now}),url=endpointUrl(endpoint,mode),last=Math.min(toChunk??chunks.length-1,chunks.length-1);
+ const {origin,chunkSize,chunks,outputPath}=await loadVerifiedPlan({zip,output,now}),url=endpointUrl(endpoint,mode),last=Math.min(toChunk??chunks.length-1,chunks.length-1);
  const order=[];for(let chunk=fromChunk;chunk<=last;chunk++)order.push(chunk);if(mode==='rollback')order.reverse();
  const originBody={archiveSha256:origin.archiveSha256,generatedAt:origin.generatedAt,generatedAtSource:origin.generatedAtSource};
  const results=[],totals={};
+ // The result file is rewritten after every chunk, so a run cut short still leaves what it did and where it stopped.
+ const report=async()=>{
+  const failed=results.find(result=>result.error),summary={schemaVersion:1,mode,archiveSha256:origin.archiveSha256,chunkSize,chunksRequested:order.length,chunksDone:results.filter(result=>!result.error).length,failed:failed||null,totals};
+  await writeFile(path.join(outputPath,mode+'.json'),JSON.stringify({...summary,results},null,1)+'\n',{mode:0o600});
+  return summary;
+ };
  for(const chunk of order){
   const body=mode==='rollback'?{origin:originBody,chunk}:{origin:originBody,chunk,items:chunks[chunk]};
-  const response=await fetchImpl(url,{method:'POST',headers:{'Content-Type':'application/json',...accessHeaders(env)},body:JSON.stringify(body),redirect:'error'});
-  let data=null;try{data=await response.json();}catch{}
+  // A dropped connection or a client timeout leaves the chunk's outcome unknown: the Worker may have written part of it.
+  // It is reported like any failure and the run stops; rerunning the same command completes the chunk from its intent.
+  let response;
+  try{response=await fetchImpl(url,{method:'POST',headers:{'Content-Type':'application/json',...accessHeaders(env)},body:JSON.stringify(body),redirect:'error'});}
+  catch(error){results.push({chunk,status:null,error:'network_error',cause:networkCause(error)});break;}
+  let data=null;try{data=await response.json();}catch(error){if(response.ok){results.push({chunk,status:response.status,error:'response_unreadable',cause:networkCause(error)});break;}}
   if(!response.ok){results.push({chunk,status:response.status,error:data?.code||data?.error||'http_'+response.status});break;}
-  const outcomes=data.outcomes||data.facts||{};for(const [key,value] of Object.entries(outcomes))totals[key]=(totals[key]||0)+value;
-  results.push({chunk,status:response.status,replay:!!data.replay,conflicts:data.conflicts??data.films?.conflict??0,outcomes});
+  const outcomes=data?.outcomes||data?.facts||{};for(const [key,value] of Object.entries(outcomes))totals[key]=(totals[key]||0)+value;
+  results.push({chunk,status:response.status,replay:!!data?.replay,conflicts:data?.conflicts??data?.films?.conflict??0,outcomes});
+  await report();
  }
- const failed=results.find(result=>result.error),summary={schemaVersion:1,mode,archiveSha256:origin.archiveSha256,chunksRequested:order.length,chunksDone:results.filter(result=>!result.error).length,failed:failed||null,totals};
- await writeFile(path.join(outputPath,mode+'.json'),JSON.stringify({...summary,results},null,1)+'\n',{mode:0o600});
- return summary;
+ return report();
+}
+// Only an error code or name leaves the process: messages can quote the URL or headers.
+function networkCause(error){
+ const code=[error?.cause?.code,error?.code,error?.name].find(value=>typeof value==='string'&&/^[A-Za-z0-9_]{1,64}$/.test(value));
+ return code||'unknown';
 }
 
 function parseArgs(argv){
- const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk'};
- for(let i=0;i<rest.length;i++){const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --output <abs> [--generated-at <UTC>] | validate|commit|rollback --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n]',2);args[name]=rest[++i];}
+ const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk'};
+ for(let i=0;i<rest.length;i++){const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --output <abs> [--generated-at <UTC>] [--chunk-size 1..'+MAX_CHUNK_SIZE+'] | validate|commit|rollback --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n]',2);args[name]=rest[++i];}
  for(const key of ['fromChunk','toChunk'])if(args[key]!=null){args[key]=Number(args[key]);if(!Number.isInteger(args[key])||args[key]<0)throw new ImportError('Chunk numbers are non-negative integers',2);}
+ // The chunk size belongs to the plan; the remote steps read it from origin.json.
+ if(args.chunkSize!=null){if(mode!=='plan')throw new ImportError('--chunk-size is a plan option; '+mode+' uses the chunk size in origin.json',2);args.chunkSize=checkChunkSize(/^\d+$/.test(args.chunkSize)?Number(args.chunkSize):NaN);}
  return args;
 }
 async function main(){
