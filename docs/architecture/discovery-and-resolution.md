@@ -47,4 +47,4 @@ The catalogue upsert above is the only writer that creates or re-identifies cata
 
 R2 remains authoritative. The separately planned D1 candidate tables are not active production authority.
 
-**Planned, not implemented:** [ADR 0034](../adr/0034-bounded-discovery-ledger.md) (proposed) bounds the "persistent candidate ledger" node above to the latest scan's candidates. History moves to a segmented archive that the commit reads only for re-entering keys; chunks and status never read it. The diagram shows the current full ledger and changes only when the implementation is delivered, under its own visual review.
+**Implemented, inactive by default:** with `DISCOVERY_LEDGER_MODE=bounded`, [ADR 0034](../adr/0034-bounded-discovery-ledger.md) ([AIR-220](https://trello.com/c/uPvMc5ww)) bounds the "persistent candidate ledger" node above to the latest scan's candidates. History moves to a write-once segmented archive, which the EPG commit reads only for re-entering keys; chunks and status never read it. The diagram shows the default full ledger. It changes, under its own visual review, when the bounded mode is activated ([AIR-222](https://trello.com/c/9Y4G9DG6)).

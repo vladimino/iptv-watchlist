@@ -233,7 +233,14 @@ The size budget for the active ledger (10–15 MB was the working hypothesis) is
 ## Evidence
 
 - **Original decision:** explicit owner acceptance on 2026-10-27, following [AIR-219](https://trello.com/c/AKHjmhXR) delivery. The first independent review ([PR #167](https://github.com/vladimino/iptv-watchlist/pull/167)) raised the crash consistency, payload parity and unique counts, rollback, fencing and snapshot consistency points addressed above. A re-review raised the duplicate count after an aborted archive write, addressed by reconciling `alsoArchived` against the fenced starting manifest.
-- **Implementation:** not started ([AIR-220](https://trello.com/c/uPvMc5ww))
+- **Implementation:** [AIR-220](https://trello.com/c/uPvMc5ww), inactive by default (`DISCOVERY_LEDGER_MODE` unset = `full`):
+  - `src/sources.js` (mode, hash, segment keys);
+  - `src/worker.js` (`planDiscoveryLedger`, `publishGenerationWithLedger`, publication fence);
+  - `src/discovery.js` (`ledgerCounts`);
+  - `src/enrichment.js` (`409` gates);
+  - tests `tests/discovery-ledger-archive.mjs`;
+  - offline benchmark `scripts/discovery-ledger-benchmark.mjs`;
+  - [runbook](../runbooks/discovery-ledger.md).
 - **Dated verification:** the [AIR-211 report](../evidence/epg-memory-pressure-2026-10-27.md) (sizes and growth on 27 October 2026, offline replay). No implementation has been measured.
 - **Uncertainty:**
   - the real share of the ledger that is in the latest scan, and so the active size (the item composition was not read);
