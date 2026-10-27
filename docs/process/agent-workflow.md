@@ -27,6 +27,7 @@ At the start of work, read the relevant current card and latest comments, its na
 - Follow the detailed [Trello card conventions](trello-card-conventions.md) for Russian descriptions, '[AIR-N]' names, a current plan-context introduction, relevant functional labels, scope, objectively verifiable Done, tests/evidence and rollback.
 - Real prerequisites belong in a **native Trello checklist**, with direct URLs to upstream cards. Do not create false blockers or empty checklists. Reconcile checkmarks with *actual* Done status after closing upstream cards.
 - Give direct Trello links to relevant prerequisites and successor work in PR descriptions and final delivery reports. Do not assign the next AIR number without checking whether it is already used.
+- **Ambiguous Trello write results are not permission to retry.** After a timeout, tool error or missing/unclear write response, read or search live Trello to determine whether the mutation actually succeeded before repeating it. Especially never retry `create` blindly: check the intended card's name, AIR number, board/list, and existing matches first. If a duplicate is found, preserve the canonical card and its activity, then archive only the confirmed duplicate. Apply the same verify-before-retry rule to moves, comments, checklist edits and other non-idempotent mutations.
 - Code ready, PR merged, successful deployment, read-only production smoke test, shadow verification and cutover are different claims. Record precisely which of them is proven.
 
 ## Delivery pipeline for already approved work
