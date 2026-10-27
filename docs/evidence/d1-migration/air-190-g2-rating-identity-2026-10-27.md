@@ -5,7 +5,7 @@
 **Command:** `node scripts/offline-import.mjs --snapshot <private snapshot> --database <private SQLite>`, run twice on one new database (from `0001`–`0003`)  
 **Scope:** private SQLite only; no Cloudflare D1 (scratch or production), no R2 request, Worker, Scheduled Task, flag or Access change. No acknowledged list was built or used  
 **Verdict:** **the two G2 owner ratings resolve, and nothing else moves.** Class C goes from 36 to 34 (G1 4, G3 30); the rerun applies nothing  
-**Used by:** [AIR-190](https://trello.com/c/jLOxHfLp), [ADR-0027](../../adr/0027-owner-rating-tmdb-identity.md), [AIR-74](https://trello.com/c/5AdAmKPe); compared with the [schema v3 offline import](air-177-candidate-show-identity-2026-10-27.md) of the same snapshot
+**Used by:** [AIR-190](https://trello.com/c/pyXBDUG4), [ADR-0027](../../adr/0027-owner-rating-tmdb-identity.md), [AIR-74](https://trello.com/c/5AdAmKPe); compared with the [schema v3 offline import](air-177-candidate-show-identity-2026-10-27.md) of the same snapshot
 
 Aggregates only; source keys, film ids, TMDB ids and ratings stay in the private reports.
 

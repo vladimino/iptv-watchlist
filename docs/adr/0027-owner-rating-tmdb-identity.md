@@ -3,8 +3,8 @@
 **Status:** Proposed (offline import contract and code only; it authorizes no R2 or D1 write, flag, Task, snapshot or acknowledged list)  
 **Original decision date:** 2026-10-27  
 **Recorded at:** 2026-10-27  
-**Approval source:** owner decision G2-A on [AIR-180](https://trello.com/c/NrsSc6gk), 2026-10-27, carried by [AIR-190](https://trello.com/c/jLOxHfLp); this record awaits review  
-**Related work:** [AIR-190](https://trello.com/c/jLOxHfLp), [AIR-180 audit](../evidence/d1-migration/air-180-class-c-audit-2026-10-27.md), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0019](0019-live-d1-backfill-boundaries.md) item 8, [D1 schema reference](../reference/data/d1-schema.md)  
+**Approval source:** owner decision G2-A on [AIR-180](https://trello.com/c/NrsSc6gk), 2026-10-27, carried by [AIR-190](https://trello.com/c/pyXBDUG4); this record awaits review  
+**Related work:** [AIR-190](https://trello.com/c/pyXBDUG4), [AIR-180 audit](../evidence/d1-migration/air-180-class-c-audit-2026-10-27.md), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0019](0019-live-d1-backfill-boundaries.md) item 8, [D1 schema reference](../reference/data/d1-schema.md)  
 **Supersedes:** None (it adds one resolution path for one family; ADR-0019's ban on minting Film ids is unchanged)  
 **Superseded by:** None
 
