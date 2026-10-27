@@ -1,9 +1,11 @@
 // AIR-199: the production shape of 27 Oct 2026. The EPG commit published a new generation (pointer and generation
-// files) and the invocation then ended (Workers `exceededMemory`) before `queueDiscovery`; a retry of the same commit
-// ended the same way. The continuation still holds the previous generation's terminal `chunk_budget` record with no
-// chunks left. These tests pin down what the Worker does in that state today: which reads show the mismatch, why the
-// AIR-159 generation handoff is not reached while the sync run is still in the `epg` stage, and that a retry which
-// completes restores the series for the published generation through the commit's own `queueDiscovery`.
+// files) and the invocation then ended (Workers `exceededMemory`) before `queueDiscovery`. A retry of the same commit
+// took the resume path, saved the sync run as `complete` and ended the same way, still before `queueDiscovery` (case
+// 7). The continuation still holds the previous generation's terminal `chunk_budget` record with no chunks left. These
+// tests pin down what the Worker does in that state today: which reads show the mismatch, why the AIR-159 generation
+// handoff is not reached while the sync run is still in the `epg` stage, that a retry which completes restores the
+// series through the commit's own `queueDiscovery`, and that once the run is `complete` only a continuation step,
+// which no scheduled caller makes from this state, reaches the handoff.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -119,5 +121,26 @@ const before=structuredClone(continuation());
 const late=JSON.parse(JSON.stringify(await call('queueDiscovery')(env,'epg_committed',OLD)));
 assert.equal(late.programmeRunId,NEW);assert.deepEqual(continuation(),before);
 
+// 7. The observed end state: the retry saves the run as `complete` in finishSync and then ends (here: every read after
+//    that save never returns) before refreshPredictionQueue, the ratings refresh and queueDiscovery finish. The run is
+//    `complete`, the published pointer names NEW, the continuation is still the spent OLD record, and the read-only
+//    views show `settled` with no generation conflict, so the hourly stage A makes no step. The next step that is made
+//    is a continuation step and the AIR-159 handoff recovers NEW.
+seedInterruptedCommit();
+let savedComplete=false;const originalPut=bucket.put.bind(bucket);
+bucket.put=async(key,value,options)=>{const saved=await originalPut(key,value,options);if(key==='sync.json'&&JSON.parse(value).stage==='complete')savedComplete=true;return saved;};
+bucket.get=async key=>{if(savedComplete)return new Promise(()=>{});return originalGet(key);};
+step();await settle();
+bucket.get=originalGet;bucket.put=originalPut;
+assert.equal(records.get('sync.json').stage,'complete');assert.equal(records.get('sync.json').runId,NEW);
+assert.deepEqual(continuation(),STALE,'the retry ended before queueDiscovery');
+assert.equal(ring().filter(entry=>entry.route==='/api/sync/epg'&&entry.phase==='completed').length,0);
+pipeline=await read('/api/enrichment/pipeline/status');
+assert.equal(pipeline.continuation.programmeRunId,OLD);assert.equal(pipeline.continuation.remainingChunks,0);
+assert.equal(pipeline.continuationHealth.status,'settled');assert.equal(pipeline.continuationHealth.generationConflict,null);
+assert.equal((await read('/api/status')).stage,'complete');
+r=await step();
+assert.equal(r.data.diagnostic.recovery.action,'generation_recovered');assert.equal(r.data.diagnostic.recovery.superseded,OLD);assert.equal(continuation().programmeRunId,NEW);
+
 assert.deepEqual(fetches.filter(url=>!url.includes('letterboxd.com')),[],'no TMDB or EPG request was made');
-console.log('AIR-199 interrupted EPG commit: read-only views, two entered without outcome, commit retry versus AIR-159 handoff, competing callers and generation fence passed');
+console.log('AIR-199 interrupted EPG commit: read-only views, two entered without outcome, commit retry versus AIR-159 handoff, competing callers, generation fence and the observed complete-but-unqueued end state passed');
