@@ -270,5 +270,189 @@ const LetterboxdFacts=(()=>{
   await projectRecords(env,[result.record]);
   return {...result,conflict:false,accepted};
  }
- return {FACTS_KEYS,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts};
+
+ // ---- Baseline import (contract "Baseline import protocol"), owner-only, behind LETTERBOXD_BASELINE_IMPORT.
+ const VIEW_FIELDS={rating:'actualRating',watched:'watched',watchlist:'watchlist'};
+ const HEX64=/^[0-9a-f]{64}$/,DAY=/^\d{4}-\d{2}-\d{2}$/,MAX_ITEMS=200,MAX_CHUNK=10000;
+ const importKey=(sha,chunk,kind)=>FACTS_PREFIX.replace('facts/','imports/')+sha+'/chunks/'+chunk+'.'+kind+'.json';
+ const baselineEnabled=env=>env?.LETTERBOXD_BASELINE_IMPORT==='on';
+ // Strict input: the origin binds the request to one archive; items name trusted ids and the facts the export showed.
+ function validateBaselineRequest(body,{needItems=true,now=Date.now()}={}){
+  const fail=message=>{throw new FactsError('invalid_request',message);};
+  if(!body||typeof body!=='object'||Array.isArray(body))fail('Expected a JSON object');
+  const origin=body.origin;
+  if(!origin||!HEX64.test(String(origin.archiveSha256||'')))fail('origin.archiveSha256 must be a SHA-256');
+  if(typeof origin.generatedAt!=='string'||!ISO.test(origin.generatedAt)||Date.parse(origin.generatedAt)>now||Date.parse(origin.generatedAt)<Date.UTC(2011,0,1))fail('origin.generatedAt must be a past ISO UTC time');
+  if(!['archive_name','owner_declared'].includes(origin.generatedAtSource))fail('origin.generatedAtSource must be archive_name or owner_declared');
+  if(!Number.isInteger(body.chunk)||body.chunk<0||body.chunk>MAX_CHUNK)fail('chunk must be an integer 0..'+MAX_CHUNK);
+  if(!needItems)return {origin,chunk:body.chunk,items:[]};
+  if(!Array.isArray(body.items)||!body.items.length||body.items.length>MAX_ITEMS)fail('items must hold 1..'+MAX_ITEMS+' films');
+  const lids=new Set();
+  const items=body.items.map(item=>{
+   if(!item||!LID.test(String(item.lid||'')))fail('Invalid Letterboxd id');
+   if(lids.has(item.lid))fail('A film appears twice in one chunk');lids.add(item.lid);
+   if(item.tmdb!=null&&!TMDB.test(String(item.tmdb)))fail('Invalid TMDB id');
+   const facts=item.facts||{},keys=Object.keys(facts);
+   if(!keys.length||keys.some(key=>!FACT_NAMES.includes(key)))fail('Unknown or missing facts');
+   if('watched' in facts&&facts.watched!==true)fail('An export can only show watched: true');
+   if('watchlist' in facts&&facts.watchlist!==true)fail('An export can only show watchlist: true');
+   if('rating' in facts&&!validValue('rating',facts.rating))fail('Invalid rating');
+   if('rating' in facts&&facts.watched!==true)fail('A rating or "not rated" row is also watched');
+   const effectiveOn={};for(const [fact,day] of Object.entries(item.effectiveOn||{})){if(!FACT_NAMES.includes(fact)||!DAY.test(String(day)))fail('Invalid effectiveOn');effectiveOn[fact]=day;}
+   return {lid:String(item.lid),tmdb:item.tmdb!=null?String(item.tmdb):null,facts,effectiveOn};
+  });
+  return {origin,chunk:body.chunk,items};
+ }
+ const itemsHash=async items=>sha256(JSON.stringify(items));
+ async function exportObservations(factKey,item,origin){
+  const list=[];
+  for(const fact of FACT_NAMES)if(fact in item.facts)list.push({fact,observation:await observation({factKey,fact,value:item.facts[fact],observedAt:origin.generatedAt,source:'letterboxd_export',sourceRef:origin.archiveSha256,effectiveOn:item.effectiveOn[fact]??null})});
+  return list;
+ }
+ async function floorsFor(env,lid,factKey){
+  const [{value:filmsList},{value:watchlist}]=await Promise.all([readJSON(env,FACTS_KEYS.filmsList),readJSON(env,FACTS_KEYS.watchlist)]);
+  return {...await summaryObservations('films-list',filmsList,lid,factKey),...await summaryObservations('watchlist',watchlist,lid,factKey)};
+ }
+ // The record key the link index would give these ids, or alias_conflict, without writing.
+ function plannedKey(index,links){
+  const aliases=aliasesOf(links),keys=[...new Set(aliases.map(alias=>index[alias]).filter(Boolean))];
+  if(keys.length>1)return null;
+  const key=keys[0]||factKeyFor(links);
+  for(const [alias,value] of Object.entries(index))if(value===key&&!aliases.includes(alias)&&aliases.some(mine=>mine.split(':')[0]===alias.split(':')[0]))return null;
+  return key;
+ }
+ const tally=(counts,outcomes)=>{for(const item of outcomes)counts[item.outcome]=(counts[item.outcome]||0)+1;if(outcomes.some(item=>item.tie))counts.tie=(counts.tie||0)+outcomes.filter(item=>item.tie).length;};
+
+ // Validate: what a commit of this chunk would do now, with no write.
+ async function previewBaselineChunk(env,body){
+  const {origin,chunk,items}=validateBaselineRequest(body);
+  const {value:links}=await readJSON(env,FACTS_KEYS.links),index=links||{},counts={},films={conflict:0,planned:0};
+  for(const item of items){
+   const factKey=plannedKey(index,{letterboxd:item.lid,tmdb:item.tmdb});
+   if(!factKey){films.conflict++;continue;}
+   films.planned++;
+   const {value:stored}=await readJSON(env,recordKey(factKey)),record=clone(stored)||emptyRecord(factKey,{letterboxd:item.lid,tmdb:item.tmdb}),floors=await floorsFor(env,item.lid,factKey);
+   tally(counts,(await exportObservations(factKey,item,origin)).map(({fact,observation:o})=>({fact,...applyObservation(record,fact,o,{floor:floors[fact]||null})})));
+  }
+  return {chunk,films,outcomes:counts};
+ }
+
+ // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
+ async function commitBaselineChunk(env,body){
+  const {origin,chunk,items}=validateBaselineRequest(body),hash=await itemsHash(items),sha=origin.archiveSha256;
+  const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
+  if(receipt){if(receipt.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was committed with other items');return {...receipt,replay:true};}
+  const {value:view}=await readJSON(env,FACTS_KEYS.viewIndex);
+  const before={};for(const item of items)for(const id of projectionIds({letterboxd:item.lid,tmdb:item.tmdb})){const entry=view?.[id]||{};before[id]=Object.fromEntries(Object.values(VIEW_FIELDS).filter(field=>Object.hasOwn(entry,field)).map(field=>[field,entry[field]]));}
+  let intent=null;
+  await casJSON(env,importKey(sha,chunk,'intent'),null,current=>{
+   if(current){if(current.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was opened with other items');intent=current;return null;}
+   intent={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,films:items.map(item=>item.lid),viewBefore:before,openedAt:new Date().toISOString()};return intent;
+  });
+  const counts={},films=[],records=[];let conflicts=0;
+  for(const item of items){
+   const links={letterboxd:item.lid,tmdb:item.tmdb},factKey=await linkOrNote(env,links);
+   if(!factKey){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+   const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey)});
+   tally(counts,result.outcomes);records.push(result.record);
+   films.push({lid:item.lid,factKey:result.factKey,observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
+  }
+  await projectRecords(env,records);
+  // Read back: every fact this import made current is still current, or a greater observation replaced it.
+  for(const film of films.filter(film=>!film.conflict)){
+   const {value:stored}=await readJSON(env,recordKey(film.factKey));
+   for(const {fact,outcome} of film.outcomes){
+    if(outcome!=='new'&&outcome!=='replaces')continue;
+    const mine=film.observations.find(item=>item.fact===fact),current=stored?.[fact];
+    if(!current||current.observationId!==mine.observationId&&compareObservations(current,mine.observation)<=0)throw new FactsError('readback_failed','Fact '+fact+' is not current after commit');
+   }
+  }
+  const entries=films.map(film=>film.conflict?film:{...film,observations:film.observations.map(({fact,observationId})=>({fact,observationId}))});
+  const next={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,committedAt:new Date().toISOString(),films:films.length,conflicts,outcomes:counts,entries,viewBefore:intent.viewBefore};
+  await casJSON(env,importKey(sha,chunk,'receipt'),null,current=>current?null:next);
+  return {...next,replay:false};
+ }
+
+ // Rollback of one committed chunk: restore each fact's before-image only while this export's observation is current,
+ // and the projection's before-image only for fields this rollback left without a fact.
+ // Rollback of one committed chunk, crash-recoverable: a create-only rollback intent first fixes the plan, per fact, from the
+ // receipt (the export's observation and the view fields it projected). Each step then converges to that plan and is safe to
+ // repeat: a fact whose export observation is still current is restored to its before-image (or removed when the import created
+ // it); one already restored by an earlier attempt counts as restored; one a later writer replaced is superseded and kept.
+ // View fields of a removed fact return to the commit's before-image unless the record holds that fact again.
+ async function rollbackBaselineChunk(env,body){
+  const {origin,chunk}=validateBaselineRequest(body,{needItems:false}),sha=origin.archiveSha256;
+  const {value:done}=await readJSON(env,importKey(sha,chunk,'rollback'));if(done)return {...done,replay:true};
+  const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
+  if(!receipt)throw new FactsError('not_committed','This chunk has no receipt');
+  let plan=null;
+  await casJSON(env,importKey(sha,chunk,'rollback-intent'),null,current=>{
+   if(current){plan=current;return null;}
+   plan={schemaVersion:1,archiveSha256:sha,chunk,openedAt:new Date().toISOString(),viewBefore:receipt.viewBefore||{},
+    facts:receipt.entries.filter(entry=>!entry.conflict).flatMap(entry=>entry.observations.map(({fact,observationId})=>({factKey:entry.factKey,fact,observationId})))};
+   return plan;
+  });
+  const counts={restored:0,superseded:0},records=new Map(),removed=[];
+  for(const factKey of [...new Set(plan.facts.map(item=>item.factKey))]){
+   const items=plan.facts.filter(item=>item.factKey===factKey),outcome=new Map();
+   const {value:record}=await casJSON(env,recordKey(factKey),null,current=>{
+    if(!current)return null;
+    outcome.clear();let changed=false;
+    for(const {fact,observationId} of items){
+     const now=current[fact];
+     if(now?.observationId===observationId){
+      // Roll back now, and leave a marker so a repeated attempt recognizes this fact as already rolled back.
+      rollbackFact(current,fact,observationId);changed=true;
+      if(current[fact]){current[fact].rolledBackFrom=observationId;outcome.set(fact,'restored');}
+      else{current.rolledBack={...(current.rolledBack||{}),[fact]:observationId};outcome.set(fact,'removed');}
+     }
+     else if(now&&now.rolledBackFrom===observationId)outcome.set(fact,'restored');
+     else if(!now&&current.rolledBack?.[fact]===observationId)outcome.set(fact,'removed');
+     else outcome.set(fact,'superseded');
+    }
+    return changed?current:null;
+   });
+   if(!record)continue;
+   records.set(factKey,record);
+   for(const [fact,result] of outcome){if(result==='superseded')counts.superseded++;else{counts.restored++;if(result==='removed')removed.push({factKey,fact,links:record.links});}}
+  }
+  await projectRecords(env,[...records.values()]);
+  if(removed.length)await casJSON(env,FACTS_KEYS.viewIndex,{},view=>{
+   let changed=false;
+   for(const {factKey,fact,links} of removed){
+    if(records.get(factKey)?.[fact])continue;
+    for(const id of projectionIds(links)){
+     const field=VIEW_FIELDS[fact],prior=plan.viewBefore?.[id]||{},item={...(view[id]||{})};
+     if(Object.hasOwn(prior,field))item[field]=prior[field];else delete item[field];
+     if(JSON.stringify(item)!==JSON.stringify(view[id]||{})){view[id]=item;changed=true;}
+    }
+   }
+   return changed?view:null;
+  });
+  const result={schemaVersion:1,archiveSha256:sha,chunk,rolledBackAt:new Date().toISOString(),facts:counts};
+  await casJSON(env,importKey(sha,chunk,'rollback'),null,current=>current?null:result);
+  return {...result,replay:false};
+ }
+
+ // Owner-only route (the whole Worker is behind Cloudflare Access); the gate keeps it inert until the owner enables it.
+ async function handleBaselineRequest(request,env,pathname){
+  const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
+  // Fail closed unless the routine writers record facts too: otherwise the next sync would clear imported ratings by absence.
+  if(!baselineEnabled(env))return json({error:'Letterboxd baseline import is disabled',code:'import_disabled'},409);
+  if(!factsEnabled(env))return json({error:'Letterboxd baseline import requires LETTERBOXD_FACTS=on',code:'facts_disabled'},409);
+  if(request.method!=='POST')return json({error:'Method not allowed'},405);
+  if(!/^application\/json\b/i.test(request.headers.get('Content-Type')||''))return json({error:'Expected application/json'},415);
+  let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}
+  const action=pathname.slice('/api/letterboxd/baseline/'.length);
+  try{
+   if(action==='validate')return json(await previewBaselineChunk(env,body));
+   if(action==='commit')return json(await commitBaselineChunk(env,body));
+   if(action==='rollback')return json(await rollbackBaselineChunk(env,body));
+   return json({error:'Not found'},404);
+  }catch(error){
+   if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409}[error.code]||500;return json({error:error.message,code:error.code},status);}
+   throw error;
+  }
+ }
+ return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts};
 })();
