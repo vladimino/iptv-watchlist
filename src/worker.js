@@ -27,7 +27,7 @@ async function loadEpgSnapshot(env){
 // Everything is derived in memory from the pinned generation, the watchlist, the view index and the current
 // profile: no R2 write, no model call, no TMDB call, no sync. The catalogue shape of `/api/programme` is not
 // changed. Films whose shows belong to another generation, whose prediction is not current for the profile,
-// whose identity is unverified, or that are rated or on the watchlist are not returned.
+// whose identity is unverified, or that are watched, rated or on the watchlist are not returned.
 const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
 function catalogShowStatus(show,now){return Number(show.start)>now?'future':Number(show.end)>now?'on_air':'archive';}
 function catalogPerson(person){return {id:String(person.id),name:person.name||person.original||null};}
@@ -55,16 +55,39 @@ function catalogPosters(metadata){
   return shared?{poster:shared,source:'metadata_cache'}:{poster:null,source:null};
  };
 }
+// Films the owner has watched or rated, as TMDB ids, so a catalog record is excluded whatever id it uses. A view-index entry
+// counts when it is watched (`watched: true`, projected from fact records) or carries an actual rating (also the legacy index).
+// The entry's own TMDB id comes from a `tmdb_<n>` key; a Letterboxd id is bridged to a TMDB id only through a stored id: the
+// metadata cache, the watchlist, the programme or a verified catalog record with that id, and only while all of them agree. A
+// Letterboxd id with two stored TMDB ids, or with none, is matched by its own id alone. Titles are never compared.
+const CATALOG_TMDB_ID=/^tmdb_([1-9]\d*)$/;
+const catalogConsumed=item=>item?.watched===true||item?.actualRating!=null;
+function catalogConsumedTmdb({index,metadata,watchlist,programme,catalog}){
+ const byLid=new Map(),conflicted=new Set();
+ const add=(id,tmdbId)=>{
+  if(id==null||tmdbId==null)return;const lid=String(id),tmdb=String(tmdbId);
+  if(CATALOG_TMDB_ID.test(lid)||!/^[1-9]\d*$/.test(tmdb)||conflicted.has(lid))return;
+  if(!byLid.has(lid))byLid.set(lid,tmdb);else if(byLid.get(lid)!==tmdb){byLid.delete(lid);conflicted.add(lid);}
+ };
+ for(const [id,record] of Object.entries(metadata||{}))add(record?.id??id,record?.tmdbId);
+ for(const film of [...(watchlist?.films||[]),...(programme?.films||[])])add(film?.id,film?.tmdbId);
+ for(const film of Object.values(catalog||{}))if(film?.tmdbId&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId))add(film.id,film.tmdbId);
+ const consumed=new Set();
+ for(const [id,item] of Object.entries(index||{})){if(!catalogConsumed(item))continue;const tmdb=CATALOG_TMDB_ID.exec(id)?.[1]||byLid.get(id);if(tmdb)consumed.add(tmdb);}
+ return consumed;
+}
 function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
+ const consumedTmdb=catalogConsumedTmdb({index,metadata,watchlist,programme,catalog});
  const byIdentity=new Map();
  for(const film of Object.values(catalog||{})){
   if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
   const id=String(film.id),identity=film.canonicalIdentity;
   if(excluded.has(id)||excluded.has(identity))continue;
   const item=index?.[id];
-  if(item?.actualRating!=null)continue;
+  // Watched or rated, under this id or any id of the same TMDB film: never offered, so a prediction never stands in for a rating.
+  if(catalogConsumed(item)||consumedTmdb.has(String(film.tmdbId)))continue;
   if(!profile||!indexedPredictionCurrent(item,profile))continue;
   if(!Array.isArray(film.shows)||film.showsProgrammeRunId!==programmeRunId)continue;
   const shows=dedupeShows(film.shows).filter(show=>Number(show.start)>from&&Number(show.start)<to).sort((a,b)=>Number(a.start)-Number(b.start)||String(a.channelId||'').localeCompare(String(b.channelId||''),'en'));

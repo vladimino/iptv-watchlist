@@ -1,6 +1,6 @@
 # Catalog of available films outside the watchlist
 
-`GET /api/catalog/available` is a read-only query over the published EPG generation. It returns the verified catalog films that are **not** on the watchlist, are available now, in the 72-hour catch-up or within the next 24 hours, and carry a prediction that is current for the current taste profile. It is the shared source for discovery surfaces such as a "finds" section or similar-film suggestions; those consumers rank and present, this route only decides eligibility and returns a minimal display record.
+`GET /api/catalog/available` is a read-only query over the published EPG generation. It returns the verified catalog films that are **not** on the watchlist and that the owner has neither watched nor rated, are available now, in the 72-hour catch-up or within the next 24 hours, and carry a prediction that is current for the current taste profile. It is the shared source for discovery surfaces such as a "finds" section or similar-film suggestions; those consumers rank and present, this route only decides eligibility and returns a minimal display record.
 
 The route does not change `GET /api/programme` or `GET /api/watchlist`, which keep serving the watchlist catalogue. It performs no R2 write, no model call, no TMDB call and no sync; the [GET side-effect test](../../../tests/get-side-effects.mjs) covers it like every other read.
 
@@ -12,9 +12,9 @@ The route does not change `GET /api/programme` or `GET /api/watchlist`, which ke
 | `programme.json` | The watchlist films of that generation (exclusion by id and TMDB identity) and the run id the response is pinned to |
 | `epg/discovered-films.json` | The catalog records: identity, display fields, credits, the shows of the generation that last confirmed them |
 | `watchlist.json` | Further watchlist ids and TMDB identities to exclude, including films without a programme show |
-| `enrichment/view-index.json` | The stored current prediction, the fingerprint facet and the actual rating per film |
+| `enrichment/view-index.json` | The stored current prediction and fingerprint facet, and the owner's `watched` and `actualRating` per id (see [Watched and rated films](#watched-and-rated-films)) |
 | `enrichment/profile/current.json` | The profile version and hash a prediction must match to be current |
-| `metadata.json` | The Letterboxd metadata cache of films that are or were on the watchlist, read only for a poster fallback: a catalog record without its own TMDB poster takes the cached `https://` poster of the record with the same stored id (whose cached TMDB id is the same or absent), or of the same TMDB id. Every cached record for that stored id, and every cached record for that TMDB id, must carry the same poster: once two disagree the key stays conflicted regardless of further records or their order, and a conflicted TMDB identity yields no poster even through the stored-id match. No other field is taken from it and nothing is fetched |
+| `metadata.json` | The Letterboxd metadata cache of films that are or were on the watchlist, read for the stored TMDB id of a Letterboxd id (see [Watched and rated films](#watched-and-rated-films)) and for a poster fallback: a catalog record without its own TMDB poster takes the cached `https://` poster of the record with the same stored id (whose cached TMDB id is the same or absent), or of the same TMDB id. Every cached record for that stored id, and every cached record for that TMDB id, must carry the same poster: once two disagree the key stays conflicted regardless of further records or their order, and a conflicted TMDB identity yields no poster even through the stored-id match. No other field is taken from it and nothing is fetched |
 
 The ratings seed compiled into the Worker is applied to an in-memory copy of the view index. Unlike `GET /api/enrichment/view`, this route never writes that seed back. `started/` markers are not consulted: they belong to the watchlist UI and are not a watched signal for catalog films.
 
@@ -24,10 +24,21 @@ A catalog record is returned only when every rule holds:
 
 1. **Verified identity.** The record has a `tmdbId` and `canonicalIdentity` equal to `tmdb:<tmdbId>`. An observation key or a record without a verified identity is not a film here.
 2. **Outside the watchlist.** Neither its id nor its TMDB identity appears among the programme's films or the watchlist's films. A watchlist film without a scheduled show is still a watchlist film.
-3. **Not rated.** The view index has no `actualRating` for it, after the compiled ratings seed.
+3. **Not watched and not rated.** Neither the record's own id nor any other id of the same TMDB film is watched or rated in the view index, after the compiled ratings seed. See [Watched and rated films](#watched-and-rated-films).
 4. **Current prediction.** The stored prediction matches the current profile version and hash, the stored fingerprint hash, fingerprint schema version 1 and prediction prompt version 1. Without a profile nothing is current and the list is empty.
 5. **Real shows of the pinned generation.** The record's `shows` were written by the pinned generation (`showsProgrammeRunId` equals the response's `programmeRunId`). Shows carried over from an earlier generation are not availability in the new one. `epgLastAiring` alone is not a show.
 6. **Inside the window.** At least one show starts strictly after `now − 72h` and strictly before `now + 24h`. A start exactly 72 hours ago has expired; a start exactly 24 hours ahead is outside the horizon. Only shows inside the window are returned.
+
+### Watched and rated films
+
+A view-index entry is **consumed** when it has `watched: true` or a non-null `actualRating`. `watched: false` alone, or `actualRating: null` alone (a watchlist film the films list shows without a rating, or an explicitly cleared rating), is not. A rated film is never returned, so a prediction never stands in for an actual rating, and the response carries no `watched` or `actualRating` field.
+
+A catalog record is excluded when its own entry is consumed, or when any consumed entry belongs to the same TMDB film:
+
+- an entry keyed `tmdb_<n>` belongs to TMDB id `n`;
+- an entry keyed by a Letterboxd id belongs to the TMDB id stored for that Letterboxd id in `metadata.json`, in `watchlist.json`, in the programme or on a verified catalog record with that id, and only while every one of those stored values is the same. A Letterboxd id with two different stored TMDB ids, or with none, excludes only a catalog record with that very id.
+
+Titles, years and aliases are never compared, so a remake or a namesake of a watched film is still offered. The same reading works with either value of `LETTERBOXD_FACTS`: with the gate on, the [fact projection](../integrations/letterboxd-user-facts.md#projections) writes `watched` and `actualRating` under every trusted alias of a film (its Letterboxd id and `tmdb_<n>`), and the stored TMDB id covers a record that has only its Letterboxd id; with the gate off, the legacy index holds ratings under the Letterboxd id and the stored TMDB id carries them to the `tmdb_<n>` record. The route reads neither the fact records nor the link index, so it stays a bounded read of fixed keys. Watchlist exclusions are unchanged and independent of these facts: a watched film that is on the watchlist again (a rewatch) stays on the watchlist and is excluded as a watchlist film.
 
 One entry per canonical identity: when two records share a TMDB identity, the one whose availability ends later is kept, then the smaller id. The list is ordered by `availableUntil`, then id, so the same stored state always produces the same order.
 
