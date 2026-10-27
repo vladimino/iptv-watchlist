@@ -520,11 +520,14 @@ function synopsis(film){
  return `<details class="film-synopsis"><summary><span>${escapeHTML(short)}…</span><strong>Читать полностью</strong></summary><p>${escapeHTML(text)}</p></details>`;
 }
 function personal(film){const item=enrichment.films[String(film.id)]||{},actual=Number.isFinite(item.actualRating),prediction=item.prediction;return {rating:actual?item.actualRating:Number.isFinite(prediction?.predictedRating)?prediction.predictedRating:null,actual,probability:Number.isFinite(prediction?.probability4Plus)?prediction.probability4Plus:0};}
+// P(4.0+) as a whole percent, only for a current forecast with a finite probability in [0, 1]; otherwise null.
+function chance4Plus(prediction){const value=prediction?.probability4Plus;return Number.isFinite(prediction?.predictedRating)&&Number.isFinite(value)&&value>=0&&value<=1?Math.round(value*100):null;}
 function recommendation(film){
  const item=enrichment.films[String(film.id)]||{},p=item.prediction,actual=item.actualRating;
  if(actual===null||actual===undefined){if(!p)return '';}
  const actualBadge=actual===null||actual===undefined?'':`<div class="score-badge score-actual" aria-label="Моя оценка ${Number(actual).toFixed(1)} из 5"><span>МОЯ ОЦЕНКА</span><strong>${Number(actual).toFixed(1)}</strong></div>`;
- const predictedBadge=p?`<div class="score-badge score-predicted${p.stale?' is-stale':''}" aria-label="Прогноз ${Number(p.predictedRating).toFixed(1)} из 5${p.stale?', ожидает пересчёта':''}"><span>ПРОГНОЗ</span><strong>${Number(p.predictedRating).toFixed(1)}</strong>${p.stale?'<small>ожидает пересчёта</small>':''}</div>`:'';
+ const chance=p&&!p.stale?chance4Plus(p):null;
+ const predictedBadge=p?`<div class="score-badge score-predicted${p.stale?' is-stale':''}" aria-label="Прогноз ${Number(p.predictedRating).toFixed(1)} из 5${p.stale?', ожидает пересчёта':chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${Number(p.predictedRating).toFixed(1)}</strong>${p.stale?'<small>ожидает пересчёта</small>':chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'';
  return `<div class="film-score-badges">${actualBadge}${predictedBadge}</div>`;
 }
 function moodTags(film){const ids=[...filmFacets(film).moods];return ids.length?`<div class="film-moods">${ids.slice(0,4).map(id=>`<span>${escapeHTML(moodLabel(id))}</span>`).join('')}</div>`:'';}
@@ -631,7 +634,7 @@ function findsLabels(film){
  return out.slice(0,2);
 }
 function findsCard(film,now=nowMs(),scope=findsScope()){
- const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),chance=Math.round(p.probability4Plus*100),original=film.original&&film.original!==film.title?film.original:'';
+ const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),chance=chance4Plus(p),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
  const title=film.url?`<a class="finds-title-link" href="${escapeHTML(film.url)}" target="_blank" rel="noopener noreferrer" title="Открыть на TMDB">${escapeHTML(film.title||film.original||'')}</a>`:escapeHTML(film.title||film.original||'');
  return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${poster}</div><div class="film-info"><h3>${title}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p></article>`;
