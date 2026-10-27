@@ -9,33 +9,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import {spawnSync} from 'node:child_process';
-import {webcrypto} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {REPO,directoryBase,loadWorker,overlayStore} from './discovery-ledger-offline.mjs';
 
-const REPO=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const SEEN=22000,BASE=Date.UTC(2026,9,27,12);
 const P_RUN='00000000-0000-4000-8000-000000000001',R_RUN='00000000-0000-4000-8000-000000000002';
-
-// Disk-backed store with a copy-on-write overlay: reads fall back to the base directory, writes go to the overlay.
-function diskStore(baseDir,overlayDir){
- const file=(dir,key)=>path.join(dir,encodeURIComponent(key));
- fs.mkdirSync(overlayDir,{recursive:true});
- const meta=new Map();let revision=0;
- const locate=key=>fs.existsSync(file(overlayDir,key))?file(overlayDir,key):baseDir&&fs.existsSync(file(baseDir,key))?file(baseDir,key):null;
- const etagOf=key=>{if(!meta.has(key)){const where=locate(key);if(!where)return null;meta.set(key,'b'+fs.statSync(where).size+'-'+(++revision));}return meta.get(key);};
- return {
-  async get(key){const where=locate(key);if(!where)return null;const etag=etagOf(key);return {etag,size:fs.statSync(where).size,json:async()=>JSON.parse(new TextDecoder().decode(fs.readFileSync(where))),text:async()=>new TextDecoder().decode(fs.readFileSync(where))};},
-  async put(key,value,options={}){const c=options.onlyIf,exists=!!locate(key);if(c?.etagDoesNotMatch==='*'&&exists||c?.etagMatches&&c.etagMatches!==etagOf(key))return null;fs.writeFileSync(file(overlayDir,key),typeof value==='string'?value:String(value));meta.set(key,'o'+(++revision));return {etag:meta.get(key)};},
-  async list({prefix=''}={}){const keys=new Set();for(const dir of [baseDir,overlayDir].filter(Boolean))for(const name of fs.readdirSync(dir)){const key=decodeURIComponent(name);if(key.startsWith(prefix))keys.add(key);}return {objects:[...keys].sort().map(key=>({key})),truncated:false};},
-  async delete(key){fs.rmSync(file(overlayDir,key),{force:true});meta.delete(key);}
- };
-}
-function loadWorker(){
- const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,ASSETS:{},console:{...console,log:()=>{}},fetch:async()=>new Response('unavailable',{status:599})});
- vm.runInContext(fs.readFileSync(path.join(REPO,'src/domain/film-person.js'),'utf8'),context);
- for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(path.join(REPO,file),'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
- return context;
-}
 
 // Synthetic shapes. Ledger items: ~1 KB with Cyrillic titles and descriptions; the first SEEN are in the latest scan.
 const RU=['Брат','Сибирский цирюльник','Москва слезам не верит','Ирония судьбы','Кин-дза-дза','Сталкер','Зеркало','Солярис'];
@@ -69,7 +47,7 @@ async function buildFixtures(dir,ledgerBytes){
  const fullBytes=fs.statSync(path.join(fullDir,encodeURIComponent('epg/discovery-latest.json'))).size;
  // The bounded store: what one bounded commit of P's own scan makes from the full store (the AIR-222 split, offline).
  const boundedDir=path.join(dir,'bounded');fs.cpSync(fullDir,boundedDir,{recursive:true});
- const store=diskStore(null,boundedDir),env={BUCKET:store,DISCOVERY_LEDGER_MODE:'bounded'};
+ const store=overlayStore(null,boundedDir),env={BUCKET:store,DISCOVERY_LEDGER_MODE:'bounded'};
  await store.put('sync.json',JSON.stringify({runId:P_RUN,stage:'epg'}));
  await store.put('epg/published-generation.json',JSON.stringify({programmeRunId:'00000000-0000-4000-8000-000000000000',phase:'published'}));
  await vm.runInContext('publishGenerationWithLedger',context)(env,P_RUN,scanOf(total,0),{programmeRunId:P_RUN},{'discovered-films.json':catalog,'programme.json':programme});
@@ -80,7 +58,7 @@ async function buildFixtures(dir,ledgerBytes){
 async function child(scenario,dir){
  const [mode,step]=scenario.split('-'),overlay=fs.mkdtempSync(path.join(dir,'run-'));
  try{
-  const context=loadWorker(),store=diskStore(path.join(dir,mode),overlay),env={BUCKET:store,DISCOVERY_LEDGER_MODE:mode,TMDB_API_READ_ACCESS_TOKEN:'t',TMDB_REQUEST_INTERVAL_MS:0};
+  const context=loadWorker(),store=overlayStore(directoryBase(path.join(dir,mode)),overlay),env={BUCKET:store,DISCOVERY_LEDGER_MODE:mode,TMDB_API_READ_ACCESS_TOKEN:'t',TMDB_REQUEST_INTERVAL_MS:0};
   const total=JSON.parse(fs.readFileSync(path.join(dir,'shape.json'),'utf8')).total;
   if(step==='commit'){
    await store.put('sync.json',JSON.stringify({runId:R_RUN,stage:'epg'}));
