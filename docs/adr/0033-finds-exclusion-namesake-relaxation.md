@@ -1,9 +1,9 @@
 # ADR 0033: The Finds title exclusion keeps a name the owner watched in several distinct years, and ignores an alias-only namesake whose year is at least two years away
 
-**Status:** Proposed 2026-10-27 (design decision only; owner acceptance is required before implementation; it authorizes no code activation, list build, upload, flag change, R2 or D1 read or write, production read or Letterboxd or TMDB request)  
+**Status:** Accepted 2026-10-27 (owner-approved design decision only; it authorizes no code activation, list build, upload, flag change, R2 or D1 read or write, production read or Letterboxd or TMDB request)  
 **Original decision date:** 2026-10-27  
 **Recorded at:** 2026-10-27  
-**Approval source:** pending owner review on [AIR-216](https://trello.com/c/hx6QPPZf)  
+**Approval source:** explicit owner acceptance on 2026-10-27, including residual risks B and C, on [AIR-216](https://trello.com/c/hx6QPPZf)  
 **Related work:** [AIR-216](https://trello.com/c/hx6QPPZf), [AIR-198 rollout evidence](../evidence/letterboxd/air-198-finds-exclusion-rollout-2026-10-27.md), [AIR-217](https://trello.com/c/oMmKr9FV) (implementation), [AIR-218](https://trello.com/c/lmToHh5p) (follow-up), [ADR-0028](0028-finds-display-only-watched-exclusion.md), [catalog API](../reference/api/catalog.md#display-only-title-exclusion)  
 **Supersedes:** [ADR-0028](0028-finds-display-only-watched-exclusion.md) in part, and only for lists tagged `strict_original_exact_year_v2`: the export-namesake clause of decision 2 ("a normalized name that no other film of the same export carries in any year"), the alias part of decision 3.3 (catalog uniqueness) and the synthetic case "Two export films with the same name in different years". Every other part of ADR-0028 stays in force.  
 **Superseded by:** None
