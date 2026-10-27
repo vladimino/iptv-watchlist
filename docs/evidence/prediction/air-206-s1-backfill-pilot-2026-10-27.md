@@ -1,9 +1,9 @@
 # Selective prediction compatibility: impact facet backfill (stage S1, pilot and remaining pages)
 
-**Executed:** 2026-10-27, 23:22:30.576–23:22:33.163 UTC, by the owner in a browser session behind Cloudflare Access (DevTools console, same-origin `fetch`)
-**Verified:** 2026-10-27, about 23:23 UTC, owner-only IPTV MCP read tools only (`enrichment_queue`, `prediction_queue_overview`, `prediction_film_diagnostics`)
+**Executed:** 2026-10-27, by the owner in a browser session behind Cloudflare Access (DevTools console, same-origin `fetch`): pilot page 23:22:30.576–23:22:33.163 UTC; remaining pages until 23:29:41.737 UTC
+**Verified:** 2026-10-27, about 23:23 UTC (after the pilot) and about 23:30 UTC (after the remaining pages), owner-only IPTV MCP read tools only (`enrichment_queue`, `prediction_queue_overview`, `prediction_film_diagnostics`)
 **Code:** `main` `da71772`
-**Approval:** owner's explicit approval of exactly one pilot page, recorded on [AIR-206](https://trello.com/c/87mg3VNi) on 28 October 2026 (board time); no further pages, flags, Tasks, profile publication, model or sync
+**Approval:** owner's explicit approval of exactly one pilot page, recorded on [AIR-206](https://trello.com/c/87mg3VNi) on 28 October 2026 (board time), then a separate owner approval of the remaining pages in the AIR-206 conversation; no flags, Tasks, profile publication, model or sync
 **Verdict:** pilot **GO**, then the owner approved the remaining pages in the AIR-206 conversation and ran them. **S1 complete:** the backfill reached the end of the id list (`nextCursor: null`), and every observable control value is unchanged. See [Remaining pages](#remaining-pages)
 
 ## The call
@@ -33,7 +33,7 @@ The route walks the view-index and catalog ids in sorted order. For each id whos
 - The window coverage moved from 1,892 to 1,888 because the viewing window moved with the clock; the share stays 100 %.
 - Film diagnostics for three ids inside the processed range (`10oS`, `15LW`, `17Vk`) and one outside it (`2Eao`) are unchanged: fingerprint current, prediction current, `mode: strict`, index `agreed`.
 
-## Findings
+## Findings (pilot)
 
 1. **The write is safe under strict.** No decision, counter or diagnostic changed.
 2. **Facet coverage before the call was zero in this page.** That is consistent with every index entry written before the queue change lacking `impactFeatures`. About 2,333 queue films (plus any other index ids) remain, i.e. roughly 29 more pages of 80 by `nextCursor`, starting from `1Y52`.
@@ -41,7 +41,7 @@ The route walks the view-index and catalog ids in sorted order. For each id whos
 
 ## Limits
 
-One page; the response is the owner's console output (screenshot), not a server log. The Worker version and flag bindings were not read.
+Pilot: one page; the response is the owner's console output (screenshot), not a server log. The Worker version and flag bindings were not read.
 
 ## Remaining pages
 
@@ -69,3 +69,4 @@ Controls read about 23:30 UTC with the same read-only IPTV MCP tools:
 
 The scheduled run at 23:26 refreshed the queue between pages without any error or contention reported by the script. Facet coverage itself still cannot be read with read-only tools while every prediction is exact. The next measurable point is the first selective evaluation after a change-impact publication (S4).
 
+Remaining pages: the totals are the owner's console summary; per-page lines and server logs were not captured.
