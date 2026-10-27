@@ -64,3 +64,23 @@ The watchlist parser stores `data-postered-identifier.lid` as the film id, and t
 A title match to a stored id that another export code already equals is a second film with a similar title (a remake or namesake); the report counts it as `titleYearOnCodeMatchedLid` and it does not weaken the verdict. `titleYearOnStoredLid` counts only title matches to stored ids no code claims.
 
 Until a snapshot verdict is `supported`, treat `lid_exact` counts as an observation about this one snapshot, not as a general rule.
+
+## Identity from the Letterboxd film page
+
+A film the matcher leaves unresolved can get its identity only from the Letterboxd film page its own export code leads to. [`src/letterboxd-identity.js`](../../../src/letterboxd-identity.js) decides it; it is pure and receives the page evidence, the reconciliation rows and the identities already imported. The page is read with `parseFilm` of [`src/sources.js`](../../../src/sources.js), the parser the Worker's metadata cache uses, so the resolver trusts nothing the Worker does not already trust. The operator command and network policy are in the [reconciliation runbook](../../runbooks/letterboxd-export-reconciliation.md#identity-from-film-pages).
+
+**Queue.** Every `match` row that is not `accepted`, whose code is a valid export code and is not already an imported Letterboxd id (`lid` of a baseline import plan item), in this order: `candidate`, `ambiguous`, `unmatched`, then any other status; by code within a group.
+
+**Evidence of one page.** The shortlink `https://boxd.it/<code>` is followed hop by hop; a hop may only go to `https://boxd.it` or `https://letterboxd.com`, and the last one must be a film page `https://letterboxd.com/film/<slug>/` answering 200. From that page the resolver keeps: the code of `<link rel="shortlink">`, the path of `<link rel="canonical">`, every `data-tmdb-id` and `data-tmdb-type`, the film name and alternative titles from `parseFilm`, and the release year from `og:title` and the JSON-LD `releasedEvent`. It keeps no HTML.
+
+**Decisions.**
+
+| Decision | When |
+| --- | --- |
+| `accepted` (method `letterboxd_page`) | Every queued film is observed (the run is final) and every check below passes: the shortlink code equals the export code; the canonical path, if present, is the landing path; exactly one TMDB id of type `movie`; the normalized export name equals the page's film name; the export and page years are equal; and no cross-film check fires |
+| `provisional` | Every check passes, but some queued film is not observed yet (`queue_incomplete`). It carries no TMDB id and is not fit for an import: a film observed later can still make it a `duplicate_tmdb` conflict or a `same_title_year` review |
+| `conflict` | A contradiction: `shortlink_mismatch`, `canonical_mismatch`, `tmdb_multiple` (two TMDB ids on one page), `title_differs`, `year_disagrees` (more than one year apart), `tmdb_already_imported` (the TMDB id belongs to an imported film), `duplicate_tmdb` (two queued codes land on one TMDB id; both are conflicts) |
+| `owner_review` | Missing or weak evidence: `shortlink_missing`, `tmdb_missing`, `tmdb_not_movie`, `tmdb_type_missing`, `title_missing`, `title_alias_only` (the export name is only an alternative title), `year_off_by_one`, `page_year_missing`, `page_year_inconsistent`, `export_year_missing`, `ledger_candidate_differs` (the title/year candidate pointed at a stored film with another TMDB id: a remake or namesake), `ledger_ambiguous`, `same_title_year` (another queued export film has the same normalized name and year), and the page outcomes `not_found`, `redirect_off_site`, `not_film_page`, `too_many_redirects`, `unexpected_status`, `unparsable_page` |
+| `pending` | Not observed yet (`not_fetched`) or the fetch failed within its retry bound (`fetch_failed`) |
+
+Title normalization is the matcher's. Cross-film checks look at every observed film, so a decision can change while the queue is incomplete. Decisions are final only when the report says `final: true`, that is, no queued film is `pending`; `accepted` exists only then. A run bounded to the priority wave (`candidate` and `ambiguous`) reports that wave as observed in `progress` but decides it provisionally; the later `unmatched` films are still compared with it before anything is accepted. An `accepted` decision is an identity proposal for a later, separately approved import; nothing here writes facts.
