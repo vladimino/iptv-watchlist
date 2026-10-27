@@ -5,7 +5,7 @@
 **Sources:** repository code only (`src/`, `public/app.js`). No R2, D1, MCP, Cloudflare or production read; no profile, prediction or queue was opened  
 **Scope:** every place that decides whether a stored prediction is current with respect to the published taste profile, and the profile publisher  
 **Verdict:** the profile rule is strict equality of version **and** hash, duplicated in 13 decision points across 8 files with no shared function; any selective model must replace all of them together  
-**Used by:** [AIR-32](https://trello.com/c/eKFV3v2j), [ADR-0030](../../adr/0030-selective-prediction-profile-compatibility.md); input for [AIR-202](https://trello.com/c/POMLJNUx)–[AIR-206](https://trello.com/c/87mg3VNi)
+**Used by:** [AIR-32](https://trello.com/c/eKFV3v2j), [ADR-0031](../../adr/0031-selective-prediction-profile-compatibility.md); input for [AIR-202](https://trello.com/c/POMLJNUx)–[AIR-206](https://trello.com/c/87mg3VNi)
 
 ## Method
 
@@ -37,7 +37,7 @@ Not a freshness decision: `src/offline-importer.js` validates and compares store
 
 ## Findings for the design
 
-- The five-field equality exists in four independent copies (#1/#2, #8 inline, #11/#12 domain, #13 D1) plus the run binding; agreement between queue and readers is today only a consequence of copying. One evaluator is needed (ADR-0030 section 5).
+- The five-field equality exists in four independent copies (#1/#2, #8 inline, #11/#12 domain, #13 D1) plus the run binding; agreement between queue and readers is today only a consequence of copying. One evaluator is needed (ADR-0031 section 5).
 - The view-index fingerprint facet keeps only general execution dimensions and drops `unknown` and `not_applicable` (`executionFacet`), and holds no genres. It cannot evaluate genre-specific or unknown-aware selectors; the queue needs its own impact features.
 - Stored genres are display names: Russian TMDB names from discovery (`language=ru-RU`) and Russian labels from the Letterboxd source map. Selectors need a closed canonical genre list with an alias table; an unmapped name has to count as unknown.
 - The runner binds a run to one profile hash (#4, #5, #7). That boundary is compatible with selective freshness and stays.

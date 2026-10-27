@@ -1,6 +1,6 @@
 {
  "specVersion": 1,
- "decision": "docs/adr/0030-selective-prediction-profile-compatibility.md",
+ "decision": "docs/adr/0031-selective-prediction-profile-compatibility.md",
  "note": "Pure specification fixtures. Synthetic hashes and features only; no production record. They state expected outcomes for the shared compatibility evaluator and the publication validator; they are not an implementation.",
  "vocabulary": {
   "scopes": ["identity","selective","global"],

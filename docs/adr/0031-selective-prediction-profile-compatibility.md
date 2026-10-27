@@ -1,4 +1,4 @@
-# ADR 0030: A prediction stays usable across taste-profile versions only through a published, typed change impact evaluated by one shared rule
+# ADR 0031: A prediction stays usable across taste-profile versions only through a published, typed change impact evaluated by one shared rule
 
 **Status:** Accepted 2026-10-27, option A of section 4a (design only; it authorizes no profile publication, model run, queue change, flag, Scheduled Task, R2 or D1 operation)  
 **Original decision date:** 2026-10-27  

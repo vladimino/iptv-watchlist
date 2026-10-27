@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 
-// Specification fixtures for selective prediction compatibility (ADR-0030). They hold no evaluator: this test only keeps them
+// Specification fixtures for selective prediction compatibility (ADR-0031). They hold no evaluator: this test only keeps them
 // internally consistent and aligned with the live fingerprint and profile vocabularies, so the evaluator and publisher built
 // later are tested against cases that use real mechanic, execution, genre and profile field names.
 const spec=JSON.parse(fs.readFileSync('tests/fixtures/profile-compatibility/cases.json','utf8'));
