@@ -202,6 +202,8 @@
 .finds-card .film-info h3{font-size:19px;margin:2px 0 4px;display:block}
 .finds-title-link{color:inherit;text-decoration:none}.finds-title-link:hover,.finds-title-link:focus-visible{color:var(--lime);text-decoration:underline}.finds-title-link:focus-visible{outline:2px solid var(--lime);outline-offset:3px;border-radius:2px}
 .finds-labels{padding:0 17px 10px}
+.finds-reason{margin:0;padding:0 17px 8px;font-size:13px;color:#d7f5dc;overflow-wrap:anywhere}
+.finds-reason span{color:#9fd3ad}
 .finds-airing{margin:0;padding:0 17px 15px;font-size:13px;color:#cde7d1}.finds-airing[data-airing=live]{color:var(--lime);font-weight:600}
 @media(max-width:760px){.finds{padding:14px}.finds-cards{grid-template-columns:1fr}.finds-card .film-head{padding-right:110px}}
 @media(max-width:410px){.finds-card .film-head{padding-top:84px;padding-right:17px}}
