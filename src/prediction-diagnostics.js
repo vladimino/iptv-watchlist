@@ -17,7 +17,10 @@ async function loadPredictionDiagnosticSnapshot(env,filmId){
   try{const state=await readFilmState(env,filmId);films[filmId]={status:'recorded',fingerprint:state?.fingerprint??null,predictions:state?.predictions??null};}
   catch{films[filmId]={status:'unavailable',fingerprint:null,predictions:null};}
  }
+ // The same freshness rule (mode and profile snapshot) as the queue and the readers; strict unless switched.
+ const freshness=await predictionFreshness(env,profile.value),catalogFilms=allEnrichmentFilms(programme.value?.films?programme.value:{films:[]},catalog.value);
  return {
+  freshness,filmsById:new Map(catalogFilms.map(film=>[String(film.id),film])),
   queue:queue.value,queueStatus:queue.status,profile:profile.value,profileStatus:profile.status,index:index.value,indexStatus:index.status,
   programme:programme.value,programmeStatus:programme.status,catalog:catalog.value,catalogStatus:catalog.status,
   publishedGeneration:publishedGeneration.value,publishedGenerationStatus:publishedGeneration.status,films,
@@ -90,23 +93,25 @@ function predictionDiagnosticFingerprint(record){
  const fingerprint=record.fingerprint;
  return {presence:'recorded',schemaVersion:fingerprint.fingerprintSchemaVersion??null,current:fingerprintCurrent(fingerprint),invalidated:!!fingerprint.invalidatedAt};
 }
-function predictionDiagnosticPrediction(record,profile){
+function predictionDiagnosticPrediction(record,profile,freshness=strictFreshness(profile),film=null){
  if(!record||record.status==='unavailable')return {presence:'unknown',current:null,stale:'unknown',profileMatch:null,cause:'unknown'};
  const prediction=record.predictions?.current;
  if(!record.predictions||!prediction)return {presence:record.predictions?'recorded_without_current':'not_recorded',current:false,stale:'unknown',profileMatch:null,cause:'not_recorded'};
  if(!profile)return {presence:'recorded',current:false,stale:'unknown',profileMatch:null,cause:'profile_not_recorded'};
- const current=predictionCurrent(prediction,profile,record.fingerprint);
+ const current=!!freshness.state(prediction,record.fingerprint,film?.genres);
  const profileMatch=prediction.tasteProfileVersion===profile.version&&prediction.tasteProfileHash===profile.profileHash;
- const cause=current?'current':!fingerprintCurrent(record.fingerprint)?'fingerprint_not_current':!profileMatch?'profile_changed':'stale';
- return {presence:'recorded',current,stale:!current,profileMatch,cause};
+ // A prediction kept under another profile version by the selective rule is 'compatible'; its record keeps its own version.
+ const cause=current?(profileMatch?'current':'compatible'):!fingerprintCurrent(record.fingerprint)?'fingerprint_not_current':!profileMatch?'profile_changed':'stale';
+ return {presence:'recorded',current,stale:!current,profileMatch,cause,mode:freshness.mode};
 }
 function predictionDiagnosticIndex(snapshot,filmId,record){
  if(snapshot.indexStatus==='unavailable'||snapshot.profileStatus==='unavailable'||!record||record.status==='unavailable')return 'unknown';
  if(snapshot.indexStatus!=='recorded'||!snapshot.profile)return 'unknown';
  const item=snapshot.index?.[filmId];
  if(!item)return 'not_recorded';
- const indexCurrent=!!indexedPredictionCurrent(item,snapshot.profile);
- const fileCurrent=!!predictionCurrent(record.predictions?.current,snapshot.profile,record.fingerprint);
+ const freshness=snapshot.freshness||strictFreshness(snapshot.profile),film=snapshot.filmsById?.get(filmId)||null;
+ const indexCurrent=!!freshness.indexed(item,film);
+ const fileCurrent=!!freshness.state(record.predictions?.current,record.fingerprint,film?.genres);
  return indexCurrent===fileCurrent?'agreed':'inconsistent';
 }
 function predictionDiagnosticSources(snapshot){
@@ -131,12 +136,12 @@ function predictionDiagnosticReasons(snapshot,outstanding){
  if(published?.phase&&published.phase!=='published')reasons.push('generation_not_published');
  if(queue?.profileVersion!=null&&profile?.version!=null&&queue.profileVersion!==profile.version)reasons.push('profile_version_differs');
  if(queue?.profileHash&&profile?.profileHash&&queue.profileHash!==profile.profileHash)reasons.push('profile_hash_differs');
- if(Array.isArray(outstanding)&&snapshot.indexStatus==='recorded'&&snapshot.profileStatus==='recorded'&&profile&&outstanding.some(id=>indexedPredictionCurrent(snapshot.index?.[id],profile)))reasons.push('index_ahead_of_queue');
+ if(Array.isArray(outstanding)&&snapshot.indexStatus==='recorded'&&snapshot.profileStatus==='recorded'&&profile&&outstanding.some(id=>(snapshot.freshness||strictFreshness(profile)).indexed(snapshot.index?.[id],snapshot.filmsById?.get(id)||null)))reasons.push('index_ahead_of_queue');
  return reasons;
 }
 function predictionDiagnosticCoverage(snapshot,now){
  if(snapshot.programmeStatus!=='recorded'||snapshot.profileStatus!=='recorded'||snapshot.indexStatus==='unavailable'||!snapshot.profile)return {status:'unknown',current:null,total:null,percent:null,windowCurrent:null,windowTotal:null,windowPercent:null};
- const summary=canonicalCoverageSummary(snapshot.programme,snapshot.catalogStatus==='recorded'?snapshot.catalog:null,snapshot.index||{},snapshot.profile,now);
+ const summary=canonicalCoverageSummary(snapshot.programme,snapshot.catalogStatus==='recorded'?snapshot.catalog:null,snapshot.index||{},snapshot.profile,now,snapshot.freshness||strictFreshness(snapshot.profile));
  const complete=snapshot.catalogStatus==='recorded'&&snapshot.indexStatus==='recorded';
  return {
   status:complete?'recorded':'partial',current:summary.currentPredictionsTotal,total:summary.confirmedFilmsTotal,
@@ -174,7 +179,7 @@ function predictionFilmDiagnostic(snapshot,filmId,now){
  return {
   atomic:false,filmId,lane:predictionDiagnosticLane(snapshot.queue,filmId),eligibleNow:eligibility.eligibleNow,cause:eligibility.cause,
   snapshot:{...predictionDiagnosticSnapshotId(snapshot.queue),consistent:reasons.length===0,partial:reasons.length>0,reasons},
-  fingerprint:predictionDiagnosticFingerprint(record),prediction:predictionDiagnosticPrediction(record,snapshot.profile),
+  fingerprint:predictionDiagnosticFingerprint(record),prediction:predictionDiagnosticPrediction(record,snapshot.profile,snapshot.freshness||strictFreshness(snapshot.profile),snapshot.filmsById?.get(filmId)||null),
   index:predictionDiagnosticIndex(snapshot,filmId,record),retry:predictionDiagnosticRetry(snapshot.queue,filmId),
  };
 }
