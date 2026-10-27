@@ -11,4 +11,18 @@ assert.equal(inspectAddedLines(patch, 'docs/process/documentation-governance.md'
 assert.equal(inspectAddedLines('@@ -1 +1 @@\n-[AIR-22] old\n+See the current validation contract.', file).length, 0);
 assert.equal(inspectAddedLines('@@ -2,0 +3 @@\n+See [the rationale](../adr/0015-decision.md).', file).length, 0);
 assert.equal(inspectAddedLines('@@ -2,0 +3 @@\n+Historical retry records without a summary return null.', file).length, 0);
-console.log('Timeless documentation advisory fixtures passed.');
+
+const nav = 'docs/architecture/README.md';
+const patchFor = text => '@@ -1,0 +2 @@\n+' + text;
+assert.equal(inspectAddedLines(patchFor('merged (AIR-141)'), nav)[0]?.severity, 'error');
+assert.equal(inspectAddedLines(patchFor('The diagrams were delivered across AIR-140–143.'), nav)[0]?.severity, 'error');
+assert.equal(inspectAddedLines(patchFor('Implemented in AIR-152'), 'docs/reference/README.md')[0]?.severity, 'error');
+assert.equal(inspectAddedLines(patchFor('See AIR-141 source evidence'), nav)[0]?.severity, 'warning');
+assert.equal(inspectAddedLines(patchFor('See [ADR-0005](../adr/0005.md)'), nav).length, 0);
+assert.equal(inspectAddedLines(patchFor('merged (AIR-141)'), 'docs/evidence/README.md').length, 0);
+assert.equal(inspectAddedLines(patchFor('merged (AIR-141)'), 'docs/process/README.md').length, 0);
+assert.equal(inspectAddedLines(patchFor('merged (AIR-141)'), 'docs/reference/api/mcp.md')[0]?.severity, 'warning');
+assert.equal(inspectAddedLines('@@ -1 +1 @@\n-merged (AIR-141)\n+Architecture and current boundaries', nav).length, 0);
+assert.equal(inspectAddedLines(patchFor('A working overview.'), nav).length, 0);
+
+console.log('Timeless documentation strict and advisory fixtures passed.');
