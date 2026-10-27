@@ -1,9 +1,9 @@
 # ADR 0028: Finds hide an export film without a proven identity only by a strict, display-only title-and-year match behind an off-by-default switch
 
-**Status:** Proposed (design only; it authorizes no code activation, flag change, R2 or D1 write, upload, production read or Letterboxd request)  
+**Status:** Accepted 2026-10-27 (design decision only; it authorizes no code activation, flag change, R2 or D1 write, upload, production read or Letterboxd request)  
 **Original decision date:** 2026-10-27  
 **Recorded at:** 2026-10-27  
-**Approval source:** owner approval of the strict strategy, recorded on [AIR-196](https://trello.com/c/cvVor8KO) on 2026-10-27; this record awaits review  
+**Approval source:** owner accepted ADR-0028 explicitly on 2026-10-27 after independent review of PR #155 at commit `0907ed4`; this acceptance authorizes the architectural decision, not production operations or implementation activation  
 **Related work:** [AIR-196](https://trello.com/c/cvVor8KO), [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026-10-27.md), [AIR-197](https://trello.com/c/4lY20BgM) (implementation), [AIR-198](https://trello.com/c/9xpmq2fc) (rollout), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0011](0011-bounded-title-variants.md), [ADR-0023](0023-letterboxd-user-facts.md), [catalog API](../reference/api/catalog.md#watched-and-rated-films)  
 **Supersedes:** None (it adds one display rule to the Finds read path; identity, facts and ratings keep their accepted rules)  
 **Superseded by:** None
@@ -109,7 +109,7 @@ Fully reversible. Setting `FINDS_TITLE_EXCLUSION` to anything other than `on` re
 
 ## Evidence
 
-- **Original decision:** owner approval of the strict strategy on [AIR-196](https://trello.com/c/cvVor8KO), 2026-10-27.
+- **Original decision:** owner approval of the strict strategy on [AIR-196](https://trello.com/c/cvVor8KO), 2026-10-27. **ADR acceptance:** explicit owner approval following the positive independent re-review of [PR #155](https://github.com/vladimino/iptv-watchlist/pull/155), 2026-10-27.
 - **Implementation:** none; planned in [AIR-197](https://trello.com/c/4lY20BgM) behind the off-by-default switch.
 - **Dated verification:** offline estimate in the [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026-10-27.md) (private snapshot, not production).
 - **Uncertainty:** the effect on the current Finds and the false-suppression rate on fresh production data are not measured; uniqueness outside the export and the catalog is not checked; the export does not say whether an entry is a film or a series.
