@@ -34,7 +34,7 @@ Until the write cutover, the R2 column is what production reads and writes. The 
 | `programme.json` shows | `programme_generation`, `film_generation`, `film_show` | R2 is the published generation |
 | `programme.json` film body | `film_metadata`, `film_person_credit` | Same catalog record as the watchlist film |
 | `epg/published-generation.json` | `published_generation` | R2 is the one current pointer |
-| `epg/discovery-latest.json` | `candidate`, `candidate_generation`, `candidate_show` | `candidate` is latest; each generation keeps its observation |
+| `epg/discovery-latest.json` | `candidate`, `candidate_generation`, `candidate_show` | `candidate` is latest; each generation keeps its observation. Under the proposed [ADR 0034](../../adr/0034-bounded-discovery-ledger.md) the archive `epg/discovery-archive/v1/` is a second source for `candidate`. It must be read as the manifest version named by the published active ledger and exactly its segment versions, deduplicated with active-wins and compared on payloads, and it must be mapped before such a ledger is imported |
 | `epg/discovery-resolution.json` | `candidate_decision`, `candidate_decision_history` | R2 is the decision record |
 | `epg/discovered-films.json` | `film` and `film_external_id` when the row is a Film | The observation key stays a candidate |
 | `metadata.json` | `film_metadata`, `film_person_credit`; `film_dimension` is only the lifecycle status | R2 cache of the same catalog record |
