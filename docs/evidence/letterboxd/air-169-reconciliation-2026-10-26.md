@@ -3,7 +3,7 @@
 **Captured:** 2026-10-26, offline on the owner's machine; `scripts/letterboxd-reconcile.mjs` at `main` `80712e7`, re-run with the namesake fix of this PR (identical results except `lidHypothesis`)  
 **Inputs:** the owner's Letterboxd account export of 2026-10-26 13:48 UTC (`watched.csv`, `ratings.csv`, `watchlist.csv`, `diary.csv` only); the [AIR-175 production R2 snapshot](../d1-migration/air-175-r2-snapshot-identity-2026-10-26.md), `consistent_fenced`, re-verified offline before the run (`--verify`: 7,994 objects, 581,345,885 bytes, aggregate `f71eee10…`, `manifest.json` SHA-256 `c26e0453…`, `finishedAt` 2026-10-26T22:19:31.757Z)  
 **Scope:** offline only; no network, no R2 or D1 access, no Worker route, no import or write of any rating, watched mark or watchlist entry  
-**Verdict:** export codes **are** the stored Letterboxd ids for this snapshot (`supported`: 420 of 420 stored ids equal an export code, 0 disagreements); 420 films accepted, the other 2,040 need an identity source the snapshot does not hold  
+**Verdict:** for the 420 Letterboxd ids stored in this snapshot, export codes **are** those ids (`supported`: 420 of 420 equal an export code, 0 disagreements); this is not a validated mapping for the other 2,040 export films. 420 films accepted; 2,040 watched films are not accepted (561 candidate, 1 ambiguous, 1,478 unmatched)  
 **Used by:** [AIR-169](https://trello.com/c/pFtiCeYW); input for [AIR-170](https://trello.com/c/UaOFSsF9) (storage contract)
 
 Aggregates only. The extracted CSV files and the per-film `matches.jsonl` stay in private directories outside the repository; no title, code, URI or rating appears here. Procedure: [letterboxd-export-reconciliation.md](../../runbooks/letterboxd-export-reconciliation.md); rules: [export contract](../../reference/integrations/letterboxd-export.md).
@@ -61,7 +61,16 @@ The first run reported `mixed` because the matcher counted the one namesake, a s
 ## What the numbers mean
 
 - **Watchlist is fully reconciled.** All 397 watchlist films, including the 97 rewatches, are accepted by exact id.
-- **Most watched films are unknown to production.** The snapshot stores Letterboxd ids only for watchlist and programme films (420). 1,478 watched films have no stored record at all; 561 match a verified catalog record by title and year but have no second signal, so they stay `candidate`. The export carries no TMDB id, so these 2,039 films need an identity source outside this snapshot (for example TMDB lookup by the owner-approved path chosen in AIR-170) before any import.
+- **Most watched films have no stored Letterboxd id, which is not the same as being absent from the catalog.** The snapshot stores Letterboxd ids only for watchlist and programme films (420). Of the 2,160 watched films, 120 are accepted and **2,040 are not**:
+
+  | Watched, not accepted | Films | Meaning |
+  | --- | --- | --- |
+  | `candidate` | 561 | Title and year match a verified catalog record, no second signal yet: likely present in the catalog, identity unproven |
+  | `ambiguous` | 1 | Title and year match more than one stored target |
+  | `unmatched` | 1,478 | No usable title match: 1,439 with no stored record of that title, 39 whose stored title has a different year |
+  | **Total** | **2,040** | |
+
+  The export carries no TMDB id, so all 2,040 need identity evidence beyond this snapshot (for example a TMDB lookup on the owner-approved path chosen in AIR-170) before any import.
 - **Ratings evidence is thin.** With no published ratings generation, rating agreement comes only from the view index (109 agree, 0 disagree, 311 unknown).
 - **Watched without rating:** 4 of 8 accepted, 4 unmatched.
 
