@@ -64,6 +64,21 @@ assert.equal(run(profile,options,features,'selective',null).outcome,'stale');
 assert.equal(run(profile,options,features,'shadow').reason,'profile_changed','an unknown mode is strict');
 assert.equal(run(profile,options,{...features,fingerprintHash:'another'}).reason,'film_features_unknown','features of another fingerprint are unknown');
 assert.equal(run(profile,options,null).reason,'film_features_unknown');
+// Features without the prediction's own fingerprint hash prove nothing, even when their selectors would not reach.
+assert.equal(run().reason,'profile_unaffected','the bound features are unaffected');
+for(const fingerprintHash of [undefined,null,'',fp.fingerprintHash+'x'])assert.equal(run(profile,options,{...features,fingerprintHash}).reason,'film_features_unknown','feature hash '+fingerprintHash);
+// A stored value outside the fingerprint vocabulary is malformed, so unknown, never "not reached".
+const malformed=f=>run(profile,options,{...features,...f}).reason;
+assert.equal(malformed({plotMechanics:['car_chase']}),'film_features_unknown');
+assert.equal(malformed({plotMechanics:['investigation',7]}),'film_features_unknown');
+assert.equal(malformed({plotMechanics:'heist'}),'film_features_unknown');
+const paceProfileEarly=profileOf('execution');
+const paceRun=f=>run(paceProfileEarly,options,{...features,...f},'selective',{...old,tasteProfileVersion:4,tasteProfileHash:'h4'}).reason;
+assert.equal(paceRun({execution:{pace:'glacial',opposition_competence:'high'}}),'film_features_unknown');
+assert.equal(paceRun({execution:{pace:'not_applicable',opposition_competence:'high'}}),'film_features_unknown','not_applicable is valid only where the vocabulary allows it');
+assert.equal(paceRun({execution:{pace:'fast',opposition_competence:'not_applicable'}}),'profile_unaffected');
+assert.equal(paceRun({execution:null}),'film_features_unknown');
+assert.equal(paceRun({execution:['pace']}),'film_features_unknown');
 assert.equal(run(profile,options,features,'selective',{...old,tasteProfileVersion:'1'}).reason,'profile_provenance_mismatch','a non-numeric version is never matched');
 assert.equal(run(profile,options,features,'selective',{...old,fingerprintSchemaVersion:0}).reason,'fingerprint_changed');
 const identityChanged={version:3,profileHash:'h3',lineage:[...chain,{version:3,profileHash:'h3',changeImpact:{impactSchemaVersion:1,from:{version:2,profileHash:'h2'},scope:'identity',changedFields:[],selectors:[]}}]};

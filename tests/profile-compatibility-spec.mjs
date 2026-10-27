@@ -63,9 +63,12 @@ for(const [name,versions] of Object.entries(lineages)){
   if(impact?.scope==='identity')assert.equal(impact.from.profileHash,versions[i].profileHash,name+' identity keeps the hash');
  }
 }
+// Features use the live vocabulary and carry the fingerprint hash; malformed or unbound ones exist only for cases that
+// expect film_features_unknown.
 for(const [name,value] of Object.entries(features)){
- if(value.plotMechanics)assert(value.plotMechanics.every(m=>MECHANICS.includes(m)),name);
- for(const [dimension,level] of Object.entries(value.execution||{}))assert(EXECUTION[dimension]?.includes(level),name+' '+dimension);
+ const wellFormed=(!value.plotMechanics||value.plotMechanics.every(m=>MECHANICS.includes(m)))&&(!value.execution||!Array.isArray(value.execution)&&Object.entries(value.execution).every(([dimension,level])=>EXECUTION[dimension]?.includes(level)));
+ const bound=typeof value.fingerprintHash==='string'&&value.fingerprintHash===spec.defaults.fingerprint.fingerprintHash;
+ if(!wellFormed||!bound)assert(cases.filter(c=>c.features===name).every(c=>c.expected.reason==='film_features_unknown'),name+' is malformed or unbound, so it may only be used by unknown-feature cases');
 }
 
 // Evaluation cases: closed vocabulary, every reference resolves, and every behaviour the ADR names is covered.

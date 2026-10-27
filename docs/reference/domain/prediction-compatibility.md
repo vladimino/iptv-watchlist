@@ -37,15 +37,15 @@ The first failing check decides:
    - versions must increase and `from` must name the previous link (`profile_chain_broken`);
    - the link's impact must be well formed (schema 1, known scope, valid selectors, no selectors outside `selective`); a `selective` link also needs a complete owner approval whose `declarationSha256` equals `digest` of its canonical declaration; an `identity` link must keep the hash. Any failure → `profile_impact_unknown`;
    - `global` → `profile_global_change`; `identity` passes;
-   - `selective`: features of another fingerprint hash, or none → `film_features_unknown`; a reached film → `profile_impacted`; otherwise any unknown feature → `film_features_unknown`.
+   - `selective`: features without a `fingerprintHash` equal to the fingerprint's (missing, null, empty or another hash), or no features → `film_features_unknown`; a reached film → `profile_impacted`; otherwise any unknown feature → `film_features_unknown`.
 7. Otherwise → `compatible/profile_unaffected`.
 
 ## Selector reach
 
 | Selector | Reached when | Unknown when |
 | --- | --- | --- |
-| `mechanic` | `plotMechanics` contains a value | `plotMechanics` absent (an empty list reaches nothing) |
-| `execution` | the dimension's value is in `values`; `not_applicable` reaches nothing | the value is `unknown`; a general dimension is absent; a genre-specific dimension is absent and the film's genres are unknown or include the dimension's genre |
+| `mechanic` | `plotMechanics` contains a value | `plotMechanics` absent or not a list, or any stored value outside the mechanics vocabulary (an empty list reaches nothing) |
+| `execution` | the dimension's value is in `values`; `not_applicable` reaches nothing | `execution` is not an object; the value is `unknown` or outside that dimension's vocabulary (including `not_applicable` where the dimension does not allow it); a general dimension is absent; a genre-specific dimension is absent and the film's genres are unknown or include the dimension's genre |
 | `genre` | a canonical genre of the film is in `values` | no genres, or any stored name without an alias |
 
 Stored genre names are mapped case-insensitively, after trimming, by `PROFILE_GENRE_ALIASES`. It covers the Russian TMDB names, the Letterboxd source labels and the English TMDB names, onto the canonical genres of the ADR. Genre domains of the genre-specific dimensions are in `PROFILE_GENRE_DOMAINS`: `comedy_*` → comedy, `horror_*` → horror, `scifi_plot_driven_concept` → science_fiction, `adventure_discovery_strength` → adventure, `action_readability` and `hero_vulnerability` → action.
@@ -56,4 +56,4 @@ Strict mode returns every non-exact prediction as stale, so the selective rule c
 
 ## Tests
 
-`tests/prediction-compatibility.mjs` checks every case of `tests/fixtures/profile-compatibility/cases.json` against the live vocabulary, together with negative cases (missing or wrong digest, tampered or unapproved links, broken or unordered lineage, foreign features, absent genre-specific dimensions in and outside their genre, unknown mode), feature extraction, and a lineage built by the publisher's own functions.
+`tests/prediction-compatibility.mjs` checks every case of `tests/fixtures/profile-compatibility/cases.json` against the live vocabulary, together with negative cases (missing or wrong digest, tampered or unapproved links, broken or unordered lineage, features with a missing, null or foreign fingerprint hash, stored values outside the vocabulary, absent genre-specific dimensions in and outside their genre, unknown mode), feature extraction, and a lineage built by the publisher's own functions.

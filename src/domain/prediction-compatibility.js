@@ -29,17 +29,23 @@ function predictionCanonicalGenres(genres){
  const mapped=genres.map(name=>typeof name==='string'?PROFILE_GENRE_ALIASES[name.trim().toLocaleLowerCase('ru')]:undefined);
  return mapped.every(Boolean)?[...new Set(mapped)]:null;
 }
-// 'reached' | 'not_reached' | 'unknown' for one valid selector.
-function predictionSelectorReach(selector,features,general){
- if(selector.kind==='mechanic'){if(!Array.isArray(features.plotMechanics))return 'unknown';return features.plotMechanics.some(value=>selector.values.includes(value))?'reached':'not_reached';}
+// 'reached' | 'not_reached' | 'unknown' for one valid selector. A stored value outside the fingerprint vocabulary is
+// malformed and counts as unknown, never as "not reached".
+function predictionSelectorReach(selector,features,vocabulary){
+ const general=vocabulary.general||[];
+ if(selector.kind==='mechanic'){
+  if(!Array.isArray(features.plotMechanics)||!features.plotMechanics.every(value=>vocabulary.mechanics.includes(value)))return 'unknown';
+  return features.plotMechanics.some(value=>selector.values.includes(value))?'reached':'not_reached';
+ }
  if(selector.kind==='genre'){const genres=predictionCanonicalGenres(features.genres);if(!genres)return 'unknown';return genres.some(genre=>selector.values.includes(genre))?'reached':'not_reached';}
- const value=features.execution?.[selector.dimension];
+ if(!features.execution||typeof features.execution!=='object'||Array.isArray(features.execution))return 'unknown';
+ const value=features.execution[selector.dimension];
  if(value===undefined){
   if(general.includes(selector.dimension))return 'unknown';
   const genres=predictionCanonicalGenres(features.genres),domain=PROFILE_GENRE_DOMAINS[selector.dimension]||[];
   return !genres||!domain.length||genres.some(genre=>domain.includes(genre))?'unknown':'not_reached';
  }
- if(value==='unknown')return 'unknown';
+ if(value==='unknown'||!vocabulary.execution[selector.dimension]?.includes(value))return 'unknown';
  if(value==='not_applicable')return 'not_reached';
  return selector.values.includes(value)?'reached':'not_reached';
 }
@@ -74,8 +80,9 @@ function predictionCompatibility(prediction,fingerprint,features,profile,mode,op
  const links=lineage.length-1-start,last=lineage.at(-1);
  if(last?.version!==profile.version||last?.profileHash!==profile.profileHash)return result('stale','profile_chain_broken',links);
  if(prediction.tasteProfileHash===profile.profileHash)return result('compatible','content_identical',links);
- const vocabulary=options.vocabulary,general=vocabulary.general||[];
- const known=features&&(features.fingerprintHash==null||features.fingerprintHash===fingerprint.fingerprintHash);
+ const vocabulary=options.vocabulary;
+ // Features count only when they carry the hash of the very fingerprint the prediction was made with.
+ const known=!!features&&typeof features.fingerprintHash==='string'&&features.fingerprintHash.length>0&&features.fingerprintHash===fingerprint.fingerprintHash;
  for(let i=start+1;i<lineage.length;i++){
   const link=lineage[i],previous=lineage[i-1],impact=link?.changeImpact;
   if(!(link?.version>previous.version))return result('stale','profile_chain_broken',links);
@@ -84,7 +91,7 @@ function predictionCompatibility(prediction,fingerprint,features,profile,mode,op
   if(impact.scope==='global')return result('stale','profile_global_change',links);
   if(impact.scope==='identity'){if(link.profileHash!==previous.profileHash)return result('stale','profile_impact_unknown',links);continue;}
   if(!known)return result('stale','film_features_unknown',links);
-  const reach=impact.selectors.map(selector=>predictionSelectorReach(selector,features,general));
+  const reach=impact.selectors.map(selector=>predictionSelectorReach(selector,features,vocabulary));
   if(reach.includes('reached'))return result('stale','profile_impacted',links);
   if(reach.includes('unknown'))return result('stale','film_features_unknown',links);
  }
