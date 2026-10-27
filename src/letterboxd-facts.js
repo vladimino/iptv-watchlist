@@ -161,7 +161,9 @@ const LetterboxdFacts=(()=>{
  // will replace, so the films that drop out of a list keep their last observation even after a crash; a retry of the same scan
  // resumes the stage, and a newer scan first finishes an unfinished older one.
  const pendingKey=key=>key.replace(/\.json$/,'.pending.json');
- async function stagedScan(env,key,summary,apply){
+ // The stage also keeps the context its scan saw (the watchlist and its trusted links), so a resumed stage is applied with its own
+ // context, never with a newer scan's.
+ async function stagedScan(env,key,summary,context,apply){
   const {value:open}=await readJSON(env,pendingKey(key));
   if(open&&!open.done&&open.summary.scanId!==summary.scanId)await finishStage(env,key,open,apply);
   const {value:published}=await readJSON(env,key);
@@ -170,18 +172,20 @@ const LetterboxdFacts=(()=>{
   await casJSON(env,pendingKey(key),null,current=>{
    if(current&&!current.done&&current.summary.scanId===summary.scanId){stage=current;return null;}
    if(current&&!current.done)throw new FactsError('write_contention','Another scan stage opened during write');
-   stage={schemaVersion:1,done:false,summary,previous:published||null,stagedAt:new Date().toISOString()};return stage;
+   stage={schemaVersion:1,done:false,summary,previous:published||null,context,stagedAt:new Date().toISOString()};return stage;
   });
   return finishStage(env,key,stage,apply);
  }
  async function finishStage(env,key,stage,apply){
-  const result=await apply(stage.summary,stage.previous);
+  const result=await apply(stage.summary,stage.previous,stage.context||{});
   await casJSON(env,key,null,current=>current&&Date.parse(current.observedAt)>=Date.parse(stage.summary.observedAt)?null:stage.summary);
   await casJSON(env,pendingKey(key),null,current=>current&&!current.done&&current.summary.scanId===stage.summary.scanId?{done:true,scanId:stage.summary.scanId,finishedAt:new Date().toISOString()}:null);
   return {stored:true,...result};
  }
  const linkedLid=(index,lid)=>index['letterboxd:'+lid]||null;
  // Trusted links of current watchlist films: the Letterboxd id and the TMDB id Letterboxd's own film page gives.
+ // Only the fields a resumed stage needs: the Letterboxd id and the trusted TMDB id.
+ function contextFilms(films){return [...watchlistLinks(films).values()].map(links=>({id:links.letterboxd,tmdbId:links.tmdb}));}
  function watchlistLinks(films){const map=new Map();for(const film of films||[]){const lid=String(film?.id??'');if(!LID.test(lid))continue;const tmdb=film.tmdbId!=null&&TMDB.test(String(film.tmdbId))?String(film.tmdbId):null;map.set(lid,{letterboxd:lid,tmdb});}return map;}
 
  // Ids that would put a second id of the same kind on a record are never written; they are listed for the identity review.
@@ -198,8 +202,9 @@ const LetterboxdFacts=(()=>{
  // record or are on the current watchlist (ADR-0024). Every step is idempotent, so a resumed stage repeats it safely.
  async function applyFilmsListScan(env,{scanId,observedAt,films,total},{watchlistFilms=[]}={}){
   if(!scanId||!films||typeof films!=='object')throw new FactsError('invalid_scan','Scan summary is incomplete');
-  const summary={schemaVersion:1,scanId,observedAt,total:total??Object.keys(films).length,films},watchlist=watchlistLinks(watchlistFilms);
-  return stagedScan(env,FACTS_KEYS.filmsList,summary,async(current,previous)=>{
+  const summary={schemaVersion:1,scanId,observedAt,total:total??Object.keys(films).length,films};
+  return stagedScan(env,FACTS_KEYS.filmsList,summary,{watchlistFilms:contextFilms(watchlistFilms)},async(current,previous,context)=>{
+   const watchlist=watchlistLinks(context.watchlistFilms);
    const [{value:links},{value:index}]=await Promise.all([readJSON(env,FACTS_KEYS.links),readJSON(env,FACTS_KEYS.viewIndex)]);
    const linkIndex=links||{},view=index||{},records=[],outcomes={};
    const count=list=>{for(const item of list)outcomes[item.outcome]=(outcomes[item.outcome]||0)+1;};
@@ -231,8 +236,9 @@ const LetterboxdFacts=(()=>{
  // longer shows becomes watchlist: false. Only changed records are written.
  async function applyWatchlistScan(env,{scanId,observedAt,films}){
   if(!scanId||!Array.isArray(films))throw new FactsError('invalid_scan','Watchlist summary is incomplete');
-  const byLid=watchlistLinks(films.map(film=>typeof film==='object'?film:{id:film})),listed=[...byLid.keys()],summary={schemaVersion:1,scanId,observedAt,films:listed};
-  return stagedScan(env,FACTS_KEYS.watchlist,summary,async current=>{
+  const given=contextFilms(films.map(film=>typeof film==='object'?film:{id:film})),summary={schemaVersion:1,scanId,observedAt,films:given.map(film=>film.id)};
+  return stagedScan(env,FACTS_KEYS.watchlist,summary,{watchlistFilms:given},async(current,previous,context)=>{
+   const byLid=watchlistLinks(context.watchlistFilms);
    const [{value:links},{value:index}]=await Promise.all([readJSON(env,FACTS_KEYS.links),readJSON(env,FACTS_KEYS.viewIndex)]);
    const linkIndex=links||{},view=index||{},set=new Set(current.films),records=[],outcomes={};let written=0,conflicts=0;
    const write=async(lid,value)=>{

@@ -136,6 +136,12 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal(b.records.get(F.recordKey('tmdb-348')).watchlist.value,false);assert.equal(b.records.get(F.recordKey('tmdb-949')).watchlist.observedAt,at(0));
  assert.equal(b.records.get('enrichment/view-index.json').tmdb_348.watchlist,false);
  assert.ok(b.puts-before<=5,'stage, summary, stage closure, one record and the projection');
+ // A watchlist stage resumed by a newer scan keeps its own membership and trusted links.
+ b.failOnce(key=>key===F.recordKey('tmdb-555'));
+ await assert.rejects(F.applyWatchlistScan(env,{scanId:'w3',observedAt:at(2),films:[{id:'heat',tmdbId:'949'},{id:'drive',tmdbId:'555'}]}),/injected/);
+ await F.applyWatchlistScan(env,{scanId:'w4',observedAt:at(3),films:[{id:'heat',tmdbId:'949'}]});
+ const drive=b.records.get(F.recordKey('tmdb-555'));
+ assert.equal(drive.watchlist.value,false,'added by the resumed w3, then removed by w4');assert.equal(drive.watchlist.replaced.observedAt,at(2));
 }
 
 // Worker writers behind LETTERBOXD_FACTS: the EPG films scan no longer clears ratings by absence; off keeps the old path.
@@ -182,6 +188,13 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  await F.applyFilmsListScan(env,{scanId:'s5',observedAt:at(5),films:{alien:1},total:1},{watchlistFilms});
  assert.equal(b.records.get(F.recordKey('tmdb-348')).rating.value,1);assert.equal(b.records.get(F.recordKey('tmdb-348')).rating.replaced.observedAt,at(4),'s4 was applied before s5');
  assert.equal(b.records.get('letterboxd/facts/scans/films-list.json').scanId,'s5');
+ // An unfinished stage resumed by a newer scan uses its own watchlist context, not the newer scan's.
+ b.failOnce(key=>key===F.recordKey('tmdb-777'));
+ await assert.rejects(F.applyFilmsListScan(env,{scanId:'s5b',observedAt:at(5.5),films:{alien:1,gone:3.5},total:2},{watchlistFilms:[...watchlistFilms,{id:'gone',tmdbId:'777'}]}),/injected/);
+ await F.applyFilmsListScan(env,{scanId:'s5c',observedAt:at(5.7),films:{alien:1},total:1},{watchlistFilms});
+ const gone=b.records.get(F.recordKey('tmdb-777'));
+ assert.ok(gone,'the resumed stage creates the record of a film only its own watchlist held');
+ assert.equal(gone.rating.value,3.5);assert.equal(gone.links.tmdb,'777');assert.equal(gone.rating.observedAt,at(5.5));
  // Alias conflicts are recorded for review, not written.
  await F.linkFilm(env,{letterboxd:'other',tmdb:'111'});
  const conflicted=await F.applyFilmsListScan(env,{scanId:'s6',observedAt:at(6),films:{newfilm:3},total:1},{watchlistFilms:[{id:'newfilm',tmdbId:'111'}]});
@@ -204,4 +217,4 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  results=await put([{filmId:'heat',rating:5}]);
  assert.equal(results[0].status,'older');assert.equal(records.get('enrichment/films/heat/actual.json').rating,4,'a rejected edit does not touch actual.json');
 }
-console.log('Letterboxd facts: order and ties, null and before-image, rollback and overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, staged publication and crash resume, conflict registry, facts-first owner edit, gated writers passed');
+console.log('Letterboxd facts: order and ties, null and before-image, rollback and overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, staged publication and crash resume with the stage context, conflict registry, facts-first owner edit, gated writers passed');
