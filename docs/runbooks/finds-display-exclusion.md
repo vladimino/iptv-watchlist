@@ -25,7 +25,7 @@ The Finds section can hide watched Letterboxd export films that have no accepted
    ```bash
    node scripts/letterboxd-display-exclusion.mjs build --zip <zip> --plan <plan dir> --snapshot <snapshot> --output <file>
    ```
-   Standard output gives `counts`: `exportFilms` (watched or rated), `withIdentity`, `droppedNoYear`, `droppedNoName`, `droppedExportNamesake` and `entries`. Compare them with the [AIR-193 evidence](../evidence/letterboxd/air-193-identity-alternatives-2026-10-27.md) before going on.
+   Standard output gives `counts`: `exportFilms` (watched or rated), `withIdentity`, `droppedNoYear`, `droppedNoName`, `droppedExportNamesake` and `entries`. Compare them with the [identity alternatives evidence](../evidence/letterboxd/air-193-identity-alternatives-2026-10-27.md) before going on.
 3. **Preflight (owner approval for each production read).** On a fresh verified snapshot or an approved read-only check, measure on the current generation:
    - how many visible Finds the list would hide;
    - aggregate collisions;
