@@ -27,7 +27,9 @@ The profile body already has the structure needed to say what an edit can reach:
    "changedFields": ["horrorPreferences"],
    "selectors": [{"kind": "genre", "values": ["horror"]},
                  {"kind": "execution", "dimension": "horror_rule_consistency", "values": ["weak", "mixed"]}],
-   "rationale": "free text, display only"}
+   "rationale": "free text, display only",
+   "approval": {"approvedBy": "owner", "approvedAt": "<ISO time>", "reviewRef": "<id of the owner's recorded decision>",
+                "declarationSha256": "<SHA-256 of the canonical declaration, section 4>"}}
   ```
 
 - `scope` is `identity` (same `profileHash` as `from`, no changed field), `selective` (at least one selector) or `global`. The publisher may always choose `global`.
@@ -41,8 +43,10 @@ A selector says which films an edit **can** reach. Selectors inside one link are
 | Kind | Values | A film is reached when | Feature unknown when (→ treated as reached) |
 | --- | --- | --- | --- |
 | `mechanic` | `MECHANICS` of the fingerprint contract | `plotMechanics` intersects `values` (an empty list is known and reaches nothing) | `plotMechanics` absent |
-| `execution` | one `dimension` of `EXECUTION` and a non-empty list of its concrete values (never `unknown` or `not_applicable`) | the film's value for the dimension is in `values`; `not_applicable` reaches nothing; an absent **genre-specific** dimension reaches nothing (the contract makes those optional precisely because they apply to one genre) | the value is `unknown`, or an absent **general** dimension |
+| `execution` | one `dimension` of `EXECUTION` and a non-empty list of its concrete values (never `unknown` or `not_applicable`) | the film's value for the dimension is in `values`; `not_applicable` reaches nothing; an absent **genre-specific** dimension reaches nothing **only when the film's genres are known, all mapped, and none is in that dimension's genre domain** (below) | the value is `unknown`; an absent **general** dimension; an absent genre-specific dimension on a film whose genres are empty, unmapped, or include the dimension's domain |
 | `genre` | closed canonical genres (`action`, `adventure`, `animation`, `comedy`, `crime`, `documentary`, `drama`, `family`, `fantasy`, `history`, `horror`, `music`, `mystery`, `romance`, `science_fiction`, `thriller`, `tv_movie`, `war`, `western`) | a stored genre name, case-folded and mapped through the closed alias table, is in `values` | the film has no genres, or any stored genre name has no alias |
+
+Genre domains of the genre-specific dimensions: `comedy_stupidity_for_gags`, `comedy_gross_out` → `comedy`; `horror_rule_consistency`, `horror_threat_causality` → `horror`; `scifi_plot_driven_concept` → `science_fiction`; `adventure_discovery_strength` → `adventure`; `action_readability`, `hero_vulnerability` → `action`. Absence is therefore never read as "unaffected" by itself: a horror film whose older fingerprint lacks `horror_rule_consistency` is reached by any selector on that dimension, whichever profile field declared it; only a film proved to be outside the domain is not.
 
 Features are read from the stored fingerprint the prediction was made with (its `fingerprintHash` must equal the prediction's, see 3) and the film's current metadata genres. The view-index fingerprint facet is **not** sufficient: it drops `unknown`, `not_applicable` and every genre-specific dimension, so the queue needs its own impact features keyed by fingerprint hash (AIR-204).
 
@@ -55,14 +59,14 @@ Features are read from the stored fingerprint the prediction was made with (its 
 3. Mode `strict` → `stale/profile_changed` (today's behaviour).
 4. Prediction version newer than current → `stale/profile_ahead`. Version not in the lineage → `stale/profile_outside_lineage`. In the lineage with another hash → `stale/profile_provenance_mismatch`.
 5. Prediction hash equals the current hash (content restored) → `compatible/content_identical`.
-6. For each link after the prediction's version up to the current one, in order: `from` must equal the previous lineage record (`stale/profile_chain_broken`); a missing, unknown-schema or invalid impact, an unknown scope or an unknown selector kind → `stale/profile_impact_unknown` (**unknown means global**); `global` → `stale/profile_global_change`; `identity` passes; `selective`: a reached film → `stale/profile_impacted`, otherwise an unknown feature → `stale/film_features_unknown`, otherwise the link passes.
+6. For each link after the prediction's version up to the current one, in order: `from` must equal the previous lineage record (`stale/profile_chain_broken`); a missing, unknown-schema or invalid impact, an unknown scope or an unknown selector kind, or a `selective` impact without a valid owner approval bound to it (section 4) → `stale/profile_impact_unknown` (**unknown means global**); `global` → `stale/profile_global_change`; `identity` passes; `selective`: a reached film → `stale/profile_impacted`, otherwise an unknown feature → `stale/film_features_unknown`, otherwise the link passes.
 7. All links pass → `compatible/profile_unaffected`.
 
 `current` and `compatible` are both "not stale" for every consumer; `compatible` additionally exposes `originalProfile` and `evaluatedAgainst` so a reader can say which profile produced the number. Existing version records have no `changeImpact`, so every prediction made before activation evaluates to `profile_impact_unknown` across the first new version: activation cannot silently keep an old prediction.
 
 ### 4. Publication validation
 
-The publisher (AIR-202) computes the changed top-level fields itself by comparing the new profile body with the current one, then rejects the whole publication (current pointer unchanged) unless, in this order: the impact exists (`impact_missing`), has schema 1 (`impact_schema_unknown`), `from` equals the current record (`from_mismatch`), the scope is known (`scope_unknown`), `identity` keeps the hash (`identity_requires_same_hash`), `changedFields` equals the computed set (`changed_fields_mismatch`), no changed field is global-only (`global_field_requires_global`), a selective impact has selectors (`selective_requires_selectors`), every selector kind and value is valid (`selector_kind_unknown`, `selector_invalid`), every changed field is covered by a selector it permits (`field_not_covered`), and each genre-specific field includes its genre floor (`genre_floor_missing`). Extra selectors only widen the impact and are allowed.
+The publisher (AIR-202) computes the changed top-level fields itself by comparing the new profile body with the current one, then rejects the whole publication (current pointer unchanged) unless, in this order: the impact exists (`impact_missing`), has schema 1 (`impact_schema_unknown`), `from` equals the current record (`from_mismatch`), the scope is known (`scope_unknown`), `identity` keeps the hash (`identity_requires_same_hash`), `changedFields` equals the computed set (`changed_fields_mismatch`), no changed field is global-only (`global_field_requires_global`), a selective impact has selectors (`selective_requires_selectors`), every selector kind and value is valid (`selector_kind_unknown`, `selector_invalid`), every changed field is covered by a selector it permits (`field_not_covered`), each genre-specific field includes its genre floor (`genre_floor_missing`), and a selective declaration carries a complete owner approval (`selective_requires_owner_approval`) whose `declarationSha256` equals the SHA-256 of the canonical declaration `[from.version, from.profileHash, to.version, to.profileHash, scope, sorted changedFields, selectors]` (`approval_mismatch`). Extra selectors only widen the impact and are allowed. `global` and `identity` need no approval.
 
 | Changed field | Permitted selectors | Genre floor |
 | --- | --- | --- |
@@ -77,7 +81,16 @@ The publisher (AIR-202) computes the changed top-level fields itself by comparin
 | `payoffEnding` | `execution` on `payoff`, `ending_quality` | — |
 | `positiveSignals`, `negativeSignals`, `hardSkips` | `mechanic`, `execution` (any dimension), `genre` | — |
 
-The validator checks structure and coverage, not meaning: whether "loves heists" really reaches only heist films is the publisher's declaration. That residual risk is accepted and bounded by shadow comparison before activation, by `global` always being available, and by strict mode (section 6).
+### 4a. Trust model and guarantees
+
+The validator proves structure and coverage, never meaning: no table can show that a reworded `positiveSignals`, `hardSkips`, `characterLogic`, `pace`, `payoffEnding` or `genrePreferences` entry reaches only the declared films. A structurally valid but semantically too narrow declaration would silently keep incompatible scores. The contract therefore separates what the system guarantees from what a person decides:
+
+- **Guaranteed mechanically:** closed vocabularies, coverage of every changed field, global-only fields, genre floors, fail-closed handling of every unknown (impact, schema, kind, feature, approval), immutable provenance, one rule for all consumers.
+- **Decided by the owner:** that a selective declaration matches the meaning of the edit. **Every change is global by default.** A version is published `selective` only when the owner has reviewed that exact declaration and recorded the decision (`reviewRef`, for example the Trello comment of the decision); the publication carries the approval, and its SHA-256 binds it to the transition and the exact selectors, so a changed selector, field list or target hash invalidates it. The evaluator re-checks the binding on every link and treats a missing or mismatched approval as unknown, i.e. global.
+- **Not a safety mechanism:** shadow telemetry (AIR-204) validates declarations after the fact (how many films each would keep, and whether owner-reviewed declarations look plausible). It never authorizes selective scope.
+- **Residual risk the owner accepts by accepting this ADR:** the Worker can check that an approval record is present, complete and bound to the declaration, and that the publication is an authenticated owner request behind Access; it cannot prove a human actually read the declaration. A wrong approved declaration is recoverable by a `global` version or strict mode (section 6), not prevented.
+
+A narrower alternative, if the owner prefers fewer judgement calls: allow `selective` only for the four genre-specific sections (with their floors) and make every other field global-only. It removes the free-form-field risk at the cost of most of the savings; it is a one-row change to the field table.
 
 ### 5. Every consumer uses the same rule and the same inputs
 
@@ -99,7 +112,7 @@ The publisher's write sequence and concurrency guard (AIR-202), the evaluator mo
 
 | Card | Delivers | Needs |
 | --- | --- | --- |
-| [AIR-202](https://trello.com/c/POMLJNUx) | Validated `changeImpact` (section 4), immutable create-only version record, `lineage` in `current.json`, publication rejected without a pointer change | this ADR accepted |
+| [AIR-202](https://trello.com/c/POMLJNUx) | Validated `changeImpact` with approval binding (sections 4, 4a), immutable create-only version record, `lineage` in `current.json`, publication rejected without a pointer change | this ADR accepted |
 | [AIR-203](https://trello.com/c/2mnvn1hd) | Pure evaluator (section 3) passing every [fixture](../../tests/fixtures/profile-compatibility/cases.json); feature extraction and genre alias table | AIR-202 record shape |
 | [AIR-204](https://trello.com/c/wFArDNnm) | Queue built with the evaluator in shadow, impact features keyed by fingerprint hash, counters `exact/compatible/stale` by reason, the mode switch registered | AIR-203 |
 | [AIR-205](https://trello.com/c/bjx64Z6X) | Every reader in section 5 on the evaluator; queue/reader agreement test; fail closed on unknown | AIR-204 |
@@ -114,10 +127,12 @@ The publisher's write sequence and concurrency guard (AIR-202), the evaluator mo
 - **Per-film impact lists in the publication.** Rejected: unbounded, stale as soon as the catalog changes, and impossible to validate against unseen films.
 - **Only one-step compatibility (vN→vN+1).** Rejected: two quick publications would turn every film stale again; the bounded lineage makes the rule transitive at a fixed cost.
 - **Unknown features or impact treated as unaffected.** Rejected: fails open. Unknown is always global/stale.
+- **Structural validation alone authorizes selective scope.** Rejected in review: coverage cannot prove that free-form prose reaches only the declared films, so a narrow declaration could silently keep incompatible scores (section 4a).
+- **Absent genre-specific dimension always treated as unaffected.** Rejected in review: an older fingerprint of a film inside the genre may simply lack the field; absence counts only when the genres prove the film is outside the domain.
 
 ## Consequences
 
-Profile edits cost model runs in proportion to their declared reach. Every consumer depends on one more input (the lineage) and one shared function, so a disagreement between queue and UI becomes a testable invariant instead of a copy-paste risk. Publication becomes stricter: a profile edit without a valid impact is refused. The residual risk is a wrong declaration; it is visible in the publication record and recoverable by a `global` version or by strict mode.
+Profile edits cost model runs in proportion to their declared reach. Every consumer depends on one more input (the lineage) and one shared function, so a disagreement between queue and UI becomes a testable invariant instead of a copy-paste risk. Publication becomes stricter: a profile edit without a valid impact is refused, and a selective one needs a recorded owner review of its exact declaration, which adds a human step to every selective publication. The residual risk is a wrongly approved declaration; it is visible in the immutable record with its approval and recoverable by a `global` version or by strict mode.
 
 ## Recovery and migration boundary
 
@@ -128,7 +143,7 @@ This ADR changes no code or data. Accepting it authorizes none of: a profile pub
 - **Original decision:** [AIR-32](https://trello.com/c/eKFV3v2j), owner comment of 27 October 2026 (design-first phase A)
 - **Audit:** [equality guards and consumers on `main` `1f956dd`](../evidence/prediction/air-32-profile-equality-guards-audit-2026-10-27.md)
 - **Specification:** [fixtures](../../tests/fixtures/profile-compatibility/cases.json) checked by `tests/profile-compatibility-spec.mjs` against the live mechanic, execution, genre and profile field vocabularies
-- **Uncertainty:** the selectors' semantic accuracy cannot be proven offline; the share of films a typical edit reaches is not measured (AIR-204 shadow counters measure it)
+- **Uncertainty:** the selectors' semantic accuracy cannot be proven by the system (section 4a: it is an owner decision, bound by approval); the share of films a typical edit reaches is not measured (AIR-204 shadow counters measure it)
 
 ## Follow-ups
 

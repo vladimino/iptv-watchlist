@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 
 // Specification fixtures for selective prediction compatibility (ADR-0030). They hold no evaluator: this test only keeps them
 // internally consistent and aligned with the live fingerprint and profile vocabularies, so the evaluator and publisher built
@@ -34,6 +35,15 @@ assert.deepEqual(Object.entries(fieldRules).filter(([,rule])=>rule.scope==='glob
 for(const value of Object.values(v.genreAliases))assert(v.genres.includes(value),'alias target '+value);
 for(const name of Object.values(GENRE_MAP))assert(name.toLowerCase() in v.genreAliases,'stored genre '+name+' has an alias');
 
+// Genre-specific dimensions: each has a closed genre domain, so an absent dimension is proved irrelevant only by known genres outside it.
+assert.deepEqual(Object.keys(v.genreDomains).sort(),[...GENRE_DIMENSIONS].sort(),'one domain per genre-specific dimension');
+for(const [dimension,domain] of Object.entries(v.genreDomains))assert(domain.length&&domain.every(genre=>v.genres.includes(genre)),dimension);
+for(const [field,rule] of Object.entries(fieldRules))if(rule.genreFloor)for(const dimension of rule.dimensions)assert(v.genreDomains[dimension].every(genre=>rule.genreFloor.includes(genre)),field+' floor covers '+dimension);
+
+// Owner approval: a selective declaration is bound by SHA-256 to the transition and its exact content.
+const digest=(impact,to)=>createHash('sha256').update(JSON.stringify([impact.from.version,impact.from.profileHash,to.version,to.profileHash,impact.scope,[...impact.changedFields].sort(),impact.selectors])).digest('hex');
+const approved=(impact,to)=>!!impact.approval&&impact.approval.approvedBy==='owner'&&!!impact.approval.reviewRef&&!!impact.approval.approvedAt&&impact.approval.declarationSha256===digest(impact,to);
+
 // Reasons belong to exactly one outcome.
 const reasonOutcome=new Map();
 for(const [outcome,reasons] of Object.entries(v.reasons)){assert(v.outcomes.includes(outcome));for(const reason of reasons){assert(!reasonOutcome.has(reason),reason);reasonOutcome.set(reason,outcome);}}
@@ -42,13 +52,13 @@ for(const [outcome,reasons] of Object.entries(v.reasons)){assert(v.outcomes.incl
 const selectorValid=selector=>selector.kind==='mechanic'?selector.values.length>0&&selector.values.every(value=>MECHANICS.includes(value))
  :selector.kind==='execution'?selector.dimension in EXECUTION&&selector.values.length>0&&selector.values.every(value=>EXECUTION[selector.dimension].includes(value)&&!['unknown','not_applicable'].includes(value))
  :selector.kind==='genre'?selector.values.length>0&&selector.values.every(value=>v.genres.includes(value)):false;
-const impactValid=impact=>!!impact&&impact.impactSchemaVersion===1&&v.scopes.includes(impact.scope)&&impact.selectors.every(selectorValid)&&(impact.scope!=='selective'||impact.selectors.length>0);
+const impactValid=(impact,to)=>!!impact&&impact.impactSchemaVersion===1&&v.scopes.includes(impact.scope)&&impact.selectors.every(selectorValid)&&(impact.scope!=='selective'||impact.selectors.length>0&&approved(impact,to));
 for(const [name,versions] of Object.entries(lineages)){
  assert(versions.length>=2,name);
  for(let i=1;i<versions.length;i++){
   assert(versions[i].version>versions[i-1].version,name+' versions increase');
   const impact=versions[i].changeImpact;
-  if(!impactValid(impact))assert(cases.some(c=>c.lineage===name&&c.expected.reason==='profile_impact_unknown'),name+' carries an invalid impact only for unknown cases');
+  if(!impactValid(impact,versions[i]))assert(cases.some(c=>c.lineage===name&&c.expected.reason==='profile_impact_unknown'),name+' carries an invalid impact only for unknown cases');
   if(impact?.scope==='identity')assert.equal(impact.from.profileHash,versions[i].profileHash,name+' identity keeps the hash');
  }
 }
@@ -80,7 +90,7 @@ for(const p of publications){
  assert(v.publication.decisions.includes(p.expected.decision),p.id);
  assert(p.next.version>p.previous.version,p.id);
  for(const field of p.actualChangedFields)assert(field in fieldRules,p.id+' '+field);
- if(p.expected.decision==='accept'){assert(impactValid(p.changeImpact),p.id);assert.equal(p.expected.code,undefined,p.id);}
+ if(p.expected.decision==='accept'){assert(impactValid(p.changeImpact,p.next),p.id);assert.equal(p.expected.code,undefined,p.id);}
  else assert(v.publication.codes.includes(p.expected.code),p.id);
 }
 for(const code of v.publication.codes)assert(publications.some(p=>p.expected.code===code),'publication case for '+code);
