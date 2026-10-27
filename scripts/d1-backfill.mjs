@@ -261,7 +261,7 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
    throw error;
   }
   report.result={...result,adapter:db.stats||null};
-  await writeFile(path.join(absoluteOutput,'ledger.json'),JSON.stringify({aggregateSha256:batch.aggregateSha256,classC:result.classes.C.records,ledger:result.ledger},null,2)+'\n',{mode:0o600});
+  await writeFile(path.join(absoluteOutput,'ledger.json'),JSON.stringify({aggregateSha256:batch.aggregateSha256,classC:result.classes.C.records,superseded:result.classes.S.records,ledger:result.ledger},null,2)+'\n',{mode:0o600});
   report.stopReasons=result.stopReasons;
   return await finish(result.stopped?'stopped':result.pending>0?'partial':'completed');
  }catch(error){
