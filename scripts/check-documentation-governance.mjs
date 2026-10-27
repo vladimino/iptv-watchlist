@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-const flagNames = ['SCORED_RESOLUTION', 'CANDIDATE_DISCOVERY', 'LIFECYCLE_LOCALIZATION', 'RATINGS_REFRESH', 'PREDICTION_VERSION_OBJECTS', 'CATALOG_POSTER_HYDRATION'];
+const flagNames = ['SCORED_RESOLUTION', 'CANDIDATE_DISCOVERY', 'LIFECYCLE_LOCALIZATION', 'RATINGS_REFRESH', 'PREDICTION_VERSION_OBJECTS', 'CATALOG_POSTER_HYDRATION', 'PREDICTION_PROFILE_COMPATIBILITY'];
 
 // The value must sit on the label's own line: a label left empty by the PR template must not pick
 // up the next line as its value, so the whitespace after the colon excludes line breaks.

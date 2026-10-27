@@ -2,7 +2,7 @@
 
 `src/domain/prediction-compatibility.js` is the one rule that decides whether a stored prediction is still usable after the taste profile moves on, as decided in [ADR-0031](../../adr/0031-selective-prediction-profile-compatibility.md). It is a pure function with no storage, network or clock access, built on the selector and approval rules of `src/domain/profile-impact.js` (the publisher's rules, see [taste-profile publication](../api/enrichment.md#taste-profile-publication)).
 
-**Not wired.** No route, queue, reader, MCP tool, UI or D1 repository calls it. Every consumer still compares the profile version and hash strictly (see the prediction row in [Film/Person lifecycle](film-person.md)). Connecting it, and the mode switch, are separate changes.
+**Consumers.** The prediction queue uses it ([below](#prediction-queue)). Readers, the runner steps, catalog, Finds, diagnostics, MCP, UI and the D1 repository still compare the profile version and hash strictly (see the prediction row in [Film/Person lifecycle](film-person.md)).
 
 ## Call
 
@@ -50,10 +50,31 @@ The first failing check decides:
 
 Stored genre names are mapped case-insensitively, after trimming, by `PROFILE_GENRE_ALIASES`. It covers the Russian TMDB names, the Letterboxd source labels and the English TMDB names, onto the canonical genres of the ADR. Genre domains of the genre-specific dimensions are in `PROFILE_GENRE_DOMAINS`: `comedy_*` → comedy, `horror_*` → horror, `scifi_plot_driven_concept` → science_fiction, `adventure_discovery_strength` → adventure, `action_readability` and `hero_vulnerability` → action.
 
+## Prediction queue
+
+Every queue refresh evaluates each queue film against the current profile:
+
+- **Inputs.** The fingerprint and features come from the film's `impactFeatures` in `enrichment/view-index.json`: `{fingerprintHash, fingerprintSchemaVersion, invalidatedAt, plotMechanics, execution}`. They are copied from the full fingerprint whenever the index receives it: on submit, on runner repair and by the fingerprint-view backfill. The display facet is never used as input. An entry whose `impactFeatures` is missing, or carries another fingerprint hash, has unknown features. The genres are the film's stored genres. Lineage approvals are re-checked with the SHA-256 of each link's declaration, computed once per refresh.
+- **Decision.** `PREDICTION_PROFILE_COMPATIBILITY` (see the [flag register](../feature-flags.md)) chooses the rule. `strict` (the default) keeps exact version and hash equality, the same rule as before. Only the exact value `selective` lets the evaluator decide: then a `current` or `compatible` prediction stays out of the queue and every other predicted film is queued again. The runner chooses the work per film: `prediction_only` while the fingerprint is current.
+- **Counters.** `enrichment/prediction-queue.json` and `GET /api/enrichment/queue/status` carry `compatibility` in both modes:
+
+  ```json
+  {"mode": "strict", "evaluatorVersion": 1, "profileVersion": 2, "films": 4, "missing": 1,
+   "strict": {"current": 0, "stale": 3}, "selective": {"current": 0, "compatible": 1, "stale": 2},
+   "reasons": {"profile_unaffected": 1, "profile_impacted": 1, "film_features_unknown": 1},
+   "wouldKeep": 1, "wouldRequeue": 0, "strictDisagreements": 0}
+  ```
+
+  - `missing` counts films without a prediction; they are excluded from the other counts.
+  - `wouldKeep` counts predictions strict equality queues but the evaluator keeps.
+  - `wouldRequeue` counts the reverse; it should stay 0, because an exact match is always current.
+  - `strictDisagreements` compares the evaluator in strict mode with the plain equality check; it should stay 0.
+- **Not switched by the mode.** Coverage, catalog and Finds, the view (`stale`), the runner's start, next, submit and complete steps, diagnostics and the D1 projection keep strict equality. While that holds, a prediction kept by `selective` is out of the queue but still shown as awaiting recalculation. The value therefore stays `strict` until those consumers use the same evaluator and the activation is approved.
+
 ## Rollback
 
-Strict mode returns every non-exact prediction as stale, so the selective rule can be turned off without touching any record. A profile republished with earlier content is `content_identical` for predictions made under that content.
+Setting the queue back to `strict` restores exact equality on the next refresh. Strict mode returns every non-exact prediction as stale, so the selective rule can be turned off without touching any record. A profile republished with earlier content is `content_identical` for predictions made under that content.
 
 ## Tests
 
-`tests/prediction-compatibility.mjs` checks every case of `tests/fixtures/profile-compatibility/cases.json` against the live vocabulary, together with negative cases (missing or wrong digest, tampered or unapproved links, broken or unordered lineage, features with a missing, null or foreign fingerprint hash, stored values outside the vocabulary, absent genre-specific dimensions in and outside their genre, unknown mode), feature extraction, and a lineage built by the publisher's own functions.
+`tests/queue-compatibility.mjs` covers the queue: the exact mode values, impact features written on submit, the strict default with its counters, queue/view agreement under strict, a selective publication that keeps an unaffected film, entries without impact features, a tampered approval, a global edit and the return to strict. `tests/prediction-compatibility.mjs` checks every case of `tests/fixtures/profile-compatibility/cases.json` against the live vocabulary, together with negative cases (missing or wrong digest, tampered or unapproved links, broken or unordered lineage, features with a missing, null or foreign fingerprint hash, stored values outside the vocabulary, absent genre-specific dimensions in and outside their genre, unknown mode), feature extraction, and a lineage built by the publisher's own functions.
