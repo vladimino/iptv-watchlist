@@ -82,17 +82,20 @@ function catalogConsumedTmdb({index,metadata,watchlist,programme,catalog}){
 // response says only `state` and a count, never a title, an id or a hash of the list.
 const FINDS_TITLE_EXCLUSION_KEY='letterboxd/display-exclusion.json',FINDS_TITLE_EXCLUSION_MAX_BYTES=2*1024*1024,FINDS_TITLE_EXCLUSION_MAX_ENTRIES=20000;
 const findsTitleExclusionEnabled=env=>env?.FINDS_TITLE_EXCLUSION==='on';
+// The rule tag selects the catalog guard: the legacy tag keeps the ADR-0028 guard exactly, the v2 tag the ADR-0033 one; any
+// other tag makes the list unavailable. A deploy therefore changes nothing until a list with the v2 tag is placed.
+const FINDS_TITLE_RULES=new Set(['strict_original_exact_year','strict_original_exact_year_v2']);
 // normTitle_v1: must stay identical to normTitle in src/letterboxd-match.js, which the offline builder uses; a test compares them.
 const findsTitleKey=value=>String(value??'').normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 const FINDS_HEX64=/^[0-9a-f]{64}$/,FINDS_ISO=/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{3})?)?Z)?$/;
 const findsPlain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const findsExactKeys=(value,keys)=>findsPlain(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
 const findsTime=value=>typeof value==='string'&&FINDS_ISO.test(value)&&Number.isFinite(Date.parse(value))?Date.parse(value):null;
-// The matching keys of a valid list, or null. Entries are canonical (already normalized, strictly ascending by title then year,
+// The matching keys and rule tag of a valid list, or null. Entries are canonical (already normalized, strictly ascending by title then year,
 // so a duplicate is invalid) and their JSON must hash to contentSha256.
 async function findsTitleExclusionKeys(list,now){
  if(!findsExactKeys(list,['schemaVersion','kind','rule','normalization','source','builtAt','counts','entries','contentSha256']))return null;
- if(list.schemaVersion!==1||list.kind!=='letterboxd_display_exclusion'||list.rule!=='strict_original_exact_year'||list.normalization!=='normTitle_v1')return null;
+ if(list.schemaVersion!==1||list.kind!=='letterboxd_display_exclusion'||!FINDS_TITLE_RULES.has(list.rule)||list.normalization!=='normTitle_v1')return null;
  const source=list.source;
  if(!findsExactKeys(source,['type','archiveSha256','exportedAt','baselinePlanSha256'])||source.type!=='letterboxd_export'||!FINDS_HEX64.test(source.archiveSha256)||!FINDS_HEX64.test(source.baselinePlanSha256))return null;
  const exportedAt=findsTime(source.exportedAt),builtAt=findsTime(list.builtAt);
@@ -111,7 +114,7 @@ async function findsTitleExclusionKeys(list,now){
  if(typeof list.contentSha256!=='string'||!FINDS_HEX64.test(list.contentSha256))return null;
  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(entries)));
  if([...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,'0')).join('')!==list.contentSha256)return null;
- return keys;
+ return {keys,rule:list.rule};
 }
 // With the switch off the object is not read. The size check uses the R2 object size before the body is read or parsed.
 async function loadFindsTitleExclusion(env,now){
@@ -123,17 +126,28 @@ async function loadFindsTitleExclusion(env,now){
   if(!Number.isInteger(object.size)||object.size>FINDS_TITLE_EXCLUSION_MAX_BYTES){await object.body?.cancel?.();return unavailable;}
   const text=await object.text();
   if(new TextEncoder().encode(text).length>FINDS_TITLE_EXCLUSION_MAX_BYTES)return unavailable;
-  const keys=await findsTitleExclusionKeys(JSON.parse(text),now);
-  return keys?{state:'applied',keys}:unavailable;
+  const valid=await findsTitleExclusionKeys(JSON.parse(text),now);
+  return valid?{state:'applied',...valid}:unavailable;
  }catch{return unavailable;}
 }
-// Whether a verified catalog record is hidden. Original title only, exact year; no other verified TMDB film of this catalog
-// carries the key as its original title, localized title or alias in any year; and a TMDB film with a stored Letterboxd id is
-// left to identity (metadata cache, watchlist, programme, a verified catalog record keyed by a Letterboxd id).
-function findsTitleSuppressor({keys,catalog,metadata,watchlist,programme}){
+// Whether a verified catalog record is hidden. Original title only, exact year; a TMDB film with a stored Letterboxd id is left
+// to identity (metadata cache, watchlist, programme, a verified catalog record keyed by a Letterboxd id); and catalog uniqueness:
+// - legacy tag: no other verified TMDB film of this catalog carries the key as its original title, localized title or alias,
+//   in any year;
+// - v2 tag: no other TMDB film carries it as its original or localized title, in any year, and every other TMDB film that
+//   carries it only as an alias has an integer year at least two years from the record's on every verified record.
+function findsTitleSuppressor({keys,rule,catalog,metadata,watchlist,programme}){
  const verified=Object.values(catalog||{}).filter(film=>film&&film.tmdbId&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId));
- const namesakes=new Map(),linked=new Set();
- for(const film of verified)for(const title of [film.original,film.title,...(Array.isArray(film.aliases)?film.aliases:[])]){const key=findsTitleKey(title);if(!key)continue;if(!namesakes.has(key))namesakes.set(key,new Set());namesakes.get(key).add(String(film.tmdbId));}
+ const relaxed=rule==='strict_original_exact_year_v2',namesakes=new Map(),aliasOnly=new Map(),years=new Map(),linked=new Set();
+ const add=(map,key,tmdbId)=>{if(!key)return;if(!map.has(key))map.set(key,new Set());map.get(key).add(tmdbId);};
+ for(const film of verified){
+  const tmdbId=String(film.tmdbId),aliases=(Array.isArray(film.aliases)?film.aliases:[]).map(findsTitleKey);
+  if(!years.has(tmdbId))years.set(tmdbId,[]);years.get(tmdbId).push(film.year);
+  for(const key of [findsTitleKey(film.original),findsTitleKey(film.title)])add(namesakes,key,tmdbId);
+  for(const key of aliases)add(relaxed?aliasOnly:namesakes,key,tmdbId);
+ }
+ // An alias-only namesake within a year of the record, or without a year, may be the very film the export entry names.
+ const aliasFar=(key,tmdbId,year)=>[...(aliasOnly.get(key)||[])].every(other=>other===tmdbId||namesakes.get(key)?.has(other)||years.get(other).every(value=>Number.isInteger(value)&&Math.abs(value-year)>=2));
  const link=(id,tmdbId)=>{if(id==null||tmdbId==null||tmdbId==='')return;if(!CATALOG_TMDB_ID.test(String(id)))linked.add(String(tmdbId));};
  for(const [id,record] of Object.entries(metadata||{}))link(record?.id??id,record?.tmdbId);
  for(const film of [...(watchlist?.films||[]),...(programme?.films||[]),...verified])link(film?.id,film?.tmdbId);
@@ -142,14 +156,14 @@ function findsTitleSuppressor({keys,catalog,metadata,watchlist,programme}){
   const key=findsTitleKey(film.original),tmdbId=String(film.tmdbId);
   if(!key||!keys.has(key+'\u0000'+film.year))return false;
   const owners=namesakes.get(key);
-  return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId);
+  return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId)&&(!relaxed||aliasFar(key,tmdbId,film.year));
  };
 }
 function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'off',keys:null}}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const consumedTmdb=catalogConsumedTmdb({index,metadata,watchlist,programme,catalog});
- const hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
+ const hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,rule:titleExclusion.rule,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
  const byIdentity=new Map();
  for(const film of Object.values(catalog||{})){
   if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
