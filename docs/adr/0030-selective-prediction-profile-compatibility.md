@@ -1,11 +1,11 @@
 # ADR 0030: A prediction stays usable across taste-profile versions only through a published, typed change impact evaluated by one shared rule
 
-**Status:** Proposed (design only; it authorizes no profile publication, model run, queue change, flag, Scheduled Task, R2 or D1 operation)  
+**Status:** Accepted 2026-10-27, option A of section 4a (design only; it authorizes no profile publication, model run, queue change, flag, Scheduled Task, R2 or D1 operation)  
 **Original decision date:** 2026-10-27  
 **Recorded at:** 2026-10-27  
-**Approval source:** pending owner acceptance on [AIR-32](https://trello.com/c/eKFV3v2j)  
+**Approval source:** owner decision for option A on [AIR-32](https://trello.com/c/eKFV3v2j), recorded in the [final review](https://github.com/vladimino/iptv-watchlist/pull/162#pullrequestreview-5673703349)  
 **Related work:** [AIR-32](https://trello.com/c/eKFV3v2j); successors [AIR-202](https://trello.com/c/POMLJNUx), [AIR-203](https://trello.com/c/2mnvn1hd), [AIR-204](https://trello.com/c/wFArDNnm), [AIR-205](https://trello.com/c/bjx64Z6X), [AIR-206](https://trello.com/c/87mg3VNi); [AIR-33](https://trello.com/c/rBFiUUZQ) (fingerprint schema, builds on this model); [equality guard audit](../evidence/prediction/air-32-profile-equality-guards-audit-2026-10-27.md); [specification fixtures](../../tests/fixtures/profile-compatibility/cases.json)  
-**Supersedes:** [ADR-0013](0013-versioned-taste-profile.md) and [ADR-0014](0014-fingerprint-prediction-lifecycle.md) **in part, once accepted and activated**: the sentence "a new profile version makes predictions stale" becomes "a new profile version makes stale exactly the predictions its published impact reaches". Immutable versions, server-computed hashes, fingerprint independence and prediction history stay as decided there  
+**Supersedes:** [ADR-0013](0013-versioned-taste-profile.md) and [ADR-0014](0014-fingerprint-prediction-lifecycle.md) **in part, from activation**: the sentence "a new profile version makes predictions stale" becomes "a new profile version makes stale exactly the predictions its published impact reaches". Immutable versions, server-computed hashes, fingerprint independence and prediction history stay as decided there  
 **Superseded by:** None
 
 ## Context
@@ -90,7 +90,7 @@ The validator proves structure and coverage, never meaning: no table can show th
 - **Not a safety mechanism:** shadow telemetry (AIR-204) validates declarations after the fact (how many films each would keep, and whether owner-reviewed declarations look plausible). It never authorizes selective scope.
 - **Residual risk the owner accepts by accepting this ADR:** the Worker can check that an approval record is present, complete and bound to the declaration, and that the publication is an authenticated owner request behind Access; it cannot prove a human actually read the declaration. A wrong approved declaration is recoverable by a `global` version or strict mode (section 6), not prevented.
 
-A narrower alternative, if the owner prefers fewer judgement calls: allow `selective` only for the four genre-specific sections (with their floors) and make every other field global-only. It removes the free-form-field risk at the cost of most of the savings; it is a one-row change to the field table.
+The owner chose this model (option A): selective scope is available for every field the table permits, each time only with an approval of that exact declaration.
 
 ### 5. Every consumer uses the same rule and the same inputs
 
@@ -128,6 +128,7 @@ The publisher's write sequence and concurrency guard (AIR-202), the evaluator mo
 - **Only one-step compatibility (vN→vN+1).** Rejected: two quick publications would turn every film stale again; the bounded lineage makes the rule transitive at a fixed cost.
 - **Unknown features or impact treated as unaffected.** Rejected: fails open. Unknown is always global/stale.
 - **Structural validation alone authorizes selective scope.** Rejected in review: coverage cannot prove that free-form prose reaches only the declared films, so a narrow declaration could silently keep incompatible scores (section 4a).
+- **Selective scope only for the four genre-specific sections, every other field global-only (option B).** Not chosen by the owner: it removes judgement calls on free-form fields but forgoes most of the savings; per-declaration approval (option A) keeps the same fail-closed default.
 - **Absent genre-specific dimension always treated as unaffected.** Rejected in review: an older fingerprint of a film inside the genre may simply lack the field; absence counts only when the genres prove the film is outside the domain.
 
 ## Consequences
@@ -136,11 +137,11 @@ Profile edits cost model runs in proportion to their declared reach. Every consu
 
 ## Recovery and migration boundary
 
-This ADR changes no code or data. Accepting it authorizes none of: a profile publication, a model or prediction run, a queue rebuild, a mode switch, a Scheduled Task change, an R2 or D1 read or write. Each successor card is a separate PR; activation (AIR-206) needs its own owner approvals. Rollback paths are in section 6; none of them rewrites a prediction.
+This ADR changes no code or data. Its acceptance authorizes none of: a profile publication, a model or prediction run, a queue rebuild, a mode switch, a Scheduled Task change, an R2 or D1 read or write. Each successor card is a separate PR; activation (AIR-206) needs its own owner approvals. Rollback paths are in section 6; none of them rewrites a prediction.
 
 ## Evidence
 
-- **Original decision:** [AIR-32](https://trello.com/c/eKFV3v2j), owner comment of 27 October 2026 (design-first phase A)
+- **Original decision:** [AIR-32](https://trello.com/c/eKFV3v2j), owner comment of 27 October 2026 (design-first phase A); owner acceptance of option A in the [final review](https://github.com/vladimino/iptv-watchlist/pull/162#pullrequestreview-5673703349)
 - **Audit:** [equality guards and consumers on `main` `1f956dd`](../evidence/prediction/air-32-profile-equality-guards-audit-2026-10-27.md)
 - **Specification:** [fixtures](../../tests/fixtures/profile-compatibility/cases.json) checked by `tests/profile-compatibility-spec.mjs` against the live mechanic, execution, genre and profile field vocabularies
 - **Uncertainty:** the selectors' semantic accuracy cannot be proven by the system (section 4a: it is an owner decision, bound by approval); the share of films a typical edit reaches is not measured (AIR-204 shadow counters measure it)
