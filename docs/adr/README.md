@@ -29,11 +29,11 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0021 — A large programme generation is staged in bounded chunks and published by one fixed-size commit](0021-staged-atomic-generation-import.md) | Accepted 2026-10-26 conceptually, conditional on the scratch G4 performance and atomicity gate (design decision; no migration, scratch or production write authorized) | [AIR-167](https://trello.com/c/6ZaRfXWL), [owner review](https://github.com/vladimino/iptv-watchlist/pull/123#pullrequestreview-5655427816); [generation unit size](../evidence/d1-migration/generation-unit-size-2026-10-26.md) |
 | [0022 — A discovery decision taken against earlier airings is imported with its own evidence key](0022-stale-decision-evidence-import.md) | Accepted 2026-10-27 (design decision; no D1 or production operation authorized); supersedes ADR-0019 item 5 in part | [AIR-74](https://trello.com/c/5AdAmKPe) owner decision; [dry-run evidence](../evidence/d1-migration/air-74-sqlite-dry-run-2026-10-26.md) |
 
+| [0023 — Watched, rating and watchlist are separate Letterboxd facts with provenance, and only a newer observation replaces one](0023-letterboxd-user-facts.md) | Accepted 2026-10-27; owner-approved architecture and GitHub-rendered Mermaid (design only; no production operations authorized) | [AIR-170](https://trello.com/c/UaOFSsF9); [AIR-169 reconciliation](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md) |
+
 ## Proposed records
 
-| ADR | Status | Decision and evidence |
-| --- | --- | --- |
-| [0023 — Watched, rating and watchlist are separate Letterboxd facts with provenance, and only a newer observation replaces one](0023-letterboxd-user-facts.md) | Proposed 2026-10-27; owner architecture and rendered-diagram approval required before merge | [AIR-170](https://trello.com/c/UaOFSsF9); [AIR-169 reconciliation](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md) |
+None at present.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
