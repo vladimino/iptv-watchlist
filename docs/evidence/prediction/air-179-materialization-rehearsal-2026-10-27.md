@@ -1,6 +1,6 @@
 # Prediction version materialization: plan and offline rehearsal on the AIR-175 snapshot
 
-**Captured:** 2026-10-27, offline on the owner's machine; code on branch `claude/air-179-prediction-materializer` (base `main` `8b861ff`)  
+**Captured:** 2026-10-27, offline on the owner's machine; code on branch `claude/air-179-prediction-materializer` (base `main` `8b861ff`), re-run after the review fixes (receipts only for complete batches, bound to the batch digest) with identical figures  
 **Input:** the [AIR-175 snapshot](../d1-migration/air-175-r2-snapshot-identity-2026-10-26.md), `consistent_fenced`, aggregate `f71eee103b8e45a696def1805d050454bf3721e0cd688dc041c16bddcc0bdeb3` (the plan id), `manifest.json` SHA-256 `c26e04536ff2ebc047e731ad0b0e39eed51a9550bc921f457026de06c7b1865a` re-checked after the runs; the directory stayed write-protected  
 **Scope:** local files and an in-memory bucket only; no request to the Worker, R2 or D1, no flag, Task or Access change  
 **Verdict:** **GO for review of the materializer, offline only.** Every planned record materializes, every object equals its historical body, no body changes, every batch replays; no production run is recorded or authorized here  
@@ -27,6 +27,7 @@ Aggregates only. `plan.jsonl` (film ids, ETags, checksums) and the per-batch rep
 | --- | --- |
 | Dry run per batch | 47 × HTTP 200 |
 | Apply per batch | 47 × HTTP 200; outcomes `materialized` 2,335 |
+| Batches complete (all films `done`, sealed) | 47 of 47; incomplete 0 |
 | Replay of every batch | 47 × `replay: true`, nothing written |
 | Check after apply | pending 0, malformed 0, linked 2,335, object ≠ body 0, body changed 0, provenance block 2,335 of 2,335 |
 | Wall time (plan + rehearsal) | 2.8 s |

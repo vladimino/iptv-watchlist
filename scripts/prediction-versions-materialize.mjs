@@ -86,10 +86,11 @@ export async function rehearse({snapshot,output}){
  if(manifest.totals?.aggregateSha256!==origin.planId)throw new MaterializeError('The snapshot is not the one the plan was made from',3);
  const bucket=snapshotBucket(snapshotPath,manifest),env={BUCKET:bucket,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'},ctx=workerContext();
  const before=new Map([...bucket.records].filter(([key])=>key.endsWith('/predictions.json')).map(([key,text])=>[key,JSON.parse(text)]));
- const outcomes={},statuses={},replays={};
+ const outcomes={},statuses={},replays={},incomplete=[];
  for(const [batch,items] of batches.entries()){
   const dry=await post(ctx,env,{planId:origin.planId,batch,items,dryRun:true});statuses['dry_'+dry.status]=(statuses['dry_'+dry.status]||0)+1;
   const result=await post(ctx,env,{planId:origin.planId,batch,items});statuses[result.status]=(statuses[result.status]||0)+1;
+  if(dry.data.complete!==true||result.data.complete!==true)incomplete.push(batch);
   for(const [key,value] of Object.entries(result.data.outcomes||{}))outcomes[key]=(outcomes[key]||0)+value;
  }
  for(const [batch,items] of batches.entries()){const again=await post(ctx,env,{planId:origin.planId,batch,items});replays[again.data.replay?'replay':'not_replay']=(replays[again.data.replay?'replay':'not_replay']||0)+1;}
@@ -101,7 +102,7 @@ export async function rehearse({snapshot,output}){
   if(JSON.stringify(rules.predictionVersionBody(old.current))!==JSON.stringify(rules.predictionVersionBody(now.current)))check.bodyChanged++;
   for(const item of result.linked){const text=bucket.records.get(item.r2Key);if(!text||sha256(text)!==item.contentSha256||text!==JSON.stringify(rules.predictionVersionBody(item.role==='current'?now.current:now.history[item.index])))check.objectMismatch++;}
  }
- const report={schemaVersion:1,mode:'rehearse',network:false,planId:origin.planId,batches:batches.length,statuses,outcomes,replays,check,ok:check.pending===0&&check.malformed===0&&check.objectMismatch===0&&check.bodyChanged===0&&check.provenance===check.bundles&&!replays.not_replay};
+ const report={schemaVersion:1,mode:'rehearse',network:false,planId:origin.planId,batches:batches.length,statuses,outcomes,replays,incomplete,check,ok:!incomplete.length&&check.pending===0&&check.malformed===0&&check.objectMismatch===0&&check.bodyChanged===0&&check.provenance===check.bundles&&!replays.not_replay};
  await writeFile(path.join(outputPath,'rehearse.json'),JSON.stringify(report,null,1)+'\n',{mode:0o600});
  return report;
 }
@@ -120,9 +121,11 @@ export async function remote({mode,output,endpoint,fromBatch=0,toBatch=null,fetc
   let data=null;try{data=await response.json();}catch{}
   if(!response.ok){results.push({batch,status:response.status,error:data?.reason||data?.error||'http_'+response.status});break;}
   for(const [key,value] of Object.entries(data.outcomes||{}))totals[key]=(totals[key]||0)+value;
-  results.push({batch,status:response.status,replay:!!data.replay,outcomes:data.outcomes});
+  // An incomplete batch (a film to re-plan or to investigate) is reported and left unsealed; the next batches are independent.
+  results.push({batch,status:response.status,replay:!!data.replay,complete:data.complete===true,classes:data.classes,outcomes:data.outcomes});
  }
- const failed=results.find(result=>result.error)||null,summary={schemaVersion:1,mode,planId:origin.planId,batchesRequested:last-fromBatch+1,batchesDone:results.filter(result=>!result.error).length,failed,totals};
+ const failed=results.find(result=>result.error)||null,incomplete=results.filter(result=>!result.error&&!result.complete).map(result=>({batch:result.batch,classes:result.classes}));
+ const summary={schemaVersion:2,mode,planId:origin.planId,batchesRequested:last-fromBatch+1,batchesDone:results.filter(result=>!result.error).length,batchesComplete:results.filter(result=>result.complete).length,incomplete,failed,totals};
  await writeFile(path.join(outputPath,mode+'.json'),JSON.stringify({...summary,results},null,1)+'\n',{mode:0o600});
  return summary;
 }
@@ -138,7 +141,7 @@ async function main(){
   const args=parseArgs(process.argv.slice(2));
   if(args.mode==='plan'||args.mode==='rehearse'){if(!args.snapshot||!args.output)throw new MaterializeError(args.mode+' needs --snapshot and --output',2);const report=await(args.mode==='plan'?plan(args):rehearse(args));console.log(JSON.stringify(report));if(args.mode==='rehearse'&&!report.ok)process.exit(3);return;}
   if(!args.output||!args.endpoint)throw new MaterializeError(args.mode+' needs --output and --endpoint',2);
-  const summary=await remote(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);
+  const summary=await remote(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);if(summary.incomplete.length)process.exit(4);
  }catch(error){console.error(error instanceof MaterializeError?error.message:'Materialization failed');process.exit(error.exitCode||1);}
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))await main();

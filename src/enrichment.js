@@ -797,20 +797,33 @@ async function materializeFilm(env,item,{planId,dryRun,at}){
  for(const o of objects){const stored=await env.BUCKET.get(o.key);if(!stored||await stored.text()!==o.text)return {filmId:item.filmId,outcome:'readback_failed'};}
  return {filmId:item.filmId,outcome:'materialized',objects:objects.length,objectsPresent:objects.filter(o=>o.present).length};
 }
+// Every film outcome is one of three classes. Only a batch whose films are all `done` is sealed by a receipt; `replan` needs a
+// plan from a newer fenced snapshot, `stop` needs investigation. Neither is ever hidden behind a receipt or a replay.
+const MATERIALIZATION_CLASSES={materialized:'done',already_materialized:'done',nothing_pending:'done',would_materialize:'done',bundle_changed:'replan',bundle_missing:'replan',checksum_mismatch:'stop',bundle_unreadable:'stop',malformed_pointer:'stop',readback_failed:'stop'};
+// The receipt is bound to the exact request: plan, batch number and the ordered items with their ETag and checksum.
+const materializationDigest=request=>textSha256(JSON.stringify({planId:request.planId,batch:request.batch,items:request.items.map(item=>[item.filmId,item.expectedEtag,item.expectedSha256])}));
 async function materializePredictionVersions(env,body){
  let request;try{request=materializationRequest(body);}catch(error){return json({error:error.message},error.status||400);}
  // Writing also needs the version writer on: otherwise the next submit would put an unlinked record back into the bundle.
  if(!request.dryRun&&!predictionMaterializationEnabled(env))return json({error:'Prediction version materialization is off',reason:'materialization_off'},409);
  if(!request.dryRun&&!predictionVersionsEnabled(env))return json({error:'Prediction version objects are off',reason:'version_objects_off'},409);
- const receiptKey=MATERIALIZATION_RECEIPTS+request.planId+'/'+request.batch+'.json';
- if(!request.dryRun){const prior=await loadJSON(env,receiptKey);if(prior)return json({...prior,replay:true});}
+ const receiptKey=MATERIALIZATION_RECEIPTS+request.planId+'/'+request.batch+'.json',itemsSha256=await materializationDigest(request);
+ const sealed=async()=>{
+  const prior=await loadJSON(env,receiptKey);if(!prior)return null;
+  if(prior.itemsSha256!==itemsSha256)return json({error:'A receipt for this plan and batch holds other items',reason:'receipt_mismatch'},409);
+  return json({...prior,dryRun:request.dryRun,replay:true});
+ };
+ {const answer=await sealed();if(answer)return answer;}
  // A dry run reads only, so it takes no lease; a write batch runs under the prediction writer lease that every submit takes.
  const run=async()=>{
   const at=new Date().toISOString(),results=[];
   for(const item of request.items)results.push(await materializeFilm(env,item,{planId:request.planId,dryRun:request.dryRun,at}));
-  const outcomes={};for(const result of results)outcomes[result.outcome]=(outcomes[result.outcome]||0)+1;
-  const receipt={schemaVersion:1,planId:request.planId,batch:request.batch,dryRun:request.dryRun,at,films:results.length,outcomes,results};
-  if(!request.dryRun)await env.BUCKET.put(receiptKey,JSON.stringify(receipt),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+  const outcomes={},classes={done:0,replan:0,stop:0};
+  for(const result of results){outcomes[result.outcome]=(outcomes[result.outcome]||0)+1;classes[MATERIALIZATION_CLASSES[result.outcome]||'stop']++;}
+  const complete=classes.done===results.length,receipt={schemaVersion:2,planId:request.planId,batch:request.batch,itemsSha256,dryRun:request.dryRun,at,films:results.length,complete,classes,outcomes,results};
+  if(request.dryRun||!complete)return json({...receipt,replay:false});
+  const saved=await env.BUCKET.put(receiptKey,JSON.stringify(receipt),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+  if(saved===null)return (await sealed())||json({error:'Receipt write lost',reason:'receipt_unknown'},502);
   return json({...receipt,replay:false});
  };
  return request.dryRun?run():predictionWriter(env,run);

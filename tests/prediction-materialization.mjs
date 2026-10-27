@@ -53,6 +53,17 @@ const PLAN='a'.repeat(64);
  // The same batch again is a replay; the same film in a later batch is recognized as already materialized.
  assert.equal((await post(on,{planId:PLAN,batch:0,items:[item]})).data.replay,true);
  assert.deepEqual((await post(on,{planId:PLAN,batch:1,items:[item]})).data.outcomes,{already_materialized:1});
+ // A receipt answers only the exact request it sealed: other items, order, ETag or checksum under the same plan and batch are refused.
+ const other=seed(b,'tmdb_8'),receiptsBefore=[...b.records.keys()].length;
+ for(const items of [[other],[item,other],[{...item,expectedEtag:'x'}],[{...item,expectedSha256:'b'.repeat(64)}]]){
+  for(const dryRun of [false,true]){const refused=await post(on,{planId:PLAN,batch:0,items,dryRun});assert.equal(refused.status,409);assert.equal(refused.data.reason,'receipt_mismatch');}
+ }
+ assert.equal([...b.records.keys()].length,receiptsBefore,'a refused request writes nothing');
+ assert.equal(JSON.parse(b.records.get(bundleKey('tmdb_8'))).current.r2Key,undefined);
+ // A later plan from a newer snapshot sees the materialized bundle as it is now: nothing pending, sealed under the new plan.
+ const fresh={filmId:'tmdb_7',expectedEtag:b.etags.get(bundleKey('tmdb_7')),expectedSha256:sha256(b.records.get(bundleKey('tmdb_7')))};
+ const replanned=await post(on,{planId:'c'.repeat(64),batch:0,items:[fresh]});
+ assert.deepEqual(replanned.data.outcomes,{nothing_pending:1});assert.equal(replanned.data.complete,true);
 }
 
 // 3. Stop conditions: a changed bundle is skipped, a differing existing object stops the film, a busy writer refuses the batch.
@@ -65,6 +76,11 @@ const PLAN='a'.repeat(64);
  b.records.set(rules.predictionVersionKey('present',sha256(presentText)),presentText);
  const result=await post(on,{planId:PLAN,batch:0,items:[changed,mismatch,present]});
  assert.deepEqual(result.data.outcomes,{bundle_changed:1,checksum_mismatch:1,materialized:1});
+ assert.equal(result.data.complete,false);assert.deepEqual(result.data.classes,{done:1,replan:1,stop:1});
+ assert.ok(!b.records.has('enrichment/predictions-materialization/'+PLAN+'/0.json'),'a mixed batch is never sealed');
+ // Re-sending it revisits every film: the finished one is recognized, the two others are reported again, still unsealed.
+ const again=await post(on,{planId:PLAN,batch:0,items:[changed,mismatch,present]});
+ assert.equal(again.data.replay,false);assert.deepEqual(again.data.outcomes,{already_materialized:1,bundle_changed:1,checksum_mismatch:1});assert.equal(again.data.complete,false);
  assert.equal(result.data.results.find(r=>r.filmId==='present').objectsPresent,1,'an existing identical object is linked, not rewritten');
  assert.equal(JSON.parse(b.records.get(bundleKey('mismatch'))).current.r2Key,undefined,'a mismatch leaves the bundle unchanged');
  b.records.set('enrichment/writer-lease.json',JSON.stringify({id:'submit',expiresAt:Date.now()+60000}));b.etags.set('enrichment/writer-lease.json','lease');
@@ -98,13 +114,22 @@ try{
  assert.equal(rehearsal.ok,true,JSON.stringify(rehearsal));assert.deepEqual(rehearsal.outcomes,{materialized:60});assert.equal(rehearsal.check.linked,120);
  const b=bucket();for(const [key,text] of Object.entries(bodies)){b.records.set(key,text);b.etags.set(key,entries.find(e=>e.key===key).metadata.etag.replace(/"/g,''));}
  const fetchImpl=async(url,init)=>{const response=await ctx.worker.fetch(new Request(url,init),{BUCKET:b,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'});return {ok:response.ok,status:response.status,json:()=>response.json()};};
+ const changedKey=bundleKey('film59'),changedEtag=b.etags.get(changedKey);b.etags.set(changedKey,'after-a-submit');
  const validate=await remote({mode:'validate',output:out,endpoint:'https://site.example',fetchImpl,env:{}});
- assert.deepEqual(validate.totals,{would_materialize:60});assert.equal([...b.records.keys()].filter(key=>key.includes('/versions/')).length,0);
+ assert.deepEqual(validate.totals,{would_materialize:59,bundle_changed:1});assert.deepEqual(validate.incomplete,[{batch:1,classes:{done:9,replan:1,stop:0}}]);assert.equal([...b.records.keys()].filter(key=>key.includes('/versions/')).length,0);
  await assert.rejects(remote({mode:'apply',output:out,endpoint:'http://site.example',fetchImpl,env:{}}),/HTTPS/);
  const applied=await remote({mode:'apply',output:out,endpoint:'https://site.example',fetchImpl,env:{}});
- assert.deepEqual(applied.totals,{materialized:60});assert.equal(applied.failed,null);
- assert.deepEqual((await remote({mode:'apply',output:out,endpoint:'https://site.example',fetchImpl,env:{}})).batchesDone,2,'a rerun is a replay');
+ assert.deepEqual(applied.totals,{materialized:59,bundle_changed:1});assert.equal(applied.failed,null);assert.equal(applied.batchesComplete,1);assert.deepEqual(applied.incomplete.map(entry=>entry.batch),[1]);
+ assert.ok(b.records.has('enrichment/predictions-materialization/'+JSON.parse(fs.readFileSync(path.join(out,'origin.json'),'utf8')).planId+'/0.json'));
+ // Resuming at the incomplete batch revisits it: the finished films are recognized and the changed one is still reported, never sealed.
+ const resumed=await remote({mode:'apply',output:out,endpoint:'https://site.example',fromBatch:1,fetchImpl,env:{}});
+ assert.deepEqual(resumed.totals,{already_materialized:9,bundle_changed:1});assert.equal(resumed.batchesComplete,0);
+ b.etags.set(changedKey,changedEtag);
+ const finished=await remote({mode:'apply',output:out,endpoint:'https://site.example',fromBatch:1,fetchImpl,env:{}});
+ assert.deepEqual(finished.totals,{already_materialized:9,materialized:1});assert.deepEqual(finished.incomplete,[]);
+ const rerun=await remote({mode:'apply',output:out,endpoint:'https://site.example',fetchImpl,env:{}});
+ assert.equal(rerun.batchesComplete,2,'a rerun is a replay of both sealed receipts');assert.deepEqual(rerun.totals,{materialized:51,already_materialized:9});
  fs.appendFileSync(path.join(out,'plan.jsonl'),'\n');await assert.rejects(loadPlan(out),/plan.jsonl differs/);
  await assert.rejects(plan({snapshot,output:path.resolve('tests','private-out')}),/outside the Git repository/);
 }finally{fs.rmSync(root,{recursive:true,force:true});}
-console.log('Prediction version materialization: both gates and strict input, read-only dry run, objects and pointers with unchanged bodies, provenance and receipts, replay and recognition after a lost response, changed bundle, checksum mismatch, busy writer, CLI plan, offline rehearsal, remote validate/apply and tamper refusal passed');
+console.log('Prediction version materialization: both gates and strict input, read-only dry run, objects and pointers with unchanged bodies, provenance and receipts, replay bound to the exact items, recognition after a lost response, a later plan, unsealed mixed batches, changed bundle, checksum mismatch, busy writer, CLI plan, offline rehearsal, remote validate/apply/resume with incomplete batches and tamper refusal passed');
