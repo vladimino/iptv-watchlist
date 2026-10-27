@@ -60,6 +60,7 @@ All archive objects except the pointer are **write-once**: never overwritten, ne
   - `schemaVersion`, `manifestId`, `parentManifestId`, `segmentCount`, `hash: "fnv1a32-utf8"`;
   - for **every** segment `{segment, object, sha256, items, bytes}`, where `object` names the segment version in force;
   - `totals {items, bytes}`;
+  - `upsertedKeys`: the sorted keys this version wrote, i.e. the writer's departures. Bounded by one scan's departures;
   - the writer fence: `writerRunId`, `kind` (`commit` or `scan`), `basedOnProgrammeRunId`, `basedOnPointerEtag`, `leaseId`, `writtenAt`.
 - **Pointer:** `epg/discovery-archive/v1/current.json`, holding `{manifestId}`. It is the **only** mutable archive object, and changes only by etag compare-and-swap.
 - **Archived record = payload + envelope.**
@@ -87,8 +88,12 @@ A writer is the EPG commit of run `R` (target: the new generation `R`), or, once
    - upsert `{payload, envelope}` for the departing key, keeping the record with the later `lastSeenAt`, then the later `lastSeenProgrammeRunId`;
    - keep every other key unchanged, including archive copies of keys that re-entered; those are removed only by a later departure that overwrites them.
    - Write each new segment version under a fresh `writeId`. Untouched segments keep their `M0` object.
+   - **Reconcile against the fenced starting manifest.** `P`'s `alsoArchived` is exact only for the manifest `Mp` that `P` names. `M0` can be newer: a writer that swapped the archive pointer and then died before publishing (crash window 3) added copies of keys that are still in `P`'s active ledger.
+     - Walk `parentManifestId` from `M0` back to `Mp`. Every key in those versions' `upsertedKeys` that is in `P`'s active ledger is also archived.
+     - The walk is bounded: normally zero or one version, each with one scan's departures.
+     - If the chain is longer than a fixed bound (proposed 8 versions), or does not reach `Mp`, recompute instead. Read every segment of `M0` one at a time and collect its keys that are in `P`'s active ledger. Memory stays at one segment plus the active key set.
    - Compute the new `alsoArchived`:
-     - start from `P`'s list and keep the keys still in the new scan;
+     - start from `P`'s list plus the keys found by the reconciliation, and keep those still in the new scan;
      - add the re-entered keys found in step 1;
      - drop the departing keys, whose archive copy is now the current record.
 3. **Archive commit point.** Write manifest version `M1` with `parentManifestId = M0`, the writer fence and the full segment table. Then:
@@ -127,7 +132,7 @@ A stale commit is rejected at step 3: its predecessor was already superseded by 
   - Existing `excluded_nonfilm` and other decisions are never removed by archiving.
 - **Pipeline and enrichment status:** `discoveryCounts` over the active ledger, plus an `archive` block from the active ledger's own `archive` field and its manifest: `manifestId`, segments, bytes, `uniqueArchivedItems`.
   - `ledgerTotal` = active items + `uniqueArchivedItems`, i.e. the number of unique keys in active ∪ archive. Leftover duplicate copies are not counted.
-  - The writer computes `uniqueArchivedItems` from the carried `alsoArchived` list (section 3, step 2), so it is exact without scanning segments. Status never loads segments.
+  - The writer computes `uniqueArchivedItems` from the `alsoArchived` list, reconciled against its fenced starting manifest (section 3, step 2). It is exact after any aborted writer, normally without scanning segments. Status never loads segments.
 - **Re-entry (writer step 1):** reads from `M0`, the manifest the writer fenced on.
 - **D1 backfill, offline audits, R2 snapshot:**
   - read the published active ledger and its manifest and segment versions;
@@ -165,7 +170,7 @@ Compatibility:
 1. **No loss.** After every completed or killed writer, the unique keys of the published active ∪ its manifest's segments ⊇ the previous unique keys ∪ the keys of the published scans.
 2. **Exact boundary.** Active keys = keys of the latest scan. No key appears twice in an active ledger.
 3. **Full-mode parity.** For every key, the active record, or else the archived **payload**, deep-equals the record full mode would hold after the same sequence of published scans. Envelope fields and order are not part of the comparison.
-4. **Unique counts.** `ledgerTotal` = |unique keys of active ∪ archive|, whatever leftover duplicates exist.
+4. **Unique counts.** `ledgerTotal` = |unique keys of active ∪ archive|, whatever leftover duplicates exist. This includes copies left by a writer that swapped the archive pointer and died before publishing.
 5. **Decisions untouched.** `epg/discovery-resolution.json` changes only through the resolver, never by archiving. Every verified, ambiguous, retry, terminal and `excluded_nonfilm` decision survives archive and re-entry unchanged, and re-attaches by key.
 6. **Idempotence.** Re-running a writer after a kill at any step yields the same unique keys and payloads.
 7. **Fencing.**
@@ -183,7 +188,8 @@ Compatibility:
 **Kill-window tests required in AIR-220:**
 
 - a kill after each step of section 3, including between a segment write and the next one, and between the manifest write and the archive CAS;
-- a kill after the archive CAS but before publication, followed by the next commit;
+- a kill after the archive CAS but before publication, followed by the next commit. Specifically: `P` is published; run `R` archives departing key `K`, swaps `current.json` and dies before publication; the next run `S` keeps `K` in its scan. Expect `ledgerTotal` = the exact number of unique keys of active ∪ archive, `K` in `alsoArchived`, and payload parity;
+- the same with a chain longer than the bound or a missing manifest version, which forces the segment-by-segment reconciliation, with its peak memory measured;
 - a stale commit whose predecessor was superseded;
 - two writers racing on the archive pointer (commit and archive-aware scan);
 - a retry of the same run;
@@ -226,7 +232,7 @@ The size budget for the active ledger (10–15 MB was the working hypothesis) is
 
 ## Evidence
 
-- **Original decision:** pending owner approval on the AIR-219 delivery. The first independent review ([PR #167](https://github.com/vladimino/iptv-watchlist/pull/167)) raised the crash consistency, payload parity and unique counts, rollback, fencing and snapshot consistency points addressed above.
+- **Original decision:** pending owner approval on the AIR-219 delivery. The first independent review ([PR #167](https://github.com/vladimino/iptv-watchlist/pull/167)) raised the crash consistency, payload parity and unique counts, rollback, fencing and snapshot consistency points addressed above. A re-review raised the duplicate count after an aborted archive write, addressed by reconciling `alsoArchived` against the fenced starting manifest.
 - **Implementation:** not started ([AIR-220](https://trello.com/c/uPvMc5ww))
 - **Dated verification:** the [AIR-211 report](../evidence/epg-memory-pressure-2026-10-27.md) (sizes and growth on 27 October 2026, offline replay). No implementation has been measured.
 - **Uncertainty:**
