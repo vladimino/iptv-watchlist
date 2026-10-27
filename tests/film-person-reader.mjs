@@ -189,4 +189,23 @@ assert.equal(hotOf({programme:{films:[{id:'pre',original:'Pre',title:'Pre',epgLa
 assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'stale',original:'Stale',title:'Stale',shows:[windowShow],showsProgrammeRunId:'run-a',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'stale'),false);
 assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'current',original:'Current',title:'Current',shows:[windowShow],showsProgrammeRunId:'run-b'}]},filmTitles:[],personNames:[]},'current'),true);
 
+// A verdict of the shared compatibility evaluator, when the store supplies one, replaces the strict comparison in both the
+// lifecycle dimension and the legacy status, and a carried prediction keeps its own profile provenance.
+{
+ const moved=structuredClone(store);moved.profile={version:4,profileHash:'profile-b'};
+ const prediction=(extra,id='28nq')=>readLifecycle({...moved,...extra},NOW).films.find(item=>item.id==='film:'+id).prediction;
+ const parityOf=extra=>readLifecycle({...moved,...extra},NOW).parity;
+ assert.equal(prediction({}).status,'stale','without a verdict a new profile makes the prediction stale');
+ const carried=prediction({predictionCompatible:id=>id==='28nq'});
+ assert.equal(carried.status,'current');assert.equal(carried.sourceVersion,3);
+ assert.equal(carried.provenance.profileHash,'profile-a','the original profile stays the provenance');
+ assert.deepEqual(JSON.parse(JSON.stringify(carried.provenance.evaluatedAgainst)),{version:4,profileHash:'profile-b'});
+ assert.equal(prediction({predictionCompatible:()=>false}).status,'stale');
+ assert.equal(parityOf({predictionCompatible:id=>id==='28nq'}).ok,true,'legacy status and lifecycle agree under the verdict');
+ const exact=readLifecycle({...store,predictionCompatible:()=>false},NOW).films.find(item=>item.id==='film:28nq').prediction;
+ assert.equal(exact.status,'stale','a negative verdict wins even over an exact match');
+ const invalidated=structuredClone(moved);invalidated.fingerprints['28nq'].invalidatedAt=FRESH;
+ assert.notEqual(readLifecycle({...invalidated,predictionCompatible:()=>true},NOW).films.find(item=>item.id==='film:28nq').prediction.status,'current','a verdict never revives a prediction over a stale fingerprint');
+}
+
 console.log('Film and Person lifecycle reader passed.');

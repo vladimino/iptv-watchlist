@@ -26,7 +26,7 @@ A catalog record is returned only when every rule holds:
 1. **Verified identity.** The record has a `tmdbId` and `canonicalIdentity` equal to `tmdb:<tmdbId>`. An observation key or a record without a verified identity is not a film here.
 2. **Outside the watchlist.** Neither its id nor its TMDB identity appears among the programme's films or the watchlist's films. A watchlist film without a scheduled show is still a watchlist film.
 3. **Not watched and not rated.** Neither the record's own id nor any other id of the same TMDB film is watched or rated in the view index, after the compiled ratings seed. See [Watched and rated films](#watched-and-rated-films).
-4. **Current prediction.** The stored prediction matches the current profile version and hash, the stored fingerprint hash, fingerprint schema version 1 and prediction prompt version 1. Without a profile nothing is current and the list is empty.
+4. **Current prediction.** The stored prediction matches the current profile version and hash, the stored fingerprint hash, fingerprint schema version 1 and prediction prompt version 1; with `PREDICTION_PROFILE_COMPATIBILITY=selective`, a prediction the shared evaluator keeps across profile versions also counts ([prediction compatibility](../domain/prediction-compatibility.md#one-rule-for-every-consumer)). Without a profile nothing is current and the list is empty.
 5. **Real shows of the pinned generation.** The record's `shows` were written by the pinned generation (`showsProgrammeRunId` equals the response's `programmeRunId`). Shows carried over from an earlier generation are not availability in the new one. `epgLastAiring` alone is not a show.
 6. **Inside the window.** At least one show starts strictly after `now − 72h` and strictly before `now + 24h`. A start exactly 72 hours ago has expired; a start exactly 24 hours ahead is outside the horizon. Only shows inside the window are returned.
 7. **Not hidden by the display-only title exclusion**, when it is switched on and its list is valid. See [Display-only title exclusion](#display-only-title-exclusion).
@@ -46,25 +46,27 @@ One entry per canonical identity: when two records share a TMDB identity, the on
 
 ### Display-only title exclusion
 
-A separate, weaker rule hides a catalog film that matches a watched or rated Letterboxd export film which has no accepted identity ([ADR-0028](../../adr/0028-finds-display-only-watched-exclusion.md)). It only removes the film from this response: it writes nothing, links no Letterboxd id to a TMDB id, records no fact or rating, and no other route reads it. The watchlist, the programme, predictions and the taste profile are unaffected.
+A separate, weaker rule hides a catalog film that matches a watched or rated Letterboxd export film which has no accepted identity ([ADR-0028](../../adr/0028-finds-display-only-watched-exclusion.md); namesake guards relaxed for the `strict_original_exact_year_v2` tag by [ADR-0033](../../adr/0033-finds-exclusion-namesake-relaxation.md)). It only removes the film from this response: it writes nothing, links no Letterboxd id to a TMDB id, records no fact or rating, and no other route reads it. The watchlist, the programme, predictions and the taste profile are unaffected.
 
 **Switch.** `FINDS_TITLE_EXCLUSION` enables it only with the exact string `on` (see the [flag register](../feature-flags.md)). Any other value leaves `letterboxd/display-exclusion.json` unread.
 
 **The list.** One private R2 object, replaced only as a whole, built offline by `scripts/letterboxd-display-exclusion.mjs` and placed by a separately approved operation ([runbook](../../runbooks/finds-display-exclusion.md)); the Worker has no writer for it.
 
+The builder writes the `strict_original_exact_year_v2` tag. It lists a watched or rated export film that has no accepted identity, a year and a non-empty normalized name. When other export films (in any list, identified or not) share that name, it lists the film only if every one of them has a year, the watched or rated ones have pairwise different years, and every watchlist-only one is at least two years from every watched or rated one; otherwise the name is dropped as a whole (`droppedExportNamesake`). `keptExportNamesake` counts the entries whose name the export carries more than once. A list with the legacy `strict_original_exact_year` tag, built when every repeated name was dropped, is still read with the legacy catalog guard below.
+
 ```json
-{"schemaVersion": 1, "kind": "letterboxd_display_exclusion", "rule": "strict_original_exact_year", "normalization": "normTitle_v1",
+{"schemaVersion": 1, "kind": "letterboxd_display_exclusion", "rule": "strict_original_exact_year_v2", "normalization": "normTitle_v1",
  "source": {"type": "letterboxd_export", "archiveSha256": "<64 hex>", "exportedAt": "<ISO time>", "baselinePlanSha256": "<64 hex>"},
- "builtAt": "<ISO time>", "counts": {"exportFilms": 0, "withIdentity": 0, "droppedNoYear": 0, "droppedNoName": 0, "droppedExportNamesake": 0, "entries": 0},
+ "builtAt": "<ISO time>", "counts": {"exportFilms": 0, "withIdentity": 0, "droppedNoYear": 0, "droppedNoName": 0, "droppedExportNamesake": 0, "keptExportNamesake": 0, "entries": 0},
  "entries": [{"title": "<normalized name>", "year": 2000}], "contentSha256": "<sha256 of JSON.stringify(entries)>"}
 ```
 
 The list is used only when every check passes; otherwise the rule is `unavailable` for that request, every film is shown and the route still answers `200`:
 
 - the R2 object size is at most 2 MiB, checked before the body is read or parsed, and the body is valid JSON;
-- exactly the keys above at the top level and in `source`; the four tags have exactly the values above; `source.type` is `letterboxd_export` with lowercase 64-hex `archiveSha256` and `baselinePlanSha256`;
+- exactly the keys above at the top level and in `source`; `schemaVersion`, `kind` and `normalization` have exactly the values above, and `rule` is `strict_original_exact_year` (legacy) or `strict_original_exact_year_v2`; any other tag is invalid; `source.type` is `letterboxd_export` with lowercase 64-hex `archiveSha256` and `baselinePlanSha256`;
 - `exportedAt` and `builtAt` are ISO dates, `exportedAt` is not after `builtAt`, and `builtAt` is not more than five minutes in the future;
-- `counts` holds non-negative integers and `counts.entries` equals the number of entries; at most 20,000 entries;
+- `counts` holds non-negative integers (any names) and `counts.entries` equals the number of entries; at most 20,000 entries;
 - every entry has exactly `title` and `year`; `title` is a non-empty string of at most 300 characters that is already normalized; `year` is an integer from 1870 to 2100; entries are strictly ascending by `title`, then `year`, so a duplicate is invalid;
 - `contentSha256` is the SHA-256 of `JSON.stringify(entries)`.
 
@@ -75,7 +77,9 @@ There is no age limit: a list older than the latest export only misses films wat
 **The rule.** Evaluated on every request against the pinned generation's catalog copy, after rules 1–6, so only films the response would otherwise offer are counted. A verified record is hidden when all hold:
 
 1. it has an integer `year`, and its normalized **original** title and that year equal an entry exactly; the localized title and aliases never match;
-2. no verified record of another TMDB film in the same catalog copy has that normalized key as its original title, localized title or alias, in any year;
+2. catalog uniqueness, which depends on the list's `rule` tag:
+   - `strict_original_exact_year`: no verified record of another TMDB film in the same catalog copy has that normalized key as its original title, localized title or alias, in any year;
+   - `strict_original_exact_year_v2`: no verified record of another TMDB film has the key as its original or localized title, in any year; and every other TMDB film that carries the key only as an alias (no record of it has the key as its original or localized title) has, on every verified record, an integer `year` at least two years from the record's year. An alias-only namesake without a year or within one year blocks, because the export name may be that film's English title;
 3. its TMDB id has no stored Letterboxd id in `metadata.json`, `watchlist.json`, the programme or a verified catalog record keyed by a Letterboxd id; such a film is decided by identity alone.
 
 Nothing is stored: a new generation is evaluated afresh, so a film can be hidden in one generation and shown in the next when a namesake enters or leaves the catalog. Entries are unique by title and year, and a record has one original title and year, so at most one entry matches a record.
