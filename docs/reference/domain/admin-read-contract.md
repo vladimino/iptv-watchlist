@@ -93,7 +93,7 @@ One admin response must name its pin, and that pin must cover every object the p
 
 These GETs do not write, and they still are not an admin query:
 
-- `GET /api/catalog/available` loads the pinned programme, the catalog, the watchlist, the view index and the profile, and derives the available catalog-only films in memory ([contract](../api/catalog.md)); it is a bounded read of fixed keys, not a search.
+- `GET /api/catalog/available` loads the pinned programme, the catalog, the watchlist, the view index, the profile and the metadata cache, and derives the available catalog-only films in memory ([contract](../api/catalog.md)); it is a bounded read of fixed keys, not a search.
 - `GET /api/programme` and `GET /api/watchlist` load a few known keys and localize in memory. Safe to read, too coarse for quality queues, and they return the public catalogue shape rather than `filmView`.
 - `GET /api/status`, `GET /api/integrations/tmdb/status`, `GET /api/ui/filter-presets`, `GET /api/enrichment/schema`, `GET /api/enrichment/profile`, `GET /api/enrichment/runner`, `GET /api/enrichment/queue/status`, `GET /api/enrichment/footer/status`, `GET /api/enrichment/pipeline/status`, `GET /api/enrichment/discovery/status`, `GET /api/enrichment/moods/diagnostics`, and the frozen diagnostic snapshot/accuracy GETs are status reads. They do not search Film or Person.
 - `GET /api/started` lists the entire `started/` prefix. It does not write, and it is not bounded by a cursor. Do not copy that pattern.
