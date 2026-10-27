@@ -41,7 +41,8 @@ for(const [dimension,domain] of Object.entries(v.genreDomains))assert(domain.len
 for(const [field,rule] of Object.entries(fieldRules))if(rule.genreFloor)for(const dimension of rule.dimensions)assert(v.genreDomains[dimension].every(genre=>rule.genreFloor.includes(genre)),field+' floor covers '+dimension);
 
 // Owner approval: a selective declaration is bound by SHA-256 to the transition and its exact content.
-const digest=(impact,to)=>createHash('sha256').update(JSON.stringify([impact.from.version,impact.from.profileHash,to.version,to.profileHash,impact.scope,[...impact.changedFields].sort(),impact.selectors])).digest('hex');
+const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+const digest=(impact,to)=>createHash('sha256').update(JSON.stringify(canonical([impact.from.version,impact.from.profileHash,to.version,to.profileHash,impact.scope,[...impact.changedFields].sort(),impact.selectors]))).digest('hex');
 const approved=(impact,to)=>!!impact.approval&&impact.approval.approvedBy==='owner'&&!!impact.approval.reviewRef&&!!impact.approval.approvedAt&&impact.approval.declarationSha256===digest(impact,to);
 
 // Reasons belong to exactly one outcome.
