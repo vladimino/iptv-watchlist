@@ -1,0 +1,56 @@
+# ADR 0023: Watched, rating and watchlist are separate Letterboxd facts with provenance, and only a newer observation replaces one
+
+**Status:** Proposed (needs the owner's architecture approval and rendered-diagram approval before merge; it authorizes no import, R2 or D1 write, flag or Task change)  
+**Original decision date:** not yet decided  
+**Recorded at:** 2026-10-27  
+**Approval source:** pending owner review of this PR  
+**Related work:** [AIR-170](https://trello.com/c/UaOFSsF9), [AIR-169 reconciliation](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md), [AIR-171 importer](https://trello.com/c/uvGt48sq), [AIR-172 finds](https://trello.com/c/FvqqJ8H0), [AIR-173 production import](https://trello.com/c/w2bVRb72), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0018](0018-letterboxd-last-good-ratings.md), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0002](0002-cloudflare-worker-r2-authority.md), [ADR-0019](0019-live-d1-backfill-boundaries.md)  
+**Supersedes:** None  
+**Superseded by:** None
+
+## Context
+
+The owner wants a one-time baseline from the Letterboxd account export (2,160 watched, 2,152 rated, 8 watched without a rating, 397 watchlist, 97 of them watched) so that finds stop offering films already seen, actual ratings outrank predictions, and history survives Letterboxd HTTP 403 periods. The [AIR-169 reconciliation](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md) against the AIR-175 snapshot established that export codes equal the stored Letterboxd ids for the 420 stored ids (`supported`), that all 397 watchlist films are accepted, and that 2,040 watched films (561 candidate, 1 ambiguous, 1,478 unmatched) have no accepted identity because production stores Letterboxd ids only for watchlist and programme films and the export carries no TMDB id.
+
+How the facts are held today (code at `main` `29fc0d1`):
+
+- **There is no watched fact.** `enrichment/view-index.json` holds only `actualRating` per id. A film never seen and a film watched without a rating are both `actualRating: null`. "Watched without a rating" exists only as `null` entries in a ratings generation (`enrichment/ratings/generations/<id>.json`, a run record), and a watchlist removal is a diff event under `events/items/`, which does not mean watched. `started/` is a UI marker, not a watched signal.
+- **Routine sync erases ratings by absence.** The EPG commit's films-list scan (`refreshRatingsFromFilms` in `src/enrichment.js`) and the ratings-generation projection assign `null` to every current watchlist film that is missing from the public films list or listed without a rating; the commit path has no "newer value wins" guard. A baseline written into the index would be wiped by the next sync.
+- **Facts are keyed by whatever id the writer holds.** The stored film id is the Letterboxd `lid`; catalog records are `tmdb_<n>`. Finds (`GET /api/catalog/available`) exclude a catalog record only when `view-index[catalogId].actualRating` is set, so a rating keyed by `lid` does not exclude the same film's `tmdb_<n>` record, and watched-unrated films are never excluded. The per-film repair path builds a URL from the id as a slug and writes under that key.
+- **The D1 schema has `actual_rating(film_id, rating NOT NULL, source, recorded_at)` and `watchlist_film`**, no watched table; `actual.json` maps to `actual_rating`, while films-list ratings live only in the index and generations, so they would not reach D1. `events/` and `started/` are `user_state` awaiting a disposition (ADR-0019 item 6).
+
+## Decision
+
+1. **Three separate facts per film.** *Watched* (the owner has seen the film; optional `watchedOn` date), *rating* (a half star 0.5–5 or explicitly none), and *watchlist membership*. None is inferred from another: a rating implies watched, but no rating does not imply unwatched; clearing a rating never clears watched; leaving the watchlist never sets watched; a watchlist film may also be watched (a rewatch).
+2. **Facts belong to the canonical film identity.** Each fact is stored under the canonical film id (`film:<lid>` for Letterboxd-identified films, `film:tmdb:<n>` for catalog films, per ADR-0009) together with the trusted links that reach it: the Letterboxd `lid` and, when verified, the TMDB id. Readers resolve any of those ids to the same facts. Only identities the export contract marks `accepted` (`lid_exact`, `tmdb_verified`) may carry imported facts; `candidate`, `ambiguous` and `unmatched` films are recorded as unresolved and gain facts only after a separate identity verification (TMDB detail by the gate of ADR-0010), never from title and year.
+3. **Every fact value carries provenance and an observation time.** Sources: `letterboxd_export` (the export's file timestamp and checksum), `letterboxd_films_list` (a complete public films-list scan or ratings generation), `letterboxd_film_page` (per-film lookup), `owner` (explicit owner edit). `observedAt` is when the source showed the value; `effectiveOn` is the source's own date when it has one (export `Date`, `Watched Date`).
+4. **Only a newer observation replaces a fact; absence is not an observation.** A value is replaced only by an observation with a later `observedAt`. A film missing from a films list, a 403, an incomplete scan, an empty diary page or a slower writer that read earlier changes nothing. A complete films list that shows a film **without** a rating is a newer observation "watched, not rated": it sets watched and clears the rating. The baseline is imported with `observedAt` equal to the export time, so any later sync or owner edit wins over it, and it never replaces a value observed after the export.
+5. **The facts have one authoritative home in R2 while R2 is authoritative (ADR-0002).** A per-film fact record under `letterboxd/facts/` (shape in the [contract](../reference/integrations/letterboxd-user-facts.md)) is written only through compare-and-swap by typed writers: the films-list scan, the per-film lookup, the owner edit and the baseline importer. `enrichment/view-index.json` `actualRating` and the new `watched` flag become **projections** of these records under every id that resolves to the film. No generic key write is added.
+6. **The baseline import is a typed, bounded, idempotent operation.** Validate (dry-run report, no write) → commit in bounded chunks, each receipted by export checksum and film id → read back. Re-running the same export writes nothing; a different export is a new baseline whose observations compete by rule 4. Rollback removes exactly the values whose provenance is that export and that no newer observation has replaced, then re-projects.
+7. **D1 interface.** When D1 becomes authoritative, the facts map to `actual_rating` (rating present), a new watched table and `watchlist_film`, each with provenance; rule 4 is the merge rule for the backfill and the delta. The schema change is a later migration under its own approval; this ADR does not change ADR-0019 or ADR-0022.
+
+## Alternatives considered
+
+- **Keep using `view-index.json` as the store and write the baseline into it.** Rejected: it is a derived projection, it has no watched field, and the films-list scan nulls it by absence.
+- **Treat a watchlist removal or a `started/` marker as watched.** Rejected: neither means the owner saw the film (`docs/reference/api/catalog.md`).
+- **Match the 2,040 unaccepted films by title and year.** Rejected: the AIR-169 contract never accepts on title and year alone; remakes and namesakes exist.
+- **Write the facts straight into D1 now.** Rejected: D1 is not authoritative (ADR-0019, ADR-0022); this would split authority.
+
+## Consequences
+
+Watched-unrated films and rewatches become representable; finds can exclude every film the owner has seen whatever its id; a 403 or a partial scan can no longer erase history; actual ratings can outrank predictions by identity. The costs: a new R2 family and a projection step, changes to every rating writer to observe rule 4, an identity resolution step in readers, and per-fact provenance. The 2,040 unaccepted films stay outside the baseline until a separate identity task resolves them.
+
+## Recovery and migration boundary
+
+This ADR is design only. Implementation is AIR-171 (importer and writer changes, with tests), AIR-172 (finds and readers) and AIR-173 (the production import under its own owner approval). Code rollback does not restore R2: rule 6 defines the data rollback. No D1 change.
+
+## Evidence
+
+- **Original decision:** pending (this PR)
+- **Implementation:** none yet
+- **Dated verification:** [AIR-169 reconciliation, 26 October 2026](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md); code reading at `main` `29fc0d1`
+- **Uncertainty:** whether the public films list reliably shows every watched film (the generation's `watched` count is the only cross-check); whether Letterboxd's export `Date` in `watched.csv` is the watch date or the log date
+
+## Follow-ups
+
+[AIR-171](https://trello.com/c/uvGt48sq) importer and writer guards, [AIR-172](https://trello.com/c/FvqqJ8H0) finds by identity, [AIR-173](https://trello.com/c/w2bVRb72) production import; an identity task for the 2,040 unaccepted films; the D1 migration for watched facts.

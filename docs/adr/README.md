@@ -31,7 +31,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-None at present.
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0023 — Watched, rating and watchlist are separate Letterboxd facts with provenance, and only a newer observation replaces one](0023-letterboxd-user-facts.md) | Proposed 2026-10-27; owner architecture and rendered-diagram approval required before merge | [AIR-170](https://trello.com/c/UaOFSsF9); [AIR-169 reconciliation](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
