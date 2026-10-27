@@ -37,6 +37,41 @@ function validateProfile(p){
  if(!Array.isArray(p.anchorFilms)||p.anchorFilms.length>100||p.anchorFilms.some(a=>!isObject(a)||!isText(a.title,200)||!Number.isFinite(a.rating)||a.rating<.5||a.rating>5||a.rating*2%1!==0||!isText(a.reason,1000)))return 'Invalid anchorFilms';
  if(JSON.stringify(p).length>60000)return 'Profile too large';return null;
 }
+// Taste-profile publication (ADR-0013, ADR-0031). Everything is validated before the first write; a rejection changes nothing.
+// The version record is written create-only, then current.json moves by compare-and-swap on the ETag read at the start,
+// so two concurrent publications cannot both become current and a version number is never rewritten.
+const PROFILE_PUBLISH_STATUS={impact_missing:400,impact_schema_unknown:400,from_mismatch:409,scope_unknown:400,identity_requires_same_hash:400,changed_fields_mismatch:400,global_field_requires_global:400,selective_requires_selectors:400,selector_kind_unknown:400,selector_invalid:400,field_not_covered:400,genre_floor_missing:400,selective_requires_owner_approval:400,approval_mismatch:400};
+async function publishProfile(env,body){
+ if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
+ if(body.schemaVersion!==1||!Number.isInteger(body.version)||body.version<1)return json({error:'Invalid version or schemaVersion'},400);
+ const issue=validateProfile(body.profile);if(issue)return json({error:issue},400);
+ const stored=await env.BUCKET.get(profileKey),current=stored?await stored.json():null,currentEtag=stored?.etag||null;
+ if(current&&body.version<=current.version)return json({error:'Version must increase',code:'version_not_increasing'},409);
+ const profileHash=await contentHash(body.profile),next={version:body.version,profileHash},impact=body.changeImpact??null;
+ let changedFields=profileChangedFields(null,body.profile),declarationSha256=null;
+ if(current){
+  const text=profileDeclarationText(impact,next);declarationSha256=text?await profileDeclarationHash(text):null;
+  const checked=validateProfileImpact({previous:current,next:{...next,profile:body.profile},impact,declarationSha256,vocabulary:{mechanics:MECHANICS,execution:EXECUTION}});
+  changedFields=checked.changedFields;
+  if(!checked.ok)return json({error:'Invalid changeImpact',code:checked.code,changedFields,profileHash,declarationSha256},PROFILE_PUBLISH_STATUS[checked.code]||400);
+ }else if(impact!=null)return json({error:'The first version has no predecessor',code:'from_mismatch',changedFields,profileHash},409);
+ if(body.dryRun)return json({dryRun:true,valid:true,version:body.version,profileHash,changedFields,declarationSha256,from:current?{version:current.version,profileHash:current.profileHash}:null});
+ const record={version:body.version,schemaVersion:1,updatedAt:new Date().toISOString(),profileHash,profile:body.profile,changeImpact:current?impact:null};
+ const versionKey=ENRICHMENT_KEY+'profile/versions/'+body.version+'.json';
+ let saved=record;
+ if(await env.BUCKET.put(versionKey,JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}})===null){
+  // A retry of the same publication finds its own record; any other record under this number is a conflict.
+  const existing=await loadJSON(env,versionKey);
+  if(!existing||existing.profileHash!==profileHash||JSON.stringify(canonical(existing.changeImpact??null))!==JSON.stringify(canonical(record.changeImpact)))return json({error:'Version record already exists',code:'version_exists'},409);
+  saved=existing;
+ }
+ const value={...saved,lineage:profileLineage(current,saved)};
+ const moved=await env.BUCKET.put(profileKey,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});
+ if(moved===null)return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);
+ try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}
+ return json(value);
+}
+async function profileDeclarationHash(text){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');}
 const MECHANICS=['heist','scam','investigation','mystery','chase_escape','rescue','escort_protection','survival','siege','ticking_clock','expedition_discovery','puzzle','plan_counterplan','multi_party_conflict'];
 const EXECUTION={plot_engine:['weak','medium','strong','unknown'],pace:['slow','medium','fast','variable','unknown'],stakes:['low','medium','high','unknown'],decision_logic:['weak','mixed','strong','unknown'],protagonist_competence:['low','mixed','high','unknown'],opposition_competence:['low','mixed','high','not_applicable','unknown'],problem_solving:['weak','medium','strong','unknown'],plan_counterplan_strength:['none','weak','medium','strong','unknown'],multi_party_goals:['none','weak','medium','strong','unknown'],chemistry:['weak','medium','strong','unknown'],payoff:['weak','mixed','strong','unknown'],ending_quality:['weak','mixed','strong','unknown'],technical_plausibility:['weak','mixed','strong','not_applicable','unknown'],action_readability:['weak','mixed','strong','unknown'],hero_vulnerability:['low','mixed','high','unknown'],comedy_stupidity_for_gags:['low','mixed','high','unknown'],comedy_gross_out:['low','mixed','high','unknown'],horror_rule_consistency:['weak','mixed','strong','unknown'],horror_threat_causality:['weak','mixed','strong','unknown'],scifi_plot_driven_concept:['weak','medium','strong','unknown'],adventure_discovery_strength:['weak','medium','strong','unknown']};
 const GENERAL_EXECUTION=['plot_engine','pace','stakes','decision_logic','protagonist_competence','opposition_competence','problem_solving','plan_counterplan_strength','multi_party_goals','chemistry','payoff','ending_quality','technical_plausibility'];
@@ -1053,7 +1088,7 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
  if(path==='/api/enrichment/diagnostics/snapshot'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(snapshot):json({error:'No frozen diagnostic snapshot'},404);}
  if(path==='/api/enrichment/diagnostics/accuracy'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(prospectiveAccuracy(snapshot,await loadJSON(env,ratingObservationsKey)||[])):json({error:'No frozen diagnostic snapshot'},404);}
  if(path==='/api/enrichment/profile'&&request.method==='GET'){const p=await loadJSON(env,profileKey);return p?json(p):json({error:'Taste profile is not configured'},404);}
- if(path==='/api/enrichment/profile'&&request.method==='PUT'){if(body.schemaVersion!==1||!Number.isInteger(body.version)||body.version<1)return json({error:'Invalid version or schemaVersion'},400);const issue=validateProfile(body.profile);if(issue)return json({error:issue},400);const current=await loadJSON(env,profileKey);if(current&&body.version<=current.version)return json({error:'Version must increase'},409);const value={version:body.version,schemaVersion:1,updatedAt:new Date().toISOString(),profileHash:await contentHash(body.profile),profile:body.profile};await saveJSON(env,ENRICHMENT_KEY+'profile/versions/'+body.version+'.json',value);await saveJSON(env,profileKey,value);try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}return json(value);}
+ if(path==='/api/enrichment/profile'&&request.method==='PUT')return publishProfile(env,body);
  if(path==='/api/enrichment/benchmark/start'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkStart(env));
  if(path==='/api/enrichment/benchmark/trial'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkTrial(env,body));
  if(path==='/api/enrichment/runner'&&request.method==='GET')return json(predictionRunnerContract());
