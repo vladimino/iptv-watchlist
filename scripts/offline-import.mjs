@@ -15,7 +15,7 @@ import {ExportError} from './migration-export.mjs';
 import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
 
 const root=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
-const note='Historical snapshot. Absent families and records that cannot be carried are listed and are not counted as matches. Class A is mapped-domain parity, class B the declared R2-only keys, class C unresolved identity and source-quality records kept in the source, S payloads of retired Film ids superseded by their canonical Film (ADR-0028). This command does not write production R2 or a production D1 database.';
+const note='Historical snapshot. Absent families and records that cannot be carried are listed and are not counted as matches. Class A is mapped-domain parity, class B the declared R2-only keys, class C unresolved identity and source-quality records kept in the source, S payloads of retired Film ids superseded by their canonical Film (ADR-0029). This command does not write production R2 or a production D1 database.';
 
 export async function prepareImport(directory,{limit=null}={}){
  const rules=loadDomainRules();

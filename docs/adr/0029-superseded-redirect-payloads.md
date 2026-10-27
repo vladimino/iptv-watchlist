@@ -1,4 +1,4 @@
-# ADR 0028: A retired Film id's fingerprint or prediction bundle is superseded by the canonical Film's own newer payload
+# ADR 0029: A retired Film id's fingerprint or prediction bundle is superseded by the canonical Film's own newer payload
 
 **Status:** Proposed (offline importer, executor and parity contract only; it authorizes no R2 or D1 write, flag, Task, snapshot, materialization or cutover)  
 **Original decision date:** 2026-10-27  

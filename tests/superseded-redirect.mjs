@@ -8,7 +8,7 @@ import {createPredictionRepository} from '../src/prediction-repository.js';
 import {acceptanceClasses,fingerprintUnit,identityResolver,importBatch,predictionUnits,projectSource,supersededPayloads,verifyParity} from '../src/offline-importer.js';
 import {loadDomainRules,openSqlite} from '../scripts/offline-import.mjs';
 
-// ADR-0028: a fingerprint or prediction bundle of a retired Film id that a redirect maps to a survivor with its own strictly newer
+// ADR-0029: a fingerprint or prediction bundle of a retired Film id that a redirect maps to a survivor with its own strictly newer
 // payload is superseded by the canonical payload. Every other collision keeps the class A fail-closed path.
 const rules=loadDomainRules(),at='2026-10-19T01:00:00.000Z',older='2026-10-01T01:00:00.000Z',newer='2026-10-20T01:00:00.000Z';
 const dim=dimension=>({dimension,status:'resolved',updatedAt:at,source:'letterboxd',sourceVersion:null,provenance:null,value:null,nextAction:'none',attempts:0});
@@ -136,4 +136,4 @@ async function run(name,entries,films){
  assert.equal(classes.S.count,1);assert.equal(classes.C.count,0);assert.equal(classes.A.open,0);
 }
 fs.rmSync(root,{recursive:true,force:true});
-console.log('Superseded redirect payloads (ADR-0028): proven retired fingerprint and bundle superseded with both checksums, deterministic, projection agrees; no redirect, missing/older/same-time/unportable target, unportable source, missing checksum, no canonical, reused identity and missing version objects refused; SQLite run writes no row or receipt for it, parity on canonical, empty rerun; class A outside the exception still stops passed');
+console.log('Superseded redirect payloads (ADR-0029): proven retired fingerprint and bundle superseded with both checksums, deterministic, projection agrees; no redirect, missing/older/same-time/unportable target, unportable source, missing checksum, no canonical, reused identity and missing version objects refused; SQLite run writes no row or receipt for it, parity on canonical, empty rerun; class A outside the exception still stops passed');

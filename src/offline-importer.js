@@ -160,7 +160,7 @@ export function ratingIdentity({identity,films=[],metadata=null,metadataSha256=n
  return {resolve:key=>proposed.get(key)||direct.get(key)||(()=>{const stored=enrichmentStoredId(key);return stored?identity.resolve(stored):{source:null,canonical:null,filmId:null,via:null,reason:'identity_unreadable'};})()};
 }
 
-// ADR-0028: a fingerprint or prediction bundle stored under a retired Film id, which a redirect maps to a survivor Film that holds its
+// ADR-0029: a fingerprint or prediction bundle stored under a retired Film id, which a redirect maps to a survivor Film that holds its
 // own strictly newer payload of the same family, is superseded by that canonical payload. No row is written from it, the object stays in
 // R2, and the ledger keeps it with both checksums. Every other collision keeps the fail-closed path; this never creates a Film.
 // entries are {key,sha256,body} for every fingerprint.json and predictions.json of the snapshot; the same result feeds the write list
@@ -267,7 +267,7 @@ export async function importBatch(db,repositories,batch){
    ledger.push(entry(unit,'unresolved',unit.reason||'film_unresolved'));
    continue;
   }
-  // ADR-0028: a superseded payload writes nothing and takes no receipt; the canonical payload is imported by its own unit.
+  // ADR-0029: a superseded payload writes nothing and takes no receipt; the canonical payload is imported by its own unit.
   if(unit.superseded){
    counts.superseded++;
    ledger.push(entry(unit,'superseded',unit.reason));
@@ -359,7 +359,7 @@ export async function receiptAudit(db,shas){
 }
 
 // Three classes that are never merged into one verdict: A mapped-domain parity, B declared R2-only artifacts, C unresolved identity and source-quality records.
-// S lists the payloads superseded by their canonical Film under ADR-0028: neither a class A gap nor a class C record to acknowledge.
+// S lists the payloads superseded by their canonical Film under ADR-0029: neither a class A gap nor a class C record to acknowledge.
 export function acceptanceClasses({inventory,coverage,counts={},ledger=[],appliedByFamily={},parity=null,receipts=null,stopped=false}={}){
  const prediction=inventory?.families?.prediction||{status:'unknown',keys:[]};
  const predictionUnportable=ledger.filter(item=>item.family==='prediction'&&item.outcome==='unportable').length;
