@@ -2,9 +2,9 @@
 
 [AIR-74](https://trello.com/c/5AdAmKPe) · owner-approved stage of 28 October 2026 (fresh fenced snapshot, plan, offline rehearsal, read-only production validate), steps 1–5 of [the prediction versions runbook](../../runbooks/prediction-versions.md#2-one-time-materialization-of-historical-versions-implemented-no-production-execution-recorded-here). Follows the [offline GO/NO-GO](../d1-migration/air-74-offline-go-no-go-2026-10-28.md).
 
-**Captured:** 2026-10-28, 16:15–17:17 UTC, from the agent container; code at `main` `49edea7`. **Scope:** read-only. Cloudflare API reads of the Worker settings, deployment and Access configuration; production R2 bucket `iptv` read with the bucket-scoped read-only credential; offline plan and rehearsal; validate as dry runs only. **Not done:** `apply`, any R2 write, any flag, Access, Scheduled Task or D1 change. Private files (snapshot, `plan.jsonl`, per-batch results) stay outside the repository; film ids are not reproduced here.
+**Captured:** 2026-10-28, 16:15–17:17 UTC and 19:56–20:15 UTC (section 7), from the agent container; code at `main` `49edea7`. **Scope:** read-only. Cloudflare API reads of the Worker settings, deployment and Access configuration; production R2 bucket `iptv` read with the bucket-scoped read-only credential; offline plan and rehearsal; validate as dry runs only. **Not done:** `apply`, any R2 write, any flag, Access, Scheduled Task or D1 change. Private files (snapshot, `plan.jsonl`, per-batch results) stay outside the repository; film ids are not reproduced here.
 
-**Verdict:** **validate GO for the plan below.** All 47 batches complete, 2,346 `would_materialize`, 0 `bundle_changed`, 0 stops, 0 errors, 0 writes. **The next gate (apply) is blocked** on the Access path to the Worker route and needs its own approvals (section 6).
+**Verdict:** **validate GO for the plan below.** All 47 batches complete, 2,346 `would_materialize`, 0 `bundle_changed`, 0 stops, 0 errors, 0 writes. The same result through the real Cloudflare Access/HTTP path followed at 20:13 UTC (section 7). The next gate (apply) needs its own approvals (section 6).
 
 ## 1. Preflight (16:15–16:20 UTC)
 
@@ -76,14 +76,31 @@ Every bundle still had the ETag and SHA-256 of the snapshot at validate time, ab
 
 ## 6. Obstacles to the next gate (apply)
 
-1. **Access path to the Worker route.** `apply` must run through the Worker (it writes under the prediction writer lease and seals receipts). It needs a scoped Access service token, a Service Auth policy for the Worker hostname and the two `PREDICTION_MATERIALIZE_ACCESS_*` variables in the executing environment (a cloud session sees new variables only after a restart). Each is a separate owner approval; the AIR-173 pattern (create, use, remove the policy, revoke the token) applies.
+1. **Access path to the Worker route.** `apply` must run through the Worker (it writes under the prediction writer lease and seals receipts). Section 7 proved the owner's `cloudflared` Access login works from this container without any Access change; an apply run needs a transport that may send `dryRun: false`, which the dry-run adapter refuses by design, and a valid login at that time.
 2. **Separate approvals** for `PREDICTION_MATERIALIZATION=on`, the `apply` run itself, and switching the flag back off; `PREDICTION_VERSION_OBJECTS` stays `on`.
 3. **Plan freshness.** Submits since 16:57 UTC rewrite some bundles; those films return `bundle_changed` (class `replan`) and leave their batch unsealed. If the drift is large, take a new fenced snapshot, re-plan and re-validate just before apply.
 4. **Reconcile** after apply with a new fenced snapshot and `prediction-versions-plan.mjs` (0 pending outside films a later submit wrote with the writer on); then the D1 importer must report no `prediction_version_*` reasons.
 
+## 7. HTTP dry-run through Cloudflare Access (19:56–20:15 UTC, owner-approved)
+
+The documented transport, the deployed Worker route behind Access, run on the same plan `2ce0866d…` (`plan.jsonl` SHA-256 `52bec800…`) in the same container.
+
+| Step | Result |
+| --- | --- |
+| Preflight | plan and snapshot intact (planId, `plan.jsonl` and `manifest.json` checksums as above); Worker deployment `130314e4…`; `PREDICTION_VERSION_OBJECTS` `on`, `PREDICTION_MATERIALIZATION` absent; route code unchanged since section 5 |
+| Network | the cloud environment's policy first refused `iptv.vladimino.workers.dev`, `vladimino.cloudflareaccess.com` and `login.cloudflareaccess.org`; the owner allowed the three hosts and the running container picked the change up without a restart |
+| Authorization | `cloudflared access login` (2026.9.0) for the "All Workers" Access application; the owner confirmed the login in their browser; the JWT stays in the container's cloudflared store and is never printed. No Service Auth policy and no service token were created; Access applications and policies are unchanged |
+| Path check | `GET /api/status` with the token: HTTP 200 JSON from the Worker; without it: 302 to the Access login |
+| Transport | private, uncommitted adapter around the standard CLI's `remote({mode: 'validate'})` (same batches, order, stop rule and `validate.json`), adding only the `cf-access-token` header; it parses each request body and refuses anything other than `dryRun: true` to the materialize route before a request leaves |
+| Smoke | batch 0: HTTP 200, 50 `would_materialize`, complete |
+| Full run (20:02:37–20:13:19 UTC) | **47/47 batches HTTP 200, 47 complete, 0 incomplete, 0 replays, no failed batch**; films 2,346: **`would_materialize` 2,346**; `already_materialized` 0, `nothing_pending` 0, `bundle_changed` 0, `bundle_missing` 0, `checksum_mismatch` 0, `bundle_unreadable` 0, `malformed_pointer` 0; classes done 2,346, replan 0, stop 0; no Access, HTTP, Worker or storage error |
+| No writes | 47 requests, all `dryRun: true`; read-only R2 listing of `enrichment/predictions-materialization/` afterwards: 0 receipt objects; flags re-read: unchanged |
+
+**Verdicts.** HTTP transport: **GO** (real Access path to the deployed Worker). Plan freshness: **GO** at 20:13 UTC (every planned bundle still had the snapshot's ETag and SHA-256, 3 h 15 min after the cut). Apply: **not authorized**; it needs its own owner approval (flag on, apply, flag off), a write-capable transport for that run and a fresh dry run just before it.
+
 ## Limits
 
-- The validate used the Worker code, not the Worker deployment's HTTP path; it proves the route's dry-run outcome on production data, not the Access or network path.
+- Section 5 ran the Worker code without the HTTP path; section 7 covers the Access and network path.
 - Consistent at the snapshot's `finishedAt`; validate shows the bundles were unchanged at 16:58–17:16 UTC only.
 
 **Used by:** [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0026](../../adr/0026-historical-prediction-version-materialization.md). **Superseded by:** none recorded.
