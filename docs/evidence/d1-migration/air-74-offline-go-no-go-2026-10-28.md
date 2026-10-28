@@ -1,6 +1,6 @@
 # AIR-74 offline GO/NO-GO on the 28 October snapshot (materialization rehearsal and D1 dry-runs, local only)
 
-**Captured:** 2026-10-28, 11:18–RERUN_END UTC, in the agent container; code at `main` `bb706d6` plus the two commits of this change (rehearsal check, `letterboxd/display-exclusion.json` classification)  
+**Captured:** 2026-10-28, 11:18–15:41 UTC, in the agent container; code at `main` `bb706d6` plus the two commits of this change (rehearsal check, `letterboxd/display-exclusion.json` classification)  
 **Input:** the [AIR-222 stage 2](../discovery-ledger-split-air-222-stage-2-2026-10-28.md) cut of production bucket `iptv` taken before the ledger split install: `consistent_fenced`, 8,723 objects, 659,175,433 bytes, aggregate `23d2e9d7a705cee62d115f4cc2887b5728bdccc1893ce284b8a07b99547da6fa`, `manifest.json` SHA-256 `d7b22d33e4d4216886b7c47f257852bdd78d5a7ba5b973c40ce5d7685b51e6d1`, `finishedAt` 2026-10-28T10:16:21.769Z. Re-verified offline first (`r2-snapshot-export.mjs --verify` re-hashes every object, no network); the directory stayed write-protected  
 **Scope:** private files and SQLite databases only. No R2 request, no Worker call, no Cloudflare D1 (scratch or production), no flag, Scheduled Task or Access change  
 **Verdict:** **Offline materialization GO; G5 NO-GO.** The historical version materialization plan rehearses clean on this snapshot. The D1 executor stops by contract on class A `prediction_version_object_missing`, which only the production materialization removes; class C and two dispositions also wait on the owner  
@@ -42,7 +42,10 @@ Each on its own new database from `0001`–`0003`, with an acknowledged list bui
 | --- | --- | --- | --- | --- | --- | --- |
 | plain 1 | 15:00:53–15:32:14 | `stopped: class_a_blocker` | 21,701 | 11,681 | 21,702 / 0 / 0 | 16 |
 | staged 1 | 15:00:53–15:32:29 | `stopped: class_a_blocker` | 21,701 | 11,681 | 21,702 / 0 / 0 | 16 |
-RERUN_ROWS
+| plain 2 (rerun) | 15:32:54–15:41:10 | `stopped: class_a_blocker` | **0** (21,701 resumed) | 11,681 | 21,702 / 0 / 0 | 16 |
+| staged 2 (rerun) | 15:32:54–15:41:08 | `stopped: class_a_blocker` | **0** (21,701 resumed) | 11,681 | 21,702 / 0 / 0 | 16 |
+
+The reruns apply nothing and report identical counts: the reached part of the import is idempotent on both paths.
 
 Both stop at the first prediction bundle with `prediction_version_object_missing` (class A, `prediction_family_unportable`), as in the AIR-194 replay. The staged path therefore never reaches the generation unit: `staged.gate` reports 0 commits, which is not a pass.
 
