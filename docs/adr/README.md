@@ -48,7 +48,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| Record | Status and boundary | Related work |
+| --- | --- | --- |
+| [0039 — The owner reads registered feature flags through one MCP tool that names each binding and echoes only known tokens](0039-allowlisted-feature-flag-readout.md) | Proposed 2026-10-28 (AIR-233 implementation; owner decision pending; no flag change) | [AIR-233](https://trello.com/c/8eUZ6gB7) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

@@ -1,6 +1,6 @@
 # Authentication and MCP request boundary
 
-**Scope:** owner-only remote MCP authentication and tool invocation. Sources: [MCP contract](../reference/api/mcp.md), [MCP implementation](../../src/mcp.js), [deployment runbook](../runbooks/deployment.md), [ADR-0004](../adr/0004-mcp-access-boundary.md).
+**Scope:** owner-only remote MCP authentication and tool invocation. Sources: [MCP contract](../reference/api/mcp.md), [MCP implementation](../../src/mcp.js), [deployment runbook](../runbooks/deployment.md), [ADR-0004](../adr/0004-mcp-access-boundary.md), [ADR-0039](../adr/0039-allowlisted-feature-flag-readout.md).
 
 ```mermaid
 sequenceDiagram
@@ -24,8 +24,8 @@ sequenceDiagram
         Worker-->>Client: Reject request
     else JWT valid
         Worker->>Worker: Validate protocol and tool allowlist
-        alt Read-only probe
-            Worker-->>Client: Probe result (no R2 access)
+        alt Read-only probe or feature flag readout
+            Worker-->>Client: Probe result or registered flag values (no R2 access)
         else Authorized EPG or prediction tool
             Worker->>Handler: Narrow tool arguments only
             Handler->>R2: Read/write per tool contract
@@ -37,6 +37,6 @@ sequenceDiagram
 
 Cloudflare Access protects the `/mcp` endpoint under the separate **IPTV MCP** application with Managed OAuth and owner-only policy. The Worker also independently verifies the Access JWT, including the application audience. The remainder of the Worker stays behind `All Workers`; `/mcp/` is not the exact MCP route.
 
-MCP uses stateless Streamable HTTP with JSON replies. `probe_read` and `probe_echo` do **not** access storage. Other tools have explicitly defined side effects: some diagnostics read R2 and some status operations may perform recovery writes. EPG and prediction writer tools can change R2, **but only if invoked**. They cannot accept arbitrary URLs, API paths or R2 keys. Neither GitHub deployment nor enabling a connection starts a prediction run.
+MCP uses stateless Streamable HTTP with JSON replies. `probe_read`, `probe_echo` and `feature_flags` do **not** access storage. `feature_flags` reads only the registered feature flag bindings by name and echoes a value only when it consists of that flag's known tokens ([ADR 0039](../adr/0039-allowlisted-feature-flag-readout.md)). Other tools have explicitly defined side effects: some diagnostics read R2 and some status operations may perform recovery writes. EPG and prediction writer tools can change R2, **but only if invoked**. They cannot accept arbitrary URLs, API paths or R2 keys. Neither GitHub deployment nor enabling a connection starts a prediction run.
 
 An Access JWT must not be forwarded into an internal continuation hop or exposed in logs. Policy, application audience and live authorization are deployment settings, **not** a code-only test result. External ChatGPT Scheduled Tasks have separate state and approvals. See [MCP operations](../runbooks/mcp-connectivity.md) and [scheduled tasks ADR](../adr/0005-external-chatgpt-tasks.md).
