@@ -123,4 +123,26 @@ const kinds=record=>JSON.parse(JSON.stringify((record.ratingHistory||[]).map(ent
  await F.previewBaselineChunk(env,{origin,chunk:0,items:[{lid:'alien',tmdb:'348',facts:{watched:true,rating:4}}]});
  assert.equal(b.records.has(F.recordKey('tmdb-348')),false);
 }
-console.log('Rating history: first observation, change, confirmation, repeat, older, null, scan floor, absence, concurrent CAS, crash replay, export pre-existing, rollback and re-apply passed');
+// Convergence: the overlay read (and the merge it specifies) keeps every distinct event of both records exactly once.
+{
+ const t=(minutes)=>new Date(Date.UTC(2026,9,28,10,minutes)).toISOString();
+ const e=(kind,id,minutes,extra={})=>({kind,observationId:id,recordedAt:t(minutes),...(kind==='rolled_back'?{at:t(minutes),restored:null}:{value:extra.value??4,observedAt:t(minutes),source:'owner'}),...extra});
+ const source={...F.emptyRecord('lb-alien',{letterboxd:'alien'}),rating:{value:3,observedAt:t(5),source:'owner',observationId:'s2'},
+  ratingHistory:[e('first_observed','s1',1,{value:2}),e('changed','x',3,{value:4}),e('rolled_back','x',4),e('changed','x',6,{value:4}),e('changed','s2',7,{value:3})]};
+ const target={...F.emptyRecord('tmdb-348',{tmdb:'348'}),rating:{value:5,observedAt:t(2),source:'owner',observationId:'t1'},
+  ratingHistory:[e('first_observed','t1',2,{value:5}),e('changed','x',3,{value:4})]};
+ const merged=F.overlay(source,target);
+ const ids=list=>JSON.parse(JSON.stringify(list.map(entry=>entry.kind+':'+entry.observationId)));
+ assert.deepEqual(ids(merged.ratingHistory),['first_observed:s1','first_observed:t1','changed:x','rolled_back:x','changed:x','changed:s2'],'both histories, the shared event once, the re-application kept');
+ assert.equal(merged.rating.observationId,'s2','the current value still follows the observation order');
+ assert.equal(source.ratingHistory.length,5);assert.equal(target.ratingHistory.length,2,'inputs are not modified');
+ // Repeated convergence and either argument order give the same list; merging the result again changes nothing.
+ assert.deepEqual(ids(F.overlay(target,source).ratingHistory),ids(merged.ratingHistory));
+ assert.deepEqual(ids(F.mergeRatingHistories(merged.ratingHistory,target.ratingHistory)),ids(merged.ratingHistory));
+ assert.deepEqual(ids(F.mergeRatingHistories(merged.ratingHistory,merged.ratingHistory)),ids(merged.ratingHistory));
+ // A record without history keeps the other's; two without history produce none.
+ assert.equal(F.overlay({...source,ratingHistory:undefined},target).ratingHistory.length,2);
+ assert.equal(F.overlay({...source,ratingHistory:undefined},{...target,ratingHistory:undefined}).ratingHistory,undefined);
+}
+
+console.log('Rating history: first observation, change, confirmation, repeat, older, null, scan floor, absence, concurrent CAS, crash replay, export pre-existing, rollback and re-apply, convergence union with overlaps, re-application and repeated merges passed');

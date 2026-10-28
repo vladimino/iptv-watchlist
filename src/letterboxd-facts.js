@@ -69,14 +69,15 @@ const LetterboxdFacts=(()=>{
   const history=Array.isArray(record.ratingHistory)?record.ratingHistory:[];
   const last=history.filter(entry=>entry.observationId===incoming.observationId).at(-1);
   if(last&&last.kind!=='rolled_back')return;
-  record.ratingHistory=[...history,{kind:effective?'changed':'first_observed',value:incoming.value,observedAt:incoming.observedAt,source:incoming.source,sourceRef:incoming.sourceRef??null,observationId:incoming.observationId,previous:effective?{value:effective.value,observedAt:effective.observedAt,source:effective.source,observationId:effective.observationId}:null}];
+  record.ratingHistory=[...history,{kind:effective?'changed':'first_observed',recordedAt:new Date().toISOString(),value:incoming.value,observedAt:incoming.observedAt,source:incoming.source,sourceRef:incoming.sourceRef??null,observationId:incoming.observationId,previous:effective?{value:effective.value,observedAt:effective.observedAt,source:effective.source,observationId:effective.observationId}:null}];
  }
  // A rollback restores a before-image; the history keeps the rolled-back entry and records the reversal after it.
  function recordRatingRollback(record,observationId,at){
   const history=Array.isArray(record.ratingHistory)?record.ratingHistory:[];
-  if(history.some(entry=>entry.kind==='rolled_back'&&entry.observationId===observationId))return;
+  const last=history.filter(entry=>entry.observationId===observationId).at(-1);
+  if(!last||last.kind==='rolled_back')return;
   const restored=record.rating||null;
-  record.ratingHistory=[...history,{kind:'rolled_back',observationId,at,restored:restored?{value:restored.value,observedAt:restored.observedAt,source:restored.source,observationId:restored.observationId}:null}];
+  record.ratingHistory=[...history,{kind:'rolled_back',recordedAt:at,observationId,at,restored:restored?{value:restored.value,observedAt:restored.observedAt,source:restored.source,observationId:restored.observationId}:null}];
  }
  // Restores the before-image of one export's observation, only while that observation is still current.
  function rollbackFact(record,fact,observationId){
@@ -89,7 +90,23 @@ const LetterboxdFacts=(()=>{
  function overlay(source,target){
   const merged=clone(target||source);
   for(const fact of FACT_NAMES){const winner=greater(source?.[fact]||null,target?.[fact]||null);if(winner)merged[fact]=winner;else delete merged[fact];}
+  const history=mergeRatingHistories(source?.ratingHistory,target?.ratingHistory);
+  if(history.length)merged.ratingHistory=history;else delete merged.ratingHistory;
   return merged;
+ }
+ // An entry's identity within its record: the observation it is about, whether it applied or reversed it, and how many times
+ // that observation was applied or reversed before (a rollback followed by a re-application is two distinct events).
+ function ratingHistoryIdentities(list){
+  const seen=new Map();
+  return (Array.isArray(list)?list:[]).map(entry=>{const key=(entry.kind==='rolled_back'?'r':'a')+'|'+entry.observationId,n=seen.get(key)||0;seen.set(key,n+1);return {id:key+'|'+n,entry};});
+ }
+ // The union of two records' histories (a convergence merge, or its overlay read): every distinct event once, ordered by the
+ // time the entry was written, then by identity. Idempotent: merging a list with itself or with an earlier merge changes nothing.
+ function mergeRatingHistories(left,right){
+  const events=new Map();
+  for(const {id,entry} of [...ratingHistoryIdentities(left),...ratingHistoryIdentities(right)])if(!events.has(id))events.set(id,entry);
+  const time=entry=>entry.recordedAt||entry.at||entry.observedAt||'';
+  return [...events.entries()].sort(([a,x],[b,y])=>time(x)<time(y)?-1:time(x)>time(y)?1:a<b?-1:a>b?1:0).map(([,entry])=>clone(entry));
  }
 
  // What a scan summary says about one Letterboxd id, as observations.
@@ -500,5 +517,5 @@ const LetterboxdFacts=(()=>{
    throw error;
   }
  }
- return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
 })();
