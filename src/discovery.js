@@ -689,7 +689,11 @@ function discoveryContract(record,override={}){
   else if(state==='complete'||['programme_changed','missing_secret','idle'].includes(reason)||remainingChunks<=0)nextAction='stop';
   else nextAction='continue';
  }
- return {state,remainingChunks,nextAction,reason:reason||null,at:override.at||record?.at||null,nextCatchUpAt:nextAction==='wait'?(catchUpAt||nextCatchUpAt()):catchUpAt,retryAt:retryAt||null,programmeRunId:override.programmeRunId!==undefined?override.programmeRunId:record?.programmeRunId??null};
+ // nextCatchUpAt is the gate a `wait` must honor; nextScheduledRunAt is the first nominal hourly Scheduled Task trigger
+ // at or after it, i.e. when the catch-up is expected to happen. Only a `wait` carries it, and it is null when the
+ // schedule is unknown: it never shortens or replaces the gate.
+ const gate=nextAction==='wait'?(catchUpAt||nextCatchUpAt()):catchUpAt,gateMs=Date.parse(gate||'');
+ return {state,remainingChunks,nextAction,reason:reason||null,at:override.at||record?.at||null,nextCatchUpAt:gate,nextScheduledRunAt:nextAction==='wait'?hourlyTaskRunAt(Math.max(Date.now(),Number.isFinite(gateMs)?gateMs:0)):null,retryAt:retryAt||null,programmeRunId:override.programmeRunId!==undefined?override.programmeRunId:record?.programmeRunId??null};
 }
 function continuationDecision(current,now){
  if(!current)return {run:true,budget:DISCOVERY_CHUNK_BUDGET};
