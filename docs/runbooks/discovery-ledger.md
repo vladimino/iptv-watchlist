@@ -66,24 +66,34 @@ The production split replaces the Worker's own first bounded commit, which would
   - an existing archive;
   - an unpublished generation.
 - **Write order and preconditions:**
-  1. Segment versions, then the manifest, are create-only. An object that already holds the planned bytes is skipped; any other object at that key stops the apply.
-  2. The archive pointer `current.json`, create-only.
-  3. Last, the active ledger `epg/discovery-latest.json`, by a CAS on the snapshot's ETag of the full ledger.
+  1. A write-once copy of the source ledger, `epg/discovery-archive/v1/sources/<manifestId>/discovery-latest.json`, byte for byte. It is the rollback copy, because both live copies are replaced below.
+  2. Segment versions, then the manifest, all create-only. An object that already holds the planned bytes is skipped; any other object at that key stops the apply.
+  3. The archive pointer `current.json`, create-only.
+  4. The active ledger in the published generation's copy, `epg/generations/<P>/discovery-latest.json`, by a CAS on the snapshot's ETag of the full ledger. This is the copy every Worker reader and the next commit load: `loadJSON` pins `epg/discovery-latest.json` to the published generation.
+  5. The same bytes at the root key `epg/discovery-latest.json`, by a CAS, so the two copies stay equal.
 
-  The generation copy `epg/generations/<P>/discovery-latest.json` is never written. It remains the rollback copy of the full ledger.
+  AIR-221 (27 October) planned only the root key and kept the generation copy. The Worker would not have read that split: its first commit would still have parsed the full ledger. AIR-222 found and fixed this ([evidence](../evidence/discovery-ledger-split-air-222-stage-1-2026-10-28.md)).
 - **Fence.** Before the first write, every precondition is checked. Before each write, the apply re-checks:
   - the published pointer ETag;
-  - the generation copy ETag;
   - that no `sync.json` is in stage `epg`;
   - the discovery lease, which the apply holds throughout.
 
-  The pointer moves before the active ledger. If a commit replaces the ledger in between, the apply stops. Any Worker that meets the pointer then reads the full ledger plus the archive as `frozen` or `bounded`, without loss. A rerun after any stop completes the same state; a rerun after success writes nothing.
+  The archive pointer moves before either ledger copy:
+  - **A commit in between** publishes a new generation, so the pointer fence stops the apply. Any Worker that meets the archive pointer reads the full ledger plus the archive as `frozen` or `bounded`, without loss.
+  - **Rerun.** A rerun after any stop completes the same state; a rerun after success writes nothing.
+  - **Readers after a split.** Status and chunks read the active ledger immediately. Archived rows were never actionable, and a chunk keeps its progress per candidate, not by ledger index.
+- **With the flag unset.** After the split, a Worker with `DISCOVERY_LEDGER_MODE` unset acts as `frozen`:
+  - its commit starts from the active ledger and reads re-entries from the archive;
+  - departures stay active, and nothing is archived.
+
+  This is the intended first production state; `bounded` is a separate step.
 - **Rehearsal.** `node scripts/discovery-ledger-split.mjs rehearse --snapshot /abs/snapshot --output /abs/private/dir --heap` plans, then proves the following on a copy-on-write store over the snapshot:
   - the install and its R2 reconstruction parity;
   - replay and resume;
   - six refused fences;
-  - the next bounded commit and a chunk against full mode;
-  - with `--heap`, the commit and chunk memory.
+  - the next commit with the flag unset (frozen) and in `bounded` mode, and a chunk, against full mode;
+  - that the Worker's own read path returns the installed active ledger;
+  - with `--heap`, the commit and chunk memory in full, frozen and bounded mode.
 
   The verdict is in `report.json` (exit 0 GO, exit 3 NO-GO). On a production-sized snapshot it takes a few minutes, needs about 1.5 GB of RAM, and with `--heap` about 3 minutes more. See the dated [rehearsal evidence](../evidence/discovery-ledger-split-rehearsal-2026-10-27.md).
 - **Privacy.** Keys, titles and object bytes stay in the private output directory. Only `report.json` aggregates go to the repository or Trello.

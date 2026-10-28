@@ -3,9 +3,11 @@
 // to a private overlay directory outside the repository.
 //
 // `plan` reads a `consistent_fenced` snapshot (scripts/r2-snapshot-export.mjs layout) and writes a private, deterministic
-// plan: the exact bytes of every archive segment version, the archive manifest, the archive pointer and the new active
-// ledger, each with its precondition (create-only, or the snapshot's ETag and SHA-256 of the object it replaces), plus the
-// fence (published generation pointer and its ledger copy). Departing candidates are moved verbatim: no re-merge, no re-key.
+// plan: the exact bytes of a write-once copy of the source ledger, every archive segment version, the archive manifest, the
+// archive pointer and the new active ledger, each with its precondition (create-only, or the snapshot's ETag and SHA-256 of
+// the object it replaces), plus the fence (published generation pointer). The active ledger replaces both copies of the
+// ledger: the published generation's copy, which is the one the Worker reads (`loadJSON` pins it), and the shared root key.
+// Departing candidates are moved verbatim: no re-merge, no re-key.
 //
 // `rehearse` applies that plan to a copy-on-write store over the snapshot with `applySplit` and proves, with the Worker's own
 // code: payload parity of active ∪ archive with the source ledger (the R2 reconstruction), idempotent replay, resume after a
@@ -25,7 +27,7 @@ import {REPO,layeredBase,loadWorker,overlayStore,snapshotBase} from './discovery
 import {verifyProductionSnapshot} from './r2-snapshot-export.mjs';
 
 export class SplitError extends Error{constructor(message,exitCode=1){super(message);this.name='SplitError';this.exitCode=exitCode;}}
-const ROOT_LEDGER='epg/discovery-latest.json',POINTER='epg/published-generation.json',RESOLUTION='epg/discovery-resolution.json';
+const ROOT_LEDGER='epg/discovery-latest.json',SOURCE_COPIES='epg/discovery-archive/v1/sources/',POINTER='epg/published-generation.json',RESOLUTION='epg/discovery-resolution.json';
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const uuidFrom=text=>{const h=sha256(text);return h.slice(0,8)+'-'+h.slice(8,12)+'-4'+h.slice(13,16)+'-8'+h.slice(17,20)+'-'+h.slice(20,32);};
 const fileId=key=>sha256(Buffer.from(key,'utf8'));
@@ -79,7 +81,8 @@ export function planSplit({ledgerBytes,ledgerEntry,generationEntry,pointerEntry,
  const sourceSha=ledgerEntry?.sha256||sha256(ledgerBytes||''),writeId=uuidFrom('air-221|segments|'+sourceSha+'|'+P),manifestId=uuidFrom('air-221|manifest|'+sourceSha+'|'+P);
  const envelope={archivedAt:cutAt,archivedFromProgrammeRunId:P,archiveWriteId:writeId},bySegment=new Map();
  for(const payload of departures){const segment=segmentOf(payload.key,count);if(!bySegment.has(segment))bySegment.set(segment,{});bySegment.get(segment)[payload.key]={payload,envelope};}
- const writes=[],segments=[];
+ // A write-once copy of the source ledger comes first: both live copies are replaced, so this is the rollback copy.
+ const writes=[{kind:'source',key:SOURCE_COPIES+manifestId+'/discovery-latest.json',op:'create',text:ledgerBytes?ledgerBytes.toString('utf8'):''}],segments=[];
  for(let segment=0;segment<count;segment++){
   const segmentItems=bySegment.get(segment);
   if(!segmentItems){segments.push({segment,object:null,sha256:null,items:0,bytes:0});continue;}
@@ -95,9 +98,12 @@ export function planSplit({ledgerBytes,ledgerEntry,generationEntry,pointerEntry,
  writes.push({kind:'pointer',key:pointerKey,op:'create',text:JSON.stringify({manifestId})});
  const {items:_items,...meta}=ledger||{};
  const activeLedger={...meta,items:active,ledgerMode:'bounded',archive:{version:'v1',manifestId,segments:count,items:totals.items,bytes:totals.bytes,alsoArchived:[],uniqueArchivedItems:totals.items}};
- writes.push({kind:'active',key:ROOT_LEDGER,op:'replace',expectedEtag:unquote(ledgerEntry?.metadata?.etag),expectedSha256:ledgerEntry?.sha256||null,text:JSON.stringify(activeLedger)});
+ // The generation copy is what every Worker reader and the next commit load; the root key follows so both stay equal.
+ const activeText=JSON.stringify(activeLedger);
+ if(generationEntry)writes.push({kind:'active-generation',key:generationEntry.key,op:'replace',expectedEtag:unquote(generationEntry.metadata?.etag),expectedSha256:generationEntry.sha256,text:activeText});
+ writes.push({kind:'active-root',key:ROOT_LEDGER,op:'replace',expectedEtag:unquote(ledgerEntry?.metadata?.etag),expectedSha256:ledgerEntry?.sha256||null,text:activeText});
  for(const write of writes){write.sha256=sha256(write.text);write.bytes=Buffer.byteLength(write.text);}
- const fence={pointer:{key:POINTER,etag:unquote(pointerEntry?.metadata?.etag),programmeRunId:P},generationCopy:generationEntry?{key:generationEntry.key,etag:unquote(generationEntry.metadata?.etag),sha256:generationEntry.sha256}:null,resolution:resolution?{key:RESOLUTION}:null};
+ const fence={pointer:{key:POINTER,etag:unquote(pointerEntry?.metadata?.etag),programmeRunId:P},resolution:resolution?{key:RESOLUTION}:null};
  return {stops:[...new Set(stops)],checks,P,ledger,items,active,departures,manifest,writes,fence,sourceSha,writeId,manifestId};
 }
 
@@ -118,7 +124,7 @@ function describe(split,decisions,now,context,sourceBytes){
  const write=kind=>split.writes.filter(entry=>entry.kind===kind),segmentSizes=write('segment').map(entry=>entry.bytes);
  return {
   source:{...side(split.items),bytes:sourceBytes},
-  active:{...side(split.active),bytes:write('active')[0]?.bytes||0},
+  active:{...side(split.active),bytes:write('active-root')[0]?.bytes||0},
   archived:{...side(split.departures),bytes:split.manifest.totals.bytes,segmentVersions:segmentSizes.length,maxSegmentBytes:Math.max(0,...segmentSizes),manifestBytes:write('manifest')[0]?.bytes||0},
   checks:split.checks
  };
@@ -149,9 +155,9 @@ export function loadPlan(output){
 }
 
 // Applies a plan to an R2-like store (an R2 binding, or the offline overlay). Every precondition is checked before the
-// first write; each write re-checks the fence (published pointer, its ledger copy, the discovery lease, no EPG commit in
-// stage `epg`). Create-only writes skip an object that already holds the planned bytes and stop on any other; the active
-// ledger is replaced only by a CAS on the source ledger's ETag, or skipped when it already holds the planned bytes. A rerun
+// first write; each write re-checks the fence (published pointer, the discovery lease, no EPG commit in stage `epg`).
+// Create-only writes skip an object that already holds the planned bytes and stop on any other; each ledger copy is
+// replaced only by a CAS on the source ledger's ETag, or skipped when it already holds the planned bytes. A rerun
 // after any stop completes the same state; a rerun after success writes nothing. `failAfter` simulates a kill (tests).
 export async function applySplit(env,planned,{context,failAfter=null}={}){
  const store=env.BUCKET,result={applied:0,skipped:0,writes:[]};
@@ -159,7 +165,6 @@ export async function applySplit(env,planned,{context,failAfter=null}={}){
  for(const write of planned.writes)if(sha256(write.text)!==write.sha256)throw new SplitError('Planned object does not match its checksum',3);
  const fence=async lease=>{
   const pointer=await store.get(planned.fence.pointer.key);if(unquote(pointer?.etag)!==planned.fence.pointer.etag)throw new SplitError('Fence lost: published generation changed',3);
-  if(planned.fence.generationCopy){const copy=await store.get(planned.fence.generationCopy.key);if(unquote(copy?.etag)!==planned.fence.generationCopy.etag)throw new SplitError('Fence lost: generation ledger copy changed',3);}
   const run=await store.get('sync.json'),body=run?await run.json():null;if(body?.stage==='epg')throw new SplitError('Fence lost: an EPG commit is in progress',3);
   if(lease&&!await vm.runInContext('renewDiscoveryLease',context)(env,lease))throw new SplitError('Fence lost: discovery lease',3);
  };
@@ -191,8 +196,8 @@ export async function applySplit(env,planned,{context,failAfter=null}={}){
 
 // Reads back an applied split as an offline reader does (section 4 of ADR 0034): the active ledger, the manifest it names
 // and exactly that manifest's segment versions, each checked against its SHA-256.
-async function readSplit(store){
- const active=await (await store.get(ROOT_LEDGER)).json(),manifestId=active.archive?.manifestId;
+async function readSplit(store,context){
+ const active=await vm.runInContext('loadJSON',context)({BUCKET:store},ROOT_LEDGER),manifestId=active?.archive?.manifestId;
  const manifestObject=await store.get('epg/discovery-archive/v1/manifests/'+manifestId+'.json'),manifest=manifestObject?await manifestObject.json():null;
  if(!manifest)throw new SplitError('Archive manifest missing',3);
  const archived=new Map();
@@ -249,9 +254,9 @@ export async function rehearse({snapshot,output,heap=false}){
 
  // 1. Install, read back, reconstruct (R2 rollback parity), decisions untouched.
  const installed=overlay('installed'),first=await applySplit(installed.env,planned,{context});sampleMemory();
- const read=await readSplit(installed.store),reconstruction=parity(split.items,read.active.items,read.archived);sampleMemory();
+ const read=await readSplit(installed.store,context),reconstruction=parity(split.items,read.active.items,read.archived);sampleMemory();
  const activeKeys=new Set(read.active.items.map(item=>item.key));
- checks.install={applied:first.applied,skipped:first.skipped,writes:installed.store.writes.filter(key=>key!=='epg/resolver-lease.json').length,activeItems:read.active.items.length,archivedItems:read.archived.size,boundaryExact:read.active.items.length===split.active.length&&split.active.every(item=>activeKeys.has(item.key)),decisionsUntouched:await resolutionNow(installed.store)===resolutionSha,generationCopyUntouched:!installed.store.writes.includes(planned.fence.generationCopy?.key)};
+ checks.install={applied:first.applied,skipped:first.skipped,writes:installed.store.writes.filter(key=>key!=='epg/resolver-lease.json').length,activeItems:read.active.items.length,archivedItems:read.archived.size,boundaryExact:read.active.items.length===split.active.length&&split.active.every(item=>activeKeys.has(item.key)),decisionsUntouched:await resolutionNow(installed.store)===resolutionSha,workerReadsActive:read.active.ledgerMode==='bounded',rootEqualsGeneration:await (async()=>{const root=await installed.store.get(ROOT_LEDGER),generation=await installed.store.get('epg/generations/'+planned.fence.pointer.programmeRunId+'/discovery-latest.json');return !!root&&!!generation&&sha256(await root.text())===sha256(await generation.text());})(),sourceCopyExact:await (async()=>{const copy=await installed.store.get(planned.writes[0].key);return !!copy&&sha256(Buffer.from(await copy.arrayBuffer()))===split.sourceSha;})()};
  checks.reconstruction=reconstruction;
  const counts=vm.runInContext('ledgerCounts',context)(read.active,decisions,Date.parse(snap.manifest.finishedAt));
  checks.counts={ledgerTotal:counts.ledgerTotal,sourceItems:split.items.length,exact:counts.ledgerTotal===split.items.length};
@@ -261,13 +266,14 @@ export async function rehearse({snapshot,output,heap=false}){
  const before=installed.store.writes.length,replay=await applySplit(installed.env,planned,{context});
  checks.replay={applied:replay.applied,skipped:replay.skipped,plannedWrites:installed.store.writes.slice(before).filter(key=>key!=='epg/resolver-lease.json').length,zeroMutations:replay.applied===0&&installed.store.writes.slice(before).every(key=>key==='epg/resolver-lease.json')};
 
- // 3. Kill after the first segment, mid segments, the last segment, the manifest and the archive pointer; then resume.
- const segmentWrites=planned.writes.filter(write=>write.kind==='segment').length,kills=[...new Set([1,Math.max(1,segmentWrites>>1),segmentWrites,segmentWrites+1,segmentWrites+2])];
+ // 3. Kills, then resume.
+ // Kill after the source copy, a middle segment, the last segment, the manifest, the archive pointer and the generation copy.
+ const segmentWrites=planned.writes.filter(write=>write.kind==='segment').length,kills=[...new Set([1,1+Math.max(1,segmentWrites>>1),1+segmentWrites,2+segmentWrites,3+segmentWrites,4+segmentWrites])].filter(n=>n<planned.writes.length);
  checks.resume=[];
  for(const killAfter of kills){
   const run=overlay('kill-'+killAfter);let stopped=false;
   try{await applySplit(run.env,planned,{context,failAfter:killAfter});}catch(error){stopped=error.exitCode===9;}
-  const midway=await vm.runInContext('ledgerCounts',context)((await (await run.store.get(ROOT_LEDGER)).json()),decisions,Date.parse(snap.manifest.finishedAt));
+  const midway=vm.runInContext('ledgerCounts',context)(await vm.runInContext('loadJSON',context)({BUCKET:run.store},ROOT_LEDGER),decisions,Date.parse(snap.manifest.finishedAt));
   const resumed=await applySplit(run.env,planned,{context}),state=await plannedState(run.store,planned);
   checks.resume.push({killAfter,stopped,ledgerTotalWhileStopped:midway.ledgerTotal,resumedApplied:resumed.applied,identical:stable(state)===stable(reference)});
   fs.rmSync(path.join(work,'kill-'+killAfter),{recursive:true,force:true});
@@ -297,9 +303,15 @@ export async function rehearse({snapshot,output,heap=false}){
  const boundedStore=overlayStore(layeredBase(path.join(work,'installed'),snap.base),path.join(work,'next-bounded'));
  await commit({BUCKET:full.store,DISCOVERY_LEDGER_MODE:'full'},context,S,scan.items);sampleMemory();
  await commit({BUCKET:boundedStore,DISCOVERY_LEDGER_MODE:'bounded'},context,S,scan.items);sampleMemory();
- const fullLedger=await (await full.store.get(ROOT_LEDGER)).json(),after=await readSplit(boundedStore),scanKeys=new Set(scan.items.map(item=>vm.runInContext('canonicalDiscoveryCandidate',context)(item).key));
+ const fullLedger=await vm.runInContext('loadJSON',context)({BUCKET:full.store},ROOT_LEDGER),after=await readSplit(boundedStore,context),scanKeys=new Set(scan.items.map(item=>vm.runInContext('canonicalDiscoveryCandidate',context)(item).key));
  const afterCounts=vm.runInContext('ledgerCounts',context)(after.active,decisions,Date.now()),activeKeysAfter=new Set(after.active.items.map(item=>item.key));
  checks.nextCommit={scanItems:scan.items.length,leaving:scan.leaving,returning:scan.returning,activeItems:after.active.items.length,boundaryExact:after.active.items.length===scanKeys.size&&after.active.items.every(item=>scanKeys.has(item.key)),parity:parity(fullLedger.items,after.active.items,after.archived),alsoArchived:after.active.archive?.alsoArchived?.length??null,ledgerTotal:afterCounts.ledgerTotal,fullLedgerItems:fullLedger.items.length,countsExact:afterCounts.ledgerTotal===fullLedger.items.length,reentered:scan.returningKeys.filter(key=>activeKeysAfter.has(key)).length,decisionsUntouched:await resolutionNow(boundedStore)===resolutionSha,archiveManifests:(await boundedStore.list({prefix:'epg/discovery-archive/v1/manifests/'})).objects.length};
+ // 5b. The same commit with the flag unset (the state right after a production split, before `bounded` is set): a Worker
+ // that meets the archive pointer acts as frozen. It must read only the active ledger, archive nothing and lose nothing.
+ const frozenStore=overlayStore(layeredBase(path.join(work,'installed'),snap.base),path.join(work,'next-frozen'));
+ await commit({BUCKET:frozenStore,DISCOVERY_LEDGER_MODE:'full'},context,S,scan.items);sampleMemory();
+ const frozen=await readSplit(frozenStore,context),frozenCounts=vm.runInContext('ledgerCounts',context)(frozen.active,decisions,Date.now());
+ checks.frozenCommit={ledgerMode:frozen.active.ledgerMode||null,activeItems:frozen.active.items.length,parity:parity(fullLedger.items,frozen.active.items,frozen.archived),ledgerTotal:frozenCounts.ledgerTotal,countsExact:frozenCounts.ledgerTotal===fullLedger.items.length,readSourceCopy:frozenStore.reads.includes(planned.writes[0].key),archiveWrites:frozenStore.writes.filter(key=>key.startsWith('epg/discovery-archive/')).length,decisionsUntouched:await resolutionNow(frozenStore)===resolutionSha};
  fullLedger.items=null;
 
  // 6. One discovery chunk after that commit in both modes (TMDB unreachable): decisions of active candidates must agree.
@@ -314,13 +326,15 @@ export async function rehearse({snapshot,output,heap=false}){
  const reasons=[];
  if(!checks.install.boundaryExact)reasons.push('install_boundary');
  if(!checks.install.decisionsUntouched)reasons.push('install_decisions_changed');
- if(!checks.install.generationCopyUntouched)reasons.push('generation_copy_written');
+ if(!checks.install.workerReadsActive||!checks.install.rootEqualsGeneration)reasons.push('install_not_read_by_worker');
+ if(!checks.install.sourceCopyExact)reasons.push('source_copy');
  if(!reconstruction.exact||reconstruction.activeAlsoArchived)reasons.push('reconstruction_parity');
  if(!checks.counts.exact)reasons.push('counts');
  if(!checks.replay.zeroMutations)reasons.push('replay_mutated');
  if(checks.resume.some(entry=>!entry.stopped||!entry.identical||entry.ledgerTotalWhileStopped<split.items.length))reasons.push('resume');
  for(const [name,entry] of Object.entries(checks.negative))if(!entry.refused||entry.plannedWrites)reasons.push('negative_'+name);
  if(!checks.nextCommit.boundaryExact||!checks.nextCommit.parity.exact||!checks.nextCommit.countsExact||!checks.nextCommit.decisionsUntouched)reasons.push('next_commit');
+ if(checks.frozenCommit.ledgerMode!=='frozen'||!checks.frozenCommit.parity.exact||!checks.frozenCommit.countsExact||checks.frozenCommit.readSourceCopy||checks.frozenCommit.archiveWrites||!checks.frozenCommit.decisionsUntouched)reasons.push('frozen_commit');
  if(checks.chunk.fullHttp!==200||checks.chunk.boundedHttp!==200||checks.chunk.activeDecisionsDiffer||checks.chunk.archiveReadsByChunk)reasons.push('chunk');
  report.verdict=reasons.length?'NO-GO':'GO';report.reasons=reasons;
  fs.rmSync(work,{recursive:true,force:true});
@@ -333,10 +347,11 @@ function finish(out,report,started){
 }
 
 // Smallest V8 old space (MB) at which each scenario completes, in a child process. The commit runs on the snapshot (full)
-// or the installed split (bounded) with the rehearsal's next scan; the chunk runs after that commit in each mode.
+// or the installed split (bounded, and frozen: the flag unset after a split) with the rehearsal's next scan; the chunk runs
+// after that commit in each mode.
 function heapReport(snapshot,work,runId){
  const result={};
- for(const scenario of ['full-commit','bounded-commit','full-chunk','bounded-chunk']){
+ for(const scenario of ['full-commit','frozen-commit','bounded-commit','full-chunk','frozen-chunk','bounded-chunk']){
   const run=mb=>spawnSync(process.execPath,[...(mb?['--max-old-space-size='+mb,'--max-semi-space-size=1']:[]),fileURLToPath(import.meta.url),'--child',scenario,snapshot,work,runId],{stdio:'ignore'}).status===0;
   if(!run(null)){result[scenario]='error';continue;}
   let lo=16,hi=2048;while(hi-lo>4){const mid=(lo+hi)>>1;if(run(mid))hi=mid;else lo=mid;}
@@ -349,11 +364,11 @@ async function child(scenario,snapshot,work,runId){
  const dir=fs.mkdtempSync(path.join(work,'child-')),base=snapshotBase(snapshot,manifest);
  try{
   if(step==='commit'){
-   const layer=mode==='bounded'?layeredBase(path.join(work,'installed'),base):base,store=overlayStore(layer,dir);
-   await commit({BUCKET:store,DISCOVERY_LEDGER_MODE:mode},context,runId,JSON.parse(fs.readFileSync(path.join(work,'scan.json'),'utf8')));
+   const layer=mode==='full'?base:layeredBase(path.join(work,'installed'),base),store=overlayStore(layer,dir);
+   await commit({BUCKET:store,DISCOVERY_LEDGER_MODE:mode==='bounded'?'bounded':'full'},context,runId,JSON.parse(fs.readFileSync(path.join(work,'scan.json'),'utf8')));
   }else{
-   const layer=mode==='bounded'?layeredBase(path.join(work,'next-bounded'),layeredBase(path.join(work,'installed'),base)):layeredBase(path.join(work,'next-full'),base);
-   if(await chunk({BUCKET:overlayStore(layer,dir),DISCOVERY_LEDGER_MODE:mode},context,runId)!==200)throw new Error('chunk failed');
+   const layer=mode==='full'?layeredBase(path.join(work,'next-full'),base):layeredBase(path.join(work,'next-'+mode),layeredBase(path.join(work,'installed'),base));
+   if(await chunk({BUCKET:overlayStore(layer,dir),DISCOVERY_LEDGER_MODE:mode==='bounded'?'bounded':'full'},context,runId)!==200)throw new Error('chunk failed');
   }
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 }

@@ -2,6 +2,8 @@
 
 [AIR-221](https://trello.com/c/9ZiVygrd) · offline. Rehearses the split of [ADR 0034](../adr/0034-bounded-discovery-ledger.md) that [AIR-222](https://trello.com/c/9Y4G9DG6) would apply in production. Procedure: [discovery-ledger runbook, offline split](../runbooks/discovery-ledger.md#offline-split-air-221-rehearsal).
 
+> **Correction (28 October 2026, [AIR-222](https://trello.com/c/9Y4G9DG6)).** The plan rehearsed here replaced only the root key `epg/discovery-latest.json` and kept the published generation's copy. The Worker reads the generation copy (`loadJSON` pins it), so the installed split would have been ignored and the first bounded commit would still have parsed the full ledger. The data results below remain valid: partition, parity, counts, resume and fences. The commit memory and its "bounded" path do not. The corrected plan and its numbers are in the [AIR-222 stage 1 evidence](discovery-ledger-split-air-222-stage-1-2026-10-28.md).
+
 **Captured at:** 2026-10-27, AIR-221 branch on top of `main` `286724c`. **Command:** `node scripts/discovery-ledger-split.mjs rehearse --snapshot <snapshot> --output <private dir> --heap`. **Scope:** the [AIR-175 production snapshot](d1-migration/air-175-r2-snapshot-identity-2026-10-26.md), run by the owner on their machine on 2026-10-27 at the PR head (the snapshot never left that machine; only `report.json` aggregates were shared), and a production-shaped synthetic snapshot built with the AIR-220 benchmark shapes. **Evidence lifecycle:** dated measurement of this code on this input. **Operational authority:** none. No production read or write, no flag, no Task, no D1.
 
 ## What the rehearsal does
