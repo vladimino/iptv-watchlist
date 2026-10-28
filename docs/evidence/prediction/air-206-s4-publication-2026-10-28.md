@@ -2,7 +2,7 @@
 
 **Executed:** 2026-10-28, by the owner in a browser session behind Cloudflare Access (DevTools console, same-origin `fetch`): approved dry run 05:49:40.081 UTC, publication 05:49:42.925 UTC (Madrid 06:49, CET)
 **Verified:** 2026-10-28, about 05:51 UTC, owner-only IPTV MCP read tools only (`enrichment_profile`, `enrichment_queue`, `prediction_queue_overview`, `prediction_film_diagnostics`)
-**Code:** `main` `1f92365` and later documentation-only merges; the Worker version was not read
+**Code:** `main` `d14f861`; no file under `src/` changed since `1f92365`, the code of the S3 dry run. The Worker version was not read
 **Approval:** owner approval of publication of the pre-approved version 2 only, recorded on [AIR-206](https://trello.com/c/87mg3VNi) (card comment of 28 October, 05:28 UTC). The declaration approval is in [S3 evidence](air-206-s3-declaration-2026-10-28.md). The switch `PREDICTION_PROFILE_COMPATIBILITY=selective` (S2) was set by the owner in the Cloudflare dashboard before this stage. No Scheduled Task, model, sync, discovery or other flag was changed
 **Verdict:** **S4 complete.** Version 2 is current with the approved change impact and a two-link lineage. Under `selective`, 2,054 of 2,342 predictions stay usable and only 288 are requeued, where strict would have requeued all 2,342. Both invariants (`wouldRequeue`, `strictDisagreements`) are 0
 
