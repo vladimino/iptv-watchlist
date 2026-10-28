@@ -1,6 +1,6 @@
 # AIR-206 S5 — selective prediction stabilization, read-only acceptance
 
-**Observed:** 2026-10-28, production IPTV MCP read-only tools. **Owner authorization:** S5 read-only verification in the AIR-206 conversation; no manual model run, task edit, flag, queue reconcile, or R2/D1 mutation. **Card:** https://trello.com/c/87mg3VNi
+**Observed:** 2026-10-28, production IPTV MCP read-only tools; the final snapshot was refreshed at 07:39:36.565 UTC. **Owner authorization:** S5 read-only verification in the AIR-206 conversation; no manual model run, task edit, flag, queue reconcile, or R2/D1 mutation. **Card:** https://trello.com/c/87mg3VNi
 
 **Verdict:** **GO for bounded selective-invalidation acceptance**, not proof of completed continuous prediction run or a full per-record audit. The observed queue is consistent, the original compatible count is stable, and new exact v2 predictions accumulate while stale predictions decrease.
 
