@@ -1,9 +1,9 @@
 # ADR 0035: A fingerprint stays usable across fingerprint schema and prompt versions only through a declared, typed transition evaluated by one shared rule
 
-**Status:** Proposed (design only; it authorizes no fingerprint or prediction regeneration, model run, queue change, flag, Scheduled Task, R2 or D1 operation)  
-**Original decision date:** 2026-10-28 (proposed)  
+**Status:** Accepted (design only; it authorizes no fingerprint or prediction regeneration, model run, queue change, flag, Scheduled Task, R2 or D1 operation)  
+**Original decision date:** 2026-10-28 (owner accepted)  
 **Recorded at:** 2026-10-28  
-**Approval source:** pending the owner's decision on [AIR-33](https://trello.com/c/rBFiUUZQ)  
+**Approval source:** [owner's explicit Accepted decision recorded on AIR-33](https://trello.com/c/rBFiUUZQ#comment-6ae1b5871d105d86d6309487), following [positive independent re-review](https://github.com/vladimino/iptv-watchlist/pull/192#pullrequestreview-5679876831)  
 **Related work:** [AIR-33](https://trello.com/c/rBFiUUZQ); successors [AIR-207](https://trello.com/c/GiFL0jy8), [AIR-208](https://trello.com/c/54RDVHNj), [AIR-209](https://trello.com/c/kDbOGZuj), [AIR-210](https://trello.com/c/DM1Rrnrz); [ADR-0031](0031-selective-prediction-profile-compatibility.md), whose outcome model this extends; [fingerprint contract audit](../evidence/prediction/air-33-fingerprint-contract-audit-2026-10-28.md); [specification fixtures](../../tests/fixtures/fingerprint-compatibility/cases.json)  
 **Supersedes:** [ADR-0014](0014-fingerprint-prediction-lifecycle.md) and step 1 of [ADR-0031](0031-selective-prediction-profile-compatibility.md) section 3 **in part, from activation**:
 - "fingerprint current means schema version equal to the code" becomes "the fingerprint is exact, or compatible through every declared transition between its versions and the code's";
