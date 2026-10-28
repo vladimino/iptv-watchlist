@@ -2,7 +2,7 @@
 
 - **Card:** [AIR-12](https://trello.com/c/kh3xGQSp). **Captured:** 28 October 2026, 17:40–18:00 UTC. **Code:** GitHub `main` at `1a4a3ac`.
 - **Scope:** the R2 keys, record shapes and writers of prediction history and of the owner's actual Letterboxd ratings; write invariants, idempotency, compare-and-swap and crash/replay; what is missing for a durable quality history. Read the code, plus aggregate read-only R2 reads of production (Cloudflare API `GET`/`LIST`, no record contents reproduced).
-- **Verdict:** two real gaps, fixed in the AIR-12 pull request under [ADR 0038](../../adr/0038-durable-rating-and-prediction-lineage.md) (Proposed): no durable rating change history under `LETTERBOXD_FACTS=on`, and three missing lineage fields on new prediction records. Everything else is already present and is not rewritten.
+- **Verdict:** two real gaps, fixed in the AIR-12 pull request under [ADR 0038](../../adr/0038-durable-rating-and-prediction-lineage.md) (Accepted 2026-10-28): no durable rating change history under `LETTERBOXD_FACTS=on`, and three missing lineage fields on new prediction records. Everything else is already present and is not rewritten.
 - **Operational authority:** none. No write, flag, Task, model, sync or ratings call.
 
 ## Matrix

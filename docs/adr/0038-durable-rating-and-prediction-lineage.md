@@ -1,9 +1,9 @@
 # ADR 0038: Rating changes are kept in the Letterboxd fact record, and a prediction records the run and fingerprint it came from
 
-**Status:** Proposed (owner decision required before merge)  
+**Status:** Accepted (owner decision 2026-10-28)  
 **Original decision date:** 2026-10-28  
 **Recorded at:** 2026-10-28  
-**Approval source:** [AIR-12](https://trello.com/c/kh3xGQSp) scope (durable append-only rating observations and only the missing lineage fields; no rewrite of the prediction writer, no backfill) set by the owner on 2026-10-28; the explicit Accepted/Declined decision for this record is pending  
+**Approval source:** explicit owner acceptance of ADR 0038 in the AIR-12 delivery session, 2026-10-28, after the coordinator review of [PR #210](https://github.com/vladimino/iptv-watchlist/pull/210) (review 5687357082); architecture only, no backfill, flag, R2 or D1 write authorized  
 **Related work:** [AIR-12](https://trello.com/c/kh3xGQSp), [AIR-262](https://trello.com/c/48ImXYoq), [AIR-263](https://trello.com/c/TEq1NFbA), [AIR-164](https://trello.com/c/iZzON44A); [ADR 0018](0018-letterboxd-last-good-ratings.md), [ADR 0023](0023-letterboxd-user-facts.md), [ADR 0024](0024-letterboxd-scan-summary.md), [ADR 0026](0026-historical-prediction-version-materialization.md); [gap matrix](../evidence/prediction/air-12-history-gap-matrix-2026-10-28.md)  
 **Supersedes:** None. It extends the ADR 0023 fact record; its decision 6 (`replaced` as the one-level before-image) is unchanged  
 **Superseded by:** None

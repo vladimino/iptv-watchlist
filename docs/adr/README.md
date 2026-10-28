@@ -44,12 +44,11 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0036 — The scored acceptance gate is the only EPG resolver](0036-scored-resolution-only.md) | Accepted 2026-10-28 (explicit owner decision); supersedes the runtime-mode boundary of ADR 0012 only | [AIR-90](https://trello.com/c/v9OH2Yhx); prerequisites [AIR-68](https://trello.com/c/qbLDc6Ql) and [AIR-69](https://trello.com/c/FlcWZX7W); no binding, flag, R2 or D1 operation authorized |
 
 | [0037 — The domain localization rule is the only localization of the programme and watchlist reads and of the EPG commit](0037-domain-localization-only.md) | Accepted 2026-10-28 (explicit owner decision); closes the per-path rollout boundary of the lifecycle rollout log, supersedes no ADR | [AIR-89](https://trello.com/c/vzR0uuZq); rollout [AIR-42](https://trello.com/c/drLBuWjl); metadata localization stays flag-gated and default off; no binding, flag, R2 or D1 operation authorized |
+| [0038 — Rating changes are kept in the Letterboxd fact record, and a prediction records the run and fingerprint it came from](0038-durable-rating-and-prediction-lineage.md) | Accepted 2026-10-28 (explicit owner decision); extends ADR 0023 | [AIR-12](https://trello.com/c/kh3xGQSp); [gap matrix](../evidence/prediction/air-12-history-gap-matrix-2026-10-28.md); no backfill, flag, R2 or D1 operation authorized |
 
 ## Proposed records
 
-| ADR | Status | Decision and evidence |
-| --- | --- | --- |
-| [0038 — Rating changes are kept in the Letterboxd fact record, and a prediction records the run and fingerprint it came from](0038-durable-rating-and-prediction-lineage.md) | Proposed (owner Accepted/Declined decision pending before merge); extends ADR 0023 | [AIR-12](https://trello.com/c/kh3xGQSp); [gap matrix](../evidence/prediction/air-12-history-gap-matrix-2026-10-28.md); no backfill, flag, R2 or D1 operation authorized |
+No proposed records currently.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
