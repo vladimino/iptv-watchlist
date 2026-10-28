@@ -38,6 +38,18 @@ These checks contact production only through Cloudflare Access and the two probe
 Leave Scheduled Tasks and writer MCP tools out of this connectivity smoke test. `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete` may write R2 or advance a run; AIR-62 completion is not permission for extra production calls. In contrast, `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` are read-only tools, suitable for separately authorized diagnostic checks. Do not use `/api/*`, the dashboard or synchronization as connectivity probes; some `GET` routes have side effects (see [README](../../README.md)).
 
 
+## Reading the deployed feature flags
+
+`feature_flags` answers one question: which value does each registered flag have on the Worker version that answered, and what does the code make of it. It reads no storage and changes nothing, so it is a safe read under the existing MCP authorization; it is not an approval for any flag change.
+
+1. Call `feature_flags` with no arguments. Check `summary`: `invalid` and `redacted` should be 0.
+2. For each flag you rely on, read `state`, `effective` and, where present, `effectiveWithRequirements`. A flag whose `effective` differs from `effectiveWithRequirements` is set but blocked by an unmet requirement.
+3. `redacted: true` means the binding holds something other than the flag's tokens; only its length is shown. Fix it in the dashboard (Workers & Pages → `iptv` → Settings → Variables and Secrets) under the owner's approval; never ask for the value in chat.
+4. `issue: retired_tokens` on `LIFECYCLE_LOCALIZATION` or a `set` `SCORED_RESOLUTION` is a leftover binding: inert, and its removal is a separate owner-approved settings change.
+5. Record the read time (`readAt`) next to any ledger update in the [feature flag reference](../reference/feature-flags.md#production-configuration-evidence-ledger).
+
+The field list is in the [feature flag reference](../reference/feature-flags.md#reading-the-deployed-values).
+
 ## Diagnosing a stalled EPG continuation
 
 Use this when the continuation stays `paused / epg_committed` with `remainingChunks: 12` after a published generation, as in [AIR-69](https://trello.com/c/FlcWZX7W). Everything below is a read; none of it starts a chunk, a sync or a task.

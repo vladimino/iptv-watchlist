@@ -1,6 +1,6 @@
 # Runtime feature flags
 
-**Maintained contract; dated observations, not a live configuration dashboard.** Reviewed against GitHub `main` and Trello evidence on 2026-10-25 for [AIR-146](https://trello.com/c/qfqYibFB). All flags below are Cloudflare Worker **environment variables**, not switches managed by GitHub. [`wrangler.jsonc`](../../wrangler.jsonc) uses `keep_vars: true` and deliberately does not declare their production values. A code deploy does not reset these variables. The currently deployed value must be read from authorized Cloudflare settings (or a verified read-only diagnostic that actually exposes that setting) before making operational decisions.
+**Maintained contract; dated observations, not a live configuration dashboard.** Reviewed against GitHub `main` and Trello evidence on 2026-10-25 for [AIR-146](https://trello.com/c/qfqYibFB). All flags below are Cloudflare Worker **environment variables**, not switches managed by GitHub. [`wrangler.jsonc`](../../wrangler.jsonc) uses `keep_vars: true` and deliberately does not declare their production values. A code deploy does not reset these variables. The currently deployed value must be read from authorized Cloudflare settings or from the owner-only MCP tool `feature_flags` (see [Reading the deployed values](#reading-the-deployed-values)) before making operational decisions.
 
 Do **not** interpret a source default, a dated Trello comment, or a prior deployment as proof of the live value. This page does not authorize toggling flags, launching EPG/resolver/prediction jobs, or editing R2/D1, schedules or Access. Consult the [deployment runbook](../runbooks/deployment.md) and obtain action-specific owner approval.
 
@@ -43,6 +43,22 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 - `FINGERPRINT_VERSION_OBJECTS=on` changes what the next fingerprint submit **writes to R2**; it is a production writer change and needs its own owner approval before the value is set. Switching back to `off` stops new body and record objects; objects already written stay in R2 (the Worker never deletes) and remain the only source a pointer restore can use. A restore under `selective` works only for films whose generation records exist.
 - `DISCOVERY_LEDGER_MODE=bounded` changes what the **routine EPG commit writes to R2** on its next run: new archive objects and a smaller active ledger. Once an archive exists, the manual scan and canonicalization routes answer `409`. It is a production writer change that needs its own owner approval ([AIR-222](https://trello.com/c/9Y4G9DG6)) after the offline rehearsal ([AIR-221](https://trello.com/c/9ZiVygrd)). Switching to `frozen` is rollback R1: archiving stops, and nothing is rebuilt or deleted. Removing the value later does not restore the single ledger, because `full` acts as `frozen` while an archive exists.
 - These switches are **not** Cloudflare Worker Cron settings, external ChatGPT Scheduled Tasks, secrets, API tokens or `wrangler.jsonc` deployment/binding parameters. `BUCKET`, `TMDB_API_READ_ACCESS_TOKEN`, `LETTERBOXD_USERNAME`, and `EPG_XML_URL` are dependencies/configuration, not feature flags.
+
+## Reading the deployed values
+
+The MCP tool `feature_flags` ([MCP contract](api/mcp.md), [ADR 0039](../adr/0039-allowlisted-feature-flag-readout.md)) returns, in one call, every flag of this page plus the retired `SCORED_RESOLUTION`, from the bindings of the Worker version that answers. The registry it reads is `src/feature-flags.js`; a test keeps it, the contract table above and the governance checker's flag list in step.
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `absent` (no binding) or `set` |
+| `raw` | The literal value when every comma-separated part, after trimming, is one of the flag's accepted or retired tokens and the value is at most 200 characters; otherwise `null` |
+| `redacted`, `shape` | `true` with `{type, length}` (or `{type}` for a non-string) when the value is not made of known tokens. A typo or a pasted secret is never echoed |
+| `valid`, `issue` | `valid` is `true` for an absent binding or a value the code accepts as written. `issue` is `case_or_whitespace` (a known token with other case or padding where the code does not trim), `unrecognized`, `not_string`, `unrecognized_tokens` or `retired_tokens` (for `LIFECYCLE_LOCALIZATION`), or `retired` (a `SCORED_RESOLUTION` binding exists) |
+| `effective` | The mode the code uses, computed by the consumer's own function; `null` for the retired flag |
+| `requires`, `effectiveWithRequirements`, `unmetRequirements` | For `PREDICTION_MATERIALIZATION`, `LETTERBOXD_BASELINE_IMPORT` and `FINDS_WATCHED_MARK`: the flag the route also needs, and the mode once that need is applied |
+| `registryVersion`, `readAt`, `summary` | Registry version, read time, and counts of registered, set, absent, invalid and redacted flags |
+
+The tool reads no other binding, no storage and no Cloudflare API. It does not say who set a value or when, and for `DISCOVERY_LEDGER_MODE` it does not see whether an archive makes `full` act as `frozen`. A read through it is a verified read for the ledger below; it authorizes no change.
 
 ## Production configuration evidence ledger
 
