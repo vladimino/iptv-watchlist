@@ -73,7 +73,25 @@ It refuses the name `iptv` and the `D1_BACKFILL_DATABASE_ID` uuid. Every command
 
 ## Procedure
 
-**Discovery archive (planned).** A snapshot taken after the [ADR 0034](../adr/0034-bounded-discovery-ledger.md) bounded ledger is activated contains `epg/discovery-archive/v1/`: the pointer `current.json` and write-once manifest and segment versions. Until the importer maps that prefix as a second `candidate` source, it is unmapped. The snapshot must then be treated as NO-GO for the discovery family, not imported with the active ledger alone. Once mapped, the importer reads only the manifest named by the published active ledger and its segment versions, and refuses a missing or `sha256`-mismatched version. Snapshots of the current full ledger, such as AIR-175, are not affected.
+**Discovery archive.** A snapshot taken after the [ADR 0034](../adr/0034-bounded-discovery-ledger.md) bounded ledger is active contains `epg/discovery-archive/v1/`: the pointer `current.json`, write-once manifest versions and segment versions, and the split's write-once copy of the source ledger. The importer reads the discovery family as the published active ledger, the manifest version it names (`archive.manifestId`) and exactly that manifest's segment versions; an active record wins over its archive copy. The resulting candidates, generation membership, shows and decisions are the rows a full-mode ledger produces. `report.json` carries `discoveryArchive`: mode, manifest, active, archived, `alsoArchived`, unique archived and `ledgerTotal` counts, and the number of referenced and unreferenced versions.
+
+The run stops before any write, exit code 3, with one of these reasons:
+
+| Stop reason | Meaning |
+| --- | --- |
+| `archive_manifest_unnamed` | the bounded ledger names no manifest |
+| `archive_manifest_missing` | the named manifest is not in the snapshot |
+| `archive_manifest_invalid` | the manifest's schema, segment table, segment object names or totals are inconsistent |
+| `archive_segment_missing` | a segment version the manifest names is not in the snapshot |
+| `archive_segment_sha256_mismatch` | the segment object's checksum differs from the manifest |
+| `archive_segment_invalid` | a segment body, item count, payload key or key-to-segment hash is wrong |
+| `archive_duplicate_key` | one key is in two segment versions of the named manifest |
+| `archive_pointer_missing` | `current.json` is absent although the ledger is bounded |
+| `archive_pointer_conflict` | `current.json` does not reach the named manifest through `parentManifestId`, so the snapshot mixes archive versions |
+| `archive_counts_mismatch` | the ledger's `alsoArchived` or `uniqueArchivedItems` disagrees with what the segments hold |
+| `discovery_ledger_copies_differ` | the root ledger and the published generation's copy differ, for example a cut taken during the generation handoff |
+
+`current.json` may name a newer manifest than the published ledger (an archive swap whose publication did not happen); that is accepted when the chain reaches the named manifest. Manifest and segment versions outside the consistent read are `unreferenced`: listed in class B, kept in R2, not parsed and not counted as history. The source-ledger copy under `sources/` is R2-only archive. Any other key under `epg/discovery-archive/`, such as another archive version, is unknown and fails closed. A full-mode ledger is complete on its own, and archive objects next to it are unreferenced. The parity side reconstructs the archive independently of the importer's reader. The synthetic proof and its limits are in the [AIR-261 evidence](../evidence/d1-migration/air-261-discovery-archive-import-2026-10-28.md).
 
 1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. Repeat the dry-run twice more: `applied` must be 0.
 2. **Owner acknowledges the class C list** by producing the JSON file of `{sourceKey,targetTable,targetId,reason}` records from `ledger.json` after review. The acknowledgement records a known gap; it is not lossless parity.
