@@ -2,7 +2,7 @@
 
 This page is the contract for keeping a stored fingerprint, and the predictions made from it, usable when the fingerprint schema, the fingerprint prompt or the prediction prompt changes. The decision is [ADR-0035](../../adr/0035-selective-fingerprint-transition-compatibility.md). It extends the outcome model of [prediction compatibility](prediction-compatibility.md) (ADR-0031).
 
-**Status of the code.** The rule is specified, not implemented. Every consumer compares the fingerprint schema and the prediction prompt version by strict equality with the Worker constants (`FINGERPRINT_SCHEMA_VERSION`, `PREDICTION_PROMPT_VERSION`, both 1), and no fingerprint carries a prompt version. The [specification fixtures](../../../tests/fixtures/fingerprint-compatibility/cases.json) state the expected outcomes; `tests/fingerprint-compatibility-spec.mjs` keeps them aligned with the live vocabularies.
+**Status of the code.** The rule is implemented as the pure module `src/domain/fingerprint-compatibility.js` (evaluator, registry validator and the extended prediction check) and is not called by any consumer. Every consumer compares the fingerprint schema and the prediction prompt version by strict equality with the Worker constants (`FINGERPRINT_SCHEMA_VERSION`, `PREDICTION_PROMPT_VERSION`, both 1), and no fingerprint carries a prompt version. The [specification fixtures](../../../tests/fixtures/fingerprint-compatibility/cases.json) state the expected outcomes; `tests/fingerprint-compatibility-spec.mjs` keeps them aligned with the live vocabularies.
 
 ## Version axes
 
@@ -70,12 +70,22 @@ An invalid registry counts as unknown: every link is global.
 ## Fingerprint rule
 
 ```js
-fingerprintCompatibility(fingerprint, metadata, registry, target, mode)
+fingerprintCompatibility(fingerprint, metadata, registry, target, mode, {vocabulary, digest})
+// fingerprint: the generation record the pointer names; metadata: {genres}
 // target: {fingerprintSchemaVersion, fingerprintPromptVersion}
+// vocabulary: {mechanics, execution, general, domains} of schema 1; digest(text) -> SHA-256 hex, synchronous
 // -> {outcome: 'current'|'compatible'|'stale', reason, migration: 'none'|'compatible'|'partial'|'full'|'global', fields, links}
 ```
 
-The first deciding check wins:
+- `fingerprint`, `metadata` and `registry` are never modified.
+- A stored `fingerprintPromptVersion` that is absent reads as 1.
+- `links` is the number of version steps between the record and the target on both fingerprint axes.
+- `fingerprintCompatibilityFresh(result)` is true for `current` and `compatible`.
+- `fingerprintRestoreCandidate(history, metadata, registry, target, options)` returns the first stored generation record that is `current` for the target, or null: the record a rollback restores the pointer to without a model run.
+- `fingerprintRegistryIssue(registry, options)` validates the whole registry (`{code, index}` or null); `fingerprintTransitionIssue(transition, previous, vocabulary, digest)` one declaration, with the codes of the table above.
+- `fingerprintSchemaVocabulary(schemaTransitions, version, base)` derives the vocabulary and tightened constraints of a schema version from schema 1 through the declared changes.
+
+The first deciding check wins. Within one link the selectors are read before the structural check, so a stored value outside the fingerprint's own vocabulary is unknown, never a structure difference:
 
 | Step | Outcome / reason | Migration |
 | --- | --- | --- |
@@ -87,9 +97,9 @@ The first deciding check wins:
 | no registry path | `stale/transition_unknown` | `global` |
 | invalid registry or link | `stale/transition_impact_unknown` | `global` |
 | a `global` link | `stale/transition_global` | `global` |
-| stored fingerprint fails the target validator, ignoring its version constant and the old values named by value-level changes on the path | `stale/fingerprint_structure_incompatible` | `full` |
 | reached by a selector | `stale/transition_impacted` | the selector's `partial` (fields united across links) or `full` |
-| an unknown feature | `stale/film_features_unknown` | `full` |
+| an unknown feature, including a stored value outside the own vocabulary | `stale/film_features_unknown` | `full` |
+| stored fingerprint fails the target validator (once, after the selectors of the link), ignoring its version constant and the old values named by value-level changes on the path | `stale/fingerprint_structure_incompatible` | `full` |
 | every link passes | `compatible/transition_unaffected` | `compatible` |
 
 Links on both fingerprint axes are walked in order. The first stale link gives the reason, and the widest migration wins.
@@ -98,7 +108,13 @@ A profile selector (ADR-0031) is read against the fingerprint a prediction was m
 
 ## Prediction check
 
-This replaces step 1 of the [prediction compatibility order of checks](prediction-compatibility.md#order-of-checks); steps 2–7 are unchanged.
+```js
+predictionTransitionCompatibility(prediction, fingerprint, metadata, profile, registry, target, mode, {vocabulary, digest})
+// target also carries predictionPromptVersion
+// -> {outcome, reason, requiredWork: 'none'|'prediction_only'|'fingerprint_and_prediction', fingerprint, prompt, profile}
+```
+
+This replaces step 1 of the [prediction compatibility order of checks](prediction-compatibility.md#order-of-checks); steps 2–7 are unchanged and run through `predictionCompatibility` with the target schema's vocabulary for the profile selectors and the fingerprint's own vocabulary for its features (`featureVocabulary`). The verdicts of the three parts are returned as `fingerprint`, `prompt` and `profile`.
 
 | Check | Reason |
 | --- | --- |

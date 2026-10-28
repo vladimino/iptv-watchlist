@@ -20,6 +20,7 @@ predictionCompatibility(prediction, fingerprint, features, profile, mode, {
 - `profile` is `current.json`: `{version, profileHash, lineage}`.
 - `features` comes from `predictionImpactFeatures(fingerprint, genres)`: a copy of the fingerprint's `plotMechanics` and raw `execution` (including `unknown` and `not_applicable`), its `fingerprintHash`, and the film's stored genre names.
 - `mode` is `strict` or `selective`; any other value behaves as `strict`.
+- `featureVocabulary` (optional) is the vocabulary of the fingerprint's own schema when it differs from the current one ([fingerprint compatibility](fingerprint-compatibility.md#prediction-check)); a selector value it lacks is an unknown feature. Without it, `vocabulary` answers both.
 - `digest` must be synchronous. A caller in the Worker computes the SHA-256 of each lineage link's declaration once (they are few) and passes a lookup.
 - `links` is the number of lineage transitions between the prediction's version and the current one.
 - `predictionCompatibilityFresh(result)` is true for `current` and `compatible`.
