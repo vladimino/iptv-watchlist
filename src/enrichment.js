@@ -1289,6 +1289,45 @@ async function ratingsRefresh(env,body){
  }catch(e){if(e.message==='Ratings lease lost')return json({error:'Ratings lease lost'},409);throw e;}
  finally{await releaseRatingsLease(env,lease);}
 }
+// Read-only history of one film (contract: docs/reference/api/film-history.md). Only GET and HEAD-free reads of R2: the
+// prediction bundle, the film's Letterboxd fact record through the link index, the legacy rating log and the profile, plus
+// one read per immutable version object on the requested page. Never a write, a model call, a refresh or a lease.
+async function filmHistoryRoute(env,url){
+ const filmId=url.searchParams.get('filmId');
+ if(typeof filmId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(filmId))return json({error:'filmId must be 1–80 letters, digits, "_" or "-"'},400);
+ const page=filmHistoryPageRequest(url.searchParams);if(page.error)return json({error:page.error},400);
+ const read=async key=>{const object=await env.BUCKET.get(key);if(!object)return {status:'missing',etag:null,value:null};try{return {status:'recorded',etag:object.etag,value:await object.json()};}catch{return {status:'unreadable',etag:object.etag,value:null};}};
+ const bundle=await read(filmKey(filmId)+'predictions.json');
+ const tmdb=/^tmdb_([1-9]\d{0,11})$/.exec(filmId),alias=tmdb?'tmdb:'+tmdb[1]:'letterboxd:'+filmId;
+ const links=await read(LetterboxdFacts.FACTS_KEYS.links);
+ let factKey=links.value?.[alias]||null,fact={status:'missing',etag:null,value:null};
+ if(factKey){
+  fact=await read(LetterboxdFacts.recordKey(factKey));
+  if(fact.value?.redirectTo){factKey=fact.value.redirectTo;fact=await read(LetterboxdFacts.recordKey(factKey));}
+  else if(fact.value?.migrating?.to){const target=await read(LetterboxdFacts.recordKey(fact.value.migrating.to));fact={status:fact.status,etag:fact.etag+'+'+target.etag,value:LetterboxdFacts.overlay(fact.value,target.value)};}
+ }
+ const factLinks=fact.value?.links||{},filmIds=[...new Set([filmId,...(factLinks.letterboxd?[String(factLinks.letterboxd)]:[]),...(factLinks.tmdb?['tmdb_'+factLinks.tmdb]:[])])];
+ const [legacy,profile]=await Promise.all([read(ratingObservationsKey),read(profileKey)]);
+ const digest=(await textSha256([bundle.etag,fact.etag,legacy.etag].map(value=>value||'-').join('|'))).slice(0,16);
+ if(page.digest&&page.digest!==digest)return json({error:'history_changed',detail:'The stored history changed since this cursor was issued; start again without a cursor.'},409);
+ const built=buildFilmHistory({filmId,filmIds,bundle:bundle.value,factRecord:fact.value,legacyLog:legacy.value,profile:profile.value});
+ const slice=built.events.slice(page.offset,page.offset+page.limit);
+ const records=new Map([...(Array.isArray(bundle.value?.history)?bundle.value.history:[]).map((record,i)=>['prediction|history|'+i,record]),...(bundle.value?.current?[['prediction|current|0',bundle.value.current]]:[])]);
+ for(const event of slice){
+  if(event.type!=='prediction')continue;
+  const record=records.get(event.identity);
+  if(!record?.r2Key&&!record?.contentSha256)continue;
+  if(!predictionVersionLinked(record,filmId)){event.version={status:'invalid',r2Key:historyValue(record,'r2Key'),contentSha256:historyValue(record,'contentSha256')};continue;}
+  const object=await env.BUCKET.get(record.r2Key);
+  const status=!object?'missing':await textSha256(await object.text())===record.contentSha256?'linked':'mismatch';
+  event.version={status,r2Key:record.r2Key,contentSha256:record.contentSha256};
+ }
+ const partial=[bundle,fact,legacy].some(source=>source.status==='unreadable')||slice.some(event=>event.type==='prediction'&&['missing','mismatch','invalid'].includes(event.version.status));
+ const next=page.offset+page.limit<built.events.length?String(page.offset+page.limit)+'.'+digest:null;
+ return json({schemaVersion:FILM_HISTORY_SCHEMA_VERSION,filmId,readAt:new Date().toISOString(),
+  snapshot:{profile:profile.value?{version:profile.value.version??null,profileHash:profile.value.profileHash??null}:null,sources:{predictions:{status:bundle.status},facts:{status:factKey?fact.status:'missing',factKey},legacyRatingLog:{status:legacy.status}}},
+  current:built.current,partial,notes:built.notes,events:slice,page:{limit:page.limit,offset:page.offset,total:built.events.length,nextCursor:next}});
+}
 async function enrichmentRoute(request,env,url,execution){const path=url.pathname,requestId=predictionRequestId(request);let body=null;if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!isObject(body))return json({error:'Invalid request'},400);}
  if(path==='/api/enrichment/ratings/status'&&request.method==='GET'){const stored=await loadJSON(env,RATINGS_STATUS_KEY),readable=await readableRatings(env);return json({...ratingsStatusView(stored,ratingsEnabled(env)),generationId:readable.generationId??stored?.generationId??null,pendingGenerationId:readable.pendingGenerationId});}
  if(path==='/api/enrichment/ratings/refresh'&&request.method==='POST')return ratingsRefresh(env,body);
@@ -1328,6 +1367,7 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
   const page=await env.BUCKET.list({prefix,limit:24,...(cursor?{cursor}:{})}),records=await Promise.all(page.objects.map(async item=>{const object=await env.BUCKET.get(item.key);return {key:item.key,uploadedAt:object?.uploaded?.toISOString?.()||item.uploaded?.toISOString?.()||null,etag:object?.etag||item.etag||null,value:object?await object.json():null};}));return json({exportedAt:new Date().toISOString(),group,records,nextCursor:page.truncated?page.cursor:null});
  }
  if(path==='/api/enrichment/diagnostics/freeze'&&request.method==='POST'){const result=await freezeDiagnosticSnapshot(env);return result.error?json({error:result.error},409):json({created:result.created,frozenAt:result.snapshot.frozenAt,programmeRunId:result.snapshot.programmeRunId,filmCount:result.snapshot.films.length,predictionCount:result.snapshot.films.filter(f=>!!f.prediction).length});}
+ if(path==='/api/enrichment/history'&&request.method==='GET')return filmHistoryRoute(env,url);
  if(path==='/api/enrichment/diagnostics/snapshot'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(snapshot):json({error:'No frozen diagnostic snapshot'},404);}
  if(path==='/api/enrichment/diagnostics/accuracy'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(prospectiveAccuracy(snapshot,await loadJSON(env,ratingObservationsKey)||[])):json({error:'No frozen diagnostic snapshot'},404);}
  if(path==='/api/enrichment/profile'&&request.method==='GET'){const p=await loadJSON(env,profileKey);return p?json(p):json({error:'Taste profile is not configured'},404);}

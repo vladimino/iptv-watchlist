@@ -8,5 +8,6 @@ Current interface contracts, not a grant of production writer access:
 - [Continuous prediction runner](prediction-runner.md)
 - [Run-step diagnostic provenance](run-diagnostics.md)
 - [Read-only prediction queue diagnostics](prediction-diagnostics.md)
+- [Read-only per-film prediction and rating history](film-history.md)
 
 See [runbooks](../../runbooks/README.md) for approved operator procedures, [domain](../domain/README.md) for identity/scoring and [integrations](../integrations/README.md) for Letterboxd. Runtime truth requires separately authorized verification.
