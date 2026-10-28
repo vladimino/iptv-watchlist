@@ -1,9 +1,9 @@
 # ADR 0036: The scored acceptance gate is the only EPG resolver
 
-**Status:** Proposed (owner decision required before merge)  
+**Status:** Accepted (owner decision 2026-10-28)  
 **Original decision date:** 2026-10-28  
 **Recorded at:** 2026-10-28  
-**Approval source:** [AIR-90](https://trello.com/c/v9OH2Yhx) scope (one always-active scored resolver, rollback by code revert) started by the owner on 2026-10-28 after the [AIR-68](https://trello.com/c/qbLDc6Ql) cutover (2026-10-24) and the [AIR-69](https://trello.com/c/FlcWZX7W) acceptance (2026-10-26); the explicit Accepted/Declined decision for this record is pending  
+**Approval source:** [AIR-90 owner acceptance, 2026-10-28](https://trello.com/c/v9OH2Yhx) (explicitly accepted ADR-0036; architecture only, no production flag or write authorization)  
 **Related work:** [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-68](https://trello.com/c/qbLDc6Ql), [AIR-69](https://trello.com/c/FlcWZX7W), [AIR-90](https://trello.com/c/v9OH2Yhx); [ADR 0010](0010-scored-detail-verification.md), [ADR 0012](0012-scored-resolution-rollout.md)  
 **Supersedes:** the operational boundary of [ADR 0012](0012-scored-resolution-rollout.md) (the `SCORED_RESOLUTION` runtime mode and its flag rollback); its rollout decision stays accepted history  
 **Superseded by:** None
