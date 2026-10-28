@@ -150,4 +150,52 @@ set(`report={...report,runId:'G2'}`);
 assert.deepEqual(ids(vm.runInContext(`renderFinds(${now})`,ui)),[],'a catalog answer of another generation is not shown');
 assert.equal(nodes['#finds'].hidden,true);
 
-console.log('contextual finds: filters, ranking, exclusions and render passed');
+
+// Genre identity: the watchlist labels (GENRE_MAP) and the catalog's TMDB ru-RU names meet on canonical keys, never on the raw string.
+const aliasContext=vm.createContext({});
+vm.runInContext(fs.readFileSync('src/domain/prediction-compatibility.js','utf8')+';globalThis.aliases=PROFILE_GENRE_ALIASES;',aliasContext);
+assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('FINDS_GENRE_KEYS',ui))),JSON.parse(JSON.stringify(aliasContext.aliases)),'FINDS_GENRE_KEYS is the copy of PROFILE_GENRE_ALIASES');
+const key=name=>{ui.input=name;return vm.runInContext('findsGenreKey(input)',ui);};
+assert.equal(key('Криминал'),'crime');assert.equal(key('криминал'),'crime');assert.equal(key('  КРИМИНАЛ '),'crime');assert.equal(key('Crime'),'crime');
+assert.equal(key('Фантастика'),'science_fiction');assert.equal(key('Science Fiction'),'science_fiction');assert.equal(key('science  fiction'),'science_fiction');
+assert.equal(key('Исторический'),'history');assert.equal(key('история'),'history');assert.equal(key('Музыкальный'),'music');assert.equal(key('музыка'),'music');assert.equal(key('Телефильм'),'tv_movie');assert.equal(key('телевизионный фильм'),'tv_movie');
+assert.equal(key('Нуар'),'raw:нуар');assert.equal(key(''),null);assert.equal(key(null),null);assert.equal(key(7),null);
+const tmdb=[
+ film('tmdb_70',{title:'Криминал ru',genres:['криминал','триллер'],rating:4.8}),
+ film('tmdb_71',{title:'Фантастика en',genres:['Science Fiction'],rating:4.7}),
+ film('tmdb_72',{title:'История ru',genres:['история'],rating:4.6}),
+ film('tmdb_73',{title:'Нуар',genres:['нуар'],rating:4.5}),
+ film('tmdb_74',{title:'Без жанров',genres:[],rating:4.4}),
+ film('tmdb_75',{title:'Бойовик uk',genres:['бойовик'],rating:4.3}),
+];
+reset();set(`state.genres=new Set(['Криминал'])`);assert.deepEqual(finds(tmdb),['tmdb_70'],'«Криминал» finds the TMDB «криминал»');
+set(`state.genres=new Set(['криминал'])`);assert.deepEqual(finds(tmdb),['tmdb_70'],'a lower-case selection matches too');
+set(`state.genres=new Set(['Фантастика'])`);assert.deepEqual(finds(tmdb),['tmdb_71'],'«Фантастика» finds the English TMDB name');
+set(`state.genres=new Set(['Исторический'])`);assert.deepEqual(finds(tmdb),['tmdb_72'],'«Исторический» finds TMDB «история»');
+set(`state.genres=new Set(['Нуар'])`);assert.deepEqual(finds(tmdb),['tmdb_73'],'an unknown name matches the same unknown name, case-folded');
+set(`state.genres=new Set(['Боевик'])`);assert.deepEqual(finds(tmdb),[],'an unknown catalog name (uk-UA «бойовик») does not match a known selection');
+set(`state.genres=new Set(['Драма'])`);assert.deepEqual(finds(tmdb),[],'no false match: a film without that genre is not a find');
+set(`state.genres=new Set(['Криминал','Science Fiction'])`);assert.deepEqual(finds(tmdb),['tmdb_70','tmdb_71'],'OR within genres across languages');
+set(`state.genres=new Set(['Триллер']);state.moods=new Set(['dark']);`);assert.deepEqual(finds(tmdb),[],'AND with another filter still holds');
+set(`state.genres=new Set(['Триллер']);state.moods=new Set();state.from=2020;state.to=2026;`);assert.deepEqual(finds(tmdb),['tmdb_70'],'genre and years together');
+set(`state.genres=new Set(['Триллер']);state.from=1900;state.to=MAX_YEAR;state.maxRuntime=90;`);assert.deepEqual(finds(tmdb),[],'genre and a runtime limit together');
+// Matched-genre ranking and the card text count canonical genres once and show the selected label.
+reset();set(`state.genres=new Set(['Криминал','Триллер','Фантастика','фантастика'])`);
+const twoGenres=film('tmdb_80',{title:'Два жанра',genres:['криминал','триллер'],rating:4.2}),oneGenre=film('tmdb_81',{title:'Один жанр',genres:['Science Fiction'],rating:4.9});
+assert.deepEqual(finds([oneGenre,twoGenres]),['tmdb_80','tmdb_81'],'two matched canonical genres outrank one with a higher rating');
+ui.input=twoGenres;assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('findsMatched(input,findsContext()).genres',ui))),['Криминал','Триллер']);
+ui.input=oneGenre;assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext('findsMatched(input,findsContext()).genres',ui))),['Фантастика'],'a genre selected under two spellings is counted once, under the first selected label');
+assert.match(vm.runInContext('findsCard(input,now,findsScope(),findsContext())',ui),/Совпадает с фильтрами: Фантастика</,'the card names the selected label, not the catalog spelling');
+assert.match(vm.runInContext('findsCard(input,now,findsScope(),findsContext())',ui),/Science Fiction/,'the card still shows the catalog genre as stored');
+// Unchanged without a genre filter; watched exclusion and the single request hold with a genre selected.
+reset();assert.deepEqual(finds(tmdb),baseline(tmdb));
+set(`state.genres=new Set(['Криминал']);findsMarks.set('70',{state:'marked'})`);assert.deepEqual(finds(tmdb),[],'a marked film stays excluded under a genre filter');
+set(`findsMarks.clear();films=[{id:'lb_70',tmdbId:'70',title:'x',year:2020,genres:[],shows:[]}]`);assert.deepEqual(finds(tmdb),[],'a watchlist film stays excluded');
+set(`films=[]`);
+const fetchesBeforeGenre=fetches;set(`findsSource={films:${JSON.stringify(tmdb)},programmeRunId:'G1',generatedAt:null,ready:true,error:false,watchedMarkEnabled:false};report={...report,runId:'G1'};`);
+set(`Object.assign(state,readUrlState(new URL('https://iptv.local/?genre=%D0%9A%D1%80%D0%B8%D0%BC%D0%B8%D0%BD%D0%B0%D0%BB')))`);
+assert.deepEqual(ids(vm.runInContext(`renderFinds(${now})`,ui)),['tmdb_70'],'the URL genre parameter (raw label) selects by canonical key');
+assert.equal(fetches,fetchesBeforeGenre,'no request for a genre change');
+assert.equal(vm.runInContext('urlForState("https://iptv.local/").searchParams.get("genre")',ui),'Криминал','the URL keeps the raw label');
+
+console.log('contextual finds: filters, ranking, exclusions, genre identity and render passed');
