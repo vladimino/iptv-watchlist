@@ -2,7 +2,7 @@
 
 `GET /api/enrichment/history?filmId=<id>[&limit=<n>][&cursor=<cursor>]` returns one film's predictions and rating events as one chronological list. It is owner-only like every Worker path (Cloudflare Access protects the whole Worker; the route adds no bypass and is not exposed through MCP). It only reads R2 and never writes, calls a model, refreshes ratings, takes a lease or schedules work; `tests/get-side-effects.mjs` and `tests/film-history.mjs` check that.
 
-Implementation: `filmHistoryRoute` in `src/enrichment.js` (reads), `buildFilmHistory` in `src/domain/film-history.js` (ordering and shape, pure).
+Implementation: `filmHistoryRoute` in `src/enrichment.js` (reads), `buildFilmHistory` in `src/domain/film-history.js` (ordering and shape, pure). The [prediction quality API](prediction-quality.md) evaluates these events.
 
 ## Request
 

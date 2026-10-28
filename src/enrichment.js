@@ -1289,6 +1289,50 @@ async function ratingsRefresh(env,body){
  }catch(e){if(e.message==='Ratings lease lost')return json({error:'Ratings lease lost'},409);throw e;}
  finally{await releaseRatingsLease(env,lease);}
 }
+// Read-only prediction quality over stored history (contract: docs/reference/api/prediction-quality.md). One page of Letterboxd
+// fact records per request: one bounded LIST, per record its bundles (Letterboxd and TMDB ids), the legacy log once, and the
+// immutable object of each prospective pair. The response carries additive stats so a client can sum pages. Never a write.
+const QUALITY_DEFAULT_LIMIT=25,QUALITY_MAX_LIMIT=50;
+async function predictionQualityRoute(env,url){
+ const raw=url.searchParams.get('limit');let limit=QUALITY_DEFAULT_LIMIT;
+ if(raw!==null){if(!/^\d{1,2}$/.test(raw)||Number(raw)<1||Number(raw)>QUALITY_MAX_LIMIT)return json({error:'limit must be 1..'+QUALITY_MAX_LIMIT},400);limit=Number(raw);}
+ const cursor=url.searchParams.get('cursor');
+ if(cursor!==null&&!/^[A-Za-z0-9+/=_-]{1,1024}$/.test(cursor))return json({error:'Invalid cursor'},400);
+ const read=async key=>{const object=await env.BUCKET.get(key);if(!object)return null;try{return await object.json();}catch{return undefined;}};
+ const listing=await env.BUCKET.list({prefix:'letterboxd/facts/films/',limit,...(cursor?{cursor}:{})});
+ const [legacyLog,profile]=await Promise.all([read(ratingObservationsKey),read(profileKey)]);
+ let stats=emptyQualityStats();const films=[];
+ for(const object of listing.objects||[]){
+  const record=await read(object.key);
+  if(record===undefined||!record){films.push({factKey:object.key.slice('letterboxd/facts/films/'.length).replace(/\.json$/,''),skipped:'unreadable'});continue;}
+  if(record.redirectTo){films.push({factKey:record.factKey,skipped:'redirected'});continue;}
+  if(record.migrating){films.push({factKey:record.factKey,skipped:'migration_in_progress'});continue;}
+  const links=record.links||{},ids=[...(links.letterboxd?[String(links.letterboxd)]:[]),...(links.tmdb?['tmdb_'+links.tmdb]:[])];
+  const events=[...buildFilmHistory({filmId:ids[0]||record.factKey,filmIds:ids,factRecord:record,legacyLog}).events];
+  for(const id of ids){
+   const bundle=await read(filmKey(id)+'predictions.json');
+   if(!bundle)continue;
+   for(const event of buildFilmHistory({filmId:id,bundle}).events)events.push({...event,identity:id+'|'+event.identity,filmId:id});
+  }
+  events.sort(compareHistoryEvents);
+  const film=classifyFilmQuality(events);
+  for(const item of film.ratings){
+   if(item.class!=='prospective')continue;
+   const holder=events.find(e=>e.identity===item.prediction.identity),bundle=holder?await read(filmKey(holder.filmId)+'predictions.json'):null;
+   const position=holder?.position,record2=position==='current'?bundle?.current:bundle?.history?.[Number(holder.identity.split('|').pop())];
+   if(record2?.r2Key||record2?.contentSha256){
+    const linked=predictionVersionLinked(record2,holder.filmId),object2=linked?await env.BUCKET.get(record2.r2Key):null;
+    const status=!linked?'invalid':!object2?'missing':await textSha256(await object2.text())===record2.contentSha256?'linked':'mismatch';
+    item.prediction.version={status,r2Key:record2.r2Key??null,contentSha256:record2.contentSha256??null};
+    if(status!=='linked'){item.class='excluded';item.reason='version_unverified';}
+   }
+  }
+  addFilmQuality(stats,film);
+  films.push({factKey:record.factKey,filmIds:ids,ratings:film.ratings.map(({prediction,...rest})=>({...rest,...(prediction?{prediction:{identity:prediction.identity,at:prediction.at,predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus,tasteProfileVersion:prediction.tasteProfileVersion,predictionPromptVersion:prediction.predictionPromptVersion,lineageKnown:prediction.runId!==null&&prediction.fingerprintPromptVersion!==null,versionStatus:prediction.version?.status||'none'}}:{})})),legacyUnverified:film.legacyUnverified});
+ }
+ return json({schemaVersion:PREDICTION_QUALITY_SCHEMA_VERSION,readAt:new Date().toISOString(),profile:profile?{version:profile.version??null,profileHash:profile.profileHash??null}:null,
+  page:{limit,records:(listing.objects||[]).length,nextCursor:listing.truncated?listing.cursor:null},stats,metrics:finalizeQuality(stats),films});
+}
 // Read-only history of one film (contract: docs/reference/api/film-history.md). Only GET and HEAD-free reads of R2: the
 // prediction bundle, the film's Letterboxd fact record through the link index, the legacy rating log and the profile, plus
 // one read per immutable version object on the requested page. Never a write, a model call, a refresh or a lease.
@@ -1368,6 +1412,7 @@ async function enrichmentRoute(request,env,url,execution){const path=url.pathnam
  }
  if(path==='/api/enrichment/diagnostics/freeze'&&request.method==='POST'){const result=await freezeDiagnosticSnapshot(env);return result.error?json({error:result.error},409):json({created:result.created,frozenAt:result.snapshot.frozenAt,programmeRunId:result.snapshot.programmeRunId,filmCount:result.snapshot.films.length,predictionCount:result.snapshot.films.filter(f=>!!f.prediction).length});}
  if(path==='/api/enrichment/history'&&request.method==='GET')return filmHistoryRoute(env,url);
+ if(path==='/api/enrichment/quality'&&request.method==='GET')return predictionQualityRoute(env,url);
  if(path==='/api/enrichment/diagnostics/snapshot'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(snapshot):json({error:'No frozen diagnostic snapshot'},404);}
  if(path==='/api/enrichment/diagnostics/accuracy'&&request.method==='GET'){const snapshot=await loadJSON(env,diagnosticSnapshotKey);return snapshot?json(prospectiveAccuracy(snapshot,await loadJSON(env,ratingObservationsKey)||[])):json({error:'No frozen diagnostic snapshot'},404);}
  if(path==='/api/enrichment/profile'&&request.method==='GET'){const p=await loadJSON(env,profileKey);return p?json(p):json({error:'Taste profile is not configured'},404);}
