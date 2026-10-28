@@ -24,6 +24,7 @@ Applies to ChatGPT, Cursor and other agents working on this repository. Read [th
 ## Ways of work with the owner
 
 - Address the owner informally in Russian («ты», never «вы»/«ваш»). Chat with the owner and Trello comments are Russian; GitHub PRs, review replies, commit messages and repository docs are English.
+- Times in chat with the owner and in Trello comments are Europe/Madrid (state the zone, e.g. «09:52 Madrid»), with UTC added in parentheses only where it matters for logs, CI runs or snapshot identities. Repository docs and evidence stay in UTC. Schedule windows (Scheduled Tasks, quiet windows) are reasoned about in Madrid time as well, DST included.
 - Roles: the agent is the developer; ChatGPT is the project manager and reviewer and alone moves or closes Trello cards. The agent posts only handoff-to-review and fix-note comments on the card, never "Done" evidence comments.
 - Independent review is mandatory: open a PR, answer every inline comment on its thread, and mark each answered or fixed thread **Resolved** before requesting re-review. ChatGPT merges already approved routine PR deliveries once the review and CI gates are green; the owner decides exceptional pre-merge gates and scope changes, not each ordinary merge.
 - An agent that can follow PR activity subscribes to every PR it opens as soon as it opens it, without asking, and watches it until merge or close (review comments, CI, conflicts).
