@@ -43,7 +43,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-None at present.
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0035 — A fingerprint stays usable across fingerprint schema and prompt versions only through a declared, typed transition evaluated by one shared rule](0035-selective-fingerprint-transition-compatibility.md) | Proposed 2026-10-28 (design only; no regeneration, model run, mode switch, flag, Task, R2 or D1 operation authorized); would supersede ADR-0014 and step 1 of ADR-0031 section 3 in part, from activation | [AIR-33](https://trello.com/c/rBFiUUZQ); [audit](../evidence/prediction/air-33-fingerprint-contract-audit-2026-10-28.md); [fixtures](../../tests/fixtures/fingerprint-compatibility/cases.json); successors [AIR-207](https://trello.com/c/GiFL0jy8)–[AIR-210](https://trello.com/c/DM1Rrnrz) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
