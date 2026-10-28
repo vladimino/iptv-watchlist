@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-24 (retrospective, [AIR-117](https://trello.com/c/ORglHnul))  
 **Approval source:** [AIR-68](https://trello.com/c/qbLDc6Ql)  
 **Supersedes:** None documented  
-**Superseded by:** [ADR 0035](0035-scored-resolution-only.md) for the runtime-mode boundary (the `SCORED_RESOLUTION` variable and flag rollback); the rollout decision itself stays accepted history
+**Superseded by:** [ADR 0036](0036-scored-resolution-only.md) for the runtime-mode boundary (the `SCORED_RESOLUTION` variable and flag rollback); the rollout decision itself stays accepted history
 
 ## Context
 

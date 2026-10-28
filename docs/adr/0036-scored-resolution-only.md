@@ -1,4 +1,4 @@
-# ADR 0035: The scored acceptance gate is the only EPG resolver
+# ADR 0036: The scored acceptance gate is the only EPG resolver
 
 **Status:** Proposed (owner decision required before merge)  
 **Original decision date:** 2026-10-28  
