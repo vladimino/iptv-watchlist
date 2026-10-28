@@ -66,6 +66,20 @@ Progress since the AIR-206 S5 read (07:39 UTC): exact 62 → 94, stale 228 → 1
 
 Order, if A and B are both approved: A first, then B, so that any fingerprint written during the observation already has its record. Neither requires a manual run; the regular Scheduled Task produces the writes to observe, once it is running again.
 
+## Run gap (follow-up read, 12:21–12:25 UTC)
+
+The independent review of this report observed that the hourly prediction Scheduled Task is enabled and that its latest scheduled run (11:20 UTC) was recorded `no_update`, with the last substantive result at 05:20 UTC. A second read-only pass found:
+
+| Source | Reading |
+| --- | --- |
+| `enrichment_queue` | unchanged: `refreshedAt` 08:12:10.756Z, `lastBatch` the run `bb6b6cc0-…` of 05:24–05:25 UTC (profile version 1, one film), `lastCheckAt` 05:25:54Z; `nextScheduledRunAt` moved to 13:20 UTC (it is computed from the clock, not from a run) |
+| `prediction_queue_overview` | `state: eligible`, `cause: ready`, 143 hot films eligible now, none deferred, no running lease |
+| Workers Observability, 05:00–12:25 UTC, grouped by route | `POST /mcp` dense between about 06:35 and 08:00 UTC (60–100 calls per seven-minute bucket), then at most a handful per bucket after 08:12 UTC; no runner-sized burst at 08:20, 09:20, 10:20 or 11:20 |
+
+So no prediction run has reached the Worker since 05:25 UTC: the Worker reports ready work and no lease, and the Task's hourly firings end without starting one. The reason sits in the Task's own decision, which the Worker cannot see; the per-call tool names are not in the logs (the events view of the Observability API failed on this Worker's records). A stale field the Task might gate on is `lastBatch.remaining: 0` from the last version-1 run, while the live `hotRemaining` is 143; that is a hypothesis, not a finding.
+
+Consequence for the options: a flag switch observed through the regular Task would show nothing while the gap lasts. Before A or B, the owner restores or explains the Task's runs, and a fresh baseline is read after the first substantive run.
+
 ## Limits
 
 Point-in-time reads at one stored queue refresh; the live Scheduled Task state was not read; five sampled films are not a census; no R2 object was listed. The settings read shows bindings, not what the Task's own session sees.
