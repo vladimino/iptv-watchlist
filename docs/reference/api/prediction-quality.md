@@ -21,10 +21,11 @@ Every standing rating event of a record (`ratingHistory`, each observation once:
 
 | Class | Reason | Rule |
 | --- | --- | --- |
-| `prospective` | `absent_after_prediction` | A `changed` event to a half-star value whose `previous` value is `null` (seen, not rated) with an `observedAt`, and a prediction generated **at or before** that absence observation. The rating did not exist when it was predicted, so the pair is blind. At most one per film: the first. |
+| `prospective` | `absent_after_prediction` | A `changed` event to a half-star value whose `previous` value is `null` (seen, not rated) with an `observedAt`, the value itself observed **strictly later** than that absence, and a prediction generated **at or before** the absence observation. The rating did not exist when it was predicted, so the pair is blind. At most one per film: the first. |
 | `pre_existing_or_unknown` | `first_observed` | The value existed before it was first observed; when it was given is unknown. |
 | `rerating` | `previous_rating` | A change from one value to another. Descriptive only. |
 | `unknown_order` | `no_absence_observation` | A change without a dated absence observation before it. |
+| `unknown_order` | `rating_time_missing`, `rating_time_equals_absence`, `rating_time_before_absence` | The value's `observedAt` is missing, equal to the absence observation or earlier than it: no proof that the value came after the absence. |
 | `unknown_order` | `prediction_inside_rating_window` | The only predictions were made between the absence observation and the value, so the order is unknown. |
 | `excluded` | `rating_not_a_value`, `no_prediction`, `no_prediction_before_rating`, `later_rating_after_clear` | A `null` rating; no prediction at all; predictions only after the rating; a value after the rating was cleared again (not a second blind pair). |
 | `excluded` | `prediction_incomplete` | The chosen record lacks a numeric `predictedRating` or a `probability4Plus` in [0, 1]. |

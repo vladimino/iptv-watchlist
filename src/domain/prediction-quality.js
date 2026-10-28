@@ -40,10 +40,14 @@ function classifyFilmQuality(events){
   const previous=rating.previous;
   if(previous&&isHalfStar(previous.value)){results.push({...base,class:'rerating',reason:'previous_rating'});continue;}
   if(!previous||previous.value!==null||!previous.observedAt){results.push({...base,class:'unknown_order',reason:'no_absence_observation'});continue;}
+  // The value must be observed strictly after the absence; a missing, equal or earlier time proves no order.
+  if(!rating.observedAt){results.push({...base,class:'unknown_order',reason:'rating_time_missing'});continue;}
+  if(rating.observedAt===previous.observedAt){results.push({...base,class:'unknown_order',reason:'rating_time_equals_absence'});continue;}
+  if(rating.observedAt<previous.observedAt){results.push({...base,class:'unknown_order',reason:'rating_time_before_absence'});continue;}
   if(prospective){results.push({...base,class:'excluded',reason:'later_rating_after_clear'});continue;}
   const cutoff=previous.observedAt,{prediction,tie}=predictionAtOrBefore(predictions,cutoff);
   if(!prediction){
-   const inside=predictions.some(p=>p.at!==null&&p.at>cutoff&&(!rating.observedAt||p.at<=rating.observedAt));
+   const inside=predictions.some(p=>p.at!==null&&p.at>cutoff&&p.at<=rating.observedAt);
    results.push({...base,class:inside?'unknown_order':'excluded',reason:inside?'prediction_inside_rating_window':predictions.length?'no_prediction_before_rating':'no_prediction'});continue;
   }
   const pair={...base,absenceObservedAt:cutoff,prediction:{identity:prediction.identity,at:prediction.at,predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus,tasteProfileVersion:prediction.tasteProfileVersion,predictionPromptVersion:prediction.predictionPromptVersion,fingerprintPromptVersion:prediction.fingerprintPromptVersion,runId:prediction.runId,version:prediction.version},predictionTie:tie};

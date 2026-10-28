@@ -55,6 +55,17 @@ assert.deepEqual(only(evaluate({current:pred(2,4,.6),ratingHistory:[change(5,4,a
  const r=evaluate({current:pred(2,4,.6),ratingHistory:[change(5,4,absent(3))],legacy:[{filmId:'f',before:null,after:4,observedAt:T(5),source:'letterboxd_public_films'}]});
  assert.equal(r.legacyUnverified,1);assert.deepEqual(only(r),['prospective:absent_after_prediction']);
 }
+// The value must be observed strictly after the absence: missing, equal or reversed times are unknown order, never blind.
+{
+ const missing=evaluate({current:pred(2,4,.6),ratingHistory:[change(5,4,absent(3),'m',{observedAt:null})]});
+ assert.deepEqual(only(missing),['unknown_order:rating_time_missing']);
+ const equal=evaluate({current:pred(2,4,.6),ratingHistory:[change(3,4,absent(3),'q')]});
+ assert.deepEqual(only(equal),['unknown_order:rating_time_equals_absence']);
+ const reversed=evaluate({current:pred(1,4,.6),ratingHistory:[change(5,4,absent(6),'v')]});
+ assert.deepEqual(only(reversed),['unknown_order:rating_time_before_absence']);
+ const stats=[missing,equal,reversed].reduce((s,f)=>ctx.addFilmQuality(s,f),ctx.emptyQualityStats());
+ assert.equal(plain(ctx.finalizeQuality(stats)).denominator.n,0,'none of them enters the prospective denominator');
+}
 // Incomplete prediction and broken immutable object.
 assert.deepEqual(only(evaluate({current:pred(2,4,null),ratingHistory:[change(5,4,absent(3))]})),['excluded:prediction_incomplete']);
 
@@ -99,6 +110,8 @@ const pc=pred(2,4,.6,{filmId:'lc'}),sc=sha(JSON.stringify(ctx.predictionVersionB
 set('enrichment/films/lc/predictions.json',{current:pc,history:[]});
 set('letterboxd/facts/films/lb-lc.json',{schemaVersion:1,factKey:'lb-lc',links:{letterboxd:'lc',tmdb:null},ratingHistory:[change(5,4,absent(3))]});
 set('letterboxd/facts/films/lb-old.json',{schemaVersion:1,factKey:'lb-old',links:{letterboxd:'old',tmdb:null},redirectTo:'tmdb-1'});
+set('enrichment/films/lt/predictions.json',{current:pred(1,4,.6,{filmId:'lt'}),history:[]});
+set('letterboxd/facts/films/lb-times.json',{schemaVersion:1,factKey:'lb-times',links:{letterboxd:'lt',tmdb:null},ratingHistory:[change(5,4,absent(3),'tm',{observedAt:null}),change(3,4,absent(3),'te'),change(5,4,absent(6),'tr')]});
 set('letterboxd/facts/films/lb-none.json',{schemaVersion:1,factKey:'lb-none',links:{letterboxd:'none',tmdb:null},ratingHistory:[change(5,4,absent(3))]});
 const env={BUCKET:bucket,EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester'};
 async function quality(query=''){puts=[];lists=[];const response=await ctx.worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/enrichment/quality'+query),env,{waitUntil(){throw new Error('no background work');}});const data=plain(await response.json());assert.deepEqual(puts,[],'no write');return {status:response.status,data};}
@@ -106,21 +119,22 @@ assert.equal((await quality('?limit=0')).status,400);assert.equal((await quality
 const all=await quality('?limit=50');
 {
  const {status,data}=all;assert.equal(status,200);assert.equal(lists.length,1,'one bounded LIST per request');assert.equal(lists[0].limit,50);
- assert.equal(data.page.records,5);assert.equal(data.page.nextCursor,null);
+ assert.equal(data.page.records,6);assert.equal(data.page.nextCursor,null);
  const byKey=Object.fromEntries(data.films.map(f=>[f.factKey,f]));
  assert.equal(byKey['tmdb-1'].ratings[0].class,'prospective');assert.equal(byKey['tmdb-1'].ratings[0].prediction.versionStatus,'linked');
  assert.equal(byKey['tmdb-2'].ratings[0].class,'pre_existing_or_unknown');
  assert.equal(byKey['lb-lc'].ratings[0].class,'excluded');assert.equal(byKey['lb-lc'].ratings[0].reason,'version_unverified');
- assert.equal(byKey['lb-old'].skipped,'redirected');assert.equal(byKey['lb-none'].ratings[0].reason,'no_prediction');
+ assert.equal(byKey['lb-old'].skipped,'redirected');
+ assert.deepEqual(byKey['lb-times'].ratings.map(r=>r.class+':'+r.reason).sort(),['unknown_order:rating_time_before_absence','unknown_order:rating_time_equals_absence','unknown_order:rating_time_missing']);assert.equal(byKey['lb-none'].ratings[0].reason,'no_prediction');
  assert.equal(data.metrics.denominator.n,1);assert.equal(data.metrics.bias,.5);assert.equal(data.metrics.mae,.5);assert.equal(data.metrics.probability4Plus.calibrationStatus,'insufficient_n');
- assert.equal(data.metrics.excluded.excluded,2);assert.equal(data.metrics.excluded.pre_existing_or_unknown,1);
+ assert.equal(data.metrics.excluded.excluded,2);assert.equal(data.metrics.excluded.pre_existing_or_unknown,1);assert.equal(data.metrics.excluded.unknown_order,3,'bad times do not enter the denominator');
  assert.equal(JSON.stringify(data).includes('tester'),false);
 }
 // Paging: two pages of three and two records sum to the single-page stats.
 {
  const one=await quality('?limit=3');assert.equal(one.data.page.records,3);assert.ok(one.data.page.nextCursor);
- const two=await quality('?limit=3&cursor='+one.data.page.nextCursor);assert.equal(two.data.page.records,2);assert.equal(two.data.page.nextCursor,null);
+ const two=await quality('?limit=3&cursor='+one.data.page.nextCursor);assert.equal(two.data.page.records,3);assert.equal(two.data.page.nextCursor,null);
  assert.deepEqual(plain(ctx.finalizeQuality(ctx.mergeQualityStats(one.data.stats,two.data.stats))),all.data.metrics);
  const again=await quality('?limit=50');assert.deepEqual({...again.data,readAt:null},{...all.data,readAt:null},'idempotent');
 }
-console.log('Prediction quality: blind vs pre-existing vs unknown order, rerating, cutoff ties, multiple predictions, rollback and re-apply, cleared and re-rated, legacy overlap, incomplete and unverified predictions, zero N, bias sign, Brier and calibration edges, segments, additive pages and the read-only route passed');
+console.log('Prediction quality: blind vs pre-existing vs unknown order, missing, equal and reversed rating times, rerating, cutoff ties, multiple predictions, rollback and re-apply, cleared and re-rated, legacy overlap, incomplete and unverified predictions, zero N, bias sign, Brier and calibration edges, segments, additive pages and the read-only route passed');
