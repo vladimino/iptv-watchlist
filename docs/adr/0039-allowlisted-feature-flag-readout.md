@@ -1,9 +1,9 @@
 # ADR 0039: The owner reads registered feature flags through one MCP tool that names each binding and echoes only known tokens
 
-**Status:** Proposed  
+**Status:** Accepted (owner decision 2026-10-28)  
 **Original decision date:** 2026-10-28  
 **Recorded at:** 2026-10-28  
-**Approval source:** not documented (proposed with the AIR-233 implementation; owner decision pending)  
+**Approval source:** Explicit owner acceptance on 2026-10-28 for [AIR-233](https://trello.com/c/8eUZ6gB7); read-only design only, no changes to production flags or Access  
 **Related work:** [AIR-233](https://trello.com/c/8eUZ6gB7); [feature flag reference](../reference/feature-flags.md); [MCP contract](../reference/api/mcp.md); [ADR-0004](0004-mcp-access-boundary.md)  
 **Supersedes:** None  
 **Superseded by:** None
