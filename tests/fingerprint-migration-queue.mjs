@@ -12,7 +12,8 @@ const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
  async put(key,value,options={}){const text=String(value),condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key))return null;if(condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,text);etags.set(key,'etag-'+(++revision));return {key,etag:etags.get(key)};},
  async delete(key){records.delete(key);etags.delete(key);},
- list:async({prefix='',limit=1000}={})=>({objects:[...records.keys()].filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false})
+ // Paginated like R2: `limit` objects per page and an opaque cursor while more remain.
+ list:async({prefix='',limit=1000,cursor}={})=>{const keys=[...records.keys()].filter(key=>key.startsWith(prefix)).sort(),start=cursor?Number(cursor):0,truncated=start+limit<keys.length;return {objects:keys.slice(start,start+limit).map(key=>({key})),truncated,...(truncated?{cursor:String(start+limit)}:{})};}
 };
 const baseEnv={TMDB_REQUEST_INTERVAL_MS:0,BUCKET:store};
 const sha256=text=>createHash('sha256').update(Buffer.from(text,'utf8')).digest('hex');
@@ -219,6 +220,57 @@ assert.deepEqual([queue.work.B.reason,queue.work.B.migration,queue.work.D.reason
  const again=await next(R1,runId,SELECTIVE);
  assert.deepEqual(plain(again.data.items.map(item=>[item.filmId,item.requiredWork])),[['D','fingerprint_and_prediction']],'D has no stored record to restore and regenerates');
  assert.equal(pointer('D').fingerprintSchemaVersion,2,'nothing was restored for D');
+ await finish(R1,runId);
+}
+
+// Storage safety. A planted object under a generation record's key is accepted only when it is a valid record of the same
+// identity with a stored body; a corrupted or foreign object is a storage conflict and the pointer and index do not move.
+{
+ const canonical=vm.runInContext('profileImpactCanonical',scratch),hashOf=(id,content)=>sha256(JSON.stringify(canonical({...content,filmId:id})));
+ programme([...films,film('H',['Драма']),film('J',['Драма'])]);
+ const contentH=fingerprintOf(['heist']),hashH=hashOf('H',contentH),contentJ=fingerprintOf(['scam']),hashJ=hashOf('J',contentJ);
+ write('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json',{filmId:'H',fingerprintHash:'other',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2026-01-01T00:00:00.000Z',produced:'generated',previous:null});
+ records.set('enrichment/films/J/fingerprint-generations/'+hashJ+'-s1-p1.json','{not json');etags.set('enrichment/films/J/fingerprint-generations/'+hashJ+'-s1-p1.json','etag-planted');
+ const runId=(await R1.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId;
+ const r=await R1.api('enrichment/submit','POST',{runId,items:[{filmId:'H',fingerprint:contentH,prediction},{filmId:'J',fingerprint:contentJ,prediction}]},OBJECTS);
+ for(const result of r.data.results)assert.deepEqual([result.status,result.error,result.failureScope],['failed','storage_error','run'],result.filmId+' is a storage conflict');
+ for(const id of ['H','J']){assert.equal(pointer(id),null,id+' pointer not written');assert.equal(read('enrichment/view-index.json')[id]?.fingerprintHash,undefined,id+' index not written');assert.equal(read('enrichment/films/'+id+'/predictions.json'),null,id+' no prediction');}
+ assert.equal(read('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json').fingerprintHash,'other','the planted object is left as it is');
+ // A valid record of the same identity written earlier (a retried submit) is accepted and keeps its first values.
+ write('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json',{filmId:'H',fingerprintHash:hashH,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2026-01-01T00:00:00.000Z',produced:'generated',previous:null});
+ write('enrichment/films/H/fingerprints/'+hashH+'.json',{...contentH,filmId:'H',fingerprintHash:hashH});
+ await finish(R1,runId);
+ const retryRunId=(await R1.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId,again=await R1.api('enrichment/submit','POST',{runId:retryRunId,items:[{filmId:'H',fingerprint:contentH,prediction}]},OBJECTS);
+ assert.equal(again.data.results[0].status,'created',JSON.stringify(again.data));
+ assert.equal(pointer('H').fingerprintHash,hashH);assert.equal(read('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json').generatedAt,'2026-01-01T00:00:00.000Z','first values kept');
+ await finish(R1,retryRunId);
+}
+
+// Rollback history beyond one list page: the matching record on a later page is still found; a history over the scan limit
+// is a storage error, not a silent regeneration.
+{
+ programme(films);
+ const dummy=(id,n)=>'enrichment/films/'+id+'/fingerprint-generations/'+String(n).padStart(64,'0')+'-s1-p1.json';
+ const schema1=read('enrichment/films/B/fingerprint-generations/'+keysUnder('enrichment/films/B/fingerprint-generations/').find(key=>key.endsWith('-s1-p1.json')).split('/').at(-1)),schema2Key=keysUnder('enrichment/films/B/fingerprint-generations/').find(key=>key.endsWith('-s2-p1.json')),schema2=read(schema2Key),body2=read('enrichment/films/B/fingerprints/'+schema2.fingerprintHash+'.json');
+ const {filmId:_i2,fingerprintHash:_h2,...content2}=body2,backToSchema2=()=>R1.T.writeFingerprint(baseEnv,'B',content2,pointer('B'),'generated',undefined,1);
+ await backToSchema2();
+ for(let n=0;n<150;n++)write(dummy('B',n),{filmId:'B',fingerprintHash:'missing-'+n,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2025-01-01T00:00:00.000Z',produced:'generated',previous:null});
+ assert.equal(keysUnder('enrichment/films/B/fingerprint-generations/').indexOf('enrichment/films/B/fingerprint-generations/'+schema1.fingerprintHash+'-s1-p1.json')>=100,true,'the real record sorts onto the second page');
+ queue=await reconcile(R1,SELECTIVE);assert.deepEqual(queue.pending,['B','D']);
+ let runId=await startRun(R1,SELECTIVE);
+ let r=await next(R1,runId,SELECTIVE);assert.equal(r.status,200);
+ assert.equal(pointer('B').fingerprintHash,schema1.fingerprintHash,'restored from the second page');
+ assert.deepEqual(plain(read('enrichment/runs/'+runId+'.json').restored),['B']);
+ assert.deepEqual(plain(r.data.items.map(item=>[item.filmId,item.requiredWork])),[['D','fingerprint_and_prediction']],'B is current again with its restored prediction, so the slot goes to D');
+ await finish(R1,runId);
+ for(let n=150;n<=1000;n++)write(dummy('B',n),{filmId:'B',fingerprintHash:'missing-'+n,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2025-01-01T00:00:00.000Z',produced:'generated',previous:null});
+ await backToSchema2();
+ queue=await reconcile(R1,SELECTIVE);assert.deepEqual(queue.pending,['B','D']);
+ runId=await startRun(R1,SELECTIVE);
+ r=await next(R1,runId,SELECTIVE);
+ assert.equal(r.status,502,'a history over the scan limit fails the step with the storage error status instead of regenerating');
+ assert.equal(pointer('B').fingerprintSchemaVersion,2,'nothing moved');
+ for(let n=0;n<=1000;n++){records.delete(dummy('B',n));etags.delete(dummy('B',n));}
  await finish(R1,runId);
 }
 

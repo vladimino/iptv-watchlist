@@ -935,15 +935,29 @@ const fingerprintBodyKey=(id,hash)=>filmKey(id)+'fingerprints/'+hash+'.json';
 const fingerprintGenerationPrefix=id=>filmKey(id)+'fingerprint-generations/';
 const fingerprintGenerationKey=(id,record)=>fingerprintGenerationPrefix(id)+record.fingerprintHash+'-s'+record.fingerprintSchemaVersion+'-p'+record.fingerprintPromptVersion+'.json';
 const fingerprintIdentity=f=>f?{fingerprintHash:f.fingerprintHash,fingerprintSchemaVersion:f.fingerprintSchemaVersion,fingerprintPromptVersion:f.fingerprintPromptVersion??1}:null;
-async function putCreateOnly(env,key,value){
+const FINGERPRINT_PRODUCED=['generated','partial','restored'];
+const FINGERPRINT_RECORD_KEYS=['filmId','fingerprintHash','fingerprintSchemaVersion','fingerprintPromptVersion','generatedAt','produced','fields','previous'];
+// Writes create-only and returns 'created', or 'existing' when the stored object is acceptable; anything else is a storage
+// conflict and the submit of that film fails before the pointer moves. A body is content-addressed, so only the same bytes
+// are acceptable. A record already under its own identity may differ only in what was first written (generation time,
+// produced, fields, previous); it must parse, name the same film, hash and versions, carry valid provenance and link to a
+// stored body. A corrupted, partial or foreign object never counts as the record.
+async function putCreateOnly(env,key,value,accept=stored=>stored===JSON.stringify(value)){
  const text=JSON.stringify(value);
  if(await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}})!==null)return 'created';
  const existing=await env.BUCKET.get(key),stored=existing?await existing.text():null;
- if(stored===text)return 'existing';
- // The body is content-addressed, so a different text under the same key is a storage conflict; a record under its own
- // identity may legitimately differ only in the first generation time and provenance, which stay as first written.
- if(key.includes('/fingerprint-generations/'))return 'existing';
- throw new Error('Fingerprint body conflicts');
+ if(stored===text||await accept(stored))return 'existing';
+ throw new Error('Immutable fingerprint object conflicts');
+}
+async function generationRecordAcceptable(env,stored,record){
+ let existing;try{existing=JSON.parse(stored);}catch{return false;}
+ if(!isObject(existing)||Object.keys(existing).some(key=>!FINGERPRINT_RECORD_KEYS.includes(key)))return false;
+ if(existing.filmId!==record.filmId||existing.fingerprintHash!==record.fingerprintHash||existing.fingerprintSchemaVersion!==record.fingerprintSchemaVersion||existing.fingerprintPromptVersion!==record.fingerprintPromptVersion)return false;
+ if(typeof existing.generatedAt!=='string'||!Number.isFinite(Date.parse(existing.generatedAt))||!FINGERPRINT_PRODUCED.includes(existing.produced))return false;
+ if(existing.fields!==undefined&&!(Array.isArray(existing.fields)&&existing.fields.every(field=>typeof field==='string')))return false;
+ if(existing.previous!==null&&!(isObject(existing.previous)&&typeof existing.previous.fingerprintHash==='string'&&Number.isInteger(existing.previous.fingerprintSchemaVersion)&&Number.isInteger(existing.previous.fingerprintPromptVersion)))return false;
+ const body=await loadJSON(env,fingerprintBodyKey(record.filmId,record.fingerprintHash));
+ return !!body&&body.fingerprintHash===record.fingerprintHash;
 }
 // Writes the accepted content as the film's current fingerprint and returns the stored record. `produced` is 'generated',
 // 'partial' (with `fields`) or 'restored'; `previous` is the record being replaced.
@@ -952,16 +966,21 @@ async function writeFingerprint(env,id,content,previous,produced,fields,promptVe
  const value={...body,generatedAt:at,invalidatedAt:null,fingerprintPromptVersion:promptVersion,produced,...(fields?{fields}:{}),previous:fingerprintIdentity(previous)};
  if(fingerprintVersionsEnabled(env)){
   await putCreateOnly(env,fingerprintBodyKey(id,body.fingerprintHash),body);
-  await putCreateOnly(env,fingerprintGenerationKey(id,value),{filmId:id,...fingerprintIdentity(value),generatedAt:at,produced,...(fields?{fields}:{}),previous:value.previous});
+  const record={filmId:id,...fingerprintIdentity(value),generatedAt:at,produced,...(fields?{fields}:{}),previous:value.previous};
+  await putCreateOnly(env,fingerprintGenerationKey(id,record),record,stored=>generationRecordAcceptable(env,stored,record));
  }
  await saveJSON(env,filmKey(id)+'fingerprint.json',value);
  await updateViewIndex(env,id,{fingerprintHash:value.fingerprintHash,fingerprint:fingerprintFacet(value),impactFeatures:fingerprintImpactFacet(value)});
  return value;
 }
-// The stored generation records of a film with their bodies, newest first; empty without version objects.
+// The stored generation records of a film with their bodies, newest first; empty without version objects. The whole prefix is
+// read page by page up to FINGERPRINT_GENERATION_SCAN_LIMIT records; a longer history is a storage error, never "no candidate".
+const FINGERPRINT_GENERATION_SCAN_LIMIT=1000;
 async function fingerprintGenerations(env,id){
- const page=await env.BUCKET.list({prefix:fingerprintGenerationPrefix(id),limit:100}),records=[];
- for(const object of page.objects||[]){const record=await loadJSON(env,object.key);if(!record)continue;const body=await loadJSON(env,fingerprintBodyKey(id,record.fingerprintHash));if(body)records.push({...body,...record});}
+ const prefix=fingerprintGenerationPrefix(id),keys=[];let cursor;
+ do{const page=await env.BUCKET.list({prefix,limit:100,...(cursor?{cursor}:{})});for(const object of page.objects||[])keys.push(object.key);if(keys.length>FINGERPRINT_GENERATION_SCAN_LIMIT)throw new Error('Fingerprint history exceeds the scan limit');cursor=page.truncated?page.cursor:null;}while(cursor);
+ const records=[];
+ for(const key of keys){const record=await loadJSON(env,key);if(!isObject(record)||typeof record.fingerprintHash!=='string')continue;const body=await loadJSON(env,fingerprintBodyKey(id,record.fingerprintHash));if(body&&body.fingerprintHash===record.fingerprintHash)records.push({...body,...record});}
  return records.sort((a,b)=>String(b.generatedAt).localeCompare(String(a.generatedAt)));
 }
 // Moves the pointer back to a stored generation record that is exact for the code's versions (ADR-0035 section 7), or
