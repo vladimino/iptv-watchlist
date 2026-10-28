@@ -28,7 +28,7 @@ predictionCompatibility(prediction, fingerprint, features, profile, mode, {
 
 The first failing check decides:
 
-1. Fingerprint not current (schema or `invalidatedAt`) → `stale/fingerprint_not_current`. Prediction fingerprint hash or schema differs → `fingerprint_changed`. Prompt version differs → `prompt_changed`.
+1. Fingerprint not current (schema or `invalidatedAt`) → `stale/fingerprint_not_current`. Prediction fingerprint hash or schema differs → `fingerprint_changed`. Prompt version differs → `prompt_changed`. These checks are strict equality; [fingerprint compatibility](fingerprint-compatibility.md#prediction-check) specifies the rule that replaces them for fingerprint schema and prompt transitions.
 2. Same profile version: same hash → `current/exact`, otherwise `profile_provenance_mismatch`.
 3. Mode other than `selective` → `profile_changed`.
 4. Non-integer version → `profile_provenance_mismatch`. Prediction version newer than current → `profile_ahead`. Version not in the lineage → `profile_outside_lineage`; there with another hash → `profile_provenance_mismatch`. A lineage that does not end at the current version and hash → `profile_chain_broken`.
