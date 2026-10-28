@@ -238,7 +238,26 @@ function outsideRepository(directory){
 }
 
 // One export attempt. Returns the verified result on a fenced consistent cut; throws NoGo (after writing report.json) when the proof fails.
-export async function exportProductionSnapshot({directory,credentials,fetchImpl=fetch,now=()=>new Date(),sleep=defaultSleep}){
+export const MAX_CONCURRENCY=16;
+// `--concurrency N` (1..16, default 1): how many objects are verified at once. Each object still gets its own conditional
+// HEAD, GET and HEAD; only the waiting overlaps. Listings, the fence and the manifest are unchanged and sequential. The first
+// failure stops new work; objects already in flight finish their read-only requests before the attempt ends.
+export function parseConcurrency(value){
+ if(value==null)return 1;
+ const number=Number(value);
+ if(!Number.isInteger(number)||number<1||number>MAX_CONCURRENCY)throw new ExportError('configuration','Concurrency must be an integer from 1 to '+MAX_CONCURRENCY);
+ return number;
+}
+export async function eachWithConcurrency(items,concurrency,work){
+ const results=new Array(items.length);let next=0,failure=null;
+ const worker=async()=>{
+  while(failure===null&&next<items.length){const index=next++;try{results[index]=await work(items[index],index);}catch(error){failure??=error;}}
+ };
+ await Promise.all(Array.from({length:Math.min(concurrency,items.length)},worker));
+ if(failure!==null)throw failure;
+ return results;
+}
+export async function exportProductionSnapshot({directory,credentials,fetchImpl=fetch,now=()=>new Date(),sleep=defaultSleep,concurrency=1}){
  const absolute=outsideRepository(directory);
  await mkdir(absolute,{recursive:true,mode:0o700});await mkdir(path.join(absolute,'objects'),{recursive:true,mode:0o700});await mkdir(path.join(absolute,'entries'),{recursive:true,mode:0o700});
  const client=createReadOnlyClient({credentials,fetchImpl,now,sleep});
@@ -251,7 +270,8 @@ export async function exportProductionSnapshot({directory,credentials,fetchImpl=
  try{
   const {objects,pages}=await openingListing(absolute,client);
   const entries=[];let resumed=0;
-  for(const object of objects){const entry=await downloadObject(absolute,client,object);if(entry.resumed)resumed++;entries.push({key:entry.key,file:entry.file,size:entry.size,sha256:entry.sha256,metadata:entry.metadata});}
+  const downloaded=await eachWithConcurrency(objects,parseConcurrency(concurrency),object=>downloadObject(absolute,client,object));
+  for(const entry of downloaded){if(entry.resumed)resumed++;entries.push({key:entry.key,file:entry.file,size:entry.size,sha256:entry.sha256,metadata:entry.metadata});}
   const closing=await closingListing(client);
   const changes=inventoryDelta(objects,closing);
   const fenced=await fence(client,objects);
@@ -299,9 +319,9 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  const args=process.argv.slice(2),value=flag=>{const index=args.indexOf(flag);return index<0?null:args[index+1];};
  const directory=value('--output');
  if(args.includes('--plan')){console.log(JSON.stringify(plan({directory})));process.exitCode=0;}
- else if(!directory||!path.isAbsolute(directory)){console.error('Usage: node scripts/r2-snapshot-export.mjs --output /absolute/private/directory [--verify|--plan]');process.exitCode=2;}
+ else if(!directory||!path.isAbsolute(directory)){console.error('Usage: node scripts/r2-snapshot-export.mjs --output /absolute/private/directory [--verify|--plan] [--concurrency 1..16]');process.exitCode=2;}
  else try{
-  const result=args.includes('--verify')?await verifyProductionSnapshot(directory):await exportProductionSnapshot({directory,credentials:readCredentials(process.env)});
+  const result=args.includes('--verify')?await verifyProductionSnapshot(directory):await exportProductionSnapshot({directory,credentials:readCredentials(process.env),concurrency:parseConcurrency(value('--concurrency'))});
   console.log(JSON.stringify(result));
   process.exitCode=result.status===STATUS_NO_GO?3:0;
  }catch(error){

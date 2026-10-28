@@ -620,7 +620,7 @@ const DIAGNOSTIC_VOCABULARY={
  runStage:['metadata','epg','complete'],
  stage:['idle','paused','running','complete','error','busy','partial','programme_changed','awaiting_epg_discovery','backoff','missing_secret'],
  nextAction:['continue','wait','stop'],
- reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned'],
+ reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned','interrupted'],
  errorName:['Error','TypeError','RangeError','SyntaxError','ReferenceError','AbortError','TimeoutError'],
 };
 function diagnosticCode(list,value,fallback='other'){return value==null?null:list.includes(value)?value:fallback;}
@@ -649,26 +649,54 @@ function chunkSummary(result){return {stage:diagnosticCode(DIAGNOSTIC_VOCABULARY
 function observeContinuation(step){try{console.log(JSON.stringify({event:'epg_continuation',...step}));}catch{}}
 // A step entry. `runId` is kept only when it has the server-generated UUID shape; `runIdShape` says
 // what the caller sent. `recorded` holds the result of each best-effort ring write: the stored entry
-// can only carry `entered`, the final log line carries both.
+// carries only the writes before its own, the final log line carries all of them. Phases: `entered`,
+// `checkpointed` (the discovery hop stored its checkpoint), then `completed` or `failed`.
 function continuationStep(caller,route,runId){
  const id=diagnosticId(runId);
- return {id:crypto.randomUUID(),at:new Date().toISOString(),phase:'entered',caller:diagnosticCode(DIAGNOSTIC_VOCABULARY.caller,caller||'http','http'),route:diagnosticCode(DIAGNOSTIC_VOCABULARY.route,route),runId:id,runIdShape:runId==null?null:id?'uuid':'invalid',runStage:null,branch:null,httpStatus:null,discovery:null,diagnostic:{},error:null,durationMs:null,recorded:{entered:null,outcome:null}};
+ return {id:crypto.randomUUID(),at:new Date().toISOString(),phase:'entered',caller:diagnosticCode(DIAGNOSTIC_VOCABULARY.caller,caller||'http','http'),route:diagnosticCode(DIAGNOSTIC_VOCABULARY.route,route),runId:id,runIdShape:runId==null?null:id?'uuid':'invalid',runStage:null,branch:null,httpStatus:null,discovery:null,checkpoint:null,diagnostic:{},error:null,durationMs:null,recorded:{entered:null,outcome:null}};
 }
 // Upserts the entry by id into a bounded ring (newest first). Best effort: a failed write never fails the step.
+// The same write closes earlier entries that never received a terminal phase (see `interruptedStep`).
 async function recordContinuationDiagnostic(env,entry){
  for(let attempt=0;attempt<2;attempt++){
   try{
-   const object=await env.BUCKET.get(CONTINUATION_DIAGNOSTICS_KEY),current=object?await object.json():null;
-   const recent=[entry,...(Array.isArray(current?.recent)?current.recent:[]).filter(item=>item?.id!==entry.id)].slice(0,CONTINUATION_DIAGNOSTICS_LIMIT);
+   const object=await env.BUCKET.get(CONTINUATION_DIAGNOSTICS_KEY),current=object?await object.json():null,closed=[];
+   const earlier=(Array.isArray(current?.recent)?current.recent:[]).filter(item=>item?.id!==entry.id).map(item=>{const next=interruptedStep(item,entry.at);if(next!==item)closed.push(next);return next;});
+   const recent=[entry,...earlier].slice(0,CONTINUATION_DIAGNOSTICS_LIMIT);
    const saved=await env.BUCKET.put(CONTINUATION_DIAGNOSTICS_KEY,JSON.stringify({schemaVersion:1,updatedAt:entry.at,recent}),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
-   if(saved!==null)return true;
+   if(saved!==null){for(const item of closed)observeContinuation({id:item.id,at:item.at,phase:item.phase,caller:item.caller,route:item.route,runId:item.runId,checkpoint:item.checkpoint??null,interruption:item.interruption});return true;}
   }catch{return false;}
  }
  return false;
 }
+// A step that is still `entered` or `checkpointed` long after it began has ended without its terminal phase: the
+// invocation was killed (for example by the Workers memory limit) or its outcome write was lost. The Worker cannot
+// tell which, so the entry is closed as `interrupted` with `cause: unknown`; it is not a proven error. `committed`
+// says whether the step's discovery hop had stored its checkpoint before the end: true or false from a
+// `checkpointed` entry, null (unknown) from an `entered` one. The platform outcome of the same invocation is found
+// in Workers Logs through the step id of its `epg_continuation` lines.
+const CONTINUATION_STEP_TERMINAL_MS=15*60000;
+function interruptedStep(item,now){
+ if(!item||!['entered','checkpointed'].includes(item.phase))return item;
+ const began=Date.parse(item.at),at=Date.parse(now);
+ if(!Number.isFinite(began)||!Number.isFinite(at)||at-began<CONTINUATION_STEP_TERMINAL_MS)return item;
+ return {...item,phase:'interrupted',interruption:{lastPhase:item.phase,committed:item.phase==='checkpointed'?item.checkpoint?.owned===true:null,cause:'unknown',closedAt:diagnosticTime(now)}};
+}
 // The `entered` log line is the arrival evidence and goes out before any storage access; the ring write
 // that follows is best effort and its result is kept in `recorded.entered`.
 async function openContinuationStep(env,step,persist){observeContinuation(step);if(persist)step.recorded.entered=await recordContinuationDiagnostic(env,step);return step;}
+// The step's discovery hop has stored its checkpoint. The entry records that before the hop's trailing writes (score
+// preview, variant plan, lease release, response), so an invocation that ends after this point is known to have
+// committed its chunk although no response reached the caller. Best effort, never throws.
+async function markContinuationCheckpoint(env,step,persist,committed){
+ try{
+  const {record,outcome}=committed,kept=outcome.saved?record:outcome.record;
+  step.phase='checkpointed';
+  step.checkpoint={hopId:diagnosticId(record?.hopId),owned:outcome.saved===true,write:outcome.saved?'saved':diagnosticCode(['other_hop','write_conflict'],outcome.reason),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,kept?.stage),remainingChunks:diagnosticCount(kept?.remainingChunks)};
+  if(persist)step.recorded.checkpoint=await recordContinuationDiagnostic(env,step);
+  observeContinuation(step);
+ }catch{}
+}
 // Outcome fields, then the outcome write, then the final log line carrying both write results.
 async function closeContinuationStep(env,step,started,response,error,persist){
  step.durationMs=Date.now()-started;
@@ -686,15 +714,19 @@ function discoveryContract(record,override={}){
  let nextAction=override.nextAction;
  if(!nextAction){
   if(state==='busy'||reason==='chunk_budget'||reason==='backoff'||state==='error')nextAction='wait';
-  else if(state==='complete'||['programme_changed','missing_secret','idle'].includes(reason)||remainingChunks<=0)nextAction='stop';
+  else if(state==='complete'||['programme_changed','missing_secret','idle','interrupted'].includes(reason)||remainingChunks<=0)nextAction='stop';
   else nextAction='continue';
  }
- return {state,remainingChunks,nextAction,reason:reason||null,at:override.at||record?.at||null,nextCatchUpAt:nextAction==='wait'?(catchUpAt||nextCatchUpAt()):catchUpAt,retryAt:retryAt||null,programmeRunId:override.programmeRunId!==undefined?override.programmeRunId:record?.programmeRunId??null};
+ // nextCatchUpAt is the gate a `wait` must honor; nextScheduledRunAt is the first nominal hourly Scheduled Task trigger
+ // at or after it, i.e. when the catch-up is expected to happen. Only a `wait` carries it, and it is null when the
+ // schedule is unknown: it never shortens or replaces the gate.
+ const gate=nextAction==='wait'?(catchUpAt||nextCatchUpAt()):catchUpAt,gateMs=Date.parse(gate||'');
+ return {state,remainingChunks,nextAction,reason:reason||null,at:override.at||record?.at||null,nextCatchUpAt:gate,nextScheduledRunAt:nextAction==='wait'?hourlyTaskRunAt(Math.max(Date.now(),Number.isFinite(gateMs)?gateMs:0)):null,retryAt:retryAt||null,programmeRunId:override.programmeRunId!==undefined?override.programmeRunId:record?.programmeRunId??null};
 }
 function continuationDecision(current,now){
  if(!current)return {run:true,budget:DISCOVERY_CHUNK_BUDGET};
  const due=Date.parse(current.retryAt||current.nextCatchUpAt||0),chunks=Number.isInteger(current.remainingChunks)?current.remainingChunks:0;
- if(current.stage==='complete'||['programme_changed','missing_secret','idle'].includes(current.reason))return {run:false,contract:discoveryContract(current,{nextAction:'stop'})};
+ if(current.stage==='complete'||['programme_changed','missing_secret','idle','interrupted'].includes(current.reason))return {run:false,contract:discoveryContract(current,{nextAction:'stop'})};
  if(current.reason==='chunk_budget'||current.reason==='backoff'||current.stage==='error'||current.retryAt){
   if(due>now)return {run:false,contract:discoveryContract(current,{nextAction:'wait',reason:current.reason||(current.stage==='error'?'error':'backoff')})};
   return {run:true,budget:current.reason==='chunk_budget'?DISCOVERY_CHUNK_BUDGET:Math.max(chunks,1)};
@@ -739,23 +771,32 @@ async function saveOwnedContinuation(env,hopId,record){
 // programme generation and a start after the record was opened: the status object is shared, so a
 // newer status from another hop or an unmarked status must not be attributed to this hop. In that case
 // the chunk is simply run again with the budget the hop had; its decisions are idempotent.
+// `interruptions` counts the hops of the series that ended before their checkpoint, one after another. A hop resumed
+// from such an orphan carries the count in its `running` record; a stored checkpoint drops it. When resuming
+// would make it reach DISCOVERY_INTERRUPTION_LIMIT the series fails closed instead (`interrupted`, stop): a chunk
+// that kills its invocation every time is not run again by the schedule. Only a new EPG generation or an explicit
+// owner-forced resolve starts it again.
 const CONTINUATION_HEALTH=['idle','settled','live','orphaned'];
+const DISCOVERY_INTERRUPTION_LIMIT=2;
+const continuationInterruptions=record=>Number.isInteger(record?.interruptions)&&record.interruptions>0?record.interruptions:0;
 function continuationHealth(record,lease,last,now,published){
  const hopId=diagnosticId(record?.hopId);
- if(!record||record.stage!=='running')return {status:record?'settled':'idle',hopId,lease:null,leaseHop:null,leaseExpiresAt:null,chunkCompleted:null,resumeBudget:null,generationConflict:null};
+ if(!record||record.stage!=='running')return {status:record?'settled':'idle',hopId,lease:null,leaseHop:null,leaseExpiresAt:null,chunkCompleted:null,resumeBudget:null,generationConflict:null,interruptions:null};
  const live=!!lease&&lease.expiresAt>now,leaseHop=lease?(lease.id===record.hopId?'same':'other'):null;
  const leaseExpiresAt=Number.isFinite(lease?.expiresAt)&&lease.expiresAt>0?new Date(lease.expiresAt).toISOString():null;
  const generationConflict=!!(published&&record.programmeRunId&&published!==record.programmeRunId);
- if(live)return {status:'live',hopId,lease:'live',leaseHop,leaseExpiresAt,chunkCompleted:null,resumeBudget:null,generationConflict};
+ const interruptions=continuationInterruptions(record);
+ if(live)return {status:'live',hopId,lease:'live',leaseHop,leaseExpiresAt,chunkCompleted:null,resumeBudget:null,generationConflict,interruptions};
  const openedAt=Date.parse(record.at||''),startedAt=Date.parse(last?.startedAt||'');
  const chunkCompleted=typeof last?.finishedAt==='string'&&!!record.hopId&&last.hopId===record.hopId&&!!record.programmeRunId&&last.programmeRunId===record.programmeRunId&&(!published||published===record.programmeRunId)&&Number.isFinite(openedAt)&&Number.isFinite(startedAt)&&startedAt>=openedAt;
  const budget=Math.min(DISCOVERY_CHUNK_BUDGET,Math.max(1,Number.isInteger(record.remainingChunks)?record.remainingChunks:1));
- return {status:'orphaned',hopId,lease:lease?'expired':'none',leaseHop,leaseExpiresAt,chunkCompleted,resumeBudget:chunkCompleted?budget-1:budget,generationConflict};
+ return {status:'orphaned',hopId,lease:lease?'expired':'none',leaseHop,leaseExpiresAt,chunkCompleted,resumeBudget:chunkCompleted?budget-1:budget,generationConflict,interruptions,failClosed:!chunkCompleted&&interruptions+1>=DISCOVERY_INTERRUPTION_LIMIT};
 }
-function healthSummary(health){return {status:diagnosticCode(CONTINUATION_HEALTH,health.status),hopId:health.hopId,lease:diagnosticCode(['live','expired','none'],health.lease),leaseHop:diagnosticCode(['same','other'],health.leaseHop),leaseExpiresAt:diagnosticTime(health.leaseExpiresAt),chunkCompleted:typeof health.chunkCompleted==='boolean'?health.chunkCompleted:null,resumeBudget:diagnosticCount(health.resumeBudget),generationConflict:typeof health.generationConflict==='boolean'?health.generationConflict:null};}
+function healthSummary(health){return {status:diagnosticCode(CONTINUATION_HEALTH,health.status),hopId:health.hopId,lease:diagnosticCode(['live','expired','none'],health.lease),leaseHop:diagnosticCode(['same','other'],health.leaseHop),leaseExpiresAt:diagnosticTime(health.leaseExpiresAt),chunkCompleted:typeof health.chunkCompleted==='boolean'?health.chunkCompleted:null,resumeBudget:diagnosticCount(health.resumeBudget),generationConflict:typeof health.generationConflict==='boolean'?health.generationConflict:null,interruptions:diagnosticCount(health.interruptions)};}
 // What the discovery contract says about a running record: wait for a live writer until its lease expires,
-// continue (one explicit call settles or resumes it) when the writer is gone.
+// continue (one explicit call settles or resumes it) when the writer is gone, stop when resuming would fail closed.
 function runningOverride(health){
+ if(health.status==='orphaned'&&health.failClosed)return {state:'running',reason:'interrupted',nextAction:'stop',remainingChunks:health.resumeBudget,nextCatchUpAt:null};
  if(health.status==='live')return {state:'running',reason:'busy',nextAction:'wait',nextCatchUpAt:health.leaseExpiresAt||nextCatchUpAt()};
  if(health.status==='orphaned')return {state:'running',reason:'orphaned',nextAction:'continue',remainingChunks:health.resumeBudget,nextCatchUpAt:null};
  return {};
@@ -850,7 +891,18 @@ async function advanceDiscovery(env,body={}){
    trace.saved={...continuationSummary(record),owned:true,write:'saved'};
    stored=await readContinuation(env);current=stored.record;
   }
-  else trace.recovery={orphanHopId:health.hopId,action:'resumed',chunkCompleted:false,budget:health.resumeBudget,settled:false};
+  else if(health.failClosed){
+   // The orphan's hop ended before its checkpoint, and so did the hop it was itself resumed from: fail closed.
+   // The record keeps the budget, the generation and the count; `interrupted` is a stop until the next EPG
+   // commit opens a new series or the owner forces a resolve. Nothing is run and no lease is taken.
+   const interruptions=health.interruptions+1,record={stage:'paused',reason:'interrupted',at,hopId:current.hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId:current.programmeRunId??null,interruptions};
+   const settled=await replaceContinuation(env,record,stored.etag);
+   trace.recovery={orphanHopId:health.hopId,action:'interrupted',chunkCompleted:false,budget:0,settled,interruptions};
+   if(!settled){trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false,write:'other_hop'};return busyOutcome(after,trace);}
+   trace.branch='interrupted';trace.saved={...continuationSummary(record),owned:true,write:'saved'};
+   return {stage:'paused',checked:0,remaining:null,discovery:discoveryContract(record),diagnostic:trace};
+  }
+  else trace.recovery={orphanHopId:health.hopId,action:'resumed',chunkCompleted:false,budget:health.resumeBudget,settled:false,interruptions:health.interruptions+1};
  }
  const decision=continuationDecision(current,now);
  const hardWait=current&&(['chunk_budget','backoff'].includes(current.reason)||current.stage==='error'||current.retryAt)&&Date.parse(current.retryAt||current.nextCatchUpAt||0)>now;
@@ -871,7 +923,9 @@ async function advanceDiscovery(env,body={}){
  trace.branch='chunk';trace.hopId=hopId;trace.budget=budget;
  // The running record names the generation the chunk will pin to, so a later orphan check can match it.
  const programmeRunId=current?.programmeRunId??published??null;
- const opened=await replaceContinuation(env,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId},fresh.etag);
+ // A hop resumed from an orphan that never reached its checkpoint carries the interruption count forward.
+ const interruptions=trace.recovery?.action==='resumed'?trace.recovery.interruptions:0;
+ const opened=await replaceContinuation(env,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId,...(interruptions?{interruptions}:{})},fresh.etag);
  if(!opened){await releaseDiscoveryLease(env,acquired);trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false,write:'other_hop'};return busyOutcome(after,trace);}
  // The hop's checkpoint is the first durable write after its hop-marked status: the chunk calls `checkpoint`
  // right after saving that status, before the score preview, the variant plan, the lease release and the
@@ -881,7 +935,7 @@ async function advanceDiscovery(env,body={}){
  // failure: the step stays committed and the error is classified in `trailingError`. The lease is released after
  // the checkpoint; a failed release cannot undo it and only makes the next hop wait until the lease expires.
  let result,committed=null;trace.leaseReleased=null;trace.trailingError=null;
- const checkpoint=async summary=>{const record=continuationAfterChunk(summary,budget,hopId,new Date().toISOString(),programmeRunId);committed={summary,record,outcome:await saveOwnedContinuation(env,hopId,record)};};
+ const checkpoint=async summary=>{const record=continuationAfterChunk(summary,budget,hopId,new Date().toISOString(),programmeRunId);committed={summary,record,outcome:await saveOwnedContinuation(env,hopId,record)};if(body.onCheckpoint)await body.onCheckpoint(committed);};
  const release=async()=>{try{await releaseDiscoveryLease(env,acquired);trace.leaseReleased=true;}catch{trace.leaseReleased=false;}};
  try{
   result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
@@ -908,7 +962,7 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
   else{
    const report=await loadJSON(env,'programme.json');
    if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
-   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:body.chunks!==0,trace:step.diagnostic});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
+   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:body.chunks!==0,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
   }
  }catch(e){await closeContinuationStep(env,step,started,null,e,true);throw e;}
  await closeContinuationStep(env,step,started,response,null,true);

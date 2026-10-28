@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {gzipSync} from 'node:zlib';
 import {ExportError} from '../scripts/migration-export.mjs';
-import {FENCE_KEYS,NoGo,STATUS_CONSISTENT,STATUS_NO_GO,createReadOnlyClient,exportProductionSnapshot,inventoryDelta,parseListing,plan,readCredentials,signRequest,verifyProductionSnapshot} from '../scripts/r2-snapshot-export.mjs';
+import {FENCE_KEYS,MAX_CONCURRENCY,NoGo,STATUS_CONSISTENT,STATUS_NO_GO,createReadOnlyClient,eachWithConcurrency,exportProductionSnapshot,inventoryDelta,parseConcurrency,parseListing,plan,readCredentials,signRequest,verifyProductionSnapshot} from '../scripts/r2-snapshot-export.mjs';
 
 const source=fs.readFileSync('scripts/r2-snapshot-export.mjs','utf8');
 // The exporter never names a write command, a Worker binding or a repository secret file.
@@ -180,6 +180,49 @@ try{
   await expectKind(verifyProductionSnapshot(directory),'integrity');
   await bucket.stop();
  }
+ // Concurrency: the same cut, the same aggregate and the same per-object proof with overlapping waits; a writer during a
+ // concurrent pass is still a NO-GO, the retry reuses the checkpoints, and the bound is enforced.
+ {
+  const bucket=fakeBucket(fixture(),{pageSize:4});const endpoint=await bucket.start();const credentials=readCredentials(envFor(endpoint));
+  let inFlight=0,peak=0;
+  const counting=async(url,init)=>{inFlight++;peak=Math.max(peak,inFlight);try{await new Promise(resolve=>setTimeout(resolve,5));return await fetch(url,init);}finally{inFlight--;}};
+  const sequential=await temporary();directories.push(sequential);
+  const one=await exportProductionSnapshot({directory:sequential,credentials,sleep:noSleep,fetchImpl:counting});
+  assert.equal(one.status,STATUS_CONSISTENT);assert.equal(peak,1,'the default verifies one object at a time');
+  const parallel=await temporary();directories.push(parallel);
+  const headsBefore=bucket.calls.head,getsBefore=bucket.calls.get;
+  const eight=await exportProductionSnapshot({directory:parallel,credentials,sleep:noSleep,fetchImpl:counting,concurrency:8});
+  assert.equal(eight.status,STATUS_CONSISTENT);
+  assert.equal(eight.aggregateSha256,one.aggregateSha256,'concurrency changes nothing in the cut');
+  assert.equal(peak>1,true,'requests overlap');
+  assert.equal(bucket.calls.head-headsBefore,2*13+FENCE_KEYS.length,'two conditional HEADs per object plus the fence');
+  assert.equal(bucket.calls.get-getsBefore,13);
+  assert.equal(bucket.calls.writes,0);
+  assert.equal((await verifyProductionSnapshot(parallel)).aggregateSha256,one.aggregateSha256);
+  const racy=await temporary();directories.push(racy);
+  let armed=true;
+  bucket.hooks.push(({method,key,put})=>{if(armed&&method==='HEAD'&&key==='programme.json'){armed=false;put('programme.json',json({runId:'run-2',films:[]}));}});
+  const noGo=await expectNoGo(exportProductionSnapshot({directory:racy,credentials,sleep:noSleep,concurrency:8}),'source_changed');
+  assert.match(noGo.details.message,/programme\.json/);
+  assert.equal(fs.existsSync(path.join(racy,'manifest.json')),false);
+  const retry=await exportProductionSnapshot({directory:racy,credentials,sleep:noSleep,concurrency:8});
+  assert.equal(retry.status,STATUS_CONSISTENT);assert.equal(retry.resumed>0,true);
+  assert.equal(bucket.calls.writes,0);
+  // The pool: at most N in flight, results in input order, and after the first failure no further item is started.
+  {
+   const started=[],release=new Map(),gate=index=>new Promise(resolve=>release.set(index,resolve));
+   const run=eachWithConcurrency([0,1,2,3,4,5],2,async index=>{started.push(index);await gate(index);if(index===1)throw new Error('boom');return index*10;});
+   await new Promise(resolve=>setTimeout(resolve,10));assert.deepEqual(started,[0,1],'two in flight');
+   release.get(1)();await new Promise(resolve=>setTimeout(resolve,10));assert.deepEqual(started,[0,1],'nothing new after the failure');
+   release.get(0)();await assert.rejects(run,/boom/);assert.deepEqual(started,[0,1]);
+   assert.deepEqual(await eachWithConcurrency([3,1,2],2,async n=>{await new Promise(resolve=>setTimeout(resolve,n));return n;}),[3,1,2],'input order');
+  }
+  for(const bad of [0,17,1.5,'x',-1])assert.throws(()=>parseConcurrency(bad),error=>error instanceof ExportError&&error.kind==='configuration');
+  assert.equal(parseConcurrency(undefined),1);assert.equal(parseConcurrency('16'),MAX_CONCURRENCY);
+  const usage=spawnSync(process.execPath,['scripts/r2-snapshot-export.mjs','--output',racy,'--concurrency','0'],{encoding:'utf8',env:{...process.env,...envFor(endpoint)}});
+  assert.equal(usage.status,2);assert.match(usage.stderr,/Concurrency/);
+  await bucket.stop();
+ }
  // The exporter refuses to write inside the repository and never sends anything before that check.
  await expectKind(exportProductionSnapshot({directory:path.resolve('tests','private'),credentials:readCredentials(envFor('http://127.0.0.1:9')),sleep:noSleep}),'configuration');
  // A wrong secret is refused by the bucket and reported as an authorization failure, with no retry storm.
@@ -339,4 +382,4 @@ try{
   await bucket.stop();
  }
 }finally{for(const directory of directories)await rm(directory,{recursive:true,force:true});}
-console.log('R2 snapshot export: SigV4 known answer, environment-only credentials, read-only client, fenced consistent cut, concurrent writer, inventory delta, ETag drift, identity encoding, fence and lease changes, bounded retries, resume and aggregate verification passed');
+console.log('R2 snapshot export: SigV4 known answer, environment-only credentials, read-only client, fenced consistent cut, concurrent writer, inventory delta, ETag drift, identity encoding, fence and lease changes, bounded retries, resume, concurrency and aggregate verification passed');
