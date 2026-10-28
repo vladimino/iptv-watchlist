@@ -172,6 +172,37 @@ assert.deepEqual(queue.pending,['D','B','E']);
  await reconcile(R2,both);
 }
 
+// A prediction-prompt transition (release 3: PREDICTION_PROMPT_VERSION 2, an approved selective declaration reaching
+// comedies): the unreached film's prediction is kept as compatible by the queue and every reader, with the profile
+// unchanged; the reached one is prediction_only.
+{
+ const promptTransition={transitionSchemaVersion:1,axis:'prediction_prompt',from:1,to:2,scope:'selective',changes:[{kind:'prompt_revised'}],selectors:[{kind:'genre',values:['comedy'],regenerate:{mode:'prediction'}}]};
+ promptTransition.approval={approvedBy:'owner',approvedAt:'2026-01-01T00:00:00.000Z',reviewRef:'decision-ref',declarationSha256:sha256(vm.runInContext('fingerprintTransitionDeclarationText',scratch)(promptTransition))};
+ const R3=release(source=>source.replace('const PREDICTION_PROMPT_VERSION=1;','const PREDICTION_PROMPT_VERSION=2;').replace('const FINGERPRINT_TRANSITIONS=[];','const FINGERPRINT_TRANSITIONS='+JSON.stringify([promptTransition])+';'));
+ assert.equal((await R3.api('enrichment/profile','PUT',{version:3,schemaVersion:1,profile,changeImpact:{impactSchemaVersion:1,from:{version:2,profileHash:read('enrichment/profile/current.json').profileHash},scope:'global',changedFields:['horrorPreferences'],selectors:[]}})).status,200,'profile back to the version-1 content, as a global version 3');
+ // Regenerate every prediction under version 3 at prompt 1 (release 1 code), so only the prompt axis differs afterwards.
+ const R1v3=release(source=>source);
+ await reconcile(R1v3);
+ const runId=(await R1v3.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId;
+ for(const id of ['A','B','C','E'])assert.equal((await R1v3.api('enrichment/submit','POST',{runId,items:[{filmId:id,prediction}]})).data.results[0].status,'recalculated',id);
+ await R1v3.api('enrichment/complete','POST',{runId,reason:'model_error'});
+ // The one deliberate write of this test; every read below must leave the history as it is now.
+ for(const id of ['A','B','C','E'])historyBefore[id]=historyOf(id);
+ queue=await reconcile(R3,SELECTIVE);
+ assert.deepEqual(queue.pending,['D','C'],'only the comedy is reached by the prompt revision');
+ assert.deepEqual(plain(queue.work.C),{class:'prediction_only',requiredWork:'prediction_only',migration:'prediction',reason:'prompt_impacted'});
+ const v=await view(R3,SELECTIVE);
+ assert.deepEqual([v.films.A.prediction.stale,v.films.C.prediction.stale,v.compatibility.predictionPromptVersion],[false,true,2]);
+ const a=await R3.diagnostics('A',SELECTIVE);
+ assert.deepEqual([a.fingerprint.usable,a.prediction.current,a.prediction.profileMatch,a.prediction.cause,a.prediction.reason,a.prediction.requiredWork,a.index],[true,true,true,'compatible','prompt_unaffected','none','agreed'],'kept over an older prompt version with the profile unchanged');
+ const c=await R3.diagnostics('C',SELECTIVE);
+ assert.deepEqual([c.prediction.current,c.prediction.cause,c.prediction.reason,c.prediction.requiredWork],[false,'stale','prompt_impacted','prediction_only']);
+ assert.equal((await R3.diagnostics('A')).prediction.cause,'stale','strict: the older prompt version is stale');
+ assert.equal((await R3.diagnostics('A')).prediction.reason,'prompt_changed');
+ assert.deepEqual((await reconcile(R3)).pending,['D','A','B','C','E']);
+ queue=await reconcile(R2);
+}
+
 // Strict fallback: with both switches unset the readers are back to exact equality.
 {
  queue=await reconcile(R2);
