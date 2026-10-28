@@ -119,4 +119,14 @@ Compared with the AIR-175 cut two days earlier: +1,703 candidates in the ledger,
 
 **What the owner has to approve separately:** the Task pause window for 2a; the production writer and its credential for 2c; the install itself; the flag change for 2e.
 
+## 6. Stage 2 preflight (28 October, 09:48–10:07 UTC), read-only
+
+With both Scheduled Tasks paused by the owner at 09:48 UTC (verified by the owner's peek), this session checked the bucket for quiescence and re-cut it:
+
+- listing at 09:51:46 UTC: 8,723 objects; the resolver lease expired at 06:58 UTC, the runner lease at 08:27 UTC, no writer lease; `sync.json` stage `complete`; archive pointer absent; the ledger and its generation copy unchanged since 27 October 16:06 UTC;
+- a second export with `--concurrency 16` (09:52–10:00 UTC, no checkpoint reuse): `consistent_fenced`, 8,723 objects, **the same aggregate `23d2e9d7…`** as the 08:22 UTC cut, 0 listing changes, fence ok. The bucket is byte-identical to the cut the plan was made from, so the plan of section 4 applies unchanged;
+- `discovery-ledger-install.mjs --dry-run` against production (read-only credential, 72 `GET`s, 1 `HEAD`, 0 writes): 67 planned objects absent, the 2 ledger copies still at the source version, 0 conflicts; published pointer ETag and run match the plan, `sync.json` `complete`, no active lease, archive pointer absent: **READY**, 69 writes (163.7 MB) pending.
+
+Not done: no `--apply`, no write credential exists in this session, no flag change. The apply needs the separate approvals in section 5 and the [runbook's stage 2 section](../runbooks/discovery-ledger.md#stage-2-install-owner-approval-required-for-every-run-that-writes).
+
 **Used by:** [AIR-222](https://trello.com/c/9Y4G9DG6), [ADR 0034](../adr/0034-bounded-discovery-ledger.md). **Superseded by:** none recorded.
