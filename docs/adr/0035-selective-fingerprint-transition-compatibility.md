@@ -33,19 +33,30 @@ The audit also found three gaps that any transition must close first:
 | `tasteProfileVersion` / `tasteProfileHash` | published profile ([ADR-0031](0031-selective-prediction-profile-compatibility.md)) | every prediction | per publication |
 
 - **A stored fingerprint with no `fingerprintPromptVersion` reads as version 1.** Today every stored fingerprint counts as current, so this reading keeps every current outcome unchanged when the field is introduced. Any later prompt revision is a declared transition from 1.
-- **`fingerprintPromptVersion` is outside `fingerprintHash`.** Two fingerprints with equal content are the same input to a prediction, whichever prompt produced them.
+- **`fingerprintPromptVersion` is outside `fingerprintHash`.** Two fingerprints with equal content are the same input to a prediction, whichever prompt produced them. The prompt provenance of each generation is kept in its own immutable generation record (section 2), not in the content.
 - **Not version axes:** the runner `pipelineVersion` (protocol), `MOOD_MAPPING_VERSION` (a derived display vocabulary), the evaluator versions, and the D1 schema. Changing them never makes a fingerprint or a prediction stale.
 - **Provenance is immutable.** A fingerprint keeps the schema and prompt versions that produced it, and a prediction keeps its `fingerprintHash`, `fingerprintSchemaVersion` and `predictionPromptVersion`. No transition, migration or repair stamps a newer version onto an older record. A record is kept by being judged compatible, never by being rewritten.
 
 ### 2. Immutable fingerprint versions (precondition)
 
-Before any transition other than `identity` is activated, fingerprint storage follows the pattern prediction version objects already use ([ADR-0019](0019-live-d1-backfill-boundaries.md) item 4):
-1. Every accepted fingerprint is written **create-only** as an immutable version object addressed by its `fingerprintHash`.
-2. Only then does the current pointer move.
-3. The pointer names the previous version's hash and how the new one was produced: `generated`, `partial` with the regenerated fields, or `restored`.
-4. A version object is never rewritten or deleted.
+Before any transition other than `identity` is activated, fingerprint storage follows the pattern prediction version objects already use ([ADR-0019](0019-live-d1-backfill-boundaries.md) item 4). It separates **what** was generated from **how**:
 
-A regenerated fingerprint with content equal to an existing version has the same hash; the create-only write finds that version and the pointer move is the only effect. The object key layout and the pointer field names are decided by the implementing card. The D1 `fingerprint_payload` table already records the pointer and the R2 key of the body; it needs no change for this decision.
+- **Content body.** One immutable object per distinct content, addressed by `fingerprintHash`, written create-only. Identical content from any generation shares one body.
+- **Generation record.** One immutable record per distinct `(fingerprintHash, fingerprintSchemaVersion, fingerprintPromptVersion)`, written create-only. It holds:
+  - those three values;
+  - the first `generatedAt`;
+  - how it was produced: `generated`, or `partial` with the regenerated fields.
+
+  This is the fingerprint's provenance. A regeneration under another prompt with identical content reuses the body and adds its own generation record; the earlier record stays.
+- **Pointer.** `fingerprint.json` names the current generation record and the previous one. The pointer is the only mutable part. It moves only after the body and the record exist, and a restoration (section 7) moves it to an existing record.
+- **Nothing immutable is rewritten or deleted.**
+
+**Consequences of the split:**
+- The fingerprint rule (section 4) evaluates the generation record the pointer names: its prompt version is that record's, not the body's.
+- A prediction depends on the content: it records the `fingerprintHash` and the schema version (part of the content). A new generation record with the same body therefore keeps the prediction current.
+- Rollback restores a generation record, so the prompt provenance after a rollback is the restored record's.
+
+The object key layout and the record field names are decided by the implementing card. The D1 `fingerprint_payload` table already records the pointer and the R2 key of the body; it needs no change for this decision.
 
 ### 3. Transition declarations
 
@@ -73,7 +84,7 @@ A version change on one axis ships with a **transition declaration** in an appen
 | --- | --- | --- | --- |
 | `value_removed`, `value_split`, `value_merged`, `value_renamed`, `value_redefined` | schema | films whose old field holds an old value; a `mechanic` or `execution` selector must include every old value | `selective`, `global` |
 | `dimension_redefined` | schema | films with any value of the dimension; an `execution` selector on it | `selective`, `global` |
-| `dimension_added` (genre-specific, with a closed genre domain) | schema | films in the domain; a `genre` selector must include the whole domain (genre floor) | `selective`, `global` |
+| `dimension_added` (genre-specific, with a closed genre domain) | schema | films in the domain; a `genre` selector must include the whole domain (genre floor). The dimension is **optional** in the target validator, as every genre-specific dimension of the live schema is; a declaration with a domain and `required: true` is `change_invalid` | `selective`, `global` |
 | `value_added`, `prompt_revised` | schema, prompt | not provable: any film may now qualify for the new value or the revised guidance; the owner's selectors | `selective` (owner-approved), `global` |
 | `constraint_tightened` | schema | films whose stored fingerprint fails the new rule (section 4); no selector | `identity`, `selective`, `global` |
 | `constraint_relaxed`, `field_removed`, `dimension_removed` | schema | none | `identity`, `selective`, `global` |
@@ -85,7 +96,7 @@ A version change on one axis ships with a **transition declaration** in an appen
   1. a known schema (`transition_schema_unknown`) and axis (`axis_unknown`);
   2. increasing versions (`version_not_increasing`) and a contiguous chain (`chain_broken`);
   3. a known scope (`scope_unknown`);
-  4. known (`change_kind_unknown`) and valid changes, checked against the vocabulary of the `from` version (`change_invalid`);
+  4. known (`change_kind_unknown`) and valid changes, checked against the vocabulary of the `from` version; a genre-scoped added dimension must be optional (`change_invalid`);
   5. an `identity` declaration only with changes the structural check can decide (`identity_change_not_compatible`) and without selectors (`identity_has_selectors`);
   6. no `global`-only change in a `selective` declaration (`global_only_change`);
   7. selectors present (`selective_requires_selectors`), of a known kind (`selector_kind_unknown`) and valid, including the right `regenerate` mode for the axis (`selector_invalid`);
@@ -119,7 +130,7 @@ Checks, in order:
      - its own version constant;
      - the old values that value-level changes anywhere on the path name. Coverage (section 3) guarantees that a film holding one is reached by that link's selector.
 
-     Failure → `stale/fingerprint_structure_incompatible`, `full`. A partial regeneration therefore never keeps a field that fails the new schema;
+     A genre-scoped added dimension is optional, so its absence never fails this check; whether the film needs it is decided by the genre floor. Failure → `stale/fingerprint_structure_incompatible`, `full`. A partial regeneration therefore never keeps a field that fails the new schema;
    - `selective`: a reached film → `stale/transition_impacted`, with the selector's work; otherwise an unknown feature (no genres, an unmapped genre, an absent or `unknown` value for an `execution` selector, absent `plotMechanics` for a `mechanic` selector) → `stale/film_features_unknown`, `full`; otherwise the link passes.
 6. All links pass → `compatible/transition_unaffected`, `compatible`.
 
@@ -167,7 +178,7 @@ The future migration queue applies these rules (the exact sizes and fields are d
   Within a lane, missing work comes before migration work, then the earliest availability deadline, then the film id. New hot work therefore always preempts the migration backlog.
 - **Bounded batches.** Migration items are capped per run within the adaptive batch, and the existing quota and lease rules stop a run as they do today.
 - **Version conflicts.** A run is bound to the fingerprint schema, fingerprint prompt, prediction prompt and profile hash it started with. Next, submit and complete end it (`contract_changed`) when any of them differs from the Worker's, as they already do for the profile hash. Submit stamps the Worker's versions and refuses a fingerprint whose schema constant differs from the target, as today.
-- **Repeated application is a no-op.** A migrated or compatible film evaluates `current` or `compatible` and has no work. A regenerated fingerprint equal to a stored version reuses it (section 2).
+- **Repeated application is a no-op.** A migrated or compatible film evaluates `current` or `compatible` and has no work. A regenerated fingerprint equal to a stored version reuses its body and, under the same versions, its generation record (section 2).
 
 ### 7. Modes and rollback
 
@@ -176,9 +187,9 @@ The future migration queue applies these rules (the exact sizes and fields are d
 - **Code rollback** is safe only down to the release that introduced immutable fingerprint versions and `fingerprint_ahead` handling, the **rollback floor**. Code below the floor overwrites `fingerprint.json` and would lose versions; it must not be deployed once a transition is active.
 - **Schema or prompt rollback** above the floor:
   - A fingerprint newer than the restored constant is `fingerprint_ahead`.
-  - The scheduler first looks for a stored immutable version of that film that is `current` for the restored target. When one exists, it moves the pointer back to it (`restored`), with no model run and no rewrite.
+  - The scheduler first looks for a stored generation record of that film that is `current` for the restored target. When one exists, it moves the pointer back to it, with no model run and no rewrite.
   - When none exists, the film is regenerated.
-  - Predictions in history are not promoted back to current (as in ADR-0031). A prediction whose `fingerprintHash` equals the restored version is current again by the hash rule.
+  - Predictions in history are not promoted back to current (as in ADR-0031). A prediction whose `fingerprintHash` equals the restored record's is current again by the hash rule.
 - **Forced recompute** is a `global` transition.
 
 ### Not decided here

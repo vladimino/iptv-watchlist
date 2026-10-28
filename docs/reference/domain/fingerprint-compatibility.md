@@ -34,6 +34,7 @@ Each version change on one axis (`fingerprint_schema`, `fingerprint_prompt` or `
   - dimensions: `dimension_added`, `dimension_removed`, `dimension_redefined`;
   - fields: `field_added`, `field_removed`, `field_redefined`;
   - constraints: `constraint_relaxed`, `constraint_tightened`;
+  - a `dimension_added` with a genre `domain` is optional in the target validator; with no domain it is a required general dimension and `global` only;
   - prompts: `prompt_revised` (prompt axes only).
 - `selectors` use the ADR-0031 kinds `mechanic`, `execution` and `genre`, read from the **old** fingerprint in its own schema vocabulary and from the film's metadata genres. `regenerate.mode` is:
   - `partial`, with the regenerated `fields`;
@@ -51,7 +52,7 @@ Each version change on one axis (`fingerprint_schema`, `fingerprint_prompt` or `
 | `chain_broken` | `from` is not the previous transition's `to` on the same axis |
 | `scope_unknown` | the scope is not one of the three |
 | `change_kind_unknown` | a change kind is not in the list |
-| `change_invalid` | a change names a value or dimension absent from the `from` vocabulary, or adds one already present |
+| `change_invalid` | a change names a value or dimension absent from the `from` vocabulary, adds one already present, or declares a genre-scoped added dimension `required` |
 | `identity_change_not_compatible` | an `identity` declaration contains a change the structural check cannot decide |
 | `identity_has_selectors` | an `identity` declaration has selectors |
 | `global_only_change` | `field_added`, `field_redefined` or a general `dimension_added` in a `selective` declaration |
@@ -124,7 +125,19 @@ A new fingerprint version always has a new hash, so the dependent prediction is 
 
 ## Storage
 
-Fingerprint versions are immutable objects addressed by `fingerprintHash` and written create-only; `fingerprint.json` is the pointer and names its previous version and how it was produced (`generated`, `partial`, `restored`). Pointer restoration to a stored version is the only rollback that avoids a model run. This storage is a precondition of activation, not current behaviour: `fingerprint.json` is currently replaced in place.
+Three parts, the first two immutable and create-only:
+
+| Part | Identity | Holds |
+| --- | --- | --- |
+| content body | `fingerprintHash` | the fingerprint content; shared by every generation with equal content |
+| generation record | `(fingerprintHash, fingerprintSchemaVersion, fingerprintPromptVersion)` | the versions, first `generatedAt`, and `generated` or `partial` with its fields |
+| pointer `fingerprint.json` | one per film | the current and the previous generation record |
+
+- The fingerprint rule reads the prompt version from the generation record the pointer names.
+- A prediction depends on the content hash, so a new generation record with the same body keeps it current.
+- Restoring the pointer to a stored generation record is the only rollback that avoids a model run.
+
+This storage is a precondition of activation, not current behaviour: `fingerprint.json` is currently replaced in place.
 
 ## Scheduling
 

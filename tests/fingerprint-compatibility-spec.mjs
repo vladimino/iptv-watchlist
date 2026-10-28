@@ -12,6 +12,7 @@ const enrichment=fs.readFileSync('src/enrichment.js','utf8');
 const literal=(text,name)=>{const match=text.match(new RegExp('(?:const |,)'+name+'=(\\[[^\\]]*\\]|\\{[^;]*?\\})(?=[;,])'));assert(match,name+' literal found');return Function('return '+match[1])();};
 const MECHANICS=literal(enrichment,'MECHANICS'),EXECUTION=literal(enrichment,'EXECUTION'),GENERAL=literal(enrichment,'GENERAL_EXECUTION');
 const FINGERPRINT_FIELDS=Object.keys(Function('return '+enrichment.match(/const FINGERPRINT_RULES=(\{[\s\S]*?\n\});/)[1].replace(/\b[A-Z_]{3,}\b/g,'null'))());
+assert.match(enrichment,/execution:\{kind:'enum_object',fields:EXECUTION,required:GENERAL_EXECUTION,optional:GENRE_EXECUTION\}/,'genre-specific execution dimensions are optional in the live validator');
 const {vocabulary:v,registries,fingerprints,fingerprintCases,predictionCases,declarations}=spec;
 const {genres:GENRES,genreAliases:ALIASES,genreDomains:DOMAINS}=profileSpec.vocabulary;
 
@@ -52,7 +53,9 @@ function changeValid(change,vocab,axis){
   const added=change.kind==='value_added'?change.values:change.kind==='value_split'?change.to:change.kind==='value_renamed'||change.kind==='value_merged'?[change.to]:[];
   return old.every(x=>list.includes(x))&&added.every(x=>!list.includes(x))&&(old.length||added.length)>0;
  }
- if(change.kind==='dimension_added')return !(change.dimension in vocab.execution)&&change.values.includes('unknown')&&(!change.domain||change.domain.length>0&&change.domain.every(g=>GENRES.includes(g)));
+ // A genre-scoped dimension is optional by contract (like every genre-specific dimension of the live schema), so a fingerprint
+ // outside its domain passes the target validator without it; only a general dimension may be required, and that is global-only.
+ if(change.kind==='dimension_added')return !(change.dimension in vocab.execution)&&change.values.includes('unknown')&&(change.required===undefined||typeof change.required==='boolean')&&(!change.domain||change.required!==true&&change.domain.length>0&&change.domain.every(g=>GENRES.includes(g)));
  if(change.kind==='dimension_removed'||change.kind==='dimension_redefined')return change.dimension in vocab.execution;
  return FINGERPRINT_FIELDS.includes(change.field)||change.kind==='field_added'&&!FINGERPRINT_FIELDS.includes(change.field);
 }
@@ -149,7 +152,7 @@ for(const c of fingerprintCases){
  if(e.outcome==='compatible'){assert.equal(c.mode,'selective',c.id);const n=(pathLength(registry,'fingerprint_schema',s,ts)??-99)+(pathLength(registry,'fingerprint_prompt',p,tp)??-99);assert.equal(e.links,n,c.id+' links');}
  if(e.restore){const old=fingerprints[e.restore];assert(c.history.includes(e.restore),c.id);assert.deepEqual([schemaOf(old),promptOf(old)],[ts,tp],c.id+' the restored version is current for the target');assert(!old.invalidatedAt,c.id);}
 }
-for(const category of ['exact','split','genre','diagnostic','structure','unknown','global','versions','repeat','rollback','transitive','prompt','strict'])assert(fingerprintCases.some(c=>c.category===category),'fingerprint case for '+category);
+for(const category of ['exact','split','genre','diagnostic','structure','unknown','global','versions','repeat','rollback','transitive','prompt','strict','provenance'])assert(fingerprintCases.some(c=>c.category===category),'fingerprint case for '+category);
 for(const reason of fingerprintOutcome.keys())assert(fingerprintCases.some(c=>c.expected.reason===reason),'fingerprint case for '+reason);
 
 // Prediction cases: required work follows the fingerprint/prediction boundary of ADR-0035 section 5.
@@ -168,7 +171,7 @@ for(const c of predictionCases){
  if(e.outcome!=='stale'||e.reason.startsWith('prompt_'))assert.equal(p.fingerprintHash,f.fingerprintHash,c.id+' a kept or prompt-only case keeps the fingerprint hash');
  if(c.profileLink){const vocab=vocabularyAt(registries[c.registry],schemaOf(f));assert(c.profileLink.selectors.some(sel=>sel.kind==='mechanic'&&sel.values.some(x=>!vocab.mechanics.includes(x))),c.id+' the profile selector names a value outside the fingerprint schema');}
 }
-for(const category of ['boundary','prompt','global','versions','unknown','strict','cross-rule'])assert(predictionCases.some(c=>c.category===category),'prediction case for '+category);
+for(const category of ['boundary','prompt','global','versions','unknown','strict','cross-rule','provenance'])assert(predictionCases.some(c=>c.category===category),'prediction case for '+category);
 for(const reason of predictionOutcome.keys())assert(predictionCases.some(c=>c.expected.reason===reason),'prediction case for '+reason);
 for(const work of v.requiredWork)assert(predictionCases.some(c=>c.expected.requiredWork===work),'prediction case for '+work);
 console.log(`fingerprint compatibility spec: ${fingerprintCases.length} fingerprint, ${predictionCases.length} prediction and ${declarations.length} declaration fixtures consistent with the live vocabularies`);
