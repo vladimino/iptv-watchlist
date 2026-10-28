@@ -126,12 +126,12 @@ Checks, in order:
    - no registry path to the target → `stale/transition_unknown`, `global`;
    - an invalid registry or link (section 3) → `stale/transition_impact_unknown`, `global` (**unknown means global**);
    - `global` → `stale/transition_global`, `global`;
-   - **structural check** on `identity` and `selective` schema links: the stored fingerprint must pass the target schema's validator. Two things are ignored:
+   - `selective`: a reached film → `stale/transition_impacted`, with the selector's work; otherwise an unknown feature (no genres, an unmapped genre, an absent or `unknown` value for an `execution` selector, absent `plotMechanics` for a `mechanic` selector, or a stored value outside the fingerprint's own vocabulary) → `stale/film_features_unknown`, `full`; otherwise the selectors pass;
+   - **structural check**, once, on `identity` and `selective` schema links after their selectors: the stored fingerprint must pass the target schema's validator. Two things are ignored:
      - its own version constant;
      - the old values that value-level changes anywhere on the path name. Coverage (section 3) guarantees that a film holding one is reached by that link's selector.
 
-     A genre-scoped added dimension is optional, so its absence never fails this check; whether the film needs it is decided by the genre floor. Failure → `stale/fingerprint_structure_incompatible`, `full`. A partial regeneration therefore never keeps a field that fails the new schema;
-   - `selective`: a reached film → `stale/transition_impacted`, with the selector's work; otherwise an unknown feature (no genres, an unmapped genre, an absent or `unknown` value for an `execution` selector, absent `plotMechanics` for a `mechanic` selector) → `stale/film_features_unknown`, `full`; otherwise the link passes.
+     A genre-scoped added dimension is optional, so its absence never fails this check; whether the film needs it is decided by the genre floor. Failure → `stale/fingerprint_structure_incompatible`, `full`. A partial regeneration therefore never keeps a field that fails the new schema. Otherwise the link passes.
 6. All links pass → `compatible/transition_unaffected`, `compatible`.
 
 `current` and `compatible` are both "not stale" for every consumer. A compatible fingerprint is served as it is stored: its record, its hash and its versions are unchanged.
