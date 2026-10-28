@@ -159,7 +159,7 @@ const key=name=>{ui.input=name;return vm.runInContext('findsGenreKey(input)',ui)
 assert.equal(key('Криминал'),'crime');assert.equal(key('криминал'),'crime');assert.equal(key('  КРИМИНАЛ '),'crime');assert.equal(key('Crime'),'crime');
 assert.equal(key('Фантастика'),'science_fiction');assert.equal(key('Science Fiction'),'science_fiction');assert.equal(key('science  fiction'),'science_fiction');
 assert.equal(key('Исторический'),'history');assert.equal(key('история'),'history');assert.equal(key('Музыкальный'),'music');assert.equal(key('музыка'),'music');assert.equal(key('Телефильм'),'tv_movie');assert.equal(key('телевизионный фильм'),'tv_movie');
-assert.equal(key('Нуар'),'raw:нуар');assert.equal(key(''),null);assert.equal(key(null),null);assert.equal(key(7),null);
+assert.equal(key('Нуар'),'raw:нуар');assert.equal(key('constructor'),'raw:constructor','an Object.prototype name is not a dictionary hit');assert.equal(key('__proto__'),'raw:__proto__');assert.equal(key(''),null);assert.equal(key(null),null);assert.equal(key(7),null);
 const tmdb=[
  film('tmdb_70',{title:'Криминал ru',genres:['криминал','триллер'],rating:4.8}),
  film('tmdb_71',{title:'Фантастика en',genres:['Science Fiction'],rating:4.7}),

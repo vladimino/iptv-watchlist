@@ -618,7 +618,7 @@ const FINDS_GENRE_KEYS={
  'fantasy':'fantasy','history':'history','horror':'horror','music':'music','mystery':'mystery','romance':'romance','science fiction':'science_fiction',
  'thriller':'thriller','tv movie':'tv_movie','war':'war','western':'western'
 };
-function findsGenreKey(name){if(typeof name!=='string')return null;const folded=name.trim().toLocaleLowerCase('ru').replace(/\s+/g,' ');if(!folded)return null;return FINDS_GENRE_KEYS[folded]||'raw:'+folded;}
+function findsGenreKey(name){if(typeof name!=='string')return null;const folded=name.trim().toLocaleLowerCase('ru').replace(/\s+/g,' ');if(!folded)return null;return Object.hasOwn(FINDS_GENRE_KEYS,folded)?FINDS_GENRE_KEYS[folded]:'raw:'+folded;}
 function findsGenreKeys(names){return new Set(Array.from(names||[],findsGenreKey).filter(Boolean));}
 function findsFacets(film){
  const mechanics=(film.fingerprint?.plotMechanics||[]).filter(id=>Object.hasOwn(MECHANIC_LABELS,id));
