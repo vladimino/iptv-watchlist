@@ -44,9 +44,9 @@ const iso=ms=>new Date(ms).toISOString();
 const GENERATION='a30f67e9-3a11-4f65-b9ec-ccdadfcedbfe',NEXT='5d6e7f80-1a2b-4c3d-8e9f-0a1b2c3d4e5f';
 const continuation=()=>records.get('epg/resolver-continuation.json');
 const ring=()=>records.get('epg/resolver-continuation-diagnostics.json')?.recent||[];
-const verified=()=>Object.values(records.get('epg/discovery-resolution.json')||{}).filter(d=>d.status==='verified').length;
+const decided=()=>Object.keys(records.get('epg/discovery-resolution.json')||{}).length;
 const logged=()=>logs.map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(entry=>entry?.event==='epg_continuation');
-const items=count=>Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:100,durations:[100],firstAiring:clockTime,lastAiring:clockTime,airings:1,shows:[{channelId:'t',channel:'T',start:clockTime,end:clockTime+3600000}]}));
+const items=count=>Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:200,durations:[200],firstAiring:clockTime,lastAiring:clockTime,airings:1,shows:[{channelId:'t',channel:'T',start:clockTime,end:clockTime+3600000}]}));
 const CHUNK=24,LATER=16*60000;
 function seed(){
  records.clear();etags.clear();puts=[];fetches.length=0;logs.length=0;hang=null;released=null;pending.length=0;clockTime=Date.now();
@@ -67,7 +67,7 @@ const SECRET=/Hot Film|Bearer|token=/;
 seed();
 await killedStep(leaseRelease);
 const deadHop=continuation().hopId,deadEntry=ring()[0];
-assert.equal(continuation().stage,'paused');assert.equal(continuation().remainingChunks,11);assert.equal(verified(),CHUNK);
+assert.equal(continuation().stage,'paused');assert.equal(continuation().remainingChunks,11);assert.equal(decided(),CHUNK);
 assert.equal(deadEntry.phase,'checkpointed');
 assert.deepEqual(deadEntry.checkpoint,{hopId:deadHop,owned:true,write:'saved',stage:'paused',remainingChunks:11});
 assert.equal(deadEntry.recorded.checkpoint,undefined,'the stored entry cannot know about its own write');
@@ -80,7 +80,7 @@ assert.equal(pipeline.continuationDiagnostics.recent[0].phase,'checkpointed','a 
 
 // 2. Within the lease the next call waits; it neither repeats the chunk nor closes the entry yet.
 let r=await step();
-assert.equal(r.data.discovery.state,'busy');assert.equal(r.data.discovery.nextAction,'wait');assert.equal(verified(),CHUNK);
+assert.equal(r.data.discovery.state,'busy');assert.equal(r.data.discovery.nextAction,'wait');assert.equal(decided(),CHUNK);
 assert.equal(ring().find(item=>item.id===deadEntry.id).phase,'checkpointed','a recent entry may still be a live step');
 
 // 3. The next scheduled call: one new chunk (11 -> 10), the dead entry is closed as interrupted after a commit.
@@ -89,7 +89,7 @@ r=await step();
 assert.equal(r.status,200);assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(r.data.diagnostic.health.status,'settled');assert.equal(r.data.diagnostic.recovery,null);
 assert.notEqual(r.data.diagnostic.hopId,deadHop);
 assert.equal(r.data.discovery.remainingChunks,10);assert.equal(r.data.discovery.nextAction,'continue');
-assert.equal(verified(),2*CHUNK,'exactly one more chunk; the committed one is neither repeated nor dropped');
+assert.equal(decided(),2*CHUNK,'exactly one more chunk; the committed one is neither repeated nor dropped');
 const closed=ring().find(item=>item.id===deadEntry.id);
 assert.equal(closed.phase,'interrupted');
 assert.deepEqual(closed.interruption,{lastPhase:'checkpointed',committed:true,cause:'unknown',closedAt:closed.interruption.closedAt});
@@ -115,7 +115,7 @@ assert.equal(lateResponse.status,200);assert.equal(lateResponse.data.diagnostic.
 assert.deepEqual(plain(continuation()),successor,'the late hop did not touch the newer checkpoint');
 assert.deepEqual(plain(records.get('epg/resolver-lease.json')),successorLease,'nor the lease');
 assert.deepEqual(plain(await call('saveOwnedContinuation')(env,lateHop,{stage:'paused',reason:null,at:iso(clockTime),hopId:lateHop,remainingChunks:11,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION})),{saved:false,reason:'other_hop',record:successor});
-assert.equal(verified(),2*CHUNK);
+assert.equal(decided(),2*CHUNK);
 
 // 5. Killed before its checkpoint (the production shape of 26 Oct 22:58 UTC): the chunk's final status is not stored,
 //    the record stays `running`. The next call resumes the orphan once, with the budget its hop had, and the new
@@ -129,7 +129,7 @@ pipeline=await status();
 assert.equal(pipeline.continuationHealth.status,'orphaned');assert.equal(pipeline.continuationHealth.chunkCompleted,false);assert.equal(pipeline.continuationHealth.interruptions,0);
 let report=(await post('/api/enrichment/discovery/resolve',{chunks:0})).data;
 assert.equal(report.discovery.reason,'orphaned');assert.equal(report.discovery.nextAction,'continue');
-const decisionsBefore=verified();
+const decisionsBefore=decided();
 await killedStep(finalStatus);
 assert.equal(continuation().stage,'running');assert.notEqual(continuation().hopId,firstOrphan);assert.equal(continuation().interruptions,1,'the resumed hop carries the interruption');assert.equal(continuation().remainingChunks,12);
 const firstClosed=ring().find(item=>item.phase==='interrupted');
@@ -143,26 +143,26 @@ pipeline=await status();
 assert.equal(pipeline.continuationHealth.status,'orphaned');assert.equal(pipeline.continuationHealth.interruptions,1);
 report=(await post('/api/enrichment/discovery/resolve',{chunks:0})).data;
 assert.equal(report.discovery.state,'running');assert.equal(report.discovery.reason,'interrupted');assert.equal(report.discovery.nextAction,'stop','the read-only report already says stop');
-const leaseBefore=plain(records.get('epg/resolver-lease.json')),verifiedBefore=verified();puts=[];
+const leaseBefore=plain(records.get('epg/resolver-lease.json')),decidedBefore=decided();puts=[];
 r=await step();
 assert.equal(r.status,200);assert.equal(r.data.stage,'complete','the sync run stage is unchanged');
 assert.equal(r.data.diagnostic.branch,'interrupted');
 assert.deepEqual(r.data.diagnostic.recovery,{orphanHopId:continuation().hopId,action:'interrupted',chunkCompleted:false,budget:0,settled:true,interruptions:2});
 assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,'interrupted');assert.equal(r.data.discovery.nextAction,'stop');assert.equal(r.data.discovery.remainingChunks,12);assert.equal(r.data.discovery.programmeRunId,GENERATION);
 assert.equal(continuation().stage,'paused');assert.equal(continuation().reason,'interrupted');assert.equal(continuation().interruptions,2);assert.equal(continuation().programmeRunId,GENERATION);
-assert.equal(verified(),verifiedBefore,'no chunk ran');assert.deepEqual(plain(records.get('epg/resolver-lease.json')),leaseBefore,'no lease was taken');
+assert.equal(decided(),decidedBefore,'no chunk ran');assert.deepEqual(plain(records.get('epg/resolver-lease.json')),leaseBefore,'no lease was taken');
 assert.deepEqual(puts.filter(key=>!key.includes('continuation-diagnostics')),['epg/resolver-continuation.json'],'the only write is the fail-closed record');
 assert.equal(ring()[0].discovery.reason,'interrupted');
-assert.ok(decisionsBefore<=verifiedBefore);
+assert.ok(decisionsBefore<=decidedBefore);
 // It stays closed for every scheduled call (MCP), and the read-only views agree.
-r=await step();assert.equal(r.data.diagnostic.branch,'contract');assert.equal(r.data.discovery.nextAction,'stop');assert.equal(r.data.discovery.reason,'interrupted');assert.equal(verified(),verifiedBefore);
+r=await step();assert.equal(r.data.diagnostic.branch,'contract');assert.equal(r.data.discovery.nextAction,'stop');assert.equal(r.data.discovery.reason,'interrupted');assert.equal(decided(),decidedBefore);
 pipeline=await status();assert.equal(pipeline.continuation.reason,'interrupted');assert.equal(pipeline.continuationHealth.status,'settled');
 assert.equal(call('discoveryContract')({stage:'paused',reason:'interrupted',remainingChunks:12}).nextAction,'stop');
 
 // 7. An owner-forced resolve (HTTP, outside the schedule) runs the chunk; its checkpoint drops the count.
 r=await post('/api/enrichment/discovery/resolve',{});
 assert.equal(r.status,200);assert.equal(r.data.diagnostic.decision.force,true);assert.equal(r.data.diagnostic.branch,'chunk');
-assert.equal(continuation().stage,'paused');assert.equal(continuation().reason,null);assert.equal(continuation().interruptions,undefined);assert.equal(verified(),verifiedBefore+CHUNK);
+assert.equal(continuation().stage,'paused');assert.equal(continuation().reason,null);assert.equal(continuation().interruptions,undefined);assert.equal(decided(),decidedBefore+CHUNK);
 
 // 8. One interruption followed by a stored checkpoint resets the count, so a later single interruption resumes again.
 seed();

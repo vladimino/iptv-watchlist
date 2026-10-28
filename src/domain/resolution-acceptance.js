@@ -1,4 +1,4 @@
-// Scoring result to identity gate. Pure and storage-neutral. Discovery loads it when SCORED_RESOLUTION is shadow or on.
+// Scoring result to identity gate. Pure and storage-neutral. Discovery loads it for every resolver chunk; the scored gate is the only resolver.
 function scoringEvidence(score){
  return {scorerVersion:score.scorerVersion??null,status:score.status??null,reason:score.reason??null,confidence:score.confidence??null,score:score.score??null,acceptedTmdbId:score.acceptedTmdbId??null,considered:score.considered||[]};
 }
