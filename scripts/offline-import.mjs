@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {actualUnit,catalogMetadata,classifyObject,creditRoster,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,ratingIdentity,profileUnit,projectSource,readDiscovery,refusal,supersededPayloads} from '../src/offline-importer.js';
+import {actualUnit,catalogMetadata,classifyObject,isArchiveKey,readDiscoveryArchive,creditRoster,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,ratingIdentity,profileUnit,projectSource,readDiscovery,refusal,supersededPayloads} from '../src/offline-importer.js';
 import {ExportError} from './migration-export.mjs';
 import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
 
@@ -26,13 +26,20 @@ export async function prepareImport(directory,{limit=null}={}){
  const bodies=new Map();
  const units=[];
  for(const entry of manifest.objects){
-  if(classifyObject(entry.key)!=='mapped')continue;
+  // Archive manifest and segment versions are read below, only those the published ledger names: unreferenced versions are not parsed.
+  if(classifyObject(entry.key)!=='mapped'||isArchiveKey(entry.key))continue;
   try{bodies.set(entry.key,JSON.parse(await readFile(path.join(absolute,entry.file),'utf8')));}
   catch{units.push(unportable(entry.key,entry.sha256,'object',entry.key,'json_invalid','watchlist'));}
  }
  const keys=[...byKey.keys()];
  const snapshotInventory=inventory({finishedAt:manifest.finishedAt||null,aggregateSha256:manifest.totals?.aggregateSha256||null,keys,production:loaded.production===true});
+ const shas=Object.fromEntries([...byKey].map(([key,entry])=>[key,entry.sha256]));
+ // ADR 0034: a bounded ledger is complete only with the manifest it names and that manifest's segments (rule D, active wins).
+ const published=bodies.get('epg/published-generation.json');
+ const archive=byKey.has('epg/discovery-latest.json')?await readDiscoveryArchive({ledger:bodies.get('epg/discovery-latest.json'),generationKey:published?.phase==='published'&&published.programmeRunId?'epg/generations/'+published.programmeRunId+'/discovery-latest.json':null,keys,shas,segmentOf:rules.ledgerArchiveSegment,read:async key=>{const entry=byKey.get(key);try{return JSON.parse(await readFile(path.join(absolute,entry.file),'utf8'));}catch{return null;}}}):{mode:'full',ledger:null,blockers:[],bodies:{},summary:null};
+ const ledgerBody=archive.ledger||bodies.get('epg/discovery-latest.json');
  const store=scopedStore(loaded.store,byKey);
+ if(store.discoveryLatest&&archive.ledger)store.discoveryLatest=archive.ledger;
  const view=readLifecycle(store,Date.parse(manifest.finishedAt));
  const identity=identityResolver({canonicalize:rules.canonicalFilmId,films:view.films});
  const ratings=ratingIdentity({identity,films:view.films,metadata:bodies.get('metadata.json')??null,metadataSha256:byKey.get('metadata.json')?.sha256??null,ratings:manifest.objects.filter(entry=>/^enrichment\/films\/[^/]+\/actual\.json$/.test(entry.key)).map(entry=>({key:entry.key}))});
@@ -69,7 +76,8 @@ export async function prepareImport(directory,{limit=null}={}){
  for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(entry.key))units.push(fingerprintUnit(entry,bodies.get(entry.key),identity,superseded));
  for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/predictions\.json$/.test(entry.key))units.push(...predictionUnits(entry,bodies.get(entry.key),identity,links,superseded));
  for(const entry of manifest.objects)if(/^enrichment\/films\/[^/]+\/actual\.json$/.test(entry.key))units.push(actualUnit(entry,bodies.get(entry.key),identity,ratings));
- const discovery=byKey.has('epg/discovery-latest.json')?readDiscovery(byKey.get('epg/discovery-latest.json'),bodies.get('epg/discovery-latest.json'),{deriveEvidence:rules.candidateEvidence}):{candidates:[],units:[],blockers:[]};
+ blockers.push(...archive.blockers);
+ const discovery=byKey.has('epg/discovery-latest.json')?readDiscovery(byKey.get('epg/discovery-latest.json'),ledgerBody,{deriveEvidence:rules.candidateEvidence}):{candidates:[],units:[],blockers:[]};
  units.push(...discovery.units);
  blockers.push(...discovery.blockers);
  if(byKey.has('programme.json')){
@@ -87,10 +95,9 @@ export async function prepareImport(directory,{limit=null}={}){
    if((generation.unportable||generation.unresolved)&&byKey.has('epg/discovery-resolution.json'))units.push(unportable('epg/discovery-resolution.json',sha('epg/discovery-resolution.json'),'candidate_decision','epg/discovery-resolution.json','generation_not_imported','discovery'));
   }
  }
- const shas=Object.fromEntries([...byKey].map(([key,entry])=>[key,entry.sha256]));
- const expected=projectSource({keys,bodies:Object.fromEntries(bodies),films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence,links,ratings,superseded});
+ const expected=projectSource({keys,bodies:{...Object.fromEntries(bodies),...archive.bodies},films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence,links,ratings,superseded});
  for(const blocker of expected.blockers||[])if(!blockers.some(item=>item.reason===blocker.reason&&item.targetTable===blocker.targetTable&&item.targetId===blocker.targetId))blockers.push(blocker);
- return {inventory:snapshotInventory,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit,production:loaded.production===true,source:loaded.source,baselineIdentity:loaded.baselineIdentity,aggregateSha256:manifest.totals?.aggregateSha256??null};
+ return {inventory:snapshotInventory,discoveryArchive:archive.summary,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit,production:loaded.production===true,source:loaded.source,baselineIdentity:loaded.baselineIdentity,aggregateSha256:manifest.totals?.aggregateSha256??null};
 }
 
 // The shared rules come from the production sources themselves: canonicalFilmId from the domain model and candidateEvidence from the resolver.
@@ -103,8 +110,11 @@ export function loadDomainRules(){
  vm.runInContext(domain+'\nglobalThis.domainApi={canonicalFilmId};',context);
  vm.runInContext(versions+'\nglobalThis.versionApi={predictionVersionLinked,parsePredictionVersionKey,predictionVersionKey,predictionVersionText,predictionVersionBody,predictionMaterializationPlan};',context);
  vm.runInContext(resolver+'\nglobalThis.resolverApi={candidateEvidence};',context);
+ const ledgerContext=vm.createContext({Date,Map,Set,JSON,Object,Number,String,Array,Math,TextEncoder,encodeURIComponent,decodeURIComponent,URL,URLSearchParams});
+ vm.runInContext(fs.readFileSync(path.join(root,'src/sources.js'),'utf8')+'\nglobalThis.ledgerApi={ledgerArchiveSegment};',ledgerContext);
+ const {ledgerArchiveSegment}=ledgerContext.ledgerApi;
  const {canonicalFilmId}=context.domainApi,{candidateEvidence}=context.resolverApi,versionApi=context.versionApi;
- return {canonicalFilmId:id=>canonicalFilmId(id),candidateEvidence:candidate=>candidateEvidence(candidate),predictionVersionLinked:(record,filmId)=>versionApi.predictionVersionLinked(record,filmId),parsePredictionVersionKey:key=>versionApi.parsePredictionVersionKey(key),predictionVersionKey:(filmId,sha)=>versionApi.predictionVersionKey(filmId,sha),predictionVersionText:record=>versionApi.predictionVersionText(record),predictionVersionBody:record=>versionApi.predictionVersionBody(record),predictionMaterializationPlan:(filmId,bundle)=>versionApi.predictionMaterializationPlan(filmId,bundle)};
+ return {canonicalFilmId:id=>canonicalFilmId(id),candidateEvidence:candidate=>candidateEvidence(candidate),predictionVersionLinked:(record,filmId)=>versionApi.predictionVersionLinked(record,filmId),parsePredictionVersionKey:key=>versionApi.parsePredictionVersionKey(key),predictionVersionKey:(filmId,sha)=>versionApi.predictionVersionKey(filmId,sha),predictionVersionText:record=>versionApi.predictionVersionText(record),predictionVersionBody:record=>versionApi.predictionVersionBody(record),predictionMaterializationPlan:(filmId,bundle)=>versionApi.predictionMaterializationPlan(filmId,bundle),ledgerArchiveSegment:(key,count)=>ledgerArchiveSegment(key,count)};
 }
 
 function scopedStore(store,byKey){
@@ -186,12 +196,12 @@ async function main(){
  catch(error){console.error(error instanceof ExportError||error instanceof SnapshotError?error.message:'Snapshot could not be checked');process.exit(error.exitCode||1);}
  // Fail closed: an unknown key or a stored decision that disagrees with the derived evidence stops the run before the database is touched.
  const refused=refusal(batch);
- if(refused){console.log(JSON.stringify({...batch.inventory,...refused,note}));process.exit(3);}
+ if(refused){console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,...refused,note}));process.exit(3);}
  if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync(path.join(root,'migrations',file),'utf8')).join('\n'));}
  const db=openSqlite(databasePath);
  const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
  const result=await importBatch(db,repositories,{...batch,importedAt:batch.finishedAt});
- console.log(JSON.stringify({...batch.inventory,...result,note}));
+ console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,...result,note}));
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

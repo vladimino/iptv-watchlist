@@ -3,10 +3,19 @@
 // Identity follows the shared canonicalFilmId rule and evidence keys follow the resolver's candidateEvidence rule;
 // both are supplied by the caller, so this module never carries a second copy of either rule.
 
+// ADR 0034 bounded discovery ledger: the archive pointer, the write-once manifest versions and segment versions are a second source
+// of candidates. The write-once copy of the source ledger kept by the split is a rollback copy and stays in R2.
+const ARCHIVE_POINTER='epg/discovery-archive/v1/current.json';
+const ARCHIVE_MANIFEST=/^epg\/discovery-archive\/v1\/manifests\/([^/]+)\.json$/;
+const ARCHIVE_SEGMENT=/^epg\/discovery-archive\/v1\/segments\/(\d{3})\/([^/]+)\.json$/;
+const ARCHIVE_SOURCE_COPY=/^epg\/discovery-archive\/v1\/sources\/[^/]+\/discovery-latest\.json$/;
+export const archiveManifestKey=manifestId=>'epg/discovery-archive/v1/manifests/'+manifestId+'.json';
+export function isArchiveKey(key){return key===ARCHIVE_POINTER||ARCHIVE_MANIFEST.test(key)||ARCHIVE_SEGMENT.test(key);}
+
 const FAMILIES=[
  ['watchlist',key=>key==='watchlist.json'],
  ['programme',key=>key==='programme.json'||key==='epg/published-generation.json'],
- ['discovery',key=>key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json'||key==='epg/discovered-films.json'],
+ ['discovery',key=>key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json'||key==='epg/discovered-films.json'||isArchiveKey(key)],
  ['profile',key=>key==='enrichment/profile/current.json'||/^enrichment\/profile\/versions\/\d+\.json$/.test(key)],
  ['fingerprint',key=>/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(key)],
  ['prediction',key=>/^enrichment\/films\/[^/]+\/predictions\.json$/.test(key)||VERSION_OBJECT.test(key)],
@@ -23,7 +32,7 @@ const R2_ONLY=[
  {family:'runtime_coordination',decideBy:'write_cutover',decisionRequired:false,matches:key=>['epg/resolver-lease.json','enrichment/writer-lease.json','enrichment/runner-lease.json','epg/resolver-continuation.json','epg/resolver-continuation-diagnostics.json','epg/discovery-status.json','epg/discovery-variant-pending.json','sync.json','watchlist-ingest.json','enrichment/ratings/status.json','enrichment/ratings/pending.json','enrichment/ratings/lease.json'].includes(key)},
  {family:'run_record',decideBy:'legacy_retirement',decisionRequired:false,matches:key=>/^enrichment\/(?:runs|sources|run-diagnostics|diagnostics|stop-events|start-events|benchmarks|ratings\/generations|predictions-materialization)\//.test(key)||key==='enrichment/latest-run.json'||key==='enrichment/ratings/published.json'},
  {family:'user_state',decideBy:'read_cutover',decisionRequired:true,matches:key=>key.startsWith('started/')||key.startsWith('events/')||key.startsWith('letterboxd/facts/')||key.startsWith('letterboxd/imports/')||key==='ui/filter-presets.json'||key==='letterboxd/display-exclusion.json'},
- {family:'archive',decideBy:'none',decisionRequired:false,matches:key=>/^epg\/generations\/[^/]+\//.test(key)||key==='epg/discovery-before-canonical.json'||key==='epg/discovery-resolution-before-canonical.json'},
+ {family:'archive',decideBy:'none',decisionRequired:false,matches:key=>/^epg\/generations\/[^/]+\//.test(key)||ARCHIVE_SOURCE_COPY.test(key)||key==='epg/discovery-before-canonical.json'||key==='epg/discovery-resolution-before-canonical.json'},
 ];
 
 const KNOWN_CONFLICTS=new Set([
@@ -490,6 +499,71 @@ export function generationUnit(pointer,programme,pointerSha,candidates=[],identi
  return unit({family:'programme',kind:'generation',sourceKey:'programme.json',sourceSha256:pointerSha,targetTable:'programme_generation',targetId:programmeRunId,input});
 }
 
+// ADR 0034 section 4, the consistent read of a bounded ledger: the published active ledger, the manifest version it names
+// (archive.manifestId) and exactly the segment versions that manifest names. current.json is the writers' compare-and-swap
+// point and is never followed for history; it must reach the named manifest through parentManifestId, otherwise the snapshot
+// mixes archive versions. Rule D: an active record wins over its archive copy, and the comparison is on the payload only.
+// The writer's own counts (alsoArchived, uniqueArchivedItems, the manifest totals) must agree with what was read.
+// Every problem is a blocker, so the import stops before the database is touched. A full-mode ledger is complete on its own;
+// archive objects next to it are not read as history.
+export async function readDiscoveryArchive({ledger,ledgerKey='epg/discovery-latest.json',generationKey=null,keys=[],shas={},read,segmentOf}={}){
+ if(typeof read!=='function')throw new Error('A snapshot reader is required');
+ if(typeof segmentOf!=='function')throw new Error('The shared ledgerArchiveSegment rule is required');
+ const present=new Set(keys),archiveKeys=keys.filter(isArchiveKey).sort(),active=Array.isArray(ledger?.items)?ledger.items:[];
+ const blockers=[],bodies={},manifests=archiveKeys.filter(key=>ARCHIVE_MANIFEST.test(key)),segments=archiveKeys.filter(key=>ARCHIVE_SEGMENT.test(key));
+ const block=(reason,sourceKey,targetId,extra={})=>blockers.push({reason,sourceKey,sourceSha256:shas[sourceKey]??null,targetTable:'candidate',targetId,...extra});
+ const named=ledger?.archive?.manifestId??null;
+ const summary={mode:'full',manifestId:null,active:active.length,archived:0,alsoArchived:0,uniqueArchived:0,ledgerTotal:active.length,segments:0,referenced:{manifests:0,segments:0},unreferenced:{manifests:manifests.length,segments:segments.length},pointer:present.has(ARCHIVE_POINTER)?'present':'absent'};
+ if(ledger?.ledgerMode!=='bounded'&&named==null)return {mode:'full',ledger,blockers,bodies,summary};
+ summary.mode='bounded';summary.manifestId=named;
+ if(!named){block('archive_manifest_unnamed',ledgerKey,ledgerKey);return {mode:'bounded',ledger:null,blockers,bodies,summary};}
+ if(generationKey&&present.has(generationKey)&&shas[generationKey]!==shas[ledgerKey])block('discovery_ledger_copies_differ',ledgerKey,generationKey,{other:generationKey});
+ const load=async key=>{if(key in bodies)return bodies[key];let body=null;try{body=await read(key);}catch{body=null;}bodies[key]=body;return body;};
+ const manifestKey=archiveManifestKey(named);
+ if(!present.has(manifestKey)){block('archive_manifest_missing',ledgerKey,manifestKey);return {mode:'bounded',ledger:null,blockers,bodies,summary};}
+ const manifest=await load(manifestKey);
+ const count=manifest?.segmentCount,table=Array.isArray(manifest?.segments)?manifest.segments:null;
+ if(!manifest||manifest.schemaVersion!==1||manifest.manifestId!==named||manifest.hash!=='fnv1a32-utf8'||!Number.isInteger(count)||count<1||!table||table.length!==count||table.some((entry,index)=>entry?.segment!==index)){block('archive_manifest_invalid',manifestKey,manifestKey);return {mode:'bounded',ledger:null,blockers,bodies,summary};}
+ const archived=new Map();let tableItems=0;
+ for(const entry of table){
+  tableItems+=Number(entry.items)||0;
+  if(entry.object==null){if(entry.items!==0)block('archive_manifest_invalid',manifestKey,'segment/'+entry.segment);continue;}
+  const match=String(entry.object).match(ARCHIVE_SEGMENT);
+  if(!match||Number(match[1])!==entry.segment){block('archive_manifest_invalid',manifestKey,String(entry.object));continue;}
+  if(!present.has(entry.object)){block('archive_segment_missing',manifestKey,entry.object);continue;}
+  if(shas[entry.object]!==entry.sha256){block('archive_segment_sha256_mismatch',entry.object,entry.object,{expected:entry.sha256??null,stored:shas[entry.object]??null});continue;}
+  const body=await load(entry.object),items=body?.items&&typeof body.items==='object'&&!Array.isArray(body.items)?body.items:null;
+  if(!body||body.schemaVersion!==1||body.segment!==entry.segment||!items||Object.keys(items).length!==entry.items){block('archive_segment_invalid',entry.object,entry.object);continue;}
+  summary.referenced.segments++;
+  for(const [key,value] of Object.entries(items)){
+   if(archived.has(key)){block('archive_duplicate_key',entry.object,key,{other:archived.get(key).sourceKey});continue;}
+   if(!value?.payload||typeof value.payload!=='object'||value.payload.key!==key||segmentOf(key,count)!==entry.segment){block('archive_segment_invalid',entry.object,key);continue;}
+   archived.set(key,{payload:value.payload,sourceKey:entry.object});
+  }
+ }
+ if(tableItems!==manifest.totals?.items)block('archive_manifest_invalid',manifestKey,'totals');
+ summary.referenced.manifests=1;summary.segments=summary.referenced.segments;
+ // The pointer may be ahead of the published ledger (an archive swap whose publication did not happen) but never off its chain.
+ if(!present.has(ARCHIVE_POINTER))block('archive_pointer_missing',ledgerKey,ARCHIVE_POINTER);
+ else{
+  const pointer=await load(ARCHIVE_POINTER);
+  let at=pointer?.manifestId??null,reached=false;const seen=new Set();
+  while(at&&!seen.has(at)&&seen.size<=manifests.length){
+   seen.add(at);if(at===named){reached=true;break;}
+   const key=archiveManifestKey(at);if(!present.has(key))break;
+   at=(await load(key))?.parentManifestId??null;
+  }
+  if(!reached)block('archive_pointer_conflict',ARCHIVE_POINTER,ARCHIVE_POINTER,{pointer:pointer?.manifestId??null,named});
+ }
+ const activeKeys=new Set(active.map(item=>item?.key)),overlap=[...archived.keys()].filter(key=>activeKeys.has(key)).sort();
+ const declared=Array.isArray(ledger.archive.alsoArchived)?[...ledger.archive.alsoArchived].sort():null;
+ if(!declared||declared.length!==overlap.length||declared.some((key,index)=>key!==overlap[index]))block('archive_counts_mismatch',ledgerKey,'alsoArchived',{declared:declared?.length??null,read:overlap.length});
+ if(ledger.archive.uniqueArchivedItems!==archived.size-overlap.length)block('archive_counts_mismatch',ledgerKey,'uniqueArchivedItems',{declared:ledger.archive.uniqueArchivedItems??null,read:archived.size-overlap.length});
+ const items=[...active,...[...archived].filter(([key])=>!activeKeys.has(key)).map(([,value])=>value.payload)];
+ Object.assign(summary,{archived:archived.size,alsoArchived:overlap.length,uniqueArchived:archived.size-overlap.length,ledgerTotal:items.length,unreferenced:{manifests:manifests.length-1,segments:segments.length-summary.referenced.segments}});
+ return {mode:'bounded',ledger:blockers.length?null:{...ledger,items},blockers,bodies,summary};
+}
+
 // Items carry no evidence key of their own: the key is derived by the resolver's rule from the observation's fields.
 // An item that does carry one must agree with the derived key; a disagreement is a blocker that stops the import.
 export function readDiscovery(entry,body,{deriveEvidence}={}){
@@ -650,6 +724,7 @@ function provenanceSummary(units){
  return summary;
 }
 function isMappedKey(key){
+ if(isArchiveKey(key))return true;
  if(['watchlist.json','programme.json','metadata.json','titles.json','people.json','epg/published-generation.json','epg/discovery-latest.json','epg/discovery-resolution.json','epg/discovered-films.json','enrichment/profile/current.json'].includes(key))return true;
  return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key)||VERSION_OBJECT.test(key);
 }
@@ -743,7 +818,7 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   if(key==='people.json'){for(const record of peopleRecords(body))note(key,expected.persons.some(person=>person.roleId===record?.id||person.id==='person:'+record?.id)?'mapped':'unportable',String(record?.id??key));continue;}
   if(key==='titles.json'){for(const [id,value] of Object.entries(body||{}))note(key,expected.films.some(film=>film.localization===value||film.aliases.some(alias=>alias.value===value))?'mapped':'unportable',id);continue;}
   if(key==='epg/discovered-films.json'){for(const record of Array.isArray(body)?body:Object.values(body||{})){const resolved=recordIdentity(key,record?.id);if(resolved)note(key,'mapped',resolved.filmId,{identity:provenanceOf(resolved)});}continue;}
-  if(key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json')continue;
+  if(key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json'||isArchiveKey(key))continue;
   if(key==='enrichment/profile/current.json'){const version='enrichment/profile/versions/'+body?.version+'.json';note(key,keys.includes(version)?'mapped':'unportable',String(body?.version??key));continue;}
   if(/^enrichment\/profile\/versions\/\d+\.json$/.test(key)){if(typeof body?.version==='number'&&body.profileHash&&(body.createdAt||body.updatedAt)){expected.profiles.push({id:body.version,profileHash:body.profileHash,createdAt:body.createdAt||body.updatedAt,r2Key:key,contentSha256:shas[key]||null});note(key,'mapped',String(body.version));}else note(key,'unportable',String(body?.version??key));continue;}
   if(VERSION_OBJECT.test(key)){
@@ -772,7 +847,10 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   note(key,'unportable',key);
  }
  const programmeKey=keys.includes('programme.json')?'programme.json':null;
- const discovery=keys.includes('epg/discovery-latest.json')?discoveryRecords(bodies['epg/discovery-latest.json'],deriveEvidence):{portable:true,items:[],blockers:[]};
+ const archive=archiveExpectation(keys.includes('epg/discovery-latest.json')?bodies['epg/discovery-latest.json']:null,bodies,shas,keys);
+ for(const record of archive.records)note(record.key,record.disposition,record.id);
+ expected.blockers.push(...archive.blockers);
+ const discovery=keys.includes('epg/discovery-latest.json')?discoveryRecords({items:archive.items},deriveEvidence):{portable:true,items:[],blockers:[]};
  expected.blockers.push(...discovery.blockers.map(blocker=>({...blocker,sourceKey:'epg/discovery-latest.json',sourceSha256:shas['epg/discovery-latest.json']||null})));
  const discoveryPortable=discovery.portable&&discovery.blockers.length===0;
  if(programmeKey){
@@ -786,7 +864,7 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   const runId=expected.generations[0]?.id||null;
   for(const item of discovery.items){
    if(!discoveryPortable||!runId)note('epg/discovery-latest.json','unportable',item.id);
-   else{expected.candidates.push({id:item.id,programmeRunId:runId,evidenceKey:item.evidenceKey,title:item.title,normalizedTitle:item.normalizedTitle,...(item.shows?{shows:item.shows}:{})});note('epg/discovery-latest.json','mapped',item.id,{evidence:item.evidenceProvenance});}
+   else{expected.candidates.push({id:item.id,programmeRunId:runId,evidenceKey:item.evidenceKey,title:item.title,normalizedTitle:item.normalizedTitle,...(item.shows?{shows:item.shows}:{})});note(archive.origin.get(item.id)||'epg/discovery-latest.json','mapped',item.id,{evidence:item.evidenceProvenance});}
   }
   if(!discovery.items.length)note('epg/discovery-latest.json','unportable','epg/discovery-latest.json');
  }
@@ -969,6 +1047,29 @@ function expectedCandidateShows(shows){
   identities.add(JSON.stringify([show.channelId,startMs,show.endMs??show.end??null,show.epgTitle??show.title??null]));
  }
  return [...identities].sort();
+}
+// Parity's own reading of a bounded ledger, written apart from readDiscoveryArchive: the active rows, then the payloads of the
+// segment objects that the named manifest lists, an active key winning. An archive object outside that read is unreferenced: it
+// stays in R2 and is not history. A named object that is absent or differs from the manifest's checksum stops the expectation.
+function archiveExpectation(ledger,bodies,shas,keys){
+ const archiveKeys=keys.filter(isArchiveKey),records=[],blockers=[],origin=new Map(),items=Array.isArray(ledger?.items)?[...ledger.items]:[];
+ const named=ledger?.archive?.manifestId??null;
+ if(!ledger||(ledger.ledgerMode!=='bounded'&&named==null)){for(const key of archiveKeys)records.push({key,disposition:'unreferenced',id:key});return {items,records,blockers,origin};}
+ const manifestKey=named?archiveManifestKey(named):null,manifest=manifestKey?bodies[manifestKey]:null,used=new Set([ARCHIVE_POINTER]);
+ if(!manifest||!Array.isArray(manifest.segments))blockers.push({reason:'archive_manifest_missing',sourceKey:'epg/discovery-latest.json',targetTable:'candidate',targetId:manifestKey||'epg/discovery-latest.json'});
+ else{
+  used.add(manifestKey);
+  const activeKeys=new Set(items.map(item=>item?.key));
+  for(const entry of manifest.segments){
+   if(!entry?.object)continue;
+   used.add(entry.object);
+   const body=bodies[entry.object];
+   if(!body||shas[entry.object]!==entry.sha256){blockers.push({reason:'archive_segment_unreadable',sourceKey:manifestKey,targetTable:'candidate',targetId:entry.object});continue;}
+   for(const [key,value] of Object.entries(body.items||{})){if(activeKeys.has(key)||origin.has(key))continue;origin.set(key,entry.object);items.push(value?.payload);}
+  }
+ }
+ for(const key of archiveKeys)records.push({key,disposition:used.has(key)?'mapped':'unreferenced',id:key});
+ return {items,records,blockers,origin};
 }
 function discoveryRecords(body,deriveEvidence){
  requireEvidence(deriveEvidence);
