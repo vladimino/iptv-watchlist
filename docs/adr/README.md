@@ -45,7 +45,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0037 — The domain localization rule is the only localization of the programme and watchlist reads and of the EPG commit](0037-domain-localization-only.md) | Proposed (owner Accepted/Declined decision pending before merge); closes the per-path rollout boundary of the lifecycle rollout log, supersedes no ADR | [AIR-89](https://trello.com/c/vzR0uuZq); rollout [AIR-42](https://trello.com/c/drLBuWjl); metadata localization stays flag-gated and default off; no binding, flag, R2 or D1 operation authorized |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

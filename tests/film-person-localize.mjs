@@ -10,14 +10,19 @@ const provisional=names.find(person=>person.id==='actor/delia-enea');
 const source='https://www.wikidata.org/wiki/Q1';
 const ctx=vm.createContext({FILM_TITLE_DICTIONARY:titles,PERSON_NAME_DICTIONARY:names,Date,Map,Set,JSON,Object,URL,URLSearchParams,AbortSignal,structuredClone,fetch:async()=>({ok:true,json:async()=>({results:{bindings:[]}})}),Response,Request});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8'),ctx);
-const {applyCachedTitle,applyCachedPersonName,applyReviewedPerson,applyReviewedTitle,reviewedPeople,lifecycleMode,localizeFilmTitles,localizePeople,applyEpgLocalization,presentLocalized}=ctx;
+const {applyCachedTitle,applyCachedPersonName,applyReviewedPerson,applyReviewedTitle,reviewedPeople,metadataLocalizationMode,localizeFilmTitles,localizePeople,applyEpgLocalization,presentLocalized}=ctx;
 
-assert.equal(lifecycleMode({},'programme'),'off');
-assert.equal(lifecycleMode({LIFECYCLE_LOCALIZATION:'on:epg,shadow:programme'},'programme'),'shadow');
-assert.equal(lifecycleMode({LIFECYCLE_LOCALIZATION:'on:metadata'},'epg'),'off');
-assert.equal(lifecycleMode({LIFECYCLE_LOCALIZATION:'shadow,on'},'metadata'),'off');
-assert.equal(lifecycleMode({LIFECYCLE_LOCALIZATION:'on:programme,shadow:programme'},'programme'),'shadow');
-assert.equal(lifecycleMode({LIFECYCLE_LOCALIZATION:'nope:programme,on:watchlist'},'watchlist'),'on');
+// LIFECYCLE_LOCALIZATION selects the metadata sync's localization only, default off; the retired path tokens are inert.
+assert.equal(metadataLocalizationMode({}),'off');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'on:programme,on:watchlist,on:epg'}),'off');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'shadow,on'}),'off');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'on'}),'off');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'nope:metadata'}),'off');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:['on:metadata']}),'off');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'on:epg, on:metadata'}),'on');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'shadow:metadata'}),'shadow');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'on:metadata,shadow:metadata'}),'shadow');
+assert.equal(metadataLocalizationMode({LIFECYCLE_LOCALIZATION:'shadow:metadata,on:metadata'}),'on');
 
 const reviewed={id:'28nq',tmdbId:'1656',title:dictionaryTitle,titleRu:dictionaryTitle,titleStatus:'verified',original:'The Legend of Zorro',aliases:['The Legend of Zorro']};
 applyCachedTitle(reviewed,{tmdbId:'1656',title:'Другое название',status:'provisional',sources:[source]},'on');
@@ -230,42 +235,54 @@ const fresh={id:'fresh',tmdbId:'1',title:'English',original:'English',aliases:[]
 const titleCache={fresh:{tmdbId:'1',title:'Из кэша',status:'verified',sources:[source]}};
 await localizeFilmTitles([fresh],titleCache,'on');
 applyEpgLocalization([fresh],{},'on');
-const viewed=presentLocalized({films:[fresh]},titleCache,'on');
-assert.equal(viewed.data.films[0].title,'Из кэша');
-assert.equal(viewed.data.films[0].titleStatus,'provisional');
+const viewed=presentLocalized({films:[fresh]},titleCache);
+assert.equal(viewed.films[0].title,'Из кэша');
+assert.equal(viewed.films[0].titleStatus,'provisional');
 const freshSnapshot=JSON.stringify(fresh);
 await localizeFilmTitles([fresh],titleCache,'on');
-applyEpgLocalization([fresh],{},'on');
-presentLocalized({films:[fresh]},titleCache,'on');
+applyEpgLocalization([fresh],{});
+presentLocalized({films:[fresh]},titleCache);
 assert.equal(JSON.stringify(fresh),freshSnapshot);
 
 const ownerLive=[{id:'28nq',tmdbId:'1656',title:'Своё',titleRu:'Своё',titleStatus:'verified',original:'The Legend of Zorro',aliases:[],directors:[],actors:[]}];
-const offCopy=structuredClone(ownerLive),again=structuredClone(ownerLive),shadowCopy=structuredClone(ownerLive);
+// The metadata sync keeps its default-off legacy localization: no mode and 'off' are the same legacy result.
+const offCopy=structuredClone(ownerLive),again=structuredClone(ownerLive);
 await localizeFilmTitles(offCopy,{});
 await localizeFilmTitles(again,{},'off');
 assert.equal(JSON.stringify(offCopy),JSON.stringify(again));
 assert.equal(offCopy[0].title,dictionaryTitle);
-const counted=await localizeFilmTitles(shadowCopy,{},'shadow');
-assert.equal(JSON.stringify(shadowCopy),JSON.stringify(offCopy));
-assert.equal(shadowCopy[0].titleConflicts,undefined);
-assert.ok(counted.films.mismatched>0);
-assert.ok(counted.films.mismatched<=counted.films.compared);
-assert.ok(counted.films.displayed<=counted.films.mismatched);
-const epgOff=structuredClone(ownerLive),epgShadow=structuredClone(ownerLive);
-applyEpgLocalization(epgOff,{},'off');
-const epgCount=applyEpgLocalization(epgShadow,{},'shadow');
-assert.equal(JSON.stringify(epgShadow),JSON.stringify(epgOff));
-assert.ok(epgCount.films.mismatched>0);
-assert.ok(epgCount.films.mismatched<=epgCount.films.compared);
-const readerOff=presentLocalized({films:structuredClone(ownerLive)},{},'off');
-const readerShadow=presentLocalized({films:structuredClone(ownerLive)},{},'shadow');
-assert.equal(JSON.stringify(readerShadow.data),JSON.stringify(readerOff.data));
-assert.ok(readerShadow.films.mismatched>0);
-assert.equal(readerOff.films.compared,0);
+assert.equal(offCopy[0].titleConflicts,undefined);
+// The EPG commit localizes through the domain rule whatever a caller passes: an unexplained verified title is kept
+// with an unresolved conflict instead of being overwritten, and the result is one and the same for every legacy mode word.
+const epgDomain=structuredClone(ownerLive);
+applyEpgLocalization(epgDomain,{});
+assert.equal(epgDomain[0].title,'Своё');
+assert.equal(epgDomain[0].titleStatus,'verified');
+assert.equal(epgDomain[0].titleConflicts.length,1);
+assert.equal(epgDomain[0].titleConflicts[0].reason,'unresolved');
+assert.equal(epgDomain[0].titleConflicts[0].value,dictionaryTitle);
+assert.equal(epgDomain[0].aliases.includes(dictionaryTitle),true);
+for(const stale of ['off','shadow','on',undefined,null]){const copy=structuredClone(ownerLive);applyEpgLocalization(copy,{},stale);assert.equal(JSON.stringify(copy),JSON.stringify(epgDomain));}
+assert.equal(applyEpgLocalization.length,2);
+assert.equal(presentLocalized.length,2);
+const epgTitles=structuredClone(ownerLive);
+await localizeFilmTitles(epgTitles,{},'on');
+assert.equal(JSON.stringify(epgTitles),JSON.stringify(epgDomain));
+assert.notEqual(JSON.stringify(epgDomain),JSON.stringify(offCopy));
+// The reads apply the same rule; a caller's stale mode word changes nothing.
+const readerDomain=presentLocalized({films:structuredClone(ownerLive)},{});
+assert.equal(readerDomain.films[0].title,'Своё');
+assert.equal(readerDomain.films[0].titleConflicts[0].reason,'unresolved');
+for(const stale of ['off','shadow','on']){const copy=presentLocalized({films:structuredClone(ownerLive)},{},stale);assert.equal(JSON.stringify(copy),JSON.stringify(readerDomain));}
 function assertUnits(count){assert.ok(count.films.mismatched<=count.films.compared);assert.ok(count.films.displayed<=count.films.mismatched);assert.ok(count.people.mismatched<=count.people.compared);assert.ok(count.people.displayed<=count.people.mismatched);assert.ok(count.cache.mismatched<=count.cache.compared);}
+// shadow:metadata still measures the metadata sync's two localizations without changing the stored result.
 const statusFilm=[{id:'fresh',tmdbId:'1',title:'English',original:'English',aliases:[],directors:[],actors:[]}];
 const statusCache={fresh:{tmdbId:'1',title:'Из кэша',status:'verified',sources:[source]}};
-const statusCount=await localizeFilmTitles(structuredClone(statusFilm),structuredClone(statusCache),'shadow');
+const statusShadow=structuredClone(statusFilm),statusOff=structuredClone(statusFilm);
+const statusCount=await localizeFilmTitles(statusShadow,structuredClone(statusCache),'shadow');
+await localizeFilmTitles(statusOff,structuredClone(statusCache),'off');
+assert.equal(JSON.stringify(statusShadow),JSON.stringify(statusOff));
+assert.equal(statusOff[0].titleStatus,'verified');
 assert.equal(statusCount.films.compared,1);
 assert.equal(statusCount.films.mismatched,1);
 assert.equal(statusCount.films.displayed,0);
@@ -280,28 +297,17 @@ assert.equal(cacheCount.people.compared,1);
 assert.equal(cacheCount.people.mismatched,1);
 assert.equal(cacheCount.people.displayed,1);
 assertUnits(cacheCount);
+// Owner-authored names survive the EPG commit and the reads with an owner_kept conflict; the legacy overwrite is gone.
 const actorSamples=names.filter(person=>person.status==='verified').slice(0,3);
 const actors=actorSamples.map(person=>({id:person.id,name:'Owner '+person.id,original:person.original,nameStatus:'verified',nameAuthority:'owner',aliases:[]}));
 const many={id:'many',tmdbId:'9',title:'English',original:'English',aliases:[],directors:[],actors};
 const stored={};for(const actor of actors)stored[actor.id]={name:'Кэш '+actor.id};
-const manyOff=structuredClone(many),manyShadow=structuredClone(many);
-applyEpgLocalization([manyOff],stored,'off');
-const manyCount=applyEpgLocalization([manyShadow],stored,'shadow');
-assert.equal(JSON.stringify(manyShadow),JSON.stringify(manyOff));
-assert.equal(manyCount.people.compared,3);
-assert.equal(manyCount.people.mismatched,3);
-assert.equal(manyCount.people.displayed,3);
-assert.equal(manyCount.films.displayed,0);
-assertUnits(manyCount);
-const samples=names.filter(person=>person.status==='verified').slice(0,3);
-const owned=samples.map(person=>({id:person.id,name:'Owner '+person.id,original:person.original,nameStatus:'verified',nameAuthority:'owner',aliases:[]}));
-const peoplePayload={films:[{id:'fresh',tmdbId:'1',title:'English',original:'English',aliases:[],directors:[],actors:owned}]};
-const peopleShadow=presentLocalized(structuredClone(peoplePayload),{},'shadow');
-assert.equal(peopleShadow.people.compared,3);
-assert.equal(peopleShadow.people.mismatched,3);
-assert.equal(peopleShadow.people.displayed,3);
-assert.equal(JSON.stringify(peopleShadow.data),JSON.stringify(presentLocalized(structuredClone(peoplePayload),{},'off').data));
-assertUnits(peopleShadow);
+const manyEpg=structuredClone(many);
+applyEpgLocalization([manyEpg],stored);
+for(const [i,actor] of manyEpg.actors.entries()){assert.equal(actor.name,'Owner '+actorSamples[i].id);assert.equal(actor.nameConflicts.length,1);assert.equal(actor.nameConflicts[0].reason,'owner_kept');assert.equal(actor.aliases.includes(actorSamples[i].name),true);}
+const peoplePayload={films:[{id:'fresh',tmdbId:'1',title:'English',original:'English',aliases:[],directors:[],actors:structuredClone(actors)}],people:{directors:[],actors:structuredClone(actors)}};
+const peopleRead=presentLocalized(structuredClone(peoplePayload),{});
+for(const list of [peopleRead.films[0].actors,peopleRead.people.actors])for(const [i,actor] of list.entries()){assert.equal(actor.name,'Owner '+actorSamples[i].id);assert.equal(actor.nameConflicts[0].reason,'owner_kept');assert.equal(actor.nameConflicts[0].authority,'owner');}
 
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
 const run={};
@@ -316,77 +322,66 @@ assert.equal(run.lifecycleLocalization.metadata.cache.mismatched,1);
 assert.ok(run.lifecycleLocalization.metadata.films.mismatched<=run.lifecycleLocalization.metadata.films.compared);
 const records=new Map();let puts=0;
 const bucket={get:async key=>records.has(key)?{json:async()=>structuredClone(records.get(key))}:null,put:async()=>{puts++;}};
+const generation={runId:'generation-1',updatedAt:'2026-01-01T00:00:00.000Z'};
 function seed(film,cached){
  records.clear();puts=0;
- records.set('programme.json',{films:[film],watchlistCount:1,updatedAt:'2026-01-01T00:00:00.000Z'});
- records.set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[film]});
+ records.set('programme.json',{...generation,films:[film],watchlistCount:1});
+ records.set('watchlist.json',{updatedAt:'2025-12-31T00:00:00.000Z',films:[film]});
  records.set('titles.json',cached||{});
 }
-async function read(path,mode){
- const env={BUCKET:bucket,...(mode?{LIFECYCLE_LOCALIZATION:mode}:{})};
+// Every value the retired path tokens ever had, the absent variable, a bare word, garbage, and the metadata tokens.
+const FLAGS=[undefined,'','on:programme,on:watchlist,on:epg','shadow:programme,shadow:watchlist,shadow:epg','off','on','shadow','nope','on:metadata','shadow:metadata'];
+async function read(path,flag){
+ const env={BUCKET:bucket,...(flag===undefined?{}:{LIFECYCLE_LOCALIZATION:flag})};
  const response=await ctx.worker.fetch(new Request('https://iptv.local'+path),env);
  const body=await response.json();
  return {status:response.status,body,header:response.headers.get('X-Lifecycle-Localization'),puts};
 }
-const ownerPayload={id:'28nq',tmdbId:'1656',title:'Своё',titleRu:'Своё',titleStatus:'verified',titleAuthority:'owner',original:'The Legend of Zorro',aliases:[],shows:[]};
-seed(ownerPayload);
-const offProgramme=await read('/api/programme');
-const offAgain=await read('/api/programme');
-assert.equal(offProgramme.status,200);
-assert.equal(offProgramme.header,null);
-assert.equal(offProgramme.puts,0);
-assert.equal(offProgramme.body.films[0].title,dictionaryTitle);
-assert.equal(JSON.stringify(offProgramme.body),JSON.stringify(offAgain.body));
-seed(ownerPayload);
-const onProgramme=await read('/api/programme','on:programme');
-assert.equal(onProgramme.body.films[0].title,'Своё');
-assert.equal(onProgramme.body.films[0].titleConflicts.length,1);
-assert.equal(onProgramme.body.films[0].titleConflicts[0].authority,'owner');
-assert.match(onProgramme.header,/^programme;on;films=\d+\/0\/0;people=\d+\/0\/0;cache=\d+\/0$/);
-assert.equal(onProgramme.puts,0);
-seed(ownerPayload);
-const shadowProgramme=await read('/api/programme','shadow:programme');
-assert.equal(JSON.stringify(shadowProgramme.body),JSON.stringify(offProgramme.body));
-assert.match(shadowProgramme.header,/^programme;shadow;films=\d+\/[1-9]\d*\/[1-9]\d*;people=\d+\/\d+\/\d+;cache=\d+\/\d+$/);
-assert.equal(shadowProgramme.puts,0);
-seed(ownerPayload);
-const offList=await read('/api/watchlist');
-seed(ownerPayload);
-const shadowList=await read('/api/watchlist','shadow:watchlist');
-assert.equal(shadowList.header.startsWith('watchlist;shadow;'),true);
-assert.equal(JSON.stringify(shadowList.body),JSON.stringify(offList.body));
-assert.equal(shadowList.puts,0);
-const cachePayload={id:'fresh',tmdbId:'1',title:'English',original:'English',aliases:[],shows:[]};
-seed(cachePayload,{fresh:{tmdbId:'1',title:'Из кэша',status:'verified',sources:[source]}});
-const legacyReader=await read('/api/programme');
-assert.equal(legacyReader.body.films[0].title,'Из кэша');
-assert.equal(legacyReader.body.films[0].titleStatus,'verified');
-assert.equal(legacyReader.header,null);
-seed(cachePayload,{fresh:{tmdbId:'1',title:'Из кэша',status:'verified',sources:[source]}});
-const guardedReader=await read('/api/programme','on:programme');
-assert.equal(guardedReader.body.films[0].title,'Из кэша');
-assert.equal(guardedReader.body.films[0].titleStatus,'provisional');
-assert.equal(guardedReader.puts,0);
-const approved={id:'28nq',tmdbId:'1656',title:'English',original:'The Legend of Zorro',aliases:['English'],shows:[]};
+async function sameForEveryFlag(path,film,cached,check){
+ let first=null;
+ for(const flag of FLAGS){seed(film,cached);const result=await read(path,flag);assert.equal(result.status,200,path+' '+flag);assert.equal(result.header,null,path+' '+flag);assert.equal(result.puts,0,path+' '+flag);check(result.body,flag);const text=JSON.stringify(result.body);if(first===null)first=text;else assert.equal(text,first,path+' '+flag);}
+ return JSON.parse(first);
+}
+const ownerActor={id:verified.id,name:'Своё имя',original:verified.original,nameStatus:'verified',nameAuthority:'owner',aliases:[]};
+const ownerPayload={id:'28nq',tmdbId:'1656',title:'Своё',titleRu:'Своё',titleStatus:'verified',titleAuthority:'owner',original:'The Legend of Zorro',aliases:[],shows:[],directors:[],actors:[ownerActor]};
+function ownerChecks(body){
+ const film=body.films[0];
+ assert.equal(film.title,'Своё');
+ assert.equal(film.titleRu,'Своё');
+ assert.equal(film.titleStatus,'verified');
+ assert.equal(film.titleConflicts.length,1);
+ assert.equal(film.titleConflicts[0].authority,'owner');
+ assert.equal(film.titleConflicts[0].value,dictionaryTitle);
+ assert.equal(film.aliases.includes(dictionaryTitle),true);
+ assert.equal(film.actors[0].name,'Своё имя');
+ assert.equal(film.actors[0].nameConflicts[0].reason,'owner_kept');
+ assert.equal(film.actors[0].aliases.includes(verified.name),true);
+}
+// The published generation is read as pinned: its identity and timestamp are returned unchanged under every flag.
+const ownerProgramme=await sameForEveryFlag('/api/programme',ownerPayload,null,body=>{ownerChecks(body);assert.equal(body.runId,generation.runId);assert.equal(body.updatedAt,generation.updatedAt);assert.equal(body.watchlistCount,1);});
+assert.equal(ownerProgramme.films[0].shows.length,0);
+await sameForEveryFlag('/api/watchlist',ownerPayload,null,body=>{ownerChecks(body);assert.equal(body.updatedAt,generation.updatedAt);});
+// A cached automatic title goes through the guarded transition: applied, but never promoted to a reviewed status.
+const cachePayload={id:'fresh',tmdbId:'1',title:'English',original:'English',aliases:[],shows:[],directors:[],actors:[]};
+const cachedTitles={fresh:{tmdbId:'1',title:'Из кэша',status:'verified',sources:[source]}};
+for(const path of ['/api/programme','/api/watchlist'])await sameForEveryFlag(path,cachePayload,cachedTitles,body=>{assert.equal(body.films[0].title,'Из кэша');assert.equal(body.films[0].titleRu,'Из кэша');assert.equal(body.films[0].titleStatus,'provisional');assert.equal(body.films[0].aliases.includes('English'),true);});
+// A reviewed dictionary title wins over a competing cache entry, and the competing value is not kept as an alias.
+const approved={id:'28nq',tmdbId:'1656',title:'English',original:'The Legend of Zorro',aliases:['English'],shows:[],directors:[],actors:[]};
 const competing={'28nq':{tmdbId:'1656',title:'Чужой кэш',status:'provisional',sources:[source]}};
-function originAliases(values){return [...new Set(values.filter(Boolean))];}
-function originReviewedTitle(film){const match=ctx.reviewedTitle(film);if(!match)return film;film.aliases=originAliases([...(film.aliases||[]),...(match.aliases||[]),film.title,film.original,match.title]);film.title=match.title;film.titleRu=match.title;film.titleStatus=match.status;film.titleSources=match.sources;return film;}
-function originReader(data,storedTitles){const copy=structuredClone(data);for(const film of copy.films||[]){const cached=storedTitles?.[film.id];if(!ctx.reviewedTitle(film)&&cached?.tmdbId&&cached.tmdbId===film.tmdbId&&cached.title){film.title=cached.title;film.titleRu=cached.title;film.titleStatus=cached.status;film.titleSources=cached.sources;}originReviewedTitle(film);}return copy;}
-seed(approved,competing);
-const approvedProgramme=await read('/api/programme');
-const merged=ctx.programmeWithWatchlist(structuredClone(records.get('programme.json')),structuredClone(records.get('watchlist.json')));
-assert.equal(JSON.stringify(approvedProgramme.body),JSON.stringify(originReader(merged,competing)));
-assert.equal(approvedProgramme.body.films[0].aliases.includes('Чужой кэш'),false);
-assert.equal(approvedProgramme.header,null);
-assert.equal(approvedProgramme.puts,0);
-seed(approved,competing);
-const approvedList=await read('/api/watchlist');
-assert.equal(JSON.stringify(approvedList.body),JSON.stringify(originReader(structuredClone(records.get('watchlist.json')),competing)));
-assert.equal(approvedList.body.films[0].aliases.includes('Чужой кэш'),false);
-assert.equal(approvedList.puts,0);
+for(const path of ['/api/programme','/api/watchlist'])await sameForEveryFlag(path,approved,competing,body=>{assert.equal(body.films[0].title,dictionaryTitle);assert.equal(body.films[0].titleStatus,'verified');assert.equal(body.films[0].titleConflicts,undefined);assert.equal(body.films[0].aliases.includes('Чужой кэш'),false);assert.equal(body.films[0].aliases.includes('English'),true);});
+// A mismatched TMDB identity in the cache is ignored by the reads.
+const foreign={id:'fresh',tmdbId:'1',title:'English',original:'English',aliases:[],shows:[],directors:[],actors:[]};
+for(const path of ['/api/programme','/api/watchlist'])await sameForEveryFlag(path,foreign,{fresh:{tmdbId:'2',title:'Не тот фильм',status:'provisional',sources:[source]}},body=>{assert.equal(body.films[0].title,'English');assert.equal(body.films[0].titleRu,undefined);});
 
 const sources=fs.readFileSync('src/sources.js','utf8');
 const worker=fs.readFileSync('src/worker.js','utf8');
 for(const file of [sources,worker])assert.doesNotMatch(file,/filmView|readLifecycle|backfillLifecycle|invalidatePredictionForProfile|availabilityProjection/);
+// The variable is read once, by the metadata sync; the EPG commit and the reads have no mode and no comparison header.
+assert.doesNotMatch(sources,/function lifecycleMode|X-Lifecycle-Localization/);
+assert.doesNotMatch(worker,/lifecycleMode\(|localizationResponse|X-Lifecycle-Localization|recordLifecycle\(run,'epg'/);
+assert.equal((worker.match(/metadataLocalizationMode\(env\)/g)||[]).length,1);
+const flagRead=worker.indexOf('metadataLocalizationMode(env)');
+assert.ok(flagRead>worker.indexOf('async function metadataSync(')&&flagRead<worker.indexOf('async function epgSync('));
+assert.doesNotMatch(worker.slice(worker.indexOf('async function epgSync(')),/LIFECYCLE_LOCALIZATION|localizationMode/);
 assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/film-person-reader|film-person-backfill/);
 console.log('Lifecycle localization guard passed.');

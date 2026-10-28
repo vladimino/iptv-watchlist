@@ -48,6 +48,8 @@ Source: `.github/workflows/ci.yml`. The former independent Cloudflare Workers Bu
 
 A failed test/build, or a failed account-token or Worker-settings check, prevents deployment. A successful workflow confirms publication, not completion of data migration or end-to-end smoke tests. Use authorized read-only checks after deployment. For `/mcp`, use only the safe verification procedure in [docs/mcp.md](../reference/api/mcp.md). Exercising the resolver continuation in production writes `epg/*` records and calls TMDB, so it is a separately approved operation, never a deploy smoke test.
 
+**Code-only paths and leftover variables.** The EPG resolver and the localization of the programme and watchlist reads and of the EPG commit have no runtime switch: rolling either back is a redeploy of the previous verified commit through the [Worker rollback procedure](recovery/cloudflare-worker-rollback.md), never a dashboard variable. `keep_vars: true` also preserves variables the code no longer reads (`SCORED_RESOLUTION`; the `epg`, `programme` and `watchlist` tokens of `LIFECYCLE_LOCALIZATION`, which gates the metadata sync alone). They are inert; removing them is a separate owner-approved settings change followed by a read-only check, not part of a deploy. The [flag register](../reference/feature-flags.md) lists what each variable still does.
+
 ## Troubleshooting and recovery
 
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
