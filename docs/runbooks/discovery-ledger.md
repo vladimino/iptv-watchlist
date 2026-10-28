@@ -107,6 +107,7 @@ The production split replaces the Worker's own first bounded commit, which would
 - **Preconditions for a production apply.** Both Scheduled Tasks paused by the owner and verified; no active lease; `sync.json` not in stage `epg`; a fresh `consistent_fenced` cut whose aggregate equals the one the plan was made from, or a new plan from the fresh cut; the dry run `READY`; the explicit owner approval for this run. The daily commit (17:00 Madrid) replaces the ledger, so a plan is void after it.
 - **Stops and resume.** Any fence loss or lost CAS stops the apply with the receipts written so far; nothing is deleted, and the Worker reads the full ledger plus the archive losslessly from the moment the archive pointer exists. A rerun completes the same state; a rerun after success writes only the lease.
 - **After the install.** The flag stays unset: the Worker acts as `frozen`. Resume the Scheduled Tasks (owner), then observe at least one hourly chunk and one daily commit through `epg_pipeline_status` (`archive` block, `ledgerTotal`) and Workers Observability (`exceededMemory`) before `DISCOVERY_LEDGER_MODE=bounded` is considered, which is its own approval.
+- **Performed.** The production install of 28 October 2026 (two approved runs: a transport failure with an unknown outcome stopped the first after the segments, the dry run showed the manifest in place, the second run completed the pointer and the CAS swaps) is recorded in the [stage 2 evidence](../evidence/discovery-ledger-split-air-222-stage-2-2026-10-28.md).
 
 ## Offline benchmark
 
