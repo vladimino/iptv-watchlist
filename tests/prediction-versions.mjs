@@ -137,6 +137,14 @@ assert.notEqual(bundle2.current.r2Key,bundle1.current.r2Key);
 assert.equal(sha256(records.get(bundle2.current.r2Key)),bundle2.current.contentSha256);
 // The history body excludes replacedAt and the pointer, so it hashes to the stored object exactly.
 assert.equal(sha256(ctx.testApi.predictionVersionText(bundle2.history[0])),bundle2.history[0].contentSha256);
+// Lineage of every new record: the run that produced it, its trigger and the fingerprint's full identity, also inside the
+// immutable object; the replaced record keeps the run it came from.
+assert.equal(bundle2.current.runId,runId);assert.equal(bundle2.current.trigger,'manual');assert.equal(bundle2.current.fingerprintPromptVersion,1);
+assert.equal(bundle2.current.fingerprintHash,read('enrichment/films/film001/fingerprint.json').fingerprintHash);
+assert.equal(bundle2.current.tasteProfileVersion,2);assert.equal(bundle2.history[0].tasteProfileVersion,1);
+assert.notEqual(bundle2.history[0].runId,runId);assert.equal(typeof bundle2.history[0].runId,'string');
+assert.equal(JSON.parse(records.get(bundle2.current.r2Key)).runId,runId);
+assert.equal(JSON.parse(records.get(bundle2.current.r2Key)).replacedAt,undefined);
 
 // Partial commit: the bundle write fails after the version object exists. The bundle is unchanged, the object stays unreferenced,
 // and the next successful submit writes a new version and points at that one.

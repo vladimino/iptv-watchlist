@@ -47,7 +47,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0038 — Rating changes are kept in the Letterboxd fact record, and a prediction records the run and fingerprint it came from](0038-durable-rating-and-prediction-lineage.md) | Proposed (owner Accepted/Declined decision pending before merge); extends ADR 0023 | [AIR-12](https://trello.com/c/kh3xGQSp); [gap matrix](../evidence/prediction/air-12-history-gap-matrix-2026-10-28.md); no backfill, flag, R2 or D1 operation authorized |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
