@@ -43,7 +43,12 @@ Exporter `scripts/r2-snapshot-export.mjs` at `main` `8d6b1ba`, output in a priva
 | Attempt | Window (UTC) | Result |
 | --- | --- | --- |
 | 1 | 05:31:12 – 06:39:25 | **NO-GO** `source_changed`: a film's `predictions.json` listed at 05:31 was no longer current when reached (the 06:20 hourly run rewrote it). 3,950 objects downloaded and checkpointed, 7,901 conditional `HEAD`s, 3,950 conditional `GET`s. No manifest. |
-| 2 | 06:42 – __TODO__ | __TODO__ |
+| 2 | 06:41:18 – 06:49:45 | **NO-GO** `source_changed` after 1,625 conditional `HEAD`s and 14 `GET`s: another film's `predictions.json` changed between the opening listing and its read, at about 06:45–06:49, outside the :22–:27 window assumed above. |
+| 3 | 06:50 – __TODO__ | __TODO__ |
+
+**Write pattern of the bucket (listing at 06:50:28 UTC, objects modified in the previous 24 hours, by minute of the hour).** 658 objects. The hourly Task writes from about :17 to :50: prediction bundles (`enrichment/films/*`) at :18–:49, discovery decisions, catalogue, continuation and lease at :22–:23, run diagnostics, queue, profile and leases at :49–:50. The only quiet minutes are about :51 to :16, 25 minutes. The daily commit wrote the ledger, programme, watchlist and generation objects at 16:04–16:06 UTC on 27 October.
+
+**Consequence.** Through the agent proxy the exporter sustains about 3.4 conditional `HEAD`s per second on checkpointed objects and about 1 object per second for a download. A fully checkpointed pass over 8,638 objects needs about 42 minutes, longer than the 25-minute quiet window, so without a pause of the hourly Scheduled Task a `consistent_fenced` cut cannot be produced from here; the [AIR-175 GO](d1-migration/air-175-r2-snapshot-identity-2026-10-26.md) was also taken under a Tasks freeze. Attempt 3 populates the checkpoint for the remaining objects so that a later pass needs only the ~42 minutes. A Tasks freeze is a separate owner decision ([runbook](../runbooks/r2-snapshot-export.md#procedure-each-run-needs-its-own-approval)); it was not applied.
 
 __TODO_SNAPSHOT_IDENTITY__
 
