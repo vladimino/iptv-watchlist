@@ -2,7 +2,7 @@
 
 This page is the contract for keeping a stored fingerprint, and the predictions made from it, usable when the fingerprint schema, the fingerprint prompt or the prediction prompt changes. The decision is [ADR-0035](../../adr/0035-selective-fingerprint-transition-compatibility.md). It extends the outcome model of [prediction compatibility](prediction-compatibility.md) (ADR-0031).
 
-**Status of the code.** The rule is implemented as the pure module `src/domain/fingerprint-compatibility.js` (evaluator, registry validator and the extended prediction check) and is not called by any consumer. Every consumer compares the fingerprint schema and the prediction prompt version by strict equality with the Worker constants (`FINGERPRINT_SCHEMA_VERSION`, `PREDICTION_PROMPT_VERSION`, both 1), and no fingerprint carries a prompt version. The [specification fixtures](../../../tests/fixtures/fingerprint-compatibility/cases.json) state the expected outcomes; `tests/fingerprint-compatibility-spec.mjs` keeps them aligned with the live vocabularies.
+**Status of the code.** The rule is the pure module `src/domain/fingerprint-compatibility.js` (evaluator, registry validator and the extended prediction check). The prediction queue and the runner steps call it ([below](#queue-and-runner)), decided by `PREDICTION_FINGERPRINT_COMPATIBILITY` ([feature flags](../feature-flags.md)); with the default `strict` they keep exact schema and prompt version equality. Readers and diagnostics still compare strictly on their own. Every consumer compares the fingerprint schema and the prediction prompt version by strict equality with the Worker constants (`FINGERPRINT_SCHEMA_VERSION`, `PREDICTION_PROMPT_VERSION`, both 1), and no fingerprint carries a prompt version. The [specification fixtures](../../../tests/fixtures/fingerprint-compatibility/cases.json) state the expected outcomes; `tests/fingerprint-compatibility-spec.mjs` keeps them aligned with the live vocabularies.
 
 ## Version axes
 
@@ -153,20 +153,48 @@ Three parts, the first two immutable and create-only:
 - A prediction depends on the content hash, so a new generation record with the same body keeps it current.
 - Restoring the pointer to a stored generation record is the only rollback that avoids a model run.
 
-This storage is a precondition of activation, not current behaviour: `fingerprint.json` is currently replaced in place.
+Objects under `enrichment/films/<id>/`:
 
-## Scheduling
+| Object | Written | Content |
+| --- | --- | --- |
+| `fingerprints/<fingerprintHash>.json` | create-only, with `FINGERPRINT_VERSION_OBJECTS=on` | the content: the submitted fingerprint fields, `filmId` and `fingerprintHash`; a different text under the same key is a storage conflict and the submit fails |
+| `fingerprint-generations/<fingerprintHash>-s<schema>-p<prompt>.json` | create-only, with the flag on | `{filmId, fingerprintHash, fingerprintSchemaVersion, fingerprintPromptVersion, generatedAt, produced, fields?, previous}`; an object already under the key is accepted only when it parses as a record of the same film, hash and versions with valid provenance and a stored body (it then keeps its first values); anything else is a storage conflict and the film's submit fails |
+| `fingerprint.json` | always, last | the full current record every reader understands (content, `generatedAt`, `invalidatedAt`), plus `fingerprintPromptVersion`, `produced` (`generated`, `partial` with `fields`, or `restored`) and `previous` (`{fingerprintHash, fingerprintSchemaVersion, fingerprintPromptVersion}` of the record it replaced, or null) |
 
-Migration work joins the prediction queue:
-- **Lane order:** hot (urgent first), watchlist, Finds, other cold. Within a lane, missing work precedes migration work, then the earliest availability deadline, then the film id.
-- **Run limits:** migration items per run are capped.
-- **Run binding:** a run ends with `contract_changed` when the Worker's fingerprint schema, fingerprint prompt, prediction prompt or profile hash differs from the one it started with.
+A pointer written before the prompt version existed has none of the three provenance fields and reads as prompt version 1, `generated`, no predecessor. The view index's `impactFeatures` facet also carries `fingerprintPromptVersion` (null for older entries, read as 1), so the queue evaluates from the index without opening fingerprints. Every reader keeps reading `fingerprint.json` alone.
+
+## Queue and runner
+
+The transition registry is the code constant `FINGERPRINT_TRANSITIONS` in `src/enrichment.js`, next to `FINGERPRINT_SCHEMA_VERSION` and `FINGERPRINT_PROMPT_VERSION`; its declarations are digested once per isolate, and a digest of the whole registry binds queues and runs to it. The evaluator derives every schema vocabulary from `FINGERPRINT_SCHEMA_BASE`, the frozen vocabulary of schema 1; `tests/fingerprint-migration-queue.mjs` checks that the registry applied to the base reproduces the live `MECHANICS`, `EXECUTION`, `GENERAL_EXECUTION` and genre domains, so a release cannot change a constant without declaring the transition.
+
+**Queue.** Every refresh evaluates each film that has a fingerprint, from the index facet, in both fingerprint modes, and records `fingerprintCompatibility` next to the profile block of [prediction compatibility](prediction-compatibility.md#prediction-queue):
+
+```json
+{"mode": "strict", "evaluatorVersion": 1, "registryDigest": "<sha256>", "target": {"fingerprintSchemaVersion": 2, "fingerprintPromptVersion": 1, "predictionPromptVersion": 1},
+ "films": 5, "unindexed": 0, "strict": {"current": 0, "stale": 4}, "selective": {"current": 2, "compatible": 0, "stale": 2},
+ "reasons": {"exact": 2, "fingerprint_not_current": 2}, "fingerprintReasons": {"transition_unaffected": 2, "transition_impacted": 2},
+ "migration": {"none": 0, "compatible": 2, "partial": 2, "full": 0, "global": 0},
+ "classes": {"unchanged": 0, "missing": 1, "prediction_only": 0, "fingerprint_and_prediction": 4, "migration": 4, "unknown": 0},
+ "wouldKeep": 2, "wouldRequeue": 0, "strictDisagreements": 0}
+```
+
+- `reasons` counts the selective prediction verdict, `fingerprintReasons` the selective fingerprint verdict, `migration` its work class.
+- `classes` describes the decision in force: `unchanged` films are out of the queue; `missing` have no prediction; `prediction_only` and `fingerprint_and_prediction` are outstanding; `migration` counts outstanding films whose work comes from a transition (the fingerprint is stale, or the prediction prompt moved), `unknown` those whose outcome is fail-closed (`transition_unknown`, `transition_impact_unknown`, `film_features_unknown`, `prompt_transition_unknown`, `prompt_features_unknown`).
+- `strictDisagreements` compares the decision in force with the evaluator in the same mode. Under `strict` it counts the films the evaluator judges differently from plain equality, for example a stored prompt version newer than the code's, which equality does not see.
+- `work` maps each outstanding film to `{class, requiredWork, migration, reason, fields?}`; `migration` is `partial` (with the fields to regenerate), `full`, `global`, `prediction` (prompt axis) or null for work that is not a transition's. The queue also records `fingerprintSchemaVersion`, `fingerprintPromptVersion`, `predictionPromptVersion` and the registry digest it was built with.
+- **Decision.** Under `strict` the queue decides as before the transition rule existed; the profile switch keeps its own meaning. Under `selective` one verdict per film decides: fingerprint, prediction prompt and (in the profile switch's mode) profile.
+
+**Order.** Within the hot lane and the cold lane, films without a prediction come before migration work; then the existing order (urgency, deadline, availability, arrival, id). A new hot film therefore enters a batch ahead of waiting migration films, and the lanes keep their current meaning: hot first, then watchlist films of the cold lane; cold catalog films stay counted but outside the runner list.
+
+**Batches.** `queueBatchIds` takes the ready ids in queue order and lets migration work fill at most half of the slots (rounded up, `FINGERPRINT_MIGRATION_SHARE`); missing work fills the rest; slots migration cannot fill stay empty. The runner's `start` and `next` both select through it, and the adaptive batch size, the lease and the quota rules are unchanged.
+
+**Runner.** `start` records `fingerprintPromptVersion` and the registry digest with the schema and prediction prompt versions it already kept; `next`, `submit` and `complete` (without a reason) answer `409 {code: "contract_changed"}` when any of them differs from the Worker's, as they answer `Profile changed` for the profile hash. `next` reports `fingerprintPromptVersion` with the other versions and chooses `prediction_only` when the stored fingerprint is usable under the mode in force (exact under `strict`; exact or compatible under `selective`); `submit` accepts a new fingerprint only when the stored one is not usable, stamps the new prediction with the fingerprint's own schema version, and writes the fingerprint as described under [Storage](#storage). Under `selective`, `next` first restores a fingerprint whose stored versions are newer than the code's from a stored generation record that is exact for the code (`produced: restored`, no model call) and lists the film in the run's `restored`; without such a record the film regenerates.
 
 ## Rollback
 
 | Path | Effect |
 | --- | --- |
-| switch to `strict` | every non-exact fingerprint is stale: a full re-fingerprint after a non-identity transition |
+| switch to `strict` | every non-exact fingerprint is stale: a full re-fingerprint after a non-identity transition, bounded per batch like any migration work |
 | code rollback | safe only down to the release with immutable fingerprint versions and `fingerprint_ahead` handling |
-| schema or prompt constant restored | `fingerprint_ahead` fingerprints are restored to a stored current version where one exists, otherwise regenerated; predictions with the restored hash are current again; history predictions are not promoted |
+| schema or prompt constant restored | under `selective`, the runner's `next` restores `fingerprint_ahead` fingerprints to a stored generation record that is exact for the code where one exists (written with `FINGERPRINT_VERSION_OBJECTS=on`), otherwise the film regenerates (the records are read page by page; a history over 1,000 records fails the step as a storage error rather than regenerating); a prediction made from the restored content is current again, one made from the newer content is `prediction_only`; history predictions are not promoted. Under `strict` the film regenerates in full |
 | forced recompute | a `global` transition |

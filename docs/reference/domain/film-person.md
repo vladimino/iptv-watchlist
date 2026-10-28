@@ -59,7 +59,8 @@ An explicit `shows: []` is known **no availability**. When a published programme
 | `epg/discovered-films.json` | Verified discovered catalog records; current show lists tied to the published generation |
 | `data/film-titles.json`, `data/person-names.json`, plus `REVIEWED_PEOPLE` override | Reviewed/manual localization; always stronger than automatic cache |
 | `titles.json`, `people.json` | Provisional/derived localization caches, **not** canonical Person identity |
-| `enrichment/films/<id>/fingerprint.json`, `predictions.json`, `actual.json` | Current fingerprint, current prediction with history, independent actual rating |
+| `enrichment/films/<id>/fingerprint.json`, `predictions.json`, `actual.json` | Current fingerprint (the pointer, with its prompt version and provenance), current prediction with history, independent actual rating |
+| `enrichment/films/<id>/fingerprints/<hash>.json`, `fingerprint-generations/<hash>-s<schema>-p<prompt>.json` | Immutable fingerprint content bodies and generation records, written create-only behind `FINGERPRINT_VERSION_OBJECTS` ([fingerprint compatibility](fingerprint-compatibility.md#storage)); never identity, never read by display |
 | `enrichment/view-index.json`, `enrichment/prediction-queue.json` | Derived dashboard/queue projections. Neither defines Film identity or personal truth. A view-index entry with a fingerprint also carries `impactFeatures`, a copy of the full fingerprint's mechanics and execution bound to its hash ([prediction compatibility](prediction-compatibility.md#prediction-queue)) |
 | `enrichment/profile/current.json` and `profile/versions/<n>.json` | Taste-profile version/hash that controls prediction freshness |
 
