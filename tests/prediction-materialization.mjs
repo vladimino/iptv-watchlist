@@ -104,6 +104,9 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-prediction-materialize-'))
 try{
  const snapshot=path.join(root,'snapshot'),out=path.join(root,'out');fs.mkdirSync(path.join(snapshot,'objects'),{recursive:true});
  const bodies={'watchlist.json':'{"films":[]}'};for(let i=0;i<60;i++)bodies[bundleKey('film'+i)]=JSON.stringify(legacy('film'+i));
+ // One bundle the live writer already linked in full (no record pending): the plan leaves it out and the rehearsal must leave it untouched.
+ const linked=legacy('linked'),link=record=>{const text=rules.predictionVersionText(record),digest=sha256(text);bodies[rules.predictionVersionKey('linked',digest)]=text;return {...record,r2Key:rules.predictionVersionKey('linked',digest),contentSha256:digest};};
+ bodies[bundleKey('linked')]=JSON.stringify({current:link(linked.current),history:[link(linked.history[0])]});
  const entries=Object.entries(bodies).map(([key,text])=>{const name=sha256(key)+'.bin';fs.writeFileSync(path.join(snapshot,'objects',name),text);return {key,file:'objects/'+name,size:Buffer.byteLength(text),sha256:sha256(text),metadata:{key,size:Buffer.byteLength(text),etag:'"etag-'+key.length+'-'+sha256(text).slice(0,8)+'"'}};});
  const manifest={...manifestFor(entries,1,'2026-10-26T00:00:00.000Z','2026-10-26T01:00:00.000Z',[]),status:'consistent_fenced'};
  fs.writeFileSync(path.join(snapshot,'manifest.json'),JSON.stringify(manifest));
@@ -111,12 +114,13 @@ try{
  assert.deepEqual(report.planned,{films:60,records:120,batches:2});
  assert.ok(!fs.readFileSync(path.join(out,'report.json'),'utf8').includes('film1'),'the report holds no film id');
  const rehearsal=await rehearse({snapshot,output:out});
- assert.equal(rehearsal.ok,true,JSON.stringify(rehearsal));assert.deepEqual(rehearsal.outcomes,{materialized:60});assert.equal(rehearsal.check.linked,120);
+ assert.equal(rehearsal.ok,true,JSON.stringify(rehearsal));assert.deepEqual(rehearsal.outcomes,{materialized:60});assert.equal(rehearsal.check.linked,122);
+ assert.deepEqual({bundles:rehearsal.check.bundles,planned:rehearsal.check.planned,outsidePlan:rehearsal.check.outsidePlan,outsidePlanChanged:rehearsal.check.outsidePlanChanged,provenance:rehearsal.check.provenance},{bundles:61,planned:60,outsidePlan:1,outsidePlanChanged:0,provenance:60},'provenance is expected on the planned bundles only; the already linked one stays as it was');
  const b=bucket();for(const [key,text] of Object.entries(bodies)){b.records.set(key,text);b.etags.set(key,entries.find(e=>e.key===key).metadata.etag.replace(/"/g,''));}
  const fetchImpl=async(url,init)=>{const response=await ctx.worker.fetch(new Request(url,init),{BUCKET:b,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'});return {ok:response.ok,status:response.status,json:()=>response.json()};};
  const changedKey=bundleKey('film59'),changedEtag=b.etags.get(changedKey);b.etags.set(changedKey,'after-a-submit');
  const validate=await remote({mode:'validate',output:out,endpoint:'https://site.example',fetchImpl,env:{}});
- assert.deepEqual(validate.totals,{would_materialize:59,bundle_changed:1});assert.deepEqual(validate.incomplete,[{batch:1,classes:{done:9,replan:1,stop:0}}]);assert.equal([...b.records.keys()].filter(key=>key.includes('/versions/')).length,0);
+ assert.deepEqual(validate.totals,{would_materialize:59,bundle_changed:1});assert.deepEqual(validate.incomplete,[{batch:1,classes:{done:9,replan:1,stop:0}}]);assert.equal([...b.records.keys()].filter(key=>key.includes('/versions/')).length,2,'a dry validate writes nothing: only the two objects of the already linked film exist');
  await assert.rejects(remote({mode:'apply',output:out,endpoint:'http://site.example',fetchImpl,env:{}}),/HTTPS/);
  const applied=await remote({mode:'apply',output:out,endpoint:'https://site.example',fetchImpl,env:{}});
  assert.deepEqual(applied.totals,{materialized:59,bundle_changed:1});assert.equal(applied.failed,null);assert.equal(applied.batchesComplete,1);assert.deepEqual(applied.incomplete.map(entry=>entry.batch),[1]);

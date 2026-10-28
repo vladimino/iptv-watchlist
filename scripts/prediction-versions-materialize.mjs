@@ -85,7 +85,8 @@ export async function rehearse({snapshot,output}){
  const manifest=JSON.parse(await readFile(path.join(snapshotPath,'manifest.json'),'utf8'));
  if(manifest.totals?.aggregateSha256!==origin.planId)throw new MaterializeError('The snapshot is not the one the plan was made from',3);
  const bucket=snapshotBucket(snapshotPath,manifest),env={BUCKET:bucket,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'},ctx=workerContext();
- const before=new Map([...bucket.records].filter(([key])=>key.endsWith('/predictions.json')).map(([key,text])=>[key,JSON.parse(text)]));
+ const before=new Map([...bucket.records].filter(([key])=>key.endsWith('/predictions.json')).map(([key,text])=>[key,{text,bundle:JSON.parse(text)}]));
+ const plannedKeys=new Set(batches.flat().map(item=>'enrichment/films/'+encodeURIComponent(item.filmId)+'/predictions.json'));
  const outcomes={},statuses={},replays={},incomplete=[];
  for(const [batch,items] of batches.entries()){
   const dry=await post(ctx,env,{planId:origin.planId,batch,items,dryRun:true});statuses['dry_'+dry.status]=(statuses['dry_'+dry.status]||0)+1;
@@ -94,15 +95,17 @@ export async function rehearse({snapshot,output}){
   for(const [key,value] of Object.entries(result.data.outcomes||{}))outcomes[key]=(outcomes[key]||0)+value;
  }
  for(const [batch,items] of batches.entries()){const again=await post(ctx,env,{planId:origin.planId,batch,items});replays[again.data.replay?'replay':'not_replay']=(replays[again.data.replay?'replay':'not_replay']||0)+1;}
- const rules=vm.runInContext('({predictionMaterializationPlan,predictionVersionBody})',ctx),check={bundles:0,pending:0,malformed:0,linked:0,objectMismatch:0,bodyChanged:0,provenance:0};
- for(const [key,old] of before){
-  const filmId=decodeURIComponent(key.split('/')[2]),now=JSON.parse(bucket.records.get(key)),result=rules.predictionMaterializationPlan(filmId,now);
+ const rules=vm.runInContext('({predictionMaterializationPlan,predictionVersionBody})',ctx),check={bundles:0,planned:0,outsidePlan:0,outsidePlanChanged:0,pending:0,malformed:0,linked:0,objectMismatch:0,bodyChanged:0,provenance:0};
+ // A bundle outside the plan (every record already linked by the live writer) carries no provenance block and must stay byte for byte.
+ for(const [key,{text:oldText,bundle:old}] of before){
+  const filmId=decodeURIComponent(key.split('/')[2]),nowText=bucket.records.get(key),now=JSON.parse(nowText),result=rules.predictionMaterializationPlan(filmId,now);
   check.bundles++;check.pending+=result.pending.length;check.malformed+=result.malformed.length;check.linked+=result.linked.length;
+  if(plannedKeys.has(key))check.planned++;else{check.outsidePlan++;if(nowText!==oldText)check.outsidePlanChanged++;}
   if(now.materialized?.planId===origin.planId)check.provenance++;
   if(JSON.stringify(rules.predictionVersionBody(old.current))!==JSON.stringify(rules.predictionVersionBody(now.current)))check.bodyChanged++;
   for(const item of result.linked){const text=bucket.records.get(item.r2Key);if(!text||sha256(text)!==item.contentSha256||text!==JSON.stringify(rules.predictionVersionBody(item.role==='current'?now.current:now.history[item.index])))check.objectMismatch++;}
  }
- const report={schemaVersion:1,mode:'rehearse',network:false,planId:origin.planId,batches:batches.length,statuses,outcomes,replays,incomplete,check,ok:!incomplete.length&&check.pending===0&&check.malformed===0&&check.objectMismatch===0&&check.bodyChanged===0&&check.provenance===check.bundles&&!replays.not_replay};
+ const report={schemaVersion:1,mode:'rehearse',network:false,planId:origin.planId,batches:batches.length,statuses,outcomes,replays,incomplete,check,ok:!incomplete.length&&check.pending===0&&check.malformed===0&&check.objectMismatch===0&&check.bodyChanged===0&&check.provenance===check.planned&&check.outsidePlanChanged===0&&!replays.not_replay};
  await writeFile(path.join(outputPath,'rehearse.json'),JSON.stringify(report,null,1)+'\n',{mode:0o600});
  return report;
 }
