@@ -1,0 +1,2856 @@
+{
+ "specVersion": 1,
+ "decision": "docs/adr/0035-selective-fingerprint-transition-compatibility.md",
+ "note": "Pure specification fixtures. Synthetic hashes, schemas and features only; no production record. They state expected outcomes for the fingerprint transition evaluator, the extended prediction check and the transition declaration validator; they are not an implementation.",
+ "vocabulary": {
+  "axes": [
+   "fingerprint_schema",
+   "fingerprint_prompt",
+   "prediction_prompt"
+  ],
+  "scopes": [
+   "identity",
+   "selective",
+   "global"
+  ],
+  "modes": [
+   "strict",
+   "selective"
+  ],
+  "outcomes": [
+   "current",
+   "compatible",
+   "stale"
+  ],
+  "migrations": [
+   "none",
+   "compatible",
+   "partial",
+   "full",
+   "global"
+  ],
+  "requiredWork": [
+   "none",
+   "prediction_only",
+   "fingerprint_and_prediction"
+  ],
+  "selectorKinds": [
+   "mechanic",
+   "execution",
+   "genre"
+  ],
+  "regenerateModes": [
+   "partial",
+   "full",
+   "prediction"
+  ],
+  "changeKinds": {
+   "value_added": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "owner_selectors"
+   },
+   "value_removed": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "value"
+   },
+   "value_split": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "value"
+   },
+   "value_merged": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "value"
+   },
+   "value_renamed": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "value"
+   },
+   "value_redefined": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "value"
+   },
+   "dimension_added": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "genre_domain"
+   },
+   "dimension_removed": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "none"
+   },
+   "dimension_redefined": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "dimension"
+   },
+   "field_added": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "global_only"
+   },
+   "field_removed": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "none"
+   },
+   "field_redefined": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "global_only"
+   },
+   "constraint_relaxed": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "none"
+   },
+   "constraint_tightened": {
+    "axes": [
+     "fingerprint_schema"
+    ],
+    "coverage": "structure"
+   },
+   "prompt_revised": {
+    "axes": [
+     "fingerprint_prompt",
+     "prediction_prompt"
+    ],
+    "coverage": "owner_selectors"
+   }
+  },
+  "identityCoverage": [
+   "none",
+   "structure"
+  ],
+  "fingerprintReasons": {
+   "current": [
+    "exact"
+   ],
+   "compatible": [
+    "transition_unaffected"
+   ],
+   "stale": [
+    "fingerprint_missing",
+    "fingerprint_invalidated",
+    "fingerprint_ahead",
+    "fingerprint_version_changed",
+    "transition_unknown",
+    "transition_impact_unknown",
+    "transition_global",
+    "fingerprint_structure_incompatible",
+    "transition_impacted",
+    "film_features_unknown"
+   ]
+  },
+  "predictionReasons": {
+   "current": [
+    "exact"
+   ],
+   "compatible": [
+    "prompt_unaffected"
+   ],
+   "stale": [
+    "fingerprint_not_current",
+    "fingerprint_changed",
+    "fingerprint_provenance_mismatch",
+    "prompt_changed",
+    "prompt_ahead",
+    "prompt_transition_unknown",
+    "prompt_global_change",
+    "prompt_impacted",
+    "prompt_features_unknown",
+    "film_features_unknown"
+   ]
+  },
+  "declaration": {
+   "decisions": [
+    "accept",
+    "reject"
+   ],
+   "codes": [
+    "transition_schema_unknown",
+    "axis_unknown",
+    "version_not_increasing",
+    "chain_broken",
+    "scope_unknown",
+    "change_kind_unknown",
+    "change_invalid",
+    "identity_change_not_compatible",
+    "identity_has_selectors",
+    "global_only_change",
+    "selective_requires_selectors",
+    "selector_kind_unknown",
+    "selector_invalid",
+    "change_not_covered",
+    "genre_floor_missing",
+    "partial_fields_invalid",
+    "selective_requires_owner_approval",
+    "approval_mismatch"
+   ]
+  }
+ },
+ "registries": {
+  "none": [],
+  "split": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "21fa612f24bff5c9e7b280afffafa5fa5344db8b844896ccb50bbf91691c2b1b"
+    }
+   }
+  ],
+  "genreDimension": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "dimension_added",
+      "dimension": "horror_climax_setup",
+      "values": [
+       "weak",
+       "mixed",
+       "strong",
+       "unknown",
+       "not_applicable"
+      ],
+      "domain": [
+       "horror"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "execution"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "78eff95d83086c855e45cd11cecad8f882c2200b7a1b9a6b918854f7bad8f2d3"
+    }
+   }
+  ],
+  "chain": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "21fa612f24bff5c9e7b280afffafa5fa5344db8b844896ccb50bbf91691c2b1b"
+    }
+   },
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 2,
+    "to": 3,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "dimension_added",
+      "dimension": "horror_climax_setup",
+      "values": [
+       "weak",
+       "mixed",
+       "strong",
+       "unknown",
+       "not_applicable"
+      ],
+      "domain": [
+       "horror"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "execution"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "29ff17d0177af65a10b722eb48df6f801de3cbfdd87be8341bfd72f3d6736929"
+    }
+   }
+  ],
+  "diagnostic": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "identity",
+    "changes": [
+     {
+      "kind": "constraint_relaxed",
+      "field": "sourceRefs",
+      "rule": {
+       "maxItems": 12
+      }
+     }
+    ],
+    "selectors": []
+   }
+  ],
+  "tightened": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "identity",
+    "changes": [
+     {
+      "kind": "constraint_tightened",
+      "field": "strengths",
+      "rule": {
+       "maxItems": 5
+      }
+     }
+    ],
+    "selectors": []
+   }
+  ],
+  "global": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "global",
+    "changes": [
+     {
+      "kind": "field_redefined",
+      "field": "moodLabels"
+     }
+    ],
+    "selectors": []
+   }
+  ],
+  "invalidApproval": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+   }
+  ],
+  "fingerprintPrompt": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_prompt",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "prompt_revised",
+      "fields": [
+       "execution"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "b8ce03a116ea42bbffa77e26fc5ef17245954469fc8dcf37301d1125bc614bbc"
+    }
+   }
+  ],
+  "predictionPrompt": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "prediction_prompt",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "prompt_revised"
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "comedy"
+      ],
+      "regenerate": {
+       "mode": "prediction"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "af3847e0f69642dacbcb995e370dee97a94086e4698857a15bee5d9d6f1faa21"
+    }
+   }
+  ],
+  "predictionPromptGlobal": [
+   {
+    "transitionSchemaVersion": 1,
+    "axis": "prediction_prompt",
+    "from": 1,
+    "to": 2,
+    "scope": "global",
+    "changes": [
+     {
+      "kind": "prompt_revised"
+     }
+    ],
+    "selectors": []
+   }
+  ]
+ },
+ "fingerprints": {
+  "heistComedy": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Комедия"
+   ]
+  },
+  "chaseThriller": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "chase_escape",
+    "rescue"
+   ],
+   "genres": [
+    "Триллер"
+   ]
+  },
+  "heistDrama": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Драма"
+   ]
+  },
+  "chaseHorror": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "chase_escape"
+   ],
+   "genres": [
+    "Ужасы"
+   ]
+  },
+  "survivalHorror": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "survival"
+   ],
+   "genres": [
+    "Ужасы",
+    "Триллер"
+   ]
+  },
+  "noGenres": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "survival"
+   ],
+   "genres": []
+  },
+  "unmappedGenre": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "survival"
+   ],
+   "genres": [
+    "Нуар"
+   ]
+  },
+  "manyStrengths": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+    "s6"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Драма"
+   ]
+  },
+  "invalidated": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": "2026-01-01T00:00:00.000Z",
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Драма"
+   ]
+  },
+  "schema2Chase": {
+   "fingerprintSchemaVersion": 2,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f2",
+   "plotMechanics": [
+    "chase",
+    "rescue"
+   ],
+   "genres": [
+    "Триллер"
+   ]
+  },
+  "schema2Heist": {
+   "fingerprintSchemaVersion": 2,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Драма"
+   ]
+  },
+  "prompt2Drama": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Драма"
+   ],
+   "fingerprintPromptVersion": 2
+  },
+  "prompt1Explicit": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Драма"
+   ],
+   "fingerprintPromptVersion": 1
+  },
+  "prompt2SameContent": {
+   "fingerprintSchemaVersion": 1,
+   "invalidatedAt": null,
+   "execution": {
+    "pace": "fast",
+    "plot_engine": "strong"
+   },
+   "strengths": [
+    "s1",
+    "s2"
+   ],
+   "sourceRefs": [
+    "model_knowledge"
+   ],
+   "fingerprintHash": "f1",
+   "plotMechanics": [
+    "heist"
+   ],
+   "genres": [
+    "Драма"
+   ],
+   "fingerprintPromptVersion": 2
+  }
+ },
+ "fingerprintCases": [
+  {
+   "id": "exact-current",
+   "category": "exact",
+   "mode": "selective",
+   "registry": "none",
+   "fingerprint": "heistDrama",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "migration": "none",
+    "links": 0
+   }
+  },
+  {
+   "id": "legacy-prompt-is-one",
+   "category": "exact",
+   "mode": "selective",
+   "registry": "none",
+   "fingerprint": "heistDrama",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "migration": "none",
+    "links": 0
+   },
+   "note": "no fingerprintPromptVersion field reads as version 1"
+  },
+  {
+   "id": "explicit-prompt-one",
+   "category": "exact",
+   "mode": "selective",
+   "registry": "none",
+   "fingerprint": "prompt1Explicit",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "migration": "none",
+    "links": 0
+   }
+  },
+  {
+   "id": "split-unaffected",
+   "category": "split",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "heistComedy",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "transition_unaffected",
+    "migration": "compatible",
+    "links": 1
+   }
+  },
+  {
+   "id": "split-affected",
+   "category": "split",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "chaseThriller",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_impacted",
+    "migration": "partial",
+    "links": 1,
+    "fields": [
+     "plotMechanics"
+    ]
+   }
+  },
+  {
+   "id": "split-already-migrated",
+   "category": "repeat",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "schema2Chase",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "migration": "none",
+    "links": 0
+   }
+  },
+  {
+   "id": "split-repeat-unaffected",
+   "category": "repeat",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "schema2Heist",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "migration": "none",
+    "links": 0
+   },
+   "note": "a second evaluation of an already compatible or regenerated film finds no work"
+  },
+  {
+   "id": "split-strict",
+   "category": "strict",
+   "mode": "strict",
+   "registry": "split",
+   "fingerprint": "heistComedy",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_version_changed",
+    "migration": "full",
+    "links": 1
+   }
+  },
+  {
+   "id": "genre-dimension-in-domain",
+   "category": "genre",
+   "mode": "selective",
+   "registry": "genreDimension",
+   "fingerprint": "survivalHorror",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_impacted",
+    "migration": "partial",
+    "links": 1,
+    "fields": [
+     "execution"
+    ]
+   }
+  },
+  {
+   "id": "genre-dimension-outside",
+   "category": "genre",
+   "mode": "selective",
+   "registry": "genreDimension",
+   "fingerprint": "heistComedy",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "transition_unaffected",
+    "migration": "compatible",
+    "links": 1
+   },
+   "note": "the added genre-specific dimension is optional, so the old fingerprint passes the target validator without it"
+  },
+  {
+   "id": "genre-dimension-other-genre-specific",
+   "category": "genre",
+   "mode": "selective",
+   "registry": "genreDimension",
+   "fingerprint": "chaseThriller",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "transition_unaffected",
+    "migration": "compatible",
+    "links": 1
+   }
+  },
+  {
+   "id": "genre-dimension-no-genres",
+   "category": "unknown",
+   "mode": "selective",
+   "registry": "genreDimension",
+   "fingerprint": "noGenres",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "film_features_unknown",
+    "migration": "full",
+    "links": 1
+   }
+  },
+  {
+   "id": "genre-dimension-unmapped-genre",
+   "category": "unknown",
+   "mode": "selective",
+   "registry": "genreDimension",
+   "fingerprint": "unmappedGenre",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "film_features_unknown",
+    "migration": "full",
+    "links": 1
+   }
+  },
+  {
+   "id": "diagnostic-relaxed",
+   "category": "diagnostic",
+   "mode": "selective",
+   "registry": "diagnostic",
+   "fingerprint": "manyStrengths",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "transition_unaffected",
+    "migration": "compatible",
+    "links": 1
+   }
+  },
+  {
+   "id": "tightened-within",
+   "category": "diagnostic",
+   "mode": "selective",
+   "registry": "tightened",
+   "fingerprint": "heistDrama",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "transition_unaffected",
+    "migration": "compatible",
+    "links": 1
+   }
+  },
+  {
+   "id": "tightened-violates",
+   "category": "structure",
+   "mode": "selective",
+   "registry": "tightened",
+   "fingerprint": "manyStrengths",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_structure_incompatible",
+    "migration": "full",
+    "links": 1
+   }
+  },
+  {
+   "id": "global-change",
+   "category": "global",
+   "mode": "selective",
+   "registry": "global",
+   "fingerprint": "heistDrama",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_global",
+    "migration": "global",
+    "links": 1
+   }
+  },
+  {
+   "id": "transition-missing",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "heistDrama",
+   "target": {
+    "fingerprintSchemaVersion": 3,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_unknown",
+    "migration": "global",
+    "links": 2
+   }
+  },
+  {
+   "id": "approval-mismatch",
+   "category": "unknown",
+   "mode": "selective",
+   "registry": "invalidApproval",
+   "fingerprint": "heistDrama",
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_impact_unknown",
+    "migration": "global",
+    "links": 1
+   }
+  },
+  {
+   "id": "schema-ahead",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "schema2Heist",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_ahead",
+    "migration": "full",
+    "links": 0
+   }
+  },
+  {
+   "id": "prompt-ahead",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "none",
+   "fingerprint": "prompt2Drama",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_ahead",
+    "migration": "full",
+    "links": 0
+   }
+  },
+  {
+   "id": "invalidated",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "none",
+   "fingerprint": "invalidated",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_invalidated",
+    "migration": "full",
+    "links": 0
+   }
+  },
+  {
+   "id": "missing",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "none",
+   "fingerprint": null,
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_missing",
+    "migration": "full",
+    "links": 0
+   }
+  },
+  {
+   "id": "chain-unaffected",
+   "category": "transitive",
+   "mode": "selective",
+   "registry": "chain",
+   "fingerprint": "heistComedy",
+   "target": {
+    "fingerprintSchemaVersion": 3,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "transition_unaffected",
+    "migration": "compatible",
+    "links": 2
+   }
+  },
+  {
+   "id": "chain-second-link",
+   "category": "transitive",
+   "mode": "selective",
+   "registry": "chain",
+   "fingerprint": "survivalHorror",
+   "target": {
+    "fingerprintSchemaVersion": 3,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_impacted",
+    "migration": "partial",
+    "links": 2,
+    "fields": [
+     "execution"
+    ]
+   }
+  },
+  {
+   "id": "chain-both-links",
+   "category": "transitive",
+   "mode": "selective",
+   "registry": "chain",
+   "fingerprint": "chaseHorror",
+   "target": {
+    "fingerprintSchemaVersion": 3,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_impacted",
+    "migration": "partial",
+    "links": 2,
+    "fields": [
+     "execution",
+     "plotMechanics"
+    ]
+   },
+   "note": "fields of every reached link are united; the reason is the first stale link"
+  },
+  {
+   "id": "prompt-reached",
+   "category": "prompt",
+   "mode": "selective",
+   "registry": "fingerprintPrompt",
+   "fingerprint": "survivalHorror",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 2,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "transition_impacted",
+    "migration": "full",
+    "links": 1
+   }
+  },
+  {
+   "id": "prompt-unaffected",
+   "category": "prompt",
+   "mode": "selective",
+   "registry": "fingerprintPrompt",
+   "fingerprint": "heistDrama",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 2,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "transition_unaffected",
+    "migration": "compatible",
+    "links": 1
+   }
+  },
+  {
+   "id": "prompt-regenerated-same-content",
+   "category": "provenance",
+   "mode": "selective",
+   "registry": "fingerprintPrompt",
+   "fingerprint": "prompt2SameContent",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 2,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "migration": "none",
+    "links": 0
+   },
+   "history": [
+    "prompt1Explicit"
+   ],
+   "note": "a prompt-2 regeneration with identical content reuses the content body f1 and adds its own generation record (f1, prompt 2); the prompt-1 generation record stays in history"
+  },
+  {
+   "id": "prompt-rollback-restore",
+   "category": "rollback",
+   "mode": "selective",
+   "registry": "fingerprintPrompt",
+   "fingerprint": "prompt2SameContent",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_ahead",
+    "migration": "full",
+    "links": 0,
+    "restore": "prompt1Explicit"
+   },
+   "history": [
+    "prompt1Explicit"
+   ],
+   "note": "restoring prompt 1 moves the pointer back to the stored generation record (f1, prompt 1); same body, no model run"
+  },
+  {
+   "id": "rollback-restore",
+   "category": "rollback",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "schema2Chase",
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_ahead",
+    "migration": "full",
+    "links": 0,
+    "restore": "chaseThriller"
+   },
+   "history": [
+    "chaseThriller"
+   ],
+   "note": "after a code rollback to schema 1 the scheduler moves the pointer back to the stored schema-1 version, which evaluates current; no model run"
+  }
+ ],
+ "predictionCases": [
+  {
+   "id": "kept-fingerprint-keeps-prediction",
+   "category": "boundary",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "heistComedy",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "requiredWork": "none"
+   },
+   "note": "the fingerprint is compatible and unchanged, so the prediction made from it stays current"
+  },
+  {
+   "id": "stale-fingerprint-stales-prediction",
+   "category": "boundary",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "chaseThriller",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_not_current",
+    "requiredWork": "fingerprint_and_prediction"
+   }
+  },
+  {
+   "id": "regenerated-fingerprint",
+   "category": "boundary",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "schema2Chase",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_changed",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "same-content-new-prompt",
+   "category": "provenance",
+   "mode": "selective",
+   "registry": "fingerprintPrompt",
+   "fingerprint": "prompt2SameContent",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 2,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "current",
+    "reason": "exact",
+    "requiredWork": "none"
+   },
+   "note": "the prediction depends on the content hash; a new generation record with the same body keeps it current"
+  },
+  {
+   "id": "provenance-mismatch",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "none",
+   "fingerprint": "heistDrama",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 2,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "fingerprint_provenance_mismatch",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "prediction-prompt-reached",
+   "category": "prompt",
+   "mode": "selective",
+   "registry": "predictionPrompt",
+   "fingerprint": "heistComedy",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 2
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "prompt_impacted",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "prediction-prompt-unaffected",
+   "category": "prompt",
+   "mode": "selective",
+   "registry": "predictionPrompt",
+   "fingerprint": "heistDrama",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 2
+   },
+   "expected": {
+    "outcome": "compatible",
+    "reason": "prompt_unaffected",
+    "requiredWork": "none"
+   }
+  },
+  {
+   "id": "prediction-prompt-global",
+   "category": "global",
+   "mode": "selective",
+   "registry": "predictionPromptGlobal",
+   "fingerprint": "heistDrama",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 2
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "prompt_global_change",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "prediction-prompt-ahead",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "predictionPrompt",
+   "fingerprint": "heistDrama",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 2,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "prompt_ahead",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "prediction-prompt-missing-link",
+   "category": "versions",
+   "mode": "selective",
+   "registry": "predictionPrompt",
+   "fingerprint": "heistDrama",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 3
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "prompt_transition_unknown",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "prediction-prompt-no-genres",
+   "category": "unknown",
+   "mode": "selective",
+   "registry": "predictionPrompt",
+   "fingerprint": "noGenres",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 2
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "prompt_features_unknown",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "prediction-prompt-strict",
+   "category": "strict",
+   "mode": "strict",
+   "registry": "predictionPrompt",
+   "fingerprint": "heistDrama",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 1,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 2
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "prompt_changed",
+    "requiredWork": "prediction_only"
+   }
+  },
+  {
+   "id": "profile-selector-on-new-value",
+   "category": "cross-rule",
+   "mode": "selective",
+   "registry": "split",
+   "fingerprint": "heistComedy",
+   "prediction": {
+    "fingerprintHash": "f1",
+    "fingerprintSchemaVersion": 1,
+    "predictionPromptVersion": 1,
+    "tasteProfileVersion": 1,
+    "tasteProfileHash": "h1"
+   },
+   "target": {
+    "fingerprintSchemaVersion": 2,
+    "fingerprintPromptVersion": 1,
+    "predictionPromptVersion": 1
+   },
+   "expected": {
+    "outcome": "stale",
+    "reason": "film_features_unknown",
+    "requiredWork": "prediction_only"
+   },
+   "profileLink": {
+    "scope": "selective",
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase"
+      ]
+     }
+    ]
+   },
+   "note": "a profile selector names a schema-2 value; the kept schema-1 fingerprint cannot answer it, so the feature is unknown (ADR-0031 reason)"
+  }
+ ],
+ "declarations": [
+  {
+   "id": "accept-split",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "21fa612f24bff5c9e7b280afffafa5fa5344db8b844896ccb50bbf91691c2b1b"
+    }
+   },
+   "expected": {
+    "decision": "accept"
+   }
+  },
+  {
+   "id": "accept-genre-dimension",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "dimension_added",
+      "dimension": "horror_climax_setup",
+      "values": [
+       "weak",
+       "mixed",
+       "strong",
+       "unknown",
+       "not_applicable"
+      ],
+      "domain": [
+       "horror"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "execution"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "78eff95d83086c855e45cd11cecad8f882c2200b7a1b9a6b918854f7bad8f2d3"
+    }
+   },
+   "expected": {
+    "decision": "accept"
+   }
+  },
+  {
+   "id": "accept-identity-relaxed",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "identity",
+    "changes": [
+     {
+      "kind": "constraint_relaxed",
+      "field": "sourceRefs",
+      "rule": {
+       "maxItems": 12
+      }
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "accept"
+   }
+  },
+  {
+   "id": "accept-identity-tightened",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "identity",
+    "changes": [
+     {
+      "kind": "constraint_tightened",
+      "field": "strengths",
+      "rule": {
+       "maxItems": 5
+      }
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "accept"
+   }
+  },
+  {
+   "id": "accept-global",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "global",
+    "changes": [
+     {
+      "kind": "field_redefined",
+      "field": "moodLabels"
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "accept"
+   }
+  },
+  {
+   "id": "accept-fingerprint-prompt",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_prompt",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "prompt_revised",
+      "fields": [
+       "execution"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "b8ce03a116ea42bbffa77e26fc5ef17245954469fc8dcf37301d1125bc614bbc"
+    }
+   },
+   "expected": {
+    "decision": "accept"
+   }
+  },
+  {
+   "id": "accept-prediction-prompt",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "prediction_prompt",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "prompt_revised"
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "comedy"
+      ],
+      "regenerate": {
+       "mode": "prediction"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "af3847e0f69642dacbcb995e370dee97a94086e4698857a15bee5d9d6f1faa21"
+    }
+   },
+   "expected": {
+    "decision": "accept"
+   }
+  },
+  {
+   "id": "accept-chain-link",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 2,
+    "to": 3,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "dimension_added",
+      "dimension": "horror_climax_setup",
+      "values": [
+       "weak",
+       "mixed",
+       "strong",
+       "unknown",
+       "not_applicable"
+      ],
+      "domain": [
+       "horror"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "execution"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "29ff17d0177af65a10b722eb48df6f801de3cbfdd87be8341bfd72f3d6736929"
+    }
+   },
+   "expected": {
+    "decision": "accept"
+   },
+   "previous": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "21fa612f24bff5c9e7b280afffafa5fa5344db8b844896ccb50bbf91691c2b1b"
+    }
+   }
+  },
+  {
+   "id": "reject-schema",
+   "transition": {
+    "transitionSchemaVersion": 2,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ]
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "transition_schema_unknown"
+   }
+  },
+  {
+   "id": "reject-axis",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "profile",
+    "from": 1,
+    "to": 2,
+    "scope": "global",
+    "changes": [],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "axis_unknown"
+   }
+  },
+  {
+   "id": "reject-version",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 2,
+    "to": 2,
+    "scope": "global",
+    "changes": [
+     {
+      "kind": "field_redefined",
+      "field": "moodLabels"
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "version_not_increasing"
+   }
+  },
+  {
+   "id": "reject-gap",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 3,
+    "to": 4,
+    "scope": "global",
+    "changes": [
+     {
+      "kind": "field_redefined",
+      "field": "moodLabels"
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "chain_broken"
+   },
+   "previous": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "21fa612f24bff5c9e7b280afffafa5fa5344db8b844896ccb50bbf91691c2b1b"
+    }
+   }
+  },
+  {
+   "id": "reject-fork",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 3,
+    "scope": "global",
+    "changes": [
+     {
+      "kind": "field_redefined",
+      "field": "moodLabels"
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "chain_broken"
+   },
+   "previous": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "21fa612f24bff5c9e7b280afffafa5fa5344db8b844896ccb50bbf91691c2b1b"
+    }
+   }
+  },
+  {
+   "id": "reject-scope",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "partial",
+    "changes": [],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "scope_unknown"
+   }
+  },
+  {
+   "id": "reject-change-kind",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "global",
+    "changes": [
+     {
+      "kind": "value_shuffled",
+      "field": "plotMechanics"
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "change_kind_unknown"
+   }
+  },
+  {
+   "id": "reject-domain-dimension-required",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "dimension_added",
+      "dimension": "horror_climax_setup",
+      "values": [
+       "weak",
+       "mixed",
+       "strong",
+       "unknown",
+       "not_applicable"
+      ],
+      "domain": [
+       "horror"
+      ],
+      "required": true
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "execution"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "7309fab503475b801affba8542c6317a195c63012e5cac534d726c9858671ffb"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "change_invalid"
+   }
+  },
+  {
+   "id": "reject-change-invalid",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "car_chase",
+      "to": [
+       "chase"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "action"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "8e30caf6a50f926a0db4189c2006ae9567694e8524392128980b3ffe653c6291"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "change_invalid"
+   }
+  },
+  {
+   "id": "reject-identity-change",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "identity",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "identity_change_not_compatible"
+   }
+  },
+  {
+   "id": "reject-identity-selectors",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "identity",
+    "changes": [
+     {
+      "kind": "constraint_relaxed",
+      "field": "sourceRefs",
+      "rule": {
+       "maxItems": 12
+      }
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ]
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "identity_has_selectors"
+   }
+  },
+  {
+   "id": "reject-global-only",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "field_redefined",
+      "field": "moodLabels"
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "horror"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "80622ba8ca73ae510dc1aecc38eb94175da58cd565cd598458c00bf4c2ab6880"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "global_only_change"
+   }
+  },
+  {
+   "id": "reject-no-selectors",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": []
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "selective_requires_selectors"
+   }
+  },
+  {
+   "id": "reject-selector-kind",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "year",
+      "values": [
+       1999
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "cf0c4744f7f7364cd2f7ec9b53c56b177aba61ac57b67659b76c2870053bf910"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "selector_kind_unknown"
+   }
+  },
+  {
+   "id": "reject-selector-value",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "8386b6957fbcf8b2596c19ef02a81aad58fa987feb74c579849c3dc001c74946"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "selector_invalid"
+   }
+  },
+  {
+   "id": "reject-not-covered",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "heist"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "bbade6a4d87aebf1708f5dd4a2e055398fc20c6a1606f03dc2cfbe41f958b983"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "change_not_covered"
+   }
+  },
+  {
+   "id": "reject-genre-floor",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "dimension_added",
+      "dimension": "horror_climax_setup",
+      "values": [
+       "weak",
+       "mixed",
+       "strong",
+       "unknown",
+       "not_applicable"
+      ],
+      "domain": [
+       "horror"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "genre",
+      "values": [
+       "thriller"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "abb9b715a96f8be6d97e41b394a5952eaceb8fc86e94a97c4bc265802afc5a72"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "genre_floor_missing"
+   }
+  },
+  {
+   "id": "reject-partial-fields",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "moodLabels"
+       ]
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "7337e04bb87b075c59b5113f41d7f2cce1d482e94b982d90a821096836368c01"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "partial_fields_invalid"
+   }
+  },
+  {
+   "id": "reject-no-approval",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "partial",
+       "fields": [
+        "plotMechanics"
+       ]
+      }
+     }
+    ]
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "selective_requires_owner_approval"
+   }
+  },
+  {
+   "id": "reject-approval-mismatch",
+   "transition": {
+    "transitionSchemaVersion": 1,
+    "axis": "fingerprint_schema",
+    "from": 1,
+    "to": 2,
+    "scope": "selective",
+    "changes": [
+     {
+      "kind": "value_split",
+      "field": "plotMechanics",
+      "from": "chase_escape",
+      "to": [
+       "chase",
+       "escape"
+      ]
+     }
+    ],
+    "selectors": [
+     {
+      "kind": "mechanic",
+      "values": [
+       "chase_escape"
+      ],
+      "regenerate": {
+       "mode": "full"
+      }
+     }
+    ],
+    "approval": {
+     "approvedBy": "owner",
+     "approvedAt": "2026-01-01T00:00:00.000Z",
+     "reviewRef": "decision-ref",
+     "declarationSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+   },
+   "expected": {
+    "decision": "reject",
+    "code": "approval_mismatch"
+   }
+  }
+ ]
+}

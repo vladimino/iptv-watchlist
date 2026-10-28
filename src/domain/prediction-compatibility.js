@@ -81,8 +81,12 @@ function predictionCompatibility(prediction,fingerprint,features,profile,mode,op
  if(last?.version!==profile.version||last?.profileHash!==profile.profileHash)return result('stale','profile_chain_broken',links);
  if(prediction.tasteProfileHash===profile.profileHash)return result('compatible','content_identical',links);
  const vocabulary=options.vocabulary;
- // Features count only when they carry the hash of the very fingerprint the prediction was made with.
+ // Features count only when they carry the hash of the very fingerprint the prediction was made with. They are read in that
+ // fingerprint's own schema vocabulary (options.featureVocabulary, ADR-0035 cross-rule) when the caller gives one; a selector
+ // value that vocabulary lacks cannot be answered by the fingerprint, so it is unknown.
  const known=!!features&&typeof features.fingerprintHash==='string'&&features.fingerprintHash.length>0&&features.fingerprintHash===fingerprint.fingerprintHash;
+ const featureVocabulary=options.featureVocabulary||vocabulary;
+ const answerable=selector=>selector.kind==='genre'||(selector.kind==='mechanic'?selector.values.every(value=>featureVocabulary.mechanics.includes(value)):Array.isArray(featureVocabulary.execution[selector.dimension])&&selector.values.every(value=>featureVocabulary.execution[selector.dimension].includes(value)));
  for(let i=start+1;i<lineage.length;i++){
   const link=lineage[i],previous=lineage[i-1],impact=link?.changeImpact;
   if(!(link?.version>previous.version))return result('stale','profile_chain_broken',links);
@@ -91,7 +95,7 @@ function predictionCompatibility(prediction,fingerprint,features,profile,mode,op
   if(impact.scope==='global')return result('stale','profile_global_change',links);
   if(impact.scope==='identity'){if(link.profileHash!==previous.profileHash)return result('stale','profile_impact_unknown',links);continue;}
   if(!known)return result('stale','film_features_unknown',links);
-  const reach=impact.selectors.map(selector=>predictionSelectorReach(selector,features,vocabulary));
+  const reach=impact.selectors.map(selector=>answerable(selector)?predictionSelectorReach(selector,features,featureVocabulary):'unknown');
   if(reach.includes('reached'))return result('stale','profile_impacted',links);
   if(reach.includes('unknown'))return result('stale','film_features_unknown',links);
  }

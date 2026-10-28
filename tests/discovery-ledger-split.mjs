@@ -69,7 +69,8 @@ try{
  assert.ok(first.report.archived.returnable>0&&first.report.archived.decisions.verified>0,'archived decisions are counted by status');
  const second=await plan({snapshot,output:dirB});
  assert.deepEqual(second.plan.writes.map(write=>write.sha256),first.plan.writes.map(write=>write.sha256),'the plan is deterministic');
- assert.deepEqual(first.plan.writes.map(write=>write.kind).slice(-3),['manifest','pointer','active'],'pointer before the active ledger');
+ assert.deepEqual(first.plan.writes.map(write=>write.kind).slice(-4),['manifest','pointer','active-generation','active-root'],'pointer before the active ledger');
+ assert.equal(first.plan.writes[0].kind,'source','the source copy is written first');
  const reportText=fs.readFileSync(path.join(dirA,'plan-report.json'),'utf8');
  for(const item of ledgerItems.slice(0,30))assert.ok(!reportText.includes(item.key)&&!reportText.includes(item.title),'the report carries no key or title');
 
@@ -78,23 +79,24 @@ try{
  const planned=loadPlan(dirB);
  const applied=await applySplit({BUCKET:store},planned,{context});
  assert.equal(applied.applied,planned.writes.length);
- const activeLedger=await (await store.get('epg/discovery-latest.json')).json();
+ const activeLedger=await vm.runInContext('loadJSON',context)({BUCKET:store},'epg/discovery-latest.json');
  assert.equal(activeLedger.ledgerMode,'bounded');assert.equal(activeLedger.items.length,seen);
  assert.equal(vm.runInContext('ledgerCounts',context)(activeLedger,decisions).ledgerTotal,ledgerItems.length);
  const segmentOf=vm.runInContext('ledgerArchiveSegment',context);
  for(const write of planned.writes.filter(entry=>entry.kind==='segment')){const body=JSON.parse(write.text);for(const key of Object.keys(body.items))assert.equal(segmentOf(key),body.segment);}
- assert.equal((await store.get('epg/generations/'+P+'/discovery-latest.json')).etag,planned.fence.generationCopy.etag,'the generation copy stays the rollback copy');
+ assert.deepEqual(await (await store.get('epg/generations/'+P+'/discovery-latest.json')).json(),await (await store.get('epg/discovery-latest.json')).json(),'both ledger copies hold the active ledger');
+ assert.deepEqual((await (await store.get(planned.writes[0].key)).json()).items,JSON.parse(JSON.stringify(ledgerItems)),'the source copy holds the full ledger');
  assert.equal((await applySplit({BUCKET:store},planned,{context})).applied,0,'a rerun after success writes nothing');
 
  // A commit that lands between the archive pointer and the active ledger: the split stops, nothing is lost.
  const raced=overlayStore(snapshotBase(snapshot,JSON.parse(fs.readFileSync(path.join(snapshot,'manifest.json'),'utf8'))),path.join(root,'race'));
- await assert.rejects(applySplit({BUCKET:raced},planned,{context,failAfter:planned.writes.length-1}),error=>error.exitCode===9);
+ await assert.rejects(applySplit({BUCKET:raced},planned,{context,failAfter:planned.writes.length-2}),error=>error.exitCode===9);
  const S=run(10),env={BUCKET:raced,DISCOVERY_LEDGER_MODE:'full'};
  await raced.put('sync.json',JSON.stringify({runId:S,stage:'epg'}));
  await vm.runInContext('publishGenerationWithLedger',context)(env,S,scan(10),{programmeRunId:S},{'programme.json':{runId:S,films:[]}});
  await raced.put('sync.json',JSON.stringify({runId:S,stage:'complete'}));
  await assert.rejects(applySplit({BUCKET:raced},planned,{context}),error=>error instanceof SplitError&&error.exitCode===3,'the stale split refuses');
- const racedLedger=await (await raced.get('epg/discovery-latest.json')).json(),expected=merge(ledgerItems,scan(10),{replaceShows:true,programmeRunId:S});
+ const racedLedger=await vm.runInContext('loadJSON',context)({BUCKET:raced},'epg/discovery-latest.json'),expected=merge(ledgerItems,scan(10),{replaceShows:true,programmeRunId:S});
  assert.equal(racedLedger.ledgerMode,'frozen','a full-mode Worker that meets the archive pointer acts as frozen');
  assert.equal(vm.runInContext('ledgerCounts',context)(racedLedger,decisions).ledgerTotal,expected.length,'unique counts stay exact');
  assert.deepEqual(new Set(racedLedger.items.map(item=>item.key)),new Set(expected.map(item=>item.key)),'no candidate is lost');
@@ -104,10 +106,12 @@ try{
  assert.equal(report.verdict,'GO',JSON.stringify(report.reasons));
  assert.equal(report.checks.reconstruction.exact,true);assert.equal(report.checks.reconstruction.missing,0);
  assert.equal(report.checks.replay.zeroMutations,true);
- assert.ok(report.checks.resume.length>=4&&report.checks.resume.every(entry=>entry.stopped&&entry.identical));
+ assert.ok(report.checks.install.workerReadsActive&&report.checks.install.sourceCopyExact,'the Worker reads the installed active ledger');
+ assert.ok(report.checks.resume.length>=5&&report.checks.resume.every(entry=>entry.stopped&&entry.identical));
  assert.ok(Object.values(report.checks.negative).every(entry=>entry.refused&&entry.plannedWrites===0));
  assert.equal(report.checks.nextCommit.parity.exact,true);assert.ok(report.checks.nextCommit.reentered>0,'archived candidates re-enter');
- assert.equal(report.checks.nextCommit.countsExact,true);assert.equal(report.checks.chunk.activeDecisionsDiffer,0);assert.equal(report.checks.chunk.archiveReadsByChunk,0);
+ assert.equal(report.checks.nextCommit.countsExact,true);
+ assert.equal(report.checks.frozenCommit.ledgerMode,'frozen');assert.equal(report.checks.frozenCommit.parity.exact,true);assert.equal(report.checks.frozenCommit.readSourceCopy,false);assert.ok(report.checks.frozenCommit.activeItems<ledgerItems.length,'the frozen commit starts from the active ledger');assert.equal(report.checks.frozenCommit.archiveWrites,0);assert.equal(report.checks.chunk.activeDecisionsDiffer,0);assert.equal(report.checks.chunk.archiveReadsByChunk,0);
  assert.ok(report.plan.archived.screenedWithoutExclusion>0,'archived rows the screening would exclude are counted');
  assert.ok(!fs.existsSync(path.join(dirR,'work')),'the rehearsal removes its working copies');
 

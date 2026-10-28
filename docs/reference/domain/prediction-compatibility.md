@@ -20,6 +20,7 @@ predictionCompatibility(prediction, fingerprint, features, profile, mode, {
 - `profile` is `current.json`: `{version, profileHash, lineage}`.
 - `features` comes from `predictionImpactFeatures(fingerprint, genres)`: a copy of the fingerprint's `plotMechanics` and raw `execution` (including `unknown` and `not_applicable`), its `fingerprintHash`, and the film's stored genre names.
 - `mode` is `strict` or `selective`; any other value behaves as `strict`.
+- `featureVocabulary` (optional) is the vocabulary of the fingerprint's own schema when it differs from the current one ([fingerprint compatibility](fingerprint-compatibility.md#prediction-check)); a selector value it lacks is an unknown feature. Without it, `vocabulary` answers both.
 - `digest` must be synchronous. A caller in the Worker computes the SHA-256 of each lineage link's declaration once (they are few) and passes a lookup.
 - `links` is the number of lineage transitions between the prediction's version and the current one.
 - `predictionCompatibilityFresh(result)` is true for `current` and `compatible`.
@@ -28,7 +29,7 @@ predictionCompatibility(prediction, fingerprint, features, profile, mode, {
 
 The first failing check decides:
 
-1. Fingerprint not current (schema or `invalidatedAt`) → `stale/fingerprint_not_current`. Prediction fingerprint hash or schema differs → `fingerprint_changed`. Prompt version differs → `prompt_changed`.
+1. Fingerprint not current (schema or `invalidatedAt`) → `stale/fingerprint_not_current`. Prediction fingerprint hash or schema differs → `fingerprint_changed`. Prompt version differs → `prompt_changed`. These checks are strict equality; [fingerprint compatibility](fingerprint-compatibility.md#prediction-check) specifies the rule that replaces them for fingerprint schema and prompt transitions.
 2. Same profile version: same hash → `current/exact`, otherwise `profile_provenance_mismatch`.
 3. Mode other than `selective` → `profile_changed`.
 4. Non-integer version → `profile_provenance_mismatch`. Prediction version newer than current → `profile_ahead`. Version not in the lineage → `profile_outside_lineage`; there with another hash → `profile_provenance_mismatch`. A lineage that does not end at the current version and hash → `profile_chain_broken`.

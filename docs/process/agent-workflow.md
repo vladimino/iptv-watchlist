@@ -47,6 +47,19 @@ At the start of work, read the relevant current card and latest comments, its na
 
 The reviewer must not return an unfinished routine handoff just because a merge happened while post-merge deployment is still running. If tooling fails or access prevents verification, explicitly distinguish blocked from Done rather than guessing.
 
+## Feature flag lifecycle: plan, test, switch, remove
+
+Every temporary feature flag must have an explicit end-to-end lifecycle **at the time it is first planned**:
+
+1. **Create and plan.** Specify its owner, exact permitted values and defaults, consumers, data effects, rollback boundaries and the reason the flag is temporary. Create a separate, atomic Trello **flag-removal card immediately**, before implementation, link it from the introduction/rollout card, and include the specific cutover, stabilization and acceptance criteria that will unblock deletion. Do not defer creation of the removal card until after rollout.
+2. **Implement and test.** Ship the gated change with tests for old/new modes, compatibility and failure paths; register the flag in [the maintained feature-flag contract](../reference/feature-flags.md). No assumption that a deployed flag is enabled.
+3. **Switch and stabilize.** Execute shadow/rollout/cutover only under explicit, action-specific owner authorization. Verify the actual production binding from authoritative Cloudflare settings or an MCP diagnostic that **explicitly exposes that exact effective setting**, then verify the relevant production behavior and complete the defined stabilization period. A code default, previous Trello comment, generic MCP probe, or successful deployment alone does not establish a live binding.
+4. **Remove.** When the new mode is permanently accepted and rollback no longer requires the old mode, take up the pre-created cleanup card: delete the environment selector, legacy branch and obsolete tests, update references/runbooks and production configuration as separately authorized, and verify both CI/CD jobs and necessary safe runtime checks. Preserve valid data, security gates, and retained operational capabilities. Record evidence and mark the cleanup card Done only after acceptance.
+
+Distinguish a **transitional switch** from a **permanent owner-only safety gate**: an endpoint permitting sensitive one-off writes may need a durable gate rather than automatic removal. In that case the initial card must state the rationale and the removal/disposition ticket must explicitly decide whether to retire the endpoint, retain its gate, or replace it with a supported operational control. Never remove protections merely to satisfy a cleanup metric.
+
+Before creating any cleanup card, search live Trello for an existing removal/disposition card using the flag's literal identifier and relevant migration terms; avoid duplicate tickets and duplicate prerequisite checklists. If the required rollback or migration remains incomplete, do not prematurely remove the flag. Review the register after each rollout and verify the cleanup card's existence and prerequisites.
+
 ## Documentation acceptance
 
 Before implementation, record the documentation impact in the Trello card and implementation handoff using the [documentation governance matrix](documentation-governance.md). At independent review, compare the actual diff with that matrix; require the matching source, contract, evidence, ADR and diagram changes in the same delivery. A claimed `Documentation impact: none` needs a reason that survives review. Missing required documentation is a blocking finding even when tests are green. Do not defer it to a future cleanup card.
