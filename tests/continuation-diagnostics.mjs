@@ -102,7 +102,8 @@ assert.equal(entry.route,'/api/sync/epg');
 assert.equal(entry.runId,RUN);
 assert.equal(entry.runIdShape,'uuid');
 assert.equal(entry.runStage,'complete');
-assert.deepEqual(entry.recorded,{entered:true,outcome:null},'the stored entry can only know about the entered write');
+assert.deepEqual(entry.recorded,{entered:true,outcome:null,checkpoint:true},'the stored entry can only know about the writes before its own');
+assert.deepEqual(entry.checkpoint,{hopId:chunk.body.diagnostic.hopId,owned:true,write:'saved',stage:records.get(CONTINUATION).stage,remainingChunks:records.get(CONTINUATION).remainingChunks},'the checkpoint the hop stored');
 assert.equal(entry.branch,'continuation');
 assert.equal(entry.httpStatus,200);
 assert.equal(entry.error,null);
@@ -110,23 +111,30 @@ assert.equal(typeof entry.durationMs,'number');
 assert.deepEqual(entry.discovery,summary(chunk.body.discovery));
 assert.deepEqual(entry.diagnostic,chunk.body.diagnostic,'the stored trace is the one the response carried');
 assert.equal(stored.updatedAt,entry.at);
-// The entry is written twice: `entered` before the work, the outcome after it.
-assert.equal(puts.filter(key=>key===KEY).length,2);
+// The entry is written three times: `entered` before the work, `checkpointed` right after the hop stored its
+// checkpoint (before its trailing writes), the outcome after it.
+assert.equal(puts.filter(key=>key===KEY).length,3);
 assert.equal(putBodies[0].recent[0].phase,'entered');
 assert.equal(putBodies[0].recent[0].id,entry.id);
 assert.equal(putBodies[0].recent[0].branch,null);
-assert.equal(putBodies[1].recent[0].phase,'completed');
-// Two log lines share the entry id: `entered` before any storage access, the outcome after the ring write.
+assert.equal(putBodies[1].recent[0].phase,'checkpointed');
+assert.equal(putBodies[1].recent[0].id,entry.id);
+assert.equal(putBodies[1].recent[0].checkpoint.owned,true);
+assert.equal(putBodies[2].recent[0].phase,'completed');
+// Three log lines share the entry id: `entered` before any storage access, `checkpointed`, the outcome after the ring write.
 const lines=logged();
-assert.equal(lines.length,2);
+assert.equal(lines.length,3);
 assert.equal(lines[0].id,entry.id);
 assert.equal(lines[0].phase,'entered');
 assert.equal(lines[0].branch,null);
 assert.equal(lines[1].id,entry.id);
-assert.equal(lines[1].phase,'completed');
-assert.equal(lines[1].branch,'continuation');
-assert.equal(lines[1].diagnostic.branch,'chunk');
-assert.deepEqual(lines[1].recorded,{entered:true,outcome:true});
+assert.equal(lines[1].phase,'checkpointed');
+assert.deepEqual(lines[1].checkpoint,entry.checkpoint);
+assert.equal(lines[2].id,entry.id);
+assert.equal(lines[2].phase,'completed');
+assert.equal(lines[2].branch,'continuation');
+assert.equal(lines[2].diagnostic.branch,'chunk');
+assert.deepEqual(lines[2].recorded,{entered:true,outcome:true,checkpoint:true});
 assertSanitized('chunk step');
 
 // 2. A live resolver lease: busy / wait, the continuation is untouched, and the entry says why.
@@ -219,20 +227,21 @@ const unrecorded=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(unrecorded.status,200);
 assert.equal(unrecorded.body.diagnostic.branch,'chunk');
 assert.equal(diag(),undefined);
-assert.equal(logged().length,2);
+assert.equal(logged().length,3);
 assert.equal(logged()[0].phase,'entered');
-assert.deepEqual(logged()[1].recorded,{entered:false,outcome:false});
+assert.equal(logged()[1].phase,'checkpointed');
+assert.deepEqual(logged()[2].recorded,{entered:false,outcome:false,checkpoint:false});
 assertSanitized('write failure');
 seed();
 failing.get.add(KEY);
 const unreadable=await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(unreadable.status,200);
-assert.deepEqual(logged()[1].recorded,{entered:false,outcome:false},'a ring read failure is reported the same way');
+assert.deepEqual(logged().at(-1).recorded,{entered:false,outcome:false,checkpoint:false},'a ring read failure is reported the same way');
 // A conditional-write conflict is retried once.
 seed();conflictOnce=true;
 await http('/api/sync/epg','POST',{runId:RUN});
 assert.equal(diag().recent.length,1);
-assert.deepEqual(logged()[1].recorded,{entered:true,outcome:true});
+assert.deepEqual(logged().at(-1).recorded,{entered:true,outcome:true,checkpoint:true});
 
 // 8. Run id mismatch through MCP: the call reached the Worker, and the entry says so with caller mcp.
 seed();

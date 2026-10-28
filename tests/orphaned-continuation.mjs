@@ -59,7 +59,7 @@ seedOrphan();
 let r=await step();
 assert.equal(r.status,200);assert.equal(r.data.stage,'complete');
 let d=r.data.diagnostic;
-assert.deepEqual(d.health,{status:'orphaned',hopId:ORPHAN,lease:'expired',leaseHop:'same',leaseExpiresAt:iso(now-1000),chunkCompleted:true,resumeBudget:4,generationConflict:false});
+assert.deepEqual(d.health,{status:'orphaned',hopId:ORPHAN,lease:'expired',leaseHop:'same',leaseExpiresAt:iso(now-1000),chunkCompleted:true,resumeBudget:4,generationConflict:false,interruptions:0});
 assert.deepEqual(d.recovery,{orphanHopId:ORPHAN,action:'settled',chunkCompleted:true,budget:4,settled:true});
 assert.equal(d.branch,'chunk');assert.equal(d.decision.budget,4);assert.notEqual(d.hopId,ORPHAN);assert.equal(d.saved.owned,true);assert.equal(d.saved.write,'saved');
 assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,null);assert.equal(r.data.discovery.remainingChunks,3);assert.equal(r.data.discovery.nextAction,'continue');assert.equal(r.data.discovery.programmeRunId,GENERATION);
@@ -86,7 +86,7 @@ seedOrphan({lease:'live'});
 const before=plain(continuation()),leaseExpiry=iso(now+60000);
 r=await step();
 assert.equal(r.data.discovery.state,'busy');assert.equal(r.data.discovery.reason,'busy');assert.equal(r.data.discovery.nextAction,'wait');assert.equal(r.data.discovery.nextCatchUpAt,leaseExpiry);
-assert.equal(r.data.diagnostic.branch,'lease_live');assert.deepEqual(r.data.diagnostic.health,{status:'live',hopId:ORPHAN,lease:'live',leaseHop:'same',leaseExpiresAt:leaseExpiry,chunkCompleted:null,resumeBudget:null,generationConflict:false});
+assert.equal(r.data.diagnostic.branch,'lease_live');assert.deepEqual(r.data.diagnostic.health,{status:'live',hopId:ORPHAN,lease:'live',leaseHop:'same',leaseExpiresAt:leaseExpiry,chunkCompleted:null,resumeBudget:null,generationConflict:false,interruptions:0});
 assert.deepEqual(plain(continuation()),before);assert.equal(verified(),2);assert.deepEqual(puts.filter(key=>!key.includes('continuation-diagnostics')),[]);
 const report=(await post('/api/enrichment/discovery/resolve',{chunks:0})).data;
 assert.equal(report.discovery.state,'running');assert.equal(report.discovery.reason,'busy');assert.equal(report.discovery.nextAction,'wait');assert.equal(report.discovery.nextCatchUpAt,leaseExpiry);
@@ -100,7 +100,7 @@ r=await step();assert.equal(r.data.discovery.state,'busy');assert.equal(r.data.d
 // 4. Orphan whose chunk did not finish (the last status predates the hop): resumed with the full budget (5 -> 4).
 seedOrphan({completed:false});
 pipeline=await status();
-assert.deepEqual(pipeline.continuationHealth,{status:'orphaned',hopId:ORPHAN,lease:'expired',leaseHop:'same',leaseExpiresAt:iso(now-1000),chunkCompleted:false,resumeBudget:5,generationConflict:false});
+assert.deepEqual(pipeline.continuationHealth,{status:'orphaned',hopId:ORPHAN,lease:'expired',leaseHop:'same',leaseExpiresAt:iso(now-1000),chunkCompleted:false,resumeBudget:5,generationConflict:false,interruptions:0});
 assert.deepEqual(puts.filter(key=>!key.includes('continuation-diagnostics')),[]);
 r=await step();
 assert.equal(r.data.diagnostic.recovery.action,'resumed');assert.equal(r.data.diagnostic.recovery.chunkCompleted,false);assert.equal(r.data.diagnostic.decision.budget,5);
@@ -368,8 +368,8 @@ assert.deepEqual(plain(continuation()),recoveredRecord,'the recovered checkpoint
 //     saved, lease renewed by the trailing writes), then the invocation ended before the checkpoint, the lease
 //     release and the response; the record stayed `running` and the client saw a transport error. Now an
 //     invocation that ends during the trailing writes, or whose response is lost on the way to the client, leaves
-//     a settled `paused` record: pipeline status says settled, the diagnostics entry stays at `entered` while the
-//     checkpoint is later than it (the response was lost, the step was not), and the next ordinary step continues
+//     a settled `paused` record: pipeline status says settled, the diagnostics entry stays at `checkpointed` (with the
+//     stored checkpoint) while the checkpoint is later than it (the response was lost, the step was not), and the next ordinary step continues
 //     the series without repeating the chunk or losing budget.
 const DIAGNOSTICS='epg/resolver-continuation-diagnostics.json';
 const seedPaused=(remainingChunks=10)=>{seedOrphan();set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso(now-60000),hopId:ORPHAN,remainingChunks,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});};
@@ -387,7 +387,7 @@ assert.equal(verified(),2+CHUNK);
 assert.ok(records.get('epg/resolver-lease.json').expiresAt>now,'the lease release was lost with the invocation');
 let interruptedStatus=await status();
 assert.equal(interruptedStatus.continuationHealth.status,'settled','a committed step is not an orphan, whatever happened to its response');
-assert.equal(interruptedStatus.continuationDiagnostics.recent[0].phase,'entered');
+assert.equal(interruptedStatus.continuationDiagnostics.recent[0].phase,'checkpointed');assert.equal(interruptedStatus.continuationDiagnostics.recent[0].checkpoint.owned,true);assert.equal(interruptedStatus.continuationDiagnostics.recent[0].checkpoint.hopId,continuation().hopId);
 assert.ok(Date.parse(continuation().at)>=Date.parse(interruptedStatus.continuationDiagnostics.recent[0].at),'the checkpoint is later than the entry that never got its outcome');
 // While the unreleased lease lasts, the next step waits and writes nothing.
 r=await step();
