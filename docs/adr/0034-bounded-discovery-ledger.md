@@ -244,7 +244,7 @@ The size budget for the active ledger (10–15 MB was the working hypothesis) is
 - **Split rehearsal:** [AIR-221](https://trello.com/c/9ZiVygrd). `scripts/discovery-ledger-split.mjs` plans the initial split offline from a verified snapshot:
   - departures move verbatim;
   - the archive pointer is set before the active ledger;
-  - the generation copy stays the rollback copy.
+  - a write-once source copy is the rollback copy, and the active ledger replaces both the published generation's copy (the one the Worker reads) and the root key. The AIR-221 plan of 27 October replaced only the root key, which the Worker does not read while a generation is published. [AIR-222](https://trello.com/c/9Y4G9DG6) corrected it ([evidence](../evidence/discovery-ledger-split-air-222-stage-1-2026-10-28.md)).
 
   `rehearse` proves the invariants above on a copy of the snapshot ([evidence](../evidence/discovery-ledger-split-rehearsal-2026-10-27.md)). It also found that `canonicalDiscoveryCandidate` is not idempotent for some titles; the plan reports such keys per side.
 - **Dated verification:** the [AIR-211 report](../evidence/epg-memory-pressure-2026-10-27.md) (sizes and growth on 27 October 2026, offline replay). No implementation has been measured.
