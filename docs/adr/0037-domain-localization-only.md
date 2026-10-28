@@ -1,9 +1,9 @@
 # ADR 0037: The domain localization rule is the only localization of the programme and watchlist reads and of the EPG commit
 
-**Status:** Proposed (owner decision required before merge)  
+**Status:** Accepted (owner decision 2026-10-28)  
 **Original decision date:** 2026-10-28  
 **Recorded at:** 2026-10-28  
-**Approval source:** [AIR-89](https://trello.com/c/vzR0uuZq) scope (domain as the only executed path for `programme`, `watchlist` and the EPG write localization; `metadata` stays default-off; rollback by redeploy of the previous verified commit) set by the owner on 2026-10-28 after the [AIR-42](https://trello.com/c/drLBuWjl) acceptance of the staged rollout; the explicit Accepted/Declined decision for this record is pending  
+**Approval source:** [AIR-89](https://trello.com/c/vzR0uuZq), explicit owner acceptance of ADR-0037 on 2026-10-28 (architecture scope only; no metadata activation or Cloudflare binding change authorized)  
 **Related work:** [AIR-42](https://trello.com/c/drLBuWjl), [AIR-89](https://trello.com/c/vzR0uuZq), [AIR-79](https://trello.com/c/485tlGLA); [ADR 0009](0009-canonical-film-person-identity.md), [ADR 0036](0036-scored-resolution-only.md); [lifecycle audit and rollout log](../evidence/film-person/lifecycle-audit-and-rollout.md)  
 **Supersedes:** None. The per-path `off` / `shadow` / `on` rollout boundary that this record closes was recorded in the rollout log above, not in an ADR  
 **Superseded by:** None
