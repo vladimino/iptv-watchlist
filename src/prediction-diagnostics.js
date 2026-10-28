@@ -20,7 +20,7 @@ async function loadPredictionDiagnosticSnapshot(env,filmId){
  // The same freshness rule (mode and profile snapshot) as the queue and the readers; strict unless switched.
  const freshness=await predictionFreshness(env,profile.value),catalogFilms=allEnrichmentFilms(programme.value?.films?programme.value:{films:[]},catalog.value);
  return {
-  freshness,filmsById:new Map(catalogFilms.map(film=>[String(film.id),film])),
+  freshness,filmsById:new Map(catalogFilms.map(film=>[String(film.id),film])),registryDigest:freshness.registryDigest??null,target:freshness.target??null,
   queue:queue.value,queueStatus:queue.status,profile:profile.value,profileStatus:profile.status,index:index.value,indexStatus:index.status,
   programme:programme.value,programmeStatus:programme.status,catalog:catalog.value,catalogStatus:catalog.status,
   publishedGeneration:publishedGeneration.value,publishedGenerationStatus:publishedGeneration.status,films,
@@ -87,22 +87,28 @@ function predictionDiagnosticEligibility(queue,filmId,now){
  if(lane==='cold'&&queue.priorityCount)return {eligibleNow:false,cause:'waiting_behind_hot'};
  return {eligibleNow:false,cause:'not_ready'};
 }
-function predictionDiagnosticFingerprint(record){
- if(!record||record.status==='unavailable')return {presence:'unknown',schemaVersion:null,current:null,invalidated:null};
- if(!record.fingerprint)return {presence:'not_recorded',schemaVersion:null,current:false,invalidated:false};
- const fingerprint=record.fingerprint;
- return {presence:'recorded',schemaVersion:fingerprint.fingerprintSchemaVersion??null,current:fingerprintCurrent(fingerprint),invalidated:!!fingerprint.invalidatedAt};
+// `current` is the exact schema match of today; `usable` is the verdict in force (exact, or exact or compatible under the
+// transition rule) with its reason and migration class; the provenance fields come from the stored pointer.
+function predictionDiagnosticFingerprint(record,freshness=null,film=null){
+ const mode=freshness?.fingerprintMode??'strict';
+ if(!record||record.status==='unavailable')return {presence:'unknown',schemaVersion:null,promptVersion:null,current:null,usable:null,invalidated:null,reason:null,migration:null,mode};
+ if(!record.fingerprint)return {presence:'not_recorded',schemaVersion:null,promptVersion:null,current:false,usable:false,invalidated:false,reason:'fingerprint_missing',migration:'full',mode};
+ const fingerprint=record.fingerprint,verdict=freshness?.fingerprintVerdict?freshness.fingerprintVerdict(fingerprint,film?.genres):null;
+ return {presence:'recorded',schemaVersion:fingerprint.fingerprintSchemaVersion??null,promptVersion:fingerprint.fingerprintPromptVersion??1,produced:fingerprint.produced??'generated',previous:fingerprint.previous??null,current:fingerprintCurrent(fingerprint),usable:verdict?fingerprintCompatibilityFresh(verdict):fingerprintCurrent(fingerprint),invalidated:!!fingerprint.invalidatedAt,reason:verdict?.reason??null,migration:verdict?.migration??null,mode};
 }
 function predictionDiagnosticPrediction(record,profile,freshness=strictFreshness(profile),film=null){
  if(!record||record.status==='unavailable')return {presence:'unknown',current:null,stale:'unknown',profileMatch:null,cause:'unknown'};
  const prediction=record.predictions?.current;
  if(!record.predictions||!prediction)return {presence:record.predictions?'recorded_without_current':'not_recorded',current:false,stale:'unknown',profileMatch:null,cause:'not_recorded'};
  if(!profile)return {presence:'recorded',current:false,stale:'unknown',profileMatch:null,cause:'profile_not_recorded'};
- const current=!!freshness.state(prediction,record.fingerprint,film?.genres);
+ const current=!!freshness.state(prediction,record.fingerprint,film?.genres),genres=film?.genres;
  const profileMatch=prediction.tasteProfileVersion===profile.version&&prediction.tasteProfileHash===profile.profileHash;
- // A prediction kept under another profile version by the selective rule is 'compatible'; its record keeps its own version.
- const cause=current?(profileMatch?'current':'compatible'):!fingerprintCurrent(record.fingerprint)?'fingerprint_not_current':!profileMatch?'profile_changed':'stale';
- return {presence:'recorded',current,stale:!current,profileMatch,cause,mode:freshness.mode};
+ const usable=typeof freshness.fingerprintUsable==='function'?!!freshness.fingerprintUsable(record.fingerprint,genres):fingerprintCurrent(record.fingerprint);
+ const verdict=typeof freshness.work==='function'?freshness.work(prediction,record.fingerprint,genres):null;
+ // A prediction kept under another profile version or fingerprint version by a selective rule is 'compatible'; its record
+ // keeps its own provenance. `reason` and `requiredWork` are the shared verdict's, the same the queue records.
+ const cause=current?(profileMatch&&(!verdict||verdict.outcome==='current')?'current':'compatible'):!usable?'fingerprint_not_current':!profileMatch?'profile_changed':'stale';
+ return {presence:'recorded',current,stale:!current,profileMatch,cause,reason:verdict?.reason??null,requiredWork:verdict?.requiredWork??null,mode:freshness.mode,fingerprintMode:freshness.fingerprintMode??'strict'};
 }
 function predictionDiagnosticIndex(snapshot,filmId,record){
  if(snapshot.indexStatus==='unavailable'||snapshot.profileStatus==='unavailable'||!record||record.status==='unavailable')return 'unknown';
@@ -136,6 +142,13 @@ function predictionDiagnosticReasons(snapshot,outstanding){
  if(published?.phase&&published.phase!=='published')reasons.push('generation_not_published');
  if(queue?.profileVersion!=null&&profile?.version!=null&&queue.profileVersion!==profile.version)reasons.push('profile_version_differs');
  if(queue?.profileHash&&profile?.profileHash&&queue.profileHash!==profile.profileHash)reasons.push('profile_hash_differs');
+ // A queue built under other fingerprint schema, prompt versions or transition registry than the Worker's (a deploy since
+ // its refresh) is a disagreement like a profile change.
+ const target=snapshot.target;
+ if(target&&queue?.fingerprintSchemaVersion!=null&&queue.fingerprintSchemaVersion!==target.fingerprintSchemaVersion)reasons.push('fingerprint_schema_differs');
+ if(target&&queue?.fingerprintPromptVersion!=null&&queue.fingerprintPromptVersion!==target.fingerprintPromptVersion)reasons.push('fingerprint_prompt_differs');
+ if(target&&queue?.predictionPromptVersion!=null&&queue.predictionPromptVersion!==target.predictionPromptVersion)reasons.push('prediction_prompt_differs');
+ if(snapshot.registryDigest&&queue?.fingerprintCompatibility?.registryDigest&&queue.fingerprintCompatibility.registryDigest!==snapshot.registryDigest)reasons.push('fingerprint_registry_differs');
  if(Array.isArray(outstanding)&&snapshot.indexStatus==='recorded'&&snapshot.profileStatus==='recorded'&&profile&&outstanding.some(id=>(snapshot.freshness||strictFreshness(profile)).indexed(snapshot.index?.[id],snapshot.filmsById?.get(id)||null)))reasons.push('index_ahead_of_queue');
  return reasons;
 }
@@ -149,6 +162,12 @@ function predictionDiagnosticCoverage(snapshot,now){
   windowCurrent:summary.windowCurrentPredictions,windowTotal:summary.windowFilmsTotal,
   windowPercent:summary.windowFilmsTotal?coveragePercent(summary.windowCurrentPredictions,summary.windowFilmsTotal):null,
  };
+}
+// The fingerprint rule in force and what the stored queue recorded for it (classes and migration counts; the per-film map stays in the queue object).
+function predictionDiagnosticFingerprintSummary(snapshot){
+ const freshness=snapshot.freshness||strictFreshness(snapshot.profile),block=snapshot.queue?.fingerprintCompatibility||null;
+ return {mode:freshness.fingerprintMode??'strict',target:snapshot.target??null,registryDigest:snapshot.registryDigest??null,
+  queue:block?{mode:block.mode??null,registryDigest:block.registryDigest??null,target:block.target??null,unindexed:block.unindexed??null,classes:block.classes??null,migration:block.migration??null,wouldKeep:block.wouldKeep??null,wouldRequeue:block.wouldRequeue??null,strictDisagreements:block.strictDisagreements??null}:null};
 }
 function predictionDiagnosticSnapshotId(queue){
  return {refreshedAt:queue?.refreshedAt||null,programmeRunId:queue?.programmeRunId||null};
@@ -167,7 +186,7 @@ function predictionQueueOverview(snapshot,now){
  else if(snapshot.queueStatus==='recorded'){state='eligible';cause='ready';}
  return {
   atomic:false,state,cause,
-  snapshot:{...predictionDiagnosticSnapshotId(snapshot.queue),profileVersion:snapshot.profile?.version??snapshot.queue?.profileVersion??null,consistent:reasons.length===0,partial:reasons.length>0,reasons,sources:predictionDiagnosticSources(snapshot)},
+  snapshot:{...predictionDiagnosticSnapshotId(snapshot.queue),profileVersion:snapshot.profile?.version??snapshot.queue?.profileVersion??null,consistent:reasons.length===0,partial:reasons.length>0,reasons,sources:predictionDiagnosticSources(snapshot),fingerprint:predictionDiagnosticFingerprintSummary(snapshot)},
   pending:{total:Array.isArray(outstanding)?outstanding.length:null,hot:Array.isArray(snapshot.queue?.hotPending)?snapshot.queue.hotPending.length:null,cold:Array.isArray(snapshot.queue?.coldPending)?snapshot.queue.coldPending.length:null,eligibleNow:snapshot.queueStatus==='recorded'&&Array.isArray(outstanding)?ready.length:null,deferredByRetry:Array.isArray(outstanding)?deferred.length:null,nextRetryAt:Number.isFinite(nextMs)?new Date(nextMs).toISOString():null},
   coverage:predictionDiagnosticCoverage(snapshot,now),
  };
@@ -179,7 +198,7 @@ function predictionFilmDiagnostic(snapshot,filmId,now){
  return {
   atomic:false,filmId,lane:predictionDiagnosticLane(snapshot.queue,filmId),eligibleNow:eligibility.eligibleNow,cause:eligibility.cause,
   snapshot:{...predictionDiagnosticSnapshotId(snapshot.queue),consistent:reasons.length===0,partial:reasons.length>0,reasons},
-  fingerprint:predictionDiagnosticFingerprint(record),prediction:predictionDiagnosticPrediction(record,snapshot.profile,snapshot.freshness||strictFreshness(snapshot.profile),snapshot.filmsById?.get(filmId)||null),
+  fingerprint:predictionDiagnosticFingerprint(record,snapshot.freshness||strictFreshness(snapshot.profile),snapshot.filmsById?.get(filmId)||null),prediction:predictionDiagnosticPrediction(record,snapshot.profile,snapshot.freshness||strictFreshness(snapshot.profile),snapshot.filmsById?.get(filmId)||null),
   index:predictionDiagnosticIndex(snapshot,filmId,record),retry:predictionDiagnosticRetry(snapshot.queue,filmId),
  };
 }

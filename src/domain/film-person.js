@@ -137,6 +137,11 @@ function personLocalization(facts={}){
 function fingerprintState(facts={}){
  const now=facts.now??null;
  if(!facts.present)return dimensionState('fingerprint',{status:'missing',updatedAt:now,source:'fingerprint',nextAction:'fingerprint_and_prediction'});
+ // A verdict of the shared fingerprint evaluator (ADR-0035) replaces the strict schema comparison; a kept fingerprint keeps its own versions.
+ if(typeof facts.compatible==='boolean'){
+  if(facts.invalidatedAt||!facts.compatible)return dimensionState('fingerprint',{status:'stale',updatedAt:facts.invalidatedAt||now,source:'fingerprint',sourceVersion:facts.schemaVersion??null,provenance:{schemaVersion:facts.schemaVersion??null,promptVersion:facts.promptVersion??1,invalidatedAt:facts.invalidatedAt||null,compatible:facts.compatible},nextAction:'fingerprint_and_prediction'});
+  return dimensionState('fingerprint',{status:'current',updatedAt:facts.generatedAt||now,source:'fingerprint',sourceVersion:facts.schemaVersion??DOMAIN_FINGERPRINT_SCHEMA_VERSION,provenance:{schemaVersion:facts.schemaVersion??null,promptVersion:facts.promptVersion??1,compatible:true},nextAction:'none'});
+ }
  if(facts.schemaVersion!==DOMAIN_FINGERPRINT_SCHEMA_VERSION||facts.invalidatedAt)return dimensionState('fingerprint',{status:'stale',updatedAt:facts.invalidatedAt||now,source:'fingerprint',sourceVersion:facts.schemaVersion??null,provenance:{schemaVersion:facts.schemaVersion??null,invalidatedAt:facts.invalidatedAt||null},nextAction:'fingerprint_and_prediction'});
  return dimensionState('fingerprint',{status:'current',updatedAt:facts.generatedAt||now,source:'fingerprint',sourceVersion:DOMAIN_FINGERPRINT_SCHEMA_VERSION,nextAction:'none'});
 }
@@ -148,7 +153,7 @@ function predictionState(facts={}){
  const stored=facts,profile=facts.profile;
  // A verdict of the shared evaluator (ADR-0031) replaces the strict comparison; a carried prediction keeps its own provenance.
  if(typeof facts.compatible==='boolean'&&fingerprintCurrent&&profile&&facts.currentFingerprintHash!=null&&stored.fingerprintHash===facts.currentFingerprintHash&&facts.compatible&&(stored.tasteProfileVersion!==profile.version||stored.tasteProfileHash!==profile.profileHash))return dimensionState('prediction',{status:'current',updatedAt:now,source:'prediction',sourceVersion:stored.tasteProfileVersion??null,provenance:{profileVersion:stored.tasteProfileVersion??null,profileHash:stored.tasteProfileHash??null,evaluatedAgainst:{version:profile.version,profileHash:profile.profileHash},fingerprintHash:facts.currentFingerprintHash,promptVersion:stored.predictionPromptVersion??null},nextAction:'leave'});
- const aligned=(typeof facts.compatible!=='boolean'||facts.compatible)&&fingerprintCurrent&&profile&&facts.currentFingerprintHash!=null&&stored.tasteProfileVersion===profile.version&&stored.tasteProfileHash===profile.profileHash&&stored.fingerprintHash===facts.currentFingerprintHash&&stored.fingerprintSchemaVersion===DOMAIN_FINGERPRINT_SCHEMA_VERSION&&stored.predictionPromptVersion===DOMAIN_PREDICTION_PROMPT_VERSION;
+ const aligned=(typeof facts.compatible!=='boolean'||facts.compatible)&&fingerprintCurrent&&profile&&facts.currentFingerprintHash!=null&&stored.tasteProfileVersion===profile.version&&stored.tasteProfileHash===profile.profileHash&&stored.fingerprintHash===facts.currentFingerprintHash&&stored.fingerprintSchemaVersion===(facts.fingerprint?.sourceVersion??DOMAIN_FINGERPRINT_SCHEMA_VERSION)&&stored.predictionPromptVersion===DOMAIN_PREDICTION_PROMPT_VERSION;
  if(!aligned)return dimensionState('prediction',{status:'stale',updatedAt:now,source:'prediction',sourceVersion:profile?.version??null,provenance:{profileVersion:stored.tasteProfileVersion??null,profileHash:stored.tasteProfileHash??null,fingerprintHash:stored.fingerprintHash??null,promptVersion:stored.predictionPromptVersion??null},nextAction:next});
  return dimensionState('prediction',{status:'current',updatedAt:now,source:'prediction',sourceVersion:profile.version,provenance:{profileHash:profile.profileHash,fingerprintHash:facts.currentFingerprintHash,promptVersion:DOMAIN_PREDICTION_PROMPT_VERSION},nextAction:'leave'});
 }

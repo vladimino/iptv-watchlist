@@ -12,7 +12,8 @@ function storedFilmId(film){
  return tmdb?'tmdb_'+tmdb.value:film?.id||null;
 }
 function sidecarKey(key){return key.endsWith('.json')?key.slice(0,-5)+LIFECYCLE_SIDECAR:key+LIFECYCLE_SIDECAR;}
-function fingerprintFacts(file){if(!file)return {present:false};return {present:true,schemaVersion:file.fingerprintSchemaVersion,invalidatedAt:file.invalidatedAt||null,generatedAt:file.generatedAt||null};}
+// `compatible` is the fingerprint transition verdict (ADR-0035) when the store supplies one; without it the strict rule applies.
+function fingerprintFacts(file,compatible){if(!file)return {present:false};return {present:true,schemaVersion:file.fingerprintSchemaVersion,promptVersion:file.fingerprintPromptVersion??1,invalidatedAt:file.invalidatedAt||null,generatedAt:file.generatedAt||null,...(typeof compatible==='boolean'?{compatible}:{})};}
 // `compatible` is the shared evaluator's verdict (ADR-0031) when the store supplies one; without it the strict rule applies.
 function predictionFacts(file,failure,compatible){
  const current=file?.current;
@@ -60,7 +61,7 @@ function filmFacts(record,store,resolution,now){
  const evidence=identityEvidence([loaded.programme,metadata,loaded.watchlist,record]);
  const translation=reviewedTranslation([metadata,loaded.programme,loaded.watchlist,record]);
  const decision=decisionForFilm(record,resolution);
- return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id]),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id),typeof store.predictionCompatible==='function'?store.predictionCompatible(id):undefined),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
+ return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id],fingerprintVerdictOf(store,id)),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id),typeof store.predictionCompatible==='function'?store.predictionCompatible(id):undefined),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
 }
 function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,showsProgrammeRunId:facts.showsProgrammeRunId,publishedProgrammeRunId:facts.publishedProgrammeRunId,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
 function lifecycleBody(film){return {contractVersion:film.contractVersion,id:film.id,storedId:storedFilmId(film),canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds,redirects:film.redirects||[],aliases:film.aliases,identity:film.identity,metadata:film.metadata,localization:film.localization,fingerprint:film.fingerprint,prediction:film.prediction,availability:film.availability||null};}
@@ -100,8 +101,10 @@ function legacyDisplayedTitle(store,storedId){
  if(cached?.title&&cached.tmdbId&&tmdb&&String(cached.tmdbId)===String(tmdb))return cached.title;
  return film?.title||null;
 }
-function legacyFingerprintStatus(file){
+function fingerprintVerdictOf(store,storedId){return typeof store?.fingerprintCompatible==='function'?store.fingerprintCompatible(storedId):undefined;}
+function legacyFingerprintStatus(file,verdict){
  if(!file)return 'missing';
+ if(typeof verdict==='boolean')return verdict&&!file.invalidatedAt?'current':'stale';
  return file.fingerprintSchemaVersion!==DOMAIN_FINGERPRINT_SCHEMA_VERSION||file.invalidatedAt?'stale':'current';
 }
 function legacyPredictionStatus(store,storedId){
@@ -110,8 +113,9 @@ function legacyPredictionStatus(store,storedId){
  if(!current)return 'missing';
  const fingerprint=store.fingerprints?.[storedId],profile=store.profile;
  const verdict=typeof store.predictionCompatible==='function'?store.predictionCompatible(storedId):undefined;
- if(typeof verdict==='boolean')return legacyFingerprintStatus(fingerprint)==='current'&&verdict?'current':'stale';
- const aligned=legacyFingerprintStatus(fingerprint)==='current'&&profile&&fingerprint.fingerprintHash!=null&&current.tasteProfileVersion===profile.version&&current.tasteProfileHash===profile.profileHash&&current.fingerprintHash===fingerprint.fingerprintHash&&current.fingerprintSchemaVersion===DOMAIN_FINGERPRINT_SCHEMA_VERSION&&current.predictionPromptVersion===DOMAIN_PREDICTION_PROMPT_VERSION;
+ const fingerprintStatus=legacyFingerprintStatus(fingerprint,fingerprintVerdictOf(store,storedId));
+ if(typeof verdict==='boolean')return fingerprintStatus==='current'&&verdict?'current':'stale';
+ const aligned=fingerprintStatus==='current'&&profile&&fingerprint.fingerprintHash!=null&&current.tasteProfileVersion===profile.version&&current.tasteProfileHash===profile.profileHash&&current.fingerprintHash===fingerprint.fingerprintHash&&current.fingerprintSchemaVersion===fingerprint.fingerprintSchemaVersion&&current.predictionPromptVersion===DOMAIN_PREDICTION_PROMPT_VERSION;
  return aligned?'current':'stale';
 }
 function legacyDisplayReady(store,storedId){
@@ -138,11 +142,11 @@ function semanticMismatches(store,films,now){
   const fields={
    title:[legacyDisplayedTitle(context,id),preferredTitle(film)],
    localization:[localization.status,film.localization?.status||'missing'],
-   fingerprint:[legacyFingerprintStatus(context.fingerprints?.[id]),film.fingerprint?.status||'missing'],
+   fingerprint:[legacyFingerprintStatus(context.fingerprints?.[id],fingerprintVerdictOf(context,id)),film.fingerprint?.status||'missing'],
    prediction:[legacyPredictionStatus(context,id),film.prediction?.status||'missing'],
    displayReady:[legacyDisplayReady(context,id),displayReady(film)],
    catalogReady:[legacyCatalogReady(context,id,now),catalogReady(film)],
-   predictionReady:[legacyFingerprintStatus(context.fingerprints?.[id])==='current'&&legacyPredictionStatus(context,id)==='current',predictionReady(film)]
+   predictionReady:[legacyFingerprintStatus(context.fingerprints?.[id],fingerprintVerdictOf(context,id))==='current'&&legacyPredictionStatus(context,id)==='current',predictionReady(film)]
   };
   for(const [field,[legacy,lifecycle]] of Object.entries(fields))if(legacy!==lifecycle)mismatches.push({id,field,legacy,lifecycle});
  }

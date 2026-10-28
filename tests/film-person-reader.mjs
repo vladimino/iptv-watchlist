@@ -208,4 +208,24 @@ assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'current',original:'Curr
  assert.notEqual(readLifecycle({...invalidated,predictionCompatible:()=>true},NOW).films.find(item=>item.id==='film:28nq').prediction.status,'current','a verdict never revives a prediction over a stale fingerprint');
 }
 
+// A verdict of the shared fingerprint evaluator (ADR-0035), when the store supplies one, replaces the strict schema
+// comparison for the fingerprint dimension, the legacy status and the prediction that depends on it; it never revives an
+// invalidated fingerprint, and the prediction's schema provenance is compared with the fingerprint's own.
+{
+ const older=structuredClone(store);older.fingerprints['28nq'].fingerprintSchemaVersion=0;older.predictions['28nq'].current.fingerprintSchemaVersion=0;
+ const filmOf=(extra,id='28nq')=>readLifecycle({...older,...extra},NOW).films.find(item=>item.id==='film:'+id);
+ assert.equal(filmOf({}).fingerprint.status,'stale','without a verdict another schema version is stale');
+ assert.equal(filmOf({}).prediction.status,'stale');
+ const kept=filmOf({fingerprintCompatible:id=>id==='28nq'});
+ assert.equal(kept.fingerprint.status,'current');assert.equal(kept.fingerprint.sourceVersion,0,'the kept fingerprint keeps its own version');
+ assert.deepEqual(JSON.parse(JSON.stringify(kept.fingerprint.provenance)),{schemaVersion:0,promptVersion:1,compatible:true});
+ assert.equal(kept.prediction.status,'current','the prediction made from the kept fingerprint is current');
+ assert.equal(readLifecycle({...older,fingerprintCompatible:id=>id==='28nq'},NOW).parity.ok,true,'legacy status and lifecycle agree under the fingerprint verdict');
+ assert.equal(filmOf({fingerprintCompatible:()=>false}).fingerprint.status,'stale');
+ const exact=readLifecycle({...store,fingerprintCompatible:()=>false},NOW).films.find(item=>item.id==='film:28nq');
+ assert.equal(exact.fingerprint.status,'stale','a negative verdict wins even over an exact schema match');
+ const invalidated=structuredClone(older);invalidated.fingerprints['28nq'].invalidatedAt=FRESH;
+ assert.equal(readLifecycle({...invalidated,fingerprintCompatible:()=>true},NOW).films.find(item=>item.id==='film:28nq').fingerprint.status,'stale','a verdict never revives an invalidated fingerprint');
+}
+
 console.log('Film and Person lifecycle reader passed.');
