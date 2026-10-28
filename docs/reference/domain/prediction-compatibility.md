@@ -91,6 +91,8 @@ Under `strict` both run the exact equality checks the consumers used before, unc
 | Diagnostics and MCP `prediction_film_diagnostics`, `prediction_queue_overview`, `prediction_pending` | `state` for the file, `indexed` for index agreement and `index_ahead_of_queue` |
 | Film/Person lifecycle reader and domain | an optional evaluator verdict per film (`predictionCompatible(id)` on the store); without one, strict |
 
+The same `state` and `indexed` checks apply the fingerprint transition rule in the same call ([fingerprint compatibility](fingerprint-compatibility.md#readers-and-diagnostics)); each rule follows its own switch, and the fingerprint is judged before the profile.
+
 Two consumers stay strict by contract:
 
 - **The isolated prediction benchmark** compares fresh trial predictions with stored references made under the same profile.
