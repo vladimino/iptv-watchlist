@@ -603,9 +603,23 @@ function findsStrong(prediction){return !!prediction&&!prediction.stale&&Number.
 // (watchlist-only facts) leave no find. The record carries no synopsis or aliases, so the plot scope reads only genres and facets.
 function findsContext(){
  const validYear=Number.isInteger(state.from)&&Number.isInteger(state.to)&&state.from>=1900&&state.to<=MAX_YEAR&&state.from<=state.to,validRuntime=state.maxRuntime===null||(Number.isInteger(state.maxRuntime)&&state.maxRuntime>0);
- return {valid:validYear&&validRuntime,query:searchTokens(state.query),scopes:activeSearchScopes(state.searchScopes),genres:new Set(state.genres),mechanics:new Set(state.mechanics),moods:new Set(state.moods),execution:Object.fromEntries(EXECUTION_FILTERS.map(dimension=>[dimension.id,new Set(state.execution[dimension.id]||[])])),from:state.from,to:state.to,maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,viewing:state.viewing,startedOnly:state.startedOnly,lastChanceOnly:state.lastChanceOnly,person:!!(state.directors||state.actors)};
+ return {valid:validYear&&validRuntime,query:searchTokens(state.query),scopes:activeSearchScopes(state.searchScopes),genres:new Set(state.genres),genreKeys:findsGenreKeys(state.genres),mechanics:new Set(state.mechanics),moods:new Set(state.moods),execution:Object.fromEntries(EXECUTION_FILTERS.map(dimension=>[dimension.id,new Set(state.execution[dimension.id]||[])])),from:state.from,to:state.to,maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,viewing:state.viewing,startedOnly:state.startedOnly,lastChanceOnly:state.lastChanceOnly,person:!!(state.directors||state.actors)};
 }
 function findsContextActive(context){return !!context&&(context.query.tokens.length>0||context.genres.size>0||context.mechanics.size>0||context.moods.size>0||Object.values(context.execution).some(selected=>selected.size)||context.from!==1900||context.to!==MAX_YEAR||context.maxRuntime!==null||context.minPrediction!==null||context.minProbability!==null||context.lastChanceOnly||context.viewing!=='any'||context.startedOnly||context.person);}
+// Genres are matched by canonical key, not by label: the watchlist carries the Letterboxd labels mapped by GENRE_MAP («Криминал»,
+// «Фантастика», «Исторический»), the catalog carries the TMDB ru-RU names («криминал», «фантастика», «история»). FINDS_GENRE_KEYS is a
+// copy of PROFILE_GENRE_ALIASES in src/domain/prediction-compatibility.js (a test keeps them equal); a name outside it matches only the
+// same name, case-folded, never a different one. Labels and URL parameters stay as they are; only the comparison is canonical.
+const FINDS_GENRE_KEYS={
+ 'боевик':'action','приключения':'adventure','мультфильм':'animation','комедия':'comedy','криминал':'crime','документальный':'documentary','драма':'drama',
+ 'семейный':'family','фэнтези':'fantasy','история':'history','исторический':'history','ужасы':'horror','музыка':'music','музыкальный':'music','детектив':'mystery',
+ 'мелодрама':'romance','фантастика':'science_fiction','триллер':'thriller','телевизионный фильм':'tv_movie','телефильм':'tv_movie','военный':'war','вестерн':'western',
+ 'action':'action','adventure':'adventure','animation':'animation','comedy':'comedy','crime':'crime','documentary':'documentary','drama':'drama','family':'family',
+ 'fantasy':'fantasy','history':'history','horror':'horror','music':'music','mystery':'mystery','romance':'romance','science fiction':'science_fiction',
+ 'thriller':'thriller','tv movie':'tv_movie','war':'war','western':'western'
+};
+function findsGenreKey(name){if(typeof name!=='string')return null;const folded=name.trim().toLocaleLowerCase('ru').replace(/\s+/g,' ');if(!folded)return null;return FINDS_GENRE_KEYS[folded]||'raw:'+folded;}
+function findsGenreKeys(names){return new Set(Array.from(names||[],findsGenreKey).filter(Boolean));}
 function findsFacets(film){
  const mechanics=(film.fingerprint?.plotMechanics||[]).filter(id=>Object.hasOwn(MECHANIC_LABELS,id));
  const moods=[...(film.fingerprint?.moodIds||[]),...(film.prediction?.moodIds||[])].filter(id=>Object.hasOwn(MOOD_LABELS,id));
@@ -625,7 +639,7 @@ function findsMatchesContext(film,context,now,scope){
  if(context.minProbability!==null&&!(p.probability4Plus>=context.minProbability))return false;
  if((context.from!==1900||context.to!==MAX_YEAR)&&!(Number.isFinite(year)&&film.year&&year>=context.from&&year<=context.to))return false;
  if(context.maxRuntime!==null&&!(runtime>0&&runtime<=context.maxRuntime))return false;
- if(context.genres.size&&!(film.genres||[]).some(genre=>context.genres.has(genre)))return false;
+ if(context.genres.size){const keys=findsGenreKeys(film.genres);if(![...context.genreKeys].some(key=>keys.has(key)))return false;}
  if(context.mechanics.size&&![...context.mechanics].some(id=>facets.mechanics.has(id)))return false;
  if(context.moods.size&&![...context.moods].some(id=>facets.moods.has(id)))return false;
  for(const [dimension,selected] of Object.entries(context.execution))if(selected.size&&!selected.has(film.fingerprint?.execution?.[dimension]))return false;
@@ -635,8 +649,10 @@ function findsMatchesContext(film,context,now,scope){
 // What a find matched among the selected genres, mechanics and moods; mechanics and moods weigh above genres in the ranking.
 function findsMatched(film,context){
  if(!context)return {mechanics:[],moods:[],genres:[]};
- const facets=findsFacets(film);
- return {mechanics:[...context.mechanics].filter(id=>facets.mechanics.has(id)),moods:[...context.moods].filter(id=>facets.moods.has(id)),genres:(film.genres||[]).filter(genre=>context.genres.has(genre))};
+ const facets=findsFacets(film),keys=findsGenreKeys(film.genres),seen=new Set();
+ // The matched genres are the selected labels (as the owner picked them), one per canonical genre the film carries.
+ const genres=[...context.genres].filter(genre=>{const key=findsGenreKey(genre);if(!key||!keys.has(key)||seen.has(key))return false;seen.add(key);return true;});
+ return {mechanics:[...context.mechanics].filter(id=>facets.mechanics.has(id)),moods:[...context.moods].filter(id=>facets.moods.has(id)),genres};
 }
 function findsEligible(film,now=nowMs(),known=watchlistIdentities(),scope=findsScope()){
  if(!film||film.id===undefined||film.id===null)return false;
