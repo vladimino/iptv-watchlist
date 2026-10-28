@@ -70,6 +70,8 @@ Every queue refresh evaluates each queue film against the current profile:
   - `wouldKeep` counts predictions strict equality queues but the evaluator keeps.
   - `wouldRequeue` counts the reverse; it should stay 0, because an exact match is always current.
   - `strictDisagreements` compares the evaluator in strict mode with the plain equality check; it should stay 0.
+
+  The same refresh records `fingerprintCompatibility` and a `work` map for the fingerprint transition rule, decided by its own switch ([fingerprint compatibility](fingerprint-compatibility.md#queue-and-runner)). Under that rule's `selective` mode one verdict per film decides, with this profile rule applied in the mode of `PREDICTION_PROFILE_COMPATIBILITY`.
 ## One rule for every consumer
 
 `predictionFreshness(env, profile)` fixes the mode and the profile snapshot (version, hash, lineage, approval digests) once per request. Its two checks are what every consumer calls:

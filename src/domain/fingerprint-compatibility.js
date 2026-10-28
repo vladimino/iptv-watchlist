@@ -2,6 +2,7 @@
 // current, compatible (kept through declared, approved transitions) or stale, and what work does a film need. Builds on
 // src/domain/prediction-compatibility.js (selector reach, genre aliases, the profile rule) and src/domain/profile-impact.js
 // (canonical JSON, approval shape). No I/O: the live schema-1 vocabulary and a synchronous SHA-256 are passed in by the caller.
+const FINGERPRINT_COMPATIBILITY_VERSION=1;
 const FINGERPRINT_TRANSITION_SCHEMA_VERSION=1;
 const FINGERPRINT_TRANSITION_AXES=['fingerprint_schema','fingerprint_prompt','prediction_prompt'];
 const FINGERPRINT_TRANSITION_SCOPES=['identity','selective','global'];
@@ -59,8 +60,10 @@ function fingerprintApplyChange(vocabulary,change){
  if(change.kind.startsWith('value_')){
   if(!list)return null;
   if(change.kind==='value_redefined')return next;
-  for(const value of old){const at=list.indexOf(value);if(at<0)return null;list.splice(at,1);}
-  list.push(...added);
+  // New values take the place of the first retired one, so a vocabulary keeps its order across releases.
+  const at=old.length?list.indexOf(old[0]):list.length;
+  for(const value of old){const index=list.indexOf(value);if(index<0)return null;list.splice(index,1);}
+  list.splice(Math.min(at,list.length),0,...added);
  }
  else if(change.kind==='dimension_added'){next.execution[change.dimension]=[...change.values];if(change.domain)next.domains[change.dimension]=[...change.domain];else next.general.push(change.dimension);}
  else if(change.kind==='dimension_removed'){delete next.execution[change.dimension];delete next.domains[change.dimension];next.general=next.general.filter(dimension=>dimension!==change.dimension);}
@@ -262,9 +265,11 @@ function fingerprintPredictionPrompt(prediction,fingerprint,metadata,registry,ta
 // predictionTransitionCompatibility(prediction, fingerprint, metadata, profile, registry, target, mode, options) ->
 // {outcome, reason, requiredWork, fingerprint, prompt, profile}. Step 1 of ADR-0031 section 3 as replaced by ADR-0035
 // section 5, then the unchanged profile rule (predictionCompatibility). `target` also carries predictionPromptVersion.
-// Profile selectors are validated against the target schema and answered by the fingerprint in its own schema.
+// `mode` is one mode for every axis, or {fingerprint, prompt, profile} when the fingerprint rule and the profile rule are
+// switched separately. Profile selectors are validated against the target schema and answered by the fingerprint in its own.
 function predictionTransitionCompatibility(prediction,fingerprint,metadata,profile,registry,target,mode,options){
- const verdict=fingerprintCompatibility(fingerprint,metadata,registry,target,mode,options);
+ const modes=mode&&typeof mode==='object'?{fingerprint:mode.fingerprint,prompt:mode.prompt,profile:mode.profile}:{fingerprint:mode,prompt:mode,profile:mode};
+ const verdict=fingerprintCompatibility(fingerprint,metadata,registry,target,modes.fingerprint,options);
  const done=(outcome,reason,extra={})=>({outcome,reason,requiredWork:!fingerprintCompatibilityFresh(verdict)?'fingerprint_and_prediction':outcome==='stale'?'prediction_only':'none',fingerprint:verdict,...extra});
  if(!prediction)return done('stale','fingerprint_changed');
  if(!fingerprintCompatibilityFresh(verdict))return done('stale','fingerprint_not_current');
@@ -272,9 +277,9 @@ function predictionTransitionCompatibility(prediction,fingerprint,metadata,profi
  if(prediction.fingerprintSchemaVersion!==fingerprint.fingerprintSchemaVersion)return done('stale','fingerprint_provenance_mismatch');
  const schemaChain=(Array.isArray(registry)?registry:[]).filter(t=>t?.axis==='fingerprint_schema');
  const own=fingerprintSchemaVocabulary(schemaChain,fingerprint.fingerprintSchemaVersion,options.vocabulary),targetVocabulary=fingerprintSchemaVocabulary(schemaChain,target.fingerprintSchemaVersion,options.vocabulary);
- const prompt=fingerprintPredictionPrompt(prediction,fingerprint,metadata,registry,target,mode,options,own);
+ const prompt=fingerprintPredictionPrompt(prediction,fingerprint,metadata,registry,target,modes.prompt,options,own);
  if(prompt.outcome==='stale')return done('stale',prompt.reason,{prompt});
- const profileResult=predictionCompatibility(prediction,fingerprint,predictionImpactFeatures(fingerprint,metadata?.genres),profile,mode,{
+ const profileResult=predictionCompatibility(prediction,fingerprint,predictionImpactFeatures(fingerprint,metadata?.genres),profile,modes.profile,{
   vocabulary:targetVocabulary||options.vocabulary,featureVocabulary:own||undefined,digest:options.digest,
   fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,predictionPromptVersion:prediction.predictionPromptVersion});
  if(profileResult.outcome==='stale'||profileResult.outcome==='compatible')return done(profileResult.outcome,profileResult.reason,{prompt,profile:profileResult});

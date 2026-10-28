@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 const source=fs.readFileSync('src/domain/fingerprint-compatibility.js','utf8');
 assert.doesNotMatch(source,/\bfetch\b|\bBUCKET\b|crypto|await|Date\.now|Math\.random/,'the evaluator stays pure');
 assert.match(fs.readFileSync('build.mjs','utf8'),/prediction-compatibility\.js'[^\n]*fingerprint-compatibility\.js/,'the Worker bundle includes the evaluator after the profile rule');
-assert.doesNotMatch(fs.readFileSync('src/enrichment.js','utf8'),/fingerprintCompatibility|predictionTransitionCompatibility|fingerprintRegistryIssue/,'no consumer calls the evaluator yet');
+assert.match(fs.readFileSync('src/enrichment.js','utf8'),/predictionTransitionCompatibility\(/,'the queue and the runner call the shared verdict (tests/fingerprint-migration-queue.mjs covers them)');
 const ctx=vm.createContext({});
 vm.runInContext(['profile-impact','prediction-compatibility','fingerprint-compatibility'].map(file=>fs.readFileSync('src/domain/'+file+'.js','utf8')).join('\n')
  +'\nglobalThis.E={fingerprintCompatibility,fingerprintCompatibilityFresh,fingerprintRestoreCandidate,fingerprintTransitionIssue,fingerprintRegistryIssue,fingerprintSchemaVocabulary,fingerprintTransitionDeclarationText,predictionTransitionCompatibility,predictionCompatibility,predictionImpactFeatures,FINGERPRINT_CHANGE_KINDS,FINGERPRINT_TRANSITION_AXES,FINGERPRINT_TRANSITION_SCOPES,FINGERPRINT_FIELDS};',ctx);

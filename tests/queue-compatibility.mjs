@@ -15,7 +15,7 @@ const store={
 };
 const env={TMDB_REQUEST_INTERVAL_MS:0,BUCKET:store};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
-vm.runInContext(['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n'),ctx);
+vm.runInContext(['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 vm.runInContext('globalThis.T={fingerprintImpactFacet,predictionCompatibilityMode,EXECUTION,GENERAL_EXECUTION};',ctx);
 const T=ctx.T;
@@ -29,7 +29,7 @@ for(const [value,mode] of [[undefined,'strict'],['strict','strict'],['selective'
 // Impact features: a copy of the full fingerprint, bound to its hash; nothing without a hash.
 const execution=Object.fromEntries(T.GENERAL_EXECUTION.map(key=>[key,T.EXECUTION[key][0]]));
 const full={fingerprintSchemaVersion:1,fingerprintHash:'f-x',plotMechanics:['heist'],execution:{...execution,pace:'unknown',horror_rule_consistency:'weak'},moodLabels:['a','b']};
-assert.deepEqual(JSON.parse(JSON.stringify(T.fingerprintImpactFacet(full))),{fingerprintHash:'f-x',fingerprintSchemaVersion:1,invalidatedAt:null,plotMechanics:['heist'],execution:{...execution,pace:'unknown',horror_rule_consistency:'weak'}},'unknown and genre-specific values are kept');
+assert.deepEqual(JSON.parse(JSON.stringify(T.fingerprintImpactFacet(full))),{fingerprintHash:'f-x',fingerprintSchemaVersion:1,fingerprintPromptVersion:null,invalidatedAt:null,plotMechanics:['heist'],execution:{...execution,pace:'unknown',horror_rule_consistency:'weak'}},'unknown and genre-specific values are kept');
 assert.equal(T.fingerprintImpactFacet({...full,fingerprintHash:''}),null);assert.equal(T.fingerprintImpactFacet(null),null);
 
 // A programme of four watchlist films, all airing now.
