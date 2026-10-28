@@ -7,7 +7,7 @@ const live=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Da
 for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(file,'utf8'),live);
 const variants=title=>vm.runInContext('candidateSearchVariants('+JSON.stringify(title)+')',live);
 const reasons=(title,year)=>variants({title,year}).map(row=>row.reason+':'+row.query+':'+(row.year??''));
-assert.equal(vm.runInContext("[candidateDiscoveryMode({}),candidateDiscoveryMode({CANDIDATE_DISCOVERY:'on'}),candidateDiscoveryMode({CANDIDATE_DISCOVERY:' shadow '})].join()",live),'off,on,shadow');
+assert.equal(vm.runInContext("[candidateDiscoveryMode({}),candidateDiscoveryMode({CANDIDATE_DISCOVERY:'on'}),candidateDiscoveryMode({CANDIDATE_DISCOVERY:' on '}),candidateDiscoveryMode({CANDIDATE_DISCOVERY:' shadow '}),candidateDiscoveryMode({CANDIDATE_DISCOVERY:'ON'})].join()",live),'off,on,on,off,off','only the exact on enables the variant searches; the shadow preview is gone');
 for(const year of ['null','undefined',"''"])assert.equal(vm.runInContext(`candidateSearchVariants({title:'Блейд',year:${year}}).some(row=>String(row.reason).startsWith('year_')||row.year===0||row.year===-1||row.year===1)`,live),false);
 assert.ok(reasons('Блейд 1',1998).includes('part_suffix:Блейд:1998'));
 assert.ok(reasons('Блейд 1',1998).includes('spelling_e:Блэйд:1998'));
@@ -41,75 +41,47 @@ async function resolve(flags,row,response,extra){
  const box=harness(flags,response);seed(box.records,row);
  if(extra)for(const [key,value] of Object.entries(extra))box.records.set(key,value);
  const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',box.ctx);
- return {...box,result,decision:box.records.get('epg/discovery-resolution.json')[row.key],preview:box.records.get('epg/discovery-score-preview.json')?.items[row.key],catalog:box.records.get('epg/discovered-films.json')};
+ return {...box,result,decision:box.records.get('epg/discovery-resolution.json')?.[row.key],preview:box.records.get('epg/discovery-score-preview.json')?.items[row.key],catalog:box.records.get('epg/discovered-films.json')};
 }
 const empty=()=>new Response(JSON.stringify({total_pages:1,results:[]}));
 const json=body=>new Response(JSON.stringify(body));
+// Without CANDIDATE_DISCOVERY the scored writer makes only its own searches: no variant, no proposal, no catalog row.
 const blade=item('Блейд 1','блейд 1',1998,120);
-const off=await resolve({scored:'shadow'},blade,empty);
+const off=await resolve({},blade,empty);
 assert.equal(off.decision.status,'no_confident_match');
 assert.equal(off.preview.proposedCandidates,undefined);
 assert.equal(off.result.tmdbCalls,off.calls());
 assert.equal(off.catalog['tmdb_36647'],undefined);
 
-const bladeOn=await resolve({scored:'shadow',discovery:'shadow'},blade,url=>url.includes(encodeURIComponent('Блэйд'))?json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]}):empty());
-assert.equal(bladeOn.decision.status,'no_confident_match');
-assert.equal(bladeOn.decision.identitySource,undefined);
-assert.equal(bladeOn.catalog['tmdb_36647'],undefined);
-assert.equal(bladeOn.preview.scoring.status,'accepted');
-assert.equal(bladeOn.preview.scoring.reason,'accepted_spelling_e');
-assert.equal(bladeOn.preview.outcome,'needs_verification');
-assert.ok(bladeOn.preview.proposedCandidates.some(row=>row.tmdbId==='36647'&&row.reason==='spelling_e'));
-assert.equal(bladeOn.result.tmdbCalls,2);
-assert.ok(bladeOn.calls()>bladeOn.result.tmdbCalls);
-assert.equal(bladeOn.result.error,null);
-
 const irony=item('Ирония судьбы, или С легким паром','ирония судьбы или с легким паром',1975,192);
-const ironyRun=await resolve({scored:'shadow',discovery:'shadow'},irony,url=>url.includes('/movie/43430')?json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184)):url.includes('year=1976')?json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]}):empty());
-assert.equal(ironyRun.decision.status,'no_confident_match');
-assert.equal(ironyRun.catalog['tmdb_43430'],undefined);
-assert.ok(ironyRun.preview.proposedCandidates.some(row=>row.tmdbId==='43430'&&row.reason==='year_after'));
-assert.equal(ironyRun.preview.scoring.acceptedTmdbId,'43430');
-assert.equal(ironyRun.preview.outcome,'detail_verified');
-assert.equal(ironyRun.preview.comparison,'scored_only');
 
 const ocean=item('11 друзей Оушена','11 друзей оушена',2001,116);
-const oceanRun=await resolve({scored:'shadow',discovery:'shadow'},ocean,url=>url.includes('/movie/161')?json(detail(161,'Одиннадцать друзей Оушена',"Ocean's Eleven",2001,116)):decodeURIComponent(url).includes('одиннадцать')?json({total_pages:1,results:[movie(161,'Одиннадцать друзей Оушена',"Ocean's Eleven",2001)]}):empty());
-assert.equal(oceanRun.decision.status,'no_confident_match');
-assert.equal(oceanRun.preview.scoring.acceptedTmdbId,'161');
-assert.equal(oceanRun.preview.scoring.reason,'accepted_numeral');
-assert.equal(oceanRun.preview.outcome,'detail_verified');
+const oceanRun=await resolve({discovery:'on'},ocean,url=>url.includes('/movie/161')?json(detail(161,'Одиннадцать друзей Оушена',"Ocean's Eleven",2001,116)):decodeURIComponent(url).includes('одиннадцать')?json({total_pages:1,results:[movie(161,'Одиннадцать друзей Оушена',"Ocean's Eleven",2001)]}):empty());
+assert.equal(oceanRun.decision.status,'verified');assert.equal(oceanRun.decision.tmdbId,'161');assert.equal(oceanRun.decision.identitySource,'tmdb_detail');
+assert.equal(oceanRun.preview.scoring.reason,'accepted_numeral');assert.equal(oceanRun.preview.outcome,'detail_verified');
 assert.ok(oceanRun.preview.proposedCandidates.some(row=>row.tmdbId==='161'&&row.reason==='numeral'));
-assert.equal(oceanRun.catalog['tmdb_161'],undefined);
+assert.equal(oceanRun.catalog['tmdb_161'].canonicalIdentity,'tmdb:161','a numeral form confirmed by the detail card is written');
+
 const matrixRival=item('Матрица 1','матрица 1',1999,136);
-const matrixRivalRun=await resolve({scored:'shadow',discovery:'shadow'},matrixRival,url=>url.includes('/movie/603')?json(detail(603,'Матрица','The Matrix',1999,136)):decodeURIComponent(url).includes('Матрица')?json({total_pages:1,results:[movie(603,'Матрица','The Matrix',1999)]}):empty(),{'epg/discovered-films.json':{tmdb_604:{id:'tmdb_604',tmdbId:'604',title:'Матрица',original:'The Matrix Reloaded',year:1999,runtime:138,canonicalIdentity:'tmdb:604',aliases:[],shows:[]}}});
-assert.equal(matrixRivalRun.preview.scoring.acceptedTmdbId,'603');
-assert.equal(matrixRivalRun.preview.outcome,'candidate_decision');
-assert.equal(matrixRivalRun.preview.reason,'detail_competing_version');
-assert.equal(matrixRivalRun.decision.status,'no_confident_match');
-assert.equal(matrixRivalRun.catalog['tmdb_603'],undefined);
-const bladeLater=await resolve({scored:'shadow',discovery:'shadow'},blade,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/36647'))return json(detail(36647,'Блэйд','Blade',1998,120));if(text.includes('Блэйд'))return json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]});if(text.includes('Блейд'))return json({total_pages:1,results:[movie(36647,'Блейд: начало','Blade',1998)]});return empty();});
-assert.equal(bladeLater.preview.scoring.reason,'accepted_spelling_e');
-assert.equal(bladeLater.preview.outcome,'detail_verified');
-assert.equal(bladeLater.decision.status,'no_confident_match');
-assert.equal(bladeLater.catalog['tmdb_36647'],undefined);
+const matrixRivalRun=await resolve({discovery:'on'},matrixRival,url=>url.includes('/movie/603')?json(detail(603,'Матрица','The Matrix',1999,136)):decodeURIComponent(url).includes('Матрица')?json({total_pages:1,results:[movie(603,'Матрица','The Matrix',1999)]}):empty(),{'epg/discovered-films.json':{tmdb_604:{id:'tmdb_604',tmdbId:'604',title:'Матрица',original:'The Matrix Reloaded',year:1999,runtime:138,canonicalIdentity:'tmdb:604',aliases:[],shows:[]}}});
+assert.equal(matrixRivalRun.preview.scoring.acceptedTmdbId,'603');assert.equal(matrixRivalRun.preview.outcome,'candidate_decision');assert.equal(matrixRivalRun.preview.reason,'detail_competing_version');
+assert.equal(matrixRivalRun.decision.status,'ambiguous','a competing edition on the detail check is an ambiguous decision, not a film');assert.equal(matrixRivalRun.catalog['tmdb_603'],undefined);
+
+const bladeLater=await resolve({discovery:'on'},blade,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/36647'))return json(detail(36647,'Блэйд','Blade',1998,120));if(text.includes('Блэйд'))return json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]});if(text.includes('Блейд'))return json({total_pages:1,results:[movie(36647,'Блейд: начало','Blade',1998)]});return empty();});
+assert.equal(bladeLater.preview.scoring.reason,'accepted_spelling_e');assert.equal(bladeLater.preview.outcome,'detail_verified');
+assert.equal(bladeLater.decision.status,'verified');assert.equal(bladeLater.decision.tmdbId,'36647');assert.equal(bladeLater.catalog['tmdb_36647'].canonicalIdentity,'tmdb:36647');
+
 const shelterRow=item('Убежище','убежище',2022,88);
-const shelterRun=await resolve({scored:'shadow',discovery:'shadow'},shelterRow,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/801970'))return json(detail(801970,'Убежище','Refuge',2023,91));if(text.includes('year=2023'))return json({total_pages:1,results:[movie(801970,'Убежище','Refuge',2023)]});return empty();});
-assert.equal(shelterRun.preview.scoring.status,'accepted');
-assert.equal(shelterRun.preview.scoring.acceptedTmdbId,'801970');
-assert.equal(shelterRun.preview.outcome,'needs_verification');
-assert.equal(shelterRun.preview.reason,'short_title_adjacent_year');
-assert.equal(shelterRun.decision.status,'no_confident_match');
-assert.equal(shelterRun.catalog['tmdb_801970'],undefined);
+const shelterRun=await resolve({discovery:'on'},shelterRow,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/801970'))return json(detail(801970,'Убежище','Refuge',2023,91));if(text.includes('year=2023'))return json({total_pages:1,results:[movie(801970,'Убежище','Refuge',2023)]});return empty();});
+assert.equal(shelterRun.preview.scoring.acceptedTmdbId,'801970');assert.equal(shelterRun.preview.outcome,'needs_verification');assert.equal(shelterRun.preview.reason,'short_title_adjacent_year');
+assert.equal(shelterRun.decision.status,'needs_verification','a short title one year away stays held');assert.equal(shelterRun.catalog['tmdb_801970'],undefined);
+
 const cheburashkaRow=item('Чебурашка 2','чебурашка 2',2025,103);
-const cheburashkaRun=await resolve({scored:'shadow',discovery:'shadow'},cheburashkaRow,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/1228477'))return json(detail(1228477,'Чебурашка 2','Cheburashka',2026,103));if(text.includes('year=2026'))return json({total_pages:1,results:[movie(1228477,'Чебурашка 2','Cheburashka',2026)]});return empty();});
-assert.equal(cheburashkaRun.preview.outcome,'detail_verified');
-assert.equal(cheburashkaRun.preview.scoring.acceptedTmdbId,'1228477');
-assert.equal(cheburashkaRun.decision.status,'no_confident_match');
-assert.equal(cheburashkaRun.catalog['tmdb_1228477'],undefined);
+const cheburashkaRun=await resolve({discovery:'on'},cheburashkaRow,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/1228477'))return json(detail(1228477,'Чебурашка 2','Cheburashka',2026,103));if(text.includes('year=2026'))return json({total_pages:1,results:[movie(1228477,'Чебурашка 2','Cheburashka',2026)]});return empty();});
+assert.equal(cheburashkaRun.preview.outcome,'detail_verified');assert.equal(cheburashkaRun.decision.status,'verified');assert.equal(cheburashkaRun.decision.tmdbId,'1228477');assert.ok(cheburashkaRun.catalog['tmdb_1228477']);
 
 const kombat=item('Мортал Комбат','мортал комбат',1995,101);
-const kombatRun=await resolve({scored:'shadow',discovery:'shadow'},kombat,url=>url.includes('/movie/9312')?json(detail(9312,'Смертельная битва','Mortal Kombat',1995,101,['Мортал Комбат'])):url.includes('/movie/1?')?json(detail(1,'Совсем другое','Other Film',1995,40,['Другое'])):json({total_pages:1,results:[movie(1,'Совсем другое','Other Film',1995),movie(9312,'Смертельная битва','Mortal Kombat',1995)]}));
+const kombatRun=await resolve({discovery:'on'},kombat,url=>url.includes('/movie/9312')?json(detail(9312,'Смертельная битва','Mortal Kombat',1995,101,['Мортал Комбат'])):url.includes('/movie/1?')?json(detail(1,'Совсем другое','Other Film',1995,40,['Другое'])):json({total_pages:1,results:[movie(1,'Совсем другое','Other Film',1995),movie(9312,'Смертельная битва','Mortal Kombat',1995)]}));
 assert.equal(kombatRun.decision.status,'no_confident_match');
 assert.equal(kombatRun.preview.scoring.status,'no_confident_match');
 assert.equal(kombatRun.preview.scoring.acceptedTmdbId,null);
@@ -119,20 +91,20 @@ assert.ok(kombatRun.urls.some(url=>url.includes('/movie/9312')));
 assert.equal(kombatRun.catalog['tmdb_9312'],undefined);
 
 const wonder=item('Чудо-женщина','чудо женщина',2020,151);
-const wonderRun=await resolve({scored:'shadow',discovery:'shadow'},wonder,url=>url.includes('year=2019')?json({total_pages:1,results:[movie(464052,'Чудо-женщина: 1984','Wonder Woman 1984',2020)]}):empty());
+const wonderRun=await resolve({discovery:'on'},wonder,url=>url.includes('year=2019')?json({total_pages:1,results:[movie(464052,'Чудо-женщина: 1984','Wonder Woman 1984',2020)]}):empty());
 assert.equal(wonderRun.decision.status,'no_confident_match');
 assert.equal(wonderRun.preview.scoring.acceptedTmdbId,null);
 assert.ok(wonderRun.preview.proposedCandidates.some(row=>row.tmdbId==='464052'));
 assert.equal(wonderRun.catalog['tmdb_464052'],undefined);
 
 const runner=item('Бегущий человек','бегущий человек',1987,101);
-const runnerResult=await resolve({scored:'shadow',discovery:'shadow'},runner,url=>url.includes('year=1988')?json({total_pages:1,results:[movie(798645,'Бегущий человек','The Running Man',2025)]}):empty());
+const runnerResult=await resolve({discovery:'on'},runner,url=>url.includes('year=1988')?json({total_pages:1,results:[movie(798645,'Бегущий человек','The Running Man',2025)]}):empty());
 assert.equal(runnerResult.decision.status,'no_confident_match');
 assert.equal(runnerResult.preview.scoring.acceptedTmdbId,null);
 assert.equal(runnerResult.preview.proposedCandidates,undefined);
 assert.equal(runnerResult.catalog['tmdb_798645'],undefined);
 
-const limited=await resolve({scored:'shadow',discovery:'shadow'},blade,url=>{if(url.includes('search/movie')&&!url.includes('year=1998'))return new Response('',{status:429,headers:{'Retry-After':'30'}});return empty();});
+const limited=await resolve({discovery:'on'},blade,url=>{if(url.includes('search/movie')&&!url.includes('year=1998'))return new Response('',{status:429,headers:{'Retry-After':'30'}});return empty();});
 assert.equal(limited.result.error,null);
 assert.equal(limited.decision.status,'no_confident_match');
 assert.equal(limited.catalog['tmdb_36647'],undefined);
@@ -140,123 +112,46 @@ assert.equal(limited.result.variantThrottled,1);
 assert.equal(limited.urls.filter(url=>url.includes('search/movie')&&!url.includes('year=1998')).length,1);
 assert.ok(limited.result.variantSkipped>=1);
 assert.equal(limited.result.tmdbCalls,2);
-assert.equal(limited.records.get('epg/discovery-variant-pending.json').jobs.length,0);
 assert.equal(limited.records.get('epg/discovery-status.json').variantThrottled,limited.result.variantThrottled);
-const skipped=await vm.runInContext("(async()=>{const stats={calls:0,errors:0,throttled:0,skipped:0};await collectVariantProposals(env,{title:'Блейд 1',normalizedTitle:'блейд 1',year:1998,duration:120,durations:[120]},Date.now(),stats);return stats;})()",bladeOn.ctx);
+const skipped=await vm.runInContext("(async()=>{const stats={calls:0,errors:0,throttled:0,skipped:0};await collectVariantProposals(env,{title:'Блейд 1',normalizedTitle:'блейд 1',year:1998,duration:120,durations:[120]},Date.now(),stats);return stats;})()",off.ctx);
 assert.equal(skipped.calls,0);
 assert.ok(skipped.skipped>=1);
-const capped=await vm.runInContext("(async()=>{const stats={calls:8,errors:0,throttled:0,skipped:0};await collectVariantProposals(env,{title:'Блейд 1',normalizedTitle:'блейд 1',year:1998,duration:120,durations:[120]},Date.now()+60000,stats);return stats;})()",bladeOn.ctx);
+const capped=await vm.runInContext("(async()=>{const stats={calls:8,errors:0,throttled:0,skipped:0};await collectVariantProposals(env,{title:'Блейд 1',normalizedTitle:'блейд 1',year:1998,duration:120,durations:[120]},Date.now()+60000,stats);return stats;})()",off.ctx);
 assert.equal(capped.calls,8);
 assert.ok(capped.skipped>=1);
 
-const moved=await resolve({scored:'shadow',discovery:'shadow'},irony,async(url,records)=>{if(url.includes('year=1976')){records.set('epg/published-generation.json',{programmeRunId:'run-2',phase:'published'});return json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]});}return empty();});
-assert.equal(moved.decision.status,'no_confident_match');
-assert.equal(moved.catalog['tmdb_43430'],undefined);
-assert.notEqual(moved.preview?.outcome,'detail_verified');
+const moved=await resolve({discovery:'on'},irony,async(url,records)=>{if(url.includes('year=1976')){records.set('epg/published-generation.json',{programmeRunId:'run-2',phase:'published'});return json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]});}return empty();});
+assert.notEqual(moved.decision?.status,'verified');assert.equal(moved.catalog['tmdb_43430'],undefined,'a generation that moved under the variant search gets no film');
 
-const dune=item('Dune','dune',1984,137);
-const known={tmdb_11:{id:'tmdb_11',tmdbId:'11',title:'Дюна',original:'Dune',year:1984,runtime:137,canonicalIdentity:'tmdb:11',aliases:['Dune'],shows:[]}};
-const duneBox=harness({scored:'shadow',discovery:'shadow'},empty);
-duneBox.records.set('programme.json',{runId:'run-1',films:[]});
-duneBox.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[dune]});
-duneBox.records.set('epg/discovered-films.json',known);
-const duneResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',duneBox.ctx);
-assert.equal(duneBox.records.get('epg/discovery-resolution.json')['dune|1984'].status,'verified');
-assert.equal(duneBox.records.get('epg/discovery-resolution.json')['dune|1984'].identitySource,'known_alias_year_runtime');
-assert.equal(duneResult.tmdbCalls,0);
-assert.equal(duneBox.calls(),1);
-const legacyOnly=await resolve({discovery:'on'},blade,url=>url.includes(encodeURIComponent('Блэйд'))?json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]}):empty());
-assert.equal(legacyOnly.result.variantCalls,0);
-assert.equal(legacyOnly.calls(),legacyOnly.result.tmdbCalls);
-assert.equal(legacyOnly.decision.status,'no_confident_match');
-const scoredWithout=await resolve({scored:'on'},irony,url=>url.includes('/movie/43430')?json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184)):url.includes('year=1976')?json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]}):empty());
+// A stale SCORED_RESOLUTION binding is ignored: the scored writer and its variant search run as if the variable were absent.
+const staleBinding=await resolve({scored:'off',discovery:'on'},blade,url=>url.includes(encodeURIComponent('Блэйд'))?json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]}):empty());
+assert.ok(staleBinding.result.variantCalls>=1);assert.notEqual(staleBinding.decision.status,'verified');assert.equal(staleBinding.catalog['tmdb_36647'],undefined);
+
+const scoredWithout=await resolve({},irony,url=>url.includes('/movie/43430')?json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184)):url.includes('year=1976')?json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]}):empty());
 assert.equal(scoredWithout.decision.status,'no_confident_match');
 assert.equal(scoredWithout.result.variantCalls,0);
 assert.ok(!scoredWithout.urls.some(url=>url.includes('year=1976')));
-const scoredWith=await resolve({scored:'on',discovery:'on'},irony,url=>url.includes('/movie/43430')?json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184)):url.includes('year=1976')?json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]}):empty());
+const scoredWith=await resolve({discovery:'on'},irony,url=>url.includes('/movie/43430')?json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184)):url.includes('year=1976')?json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]}):empty());
 assert.equal(scoredWith.decision.status,'verified');
 assert.equal(scoredWith.decision.identitySource,'tmdb_detail');
 assert.equal(scoredWith.decision.tmdbId,'43430');
 assert.ok(scoredWith.result.variantCalls>=1);
 assert.equal(scoredWith.result.tmdbCalls<scoredWith.calls(),true);
-const bladeWriter=await resolve({scored:'on',discovery:'on'},blade,url=>url.includes(encodeURIComponent('Блэйд'))?json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]}):empty());
+const bladeWriter=await resolve({discovery:'on'},blade,url=>url.includes(encodeURIComponent('Блэйд'))?json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]}):empty());
 assert.notEqual(bladeWriter.decision.status,'verified');
 assert.equal(bladeWriter.catalog['tmdb_36647'],undefined);
 assert.ok(bladeWriter.preview.proposedCandidates.some(row=>row.tmdbId==='36647'));
 
-function clockedHarness(response){
- let now=1700000000000;
- const Real=Date;
- function Clock(...args){if(!new.target)return Real(...args);return args.length?new Real(...args):new Real(now);}
- Clock.now=()=>now;Clock.parse=Real.parse;Clock.UTC=Real.UTC;Clock.prototype=Real.prototype;
- const records=new Map(),etags=new Map();let revision=0;const urls=[];
- const env={SCORED_RESOLUTION:'shadow',CANDIDATE_DISCOVERY:'shadow',TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
- const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:Clock,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{urls.push(String(input));now+=1700;return response(String(input));}});
- for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
- ctx.env=env;
- return {ctx,records,urls};
-}
+
 const clockStart=1700000000000,clockShow={channelId:'n',channel:'N',start:clockStart,end:clockStart+3600000};
 const clockRow=(title,year,duration)=>{const normalized=title.toLowerCase();return {key:normalized+'|'+year,title,normalizedTitle:normalized,year,duration,durations:[duration],seenInLatestSnapshot:true,shows:[clockShow],lastAiring:clockStart,airings:1};};
-const fillers=[1,2,3,4,5,6].map(n=>clockRow('аа 0'+n,2001,100));
-const lateMiss=clockRow('яяя 1',1998,120);
-const lateResponse=url=>{
- const text=decodeURIComponent(url).replace(/\+/g,' ');
- if(text.includes('year=1997')||text.includes('year=1999'))return json({total_pages:1,results:[movie(36647,'яяя 1','Late',1997)]});
- if(text.includes('/movie/')){const id=Number(text.match(/movie\/(\d+)/)[1]);return json(detail(id,'аа','аа',2001,40));}
- if(text.includes('яяя'))return empty();
- const query=text.match(/query=([^&]+)/)[1];
- return json({total_pages:1,results:[movie(501,query,query,2001)]});
-};
-const lateBox=clockedHarness(lateResponse);
-lateBox.records.set('programme.json',{runId:'run-1',films:[]});
-lateBox.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[...fillers,lateMiss]});
-lateBox.records.set('epg/discovered-films.json',{});
-lateBox.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
-const lateFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',lateBox.ctx);
-const lateDecision=lateBox.records.get('epg/discovery-resolution.json')[lateMiss.key];
-assert.ok(lateFirst.tmdbCalls>=13&&lateFirst.tmdbCalls<=14);
-assert.equal(lateFirst.variantCalls,0);
-assert.ok(lateFirst.variantDeferred>=1);
-assert.equal(lateDecision.status,'no_confident_match');
-assert.ok(Date.parse(lateDecision.retryAt)>clockStart);
-assert.ok(lateBox.records.get('epg/discovery-variant-pending.json').jobs.some(job=>job.key===lateMiss.key));
-assert.equal(lateBox.urls.some(url=>url.includes('year=1997')),false);
-const seen=lateBox.urls.length;
-const lateSecond=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',lateBox.ctx);
-const lateAgain=lateBox.records.get('epg/discovery-resolution.json')[lateMiss.key];
-assert.ok(lateSecond.variantCalls>0);
-assert.equal(lateSecond.tmdbCalls,0);
-assert.equal(lateAgain.status,'no_confident_match');
-assert.equal(lateAgain.retryAt,lateDecision.retryAt);
-assert.equal(lateAgain.attempts,lateDecision.attempts);
-assert.equal(lateBox.records.get('epg/discovered-films.json')['tmdb_36647'],undefined);
-assert.ok(lateBox.urls.slice(seen).some(url=>url.includes('year=1997')));
-assert.ok(lateBox.records.get('epg/discovery-score-preview.json').items[lateMiss.key].proposedCandidates.some(row=>row.tmdbId==='36647'));
-assert.equal(lateBox.records.get('epg/discovery-variant-pending.json').jobs.length,0);
-
-const dropped=clockedHarness(lateResponse);
-dropped.records.set('programme.json',{runId:'run-1',films:[]});
-dropped.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[...fillers,lateMiss]});
-dropped.records.set('epg/discovered-films.json',{});
-dropped.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
-await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',dropped.ctx);
-const keptRetry=dropped.records.get('epg/discovery-resolution.json')[lateMiss.key].retryAt;
-dropped.records.set('epg/published-generation.json',{programmeRunId:'run-2',phase:'published'});
-const marked=dropped.urls.length;
-const droppedRun=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},8)',dropped.ctx);
-assert.equal(dropped.urls.slice(marked).some(url=>url.includes('year=1997')||url.includes('year=1999')),false);
-assert.equal(droppedRun.variantCalls,0);
-assert.equal(dropped.records.get('epg/discovery-variant-pending.json').jobs.length,0);
-assert.equal(dropped.records.get('epg/discovery-resolution.json')[lateMiss.key].retryAt,keptRetry);
-
 function phasedHarness(flags,advance,response){
  let now=1700000000000;
  const Real=Date;
  function Clock(...args){if(!new.target)return Real(...args);return args.length?new Real(...args):new Real(now);}
  Clock.now=()=>now;Clock.parse=Real.parse;Clock.UTC=Real.UTC;Clock.prototype=Real.prototype;
  const records=new Map(),etags=new Map();let revision=0;const urls=[];
- const env={SCORED_RESOLUTION:flags.scored,CANDIDATE_DISCOVERY:flags.discovery,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
+ const env={CANDIDATE_DISCOVERY:flags.discovery,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:Clock,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{const url=String(input);urls.push(url);now+=advance(url);return response(url);}});
  for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
  ctx.env=env;
@@ -265,27 +160,8 @@ function phasedHarness(flags,advance,response){
 function seedPhased(box,row){box.records.set('programme.json',{runId:'run-1',films:[]});box.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[row]});box.records.set('epg/discovered-films.json',{});box.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});}
 const ironyRow=clockRow('Ирония судьбы, или С легким паром','1975',192);ironyRow.year=1975;ironyRow.key='ирония судьбы или с легким паром|1975';ironyRow.normalizedTitle='ирония судьбы или с легким паром';
 const ironyBody=url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/43430'))return json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184));if(text.includes('year=1976')||text.includes('year=1974'))return json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]});return empty();};
-let ironyJump=true;
-const ironyLate=phasedHarness({scored:'shadow',discovery:'shadow'},url=>ironyJump&&url.includes('year=1975')?20000:0,ironyBody);
-seedPhased(ironyLate,ironyRow);
-const ironyFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',ironyLate.ctx);
-const ironyStored=ironyLate.records.get('epg/discovery-resolution.json')[ironyRow.key];
-assert.equal(ironyFirst.variantCalls,0);
-assert.equal(ironyStored.status,'no_confident_match');
-assert.equal(ironyLate.records.get('epg/discovery-variant-pending.json').jobs[0].hadPriorDecision,false);
-assert.equal(ironyLate.records.get('epg/discovery-variant-pending.json').jobs[0].evidenceKey,vm.runInContext('candidateEvidence('+JSON.stringify(ironyRow)+')',ironyLate.ctx));
-ironyJump=false;
-const ironySecond=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',ironyLate.ctx);
-const ironyPreview=ironyLate.records.get('epg/discovery-score-preview.json').items[ironyRow.key];
-assert.ok(ironySecond.variantCalls>0);
-assert.equal(ironyPreview.outcome,'detail_verified');
-assert.equal(ironyPreview.comparison,'scored_only');
-assert.equal(ironyLate.records.get('epg/discovery-resolution.json')[ironyRow.key].retryAt,ironyStored.retryAt);
-assert.equal(ironyLate.records.get('epg/discovery-resolution.json')[ironyRow.key].status,'no_confident_match');
-assert.equal(ironyLate.records.get('epg/discovered-films.json')['tmdb_43430'],undefined);
-
 let writerJump=true;
-const writerLate=phasedHarness({scored:'on',discovery:'on'},url=>writerJump&&url.includes('year=1975')?20000:0,ironyBody);
+const writerLate=phasedHarness({discovery:'on'},url=>writerJump&&url.includes('year=1975')?20000:0,ironyBody);
 seedPhased(writerLate,ironyRow);
 const writerFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',writerLate.ctx);
 assert.equal(writerFirst.variantCalls,0);
@@ -299,62 +175,10 @@ assert.equal(writerLate.records.get('epg/discovery-resolution.json')[ironyRow.ke
 assert.ok(writerLate.records.get('epg/discovered-films.json')['tmdb_43430']);
 assert.ok(writerSecond.variantCalls>0);
 
-let partialJump=true;
-const partialRow=clockRow('яяя 1',1998,120);
-const partialBody=url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(/query=яяя(&|$)/.test(text))return empty();if(text.includes('year=1997')||text.includes('year=1999'))return json({total_pages:1,results:[movie(36647,'яяя 1','Late',1997)]});return empty();};
-const partial=phasedHarness({scored:'shadow',discovery:'shadow'},url=>partialJump&&/query=%D1%8F%D1%8F%D1%8F(&|$)/.test(url)?20000:0,partialBody);
-seedPhased(partial,partialRow);
-const partialFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',partial.ctx);
-const partialJob=partial.records.get('epg/discovery-variant-pending.json').jobs[0];
-const partialRetry=partial.records.get('epg/discovery-resolution.json')[partialRow.key].retryAt;
-assert.ok(partialFirst.variantCalls>=1);
-assert.equal(partialJob.offset,1);
-assert.equal(partial.urls.some(url=>url.includes('year=1997')),false);
-partialJump=false;
-await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',partial.ctx);
-assert.equal(partial.records.get('epg/discovery-resolution.json')[partialRow.key].retryAt,partialRetry);
-assert.equal(partial.records.get('epg/discovery-resolution.json')[partialRow.key].status,'no_confident_match');
-assert.ok(partial.records.get('epg/discovery-score-preview.json').items[partialRow.key].proposedCandidates.some(row=>row.tmdbId==='36647'));
-assert.equal(partial.records.get('epg/discovery-variant-pending.json').jobs.length,0);
-
-let heldJump=true;
-const held=phasedHarness({scored:'shadow',discovery:'shadow'},url=>heldJump&&url.includes('year=1974')?20000:0,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/43430'))return json(detail(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976,184));if(text.includes('year=1974'))return json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]});return empty();});
-seedPhased(held,ironyRow);
-const heldFirst=await vm.runInContext('advanceDiscovery(env,{})',held.ctx);
-const heldRetry=held.records.get('epg/discovery-resolution.json')[ironyRow.key].retryAt;
-const heldPlan=held.records.get('epg/discovery-variant-pending.json').jobs[0];
-assert.equal(heldFirst.remaining,0);
-assert.ok(heldFirst.variantPending>0);
-assert.equal(heldFirst.discovery.nextAction,'continue');
-assert.ok(heldFirst.variantCalls>=1);
-assert.equal(held.urls.some(url=>url.includes('/movie/43430')),false);
-assert.ok(heldPlan.hits.some(row=>row.tmdbId==='43430')||heldPlan.proposals.some(row=>row.tmdbId==='43430'));
-heldJump=false;
-const heldSecond=await vm.runInContext('advanceDiscovery(env,{})',held.ctx);
-const heldPreview=held.records.get('epg/discovery-score-preview.json').items[ironyRow.key];
-assert.equal(heldPreview.outcome,'detail_verified');
-assert.equal(heldPreview.comparison,'scored_only');
-assert.equal(heldPreview.scoring.acceptedTmdbId,'43430');
-assert.equal(held.records.get('epg/discovery-resolution.json')[ironyRow.key].retryAt,heldRetry);
-assert.equal(held.records.get('epg/discovery-resolution.json')[ironyRow.key].status,'no_confident_match');
-assert.equal(held.records.get('epg/discovered-films.json')['tmdb_43430'],undefined);
-assert.equal(heldSecond.discovery.nextAction,'stop');
-assert.equal(heldSecond.discovery.state,'complete');
-assert.equal(held.records.get('epg/discovery-variant-pending.json').jobs.length,0);
-
-const budgetHeld=phasedHarness({scored:'shadow',discovery:'shadow'},url=>url.includes('year=1974')?20000:0,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('year=1974'))return json({total_pages:1,results:[movie(43430,'Ирония судьбы, или С легким паром!','Ирония судьбы, или С легким паром!',1976)]});return empty();});
-seedPhased(budgetHeld,ironyRow);
-budgetHeld.records.set('epg/resolver-continuation.json',{stage:'paused',reason:null,remainingChunks:1,hopId:null,at:new Date(clockStart).toISOString(),programmeRunId:'run-1'});
-const budgetRun=await vm.runInContext('advanceDiscovery(env,{})',budgetHeld.ctx);
-assert.equal(budgetRun.discovery.nextAction,'wait');
-assert.equal(budgetRun.discovery.reason,'chunk_budget');
-assert.notEqual(budgetRun.discovery.state,'complete');
-assert.ok(budgetHeld.records.get('epg/discovery-variant-pending.json').jobs.length>0);
-
 const keptFilm=clockRow('Тест фильм',2001,100),sideFilm=clockRow('Боковой план',1902,90);
-const sideEvidence=vm.runInContext('candidateEvidence('+JSON.stringify(sideFilm)+')',held.ctx);
+const sideEvidence=vm.runInContext('candidateEvidence('+JSON.stringify(sideFilm)+')',writerLate.ctx);
 const sidePlan={schemaVersion:1,programmeRunId:'run-1',jobs:[{key:sideFilm.key,title:sideFilm.title,normalizedTitle:sideFilm.normalizedTitle,year:1902,duration:90,durations:[90],evidenceKey:sideEvidence,priorDecision:null,hadPriorDecision:false,legacyStatus:'no_confident_match',offset:0,pendingAliasIds:[],proposals:[],hits:[]}]};
-const isolated=phasedHarness({scored:'on',discovery:'on'},()=>0,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('year=1901')||text.includes('year=1903'))return json({total_pages:1,results:[movie(1,'Боковой план','Side',1901)]});if(text.includes('/movie/77'))return json(detail(77,'Тест фильм','Тест фильм',2001,100));if(text.includes('Тест фильм'))return json({total_pages:1,results:[movie(77,'Тест фильм','Тест фильм',2001)]});return empty();});
+const isolated=phasedHarness({discovery:'on'},()=>0,url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('year=1901')||text.includes('year=1903'))return json({total_pages:1,results:[movie(1,'Боковой план','Side',1901)]});if(text.includes('/movie/77'))return json(detail(77,'Тест фильм','Тест фильм',2001,100));if(text.includes('Тест фильм'))return json({total_pages:1,results:[movie(77,'Тест фильм','Тест фильм',2001)]});return empty();});
 isolated.records.set('programme.json',{runId:'run-1',films:[]});
 isolated.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[keptFilm,sideFilm]});
 isolated.records.set('epg/discovered-films.json',{});
@@ -367,22 +191,4 @@ assert.equal(isolated.urls.some(url=>url.includes('year=1901')||url.includes('ye
 assert.equal(JSON.stringify(isolated.records.get('epg/discovery-variant-pending.json')),sideBefore);
 assert.equal(isolated.records.get('epg/discovery-resolution.json')[keptFilm.key].status,'verified');
 assert.equal(isolated.records.get('epg/discovery-resolution.json')[keptFilm.key].tmdbId,'77');
-let bladeJump=true;
-const bladeRow=clockRow('Блейд 1',1998,120);
-const bladeCross=phasedHarness({scored:'shadow',discovery:'shadow'},url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');return bladeJump&&/query=Блейд(&|$)/.test(text)?20000:0;},url=>{const text=decodeURIComponent(url).replace(/\+/g,' ');if(text.includes('/movie/36647'))return json(detail(36647,'Блэйд','Blade',1998,120));if(text.includes('Блэйд'))return json({total_pages:1,results:[movie(36647,'Блэйд','Blade',1998)]});if(/query=Блейд(&|$)/.test(text))return json({total_pages:1,results:[movie(36647,'Блейд 1: начало','Blade',1998)]});return empty();});
-seedPhased(bladeCross,bladeRow);
-const bladeFirst=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',bladeCross.ctx);
-const bladeStored=bladeCross.records.get('epg/discovery-resolution.json')[bladeRow.key];
-const bladePlan=bladeCross.records.get('epg/discovery-variant-pending.json').jobs[0];
-assert.equal(bladePlan.hits[0].title,'Блейд 1: начало');
-assert.equal(bladePlan.hits[0].structuralClaims,undefined);
-bladeJump=false;
-const bladeSecond=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',bladeCross.ctx);
-const bladePreview=bladeCross.records.get('epg/discovery-score-preview.json').items[bladeRow.key];
-assert.ok(bladeSecond.variantCalls>0);
-assert.equal(bladePreview.scoring.reason,'accepted_spelling_e');
-assert.equal(bladePreview.outcome,'detail_verified');
-assert.equal(bladeCross.records.get('epg/discovery-resolution.json')[bladeRow.key].status,'no_confident_match');
-assert.equal(bladeCross.records.get('epg/discovery-resolution.json')[bladeRow.key].retryAt,bladeStored.retryAt);
-assert.equal(bladeCross.records.get('epg/discovered-films.json')['tmdb_36647'],undefined);
-console.log('Candidate discovery: title and year variants stay off the legacy decision.');
+console.log('Candidate discovery: title and year variants feed the scored writer, proposals stay proposals, and the shadow plan file is ignored.');

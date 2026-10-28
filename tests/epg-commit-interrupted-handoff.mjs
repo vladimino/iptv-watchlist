@@ -35,7 +35,7 @@ const now=Date.now(),iso=ms=>new Date(ms).toISOString();
 const continuation=()=>records.get('epg/resolver-continuation.json');
 const ring=()=>records.get('epg/resolver-continuation-diagnostics.json')?.recent||[];
 const settle=async()=>{for(let i=0;i<50;i++)await new Promise(resolve=>setTimeout(resolve,0));};
-const items=count=>Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:100,durations:[100],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]}));
+const items=count=>Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:200,durations:[200],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]}));
 const programme=runId=>({runId,updatedAt:iso(now),watchlistCount:1,films:[{id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,shows:[]}],stats:{}});
 const STALE={stage:'paused',reason:'chunk_budget',at:iso(now-86400000),hopId:OLD_HOP,remainingChunks:0,nextCatchUpAt:iso(now+3600000),retryAt:null,programmeRunId:OLD};
 

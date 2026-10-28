@@ -13,7 +13,7 @@ const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL
 const fetches=[];let epgResponse=()=>new Response('unavailable',{status:503});
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},
  fetch:async input=>{const url=String(input instanceof Request?input.url:input);fetches.push(url);return url===env.EPG_XML_URL?epgResponse():new Response('unexpected',{status:599});}});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/enrichment.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/enrichment.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 const worker=context.worker,entrypoint=vm.runInContext('DiscoveryContinuation',context);
 
 // Every loopback call is a separate invocation with its own waitUntil, as ctx.exports is on Cloudflare.
@@ -33,7 +33,7 @@ function seed(count){
  records.clear();etags.clear();hops.length=0;fetches.length=0;puts=[];
  records.set('programme.json',{runId:'run-1',updatedAt:new Date(now).toISOString(),films:[{id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,shows:[]}]});
  records.set(vm.runInContext('profileKey',context),{version:1,profileHash:'p'});
- records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:100,durations:[100],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]}))});
+ records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:200,durations:[200],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]}))});
 }
 const continuation=()=>records.get('epg/resolver-continuation.json');
 
@@ -44,12 +44,12 @@ assert.equal(response.status,200);
 const first=await response.json();
 assert.equal(first.remaining,29);assert.equal(first.discovery.state,'paused');assert.equal(first.discovery.remainingChunks,11);assert.equal(first.discovery.nextAction,'continue');
 await drain();assert.deepEqual(hops,[]);
-assert.equal(Object.values(records.get('epg/discovery-resolution.json')).filter(d=>d.status==='verified').length,1);
+assert.equal(Object.keys(records.get('epg/discovery-resolution.json')).length,1,'one decision per chunk, from the scored gate');
 assert.deepEqual(fetches,[],'no TMDB, own-origin or legacy Site request');
 assert.doesNotMatch(JSON.stringify([...records]),/legacy-site|browser-session|header\.payload/,'no credential is persisted');
 seed(5);let guard=0,last;while((last?.discovery?.state!=='complete')&&guard++<8)last=await (await call('/api/enrichment/discovery/resolve',{limit:1})).json();
 assert.equal(last.discovery.state,'complete');assert.equal(last.discovery.nextAction,'stop');assert.equal(last.remaining,0);
-assert.equal(Object.values(records.get('epg/discovery-resolution.json')).filter(d=>d.status==='verified').length,5);
+assert.equal(Object.keys(records.get('epg/discovery-resolution.json')).length,5);
 assert.equal(hops.length,0);assert.equal(records.get('epg/discovery-status.json').error,null);
 
 // Twelve chunks stop the series. A call before nextCatchUpAt does not start another.

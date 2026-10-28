@@ -316,7 +316,7 @@ Rollback of a later AIR-124 is revert of that route. It does not delete R2 objec
 
 ## Compatibility with AIR-69
 
-[AIR-69](https://trello.com/c/FlcWZX7W) is in progress. This audit did not re-read production. The latest owner checkpoint on that card (24 October 2026) says `SCORED_RESOLUTION` stayed `on`, schedules were 0, a published generation existed, and scored resolver activity for that generation was **not** confirmed. The card is not closed. Those statements are the card's checkpoint, not a new measurement.
+[AIR-69](https://trello.com/c/FlcWZX7W) is in progress. This audit did not re-read production. The latest owner checkpoint on that card (24 October 2026) says `SCORED_RESOLUTION` stayed `on`, schedules were 0, a published generation existed, and scored resolver activity for that generation was **not** confirmed. Those statements are the card's checkpoint at that date, not a new measurement; AIR-69 was accepted later and the `SCORED_RESOLUTION` variable was then retired from code ([ADR 0036](../../adr/0036-scored-resolution-only.md)).
 
 That state is compatible with AIR-123 and AIR-52. Both are offline. They do not start sync, a resolver chunk, a prediction, or a migration, and they do not change flags or schedules.
 

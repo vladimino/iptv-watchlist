@@ -8,7 +8,7 @@ for(const file of ['src/worker.js','src/enrichment.js','src/sources.js'])assert.
 assert.match(fs.readFileSync('src/discovery.js','utf8'),/scoreFilmResolution/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/scored-resolution\.js/);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/SCORED_RESOLUTION/);
-assert.match(fs.readFileSync('src/discovery.js','utf8'),/value==='shadow'\|\|value==='on'\?value:'off'/);
+assert.doesNotMatch(fs.readFileSync('src/discovery.js','utf8'),/SCORED_RESOLUTION|scoredResolutionMode/,'the scored gate is the only resolver; no runtime mode selects it');
 const ctx=vm.createContext({Map,Set,JSON});
 vm.runInContext(source+'\nglobalThis.scoreFilmResolution=scoreFilmResolution;',ctx);
 const film=(tmdbId,title,year,runtime,extra={})=>({tmdbId,title,original:title,year,runtime,...extra});

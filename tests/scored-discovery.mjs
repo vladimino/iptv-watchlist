@@ -31,44 +31,32 @@ async function run(mode,item,films,response=empty){
 
 const films={tmdb_11:dune('11',1984,137),tmdb_438631:dune('438631',2021,155)};
 films.tmdb_11.titleStatus='reviewed';
-const off=await run(null,candidate('Dune',1984),structuredClone(films));
-const shadow=await run('shadow',candidate('Dune',1984),structuredClone(films));
-assert.equal(off.records.get('epg/discovery-score-preview.json'),undefined);
-assert.equal(off.records.get('epg/discovery-resolution.json')['dune|1984'].status,'verified');
-assert.equal(shadow.records.get('epg/discovery-resolution.json')['dune|1984'].status,'verified');
-assert.equal(shadow.records.get('epg/discovered-films.json').tmdb_11.canonicalIdentity,'tmdb:11');
-assert.equal(shadow.records.get('epg/discovered-films.json').tmdb_11.title,'Дюна');
-const preview=shadow.records.get('epg/discovery-score-preview.json').items['dune|1984'];
-assert.equal(preview.legacyStatus,'verified');
-assert.equal(preview.outcome,'needs_verification');
-assert.equal(preview.comparison,'detail_not_compared');
-assert.equal(preview.scoring.acceptedTmdbId,'11');
-assert.equal(shadow.records.get('epg/discovery-resolution.json')['dune|1984'].identitySource,'known_alias_year_runtime');
-const status=await vm.runInContext('discoveryPipelineStatus(env)',shadow.live);
-assert.equal(status.scoringPreview.mode,'shadow');
-assert.equal(status.scoringPreview.needsConfirmation,1);
-assert.equal(status.scoringPreview.cutover,'shadow');
-assert.equal(status.scoringPreview.stale,false);
-assert.equal(status.scoringPreview.currentProgrammeRunId,'run-1');
-assert.equal(status.scoringPreview.outcomes.needs_verification,1);
-assert.equal(status.scoringPreview.comparison.detail_not_compared,1);
-assert.equal(status.scoringPreview.comparison.legacy_only,0);
-assert.equal(status.scoringPreview.comparison.scored_only,0);
-const offStatus=await vm.runInContext('discoveryPipelineStatus(env)',off.live);
-assert.equal(offStatus.scoringPreview.cutover,'off');
-assert.equal(offStatus.scoringPreview.stale,false);
-assert.equal(offStatus.scoringPreview.needsConfirmation,0);
-assert.equal(off.calls,0);
-assert.equal(shadow.calls,1);
-
-const heldBack=await run('on',candidate('Dune',1984),structuredClone(films));
-const held=heldBack.records.get('epg/discovery-resolution.json')['dune|1984'];
-assert.equal(held.status,'needs_verification');
-assert.equal(held.reason,undefined);
-assert.notEqual(held.identitySource,'tmdb_detail');
-assert.equal(heldBack.records.get('epg/discovered-films.json').tmdb_11.title,'Дюна');
-assert.deepEqual(heldBack.records.get('epg/discovered-films.json').tmdb_11.shows,[]);
-assert.equal(heldBack.calls,1);
+// The scored gate is the only resolver. Without the retired SCORED_RESOLUTION variable, and whatever value a stale
+// binding still carries, a known alias is scored, held for the detail read and never verified by the alias alone.
+for(const mode of [null,'off','shadow','on','legacy']){
+ const heldBack=await run(mode,candidate('Dune',1984),structuredClone(films));
+ const held=heldBack.records.get('epg/discovery-resolution.json')['dune|1984'];
+ assert.equal(held.status,'needs_verification',String(mode));
+ assert.equal(held.reason,undefined);
+ assert.notEqual(held.identitySource,'tmdb_detail');
+ assert.equal(heldBack.records.get('epg/discovered-films.json').tmdb_11.title,'Дюна');
+ assert.deepEqual(heldBack.records.get('epg/discovered-films.json').tmdb_11.shows,[]);
+ assert.equal(heldBack.calls,1,'one detail read, which the empty mock does not answer');
+ const preview=heldBack.records.get('epg/discovery-score-preview.json');
+ assert.equal(preview.mode,'on');
+ assert.equal(preview.items['dune|1984'].outcome,'needs_verification');
+ assert.equal(preview.items['dune|1984'].scoring.acceptedTmdbId,'11');
+ assert.equal(preview.items['dune|1984'].legacyStatus,undefined);
+ assert.equal(preview.items['dune|1984'].comparison,undefined);
+ const status=await vm.runInContext('discoveryPipelineStatus(env)',heldBack.live);
+ assert.equal(status.scoringPreview.mode,'on');
+ assert.equal(status.scoringPreview.cutover,'on');
+ assert.equal(status.scoringPreview.needsConfirmation,1);
+ assert.equal(status.scoringPreview.stale,false);
+ assert.equal(status.scoringPreview.currentProgrammeRunId,'run-1');
+ assert.equal(status.scoringPreview.outcomes.needs_verification,1);
+ assert.equal(status.scoringPreview.comparison,undefined);
+}
 function detailOf(id,title,original,year,runtime){return new Response(JSON.stringify({id:Number(id),title,original_title:original,release_date:year+'-01-01',runtime,overview:'A synopsis',genres:[{name:'Drama'}],poster_path:'/poster.jpg',credits:{crew:[{id:1,name:'Director',job:'Director'}],cast:[{id:2,name:'Actor'}]},translations:{translations:[{iso_639_1:'ru',data:{title}}]},alternative_titles:{titles:[{iso_3166_1:'US',title:original}]}}));}
 const gated=await run('on',candidate('Dune',1984),structuredClone(films),url=>url.includes('/movie/')?detailOf(11,'Дюна','Dune',1984,137):empty());
 const verified=gated.records.get('epg/discovery-resolution.json')['dune|1984'];
@@ -289,47 +277,34 @@ const movedResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1
 assert.equal(movedResult.stage,'programme_changed');
 assert.equal(moved.records.get('epg/discovery-resolution.json')?.['brand new film|1999'],undefined);
 assert.equal(moved.records.get('epg/discovered-films.json').tmdb_77,undefined);
-const sharedSearch=()=>new Response(JSON.stringify({total_pages:1,results:[{id:77,title:'Brand New Film',original_title:'Brand New Film',release_date:'1999-01-01'}]}));
-const agreed=await run('shadow',candidate('Brand New Film',1999),{},url=>url.includes('/movie/')?detailOf(77,'Brand New Film','Brand New Film',1999,137):sharedSearch());
-assert.equal(agreed.calls,2);
-assert.equal(agreed.records.get('epg/discovery-resolution.json')['brand new film|1999'].status,'verified');
-assert.equal(agreed.records.get('epg/discovery-resolution.json')['brand new film|1999'].identitySource,undefined);
-assert.equal(agreed.records.get('epg/discovered-films.json').tmdb_77.canonicalIdentity,'tmdb:77');
-const agreedPreview=agreed.records.get('epg/discovery-score-preview.json').items['brand new film|1999'];
-assert.equal(agreedPreview.legacyStatus,'verified');
-assert.equal(agreedPreview.outcome,'detail_verified');
-assert.equal(agreedPreview.comparison,'agree_verified');
-assert.equal(agreedPreview.scoring.acceptedTmdbId,'77');
-assert.equal(agreedPreview.knownBefore,false);
-
+// Two near editions that both miss the runtime: ambiguous from the alias index alone, no TMDB call.
 const nearFilms={tmdb_11:{...dune('11',1984,200),aliases:['Dune']},tmdb_12:{...dune('12',1985,200),aliases:['Dune']}};
-const lost=await run('shadow',candidate('Dune',1984),nearFilms,url=>url.includes('/movie/')?detailOf(11,'Дюна','Dune',1984,137):new Response(JSON.stringify({total_pages:1,results:[{id:11,title:'Dune',original_title:'Dune',release_date:'1984-01-01'}]})));
-assert.equal(lost.records.get('epg/discovery-resolution.json')['dune|1984'].status,'verified');
-assert.equal(lost.records.get('epg/discovery-score-preview.json').items['dune|1984'].comparison,'legacy_only');
-assert.equal(lost.records.get('epg/discovery-score-preview.json').items['dune|1984'].outcome,'candidate_decision');
-assert.equal(lost.calls,2);
+const near=await run(null,candidate('Dune',1984),nearFilms,()=>{throw new Error('no TMDB call for an ambiguous alias index');});
+assert.equal(near.records.get('epg/discovery-resolution.json')['dune|1984'].status,'ambiguous');
+assert.equal(near.records.get('epg/discovery-score-preview.json').items['dune|1984'].outcome,'candidate_decision');
+assert.equal(near.calls,0);
 
-const risk=await run('shadow',{...candidate('The Straight Story',null),duration:111,durations:[111]},{},url=>url.includes('/movie/')?detailOf(21283,'The Straight Story','The Straight Story',1999,111):new Response(JSON.stringify({total_pages:2,results:[{id:21283,title:'The Straight Story',original_title:'The Straight Story',release_date:'1999-01-01'}]})));
-assert.equal(risk.records.get('epg/discovery-resolution.json')['the straight story|'].status,'no_confident_match');
-assert.equal(risk.records.get('epg/discovered-films.json').tmdb_21283,undefined);
-const riskPreview=risk.records.get('epg/discovery-score-preview.json').items['the straight story|'];
-assert.equal(riskPreview.comparison,'scored_only');
-assert.equal(riskPreview.outcome,'detail_verified');
-assert.equal(riskPreview.legacyStatus,'no_confident_match');
-assert.equal(risk.calls,2);
+// A long unique title without a year is verified once the detail card agrees.
+const uniqueSearch=()=>new Response(JSON.stringify({total_pages:1,results:[{id:21283,title:'The Straight Story',original_title:'The Straight Story',release_date:'1999-01-01'}]}));
+const unique=await run(null,{...candidate('The Straight Story',null),duration:111,durations:[111]},{},url=>url.includes('/movie/')?detailOf(21283,'The Straight Story','The Straight Story',1999,111):uniqueSearch());
+assert.equal(unique.records.get('epg/discovery-resolution.json')['the straight story|'].status,'verified');
+assert.equal(unique.records.get('epg/discovery-resolution.json')['the straight story|'].identitySource,'tmdb_detail');
+assert.equal(unique.records.get('epg/discovered-films.json').tmdb_21283.canonicalIdentity,'tmdb:21283');
+assert.equal(unique.calls,2);
 
+// A 429 on the detail read of a known alias pauses the chunk: retryAt is set, no decision is written, and a call
+// before retryAt is a backoff without another TMDB request.
 const aaa={...candidate('Aaa',1984),key:'aaa|1984',title:'Aaa',normalizedTitle:'aaa'};
-const brand=candidate('Brand New Film',1999);
-const queued=harness('shadow',url=>{queued.urls.push(String(url));if(String(url).includes('/movie/'))return new Response('{}',{status:429,headers:{'Retry-After':'30'}});return new Response(JSON.stringify({total_pages:1,results:[]}));});
+const queued=harness(null,url=>{queued.urls.push(String(url));return new Response('{}',{status:429,headers:{'Retry-After':'30'}});});
 queued.urls=[];
 seed(queued.records,aaa,{tmdb_11:{id:'tmdb_11',tmdbId:'11',title:'Aaa',original:'Aaa',year:1984,runtime:137,canonicalIdentity:'tmdb:11',aliases:['Aaa'],shows:[]}});
-queued.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[aaa,brand]});
 const queuedResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',queued);
-assert.equal(queuedResult.error,null);
-assert.equal(queuedResult.tmdbCalls,2);
-assert.equal(queued.records.get('epg/discovery-resolution.json')['aaa|1984'].status,'verified');
-assert.equal(queued.records.get('epg/discovery-resolution.json')['brand new film|1999'].status,'no_confident_match');
-assert.equal(queued.records.get('epg/discovery-score-preview.json').items['aaa|1984'].comparison,'detail_not_compared');
-assert.ok(queued.urls[0].includes('search/movie'));
-assert.ok(queued.urls.some(url=>url.includes('/movie/11')));
-console.log('Scored discovery: default path, shadow comparison, detail verification, history and stale generation passed');
+assert.equal(queuedResult.error,'TMDB HTTP 429');
+assert.ok(queuedResult.retryAt);
+assert.equal(queuedResult.tmdbCalls,1);
+assert.ok(queued.urls[0].includes('/movie/11'),'a known alias goes straight to the detail read');
+assert.equal(queued.records.get('epg/discovery-resolution.json'),undefined);
+const backoff=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',queued);
+assert.equal(backoff.stage,'backoff');
+assert.equal(queued.urls.length,1,'a call before retryAt makes no TMDB request');
+console.log('Scored discovery: the single scored path, detail verification, ambiguity, backoff, history and stale generation passed');
