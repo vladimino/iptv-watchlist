@@ -49,6 +49,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0041 — The Finds display-only title exclusion runs without a switch, and FINDS_TITLE_EXCLUSION is retired](0041-retire-finds-title-exclusion-switch.md) | Accepted 2026-10-29 (owner-approved ADR and Mermaid QA; no binding change) | [AIR-229](https://trello.com/c/ubOHtAgi) |
 | [0042 — The owner's «Смотрел» mark has no switch of its own, and FINDS_WATCHED_MARK is retired](0042-retire-finds-watched-mark-switch.md) | Accepted 2026-10-29 (explicit owner decision; binding removal separately gated) | [AIR-230](https://trello.com/c/AW2GqqQL) |
 | [0043 — Films removed from the watchlist get their rating from a bounded per-film lookup queue, not from the films list](0043-removal-rating-lookup-queue.md) | Accepted 2026-10-29; owner ADR and Mermaid approval; behind `REMOVAL_RATING_LOOKUP`, off by default | [AIR-268](https://trello.com/c/7ePpEYev); no activation authorized |
+| [0044 — The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired](0044-retire-profile-compatibility-switch.md) | Accepted 2026-10-29; replaces ADR-0031 mode switch in part; no production binding change authorized | [AIR-231](https://trello.com/c/hrOVxD7v); owner ADR acceptance 2026-10-29 |
 
 ## Proposed records
 

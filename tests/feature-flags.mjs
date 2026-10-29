@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -100,7 +100,8 @@ assert.ok(!empty.read.has('TMDB_API_READ_ACCESS_TOKEN')&&!empty.read.has('LETTER
 // 2. A production-like set, including retired tokens and the retired resolver switch.
 const live=await flags({PREDICTION_PROFILE_COMPATIBILITY:'selective',PREDICTION_FINGERPRINT_COMPATIBILITY:'selective',PREDICTION_VERSION_OBJECTS:'on',FINGERPRINT_VERSION_OBJECTS:'on',LETTERBOXD_FACTS:'on',FINDS_TITLE_EXCLUSION:'on',FINDS_WATCHED_MARK:'on',LIFECYCLE_LOCALIZATION:'on:programme,on:watchlist,on:epg',SCORED_RESOLUTION:'on',RATINGS_REFRESH:'on',DISCOVERY_LEDGER_MODE:'bounded'});
 const l=name=>entry(live.report,name);
-assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROFILE_COMPATIBILITY').raw,l('PREDICTION_PROFILE_COMPATIBILITY').valid,l('PREDICTION_PROFILE_COMPATIBILITY').effective],['set','selective',true,'selective']);
+assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROFILE_COMPATIBILITY').raw,l('PREDICTION_PROFILE_COMPATIBILITY').retired,l('PREDICTION_PROFILE_COMPATIBILITY').issue,l('PREDICTION_PROFILE_COMPATIBILITY').effective],['set','selective',true,'retired',null],'the retired profile-rule switch is inert and the production selective is visible (ADR 0044)');
+assert.deepEqual([l('PREDICTION_FINGERPRINT_COMPATIBILITY').state,l('PREDICTION_FINGERPRINT_COMPATIBILITY').raw,l('PREDICTION_FINGERPRINT_COMPATIBILITY').valid,l('PREDICTION_FINGERPRINT_COMPATIBILITY').effective],['set','selective',true,'selective']);
 assert.equal(l('FINGERPRINT_VERSION_OBJECTS').effective,'on');
 assert.equal(l('DISCOVERY_LEDGER_MODE').effective,'bounded');
 assert.match(l('DISCOVERY_LEDGER_MODE').note,/does not read storage/);
@@ -115,7 +116,7 @@ assert.deepEqual([ratings.state,ratings.raw,ratings.retired,ratings.valid,rating
 const exclusion=l('FINDS_TITLE_EXCLUSION');
 assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.valid,exclusion.issue,exclusion.effective],['set','on',true,false,'retired',null],'the retired Finds exclusion switch is inert and the production on is visible (ADR 0041)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:16,set:11,absent:5,invalid:5,redacted:0});
+assert.deepEqual(live.report.summary,{registered:16,set:11,absent:5,invalid:6,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
 const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,PREDICTION_VERSION_OBJECTS:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',FINGERPRINT_VERSION_OBJECTS:'on'.repeat(150)});
@@ -143,7 +144,7 @@ for(const [name,needs] of [['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'],['P
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',PREDICTION_VERSION_OBJECTS:"predictionVersionsEnabled(env)?'on':'off'",
  PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",
- PREDICTION_PROFILE_COMPATIBILITY:'predictionCompatibilityMode(env)',PREDICTION_FINGERPRINT_COMPATIBILITY:'fingerprintCompatibilityMode(env)',FINGERPRINT_VERSION_OBJECTS:"fingerprintVersionsEnabled(env)?'on':'off'",DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
+ PREDICTION_FINGERPRINT_COMPATIBILITY:'fingerprintCompatibilityMode(env)',FINGERPRINT_VERSION_OBJECTS:"fingerprintVersionsEnabled(env)?'on':'off'",DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
 };
 const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);
@@ -164,7 +165,7 @@ for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK'];
+const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');

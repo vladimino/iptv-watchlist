@@ -66,17 +66,17 @@ const historyBefore=Object.fromEntries(['A','B','C','E'].map(id=>[id,historyOf(i
 let queue=await reconcile(R1);
 {
  const v=await view(R1);
- assert.deepEqual(plain(v.compatibility),{profileMode:'strict',fingerprintMode:'strict',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1});
+ assert.deepEqual(plain(v.compatibility),{profileMode:'selective',fingerprintMode:'strict',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1});
  for(const id of ['A','B','C','E']){assert.equal(v.films[id].prediction.stale,false,id);assert.deepEqual(v.films[id].fingerprint.plotMechanics,mechanicsOf[id],id+' display facet');}
  assert.equal(v.films.D?.prediction??null,null,'a film never submitted has no index entry');
  const status=(await R1.api('enrichment/queue/status')).data;
  assert.equal(status.fingerprintCompatibility.mode,'strict');assert.deepEqual([status.fingerprintSchemaVersion,status.fingerprintPromptVersion,status.predictionPromptVersion],[1,1,1]);
  assert.deepEqual(plain(status.fingerprintCompatibility.classes),{unchanged:4,missing:1,prediction_only:0,fingerprint_and_prediction:0,migration:0,unknown:0});
  const runner=(await R1.api('enrichment/status')).data;
- assert.deepEqual([runner.fingerprintSchemaVersion,runner.fingerprintPromptVersion,runner.predictionPromptVersion,plain(runner.compatibility)],[1,1,1,{profileMode:'strict',fingerprintMode:'strict'}]);
+ assert.deepEqual([runner.fingerprintSchemaVersion,runner.fingerprintPromptVersion,runner.predictionPromptVersion,plain(runner.compatibility)],[1,1,1,{profileMode:'selective',fingerprintMode:'strict'}]);
  const a=await R1.diagnostics('A');
  assert.deepEqual(a.fingerprint,{presence:'recorded',schemaVersion:1,promptVersion:1,produced:'generated',previous:null,current:true,usable:true,invalidated:false,reason:'exact',migration:'none',mode:'strict'});
- assert.deepEqual(a.prediction,{presence:'recorded',current:true,stale:false,profileMatch:true,cause:'current',reason:'exact',requiredWork:'none',mode:'strict',fingerprintMode:'strict'});
+ assert.deepEqual(a.prediction,{presence:'recorded',current:true,stale:false,profileMatch:true,cause:'current',reason:'exact',requiredWork:'none',mode:'selective',fingerprintMode:'strict'});
  assert.equal(a.index,'agreed');
  const d=await R1.diagnostics('D');
  assert.deepEqual([d.fingerprint.presence,d.fingerprint.usable,d.fingerprint.reason,d.fingerprint.migration,d.prediction.cause],['not_recorded',false,'fingerprint_missing','full','not_recorded']);
@@ -152,14 +152,14 @@ assert.deepEqual(queue.pending,['D','B','E']);
 }
 
 // Profile version 2 (an approved selective edit of horror preferences): the fingerprint rule is judged before the profile
-// rule, and each rule follows its own switch.
+// rule. The profile rule has no switch any more (ADR 0044): a stale PREDICTION_PROFILE_COMPATIBILITY binding is inert.
 {
  const h1=read('enrichment/profile/current.json').profileHash,changed={...profile,horrorPreferences:'Rules and causality matter'},h2=sha256(JSON.stringify(canonical(changed)));
  const impact={impactSchemaVersion:1,from:{version:1,profileHash:h1},scope:'selective',changedFields:['horrorPreferences'],selectors:[{kind:'genre',values:['horror']}]};
  impact.approval={approvedBy:'owner',approvedAt:'2026-01-01T00:00:00.000Z',reviewRef:'decision-ref',declarationSha256:sha256(vm.runInContext('profileDeclarationText',scratch)(impact,{version:2,profileHash:h2}))};
  assert.equal((await R2.api('enrichment/profile','PUT',{version:2,schemaVersion:1,profile:changed,changeImpact:impact},SELECTIVE)).status,200);
- const strictProfile=await R2.diagnostics('A',SELECTIVE);
- assert.deepEqual([strictProfile.prediction.current,strictProfile.prediction.cause,strictProfile.prediction.reason,strictProfile.prediction.mode],[false,'profile_changed','profile_changed','strict'],'profile switch off: the new version makes the kept-fingerprint prediction stale');
+ const staleBinding=await R2.diagnostics('A',{...SELECTIVE,PREDICTION_PROFILE_COMPATIBILITY:'strict'});
+ assert.deepEqual([staleBinding.prediction.current,staleBinding.prediction.cause,staleBinding.prediction.reason,staleBinding.prediction.mode],[true,'compatible','profile_unaffected','selective'],'a stale strict binding is inert');
  const both={...SELECTIVE,...PROFILE_SELECTIVE},a=await R2.diagnostics('A',both);
  assert.deepEqual([a.fingerprint.usable,a.prediction.current,a.prediction.profileMatch,a.prediction.cause,a.prediction.reason,a.prediction.requiredWork,a.prediction.mode],[true,true,false,'compatible','profile_unaffected','none','selective']);
  const e=await R2.diagnostics('E',both);
@@ -167,8 +167,8 @@ assert.deepEqual(queue.pending,['D','B','E']);
  queue=await reconcile(R2,both);
  assert.deepEqual(queue.pending,['D','B','E'],'A and C are kept under both rules');
  assert.equal((await view(R2,both)).films.A.prediction.stale,false);
- assert.equal((await reconcile(R2,SELECTIVE)).pending.includes('A'),true,'with the profile switch off A is outstanding again');
- const o=await R2.overview(both);assert.deepEqual(disagreements(o),['index_ahead_of_queue'],'the stored queue was built under the other profile switch, so the index is ahead of it');
+ assert.equal((await reconcile(R2,SELECTIVE)).pending.includes('A'),false,'without any profile binding A stays kept');
+ const o=await R2.overview(both);assert.deepEqual(disagreements(o),[],'one profile rule: the stored queue and the index agree whatever binding the request carries');
  await reconcile(R2,both);
 }
 
@@ -179,7 +179,7 @@ assert.deepEqual(queue.pending,['D','B','E']);
  const promptTransition={transitionSchemaVersion:1,axis:'prediction_prompt',from:1,to:2,scope:'selective',changes:[{kind:'prompt_revised'}],selectors:[{kind:'genre',values:['comedy'],regenerate:{mode:'prediction'}}]};
  promptTransition.approval={approvedBy:'owner',approvedAt:'2026-01-01T00:00:00.000Z',reviewRef:'decision-ref',declarationSha256:sha256(vm.runInContext('fingerprintTransitionDeclarationText',scratch)(promptTransition))};
  const R3=release(source=>source.replace('const PREDICTION_PROMPT_VERSION=1;','const PREDICTION_PROMPT_VERSION=2;').replace('const FINGERPRINT_TRANSITIONS=[];','const FINGERPRINT_TRANSITIONS='+JSON.stringify([promptTransition])+';'));
- assert.equal((await R3.api('enrichment/profile','PUT',{version:3,schemaVersion:1,profile,changeImpact:{impactSchemaVersion:1,from:{version:2,profileHash:read('enrichment/profile/current.json').profileHash},scope:'global',changedFields:['horrorPreferences'],selectors:[]}})).status,200,'profile back to the version-1 content, as a global version 3');
+ assert.equal((await R3.api('enrichment/profile','PUT',{version:3,schemaVersion:1,profile:{...profile,calibration:profile.calibration+' Release 3.'},changeImpact:{impactSchemaVersion:1,from:{version:2,profileHash:read('enrichment/profile/current.json').profileHash},scope:'global',changedFields:['calibration','horrorPreferences'],selectors:[]}})).status,200,'a global version 3 with new content: under the selective profile rule a prediction made under identical content would stay current, so the content differs');
  // Regenerate every prediction under version 3 at prompt 1 (release 1 code), so only the prompt axis differs afterwards.
  const R1v3=release(source=>source);
  await reconcile(R1v3);

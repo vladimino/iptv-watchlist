@@ -21,7 +21,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  fetch:async()=>{throw new Error('unexpected fetch');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),context);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context),Facts=constant('LetterboxdFacts');
 const VIEW=constant('ENRICHMENT_KEY')+'view-index.json',ORIGIN='https://iptv.vladimino.workers.dev',G1='11111111-1111-4111-8111-111111111111',G2='22222222-2222-4222-8222-222222222222';
 // No FINDS_WATCHED_MARK: the switch is retired (ADR 0042); only LETTERBOXD_FACTS gates the mark.

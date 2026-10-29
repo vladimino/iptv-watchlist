@@ -390,10 +390,11 @@ function hourlyTaskRunAt(from=Date.now(),schedule=HOURLY_TASK_SCHEDULE){
 }
 // Prediction responses: `nextCatchUpAt` is the compatibility name of the same nominal hourly run, not a gate.
 const scheduledRunFields=()=>{const at=hourlyTaskRunAt();return {nextCatchUpAt:at,nextScheduledRunAt:at};};
-// PREDICTION_PROFILE_COMPATIBILITY: which rule decides the queue (ADR-0031). Only the exact string 'selective' selects the
-// shared evaluator; anything else keeps strict version and hash equality. The selective outcome is always computed for
-// the queue's diagnostic counters, whatever the mode.
-const predictionCompatibilityMode=env=>env?.PREDICTION_PROFILE_COMPATIBILITY==='selective'?'selective':'strict';
+// The profile rule (ADR-0031) is always selective: the shared evaluator keeps a prediction that no published, owner-approved
+// change impact reaches, and an unknown or unapproved change fails closed (stale). No variable selects it: the former
+// PREDICTION_PROFILE_COMPATIBILITY switch is retired (ADR 0044) and a stale binding is inert. The strict outcome is still
+// counted beside it in the queue's diagnostic block.
+const PREDICTION_PROFILE_MODE='selective';
 // SHA-256 of every lineage link's declaration, computed once, so the pure evaluator can re-check each approval.
 async function profileLineageDigests(profile){
  const digests=new Map();
@@ -409,8 +410,8 @@ function indexedPredictionCompatibility(item,film,profile,mode,digest){
  return predictionCompatibility(item?.prediction,fingerprint,features,profile,mode,{vocabulary:{mechanics:MECHANICS,execution:EXECUTION,general:GENERAL_EXECUTION},digest,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION});
 }
 // One freshness rule per request (ADR-0031 section 5): every consumer judges a stored prediction with the same profile
-// snapshot and mode. 'strict' runs the exact equality checks below unchanged; 'selective' asks the shared evaluator, with
-// features from the full fingerprint (state) or from the index's impact facet (indexed), and the film's stored genres.
+// snapshot. The profile rule is the shared evaluator, with features from the full fingerprint (state) or from the index's
+// impact facet (indexed), and the film's stored genres.
 // The fingerprint transition evaluator's inputs (ADR-0035): the code's target versions, the registry and the digests of its
 // declarations. The registry is a code constant, so its digests are computed once per isolate.
 const fingerprintTarget=()=>({fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION});
@@ -432,17 +433,17 @@ function indexedFingerprintRecord(item){
  return {fingerprintHash:impact.fingerprintHash,fingerprintSchemaVersion:impact.fingerprintSchemaVersion,fingerprintPromptVersion:impact.fingerprintPromptVersion??1,invalidatedAt:impact.invalidatedAt||null,plotMechanics:impact.plotMechanics??undefined,execution:impact.execution??undefined};
 }
 async function predictionFreshness(env,profile){
- const mode=predictionCompatibilityMode(env),fingerprintMode=fingerprintCompatibilityMode(env),digest=mode==='selective'&&profile?await profileLineageDigests(profile):null;
+ const mode=PREDICTION_PROFILE_MODE,fingerprintMode=fingerprintCompatibilityMode(env),digest=profile?await profileLineageDigests(profile):null;
  const options={vocabulary:{mechanics:MECHANICS,execution:EXECUTION,general:GENERAL_EXECUTION},digest,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION};
  // The combined verdict checks two kinds of approval: the registry's declarations and the profile lineage's; one digest lookup serves both.
  const registry=await fingerprintRegistryDigests(),transitionOptions=fingerprintEvaluatorOptions(text=>registry.lookup(text)??digest?.(text)??null),modes={fingerprint:fingerprintMode,prompt:fingerprintMode,profile:mode};
- // One verdict covers the fingerprint, the prediction prompt and (with the profile rule's own mode) the profile. It decides
- // under the transition rule; under strict it only explains (work, fingerprintVerdict) while the exact checks below decide.
+ // One verdict covers the fingerprint, the prediction prompt and the profile. It decides under the fingerprint transition
+ // rule; under the strict fingerprint rule it only explains (work, fingerprintVerdict) and the profile evaluator decides.
  const verdict=(prediction,fingerprint,genres)=>predictionTransitionCompatibility(prediction,fingerprint,{genres},profile,FINGERPRINT_TRANSITIONS,fingerprintTarget(),modes,transitionOptions);
  const fingerprintVerdict=(fingerprint,genres)=>fingerprintCompatibility(fingerprint,{genres},FINGERPRINT_TRANSITIONS,fingerprintTarget(),fingerprintMode,transitionOptions);
- return {mode,fingerprintMode,needsGenres:mode==='selective'||fingerprintMode==='selective',registryDigest:registry.registry,target:fingerprintTarget(),
-  state:(prediction,fingerprint,genres)=>fingerprintMode==='selective'?!!profile&&!!prediction&&predictionCompatibilityFresh(verdict(prediction,fingerprint,genres)):mode==='selective'?!!profile&&!!prediction&&predictionCompatibilityFresh(predictionCompatibility(prediction,fingerprint,predictionImpactFeatures(fingerprint,genres),profile,'selective',options)):predictionCurrent(prediction,profile,fingerprint),
-  indexed:(item,film)=>fingerprintMode==='selective'?!!profile&&!!item?.prediction&&predictionCompatibilityFresh(verdict(item.prediction,indexedFingerprintRecord(item),film?.genres)):mode==='selective'?!!profile&&!!item?.prediction&&predictionCompatibilityFresh(indexedPredictionCompatibility(item,film,profile,'selective',digest)):!!profile&&indexedPredictionCurrent(item,profile),
+ return {mode,fingerprintMode,needsGenres:true,registryDigest:registry.registry,target:fingerprintTarget(),
+  state:(prediction,fingerprint,genres)=>!!profile&&!!prediction&&predictionCompatibilityFresh(fingerprintMode==='selective'?verdict(prediction,fingerprint,genres):predictionCompatibility(prediction,fingerprint,predictionImpactFeatures(fingerprint,genres),profile,'selective',options)),
+  indexed:(item,film)=>!!profile&&!!item?.prediction&&predictionCompatibilityFresh(fingerprintMode==='selective'?verdict(item.prediction,indexedFingerprintRecord(item),film?.genres):indexedPredictionCompatibility(item,film,profile,'selective',digest)),
   // The stored fingerprint may be reused for a prediction: exact today; exact or compatible under the transition rule.
   fingerprintUsable:(fingerprint,genres)=>fingerprintMode==='selective'?fingerprintCompatibilityFresh(fingerprintVerdict(fingerprint,genres)):fingerprintCurrent(fingerprint),
   work:(prediction,fingerprint,genres)=>verdict(prediction,fingerprint,genres),
@@ -627,8 +628,8 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',beforeWrite
  const [profile,index,previous,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,predictionQueueKey),loadJSON(pinned,'epg/discovered-films.json')]);
  if(!profile||!report?.films)return null;
  const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
- // Strict equality decides unless the mode is selective; the selective outcome is counted for every film either way.
- const mode=predictionCompatibilityMode(env),digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
+ // The selective profile rule decides; the strict outcome is counted for every film beside it.
+ const mode=PREDICTION_PROFILE_MODE,digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
  // The fingerprint transition rule (ADR-0035) is evaluated for every film either way and decides only under its own
  // mode. Each outstanding film gets a work class: missing (no prediction), prediction_only, fingerprint_and_prediction;
  // a class from a transition is migration work, bounded per batch; unknown counts the fail-closed outcomes.
@@ -655,7 +656,7 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',beforeWrite
   if(!strict&&predictionCompatibilityFresh(selective))compatibility.wouldKeep++;
   if(strict&&!predictionCompatibilityFresh(selective))compatibility.wouldRequeue++;
   if(strictEvaluated!==strict)compatibility.strictDisagreements++;
-  const decided=fingerprintMode==='selective'?predictionCompatibilityFresh(verdicts.selective):mode==='selective'?predictionCompatibilityFresh(selective):strict;
+  const decided=fingerprintMode==='selective'?predictionCompatibilityFresh(verdicts.selective):predictionCompatibilityFresh(selective);
   const chosen=fingerprintMode==='selective'?verdicts.selective:verdicts.strict;
   if(chosen&&predictionCompatibilityFresh(chosen)!==decided)fingerprintCompatibilityBlock.strictDisagreements++;
   fresh.set(id,decided);
@@ -950,7 +951,7 @@ async function enrichmentComplete(env,body){
  }
  const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
-async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,catalog,discovery,lease]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,RUNNER_LEASE_KEY)]);const films=report?allEnrichmentFilms(report,catalog):[];const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:predictionCompatibilityMode(env),fingerprintMode:fingerprintCompatibilityMode(env)},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:queue?.pendingCount??null,discovery:discovery||null,queue};}
+async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,catalog,discovery,lease]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,RUNNER_LEASE_KEY)]);const films=report?allEnrichmentFilms(report,catalog):[];const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:fingerprintCompatibilityMode(env)},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:queue?.pendingCount??null,discovery:discovery||null,queue};}
 async function enrichmentView(env){const [profile,index]=await Promise.all([loadJSON(env,profileKey),ensureInitialRatings(env)]),freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
  const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json')]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null}];}))};}
