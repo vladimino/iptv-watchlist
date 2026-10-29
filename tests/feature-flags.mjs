@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -98,7 +98,7 @@ for(const key of empty.read)assert.ok(allowedReads.has(key),'env read only by re
 assert.ok(!empty.read.has('TMDB_API_READ_ACCESS_TOKEN')&&!empty.read.has('LETTERBOXD_USERNAME')&&!empty.read.has('EPG_XML_URL'));
 
 // 2. A production-like set, including retired tokens and the retired resolver switch.
-const live=await flags({PREDICTION_PROFILE_COMPATIBILITY:'selective',PREDICTION_FINGERPRINT_COMPATIBILITY:'selective',PREDICTION_VERSION_OBJECTS:'on',FINGERPRINT_VERSION_OBJECTS:'on',LETTERBOXD_FACTS:'on',FINDS_TITLE_EXCLUSION:'on',FINDS_WATCHED_MARK:'on',LIFECYCLE_LOCALIZATION:'on:programme,on:watchlist,on:epg',SCORED_RESOLUTION:'on',RATINGS_REFRESH:'on',DISCOVERY_LEDGER_MODE:'bounded'});
+const live=await flags({CATALOG_POSTER_HYDRATION:'off',PREDICTION_PROFILE_COMPATIBILITY:'selective',PREDICTION_FINGERPRINT_COMPATIBILITY:'selective',PREDICTION_VERSION_OBJECTS:'on',FINGERPRINT_VERSION_OBJECTS:'on',LETTERBOXD_FACTS:'on',FINDS_TITLE_EXCLUSION:'on',FINDS_WATCHED_MARK:'on',LIFECYCLE_LOCALIZATION:'on:programme,on:watchlist,on:epg',SCORED_RESOLUTION:'on',RATINGS_REFRESH:'on',DISCOVERY_LEDGER_MODE:'bounded'});
 const l=name=>entry(live.report,name);
 assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROFILE_COMPATIBILITY').raw,l('PREDICTION_PROFILE_COMPATIBILITY').retired,l('PREDICTION_PROFILE_COMPATIBILITY').issue,l('PREDICTION_PROFILE_COMPATIBILITY').effective],['set','selective',true,'retired',null],'the retired profile-rule switch is inert and the production selective is visible (ADR 0044)');
 const fingerprintRule=l('PREDICTION_FINGERPRINT_COMPATIBILITY');
@@ -120,14 +120,16 @@ assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.vali
 const writer=l('PREDICTION_VERSION_OBJECTS');
 assert.deepEqual([writer.state,writer.raw,writer.retired,writer.valid,writer.issue,writer.effective],['set','on',true,false,'retired',null],'the retired prediction version writer switch is inert and the production on is visible (ADR 0045)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:11,absent:REGISTERED.length-11,invalid:9,redacted:0});
+const posters=l('CATALOG_POSTER_HYDRATION');
+assert.deepEqual([posters.state,posters.raw,posters.retired,posters.valid,posters.issue,posters.effective],['set','off',true,false,'retired',null],'the retired poster hydration switch is inert and the production off is visible (ADR 0048)');
+assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:12,absent:REGISTERED.length-12,invalid:10,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
-const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,CATALOG_POSTER_HYDRATION:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
+const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,LETTERBOXD_FACTS:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
 assert.doesNotMatch(leaky.text,new RegExp(SECRET),'a value outside the known tokens never leaves the Worker');
 const k=name=>entry(leaky.report,name);
 assert.deepEqual([k('CANDIDATE_DISCOVERY').raw,k('CANDIDATE_DISCOVERY').redacted,k('CANDIDATE_DISCOVERY').shape,k('CANDIDATE_DISCOVERY').issue,k('CANDIDATE_DISCOVERY').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
-assert.deepEqual([k('CATALOG_POSTER_HYDRATION').raw,k('CATALOG_POSTER_HYDRATION').redacted,k('CATALOG_POSTER_HYDRATION').issue,k('CATALOG_POSTER_HYDRATION').effective],[null,true,'case_or_whitespace','off'],'a near miss is named, not echoed');
+assert.deepEqual([k('LETTERBOXD_FACTS').raw,k('LETTERBOXD_FACTS').redacted,k('LETTERBOXD_FACTS').issue,k('LETTERBOXD_FACTS').effective],[null,true,'case_or_whitespace','off'],'a near miss is named, not echoed');
 assert.deepEqual([k('PREDICTION_MATERIALIZATION').raw,k('PREDICTION_MATERIALIZATION').shape,k('PREDICTION_MATERIALIZATION').issue,k('PREDICTION_MATERIALIZATION').effective],[null,{type:'object'},'not_string','off']);
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
 assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective],['bounded ','case_or_whitespace','full'],'a padded known token is shown, and it is invalid where the code does not trim');
@@ -150,7 +152,7 @@ for(const [name,needs] of [['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS']]){
 // 5. Parity: the effective mode is what each consumer computes, for every value shape.
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
- PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",
+ PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",
  DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
 };
 const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
@@ -172,7 +174,7 @@ for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY'];
+const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');

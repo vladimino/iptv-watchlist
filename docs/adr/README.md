@@ -53,6 +53,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0045 — Every committed prediction is written as an immutable version object, and PREDICTION_VERSION_OBJECTS is retired](0045-retire-prediction-version-objects-switch.md) | Accepted 2026-10-29; supersedes ADR-0026 gate in part; no binding removal authorized | [AIR-226](https://trello.com/c/Upzk5DqR); explicit owner ADR acceptance |
 | [0046 — Every accepted fingerprint is written as an immutable body and generation record, and FINGERPRINT_VERSION_OBJECTS is retired](0046-retire-fingerprint-version-objects-switch.md) | Accepted 2026-10-29; preserves ADR-0035, no production binding removal authorized | [AIR-266](https://trello.com/c/QsP4wGQ8); explicit owner acceptance 2026-10-29 |
 | [0047 — The fingerprint transition rule always decides, and PREDICTION_FINGERPRINT_COMPATIBILITY is retired](0047-retire-fingerprint-compatibility-switch.md) | Accepted 2026-10-29; supersedes ADR-0035 section 7 in part; binding removal separately gated | [AIR-265](https://trello.com/c/x7esHy4V); explicit owner acceptance |
+| [0048 — Catalog poster hydration is a permanent owner-only maintenance route, and CATALOG_POSTER_HYDRATION is retired](0048-permanent-catalog-poster-maintenance-route.md) | Accepted 2026-10-29; owner accepted ADR and visually approved Mermaid; binding removal separately gated | [AIR-228](https://trello.com/c/jhRjobcA) |
 
 ## Proposed records
 

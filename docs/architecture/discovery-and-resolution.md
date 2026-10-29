@@ -16,7 +16,7 @@ flowchart TD
     writer["Verified decision and<br/>film/catalogue upsert"]
     unresolved["Persist uncertainty / retryAt;<br/>do not create Film"]
     catalogue[("Film catalogue in R2:<br/>live copy and published generation copy")]
-    owner["Owner-approved call;<br/>CATALOG_POSTER_HYDRATION=on"]
+    owner["Owner-approved maintenance call<br/>through Cloudflare Access"]
     hydrate["Poster hydration:<br/>verified records without poster,<br/>bounded batch under resolver lease"]
     posterdetail["TMDB movie detail<br/>by the record's verified id"]
     epg --> ledger --> eligible
@@ -43,7 +43,7 @@ The scorer combines duplicate rows by **TMDB ID** before calculating uniqueness;
 
 The scored gate is the only resolver: the former `SCORED_RESOLUTION` rollout variable is retired from code ([ADR 0036](../adr/0036-scored-resolution-only.md)), and rolling the resolver back is a code revert, not a setting. `CANDIDATE_DISCOVERY` is an **independent optional runtime flag** (`on` only) for bounded title/year variants. The dated [AIR-68 cutover](https://trello.com/c/qbLDc6Ql) enabled scored resolution but did not approve optional variants. A historical rollout result does not establish today's flag setting. Each explicit discovery step processes a bounded chunk; no recursive public self-fetch or unbounded TMDB work is implied. See [one-chunk ADR](../adr/0006-one-chunk-discovery.md).
 
-The catalogue upsert above is the only writer that creates or re-identifies catalogue records. The owner-triggered [poster hydration](../reference/api/catalog.md#poster-hydration) ([ADR 0020](../adr/0020-owner-triggered-catalog-poster-hydration.md)) is a second, separately gated writer outside this flow: it fills only the `poster` field of already verified records from TMDB detail by the same id, under the same resolver lease, and never creates a record, a decision or an identity. Its two catalogue writes are separate compare-and-swaps, not one atomic step; a stop between them is reported and completed by the next call. It runs only on an owner-approved call, never on a schedule.
+The catalogue upsert above is the only writer that creates or re-identifies catalogue records. The owner-triggered [poster hydration](../reference/api/catalog.md#poster-hydration) ([ADR 0020](../adr/0020-owner-triggered-catalog-poster-hydration.md), [ADR 0048](../adr/0048-permanent-catalog-poster-maintenance-route.md)) is a second writer outside this flow, a permanent owner-only maintenance route with no switch of its own: it fills only the `poster` field of already verified records from TMDB detail by the same id, under the same resolver lease, and never creates a record, a decision or an identity. Its two catalogue writes are separate compare-and-swaps, not one atomic step; a stop between them is reported and completed by the next call. It runs only on an owner-approved call, never on a schedule.
 
 R2 remains authoritative. The separately planned D1 candidate tables are not active production authority.
 
