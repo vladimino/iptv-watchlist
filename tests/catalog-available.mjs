@@ -23,7 +23,7 @@ const hour=3600000,now=Date.now(),G0='11111111-1111-4111-8111-111111111111',G1='
 const profile={version:1,profileHash:'p1'};
 const prediction=(extra={})=>({predictedRating:4.5,probability4Plus:.74,confidence:'high',matchSignals:['Investigation'],mainRisk:'Slow start',moodLabels:['мрачный','напряжённый'],tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1,...extra});
 const fingerprint={fingerprintHash:'f',plotMechanics:['investigation'],moodLabels:['мрачный'],execution:{payoff:'strong',pacing:'unknown'}};
-const current=(extra={})=>({prediction:prediction(extra),fingerprintHash:'f',fingerprint});
+const current=(extra={})=>({prediction:prediction(extra),fingerprintHash:'f',impactFeatures:{fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1},fingerprint});
 const show=(start,extra={})=>({channelId:'c1',channel:'One',start,end:start+2*hour,...extra});
 const film=(id,tmdbId,shows,extra={})=>({id,tmdbId:String(tmdbId),canonicalIdentity:'tmdb:'+tmdbId,title:'Film '+id,original:'Original '+id,year:2020,runtime:100,genres:['Драма'],poster:'https://image.tmdb.org/t/p/w342/'+id+'.jpg',url:'https://www.themoviedb.org/movie/'+tmdbId,synopsis:'SYNOPSIS-'+id,aliases:['ALIAS-'+id],directors:[{id:'tmdb_director/1',name:'Director',original:'Director'}],actors:[{id:'tmdb_actor/2',name:'Actor',original:'Actor'}],shows,showsProgrammeRunId:G1,discoveredAt:new Date(now-86400000).toISOString(),...extra});
 

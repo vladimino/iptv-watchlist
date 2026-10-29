@@ -24,7 +24,7 @@ const films=[],index={};
 for(let i=0;i<200;i++){
  const id=`film-zz-${String(i).padStart(3,'0')}`;
  films.push({id,tmdbId:String(800000+i),shows:[{start:now}]});
- if(i<199)index[id]={fingerprintHash:'fp-zz',prediction:currentPrediction};
+ if(i<199)index[id]={fingerprintHash:'fp-zz',impactFeatures:{fingerprintHash:'fp-zz',fingerprintSchemaVersion:1,fingerprintPromptVersion:1},prediction:currentPrediction};
 }
 const bucket=new MemoryBucket();
 await bucket.put('programme.json',JSON.stringify({runId:'run-zz',films}));

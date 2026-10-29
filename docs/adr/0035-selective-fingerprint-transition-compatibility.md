@@ -10,7 +10,7 @@
 - the prediction's fingerprint check becomes equality of the fingerprint **hash** alone, plus a declared transition rule for the prediction prompt.
 
 Independent fingerprint and prediction freshness, prediction history and every profile rule of ADR-0031 stay as decided there.  
-**Superseded by:** None
+**Superseded by:** [ADR-0047](0047-retire-fingerprint-compatibility-switch.md) (Proposed) in part: the mode switch and the feature rollback of section 7; the transition rule, the registry, storage, migration scheduling, the code rollback floor and the schema or prompt rollback stay
 
 ## Context
 

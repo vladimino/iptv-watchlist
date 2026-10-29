@@ -51,7 +51,9 @@ delete index.film002.impactFeatures;write('enrichment/view-index.json',index);
 const reconcile=async()=>{const r=await api('enrichment/queue/reconcile','POST',{});assert.equal(r.status,200);return read('enrichment/prediction-queue.json');};
 const pending=queue=>[...queue.pending].sort();
 let queue=await reconcile();
-assert.deepEqual(pending(queue),['film003']);
+// The fingerprint rule decides (ADR 0047): film002's entry has no impact facet, so the queue cannot judge it and fails closed;
+// the runner's next repairs the facet from the stored fingerprint without a model run (below).
+assert.deepEqual(pending(queue),['film002','film003']);
 assert.deepEqual(JSON.parse(JSON.stringify(queue.compatibility)),{mode:'selective',evaluatorVersion:1,profileVersion:1,films:4,missing:1,strict:{current:3,stale:0},selective:{current:3,compatible:0,stale:0},reasons:{exact:3},wouldKeep:0,wouldRequeue:0,strictDisagreements:0});
 assert.deepEqual((await api('enrichment/queue/status')).data.compatibility,queue.compatibility,'queue status exposes the counters');
 

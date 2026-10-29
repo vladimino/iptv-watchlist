@@ -6,7 +6,8 @@ import {createHash,webcrypto} from 'node:crypto';
 // Every reader of current/stale follows the fingerprint transition rule the queue uses (ADR-0035): the view, the queue
 // status, the status route, the queue overview and the per-film diagnostics (the MCP read tools return these bodies). Two
 // Worker releases run over one bucket, as in tests/fingerprint-migration-queue.mjs: release 1 is the live code, release 2
-// has schema 2 and a declared split of chase_escape. Strict stays today's behaviour; selective explains with reasons.
+// has schema 2 and a declared split of chase_escape. The transition rule always decides (ADR 0047) and explains with reasons;
+// a stale PREDICTION_FINGERPRINT_COMPATIBILITY binding of any value is inert.
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
@@ -37,7 +38,7 @@ const R1=release(source=>source);
 const R2=release(source=>source.replace('const FINGERPRINT_SCHEMA_VERSION=1;','const FINGERPRINT_SCHEMA_VERSION=2;').replace('const FINGERPRINT_TRANSITIONS=[];','const FINGERPRINT_TRANSITIONS='+JSON.stringify([split])+';').replace("'chase_escape',","'chase','escape',"));
 const read=key=>records.has(key)?JSON.parse(records.get(key)):null;
 const write=(key,value)=>{records.set(key,JSON.stringify(value));etags.set(key,'etag-'+(++revision));};
-const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},PROFILE_SELECTIVE={PREDICTION_PROFILE_COMPATIBILITY:'selective'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'}; // a stale binding of the retired writer switch (ADR 0046): inert
+const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},STRICT={PREDICTION_FINGERPRINT_COMPATIBILITY:'strict'},PROFILE_SELECTIVE={PREDICTION_PROFILE_COMPATIBILITY:'selective'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'}; // a stale binding of the retired writer switch (ADR 0046): inert
 
 // Five watchlist films airing now; A and C hold heist (unreached by the split), B and E chase_escape (reached), D has nothing.
 const now=Date.now(),film=(id,genres)=>({id,tmdbId:String(100+id.charCodeAt(0)),title:id,original:id,url:'https://letterboxd.com/film/'+id+'/',year:2020,genres,synopsis:'A plot',directors:[],actors:[],shows:[{start:now}]});
@@ -62,27 +63,27 @@ const historyOf=id=>JSON.stringify(read('enrichment/films/'+id+'/predictions.jso
 const disagreements=o=>o.snapshot.reasons.filter(reason=>!reason.endsWith('_not_recorded'));
 const historyBefore=Object.fromEntries(['A','B','C','E'].map(id=>[id,historyOf(id)]));
 
-// Release 1, strict: every reader reports current, with the fingerprint provenance and the modes in force.
+// Release 1: every reader reports current, with the fingerprint provenance and the modes in force.
 let queue=await reconcile(R1);
 {
  const v=await view(R1);
- assert.deepEqual(plain(v.compatibility),{profileMode:'selective',fingerprintMode:'strict',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1});
+ assert.deepEqual(plain(v.compatibility),{profileMode:'selective',fingerprintMode:'selective',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1});
  for(const id of ['A','B','C','E']){assert.equal(v.films[id].prediction.stale,false,id);assert.deepEqual(v.films[id].fingerprint.plotMechanics,mechanicsOf[id],id+' display facet');}
  assert.equal(v.films.D?.prediction??null,null,'a film never submitted has no index entry');
  const status=(await R1.api('enrichment/queue/status')).data;
- assert.equal(status.fingerprintCompatibility.mode,'strict');assert.deepEqual([status.fingerprintSchemaVersion,status.fingerprintPromptVersion,status.predictionPromptVersion],[1,1,1]);
+ assert.equal(status.fingerprintCompatibility.mode,'selective');assert.deepEqual([status.fingerprintSchemaVersion,status.fingerprintPromptVersion,status.predictionPromptVersion],[1,1,1]);
  assert.deepEqual(plain(status.fingerprintCompatibility.classes),{unchanged:4,missing:1,prediction_only:0,fingerprint_and_prediction:0,migration:0,unknown:0});
  const runner=(await R1.api('enrichment/status')).data;
- assert.deepEqual([runner.fingerprintSchemaVersion,runner.fingerprintPromptVersion,runner.predictionPromptVersion,plain(runner.compatibility)],[1,1,1,{profileMode:'selective',fingerprintMode:'strict'}]);
+ assert.deepEqual([runner.fingerprintSchemaVersion,runner.fingerprintPromptVersion,runner.predictionPromptVersion,plain(runner.compatibility)],[1,1,1,{profileMode:'selective',fingerprintMode:'selective'}]);
  const a=await R1.diagnostics('A');
- assert.deepEqual(a.fingerprint,{presence:'recorded',schemaVersion:1,promptVersion:1,produced:'generated',previous:null,current:true,usable:true,invalidated:false,reason:'exact',migration:'none',mode:'strict'});
- assert.deepEqual(a.prediction,{presence:'recorded',current:true,stale:false,profileMatch:true,cause:'current',reason:'exact',requiredWork:'none',mode:'selective',fingerprintMode:'strict'});
+ assert.deepEqual(a.fingerprint,{presence:'recorded',schemaVersion:1,promptVersion:1,produced:'generated',previous:null,current:true,usable:true,invalidated:false,reason:'exact',migration:'none',mode:'selective'});
+ assert.deepEqual(a.prediction,{presence:'recorded',current:true,stale:false,profileMatch:true,cause:'current',reason:'exact',requiredWork:'none',mode:'selective',fingerprintMode:'selective'});
  assert.equal(a.index,'agreed');
  const d=await R1.diagnostics('D');
  assert.deepEqual([d.fingerprint.presence,d.fingerprint.usable,d.fingerprint.reason,d.fingerprint.migration,d.prediction.cause],['not_recorded',false,'fingerprint_missing','full','not_recorded']);
  const o=await R1.overview();
  assert.deepEqual(disagreements(o),[]);
- assert.deepEqual(o.snapshot.fingerprint.mode,'strict');assert.deepEqual(o.snapshot.fingerprint.target,{fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1});
+ assert.deepEqual(o.snapshot.fingerprint.mode,'selective');assert.deepEqual(o.snapshot.fingerprint.target,{fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1});
  assert.equal(o.snapshot.fingerprint.queue.classes.unchanged,4);assert.equal(o.snapshot.fingerprint.registryDigest,o.snapshot.fingerprint.queue.registryDigest);
  assert.deepEqual([o.coverage.current,o.coverage.total],[4,5]);
 }
@@ -94,20 +95,19 @@ let queue=await reconcile(R1);
  assert.equal(o.snapshot.fingerprint.target.fingerprintSchemaVersion,2);assert.notEqual(o.snapshot.fingerprint.registryDigest,o.snapshot.fingerprint.queue.registryDigest);
 }
 
-// Release 2, strict (no switch): a schema change makes every reader stale, with the strict reason; facets stay displayed.
-queue=await reconcile(R2);
+// Release 2 with a stale strict binding: the binding is inert, so every reader answers as without it. Exact equality would
+// have made every schema-1 fingerprint stale; the transition rule keeps the unaffected ones (checked film by film below).
+queue=await reconcile(R2,STRICT);
 {
- const v=await view(R2);
- for(const id of ['A','B','C','E']){assert.equal(v.films[id].prediction.stale,true,id+' strict');assert.deepEqual(v.films[id].fingerprint.plotMechanics,mechanicsOf[id],id+' facet kept');}
- const a=await R2.diagnostics('A');
- assert.deepEqual([a.fingerprint.current,a.fingerprint.usable,a.fingerprint.reason,a.fingerprint.migration,a.fingerprint.mode],[false,false,'fingerprint_version_changed','full','strict']);
- assert.deepEqual([a.prediction.current,a.prediction.cause,a.prediction.reason,a.prediction.requiredWork,a.prediction.fingerprintMode],[false,'fingerprint_not_current','fingerprint_not_current','fingerprint_and_prediction','strict']);
- assert.equal(a.index,'agreed');
- const o=await R2.overview();
- assert.deepEqual(disagreements(o),[]);assert.deepEqual([o.coverage.current,o.pending.total],[0,5]);
+ assert.deepEqual(plain(queue.pending),plain((await reconcile(R2)).pending));
+ assert.deepEqual(plain(await view(R2,STRICT)),plain(await view(R2)));
+ const a=await R2.diagnostics('A',STRICT);
+ assert.deepEqual([a.fingerprint.mode,a.prediction.fingerprintMode],['selective','selective']);
+ assert.deepEqual(plain(a),plain(await R2.diagnostics('A')));
+ assert.equal((await R2.overview(STRICT)).snapshot.fingerprint.mode,'selective');
 }
 
-// Release 2, selective: the kept films read as current everywhere, the reached ones as stale with the transition reason;
+// Release 2: the kept films read as current everywhere, the reached ones as stale with the transition reason;
 // queue, view, overview and diagnostics agree film by film.
 queue=await reconcile(R2,SELECTIVE);
 assert.deepEqual(queue.pending,['D','B','E']);
@@ -197,18 +197,19 @@ assert.deepEqual(queue.pending,['D','B','E']);
  assert.deepEqual([a.fingerprint.usable,a.prediction.current,a.prediction.profileMatch,a.prediction.cause,a.prediction.reason,a.prediction.requiredWork,a.index],[true,true,true,'compatible','prompt_unaffected','none','agreed'],'kept over an older prompt version with the profile unchanged');
  const c=await R3.diagnostics('C',SELECTIVE);
  assert.deepEqual([c.prediction.current,c.prediction.cause,c.prediction.reason,c.prediction.requiredWork],[false,'stale','prompt_impacted','prediction_only']);
- assert.equal((await R3.diagnostics('A')).prediction.cause,'stale','strict: the older prompt version is stale');
- assert.equal((await R3.diagnostics('A')).prediction.reason,'prompt_changed');
- assert.deepEqual((await reconcile(R3)).pending,['D','A','B','C','E']);
+ const stale=await R3.diagnostics('A',STRICT);
+ assert.deepEqual([stale.prediction.cause,stale.prediction.reason],['compatible','prompt_unaffected'],'a stale strict binding does not make the older prompt version stale');
+ assert.deepEqual((await reconcile(R3,STRICT)).pending,['D','C']);
  queue=await reconcile(R2);
 }
 
-// Strict fallback: with both switches unset the readers are back to exact equality.
+// No strict fallback any more: with no binding, or with a stale one of either value, the readers and the queue agree.
 {
  queue=await reconcile(R2);
- assert.deepEqual(queue.pending,['D','A','B','C','E']);
- const v=await view(R2);for(const id of ['A','B','C','E'])assert.equal(v.films[id].prediction.stale,true,id);
- assert.equal((await R2.diagnostics('A')).prediction.cause,'fingerprint_not_current');
+ for(const binding of [SELECTIVE,STRICT]){
+  assert.deepEqual(plain((await reconcile(R2,binding)).pending),plain(queue.pending),JSON.stringify(binding));
+  assert.deepEqual(plain(await view(R2,binding)),plain(await view(R2)),JSON.stringify(binding));
+ }
 }
 for(const id of ['A','B','C','E'])assert.equal(historyOf(id),historyBefore[id],id+' prediction history untouched by every read');
 assert.equal(read('enrichment/films/A/fingerprint.json').fingerprintSchemaVersion,1,'no read rewrote a fingerprint');
