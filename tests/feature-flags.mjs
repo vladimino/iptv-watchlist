@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','TEST_ORDERED_RATINGS','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -151,7 +151,7 @@ for(const [name,needs] of [['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS']]){
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
  PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",
- DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",TEST_ORDERED_RATINGS:"testOrderedRatingsEnabled(env)?'on':'off'",
+ DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
 };
 const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);
