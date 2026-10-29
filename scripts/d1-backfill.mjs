@@ -222,6 +222,7 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
   if(verified.status!==STATUS_CONSISTENT)throw new BackfillStop('snapshot_not_consistent',{noGoReasons:verified.noGoReasons});
   const batch=await prepareImport(snapshot,{limit});
   report.discoveryArchive=batch.discoveryArchive??null;
+  report.fingerprintVersions=batch.fingerprintVersions??null;
   if(!batch.production)throw new BackfillStop('snapshot_not_production',{});
   const refused=refusal(batch);
   if(refused)throw new BackfillStop(refused.stopReasons[0]||'refused',{blockers:refused.blockers});

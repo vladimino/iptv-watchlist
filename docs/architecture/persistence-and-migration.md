@@ -31,4 +31,6 @@ The prediction family is portable only when every prediction record links an imm
 
 A fingerprint or prediction bundle stored under a retired Film id, whose survivor holds its own newer payload, is not imported: the importer records it as superseded by the canonical payload and leaves the object in R2 ([ADR-0029](../adr/0029-superseded-redirect-payloads.md)). This is a ledger rule inside the offline import and changes no node or arrow above.
 
+The immutable fingerprint body and generation record ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md) section 2) that the current `fingerprint.json` names are mapped through it and add no row; older generations stay in R2 as unreferenced history. This is also a ledger rule inside the offline import and changes no node or arrow above.
+
 **Not deployed:** D1 production binding, shadow writers/readers and authoritative D1 cutover. Each orange node is a planned step, not a claim that its Trello task is completed or an instruction to perform it.

@@ -95,9 +95,9 @@ export async function prepareImport(directory,{limit=null}={}){
    if((generation.unportable||generation.unresolved)&&byKey.has('epg/discovery-resolution.json'))units.push(unportable('epg/discovery-resolution.json',sha('epg/discovery-resolution.json'),'candidate_decision','epg/discovery-resolution.json','generation_not_imported','discovery'));
   }
  }
- const expected=projectSource({keys,bodies:{...Object.fromEntries(bodies),...archive.bodies},films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence,links,ratings,superseded});
+ const expected=projectSource({keys,bodies:{...Object.fromEntries(bodies),...archive.bodies},films:view.films,people:view.people,rosters,listed:listedIds,shas,identity,deriveEvidence:rules.candidateEvidence,links,ratings,superseded,fingerprintContentSha256:rules.fingerprintContentSha256});
  for(const blocker of expected.blockers||[])if(!blockers.some(item=>item.reason===blocker.reason&&item.targetTable===blocker.targetTable&&item.targetId===blocker.targetId))blockers.push(blocker);
- return {inventory:snapshotInventory,discoveryArchive:archive.summary,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit,production:loaded.production===true,source:loaded.source,baselineIdentity:loaded.baselineIdentity,aggregateSha256:manifest.totals?.aggregateSha256??null};
+ return {inventory:snapshotInventory,discoveryArchive:archive.summary,fingerprintVersions:expected.fingerprintVersions??null,finishedAt:manifest.finishedAt,units,expected,blockers,shas,limit,production:loaded.production===true,source:loaded.source,baselineIdentity:loaded.baselineIdentity,aggregateSha256:manifest.totals?.aggregateSha256??null};
 }
 
 // The shared rules come from the production sources themselves: canonicalFilmId from the domain model and candidateEvidence from the resolver.
@@ -110,11 +110,17 @@ export function loadDomainRules(){
  vm.runInContext(domain+'\nglobalThis.domainApi={canonicalFilmId};',context);
  vm.runInContext(versions+'\nglobalThis.versionApi={predictionVersionLinked,parsePredictionVersionKey,predictionVersionKey,predictionVersionText,predictionVersionBody,predictionMaterializationPlan};',context);
  vm.runInContext(resolver+'\nglobalThis.resolverApi={candidateEvidence};',context);
+ // The fingerprint content hash (ADR-0035): the Worker's own isObject and canonical, taken verbatim from src/enrichment.js, hashed here.
+ const enrichment=fs.readFileSync(path.join(root,'src/enrichment.js'),'utf8');
+ const isObjectSource=enrichment.match(/^const isObject=.*$/m)?.[0],canonicalSource=enrichment.match(/^function canonical\(value\)\{.*\}$/m)?.[0];
+ if(!isObjectSource||!canonicalSource)throw new Error('The Worker canonical content rule was not found in src/enrichment.js');
+ vm.runInContext(isObjectSource+'\n'+canonicalSource+'\nglobalThis.hashApi={canonical};',context);
+ const canonicalText=value=>JSON.stringify(context.hashApi.canonical(JSON.parse(JSON.stringify(value))));
  const ledgerContext=vm.createContext({Date,Map,Set,JSON,Object,Number,String,Array,Math,TextEncoder,encodeURIComponent,decodeURIComponent,URL,URLSearchParams});
  vm.runInContext(fs.readFileSync(path.join(root,'src/sources.js'),'utf8')+'\nglobalThis.ledgerApi={ledgerArchiveSegment};',ledgerContext);
  const {ledgerArchiveSegment}=ledgerContext.ledgerApi;
  const {canonicalFilmId}=context.domainApi,{candidateEvidence}=context.resolverApi,versionApi=context.versionApi;
- return {canonicalFilmId:id=>canonicalFilmId(id),candidateEvidence:candidate=>candidateEvidence(candidate),predictionVersionLinked:(record,filmId)=>versionApi.predictionVersionLinked(record,filmId),parsePredictionVersionKey:key=>versionApi.parsePredictionVersionKey(key),predictionVersionKey:(filmId,sha)=>versionApi.predictionVersionKey(filmId,sha),predictionVersionText:record=>versionApi.predictionVersionText(record),predictionVersionBody:record=>versionApi.predictionVersionBody(record),predictionMaterializationPlan:(filmId,bundle)=>versionApi.predictionMaterializationPlan(filmId,bundle),ledgerArchiveSegment:(key,count)=>ledgerArchiveSegment(key,count)};
+ return {canonicalFilmId:id=>canonicalFilmId(id),candidateEvidence:candidate=>candidateEvidence(candidate),predictionVersionLinked:(record,filmId)=>versionApi.predictionVersionLinked(record,filmId),parsePredictionVersionKey:key=>versionApi.parsePredictionVersionKey(key),predictionVersionKey:(filmId,sha)=>versionApi.predictionVersionKey(filmId,sha),predictionVersionText:record=>versionApi.predictionVersionText(record),predictionVersionBody:record=>versionApi.predictionVersionBody(record),predictionMaterializationPlan:(filmId,bundle)=>versionApi.predictionMaterializationPlan(filmId,bundle),ledgerArchiveSegment:(key,count)=>ledgerArchiveSegment(key,count),fingerprintContentSha256:value=>createHash('sha256').update(Buffer.from(canonicalText(value),'utf8')).digest('hex')};
 }
 
 function scopedStore(store,byKey){
@@ -196,12 +202,12 @@ async function main(){
  catch(error){console.error(error instanceof ExportError||error instanceof SnapshotError?error.message:'Snapshot could not be checked');process.exit(error.exitCode||1);}
  // Fail closed: an unknown key or a stored decision that disagrees with the derived evidence stops the run before the database is touched.
  const refused=refusal(batch);
- if(refused){console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,...refused,note}));process.exit(3);}
+ if(refused){console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,fingerprintVersions:batch.fingerprintVersions,...refused,note}));process.exit(3);}
  if(!fs.existsSync(databasePath)){fs.mkdirSync(path.dirname(databasePath),{recursive:true});exec(databasePath,['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync(path.join(root,'migrations',file),'utf8')).join('\n'));}
  const db=openSqlite(databasePath);
  const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
  const result=await importBatch(db,repositories,{...batch,importedAt:batch.finishedAt});
- console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,...result,note}));
+ console.log(JSON.stringify({...batch.inventory,discoveryArchive:batch.discoveryArchive,fingerprintVersions:batch.fingerprintVersions,...result,note}));
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
