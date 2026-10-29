@@ -1,6 +1,6 @@
 # Letterboxd ingestion and last-good ratings
 
-This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0044-removal-rating-lookup-queue.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
+This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0043-removal-rating-lookup-queue.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
 
 ```mermaid
 sequenceDiagram
@@ -39,7 +39,7 @@ sequenceDiagram
     Note over Retired,R2: No Letterboxd request, no R2 read or write
 ```
 
-The optional block is the **removal lookup** of [ADR 0044](../adr/0044-removal-rating-lookup-queue.md) (Proposed, off by default): after the commit's events are written and before the films list, the films the watchlist diff removed are looked up on their own member pages through a bounded queue in `enrichment/removal-rating-lookups.json`; it never fails the commit ([contract](../reference/integrations/letterboxd-ratings.md#removed-films)).
+The optional block is the **removal lookup** of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) (Proposed, off by default): after the commit's events are written and before the films list, the films the watchlist diff removed are looked up on their own member pages through a bounded queue in `enrichment/removal-rating-lookups.json`; it never fails the commit ([contract](../reference/integrations/letterboxd-ratings.md#removed-films)).
 
 The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
 
