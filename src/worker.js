@@ -200,14 +200,14 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  return {programmeRunId,pinned,watchedMarkEnabled,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,displayExclusion,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
 }
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
-// It writes the owner's `watched` fact through the fact records and nothing else, so it needs LETTERBOXD_FACTS as well as its own
-// switch. The request guard is stricter than the shared one: a same-origin Origin is required, the body must be JSON and hold
-// exactly `tmdbId` and `watched`; a title, year or Letterboxd id is never read.
-const findsWatchedMarkEnabled=env=>env?.FINDS_WATCHED_MARK==='on'&&env?.LETTERBOXD_FACTS==='on';
+// It writes the owner's `watched` fact through the fact records and nothing else, so it needs LETTERBOXD_FACTS=on. It has no
+// switch of its own: the former FINDS_WATCHED_MARK is retired (ADR 0042) and a stale binding is inert. The request guard is
+// stricter than the shared one: a same-origin Origin is required, the body must be JSON and hold exactly `tmdbId` and `watched`;
+// a title, year or Letterboxd id is never read.
+const findsWatchedMarkEnabled=env=>env?.LETTERBOXD_FACTS==='on';
 const FINDS_WATCHED_TMDB=/^[1-9]\d{0,11}$/;
 async function catalogWatchedRoute(request,env,url){
  if(request.method!=='POST')return json({error:'Method not allowed'},405);
- if(env.FINDS_WATCHED_MARK!=='on')return json({error:'Watched mark is disabled',code:'mark_disabled'},409);
  if(env.LETTERBOXD_FACTS!=='on')return json({error:'Letterboxd facts are disabled',code:'facts_disabled'},409);
  if(request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
  if(!/^application\/json(\s*;|$)/i.test(request.headers.get('Content-Type')||''))return json({error:'Expected application/json'},415);
