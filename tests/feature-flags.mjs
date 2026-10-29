@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -104,7 +104,8 @@ assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROF
 assert.equal(l('FINGERPRINT_VERSION_OBJECTS').effective,'on');
 assert.equal(l('DISCOVERY_LEDGER_MODE').effective,'bounded');
 assert.match(l('DISCOVERY_LEDGER_MODE').note,/does not read storage/);
-assert.deepEqual([l('FINDS_WATCHED_MARK').effectiveWithRequirements,l('FINDS_WATCHED_MARK').unmetRequirements],['on',[]]);
+const mark=l('FINDS_WATCHED_MARK');
+assert.deepEqual([mark.state,mark.raw,mark.retired,mark.valid,mark.issue,mark.effective],['set','on',true,false,'retired',null],'the retired watched-mark switch is inert and the production on is visible (ADR 0042)');
 const localization=l('LIFECYCLE_LOCALIZATION');
 assert.deepEqual([localization.raw,localization.valid,localization.issue,localization.effective,localization.scope],['on:programme,on:watchlist,on:epg',false,'retired_tokens','off','metadata'],'retired tokens are shown literally and are inert');
 const retired=l('SCORED_RESOLUTION');
@@ -114,7 +115,7 @@ assert.deepEqual([ratings.state,ratings.raw,ratings.retired,ratings.valid,rating
 const exclusion=l('FINDS_TITLE_EXCLUSION');
 assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.valid,exclusion.issue,exclusion.effective],['set','on',true,false,'retired',null],'the retired Finds exclusion switch is inert and the production on is visible (ADR 0041)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:15,set:11,absent:4,invalid:4,redacted:0});
+assert.deepEqual(live.report.summary,{registered:15,set:11,absent:4,invalid:5,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
 const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,PREDICTION_VERSION_OBJECTS:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',FINGERPRINT_VERSION_OBJECTS:'on'.repeat(150)});
@@ -132,8 +133,8 @@ const padded=entry((await flags({CANDIDATE_DISCOVERY:' on '})).report,'CANDIDATE
 assert.deepEqual([padded.raw,padded.valid,padded.effective],[' on ',true,'on']);
 
 // 4. Requirements on other flags.
-const unmet=await flags({FINDS_WATCHED_MARK:'on',LETTERBOXD_BASELINE_IMPORT:'on',PREDICTION_MATERIALIZATION:'on'});
-for(const [name,needs] of [['FINDS_WATCHED_MARK','LETTERBOXD_FACTS'],['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'],['PREDICTION_MATERIALIZATION','PREDICTION_VERSION_OBJECTS']]){
+const unmet=await flags({LETTERBOXD_BASELINE_IMPORT:'on',PREDICTION_MATERIALIZATION:'on'});
+for(const [name,needs] of [['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'],['PREDICTION_MATERIALIZATION','PREDICTION_VERSION_OBJECTS']]){
  const item=entry(unmet.report,name);
  assert.deepEqual([item.effective,item.effectiveWithRequirements,item.unmetRequirements],['on','off',[needs]],name);
 }
@@ -152,7 +153,7 @@ for(const [name,expression] of Object.entries(consumer)){
 }
 // Consumers without a named reader compare the exact string on.
 const enrichment=fs.readFileSync('src/enrichment.js','utf8'),facts=fs.readFileSync('src/letterboxd-facts.js','utf8'),worker=fs.readFileSync('src/worker.js','utf8');
-for(const [source,name] of [[enrichment,'LETTERBOXD_FACTS'],[facts,'LETTERBOXD_BASELINE_IMPORT'],[worker,'FINDS_WATCHED_MARK']]){
+for(const [source,name] of [[enrichment,'LETTERBOXD_FACTS'],[facts,'LETTERBOXD_BASELINE_IMPORT']]){
  const uses=[...source.matchAll(new RegExp('env\\??\\.'+name+'([!=]==?)\'([a-z]+)\'','g'))];
  assert.ok(uses.length>0,name+' is read');
  for(const use of uses)assert.equal(use[2],'on',name+' compares the exact on');
@@ -163,7 +164,7 @@ for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION'];
+const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');
