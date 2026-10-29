@@ -46,6 +46,17 @@ const current=id=>base.bodies['enrichment/films/'+id+'/fingerprint.json'];
  assert.equal(classifyObject('enrichment/films/tmdb_1/fingerprint-generations/'+'a'.repeat(64)+'.json'),'unmapped');
  assert.equal(classifyObject('enrichment/films/tmdb_1/fingerprints/extra/'+'a'.repeat(64)+'.json'),'unmapped');
  assert.equal(inventory({keys:base.keys}).coverage.unmapped.length,0);
+ // Alias spellings of the Worker's layout are unknown, not versions: leading zeros in the versions, and a film segment that is not
+ // exactly encodeURIComponent of its id (lower-case or needless escapes, an undecodable escape). A properly encoded id is a key.
+ const hash='a'.repeat(64);
+ for(const key of ['enrichment/films/tmdb_1/fingerprint-generations/'+hash+'-s01-p1.json','enrichment/films/tmdb_1/fingerprint-generations/'+hash+'-s1-p01.json',
+  'enrichment/films/tmdb%5F1/fingerprints/'+hash+'.json','enrichment/films/a%2fb/fingerprints/'+hash+'.json','enrichment/films/%E0%A4%A/fingerprints/'+hash+'.json',
+  'enrichment/films/a b/fingerprint-generations/'+hash+'-s1-p1.json']){
+  assert.equal(isFingerprintVersionKey(key),false,key);assert.equal(classifyObject(key),'unmapped',key);
+  assert.deepEqual(inventory({keys:[key]}).coverage.unmapped,[key]);
+  assert.deepEqual(readFingerprintVersions({keys:[key],bodies:{},contentSha256:rules.fingerprintContentSha256}).records,[]);
+ }
+ for(const key of ['enrichment/films/a%2Fb/fingerprints/'+hash+'.json','enrichment/films/'+encodeURIComponent('film:the-thing')+'/fingerprint-generations/'+hash+'-s10-p2.json'])assert.equal(classifyObject(key),'mapped',key);
 }
 // 3. The current record's body and generation are mapped through it; the replaced generation is unreferenced history; no blocker.
 {
@@ -67,6 +78,17 @@ const current=id=>base.bodies['enrichment/films/'+id+'/fingerprint.json'];
  const result=readFingerprintVersions({keys,bodies:base.bodies,contentSha256:rules.fingerprintContentSha256});
  assert.deepEqual(result.blockers,[]);
  assert.equal(result.records.find(record=>record.key===body('tmdb_2',current('tmdb_2').fingerprintHash)).disposition,'unreferenced');
+}
+// 4a. A film id that needs encoding keeps its pair mapped: the segment is the Worker's encodeURIComponent of the id.
+{
+ const encoded=new CreateOnlyBucket(),id='film:the-thing';
+ await writeFingerprint({BUCKET:encoded,FINGERPRINT_VERSION_OBJECTS:'on'},id,first,null,'generated');
+ const bodies={};for(const [key,item] of encoded.objects)bodies[key]=JSON.parse(item.text);
+ const keys=[...encoded.objects.keys()].sort();
+ assert.equal(keys.filter(isFingerprintVersionKey).length,2);assert.ok(keys.filter(isFingerprintVersionKey).every(key=>key.startsWith('enrichment/films/film%3Athe-thing/')));
+ const result=readFingerprintVersions({keys,bodies,contentSha256:rules.fingerprintContentSha256});
+ assert.deepEqual(result.blockers,[]);assert.deepEqual(result.summary,{bodies:1,generations:1,mapped:2,unreferenced:0,blocked:0});
+ assert.ok(result.records.every(record=>record.id===id));
 }
 // 4b. A rewrite of identical content (a restore or a regeneration with the same result) reuses the body and record: the pointer's
 // generatedAt, produced and previous differ from the record's first values, and the pair is still mapped.
@@ -126,4 +148,4 @@ assert.deepEqual(readFingerprintVersions({keys:['watchlist.json'],bodies:{}}).re
  const failing=projectSource({keys:base.keys,bodies,identity,deriveEvidence:rules.candidateEvidence,fingerprintContentSha256:rules.fingerprintContentSha256});
  assert.deepEqual(failing.blockers.map(item=>item.reason),['fingerprint_body_hash_mismatch']);
 }
-console.log('Fingerprint version import: Worker hash rule, mapped-family coverage, current pointer mapping, reused body and record after a restore, unreferenced history and orphan body, nine fail-closed defects, required rule, projectSource accounting passed');
+console.log('Fingerprint version import: Worker hash rule, mapped-family coverage with alias spellings unknown, encoded film id, current pointer mapping, reused body and record after a restore, unreferenced history and orphan body, nine fail-closed defects, required rule, projectSource accounting passed');

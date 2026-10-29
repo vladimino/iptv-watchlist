@@ -16,8 +16,11 @@ export function isArchiveKey(key){return key===ARCHIVE_POINTER||ARCHIVE_MANIFEST
 // generation record per (hash, schema version, prompt version) holding the provenance; both create-only. fingerprint.json stays the
 // current record and is the pointer: the body and the record whose identity equals it are its immutable form, mapped through it.
 const FINGERPRINT_BODY=/^enrichment\/films\/([^/]+)\/fingerprints\/([0-9a-f]{64})\.json$/;
-const FINGERPRINT_GENERATION=/^enrichment\/films\/([^/]+)\/fingerprint-generations\/([0-9a-f]{64})-s(\d+)-p(\d+)\.json$/;
-export function isFingerprintVersionKey(key){return FINGERPRINT_BODY.test(key)||FINGERPRINT_GENERATION.test(key);}
+const FINGERPRINT_GENERATION=/^enrichment\/films\/([^/]+)\/fingerprint-generations\/([0-9a-f]{64})-s(0|[1-9]\d*)-p(0|[1-9]\d*)\.json$/;
+// Only the Worker's own layout is a version key: the film segment must be exactly encodeURIComponent of the id it decodes to
+// (filmKey), and the versions are integers without leading zeros (fingerprintGenerationKey). An alias spelling is unknown.
+const canonicalFilmSegment=segment=>{try{return encodeURIComponent(decodeURIComponent(segment))===segment;}catch{return false;}};
+export function isFingerprintVersionKey(key){const match=key.match(FINGERPRINT_BODY)||key.match(FINGERPRINT_GENERATION);return !!match&&canonicalFilmSegment(match[1]);}
 
 const FAMILIES=[
  ['watchlist',key=>key==='watchlist.json'],

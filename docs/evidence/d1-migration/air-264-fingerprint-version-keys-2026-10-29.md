@@ -33,7 +33,7 @@ They are therefore immutable copies of the current records, not a second source 
 
 Fixtures are written by the Worker's own `writeFingerprint` on a create-only bucket fake. The test checks:
 - the importer's hash equals the writer's;
-- coverage classifies both patterns as mapped, and near-miss keys (63-character hash, missing suffix, nested path) as unknown;
+- coverage classifies both patterns as mapped, and near-miss keys (63-character hash, missing suffix, nested path) and alias spellings (`-s01-p1`, `-s1-p01`, a needless `%5F`, a lower-case `%2f`, an undecodable escape, an unencoded space) as unknown, while a properly encoded film id stays mapped end to end;
 - after a second write, the current pair is mapped and the replaced pair is unreferenced; the result is deterministic under key reordering;
 - a body without its record is unreferenced;
 - a restore of identical content reuses the body and the record (the pointer's `generatedAt`, `produced` and `previous` differ from the record's) and stays mapped;
