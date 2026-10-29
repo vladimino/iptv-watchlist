@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-24 (retrospective; [AIR-118](https://trello.com/c/5qf3Zn3p))  
 **Approval source:** [AIR-64](https://trello.com/c/WTnyO8bX)  
 **Supersedes:** None documented  
-**Superseded by:** None documented
+**Superseded by:** None documented; [ADR 0040](0040-retire-ratings-only-refresh.md) (Accepted) retires the separate refresh route only, the last-good rule stays
 
 ## Context
 

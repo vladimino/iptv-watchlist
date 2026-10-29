@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','RATINGS_REFRESH','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','SCORED_RESOLUTION'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','SCORED_RESOLUTION','RATINGS_REFRESH'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -98,7 +98,7 @@ for(const key of empty.read)assert.ok(allowedReads.has(key),'env read only by re
 assert.ok(!empty.read.has('TMDB_API_READ_ACCESS_TOKEN')&&!empty.read.has('LETTERBOXD_USERNAME')&&!empty.read.has('EPG_XML_URL'));
 
 // 2. A production-like set, including retired tokens and the retired resolver switch.
-const live=await flags({PREDICTION_PROFILE_COMPATIBILITY:'selective',PREDICTION_FINGERPRINT_COMPATIBILITY:'selective',PREDICTION_VERSION_OBJECTS:'on',FINGERPRINT_VERSION_OBJECTS:'on',LETTERBOXD_FACTS:'on',FINDS_TITLE_EXCLUSION:'on',FINDS_WATCHED_MARK:'on',LIFECYCLE_LOCALIZATION:'on:programme,on:watchlist,on:epg',SCORED_RESOLUTION:'on',DISCOVERY_LEDGER_MODE:'bounded'});
+const live=await flags({PREDICTION_PROFILE_COMPATIBILITY:'selective',PREDICTION_FINGERPRINT_COMPATIBILITY:'selective',PREDICTION_VERSION_OBJECTS:'on',FINGERPRINT_VERSION_OBJECTS:'on',LETTERBOXD_FACTS:'on',FINDS_TITLE_EXCLUSION:'on',FINDS_WATCHED_MARK:'on',LIFECYCLE_LOCALIZATION:'on:programme,on:watchlist,on:epg',SCORED_RESOLUTION:'on',RATINGS_REFRESH:'on',DISCOVERY_LEDGER_MODE:'bounded'});
 const l=name=>entry(live.report,name);
 assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROFILE_COMPATIBILITY').raw,l('PREDICTION_PROFILE_COMPATIBILITY').valid,l('PREDICTION_PROFILE_COMPATIBILITY').effective],['set','selective',true,'selective']);
 assert.equal(l('FINGERPRINT_VERSION_OBJECTS').effective,'on');
@@ -109,15 +109,17 @@ const localization=l('LIFECYCLE_LOCALIZATION');
 assert.deepEqual([localization.raw,localization.valid,localization.issue,localization.effective,localization.scope],['on:programme,on:watchlist,on:epg',false,'retired_tokens','off','metadata'],'retired tokens are shown literally and are inert');
 const retired=l('SCORED_RESOLUTION');
 assert.deepEqual([retired.state,retired.raw,retired.retired,retired.valid,retired.issue,retired.effective],['set','on',true,false,'retired',null],'a stale retired binding is visible');
+const ratings=l('RATINGS_REFRESH');
+assert.deepEqual([ratings.state,ratings.raw,ratings.retired,ratings.valid,ratings.issue,ratings.effective],['set','on',true,false,'retired',null],'the retired ratings refresh switch is inert and a stale on is visible (ADR 0040)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:15,set:10,absent:5,invalid:2,redacted:0});
+assert.deepEqual(live.report.summary,{registered:15,set:11,absent:4,invalid:3,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
-const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,RATINGS_REFRESH:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',FINGERPRINT_VERSION_OBJECTS:'on'.repeat(150)});
+const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,PREDICTION_VERSION_OBJECTS:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',FINGERPRINT_VERSION_OBJECTS:'on'.repeat(150)});
 assert.doesNotMatch(leaky.text,new RegExp(SECRET),'a value outside the known tokens never leaves the Worker');
 const k=name=>entry(leaky.report,name);
 assert.deepEqual([k('CANDIDATE_DISCOVERY').raw,k('CANDIDATE_DISCOVERY').redacted,k('CANDIDATE_DISCOVERY').shape,k('CANDIDATE_DISCOVERY').issue,k('CANDIDATE_DISCOVERY').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
-assert.deepEqual([k('RATINGS_REFRESH').raw,k('RATINGS_REFRESH').redacted,k('RATINGS_REFRESH').issue,k('RATINGS_REFRESH').effective],[null,true,'case_or_whitespace','off'],'a near miss is named, not echoed');
+assert.deepEqual([k('PREDICTION_VERSION_OBJECTS').raw,k('PREDICTION_VERSION_OBJECTS').redacted,k('PREDICTION_VERSION_OBJECTS').issue,k('PREDICTION_VERSION_OBJECTS').effective],[null,true,'case_or_whitespace','off'],'a near miss is named, not echoed');
 assert.deepEqual([k('PREDICTION_MATERIALIZATION').raw,k('PREDICTION_MATERIALIZATION').shape,k('PREDICTION_MATERIALIZATION').issue,k('PREDICTION_MATERIALIZATION').effective],[null,{type:'object'},'not_string','off']);
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
 assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective],['bounded ','case_or_whitespace','full'],'a padded known token is shown, and it is invalid where the code does not trim');
@@ -136,7 +138,7 @@ for(const [name,needs] of [['FINDS_WATCHED_MARK','LETTERBOXD_FACTS'],['LETTERBOX
 
 // 5. Parity: the effective mode is what each consumer computes, for every value shape.
 const consumer={
- CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',RATINGS_REFRESH:"ratingsEnabled(env)?'on':'off'",PREDICTION_VERSION_OBJECTS:"predictionVersionsEnabled(env)?'on':'off'",
+ CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',PREDICTION_VERSION_OBJECTS:"predictionVersionsEnabled(env)?'on':'off'",
  PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",FINDS_TITLE_EXCLUSION:"findsTitleExclusionEnabled(env)?'on':'off'",
  PREDICTION_PROFILE_COMPATIBILITY:'predictionCompatibilityMode(env)',PREDICTION_FINGERPRINT_COMPATIBILITY:'fingerprintCompatibilityMode(env)',FINGERPRINT_VERSION_OBJECTS:"fingerprintVersionsEnabled(env)?'on':'off'",DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',
 };
@@ -159,8 +161,9 @@ for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z_]+)` \|/gm)].map(match=>match[1]);
-assert.deepEqual(documented,REGISTERED.filter(name=>name!=='SCORED_RESOLUTION'),'every active registered flag is in the contract table, in order');
-assert.match(reference,/`SCORED_RESOLUTION`[^\n]*retired/,'the retired flag is documented as retired');
+const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH'];
+assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
+for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');
 const checker=fs.readFileSync('scripts/check-documentation-governance.mjs','utf8');
 for(const name of JSON.parse(checker.match(/const flagNames\s*=\s*(\[[^\]]*\])/)[1].replace(/'/g,'"')))assert.ok(REGISTERED.includes(name),'checker flag '+name+' is registered');
@@ -172,8 +175,8 @@ assert.equal(withArgs.body.result.isError,true);
 assert.match(withArgs.body.result.content[0].text,/no arguments/);
 assert.doesNotMatch(JSON.stringify(withArgs.body),new RegExp(SECRET));
 assert.equal((await tool(guarded({}).env,'feature_flags',{},{assertion:null})).response.status,403,'behind the Access JWT');
-const bare=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,RATINGS_REFRESH:'on'},'feature_flags',{});
-assert.equal(entry(bare.body.result.structuredContent,'RATINGS_REFRESH').effective,'on','answers without a bucket binding');
+const bare=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,PREDICTION_VERSION_OBJECTS:'on'},'feature_flags',{});
+assert.equal(entry(bare.body.result.structuredContent,'PREDICTION_VERSION_OBJECTS').effective,'on','answers without a bucket binding');
 assert.doesNotMatch(fs.readFileSync('src/feature-flags.js','utf8'),/Object\.(keys|entries|getOwnPropertyNames)\(env|for\s*\(\s*const\s+\w+\s+in\s+env/,'the readout never enumerates env');
 
 console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and the retired switch, unmet requirements, effective modes equal to every consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');
