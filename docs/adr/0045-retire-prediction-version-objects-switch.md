@@ -1,9 +1,9 @@
 # ADR 0045: Every committed prediction is written as an immutable version object, and PREDICTION_VERSION_OBJECTS is retired
 
-**Status:** Proposed (owner flag disposition given; ADR acceptance pending; no production configuration authorization)  
+**Status:** Accepted 2026-10-29 (architecture only; no production configuration authorization)  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner flag disposition `retire now`, keeping the behaviour of the current value, given in the AIR-226 session on 2026-10-29; acceptance of this record is pending; separate approval is required to delete the production binding  
+**Approval source:** explicit owner acceptance of ADR-0045 in AIR-226 ChatGPT session on 2026-10-29; production binding removal remains a separate owner-controlled operation  
 **Related work:** [AIR-226](https://trello.com/c/Upzk5DqR); prerequisites [AIR-164](https://trello.com/c/iZzON44A) (writer) and [AIR-195](https://trello.com/c/8gzh6iES) (activation readiness); [AIR-74](https://trello.com/c/5AdAmKPe); [ADR-0019](0019-live-d1-backfill-boundaries.md) item 4; [ADR-0026](0026-historical-prediction-version-materialization.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0026](0026-historical-prediction-version-materialization.md) in part: the second gate of decision 3 (`PREDICTION_VERSION_OBJECTS=on` for a write batch, refusal `version_objects_off`); the `PREDICTION_MATERIALIZATION` gate and every other part of the operation stay  
 **Superseded by:** None
