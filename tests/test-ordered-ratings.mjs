@@ -9,9 +9,9 @@ import {webcrypto} from 'node:crypto';
 const TEAM='https://probe-team.cloudflareaccess.com',AUD='c3'.repeat(32),SITE='https://iptv.example',USER='owner-name';
 const signing=await webcrypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
 const publicJwk={...await webcrypto.subtle.exportKey('jwk',signing.publicKey),kid:'kid-1',alg:'RS256',use:'sig'};
-const RATED=`https://letterboxd.com/${USER}/films/by/diary/`;
+const RATED=`https://letterboxd.com/${USER}/diary/`;
 const item=(id,stars)=>`<tr class="diary-entry-row"><td data-postered-identifier="{&quot;lid&quot;:&quot;${id}&quot;}"></td>${stars?`<span class="rating rated-${stars}"></span>`:''}</tr>`;
-const PAGE=`<html><title>Films diary</title></html>`+item('ESyU',7)+item('abc',null)+item('xyz',10)+`<a class="next" href="/${USER}/diary/page/2/">Older</a>`;films"></span><li class=" smenu-subselected"><a class="item" href="/${USER}/films/by/diary/">Newest First</a></li>`+item('ESyU',7)+item('abc',null)+item('xyz',10)+`<a class="next" href="/${USER}/films/by/diary/page/2/">Older</a>`;
+const PAGE=`<html><title>Films diary</title></html>`+item('ESyU',7)+item('abc',null)+item('xyz',10)+`<a class="next" href="/${USER}/diary/page/2/">Older</a>`;
 let reply=()=>new Response(PAGE,{status:200,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','server':'cloudflare'}});
 const calls=[],logs=[];
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,atob,encodeURIComponent,decodeURIComponent,crypto:webcrypto,setTimeout,ASSETS:{},
