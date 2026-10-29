@@ -48,11 +48,11 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0040 — The owner-triggered ratings-only refresh is retired; its route answers 410 Gone and no flag can reopen it](0040-retire-ratings-only-refresh.md) | Accepted 2026-10-29 (explicit owner decision and rendered diagram approval); supersedes the refresh-route part of ADR 0018 | [AIR-92](https://trello.com/c/yP6I0sjp); no binding, R2 or Letterboxd operation authorized |
 | [0041 — The Finds display-only title exclusion runs without a switch, and FINDS_TITLE_EXCLUSION is retired](0041-retire-finds-title-exclusion-switch.md) | Accepted 2026-10-29 (owner-approved ADR and Mermaid QA; no binding change) | [AIR-229](https://trello.com/c/ubOHtAgi) |
 
+| [0042 — The owner's «Смотрел» mark has no switch of its own, and FINDS_WATCHED_MARK is retired](0042-retire-finds-watched-mark-switch.md) | Accepted 2026-10-29 (explicit owner decision; binding removal separately gated) | [AIR-230](https://trello.com/c/AW2GqqQL) |
+
 ## Proposed records
 
-| Record | Status and boundary | Related work |
-| --- | --- | --- |
-| [0042 — The owner's «Смотрел» mark has no switch of its own, and FINDS_WATCHED_MARK is retired](0042-retire-finds-watched-mark-switch.md) | Proposed 2026-10-29 (owner disposition `retire now`; acceptance pending; no binding change) | [AIR-230](https://trello.com/c/AW2GqqQL) |
+No proposed records currently.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
