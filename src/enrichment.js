@@ -727,7 +727,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:ratingsEnabled(env),report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest})};
 }
 function queueReadyIds(queue,now=Date.now()){const ids=queue.priorityCount?queue.hotPending:queue.coldPending;return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>now));}
 // The ids a batch takes, in queue order: migration work (ADR-0035 section 6) fills at most FINGERPRINT_MIGRATION_SHARE of the
@@ -922,10 +922,9 @@ async function predictionBenchmarkTrial(env,body){
 const RATINGS_STATUS_KEY=ENRICHMENT_KEY+'ratings/status.json';
 const RATINGS_POINTER_KEY=ENRICHMENT_KEY+'ratings/published.json';
 const RATINGS_PENDING_KEY=ENRICHMENT_KEY+'ratings/pending.json';
-const RATINGS_LEASE_KEY=ENRICHMENT_KEY+'ratings/lease.json';
-const RATINGS_LEASE_MS=120000;
 const ratingsGenerationKey=id=>ENRICHMENT_KEY+'ratings/generations/'+encodeURIComponent(id)+'.json';
-const ratingsEnabled=env=>env.RATINGS_REFRESH==='on';
+// The owner-triggered ratings-only refresh is retired (ADR 0040): the route answers 410 Gone and nothing reads RATINGS_REFRESH.
+// Stored ratings objects (status, published pointer, pending, generations) are kept and stay readable.
 // Immutable prediction versions are written only when the owner has enabled the flag; the bundle stays the runtime record either way.
 // Strict: only the exact string 'on'. No trimming, no case folding, no non-string truthiness: this flag is a production write-authority boundary.
 const predictionVersionsEnabled=env=>env?.PREDICTION_VERSION_OBJECTS==='on';
@@ -1106,188 +1105,16 @@ function ratingsStatusView(stored,enabled){
  const empty={schemaVersion:1,state:'idle',lastSuccessAt:null,lastFailureAt:null,nextRetryAt:null,generationId:null,pages:null,watched:null,attempt:null,diary:{state:'unchecked',cause:null,error:null}};
  return {...(stored||empty),enabled:!!enabled};
 }
-async function ratingsLeaseRecord(env){const object=await env.BUCKET.get(RATINGS_LEASE_KEY);return {object,current:object?await object.json():null};}
-async function acquireRatingsLease(env){
- const {object,current}=await ratingsLeaseRecord(env);
- if(current?.expiresAt>Date.now())return null;
- const lease={id:crypto.randomUUID(),expiresAt:Date.now()+RATINGS_LEASE_MS};
- const saved=await env.BUCKET.put(RATINGS_LEASE_KEY,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
- return saved?lease:null;
-}
-async function renewRatingsLease(env,lease){
- const {object,current}=await ratingsLeaseRecord(env);
- if(!object||current?.id!==lease.id||!(current.expiresAt>Date.now()))return false;
- const next={id:lease.id,expiresAt:Date.now()+RATINGS_LEASE_MS};
- const saved=await env.BUCKET.put(RATINGS_LEASE_KEY,JSON.stringify(next),{onlyIf:{etagMatches:object.etag}});
- if(!saved)return false;
- lease.expiresAt=next.expiresAt;return true;
-}
-async function requireRatingsLease(env,lease){if(!await renewRatingsLease(env,lease))throw new Error('Ratings lease lost');}
-async function releaseRatingsLease(env,lease){
- const {object,current}=await ratingsLeaseRecord(env);
- if(object&&current?.id===lease.id)await env.BUCKET.put(RATINGS_LEASE_KEY,JSON.stringify({id:lease.id,expiresAt:0}),{onlyIf:{etagMatches:object.etag}});
-}
-function ratingsRepairIds(body){
- const ids=body.filmIds;
- if(!Array.isArray(ids)||ids.length<1||ids.length>10||ids.some(id=>typeof id!=='string'||!/^[a-z0-9-]{1,80}$/.test(id)))throw new Error('Invalid repair film ids');
- return [...new Set(ids)];
-}
-function ratingsBackoffMs(status,retryAfter){
- if(status===429&&/^\d+$/.test(String(retryAfter||'')))return Math.min(Number(retryAfter)*1000,6*3600000);
- return status===403?3600000:15*60*1000;
-}
-async function readLetterboxdFilms(env,lease){
- const username=sourceConfig(env).letterboxdUsername;let url=`https://letterboxd.com/${username}/films/`,total=null,pages=0;const seen=new Map();
- while(url){
-  await requireRatingsLease(env,lease);
-  let response;try{response=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});}catch(e){return {ok:false,cause:'lookup_failed',error:String(e.message).slice(0,160),page:pages+1};}
-  if(response.status===403||response.status===429){const body=await response.text(),challenge=/cloudflare|just a moment|attention required|captcha|bot detection/i.test(body);return {ok:false,status:response.status,cause:response.status===403&&challenge?'anti_bot':response.status===429?'http_429':'http_error',error:'Letterboxd films HTTP '+response.status+' on page '+(pages+1)+(challenge?' (anti-bot challenge)':''),page:pages+1,retryAfter:response.headers?.get?.('Retry-After')||null};}
-  if(!response.ok)return {ok:false,status:response.status,cause:'http_error',error:'Letterboxd films HTTP '+response.status+' on page '+(pages+1),page:pages+1};
-  let page;try{page=parsePublicFilmsPage(await response.text(),username);}catch(e){return {ok:false,cause:'incomplete',error:String(e.message).slice(0,160),page:pages+1};}
-  pages++;
-  if(pages>60||total!==null&&page.total!==total)return {ok:false,cause:'incomplete',error:'Letterboxd films pagination changed',page:pages};
-  total=page.total;
-  for(const item of page.entries){if(seen.has(item.id))return {ok:false,cause:'incomplete',error:'Duplicate Letterboxd film',page:pages};seen.set(item.id,item.rating);}
-  url=page.next?'https://letterboxd.com'+page.next:null;
- }
- if(seen.size!==total)return {ok:false,cause:'incomplete',error:'Incomplete Letterboxd films: '+seen.size+'/'+total,pages,watched:total};
- return {ok:true,pages,watched:total,ratings:Object.fromEntries(seen)};
-}
-async function diagnoseLetterboxdDiary(env,lease){
- await requireRatingsLease(env,lease);
- try{
-  const response=await fetch(`https://letterboxd.com/${sourceConfig(env).letterboxdUsername}/diary/`,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});
-  if(!response.ok)return {state:'degraded',cause:response.status===403?'http_403':'http_error',error:'Letterboxd diary HTTP '+response.status};
-  if(!/diary-entry-row/.test(await response.text()))return {state:'degraded',cause:'incomplete_page',error:'Incomplete Letterboxd diary page'};
-  return {state:'healthy',cause:null,error:null};
- }catch(e){return {state:'degraded',cause:'lookup_failed',error:String(e.message).slice(0,160)};}
-}
 function applyRatingsSeed(index){
  let changed=false;
  for(const [id,rating] of Object.entries(typeof INITIAL_PERSONAL_RATINGS==='undefined'?{}:INITIAL_PERSONAL_RATINGS))if(!Object.hasOwn(index[id]||{},'actualRating')){index[id]={...(index[id]||{}),actualRating:rating};changed=true;}
  return changed;
-}
-async function projectRatingsGeneration(env,snapshot,startedAt,lease){
- if(env.LETTERBOXD_FACTS==='on'){await requireRatingsLease(env,lease);const watchlist=await loadJSON(env,'watchlist.json');await LetterboxdFacts.applyFilmsListScan(env,{scanId:'generation-'+snapshot.generationId,observedAt:startedAt,films:snapshot.ratings,total:snapshot.watched},{watchlistFilms:watchlist?.films||[]});return {preserved:[],observations:null};}
- const baseline=await loadJSON(env,diagnosticSnapshotKey),watchlist=await loadJSON(env,'watchlist.json');
- const watchlistIds=new Set((watchlist?.films||[]).map(film=>String(film.id))),targets=[...new Set([...watchlistIds,...(baseline?.films||[]).map(film=>String(film.filmId))])];
- for(let attempt=0;attempt<5;attempt++){
-  await requireRatingsLease(env,lease);
-  const object=await env.BUCKET.get(ENRICHMENT_KEY+'view-index.json'),index=cloneJSON(object?await object.json():{}),storedObservations=baseline?await loadJSON(env,ratingObservationsKey)||[]:null,preserved=[],added=[];
-  let changed=applyRatingsSeed(index);
-  for(const id of targets){
-   const rating=Object.hasOwn(snapshot.ratings,id)?snapshot.ratings[id]:null;
-   if(!watchlistIds.has(id)&&rating===null)continue;
-   const actual=await loadJSON(env,filmKey(id)+'actual.json');
-   if(actual?.updatedAt&&Date.parse(actual.updatedAt)>Date.parse(startedAt)&&actual.rating!==rating){if(index[id]?.actualRating!==actual.rating){index[id]={...(index[id]||{}),actualRating:actual.rating};changed=true;}preserved.push(id);continue;}
-   if(index[id]?.actualRating===rating)continue;
-   const before=index[id]?.actualRating??null;
-   const item={filmId:id,before,after:rating,observedAt:snapshot.publishedAt,source:'letterboxd_public_films',generationId:snapshot.generationId};
-   if(storedObservations&&!storedObservations.some(existing=>ratingObservationIdentity(existing)===ratingObservationIdentity(item)))added.push(item);
-   index[id]={...(index[id]||{}),actualRating:rating};changed=true;
-  }
-  if(!changed)return {preserved,observations:null};
-  await requireRatingsLease(env,lease);
-  if(added.length)await saveJSON(env,RATINGS_PENDING_KEY,{generationId:snapshot.generationId,startedAt,observations:added});
-  const saved=await env.BUCKET.put(ENRICHMENT_KEY+'view-index.json',JSON.stringify(index),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
-  if(saved)return {preserved,observations:added.length?added:null};
- }
- throw new Error('Ratings index changed during publish');
-}
-async function commitRatingsPointer(env,lease,snapshot){
- await requireRatingsLease(env,lease);
- const object=await env.BUCKET.get(RATINGS_POINTER_KEY),pointer=object?await object.json():null;
- if(pointer?.projected===true&&pointer.generationId===snapshot.generationId)return pointer;
- const next={generationId:snapshot.generationId,phase:'published',projected:true,publishedAt:snapshot.publishedAt};
- const saved=await env.BUCKET.put(RATINGS_POINTER_KEY,JSON.stringify(next),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
- if(saved===null)throw new Error('Ratings generation changed during publish');
- return next;
-}
-async function finishRatingsGeneration(env,lease,snapshot,startedAt){
- const projected=await projectRatingsGeneration(env,snapshot,startedAt,lease);
- const pending=await loadJSON(env,RATINGS_PENDING_KEY);
- const observations=projected.observations||(pending?.generationId===snapshot.generationId&&pending.observations)||null;
- await commitRatingsPointer(env,lease,snapshot);
- await requireRatingsLease(env,lease);
- if(observations?.length)await appendRatingObservations(env,observations);
- await saveJSON(env,RATINGS_PENDING_KEY,{done:true});
- return projected.preserved;
 }
 async function readableRatings(env){
  const [pointer,pending]=await Promise.all([loadJSON(env,RATINGS_POINTER_KEY),loadJSON(env,RATINGS_PENDING_KEY)]);
  const generationId=pointer?.projected===true?pointer.generationId:null;
  const pendingGenerationId=pending?.generationId&&!pending.done&&pending.generationId!==generationId?pending.generationId:null;
  return {generationId,pendingGenerationId,pointer};
-}
-async function writeRatingsStatus(env,lease,status){await requireRatingsLease(env,lease);await saveJSON(env,RATINGS_STATUS_KEY,status);return ratingsStatusView(status,true);}
-async function stageRatingsGeneration(env,lease,scan,startedAt){
- await requireRatingsLease(env,lease);
- const ratingsHash=await contentHash(scan.ratings),pointer=await loadJSON(env,RATINGS_POINTER_KEY),pending=await loadJSON(env,RATINGS_PENDING_KEY);
- if(pointer?.projected===true&&(!pending?.generationId||pending.done||pending.generationId===pointer.generationId)){
-  const previous=await loadJSON(env,ratingsGenerationKey(pointer.generationId));
-  if(previous?.ratingsHash===ratingsHash)return {snapshot:previous,startedAt:previous.publishedAt,reused:true};
- }
- const generationId=crypto.randomUUID(),publishedAt=new Date().toISOString();
- const snapshot={schemaVersion:1,generationId,ratingsHash,publishedAt,pages:scan.pages,watched:scan.watched,ratings:scan.ratings};
- await saveJSON(env,ratingsGenerationKey(generationId),snapshot);
- await saveJSON(env,RATINGS_PENDING_KEY,{generationId,startedAt});
- return {snapshot,startedAt,reused:false};
-}
-async function healthyRatingsStatus(env,lease,stored,snapshot,preserved,diary,startedAt){
- await requireRatingsLease(env,lease);
- await enrichRecentRemovalRatings(env,snapshot.ratings,snapshot.publishedAt);
- const finishedAt=new Date().toISOString();
- return writeRatingsStatus(env,lease,{schemaVersion:1,state:'healthy',lastSuccessAt:finishedAt,lastFailureAt:stored?.lastFailureAt||null,nextRetryAt:null,generationId:snapshot.generationId,pages:snapshot.pages,watched:snapshot.watched,attempt:{id:crypto.randomUUID(),kind:'full',startedAt,finishedAt,outcome:'succeeded',cause:null,error:null,page:null,pages:snapshot.pages,watched:snapshot.watched,preservedFilmIds:preserved},diary});
-}
-async function recoverPendingRatings(env,lease,stored){
- const pending=await loadJSON(env,RATINGS_PENDING_KEY);
- if(!pending?.generationId||pending.done)return null;
- const snapshot=await loadJSON(env,ratingsGenerationKey(pending.generationId));
- if(!snapshot)throw new Error('Ratings pending generation is missing');
- const preserved=await finishRatingsGeneration(env,lease,snapshot,pending.startedAt||snapshot.publishedAt);
- return healthyRatingsStatus(env,lease,stored,snapshot,preserved,stored?.diary||{state:'unchecked',cause:null,error:null},pending.startedAt||snapshot.publishedAt);
-}
-async function runRatingsFullRefresh(env,lease,stored){
- const startedAt=new Date().toISOString();
- let scan,diary={state:'unchecked',cause:null,error:null};
- try{scan=await readLetterboxdFilms(env,lease);diary=await diagnoseLetterboxdDiary(env,lease);}catch(e){if(e.message==='Ratings lease lost')throw e;scan={ok:false,cause:'lookup_failed',error:String(e.message).slice(0,160),page:null};}
- const finishedAt=new Date().toISOString(),readable=await readableRatings(env);
- if(!scan.ok){
-  const status={schemaVersion:1,state:scan.cause==='anti_bot'?'blocked':'degraded',lastSuccessAt:readable.generationId&&stored?.generationId===readable.generationId?stored.lastSuccessAt:stored?.lastSuccessAt||null,lastFailureAt:finishedAt,nextRetryAt:new Date(Date.now()+ratingsBackoffMs(scan.status,scan.retryAfter)).toISOString(),generationId:readable.generationId,pendingGenerationId:readable.pendingGenerationId,pages:stored?.pages??null,watched:stored?.watched??null,attempt:{id:crypto.randomUUID(),kind:'full',startedAt,finishedAt,outcome:scan.cause==='anti_bot'?'blocked':'failed',cause:scan.cause,error:scan.error,page:scan.page??null,pages:scan.pages??null,watched:scan.watched??null},diary};
-  return writeRatingsStatus(env,lease,status);
- }
- try{
-  const staged=await stageRatingsGeneration(env,lease,scan,startedAt);
-  const preserved=await finishRatingsGeneration(env,lease,staged.snapshot,staged.startedAt);
-  return healthyRatingsStatus(env,lease,stored,staged.snapshot,preserved,diary,startedAt);
- }catch(e){
-  if(e.message==='Ratings lease lost')throw e;
-  const current=await readableRatings(env);
-  const status={schemaVersion:1,state:'degraded',lastSuccessAt:current.generationId&&stored?.generationId===current.generationId?stored.lastSuccessAt||null:stored?.lastSuccessAt||null,lastFailureAt:finishedAt,nextRetryAt:current.pendingGenerationId?null:new Date(Date.now()+ratingsBackoffMs(0)).toISOString(),generationId:current.generationId,pendingGenerationId:current.pendingGenerationId,pages:stored?.pages??null,watched:stored?.watched??null,attempt:{id:crypto.randomUUID(),kind:'full',startedAt,finishedAt,outcome:'failed',cause:'publish_failed',error:String(e.message).slice(0,160),page:null,pages:scan.pages,watched:scan.watched},diary};
-  return writeRatingsStatus(env,lease,status);
- }
-}
-async function runRatingsRepair(env,lease,stored,filmIds){
- await requireRatingsLease(env,lease);
- const startedAt=new Date().toISOString(),results=[];
- for(const id of filmIds){await requireRatingsLease(env,lease);try{results.push(await refreshPersonalRating(env,{id,url:'https://letterboxd.com/film/'+id+'/'}));}catch(e){results.push({filmId:id,error:String(e.message).slice(0,160)});}}
- const errors=results.filter(item=>item.error),saved=results.filter(item=>item.status==='saved').length,unchanged=results.filter(item=>item.status==='unchanged').length;
- const outcome=errors.length===results.length?'failed':errors.length?'partial':'repaired';
- const readable=await readableRatings(env),finishedAt=new Date().toISOString();
- const status={schemaVersion:1,state:stored?.state||'idle',lastSuccessAt:stored?.lastSuccessAt||null,lastFailureAt:stored?.lastFailureAt||null,nextRetryAt:stored?.nextRetryAt||null,generationId:readable.generationId||stored?.generationId||null,pendingGenerationId:readable.pendingGenerationId,pages:stored?.pages??null,watched:stored?.watched??null,attempt:{id:crypto.randomUUID(),kind:'repair',startedAt,finishedAt,outcome,cause:null,error:null,saved,unchanged,errors:errors.map(item=>({filmId:item.filmId,error:item.error}))},diary:stored?.diary||{state:'unchecked',cause:null,error:null}};
- return writeRatingsStatus(env,lease,status);
-}
-async function ratingsRefresh(env,body){
- const stored=await loadJSON(env,RATINGS_STATUS_KEY);
- if(!ratingsEnabled(env))return json({...ratingsStatusView(stored,false),error:'Ratings refresh is off'},409);
- if(body.mode&&body.mode!=='full'&&body.mode!=='repair')return json({error:'Invalid ratings refresh'},400);
- let repairIds=null;if(body.mode==='repair'){try{repairIds=ratingsRepairIds(body);}catch(e){return json({error:e.message},400);}}
- const lease=await acquireRatingsLease(env);if(!lease)return json({error:'Ratings refresh is already running'},409);
- try{
-  if(!repairIds){const recovered=await recoverPendingRatings(env,lease,stored);if(recovered)return json(recovered);if(stored?.nextRetryAt&&Date.parse(stored.nextRetryAt)>Date.now())return json({...ratingsStatusView(stored,true),skipped:'backoff'},409);}
-  return json(repairIds?await runRatingsRepair(env,lease,stored,repairIds):await runRatingsFullRefresh(env,lease,stored));
- }catch(e){if(e.message==='Ratings lease lost')return json({error:'Ratings lease lost'},409);throw e;}
- finally{await releaseRatingsLease(env,lease);}
 }
 // Read-only prediction quality over stored history (contract: docs/reference/api/prediction-quality.md). One page of Letterboxd
 // fact records per request: one bounded LIST, per record its bundles (Letterboxd and TMDB ids), the legacy log once, and the
@@ -1372,9 +1199,11 @@ async function filmHistoryRoute(env,url){
   snapshot:{profile:profile.value?{version:profile.value.version??null,profileHash:profile.value.profileHash??null}:null,sources:{predictions:{status:bundle.status},facts:{status:factKey?fact.status:'missing',factKey},legacyRatingLog:{status:legacy.status}}},
   current:built.current,partial,notes:built.notes,events:slice,page:{limit:page.limit,offset:page.offset,total:built.events.length,nextCursor:next}});
 }
-async function enrichmentRoute(request,env,url,execution){const path=url.pathname,requestId=predictionRequestId(request);let body=null;if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!isObject(body))return json({error:'Invalid request'},400);}
- if(path==='/api/enrichment/ratings/status'&&request.method==='GET'){const stored=await loadJSON(env,RATINGS_STATUS_KEY),readable=await readableRatings(env);return json({...ratingsStatusView(stored,ratingsEnabled(env)),generationId:readable.generationId??stored?.generationId??null,pendingGenerationId:readable.pendingGenerationId});}
- if(path==='/api/enrichment/ratings/refresh'&&request.method==='POST')return ratingsRefresh(env,body);
+async function enrichmentRoute(request,env,url,execution){const path=url.pathname,requestId=predictionRequestId(request);let body=null;
+ // Retired before any body parsing, read or write: no Letterboxd request, no lease, no stored object touched (ADR 0040).
+ if(path==='/api/enrichment/ratings/refresh')return json({error:'gone',detail:'The ratings-only refresh is retired. Ratings arrive with the EPG sync and the per-film lookup; stored ratings stay readable at GET /api/enrichment/ratings/status.'},410);
+if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!isObject(body))return json({error:'Invalid request'},400);}
+ if(path==='/api/enrichment/ratings/status'&&request.method==='GET'){const stored=await loadJSON(env,RATINGS_STATUS_KEY),readable=await readableRatings(env);return json({...ratingsStatusView(stored,false),generationId:readable.generationId??stored?.generationId??null,pendingGenerationId:readable.pendingGenerationId});}
  if(path==='/api/enrichment/catalog/posters'&&request.method==='POST')return await catalogPosterHydration(env,body);
  if(path==='/api/enrichment/predictions/materialize'&&request.method==='POST')return await materializePredictionVersions(env,body);
  if(path==='/api/enrichment/discovery/reconcile'&&request.method==='POST'){

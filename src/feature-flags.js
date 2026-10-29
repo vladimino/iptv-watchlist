@@ -9,7 +9,6 @@ const onOff=(name,effective,extra={})=>({name,modes:['off','on'],default:'off',t
 const FEATURE_FLAGS=[
  onOff('CANDIDATE_DISCOVERY',env=>candidateDiscoveryMode(env),{trims:true}),
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
- onOff('RATINGS_REFRESH',env=>ratingsEnabled(env)?'on':'off'),
  onOff('PREDICTION_VERSION_OBJECTS',env=>predictionVersionsEnabled(env)?'on':'off'),
  onOff('PREDICTION_MATERIALIZATION',env=>predictionMaterializationEnabled(env)?'on':'off',{requires:{PREDICTION_VERSION_OBJECTS:'on'}}),
  onOff('CATALOG_POSTER_HYDRATION',env=>catalogPosterHydrationEnabled(env)?'on':'off'),
@@ -23,6 +22,7 @@ const FEATURE_FLAGS=[
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
  // Retired: the code ignores the binding whatever it holds. Reported so a stale binding is visible.
  {name:'SCORED_RESOLUTION',modes:[],default:null,tokens:['off','shadow','on'],retired:true,effective:()=>null},
+ {name:'RATINGS_REFRESH',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
 ];
 const featureFlagNames=()=>FEATURE_FLAGS.map(flag=>flag.name);
 function featureFlagRaw(flag,value){
