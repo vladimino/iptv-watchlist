@@ -21,7 +21,9 @@ The route is not a sensitive one-off write. It writes one owner `watched` fact f
 3. Unchanged: the `LETTERBOXD_FACTS` gate (`409 facts_disabled`), method, origin, content type, body shape and catalog identity guards, the fact record and projection, revocation, and the client behaviour. The refusal `409 mark_disabled` no longer exists.
 4. Stopping new marks is done by switching `LETTERBOXD_FACTS` off, which also stops every other fact writer, or by a code revert.
 
-Not decided here: removing the Cloudflare binding, which is a separate owner-approved settings change; any change to the facts gate, the guards or the fact model.
+5. **The binding is removed as the last step of the retirement.** After the code is merged and deployed and the read-only checks pass, the owner removes the exact `FINDS_WATCHED_MARK` binding from Worker `iptv` under a separate, action-specific authorization, and its absence is read back (`feature_flags`: `state: absent`). That removal and readback are the final acceptance of AIR-230: the card stays open until the binding is gone. `keep_vars: true` means no deployment removes it.
+
+Not decided here: any change to the facts gate, the guards or the fact model. Neither the acceptance of this record nor the approval of its PR authorizes a settings change; the binding removal in decision 5 needs its own owner authorization.
 
 ## Alternatives considered
 
@@ -32,11 +34,11 @@ Not decided here: removing the Cloudflare binding, which is a separate owner-app
 
 - One code path for the route and the button. The `mark_disabled` branch, its tests and its documentation go away.
 - New marks can no longer be stopped while the other fact writers keep running; stopping them means switching the facts gate off or reverting the code.
-- A leftover `FINDS_WATCHED_MARK` binding stays until the owner removes it, and changes nothing.
+- Until the owner removes it as the last step of AIR-230, the leftover `FINDS_WATCHED_MARK` binding stays and changes nothing.
 
 ## Recovery and migration boundary
 
-Reversible by a code revert: the switch comes back, and the leftover binding `on` keeps the mark available. Marks already written stay valid owner facts in every case. This record authorizes no flag, binding, R2 or D1 change.
+Reversible by a code revert. Before the binding is removed, the switch comes back and the leftover binding `on` keeps the mark available. After the binding is removed, a revert to code that reads the switch also needs the original `FINDS_WATCHED_MARK=on` restored on Worker `iptv` (owner authorization), or the mark answers `409 mark_disabled`. Marks already written stay valid owner facts in every case. This record authorizes no flag, binding, R2 or D1 change.
 
 ## Evidence
 
@@ -47,4 +49,4 @@ Reversible by a code revert: the switch comes back, and the leftover binding `on
 
 ## Follow-ups
 
-Removal of the leftover Worker binding, as a separate owner-approved settings change.
+None outside AIR-230: the binding removal and its readback (decision 5) close that card.

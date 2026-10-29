@@ -200,11 +200,10 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  return {programmeRunId,pinned,watchedMarkEnabled,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,displayExclusion,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
 }
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
-// It writes the owner's `watched` fact through the fact records and nothing else, so it needs LETTERBOXD_FACTS as well as its own
-// switch. The request guard is stricter than the shared one: a same-origin Origin is required, the body must be JSON and hold
-// exactly `tmdbId` and `watched`; a title, year or Letterboxd id is never read.
-// No switch of its own: the former FINDS_WATCHED_MARK is retired (ADR 0042) and a stale binding is inert. The mark writes only
-// through the fact records, so it still needs LETTERBOXD_FACTS=on.
+// It writes the owner's `watched` fact through the fact records and nothing else, so it needs LETTERBOXD_FACTS=on. It has no
+// switch of its own: the former FINDS_WATCHED_MARK is retired (ADR 0042) and a stale binding is inert. The request guard is
+// stricter than the shared one: a same-origin Origin is required, the body must be JSON and hold exactly `tmdbId` and `watched`;
+// a title, year or Letterboxd id is never read.
 const findsWatchedMarkEnabled=env=>env?.LETTERBOXD_FACTS==='on';
 const FINDS_WATCHED_TMDB=/^[1-9]\d{0,11}$/;
 async function catalogWatchedRoute(request,env,url){
