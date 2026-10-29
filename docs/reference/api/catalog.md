@@ -1,6 +1,6 @@
 # Catalog of available films outside the watchlist
 
-`GET /api/catalog/available` is a read-only query over the published EPG generation. It returns the verified catalog films that are **not** on the watchlist and that the owner has neither watched nor rated (and, with the [display-only title exclusion](#display-only-title-exclusion) switched on, that do not match a private list of watched films without a proven identity), are available now, in the 72-hour catch-up or within the next 24 hours, and carry a prediction that is current for the current taste profile. It is the shared source for discovery surfaces such as a "finds" section or similar-film suggestions; those consumers rank and present, this route only decides eligibility and returns a minimal display record.
+`GET /api/catalog/available` is a read-only query over the published EPG generation. It returns the verified catalog films that are **not** on the watchlist and that the owner has neither watched nor rated (and, through the [display-only title exclusion](#display-only-title-exclusion), that do not match a private list of watched films without a proven identity), are available now, in the 72-hour catch-up or within the next 24 hours, and carry a prediction that is current for the current taste profile. It is the shared source for discovery surfaces such as a "finds" section or similar-film suggestions; those consumers rank and present, this route only decides eligibility and returns a minimal display record.
 
 The route does not change `GET /api/programme` or `GET /api/watchlist`, which keep serving the watchlist catalogue. It performs no R2 write, no model call, no TMDB call and no sync; the [GET side-effect test](../../../tests/get-side-effects.mjs) covers it like every other read.
 
@@ -29,7 +29,7 @@ A catalog record is returned only when every rule holds:
 4. **Current prediction.** The stored prediction matches the current profile version and hash, the stored fingerprint hash, fingerprint schema version 1 and prediction prompt version 1; with `PREDICTION_PROFILE_COMPATIBILITY=selective`, a prediction the shared evaluator keeps across profile versions also counts ([prediction compatibility](../domain/prediction-compatibility.md#one-rule-for-every-consumer)). Without a profile nothing is current and the list is empty.
 5. **Real shows of the pinned generation.** The record's `shows` were written by the pinned generation (`showsProgrammeRunId` equals the response's `programmeRunId`). Shows carried over from an earlier generation are not availability in the new one. `epgLastAiring` alone is not a show.
 6. **Inside the window.** At least one show starts strictly after `now − 72h` and strictly before `now + 24h`. A start exactly 72 hours ago has expired; a start exactly 24 hours ahead is outside the horizon. Only shows inside the window are returned.
-7. **Not hidden by the display-only title exclusion**, when it is switched on and its list is valid. See [Display-only title exclusion](#display-only-title-exclusion).
+7. **Not hidden by the display-only title exclusion**, when its list is valid. See [Display-only title exclusion](#display-only-title-exclusion).
 
 ### Watched and rated films
 

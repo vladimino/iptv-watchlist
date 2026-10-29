@@ -45,7 +45,7 @@ A deploy of a Worker that reads both tags changes nothing on its own: the list i
 - **Back to the legacy guard:** upload the kept legacy list over the object. The next request reads it with the legacy guard.
 - **Code rollback:** reverting the retirement brings the `FINDS_TITLE_EXCLUSION` switch back, and the leftover binding `on` keeps the rule running; reverting further removes the rule. A Worker that knows only the legacy tag treats a `strict_original_exact_year_v2` list as `unavailable` and hides nothing until a legacy list is placed again. No other data was written, so nothing needs restoring.
 
-Stop and switch off on any of these:
+Stop and disable (remove the list object, above) on any of these:
 - a film the owner has not seen is hidden;
 - an `excluded` count far from the preflight;
 - `unavailable` after a placement;
