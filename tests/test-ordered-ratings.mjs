@@ -1,5 +1,5 @@
 // AIR-273, temporary (cleanup AIR-274): TEST_ORDERED_RATINGS=on turns the sync entry into a diagnostic. A start (HTTP
-// or MCP) makes exactly one GET of the owner's rated-date page 1 and returns a safe summary; steps answer 409. Nothing
+// or MCP) makes exactly one GET of the owner's diary page 1 and returns a safe summary; steps answer 409. Nothing
 // reads or writes storage and no run is created. Any other value keeps the normal sync start.
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -9,9 +9,9 @@ import {webcrypto} from 'node:crypto';
 const TEAM='https://probe-team.cloudflareaccess.com',AUD='c3'.repeat(32),SITE='https://iptv.example',USER='owner-name';
 const signing=await webcrypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
 const publicJwk={...await webcrypto.subtle.exportKey('jwk',signing.publicKey),kid:'kid-1',alg:'RS256',use:'sig'};
-const RATED=`https://letterboxd.com/${USER}/films/by/rated-date/`;
-const item=(id,stars)=>`<li class="griditem"><div data-postered-identifier='{&quot;lid&quot;:&quot;${id}&quot;}'></div>${stars?`<span class="rating rated-${stars}"></span>`:''}</li>`;
-const PAGE=`<span title="2,163&nbsp;films"></span><li class=" smenu-subselected"><a class="item" href="/${USER}/films/by/rated-date/">Newest First</a></li>`+item('ESyU',7)+item('abc',null)+item('xyz',10)+`<a class="next" href="/${USER}/films/by/rated-date/page/2/">Older</a>`;
+const RATED=`https://letterboxd.com/${USER}/films/by/diary/`;
+const item=(id,stars)=>`<tr class="diary-entry-row"><td data-postered-identifier="{&quot;lid&quot;:&quot;${id}&quot;}"></td>${stars?`<span class="rating rated-${stars}"></span>`:''}</tr>`;
+const PAGE=`<html><title>Films diary</title></html>`+item('ESyU',7)+item('abc',null)+item('xyz',10)+`<a class="next" href="/${USER}/diary/page/2/">Older</a>`;films"></span><li class=" smenu-subselected"><a class="item" href="/${USER}/films/by/diary/">Newest First</a></li>`+item('ESyU',7)+item('abc',null)+item('xyz',10)+`<a class="next" href="/${USER}/films/by/diary/page/2/">Older</a>`;
 let reply=()=>new Response(PAGE,{status:200,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','server':'cloudflare'}});
 const calls=[],logs=[];
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,atob,encodeURIComponent,decodeURIComponent,crypto:webcrypto,setTimeout,ASSETS:{},
@@ -55,7 +55,7 @@ assert.equal(objects.get('sync.json'),before);
 const report=start.data;
 assert.equal(report.mode,'test_ordered_ratings');
 assert.equal(report.runId,undefined,'no run is created');
-assert.deepEqual([report.status,report.challenge,report.validPage,report.sortIsRatedDate,report.next,report.items,report.rated,report.unrated,report.missingId,report.total,report.requests],[200,false,true,true,true,3,2,1,0,'2,163',1]);
+assert.deepEqual([report.status,report.challenge,report.validPage,report.next,report.items,report.rated,report.unrated,report.missingId,report.requests],[200,false,true,true,3,2,1,0,1]);
 assert.deepEqual(report.order.map(item=>item.rating),[3.5,null,5]);
 assert.match(report.order[0].idHash,/^[0-9a-f]{8}$/);
 assert.equal(report.headers.cacheControl,'no-store');
@@ -92,11 +92,11 @@ calls.length=0;reply=()=>{throw new Error('connection reset');};
 start=await post(env('on'),'/api/sync/start');
 assert.deepEqual([calls.length,start.data.error],[1,'connection reset']);
 
-// 5. Off, absent or any other value: the normal sync start, which never asks for the rated-date page.
+// 5. Off, absent or any other value: the normal sync start, which never asks for the diary page.
 for(const flag of [undefined,'off','On',' on','true']){
  calls.length=0;ops.length=0;
  await post(env(flag),'/api/sync/start').catch(()=>{});
  assert.equal(calls.some(call=>call.href===RATED),false,String(flag));
  assert.ok(calls.some(call=>call.href===`https://letterboxd.com/${USER}/watchlist/`),'the normal start reads the watchlist: '+flag);
 }
-console.log('TEST_ORDERED_RATINGS (AIR-273, temporary): start makes one rated-date GET with the production headers and returns a safe summary, steps answer 409, no storage, no run, 403/error not retried, off keeps the normal start passed');
+console.log('TEST_ORDERED_RATINGS (AIR-273, temporary): start makes one diary GET with the production headers and returns a safe summary, steps answer 409, no storage, no run, 403/error not retried, off keeps the normal start passed');
