@@ -1,9 +1,9 @@
 # ADR 0048: Catalog poster hydration is a permanent owner-only maintenance route, and CATALOG_POSTER_HYDRATION is retired
 
-**Status:** Proposed (owner decision recorded; ADR acceptance pending; no production configuration authorization)  
+**Status:** Accepted 2026-10-29 (architecture only; no production configuration authorization)  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner decision recorded on AIR-228 on 2026-10-29: retire only `CATALOG_POSTER_HYDRATION` and keep `POST /api/enrichment/catalog/posters` as a permanent owner-only maintenance route; acceptance of this record is pending; separate approval is required to delete the production binding  
+**Approval source:** explicit owner acceptance of ADR-0048 and visual approval of the rendered Mermaid diagram in the AIR-228 PR #238 conversation on 2026-10-29; separate approval is required to remove the production binding  
 **Related work:** [AIR-228](https://trello.com/c/jhRjobcA); [AIR-15](https://trello.com/c/Yz6SGd3R) (route and one-time run); [AIR-283](https://trello.com/c/s35GwqRz) (planned admin client); [ADR-0020](0020-owner-triggered-catalog-poster-hydration.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0020](0020-owner-triggered-catalog-poster-hydration.md) in part: the `CATALOG_POSTER_HYDRATION` gate and the one-time framing of the operation. The route, the read-only dry run, the verified-identity rule, the resolver lease, the generation and compare-and-swap checks, the batch limit, the outcomes and receipts, and the owner approval of every production execution call stay  
 **Superseded by:** None
