@@ -39,7 +39,7 @@ sequenceDiagram
     Note over Retired,R2: No Letterboxd request, no R2 read or write
 ```
 
-The optional block is the **removal lookup** of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) (Proposed, off by default): after the commit's events are written and before the films list, the films the watchlist diff removed are looked up on their own member pages through a bounded queue in `enrichment/removal-rating-lookups.json`; it never fails the commit ([contract](../reference/integrations/letterboxd-ratings.md#removed-films)).
+The optional block is the **removal lookup** of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) (Accepted, off by default): after the commit's events are written and before the films list, the films the watchlist diff removed are looked up on their own member pages through a bounded queue in `enrichment/removal-rating-lookups.json`; it never fails the commit ([contract](../reference/integrations/letterboxd-ratings.md#removed-films)).
 
 The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
 
