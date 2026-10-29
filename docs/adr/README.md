@@ -50,7 +50,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| Record | Status and boundary | Related work |
+| --- | --- | --- |
+| [0042 — The owner's «Смотрел» mark has no switch of its own, and FINDS_WATCHED_MARK is retired](0042-retire-finds-watched-mark-switch.md) | Proposed 2026-10-29 (owner disposition `retire now`; acceptance pending; no binding change) | [AIR-230](https://trello.com/c/AW2GqqQL) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

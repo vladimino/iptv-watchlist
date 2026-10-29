@@ -95,7 +95,7 @@ Nothing is stored: a new generation is evaluated afresh, so a film can be hidden
   "profile": {"version": 1},
   "total": 1,
   "posterCoverage": {"catalog": 1, "metadataCache": 0, "missing": 0},
-  "watchedMarkEnabled": false,
+  "watchedMarkEnabled": true,
   "displayExclusion": {"state": "applied", "excluded": 2},
   "films": [{
     "id": "tmdb_7", "tmdbId": "7", "canonicalIdentity": "tmdb:7",
@@ -113,7 +113,7 @@ Nothing is stored: a new generation is evaluated afresh, so a film can be hidden
 | Field | Meaning |
 | --- | --- |
 | `posterCoverage` | Where the `poster` of each returned film came from, counted over `films` only: `catalog` (the record's own TMDB poster), `metadataCache` (the `metadata.json` fallback), `missing` (`poster` is `null`). The three add up to `total`. It lets a plain read show how many available films still have no stored asset; it is not a per-film field, and `films[]` is unchanged |
-| `watchedMarkEnabled` | `true` only while both `FINDS_WATCHED_MARK` and `LETTERBOXD_FACTS` are exactly `on`, so the client knows the [owner watched mark](#owner-watched-mark) can be offered |
+| `watchedMarkEnabled` | `true` exactly while `LETTERBOXD_FACTS` is `on`, so the client knows the [owner watched mark](#owner-watched-mark) can be offered. The mark has no switch of its own ([ADR 0042](../../adr/0042-retire-finds-watched-mark-switch.md)) |
 | `displayExclusion` | The [display-only title exclusion](#display-only-title-exclusion): `state` is `applied` (valid list used) or `unavailable` (list missing, unreadable or invalid; nothing hidden). The former `off` state is gone with the switch ([ADR 0041](../../adr/0041-retire-finds-title-exclusion-switch.md)); `excluded` counts the canonical identities hidden from `films` by it. It never carries a title, id, code or any hash of the list or its source |
 | `programmeRunId`, `pinned` | The generation the response is derived from. `pinned: false` means no published pointer existed and the programme's own run id was used |
 | `generatedAt`, `window` | The clock the statuses were derived with and the availability envelope `(now − 72h, now + 24h)` |
@@ -171,7 +171,6 @@ Without any of these filters the section is exactly the plain one. With a select
 | Check | Refusal |
 | --- | --- |
 | Method is `POST` | `405` |
-| `FINDS_WATCHED_MARK` is exactly `on` | `409`, `code: mark_disabled` |
 | `LETTERBOXD_FACTS` is exactly `on` (the fact records are the only store) | `409`, `code: facts_disabled` |
 | `Origin` header present and equal to the Worker's origin (stricter than the shared check, which lets a request without `Origin` through) | `403` |
 | `Content-Type` is `application/json` | `415` |
