@@ -1,9 +1,9 @@
 # ADR 0046: Every accepted fingerprint is written as an immutable body and generation record, and FINGERPRINT_VERSION_OBJECTS is retired
 
-**Status:** Proposed (owner flag disposition given; ADR acceptance pending; no production configuration authorization)  
+**Status:** Accepted 2026-10-29 (architecture only; no production configuration authorization)  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner flag disposition `retire now`, keeping the behaviour of the current value, recorded on AIR-266 on 2026-10-29 after a read-only preflight; acceptance of this record is pending; separate approval is required to delete the production binding  
+**Approval source:** explicit owner decision `ADR-0046 — Accepted` in the AIR-266 ChatGPT session on 2026-10-29, following the earlier `retire now` disposition; removing the production binding requires separate authorization  
 **Related work:** [AIR-266](https://trello.com/c/QsP4wGQ8); prerequisites [AIR-208](https://trello.com/c/54RDVHNj) (writer) and [AIR-210](https://trello.com/c/DM1Rrnrz) (activation); [ADR-0035](0035-selective-fingerprint-transition-compatibility.md) section 2; [ADR-0039](0039-allowlisted-feature-flag-readout.md); [AIR-265](https://trello.com/c/x7esHy4V) (the separate `PREDICTION_FINGERPRINT_COMPATIBILITY` card)  
 **Supersedes:** None. ADR-0035 decides the storage (section 2) but no switch for it; the switch was the rollout gate of the AIR-208 implementation, and this record retires that gate only. Every ADR-0035 decision stays, including the separate mode switch of section 7  
 **Superseded by:** None
