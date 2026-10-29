@@ -5,8 +5,9 @@ import {createHash,webcrypto} from 'node:crypto';
 
 // The fingerprint migration queue, immutable fingerprint storage and run binding (ADR-0035 sections 2, 6, 7). Two Worker
 // "releases" run over one bucket: release 1 is the live code (schema 1, empty registry); release 2 is the same code with
-// FINGERPRINT_SCHEMA_VERSION 2, a declared split of chase_escape and the matching MECHANICS. Strict stays today's behaviour
-// in both; PREDICTION_FINGERPRINT_COMPATIBILITY=selective lets the shared verdict decide.
+// FINGERPRINT_SCHEMA_VERSION 2, a declared split of chase_escape and the matching MECHANICS. The shared transition verdict
+// always decides (ADR 0047); the strict outcome is only counted beside it, and a stale PREDICTION_FINGERPRINT_COMPATIBILITY
+// binding of any value is inert.
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
@@ -31,7 +32,7 @@ function release(patch){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
  vm.runInContext(domain,ctx);
  for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
- vm.runInContext('globalThis.T={fingerprintCompatibilityMode,writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
+ vm.runInContext('globalThis.T={writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
  return {ctx,T:ctx.T,api};
 }
@@ -40,10 +41,11 @@ const R2=release(source=>source.replace('const FINGERPRINT_SCHEMA_VERSION=1;','c
 const read=key=>records.has(key)?JSON.parse(records.get(key)):null;
 const write=(key,value)=>{records.set(key,JSON.stringify(value));etags.set(key,'etag-'+(++revision));};
 const keysUnder=prefix=>[...records.keys()].filter(key=>key.startsWith(prefix)).sort();
-const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'}; // a stale binding of the retired writer switch (ADR 0046): inert
+const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},STRICT={PREDICTION_FINGERPRINT_COMPATIBILITY:'strict'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'}; // a stale binding of the retired writer switch (ADR 0046): inert
 
 // Flags: only the exact strings.
-for(const [value,mode] of [[undefined,'strict'],['strict','strict'],['selective','selective'],['Selective','strict'],[' selective','strict'],[true,'strict']])assert.equal(R1.T.fingerprintCompatibilityMode({PREDICTION_FINGERPRINT_COMPATIBILITY:value}),mode,String(value));
+// The fingerprint rule has no switch any more (ADR 0047): no code path reads PREDICTION_FINGERPRINT_COMPATIBILITY.
+for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','src/prediction-diagnostics.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_FINGERPRINT_COMPATIBILITY|fingerprintCompatibilityMode/,file+' reads no fingerprint rule switch');
 // The immutable fingerprint writer has no switch any more (ADR 0046): no code path reads FINGERPRINT_VERSION_OBJECTS.
 for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','src/prediction-diagnostics.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.FINGERPRINT_VERSION_OBJECTS|fingerprintVersionsEnabled/,file+' reads no fingerprint writer switch');
 
@@ -91,14 +93,14 @@ for(const id of ['A','B','C','E']){
  assert.equal(read('enrichment/films/'+id+'/predictions.json').current.fingerprintSchemaVersion,1);
 }
 
-// Release 1, strict: the queue decides as before; the transition counters are all exact; the work map names the missing film.
+// Release 1: with an empty registry every schema-1 fingerprint is exact; the work map names the missing film.
 let queue=await reconcile(R1);
 assert.deepEqual(queue.pending,['D']);
-assert.deepEqual(plain(queue.fingerprintCompatibility),{mode:'strict',evaluatorVersion:1,registryDigest:sha256('[]'),target:{fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1},films:5,unindexed:0,strict:{current:4,stale:0},selective:{current:4,compatible:0,stale:0},reasons:{exact:4},fingerprintReasons:{exact:4},migration:{none:4,compatible:0,partial:0,full:0,global:0},classes:{unchanged:4,missing:1,prediction_only:0,fingerprint_and_prediction:0,migration:0,unknown:0},wouldKeep:0,wouldRequeue:0,strictDisagreements:0});
+assert.deepEqual(plain(queue.fingerprintCompatibility),{mode:'selective',evaluatorVersion:1,registryDigest:sha256('[]'),target:{fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1},films:5,unindexed:0,strict:{current:4,stale:0},selective:{current:4,compatible:0,stale:0},reasons:{exact:4},fingerprintReasons:{exact:4},migration:{none:4,compatible:0,partial:0,full:0,global:0},classes:{unchanged:4,missing:1,prediction_only:0,fingerprint_and_prediction:0,migration:0,unknown:0},wouldKeep:0,wouldRequeue:0,strictDisagreements:0});
 assert.deepEqual(plain(queue.work),{D:{class:'missing',requiredWork:'fingerprint_and_prediction',migration:null,reason:null}});
 assert.deepEqual([queue.fingerprintSchemaVersion,queue.fingerprintPromptVersion,queue.predictionPromptVersion],[1,1,1],'the queue is bound to the versions it was built with');
 assert.deepEqual(stable(await reconcile(R1)),stable(queue),'a repeated refresh is identical');
-assert.deepEqual(plain((await reconcile(R1,SELECTIVE)).pending),['D'],'selective with an empty registry and schema-1 fingerprints decides the same');
+for(const binding of [SELECTIVE,STRICT,{PREDICTION_FINGERPRINT_COMPATIBILITY:' Strict'}])assert.deepEqual(stable(await reconcile(R1,binding)),stable(queue),'a stale binding is inert: '+JSON.stringify(binding));
 
 // Same body, two prompt versions: a second generation record, one body; the pointer names the record it replaced.
 {
@@ -126,12 +128,12 @@ assert.deepEqual(plain((await reconcile(R1,SELECTIVE)).pending),['D'],'selective
  }
  assert.equal(new Set(shapes).size,1,'the binding changes nothing');
 }
-queue=await reconcile(R1);
-assert.deepEqual(queue.pending,['D'],'strict ignores the prompt version, as today');
-assert.equal(queue.fingerprintCompatibility.strictDisagreements,1,'the evaluator counts the newer prompt as ahead while equality keeps it');
+// Release 1: the prompt-2 record is ahead of the code, even with a stale strict binding; the runner restores the prompt-1
+// record, no model call. Exact equality would have kept C; the rule in force does not.
+queue=await reconcile(R1,STRICT);
+assert.equal(queue.fingerprintCompatibility.mode,'selective');
 assert.deepEqual(plain([queue.fingerprintCompatibility.fingerprintReasons,queue.fingerprintCompatibility.reasons]),[{exact:3,fingerprint_ahead:1},{exact:3,fingerprint_not_current:1}]);
-// Selective, release 1: the prompt-2 record is ahead of the code; the runner restores the prompt-1 record, no model call.
-queue=await reconcile(R1,SELECTIVE);
+queue=await reconcile(R1);
 assert.deepEqual(queue.pending,['D','C'],'missing work before migration work');
 assert.deepEqual(plain(queue.work.C),{class:'fingerprint_and_prediction',requiredWork:'fingerprint_and_prediction',migration:'full',reason:'fingerprint_not_current'});
 {
@@ -146,27 +148,23 @@ assert.deepEqual(plain(queue.work.C),{class:'fingerprint_and_prediction',require
  await finish(R1,runId);
 }
 
-// Release 2, strict: every schema-1 fingerprint is stale (today's behaviour on a schema change); the shadow counters show
-// what selective would keep; migration work is bounded per batch and follows missing work.
-queue=await reconcile(R2);
-assert.deepEqual(queue.pending,['D','A','B','C','E']);
+// Release 2 with a stale strict binding: the transition rule decides; the shadow counters show that exact equality would
+// have made every schema-1 fingerprint stale; migration work is bounded per batch and follows missing work.
+queue=await reconcile(R2,STRICT);
+assert.deepEqual(queue.pending,['D','B','E']);
 {
  const f=plain(queue.fingerprintCompatibility);
  assert.equal(f.registryDigest,sha256(JSON.stringify(vm.runInContext('profileImpactCanonical',scratch)([split]))),'the registry digest is over the canonical declaration list');
- assert.deepEqual([f.mode,f.target.fingerprintSchemaVersion,f.strict,f.selective,f.reasons,f.fingerprintReasons,f.migration,f.classes,f.wouldKeep,f.wouldRequeue],['strict',2,{current:0,stale:4},{current:2,compatible:0,stale:2},{exact:2,fingerprint_not_current:2},{transition_unaffected:2,transition_impacted:2},{none:0,compatible:2,partial:2,full:0,global:0},{unchanged:0,missing:1,prediction_only:0,fingerprint_and_prediction:4,migration:4,unknown:0},2,0]);
- assert.deepEqual(plain(queue.work.A),{class:'fingerprint_and_prediction',requiredWork:'fingerprint_and_prediction',migration:'full',reason:'fingerprint_not_current'});
- assert.deepEqual(plain(R2.T.queueBatchIds(queue,queue.pending,3)),['D','A','B'],'3 slots: the missing film plus at most 2 migration films');
- assert.deepEqual(plain(R2.T.queueBatchIds(queue,queue.pending,8)),['D','A','B','C','E']);
- assert.deepEqual(plain(R2.T.queueBatchIds(queue,['A','B','C','E'],2)),['A'],'slots migration cannot fill stay empty');
- const runId=await startRun(R2,{},3);
- const r=await next(R2,runId);assert.equal(r.status,200);
- assert.deepEqual(plain(r.data.items.map(item=>[item.filmId,item.requiredWork])),[['D','fingerprint_and_prediction'],['A','fingerprint_and_prediction'],['B','fingerprint_and_prediction']]);
- await finish(R2,runId);
+ assert.deepEqual([f.mode,f.target.fingerprintSchemaVersion,f.strict,f.selective,f.reasons,f.fingerprintReasons,f.migration,f.classes,f.wouldKeep,f.wouldRequeue],['selective',2,{current:0,stale:4},{current:2,compatible:0,stale:2},{exact:2,fingerprint_not_current:2},{transition_unaffected:2,transition_impacted:2},{none:0,compatible:2,partial:2,full:0,global:0},{unchanged:2,missing:1,prediction_only:0,fingerprint_and_prediction:2,migration:2,unknown:0},2,0]);
+ assert.equal(queue.work.A,undefined,'the unaffected film is kept');
+ assert.deepEqual(plain(R2.T.queueBatchIds(queue,queue.pending,3)),['D','B','E'],'3 slots: the missing film plus at most 2 migration films');
+ assert.deepEqual(plain(R2.T.queueBatchIds(queue,queue.pending,2)),['D','B'],'2 slots: at most 1 migration film');
+ assert.deepEqual(plain(R2.T.queueBatchIds(queue,['B','E'],2)),['B'],'slots migration cannot fill stay empty');
 }
 
-// Release 2, selective: only the reached films migrate; a partial class names its fields; a regenerated fingerprint keeps
-// its predecessor's identity and provenance; the kept film's prediction is untouched.
-queue=await reconcile(R2,SELECTIVE);
+// Release 2: only the reached films migrate; a partial class names its fields; a regenerated fingerprint keeps its
+// predecessor's identity and provenance; the kept film's prediction is untouched.
+queue=await reconcile(R2);
 assert.deepEqual(queue.pending,['D','B','E']);
 assert.deepEqual(plain(queue.work.B),{class:'fingerprint_and_prediction',requiredWork:'fingerprint_and_prediction',migration:'partial',reason:'fingerprint_not_current',fields:['plotMechanics']});
 assert.deepEqual(plain(queue.fingerprintCompatibility.classes),{unchanged:2,missing:1,prediction_only:0,fingerprint_and_prediction:2,migration:2,unknown:0});
@@ -205,21 +203,11 @@ assert.deepEqual(stable(await reconcile(R2,SELECTIVE)),stable(queue),'a repeated
  assert.equal((await finish(R2,runId)).status,200,'a reasoned stop is still accepted');
 }
 
-// Rollback to release 1: E (schema 1) is exact again. Strict: the schema-2 fingerprints are stale and regenerate in full
-// (the rollback floor). Selective: B is restored from its stored schema-1 record (prediction_only from there); D, whose only
-// stored generation is schema 2, has nothing to restore and regenerates.
+// Rollback to release 1: E (schema 1) is exact again. B is restored from its stored schema-1 record (prediction_only from
+// there); D, whose only stored generation is schema 2, has nothing to restore and regenerates. A stale strict binding does
+// not bring back the full regeneration of the rollback floor.
 programme(films);
-queue=await reconcile(R1);
-assert.deepEqual(queue.pending,['B','D']);
-{
- const runId=await startRun(R1);
- assert.deepEqual(plain(read('enrichment/runs/'+runId+'.json').selectedIds),['B'],'both are migration work: a batch of 2 takes 1');
- const r=await next(R1,runId);
- assert.deepEqual(plain(r.data.items.map(item=>[item.filmId,item.requiredWork])),[['B','fingerprint_and_prediction']],'a full regeneration, the rollback floor');
- await finish(R1,runId);
- assert.deepEqual((await reconcile(R1)).pending,['B','D'],'the deferred film is still outstanding');
-}
-queue=await reconcile(R1,SELECTIVE);
+queue=await reconcile(R1,STRICT);
 assert.deepEqual(queue.pending,['B','D']);
 assert.deepEqual([queue.work.B.reason,queue.work.B.migration,queue.work.D.reason,queue.work.D.migration,queue.fingerprintCompatibility.fingerprintReasons.fingerprint_ahead],['fingerprint_not_current','full','fingerprint_not_current','full',2]);
 {
@@ -295,4 +283,4 @@ assert.deepEqual([queue.work.B.reason,queue.work.B.migration,queue.work.D.reason
 // Zero and one film.
 programme([]);queue=await reconcile(R1,SELECTIVE);assert.deepEqual([queue.pending,queue.fingerprintCompatibility.films,plain(queue.work)],[[],0,{}]);
 programme([films[0]]);queue=await reconcile(R1,SELECTIVE);assert.deepEqual([queue.pending,queue.fingerprintCompatibility.classes.unchanged],[[],1]);
-console.log('Fingerprint migration queue: immutable body/record/pointer storage with no writer switch (stale bindings inert), same body under two prompt versions, strict unchanged with shadow counters, selective work classes and partial fields, bounded migration batches after missing work, hot preemption, run binding to every axis, pointer restore on rollback and the strict rollback floor passed');
+console.log('Fingerprint migration queue: immutable body/record/pointer storage with no writer switch (stale bindings inert), same body under two prompt versions, no fingerprint rule switch (stale bindings inert) with strict shadow counters, work classes and partial fields, bounded migration batches after missing work, hot preemption, run binding to every axis, pointer restore on rollback and the strict rollback floor passed');

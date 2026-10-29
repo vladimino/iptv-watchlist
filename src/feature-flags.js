@@ -13,7 +13,6 @@ const FEATURE_FLAGS=[
  onOff('CATALOG_POSTER_HYDRATION',env=>catalogPosterHydrationEnabled(env)?'on':'off'),
  onOff('LETTERBOXD_FACTS',env=>env?.LETTERBOXD_FACTS==='on'?'on':'off'),
  onOff('LETTERBOXD_BASELINE_IMPORT',env=>env?.LETTERBOXD_BASELINE_IMPORT==='on'?'on':'off',{requires:{LETTERBOXD_FACTS:'on'}}),
- {name:'PREDICTION_FINGERPRINT_COMPATIBILITY',modes:['strict','selective'],default:'strict',tokens:['strict','selective'],effective:env=>fingerprintCompatibilityMode(env)},
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
  onOff('REMOVAL_RATING_LOOKUP',env=>removalLookupEnabled(env)?'on':'off'),
  // Retired: the code ignores the binding whatever it holds. Reported so a stale binding is visible.
@@ -24,6 +23,7 @@ const FEATURE_FLAGS=[
  {name:'PREDICTION_PROFILE_COMPATIBILITY',modes:[],default:null,tokens:['strict','selective'],retired:true,effective:()=>null},
  {name:'PREDICTION_VERSION_OBJECTS',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'FINGERPRINT_VERSION_OBJECTS',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
+ {name:'PREDICTION_FINGERPRINT_COMPATIBILITY',modes:[],default:null,tokens:['strict','selective'],retired:true,effective:()=>null},
 ];
 const featureFlagNames=()=>FEATURE_FLAGS.map(flag=>flag.name);
 function featureFlagRaw(flag,value){

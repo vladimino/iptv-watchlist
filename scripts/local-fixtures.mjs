@@ -10,7 +10,9 @@ function viewEntry(film){
  const moodLabels=film.moods||[];
  const fingerprint={plotMechanics:film.mechanics||[],moodLabels,fingerprintHash,execution:film.execution||{}};
  const prediction=film.prediction?{predictedRating:film.prediction.predictedRating,probability4Plus:film.prediction.probability4Plus,confidence:film.prediction.confidence,matchSignals:film.prediction.matchSignals,mainRisk:film.prediction.mainRisk,moodLabels,fingerprintHash,tasteProfileVersion:localProfile.version,tasteProfileHash:localProfile.profileHash,fingerprintSchemaVersion:1,predictionPromptVersion:1}:null;
- return [film.id,{actualRating:film.actualRating??null,fingerprintHash,fingerprint,prediction}];
+ // The impact facet binds the entry to its fingerprint, as a submit writes it; the fingerprint rule cannot judge an entry without one.
+ const impactFeatures={fingerprintHash,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,plotMechanics:fingerprint.plotMechanics,execution:fingerprint.execution};
+ return [film.id,{actualRating:film.actualRating??null,fingerprintHash,fingerprint,impactFeatures,prediction}];
 }
 export function buildLocalFixtures(catalog,now=Date.now()){
  const at=new Date(now).toISOString();

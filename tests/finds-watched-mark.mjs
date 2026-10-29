@@ -27,7 +27,7 @@ const VIEW=constant('ENRICHMENT_KEY')+'view-index.json',ORIGIN='https://iptv.vla
 // No FINDS_WATCHED_MARK: the switch is retired (ADR 0042); only LETTERBOXD_FACTS gates the mark.
 const ON={BUCKET:bucket,LETTERBOXD_FACTS:'on'};
 const hour=3600000,now=Date.now();
-const current={prediction:{predictedRating:4.5,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}};
+const current={prediction:{predictedRating:4.5,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',impactFeatures:{fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1},fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}};
 const film=(n,title,extra={})=>({id:'tmdb_'+n,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,title,original:title,year:2000,runtime:100,genres:[],poster:null,url:null,directors:[],actors:[],shows:[{channelId:'c1',channel:'One',start:now-hour,end:now+hour}],...extra});
 const CATALOG={tmdb_10:film(10,'Ten'),tmdb_11:film(11,'Eleven'),tmdb_12:film(12,'Twelve'),tmdb_13:film(13,'Thirteen'),obs:{id:'heat|1995',title:'Heat',year:1995},tmdb_14:film(14,'Conflicted',{canonicalIdentity:'conflict:14'})};
 function seed({generation=G1,catalog=CATALOG}={}){

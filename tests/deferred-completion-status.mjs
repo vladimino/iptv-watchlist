@@ -15,7 +15,7 @@ const now=Date.now(),execution=Object.fromEntries(Object.entries(call('EXECUTION
 const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']},prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
 const PROFILE={version:7,profileHash:'profile-7',updatedAt:'2026-10-12T18:00:00Z',profile:{ratingScale:'Half stars'}};
 const film=(i,start)=>({id:'tmdb_'+i,tmdbId:String(i),title:'Film '+i,original:'Film '+i,year:2020,genres:[],actors:[],directors:[],shows:[{start}]});
-const current=id=>({fingerprintHash:'fp-'+id,prediction:{tasteProfileVersion:PROFILE.version,tasteProfileHash:PROFILE.profileHash,fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,predictionPromptVersion:1}});
+const current=id=>({fingerprintHash:'fp-'+id,impactFeatures:{fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,fingerprintPromptVersion:1},prediction:{tasteProfileVersion:PROFILE.version,tasteProfileHash:PROFILE.profileHash,fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,predictionPromptVersion:1}});
 const FORBIDDEN=/обработана полностью|очередь обработана|пакет завершён/i;
 // The production shape: 2287 confirmed films, 1878 in the viewing window; every film but one hot film already has a current prediction.
 const HOT=1878,COLD=2287-HOT,catalog={},index={};

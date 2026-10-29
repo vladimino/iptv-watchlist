@@ -31,7 +31,7 @@ const worker=context.worker,constant=name=>vm.runInContext(name,context);
 for(const value of ['Ёлки–Палки!','  The  Raid: Redemption ','Amélie','ＦＵＬＬ　ＷＩＤＴＨ','8½','Dr. Strangelove…',null,''])assert.equal(constant('findsTitleKey')(value),normTitle(value),String(value));
 
 const hour=3600000,now=Date.now(),G1='11111111-1111-4111-8111-111111111111',G2='22222222-2222-4222-8222-222222222222';
-const current={prediction:{predictedRating:4.5,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}};
+const current={prediction:{predictedRating:4.5,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',impactFeatures:{fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1},fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}};
 const film=(n,original,year,extra={})=>({id:'tmdb_'+n,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,title:original,original,year,runtime:100,genres:[],poster:null,url:null,directors:[],actors:[],shows:[{channelId:'c1',channel:'One',start:now-hour,end:now+hour}],...extra});
 const CATALOG={
  tmdb_1:film(1,'Exact Film',2000),                                          // unique original title, same year: hidden

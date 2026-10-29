@@ -24,7 +24,7 @@ const get=async env=>{const response=await worker.fetch(new Request('https://ipt
 const ids=body=>body.films.map(film=>film.id).sort();
 
 const hour=3600000,now=Date.now(),G1='22222222-2222-4222-8222-222222222222',profile={version:1,profileHash:'p1'};
-const current=(rating=4.5)=>({prediction:{predictedRating:rating,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}});
+const current=(rating=4.5)=>({prediction:{predictedRating:rating,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',impactFeatures:{fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1},fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}});
 const film=(id,tmdbId,title,year)=>({id,tmdbId:String(tmdbId),canonicalIdentity:'tmdb:'+tmdbId,title,original:title,year,runtime:100,genres:[],poster:null,url:null,directors:[],actors:[],shows:[{channelId:'c1',channel:'One',start:now-hour,end:now+hour}],showsProgrammeRunId:G1});
 const CATALOG={
  tmdb_593:film('tmdb_593',593,'Solaris',1972),   // rated, rating keyed by Letterboxd id "solaris-1972"
