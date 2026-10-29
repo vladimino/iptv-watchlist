@@ -8,7 +8,7 @@
 
 `GET /api/enrichment/ratings/status` still only reads. It returns the stored `enrichment/ratings/status.json` (or an `idle` placeholder when none exists) with `generationId` and `pendingGenerationId` resolved from `enrichment/ratings/published.json` and `enrichment/ratings/pending.json`, and always `enabled: false`. The fields keep their AIR-64 meaning: `state` is `idle`, `healthy`, `degraded` or `blocked`; `lastSuccessAt` is the last complete films list the retired refresh read; `attempt` is its last call. No code path writes these objects any more, so the values are the last ones the refresh wrote.
 
-The integration footer keeps `manualRefreshEnabled: false` on the `letterboxd_ratings` source.
+The integration footer does not use this document for current ratings health; that comes from the EPG commit fields in `sync.json` ([enrichment API](../api/enrichment.md)). The footer only reports the document as the `retiredRefresh` history of the `letterboxd_ratings` source, labelled in the UI as the retired separate refresh with its last attempt time and outcome. `manualRefreshEnabled` on that source is always `false`.
 
 ## Where ratings come from
 
