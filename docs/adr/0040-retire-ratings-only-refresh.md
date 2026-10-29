@@ -1,9 +1,9 @@
 # ADR 0040: The owner-triggered ratings-only refresh is retired; its route answers 410 Gone and no flag can reopen it
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** Owner decision recorded on [AIR-92](https://trello.com/c/yP6I0sjp) on 2026-10-29 to retire the temporary ratings-only FULL/REPAIR web refresh in its current scraping form; acceptance of this record is a separate owner decision  
+**Approval source:** Owner decision recorded on [AIR-92](https://trello.com/c/yP6I0sjp) on 2026-10-29 to retire the temporary ratings-only FULL/REPAIR web refresh in its current scraping form; ADR 0040 explicitly Accepted by owner in conversation on 2026-10-29; Mermaid rendering visually approved in the same decision  
 **Related work:** [AIR-92](https://trello.com/c/yP6I0sjp); [AIR-85](https://trello.com/c/NVS7Ywdq) preflight; [AIR-64](https://trello.com/c/WTnyO8bX); [ADR 0018](0018-letterboxd-last-good-ratings.md); [ratings contract](../reference/integrations/letterboxd-ratings.md)  
 **Supersedes:** The refresh-route part of [ADR 0018](0018-letterboxd-last-good-ratings.md) ("the rating refresh has its own opt-in flag"); the last-good rule of ADR 0018 stays in force  
 **Superseded by:** None
