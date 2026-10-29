@@ -1,4 +1,4 @@
-// Letterboxd Diary viewing history (AIR-51, ADR 0048): one record per confirmed diary row, re-watches included, kept
+// Letterboxd Diary viewing history (AIR-51, ADR 0049): one record per confirmed diary row, re-watches included, kept
 // apart from the current actualRating. Read incrementally from the owner's public diary pages, a bounded number per
 // run, same origin only, no retry and no challenge handling. A row is never a rating fact and absence from the diary
 // never means "not watched". Contract: docs/reference/integrations/letterboxd-diary-history.md.
@@ -47,46 +47,87 @@ const LetterboxdDiary=(()=>{
   }
   return {challenge,rows,next:/<a\b[^>]*\bclass=(["'])[^"']*\bnext\b[^"']*\1/i.test(html)};
  }
- // The entry key. A viewing id when the row carries one; otherwise identity, date and the occurrence of that pair in
- // this read, so two viewings of one film on one day stay two entries and a rescan maps them back to the same keys.
+ // The entry key. A row with a viewing id is its own entry. A row without one cannot be told apart from another viewing
+ // of the same film on the same day, so it belongs to a day entry, `day:<lid:…|slug:…>|<date>`, that counts viewings.
+ // Rows without an identity or a date have no key and are not stored.
  function keyRows(rows){
-  const seen=new Map();
   return rows.map(row=>{
    if(row.viewingId)return {...row,key:'viewing:'+row.viewingId,keyBasis:'viewing_id'};
    const identity=row.lid?'lid:'+row.lid:row.slug?'slug:'+row.slug:null;
    if(!identity||!row.watchedDate)return {...row,key:null,keyBasis:null};
-   const base=identity+'|'+row.watchedDate,n=(seen.get(base)||0)+1;seen.set(base,n);
-   return {...row,key:'derived:'+base+'|'+n,keyBasis:'derived'};
+   return {...row,key:'day:'+identity+'|'+row.watchedDate,keyBasis:'identity_date'};
   });
  }
  const usable=row=>row.key!=null;
- // Merge one page into the history: new keys are added, known keys keep their identity; a changed rating or re-watch
- // marker is recorded as a change, an identity that disagrees with the stored one is a conflict and changes nothing.
- function mergeRows(history,rows,observedAt,page){
-  const counts={added:0,unchanged:0,updated:0,conflicts:0};
-  for(const row of rows.filter(usable)){
-   const stored=history.entries[row.key];
-   if(!stored){history.entries[row.key]={key:row.key,keyBasis:row.keyBasis,source:'letterboxd_diary',viewingId:row.viewingId,identity:row.lid?{type:'letterboxd_lid',value:row.lid}:null,
-    aliases:row.slug?[{type:'letterboxd_slug',value:row.slug}]:[],watchedDate:row.watchedDate,ratingAtEntry:row.ratingAtEntry,rewatch:row.rewatch,firstObservedAt:observedAt,observedAt,page,changes:[]};counts.added++;continue;}
-   if(row.lid&&stored.identity&&stored.identity.value!==row.lid||row.watchedDate&&stored.watchedDate&&stored.watchedDate!==row.watchedDate){counts.conflicts++;continue;}
+ // Day groups of one contiguous read (consecutive pages of one run). The count is certain only when the read holds the
+ // whole day: rows of the same date cannot continue above the first page read (unless it is page 1) or below the last
+ // one (unless it was the last diary page). Otherwise the group may be cut at the edge and its count is a lower bound.
+ function dayGroups(segment){
+  const groups=new Map(),rows=segment.rows,first=rows[0]?.watchedDate,last=rows.at(-1)?.watchedDate;
+  for(const row of rows.filter(row=>row.keyBasis==='identity_date')){
+   const group=groups.get(row.key)||{key:row.key,lid:row.lid,slug:row.slug,watchedDate:row.watchedDate,count:0,ratings:[],rewatch:[]};
+   group.count++;group.ratings.push(row.ratingAtEntry);group.rewatch.push(row.rewatch);if(!group.lid&&row.lid)group.lid=row.lid;groups.set(row.key,group);
+  }
+  for(const group of groups.values()){
+   const top=segment.startPage===1||first!==group.watchedDate,bottom=segment.reachedEnd||last!==group.watchedDate;
+   group.certain=top&&bottom;
+   group.rewatchValue=group.rewatch.some(value=>value===true)?true:group.rewatch.every(value=>value===false)?false:'unknown';
+  }
+  return [...groups.values()];
+ }
+ const newEntry=(fields,observedAt,page)=>({source:'letterboxd_diary',firstObservedAt:observedAt,observedAt,page,changes:[],...fields});
+ function withChanges(stored,changes,observedAt,page){
+  const next={...stored,observedAt,page};for(const change of changes)next[change.field]=change.to;
+  if(changes.length)next.changes=[...stored.changes,...changes].slice(-MAX_CHANGES);
+  return next;
+ }
+ // Merge into the history. Viewing-id rows: one entry each; a known id keeps its identity and date (a disagreeing row is
+ // a conflict and changes nothing); a changed rating or re-watch marker is a recorded change. Day groups: the viewing
+ // count only grows (absence proves nothing), a certain count marks the entry certain, and a certain count below the
+ // stored one is a conflict. Ratings and the re-watch marker of a day entry follow its latest certain read.
+ function mergeRows(history,rows,groups,observedAt,page,tally){
+  for(const row of rows.filter(row=>row.keyBasis==='viewing_id')){
+   tally.seen.add(row.key);const stored=history.entries[row.key];
+   if(!stored){history.entries[row.key]=newEntry({key:row.key,keyBasis:'viewing_id',viewingId:row.viewingId,identity:row.lid?{type:'letterboxd_lid',value:row.lid}:null,aliases:row.slug?[{type:'letterboxd_slug',value:row.slug}]:[],
+    watchedDate:row.watchedDate,viewings:1,viewingsCertain:true,ratingAtEntry:row.ratingAtEntry,ratingsAtEntry:[row.ratingAtEntry],rewatch:row.rewatch},observedAt,page);tally.added.add(row.key);continue;}
+   if(row.lid&&stored.identity&&stored.identity.value!==row.lid||row.watchedDate&&stored.watchedDate&&stored.watchedDate!==row.watchedDate){tally.conflicts.add(row.key);continue;}
    const changes=[];
-   if(row.ratingAtEntry!==stored.ratingAtEntry)changes.push({field:'ratingAtEntry',from:stored.ratingAtEntry,to:row.ratingAtEntry,observedAt});
+   if(row.ratingAtEntry!==stored.ratingAtEntry)changes.push({field:'ratingAtEntry',from:stored.ratingAtEntry,to:row.ratingAtEntry,observedAt},{field:'ratingsAtEntry',from:stored.ratingsAtEntry,to:[row.ratingAtEntry],observedAt});
    if(row.rewatch!=='unknown'&&row.rewatch!==stored.rewatch)changes.push({field:'rewatch',from:stored.rewatch,to:row.rewatch,observedAt});
-   const next={...stored,observedAt,page};
+   const next=withChanges(stored,changes,observedAt,page);
    if(!stored.identity&&row.lid)next.identity={type:'letterboxd_lid',value:row.lid};
    if(row.slug&&!stored.aliases.some(alias=>alias.value===row.slug))next.aliases=[...stored.aliases,{type:'letterboxd_slug',value:row.slug}];
-   for(const change of changes)next[change.field]=change.to;
-   if(changes.length){next.changes=[...stored.changes,...changes].slice(-MAX_CHANGES);counts.updated++;}else counts.unchanged++;
+   if(changes.length)tally.updated.add(row.key);
    history.entries[row.key]=next;
   }
-  return counts;
+  for(const group of groups){
+   tally.seen.add(group.key);const stored=history.entries[group.key];
+   const fields={viewings:group.count,viewingsCertain:group.certain,ratingAtEntry:group.count===1?group.ratings[0]:null,ratingsAtEntry:group.ratings,rewatch:group.rewatchValue};
+   if(!stored){history.entries[group.key]=newEntry({key:group.key,keyBasis:'identity_date',viewingId:null,identity:group.lid?{type:'letterboxd_lid',value:group.lid}:null,aliases:group.slug?[{type:'letterboxd_slug',value:group.slug}]:[],watchedDate:group.watchedDate,...fields},observedAt,page);tally.added.add(group.key);continue;}
+   if(group.certain&&stored.viewingsCertain&&group.count<stored.viewings){tally.conflicts.add(group.key);continue;}
+   const changes=[];
+   if(group.count>stored.viewings)changes.push({field:'viewings',from:stored.viewings,to:group.count,observedAt});
+   if(group.certain&&!stored.viewingsCertain)changes.push({field:'viewingsCertain',from:false,to:true,observedAt});
+   if(group.certain&&group.count>=stored.viewings){
+    if(fields.ratingAtEntry!==stored.ratingAtEntry)changes.push({field:'ratingAtEntry',from:stored.ratingAtEntry,to:fields.ratingAtEntry,observedAt});
+    if(JSON.stringify(fields.ratingsAtEntry)!==JSON.stringify(stored.ratingsAtEntry))changes.push({field:'ratingsAtEntry',from:stored.ratingsAtEntry,to:fields.ratingsAtEntry,observedAt});
+    if(fields.rewatch!=='unknown'&&fields.rewatch!==stored.rewatch)changes.push({field:'rewatch',from:stored.rewatch,to:fields.rewatch,observedAt});
+   }
+   const next=withChanges(stored,changes,observedAt,page);
+   if(!stored.identity&&group.lid)next.identity={type:'letterboxd_lid',value:group.lid};
+   if(group.slug&&!stored.aliases.some(alias=>alias.value===group.slug))next.aliases=[...stored.aliases,{type:'letterboxd_slug',value:group.slug}];
+   if(changes.some(change=>change.field!=='viewingsCertain'))tally.updated.add(group.key);
+   history.entries[group.key]=next;
+  }
  }
- // Per-film aggregates from confirmed entries only: viewings counted by entry, the latest watched date.
+ // Per-film aggregates from confirmed entries only: viewings summed over entries, the latest watched date. A film with
+ // an uncertain day count reports `viewingCountExact: false`, its count being a lower bound.
  function summarize(history){
   const films={};
   for(const entry of Object.values(history?.entries||{})){
-   if(!entry.identity)continue;const id=entry.identity.value,film=films[id]||(films[id]={viewingCount:0,lastWatchedAt:null,rewatches:0});
-   film.viewingCount++;if(entry.rewatch===true)film.rewatches++;if(!film.lastWatchedAt||entry.watchedDate>film.lastWatchedAt)film.lastWatchedAt=entry.watchedDate;
+   if(!entry.identity)continue;const id=entry.identity.value,film=films[id]||(films[id]={viewingCount:0,viewingCountExact:true,lastWatchedAt:null,rewatches:0});
+   film.viewingCount+=entry.viewings||1;if(entry.viewingsCertain===false)film.viewingCountExact=false;if(entry.rewatch===true)film.rewatches++;
+   if(!film.lastWatchedAt||entry.watchedDate>film.lastWatchedAt)film.lastWatchedAt=entry.watchedDate;
   }
   return films;
  }
@@ -101,38 +142,51 @@ const LetterboxdDiary=(()=>{
  async function syncHistory(env,{now=Date.now(),maxPages=MAX_PAGES}={}){
   const startedAt=new Date(now).toISOString(),username=sourceConfig(env).letterboxdUsername;
   const previous=await loadJSON(env,KEYS.state)||{schemaVersion:1,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null};
-  const counts={pages:0,rows:0,added:0,unchanged:0,updated:0,conflicts:0,unresolved:0,undated:0};
+  const counts={pages:0,rows:0,unresolved:0,undated:0};
   const coverage={newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false,...previous.coverage};
-  let page=1,mode='incremental',outcome=null,stopReason=null,moreAfter=null,firstRows=[];
+  const tally={seen:new Set(),added:new Set(),updated:new Set(),conflicts:new Set()};
+  let page=1,mode='incremental',outcome=null,stopReason=null,moreAfter=null,firstRows=[],segment=null;
+  const fail=(kind,reason)=>{outcome=kind;stopReason=reason;moreAfter=page;};
   while(true){
    if(counts.pages>=maxPages){moreAfter=page;break;}
-   let response;
-   try{response=await fetch(pageUrl(username,page),{headers:HEADERS,redirect:'manual',signal:AbortSignal.timeout(15000)});}
-   catch(e){outcome='failed';stopReason='fetch:'+String(e.message).slice(0,120);moreAfter=page;break;}
-   if(response.status!==200){outcome=outcomeOf(response.status);stopReason='http_'+response.status+'_page_'+page;moreAfter=page;break;}
-   const parsed=parsePage(await response.text());
-   if(parsed.challenge){outcome='blocked';stopReason='challenge_page_'+page;moreAfter=page;break;}
+   // Request, body and parse are one bounded step: any failure of it is a reported outcome, not an exception.
+   let parsed;
+   try{
+    const response=await fetch(pageUrl(username,page),{headers:HEADERS,redirect:'manual',signal:AbortSignal.timeout(15000)});
+    if(response.status!==200){fail(outcomeOf(response.status),'http_'+response.status+'_page_'+page);break;}
+    let html;try{html=await response.text();}catch(e){fail('failed','read:'+String(e.message).slice(0,120)+'_page_'+page);break;}
+    parsed=parsePage(html);
+   }catch(e){fail('failed','fetch:'+String(e.message).slice(0,120));break;}
+   if(parsed.challenge){fail('blocked','challenge_page_'+page);break;}
+   // A page without rows is never read as an empty diary: no layout for that is known, so it is a failure that keeps
+   // the coverage and the resume point.
+   if(!parsed.rows.length){fail('failed','unrecognized_page_'+page);break;}
    const rows=keyRows(parsed.rows);counts.pages++;
-   if(!rows.length&&page===1&&!parsed.next){coverage.reachedEnd=true;break;}
-   if(!rows.length){outcome='failed';stopReason='unrecognized_page_'+page;moreAfter=page;break;}
    if(page===1)firstRows=rows;
    counts.rows+=rows.length;counts.unresolved+=rows.filter(row=>!row.lid).length;counts.undated+=rows.filter(row=>!row.watchedDate).length;
-   const observedAt=new Date(now).toISOString();let merged={added:0,unchanged:0,updated:0,conflicts:0};
-   await mergeStoredJSON(env,KEYS.history,emptyHistory(),history=>{merged=mergeRows(history,rows,observedAt,page);return rows.some(usable)?history:null;});
-   for(const name of ['added','unchanged','updated','conflicts'])counts[name]+=merged[name];
+   if(!segment||segment.lastPage!==page-1)segment={startPage:page,lastPage:page,rows:[],reachedEnd:false};
+   segment.lastPage=page;segment.rows.push(...rows);segment.reachedEnd=!parsed.next;
+   const groups=dayGroups(segment),pageKeys=new Set(rows.filter(usable).map(row=>row.key));
+   const knownBefore=new Set([...pageKeys].filter(key=>!tally.added.has(key)&&tally.seen.has(key)));
+   const observedAt=new Date(now).toISOString();
+   await mergeStoredJSON(env,KEYS.history,emptyHistory(),history=>{
+    for(const key of pageKeys)if(history.entries[key]&&!tally.added.has(key))knownBefore.add(key);
+    mergeRows(history,rows,groups,observedAt,page,tally);return pageKeys.size?history:null;
+   });
    for(const row of rows.filter(row=>row.watchedDate)){
     if(!coverage.newestWatchedDate||row.watchedDate>coverage.newestWatchedDate)coverage.newestWatchedDate=row.watchedDate;
     if(!coverage.oldestWatchedDate||row.watchedDate<coverage.oldestWatchedDate)coverage.oldestWatchedDate=row.watchedDate;
    }
    if(!parsed.next){coverage.reachedEnd=true;break;}
    if(page>=STOP_PAGE){outcome='partial';stopReason='page_limit';break;}
-   const allNew=merged.added>0&&merged.added===rows.filter(usable).length;
+   const allNew=pageKeys.size>0&&knownBefore.size===0;
    if(mode==='incremental'&&allNew){page++;continue;}
    if(mode==='incremental'&&previous.resumePage){mode='backfill';page=Math.max(page+1,previous.resumePage-1);continue;}
    if(mode==='incremental'&&!coverage.reachedEnd){mode='backfill';page++;continue;}
    if(mode==='backfill'){page++;continue;}
    break;
   }
+  Object.assign(counts,{added:tally.added.size,updated:tally.updated.size,unchanged:[...tally.seen].filter(key=>!tally.added.has(key)&&!tally.updated.has(key)&&!tally.conflicts.has(key)).length,conflicts:tally.conflicts.size});
   // Pages left unread: resume there next time, unless only an incremental pass ran and an older backfill is pending.
   const resumePage=coverage.reachedEnd&&moreAfter==null?null:moreAfter!=null&&(mode==='backfill'||page>1)?moreAfter:previous.resumePage||null;
   if(!outcome)outcome=coverage.reachedEnd&&resumePage==null?'complete':'partial';

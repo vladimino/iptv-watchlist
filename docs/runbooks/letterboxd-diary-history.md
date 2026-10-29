@@ -1,6 +1,6 @@
 # Letterboxd Diary viewing history — activation, observation, rollback
 
-Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decision: [ADR 0048](../adr/0048-letterboxd-diary-viewing-history.md). Card: [AIR-51](https://trello.com/c/33d4hKJ3).
+Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decision: [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md). Card: [AIR-51](https://trello.com/c/33d4hKJ3).
 
 A deploy does not activate anything. Each step below that changes production needs its own owner approval.
 

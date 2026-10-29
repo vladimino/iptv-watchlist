@@ -1,4 +1,4 @@
-# ADR 0048: The Letterboxd Diary is read into a separate viewing history, incrementally and behind a gate
+# ADR 0049: The Letterboxd Diary is read into a separate viewing history, incrementally and behind a gate
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-29  
@@ -28,14 +28,16 @@ The current code already reads Diary page 1, but only inside the films-list repa
    - Page 1 always. The next page only while a page is entirely new.
    - A pending backfill resumes one page before where it stopped, as overlap, and continues from there.
    - Each page is committed by compare-and-swap before the next request. The run state, `letterboxd/diary/state.json`, is written last.
-4. **Keys that do not merge viewings.**
-   - The viewing id is the key when the row carries one.
-   - Otherwise the key is identity, watched date and the occurrence of that pair in the read, so two viewings on one day stay two.
-   - A stored key keeps its identity. A row that disagrees is counted as a conflict and changes nothing. A rating or re-watch edit is recorded as a change on the entry.
+4. **Keys that neither merge nor invent viewings.**
+   - A row with a viewing id is its own entry.
+   - Without an id, two viewings of one film on one day cannot be told apart, so the entry is per film and day and counts its viewings.
+   - The rows of a day are counted together across the consecutive pages of one read. The count is certain only when the read holds the whole day; otherwise it is a lower bound.
+   - The count only grows: a cut read never lowers it, and a page shift never adds a viewing.
+   - A stored viewing id keeps its identity. A disagreeing row, or a certain count below a stored certain count, is a conflict and changes nothing. Rating and re-watch edits are recorded as changes.
 5. **Honest coverage.**
    - Outcomes are `complete`, `partial`, `blocked`, `rate_limited` or `failed`, with a stop reason and the per-run counts.
    - The coverage is the newest and oldest dates seen and whether the last page was ever reached.
-   - Absence from the diary proves nothing. A failure keeps the last good history.
+   - Absence from the diary proves nothing. A failure, including an unreadable body or a page without diary rows (never taken for an empty diary), keeps the last good history, the coverage and the resume point.
 6. **Identity only by lid.** A row without a lid is stored but marked unresolved. A slug alone never links a film.
 7. **Gated.**
    - Behind `LETTERBOXD_DIARY_HISTORY`, off by default. With it off, the stage neither reads nor writes, and the repair keeps its own single page-1 request.

@@ -1,6 +1,6 @@
 # Letterboxd Diary viewing history — contract
 
-[AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0048](../../adr/0048-letterboxd-diary-viewing-history.md). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). Gate: `LETTERBOXD_DIARY_HISTORY`, off by default ([feature flags](../feature-flags.md)).
+[AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0049](../../adr/0049-letterboxd-diary-viewing-history.md). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). Gate: `LETTERBOXD_DIARY_HISTORY`, off by default ([feature flags](../feature-flags.md)).
 
 The owner's public Letterboxd Diary is read into a viewing history: one record per diary row, re-watches included. It is kept apart from the current rating. It never writes a rating, watched or watchlist fact, never changes `actualRating`, and absence from the diary means nothing.
 
@@ -26,20 +26,22 @@ The owner's public Letterboxd Diary is read into a viewing history: one record p
 
 | Field | Meaning |
 | --- | --- |
-| `key`, `keyBasis` | `viewing:<id>` (`viewing_id`) when the row carries a viewing id. Otherwise `derived:<lid:…\|slug:…>\|<watchedDate>\|<n>` (`derived`), where `n` is the occurrence of that identity and date in the read, so two viewings on one day stay two |
+| `key`, `keyBasis` | `viewing:<id>` (`viewing_id`) when the row carries a viewing id: one entry per viewing. Otherwise `day:<lid:…\|slug:…>\|<watchedDate>` (`identity_date`): one entry per film and day that counts its viewings, because without an id two viewings of one film on one day cannot be told apart |
 | `source` | `letterboxd_diary` |
 | `identity` | `{type: 'letterboxd_lid', value}`, or `null` (unresolved: never linked to a film) |
 | `aliases` | `[{type: 'letterboxd_slug', value}]`, an observation of that row only. Cross-source Film aliases are [AIR-276](https://trello.com/c/PeWwEti8) |
 | `viewingId` | The viewing id, or `null` |
 | `watchedDate` | `YYYY-MM-DD` from the diary. It is not `observedAt` |
-| `ratingAtEntry` | The rating shown on that entry (`null` when unrated). It is not the current rating |
+| `viewings`, `viewingsCertain` | How many diary rows the entry stands for (1 for a viewing-id entry). `viewingsCertain` is true once a read held the whole day: a contiguous read (consecutive pages of one run) that starts at page 1, or whose first row has another date, and that ends at the last diary page, or whose last row has another date. Otherwise the count is a lower bound |
+| `ratingAtEntry`, `ratingsAtEntry` | The rating on the entry (`null` when unrated, and `null` for a day entry with more than one viewing), and the ratings of the day's rows in diary order. Neither is the current rating |
 | `rewatch` | `true`, `false` or `unknown` |
 | `firstObservedAt`, `observedAt`, `page` | First and latest read, and the page it was seen on |
 | `changes` | Up to ten `{field, from, to, observedAt}`, recorded when the entry's rating or re-watch marker changed |
 
 **Merge rules:**
 - **A new key** is added.
-- **A known key** keeps its identity. A row with another lid or date under the same key is counted as a `conflict` and changes nothing.
+- **A known viewing id** keeps its identity. A row with another lid or date under the same id is counted as a `conflict` and changes nothing.
+- **A day entry's count only grows.** A cut read (lower bound) never lowers it, and a page shift never adds a viewing, because the rows of one day are counted together across the pages of one contiguous read. A certain count below a stored certain count is a `conflict` and changes nothing. Ratings and the re-watch marker follow the latest certain read.
 - **Edits.** A different rating, or a known re-watch value, is recorded as a change. A slug is added as an alias.
 - **Never deleted.** Entries are not removed: a row missing from a page proves nothing.
 - **Rows without a key** are not stored, but are counted in `undated` or `unresolved`. These are rows without a date, or without both lid and slug.
@@ -49,8 +51,8 @@ The owner's public Letterboxd Diary is read into a viewing history: one record p
 | Field | Meaning |
 | --- | --- |
 | `lastAttemptAt`, `lastSuccessAt`, `lastFailureAt` | A failed, blocked or rate-limited run moves only `lastFailureAt` |
-| `lastOutcome` | `complete` (the last page has been reached at some point and nothing is pending), `partial` (pages remain), `blocked` (403 or challenge), `rate_limited` (429), `failed` (other HTTP, fetch error, unrecognized page) |
-| `stopReason` | `http_<status>_page_<n>`, `challenge_page_<n>`, `fetch:<message>`, `unrecognized_page_<n>`, `page_budget`, `overlap`, `page_limit` |
+| `lastOutcome` | `complete` (the last page has been reached at some point and nothing is pending), `partial` (pages remain), `blocked` (403 or challenge), `rate_limited` (429), `failed` (other HTTP, a fetch or body-read error, or a page without diary rows). A page without rows is never read as an empty diary: no empty-diary layout is known, so it fails and keeps the coverage and the resume point |
+| `stopReason` | `http_<status>_page_<n>`, `challenge_page_<n>`, `fetch:<message>`, `read:<message>_page_<n>`, `unrecognized_page_<n>`, `page_budget`, `overlap`, `page_limit` |
 | `counts` | `pages`, `rows`, `added`, `unchanged`, `updated`, `conflicts`, `unresolved`, `undated` of the run |
 | `coverage` | `newestWatchedDate`, `oldestWatchedDate`, `reachedEnd` |
 | `resumePage` | The first page not yet read by the backfill, or `null` |
@@ -82,7 +84,7 @@ With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ra
 
 It returns:
 - `enabled`, `state`, `entries`, `unresolvedEntries`, and `films` (how many films have entries);
-- with `filmId`: `film {viewingCount, lastWatchedAt, rewatches, entries[]}`, newest first.
+- with `filmId`: `film {viewingCount, viewingCountExact, lastWatchedAt, rewatches, entries[]}`, newest first. `viewingCount` sums the entries' `viewings`; `viewingCountExact` is false while any of them is a lower bound.
 
 An invalid `filmId` answers 400. Timeline, Finds and predictions do not consume it yet.
 
