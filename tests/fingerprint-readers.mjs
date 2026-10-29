@@ -37,7 +37,7 @@ const R1=release(source=>source);
 const R2=release(source=>source.replace('const FINGERPRINT_SCHEMA_VERSION=1;','const FINGERPRINT_SCHEMA_VERSION=2;').replace('const FINGERPRINT_TRANSITIONS=[];','const FINGERPRINT_TRANSITIONS='+JSON.stringify([split])+';').replace("'chase_escape',","'chase','escape',"));
 const read=key=>records.has(key)?JSON.parse(records.get(key)):null;
 const write=(key,value)=>{records.set(key,JSON.stringify(value));etags.set(key,'etag-'+(++revision));};
-const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},PROFILE_SELECTIVE={PREDICTION_PROFILE_COMPATIBILITY:'selective'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'};
+const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},PROFILE_SELECTIVE={PREDICTION_PROFILE_COMPATIBILITY:'selective'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'}; // a stale binding of the retired writer switch (ADR 0046): inert
 
 // Five watchlist films airing now; A and C hold heist (unreached by the split), B and E chase_escape (reached), D has nothing.
 const now=Date.now(),film=(id,genres)=>({id,tmdbId:String(100+id.charCodeAt(0)),title:id,original:id,url:'https://letterboxd.com/film/'+id+'/',year:2020,genres,synopsis:'A plot',directors:[],actors:[],shows:[{start:now}]});

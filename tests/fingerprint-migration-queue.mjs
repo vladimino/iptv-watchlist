@@ -31,7 +31,7 @@ function release(patch){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
  vm.runInContext(domain,ctx);
  for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
- vm.runInContext('globalThis.T={fingerprintCompatibilityMode,fingerprintVersionsEnabled,writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
+ vm.runInContext('globalThis.T={fingerprintCompatibilityMode,writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
  return {ctx,T:ctx.T,api};
 }
@@ -40,11 +40,12 @@ const R2=release(source=>source.replace('const FINGERPRINT_SCHEMA_VERSION=1;','c
 const read=key=>records.has(key)?JSON.parse(records.get(key)):null;
 const write=(key,value)=>{records.set(key,JSON.stringify(value));etags.set(key,'etag-'+(++revision));};
 const keysUnder=prefix=>[...records.keys()].filter(key=>key.startsWith(prefix)).sort();
-const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'};
+const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},OBJECTS={FINGERPRINT_VERSION_OBJECTS:'on'}; // a stale binding of the retired writer switch (ADR 0046): inert
 
 // Flags: only the exact strings.
 for(const [value,mode] of [[undefined,'strict'],['strict','strict'],['selective','selective'],['Selective','strict'],[' selective','strict'],[true,'strict']])assert.equal(R1.T.fingerprintCompatibilityMode({PREDICTION_FINGERPRINT_COMPATIBILITY:value}),mode,String(value));
-for(const [value,on] of [[undefined,false],['on',true],['On',false],[' on',false],[true,false]])assert.equal(R1.T.fingerprintVersionsEnabled({FINGERPRINT_VERSION_OBJECTS:value}),on,String(value));
+// The immutable fingerprint writer has no switch any more (ADR 0046): no code path reads FINGERPRINT_VERSION_OBJECTS.
+for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','src/prediction-diagnostics.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.FINGERPRINT_VERSION_OBJECTS|fingerprintVersionsEnabled/,file+' reads no fingerprint writer switch');
 
 // The registry applied to the frozen schema-1 base reproduces the live vocabulary of each release.
 for(const [name,R] of [['release 1',R1],['release 2',R2]]){
@@ -109,6 +110,22 @@ assert.deepEqual(plain((await reconcile(R1,SELECTIVE)).pending),['D'],'selective
  assert.deepEqual(keysUnder('enrichment/films/C/fingerprint-generations/').map(key=>key.slice(key.lastIndexOf('-s'))),['-s1-p1.json','-s1-p2.json'],'two generation records');
  assert.equal(read('enrichment/films/C/fingerprint-generations/'+before.fingerprintHash+'-s1-p1.json').generatedAt,before.generatedAt,'the first record is untouched');
 }
+// No binding and every stale binding write the same three objects (ADR 0046): body, generation record, then the pointer.
+{
+ const {filmId:_i,fingerprintHash:_h,generatedAt:_g,invalidatedAt:_n,fingerprintPromptVersion:_p,produced:_r,previous:_v,...content}=pointer('C');
+ const shapes=[];
+ for(const [n,binding] of [[undefined],['off'],['on'],['On'],[{value:'on'}]].entries()){
+  const id='W'+n,env={...baseEnv,...(binding[0]===undefined?{}:{FINGERPRINT_VERSION_OBJECTS:binding[0]})};
+  const value=await R1.T.writeFingerprint(env,id,content,null,'generated');
+  const body=read('enrichment/films/'+id+'/fingerprints/'+value.fingerprintHash+'.json'),record=read('enrichment/films/'+id+'/fingerprint-generations/'+value.fingerprintHash+'-s1-p1.json');
+  assert.equal(body.fingerprintHash,value.fingerprintHash,String(binding[0]));assert.equal(record.fingerprintHash,value.fingerprintHash,String(binding[0]));
+  const {filmId:_a,fingerprintHash:_b,...bodyRest}=body,{filmId:_c,fingerprintHash:_d,generatedAt:_e,...recordRest}=record;
+  shapes.push(JSON.stringify(plain({body:bodyRest,record:recordRest,pointer:[value.produced,value.previous,value.fingerprintPromptVersion]})));
+  for(const key of [...records.keys()].filter(key=>key.startsWith('enrichment/films/'+id+'/'))){records.delete(key);etags.delete(key);}
+  const index=read('enrichment/view-index.json');if(index){delete index[id];write('enrichment/view-index.json',index);}
+ }
+ assert.equal(new Set(shapes).size,1,'the binding changes nothing');
+}
 queue=await reconcile(R1);
 assert.deepEqual(queue.pending,['D'],'strict ignores the prompt version, as today');
 assert.equal(queue.fingerprintCompatibility.strictDisagreements,1,'the evaluator counts the newer prompt as ahead while equality keeps it');
@@ -171,10 +188,11 @@ assert.deepEqual(stable(await reconcile(R2,SELECTIVE)),stable(queue),'a repeated
  assert.equal(keysUnder('enrichment/films/B/fingerprints/').length,2);assert.equal(keysUnder('enrichment/films/B/fingerprint-generations/').length,2);
  assert.equal(read('enrichment/films/B/predictions.json').current.fingerprintSchemaVersion,2,'the new prediction carries its fingerprint schema');
  assert.equal(read('enrichment/films/B/predictions.json').history.at(-1).fingerprintHash,oldB.fingerprintHash,'the old prediction is history');
- r=await R2.api('enrichment/submit','POST',{runId,items:[{filmId:'D',fingerprint:fingerprintOf(['heist'],2),prediction}]},SELECTIVE);
+ r=await R2.api('enrichment/submit','POST',{runId,items:[{filmId:'D',fingerprint:fingerprintOf(['heist'],2),prediction}]},{...SELECTIVE,FINGERPRINT_VERSION_OBJECTS:'off'});
  assert.equal(r.data.results[0].status,'created');
- assert.deepEqual([pointer('D').fingerprintPromptVersion,pointer('D').produced,pointer('D').previous],[1,'generated',null],'without the flag only the pointer is written, stamped');
- assert.deepEqual(keysUnder('enrichment/films/D/fingerprints/'),[]);assert.deepEqual(keysUnder('enrichment/films/D/fingerprint-generations/'),[]);
+ assert.deepEqual([pointer('D').fingerprintPromptVersion,pointer('D').produced,pointer('D').previous],[1,'generated',null],'the pointer is stamped');
+ assert.deepEqual(keysUnder('enrichment/films/D/fingerprints/'),['enrichment/films/D/fingerprints/'+pointer('D').fingerprintHash+'.json'],'a stale off binding is inert: the body is written');
+ assert.deepEqual(keysUnder('enrichment/films/D/fingerprint-generations/'),['enrichment/films/D/fingerprint-generations/'+pointer('D').fingerprintHash+'-s2-p1.json'],'and so is the generation record');
  assert.equal((await R2.api('enrichment/submit','POST',{runId,items:[{filmId:'A',prediction}]},SELECTIVE)).data.results[0].error,'Film not selected','a kept film is not work');
  assert.deepEqual(read('enrichment/films/A/predictions.json').current,oldPredictionA,'the kept prediction keeps its schema-1 provenance');
  // Preemption: a new hot film without a prediction enters the batch before the waiting migration film.
@@ -188,8 +206,8 @@ assert.deepEqual(stable(await reconcile(R2,SELECTIVE)),stable(queue),'a repeated
 }
 
 // Rollback to release 1: E (schema 1) is exact again. Strict: the schema-2 fingerprints are stale and regenerate in full
-// (the rollback floor). Selective: B is restored from its stored schema-1 record (prediction_only from there); D, written
-// without version objects, has nothing to restore and regenerates.
+// (the rollback floor). Selective: B is restored from its stored schema-1 record (prediction_only from there); D, whose only
+// stored generation is schema 2, has nothing to restore and regenerates.
 programme(films);
 queue=await reconcile(R1);
 assert.deepEqual(queue.pending,['B','D']);
@@ -277,4 +295,4 @@ assert.deepEqual([queue.work.B.reason,queue.work.B.migration,queue.work.D.reason
 // Zero and one film.
 programme([]);queue=await reconcile(R1,SELECTIVE);assert.deepEqual([queue.pending,queue.fingerprintCompatibility.films,plain(queue.work)],[[],0,{}]);
 programme([films[0]]);queue=await reconcile(R1,SELECTIVE);assert.deepEqual([queue.pending,queue.fingerprintCompatibility.classes.unchanged],[[],1]);
-console.log('Fingerprint migration queue: immutable body/record/pointer storage, same body under two prompt versions, strict unchanged with shadow counters, selective work classes and partial fields, bounded migration batches after missing work, hot preemption, run binding to every axis, pointer restore on rollback and the strict rollback floor passed');
+console.log('Fingerprint migration queue: immutable body/record/pointer storage with no writer switch (stale bindings inert), same body under two prompt versions, strict unchanged with shadow counters, selective work classes and partial fields, bounded migration batches after missing work, hot preemption, run binding to every axis, pointer restore on rollback and the strict rollback floor passed');
