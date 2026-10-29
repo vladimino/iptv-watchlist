@@ -12,12 +12,19 @@ const ARCHIVE_SOURCE_COPY=/^epg\/discovery-archive\/v1\/sources\/[^/]+\/discover
 export const archiveManifestKey=manifestId=>'epg/discovery-archive/v1/manifests/'+manifestId+'.json';
 export function isArchiveKey(key){return key===ARCHIVE_POINTER||ARCHIVE_MANIFEST.test(key)||ARCHIVE_SEGMENT.test(key);}
 
+// ADR-0035 section 2 (AIR-210): immutable fingerprint storage. A content body per distinct content, keyed by its hash, and a
+// generation record per (hash, schema version, prompt version) holding the provenance; both create-only. fingerprint.json stays the
+// current record and is the pointer: the body and the record whose identity equals it are its immutable form, mapped through it.
+const FINGERPRINT_BODY=/^enrichment\/films\/([^/]+)\/fingerprints\/([0-9a-f]{64})\.json$/;
+const FINGERPRINT_GENERATION=/^enrichment\/films\/([^/]+)\/fingerprint-generations\/([0-9a-f]{64})-s(\d+)-p(\d+)\.json$/;
+export function isFingerprintVersionKey(key){return FINGERPRINT_BODY.test(key)||FINGERPRINT_GENERATION.test(key);}
+
 const FAMILIES=[
  ['watchlist',key=>key==='watchlist.json'],
  ['programme',key=>key==='programme.json'||key==='epg/published-generation.json'],
  ['discovery',key=>key==='epg/discovery-latest.json'||key==='epg/discovery-resolution.json'||key==='epg/discovered-films.json'||isArchiveKey(key)],
  ['profile',key=>key==='enrichment/profile/current.json'||/^enrichment\/profile\/versions\/\d+\.json$/.test(key)],
- ['fingerprint',key=>/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(key)],
+ ['fingerprint',key=>/^enrichment\/films\/[^/]+\/fingerprint\.json$/.test(key)||isFingerprintVersionKey(key)],
  ['prediction',key=>/^enrichment\/films\/[^/]+\/predictions\.json$/.test(key)||VERSION_OBJECT.test(key)],
  ['actual',key=>/^enrichment\/films\/[^/]+\/actual\.json$/.test(key)],
 ];
@@ -566,6 +573,70 @@ export async function readDiscoveryArchive({ledger,ledgerKey='epg/discovery-late
 
 // Items carry no evidence key of their own: the key is derived by the resolver's rule from the observation's fields.
 // An item that does carry one must agree with the derived key; a disagreement is a blocker that stops the import.
+// Reads the immutable fingerprint objects of a snapshot (ADR-0035 section 2, AIR-264). They add no row: fingerprint_payload already
+// carries the current record. A body and a generation record whose identity is the film's current fingerprint.json are mapped through
+// it, and the body must be that record's content byte for byte in canonical form. A valid object nothing current names (an older
+// generation, or a body whose record write never followed) is unreferenced: it stays in R2 and is listed. Anything malformed, a body
+// whose hash is not the hash of its content, a record that disagrees with its key or has no body, and a current record that
+// disagrees with its own body, is a blocker before any write. contentSha256 is the Worker's own canonical content hash.
+const FINGERPRINT_RECORD_KEYS=['filmId','fingerprintHash','fingerprintSchemaVersion','fingerprintPromptVersion','generatedAt','produced','fields','previous'];
+const FINGERPRINT_PRODUCED=['generated','partial','restored'];
+const FINGERPRINT_PROVENANCE=['generatedAt','invalidatedAt','fingerprintPromptVersion','produced','fields','previous'];
+export function readFingerprintVersions({keys=[],bodies={},shas={},contentSha256}={}){
+ const versionKeys=keys.filter(isFingerprintVersionKey).sort();
+ const records=[],blockers=[],summary={bodies:0,generations:0,mapped:0,unreferenced:0,blocked:0};
+ if(!versionKeys.length)return {records,blockers,summary};
+ if(typeof contentSha256!=='function')throw new Error('The shared fingerprint content hash rule is required');
+ const decode=segment=>{try{return decodeURIComponent(segment);}catch{return null;}};
+ const films=new Map();
+ for(const key of versionKeys){
+  const body=key.match(FINGERPRINT_BODY),generation=key.match(FINGERPRINT_GENERATION),segment=(body||generation)[1];
+  if(!films.has(segment))films.set(segment,{bodies:new Map(),generations:new Map()});
+  if(body){films.get(segment).bodies.set(body[2],key);summary.bodies++;}
+  else{films.get(segment).generations.set(generation[2]+'-s'+generation[3]+'-p'+generation[4],{key,hash:generation[2],schema:Number(generation[3]),prompt:Number(generation[4])});summary.generations++;}
+ }
+ const isPlain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+ for(const [segment,film] of films){
+  const storedId=decode(segment),failed=new Set();
+  const block=(key,reason)=>{failed.add(key);blockers.push({reason,sourceKey:key,sourceSha256:shas[key]??null,targetTable:'fingerprint_payload',targetId:storedId??segment});};
+  for(const [hash,key] of film.bodies){
+   const value=bodies[key];
+   if(!isPlain(value)){block(key,'fingerprint_version_unreadable');continue;}
+   if(value.fingerprintHash!==hash||storedId==null||value.filmId!==storedId){block(key,'fingerprint_body_identity_mismatch');continue;}
+   const {fingerprintHash:_hash,...content}=value;
+   if(contentSha256(content)!==hash)block(key,'fingerprint_body_hash_mismatch');
+  }
+  for(const [,generation] of film.generations){
+   const value=bodies[generation.key];
+   const valid=isPlain(value)&&Object.keys(value).every(name=>FINGERPRINT_RECORD_KEYS.includes(name))&&value.filmId===storedId&&value.fingerprintHash===generation.hash&&value.fingerprintSchemaVersion===generation.schema&&value.fingerprintPromptVersion===generation.prompt
+    &&typeof value.generatedAt==='string'&&Number.isFinite(Date.parse(value.generatedAt))&&FINGERPRINT_PRODUCED.includes(value.produced)
+    &&(value.fields===undefined||(Array.isArray(value.fields)&&value.fields.every(field=>typeof field==='string')))
+    &&(value.previous===null||(isPlain(value.previous)&&typeof value.previous.fingerprintHash==='string'&&Number.isInteger(value.previous.fingerprintSchemaVersion)&&Number.isInteger(value.previous.fingerprintPromptVersion)));
+   if(!valid){block(generation.key,'fingerprint_generation_invalid');continue;}
+   if(!film.bodies.has(generation.hash))block(generation.key,'fingerprint_generation_body_missing');
+  }
+  const current=bodies['enrichment/films/'+segment+'/fingerprint.json'];
+  const referenced=new Set();
+  if(isPlain(current)&&typeof current.fingerprintHash==='string'){
+   const identity=current.fingerprintHash+'-s'+current.fingerprintSchemaVersion+'-p'+(current.fingerprintPromptVersion??1);
+   const generation=film.generations.get(identity),bodyKey=film.bodies.get(current.fingerprintHash);
+   if(generation&&bodyKey&&!failed.has(generation.key)&&!failed.has(bodyKey)){
+    const {fingerprintHash:_current,...content}=current;for(const name of FINGERPRINT_PROVENANCE)delete content[name];
+    const {fingerprintHash:_hash,...stored}=bodies[bodyKey];
+    if(contentSha256(content)!==contentSha256(stored))block(bodyKey,'fingerprint_current_body_mismatch');
+    else{referenced.add(generation.key);referenced.add(bodyKey);}
+   }
+  }
+  for(const key of [...film.bodies.values(),...[...film.generations.values()].map(item=>item.key)]){
+   if(failed.has(key))continue;
+   if(referenced.has(key)){records.push({key,disposition:'mapped',id:storedId,via:'fingerprint_pointer'});summary.mapped++;}
+   else{records.push({key,disposition:'unreferenced',id:storedId,reason:'fingerprint_version_unreferenced'});summary.unreferenced++;}
+  }
+ }
+ summary.blocked=blockers.length;
+ return {records,blockers,summary};
+}
+
 export function readDiscovery(entry,body,{deriveEvidence}={}){
  requireEvidence(deriveEvidence);
  const items=Array.isArray(body?.items)?body.items:[];
@@ -726,7 +797,7 @@ function provenanceSummary(units){
 function isMappedKey(key){
  if(isArchiveKey(key))return true;
  if(['watchlist.json','programme.json','metadata.json','titles.json','people.json','epg/published-generation.json','epg/discovery-latest.json','epg/discovery-resolution.json','epg/discovered-films.json','enrichment/profile/current.json'].includes(key))return true;
- return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key)||VERSION_OBJECT.test(key);
+ return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key)||VERSION_OBJECT.test(key)||isFingerprintVersionKey(key);
 }
 function personIdFor(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
 function withCredits(unit){
@@ -787,7 +858,7 @@ async function personStored(repositories,unit){
 
 // The source projection is independent of the write list: every mapped object is projected to the rows it must produce,
 // through the same identity and evidence rules, and the read-back is compared against that projection.
-export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence,links=null,ratings=null,superseded=null}={}){
+export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},listed={},shas={},identity,deriveEvidence,links=null,ratings=null,superseded=null,fingerprintContentSha256=null}={}){
  requireIdentity(identity);
  const expected={films:[],persons:[],fingerprints:[],ratings:[],predictions:[],redirects:[],decisions:[],candidates:[],generations:[],profiles:[],records:[],unprojected:[],r2Only:[],blockers:[]};
  for(const film of films){
@@ -810,6 +881,7 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   if(kind==='excluded')continue;
   if(kind==='r2_only'){expected.r2Only.push(key);continue;}
   if(kind==='unmapped'){expected.unprojected.push(key);continue;}
+  if(isFingerprintVersionKey(key))continue;
   accounted.add(key);
   const body=bodies[key];
   if(key==='watchlist.json'){for(const record of body?.films||[]){const resolved=recordIdentity(key,record?.id);if(resolved)note(key,'mapped',resolved.filmId,{identity:provenanceOf(resolved)});}continue;}
@@ -846,6 +918,10 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
   }
   note(key,'unportable',key);
  }
+ const fingerprintVersions=readFingerprintVersions({keys,bodies,shas,contentSha256:fingerprintContentSha256});
+ for(const record of fingerprintVersions.records)note(record.key,record.disposition,record.id,record.via?{via:record.via}:{reason:record.reason});
+ expected.blockers.push(...fingerprintVersions.blockers);
+ expected.fingerprintVersions=fingerprintVersions.summary;
  const programmeKey=keys.includes('programme.json')?'programme.json':null;
  const archive=archiveExpectation(keys.includes('epg/discovery-latest.json')?bodies['epg/discovery-latest.json']:null,bodies,shas,keys);
  for(const record of archive.records)note(record.key,record.disposition,record.id);
