@@ -1,9 +1,9 @@
 # ADR 0047: The fingerprint transition rule always decides, and PREDICTION_FINGERPRINT_COMPATIBILITY is retired
 
-**Status:** Proposed (owner flag disposition given; ADR acceptance pending; no production configuration authorization)  
+**Status:** Accepted 2026-10-29 (architecture only; no production configuration authorization)  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner flag disposition `retire now`, keeping the behaviour of the current value, given in the AIR-265 session on 2026-10-29 after a read-only preflight; acceptance of this record is pending; separate approval is required to delete the production binding  
+**Approval source:** explicit owner acceptance of ADR-0047 in AIR-265 ChatGPT session on 2026-10-29 following `retire now`; separate authorization is required to delete the production binding  
 **Related work:** [AIR-265](https://trello.com/c/x7esHy4V); prerequisite [AIR-210](https://trello.com/c/DM1Rrnrz) (activation and stage B parity); [AIR-208](https://trello.com/c/54RDVHNj), [AIR-209](https://trello.com/c/kDbOGZuj); [ADR-0035](0035-selective-fingerprint-transition-compatibility.md); [ADR 0044](0044-retire-profile-compatibility-switch.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0035](0035-selective-fingerprint-transition-compatibility.md) in part: the mode switch and the feature rollback of section 7. The transition rule, the registry and its approvals, immutable storage, migration scheduling, the code rollback floor and the schema or prompt rollback stay  
 **Superseded by:** None
