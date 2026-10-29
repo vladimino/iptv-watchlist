@@ -13,7 +13,7 @@ Effect: from the next prediction submit on, every created or recalculated predic
 
 ## 2. One-time materialization of historical versions (implemented; no production execution recorded here)
 
-Records written before the rule, in `current` and in `history`, carry no pointer. The backfill needs each of them as an immutable object. The operation is described by [ADR-0026](../adr/0026-historical-prediction-version-materialization.md): a plan from a fenced snapshot, bounded batches sent to a gated Worker route that writes under the prediction writer lease, receipts, and reconciliation from a new snapshot. It is not a background job and not a Scheduled Task change. Every production step below is a separate owner approval.
+Records written before the rule, in `current` and in `history`, carry no pointer. The backfill needs each of them as an immutable object. The production run of 28 October 2026 is recorded in the [apply evidence](../evidence/prediction/air-74-materialization-apply-2026-10-28.md). The operation is described by [ADR-0026](../adr/0026-historical-prediction-version-materialization.md): a plan from a fenced snapshot, bounded batches sent to a gated Worker route that writes under the prediction writer lease, receipts, and reconciliation from a new snapshot. It is not a background job and not a Scheduled Task change. Every production step below is a separate owner approval.
 
 ### Body, key and bundle change
 

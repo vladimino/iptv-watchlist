@@ -2,7 +2,7 @@
 
 [AIR-74](https://trello.com/c/5AdAmKPe) · the owner-approved production apply of plan `2ce0866d…` (owner GO in the session of 28 October 2026), steps 4–7 of [the prediction versions runbook](../../runbooks/prediction-versions.md#2-one-time-materialization-of-historical-versions-implemented-no-production-execution-recorded-here) and [ADR-0026](../../adr/0026-historical-prediction-version-materialization.md). Follows the [plan, rehearsal and validate evidence](air-74-materialization-validate-2026-10-28.md).
 
-**Captured:** 2026-10-28, 20:20–23:50 UTC, from the agent container that holds the plan and its snapshot; code at `main` `be9b5e2`. **Scope:** one production write operation through the deployed Worker route, under the owner's Cloudflare Access login; the temporary flag; read-only reconciliation on a new fenced snapshot. **Not done:** any other flag, Access, Scheduled Task, lease, D1 or deletion; no export before the apply (the plan stayed fresh). Private files (plan, receipts copies, logs, snapshots) stay outside the repository; no film id, key, ETag or credential is reproduced here.
+**Captured:** 2026-10-28, 20:20 UTC – 2026-10-29, 00:50 UTC, from the agent container that holds the plan and its snapshot; code at `main` `be9b5e2`. **Scope:** one production write operation through the deployed Worker route, under the owner's Cloudflare Access login; the temporary flag; read-only reconciliation on a new fenced snapshot. **Not done:** any other flag, Access, Scheduled Task, lease, D1 or deletion; no export before the apply (the plan stayed fresh). Private files (plan, receipts copies, logs, snapshots) stay outside the repository; no film id, key, ETag or credential is reproduced here.
 
 **Verdict:** **materialization GO.** All 2,346 planned historical records are immutable version objects, every planned bundle links them with this plan's provenance, no prediction body changed, nothing is pending in the bucket, and `PREDICTION_MATERIALIZATION` is back to absent. This is not an AIR-74 G5 GO (section 6).
 
@@ -80,7 +80,14 @@ Independent check (private script with the Worker's own version rules) of every 
 
 `prediction-versions-plan.mjs` on the whole bucket: 2,382 bundles, 2,670 records linked, **0 pending**, 0 malformed, 0 objects to write, 0 checksum mismatches, 0 unreadable bundles, 0 unreferenced version objects.
 
-IMPORTER_RESULT
+**Offline importer on the new snapshot** (local SQLite only):
+
+| Run | Result |
+| --- | --- |
+| `main` as is | stops `unknown_key` before any write on the 38 immutable fingerprint storage keys (19 `fingerprints/<sha256>.json`, 19 `fingerprint-generations/<sha256>-s1-p1.json`); this is blocker 1 below, unchanged |
+| Diagnostic, test-only classification of those 38 keys as R2-only (uncommitted, not a disposition decision; 29 Oct 23:49–00:50 UTC) | completed: 33,811 units applied, 33,811 receipts matching, 0 conflicts, 0 unmapped; **class A not blocking: prediction family 5,052 keys, 2,654 applied, 0 unportable, no `prediction_version_*` reason**; parity **`ok: true`** (0 missing, 0 mismatched, 0 extra; the 287 extra `prediction_current` rows of the pre-apply replay are gone); discovery ledger total 53,983; class C 39 `film_unresolved` (16 fingerprint, 16 prediction, 6 rating, 1 decision) |
+
+The diagnostic run shows only that the prediction family is now portable; it is not a G5 verdict. The executor replay up to the discovery units was not run: its prerequisites (blockers 1 and 2) are not met, and they are not bypassed with test-only exceptions.
 
 ## 5. State after the operation
 
