@@ -14,7 +14,6 @@ const FEATURE_FLAGS=[
  onOff('CATALOG_POSTER_HYDRATION',env=>catalogPosterHydrationEnabled(env)?'on':'off'),
  onOff('LETTERBOXD_FACTS',env=>env?.LETTERBOXD_FACTS==='on'?'on':'off'),
  onOff('LETTERBOXD_BASELINE_IMPORT',env=>env?.LETTERBOXD_BASELINE_IMPORT==='on'?'on':'off',{requires:{LETTERBOXD_FACTS:'on'}}),
- onOff('FINDS_WATCHED_MARK',env=>env?.FINDS_WATCHED_MARK==='on'?'on':'off',{requires:{LETTERBOXD_FACTS:'on'}}),
  {name:'PREDICTION_PROFILE_COMPATIBILITY',modes:['strict','selective'],default:'strict',tokens:['strict','selective'],effective:env=>predictionCompatibilityMode(env)},
  {name:'PREDICTION_FINGERPRINT_COMPATIBILITY',modes:['strict','selective'],default:'strict',tokens:['strict','selective'],effective:env=>fingerprintCompatibilityMode(env)},
  onOff('FINGERPRINT_VERSION_OBJECTS',env=>fingerprintVersionsEnabled(env)?'on':'off'),
@@ -24,6 +23,7 @@ const FEATURE_FLAGS=[
  {name:'SCORED_RESOLUTION',modes:[],default:null,tokens:['off','shadow','on'],retired:true,effective:()=>null},
  {name:'RATINGS_REFRESH',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'FINDS_TITLE_EXCLUSION',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
+ {name:'FINDS_WATCHED_MARK',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
 ];
 const featureFlagNames=()=>FEATURE_FLAGS.map(flag=>flag.name);
 function featureFlagRaw(flag,value){

@@ -8,7 +8,7 @@
 
 `GET /api/enrichment/ratings/status` still only reads. It returns the stored `enrichment/ratings/status.json` (or an `idle` placeholder when none exists) with `generationId` and `pendingGenerationId` resolved from `enrichment/ratings/published.json` and `enrichment/ratings/pending.json`, and always `enabled: false`. The fields keep their AIR-64 meaning: `state` is `idle`, `healthy`, `degraded` or `blocked`; `lastSuccessAt` is the last complete films list the retired refresh read; `attempt` is its last call. No code path writes these objects any more, so the values are the last ones the refresh wrote.
 
-The integration footer keeps `manualRefreshEnabled: false` on the `letterboxd_ratings` source.
+The integration footer does not use this document for current ratings health; that comes from the EPG commit fields in `sync.json` ([enrichment API](../api/enrichment.md)). The footer only reports the document as the `retiredRefresh` history of the `letterboxd_ratings` source, labelled in the UI as the retired separate refresh with its last attempt time and outcome. `manualRefreshEnabled` on that source is always `false`.
 
 ## Where ratings come from
 
@@ -18,7 +18,7 @@ The integration footer keeps `manualRefreshEnabled: false` on the `letterboxd_ra
 
 ## Removed films
 
-With `REMOVAL_RATING_LOOKUP=on` ([ADR 0042](../../adr/0042-removal-rating-lookup-queue.md), [AIR-268](https://trello.com/c/7ePpEYev)) a removal event no longer waits for a complete films list. When the EPG commit builds the watchlist diff, it hands the removed films with their Letterboxd film URL to `lookupRemovalRatings`, which runs right after the commit's events are written and before the films list:
+With `REMOVAL_RATING_LOOKUP=on` ([ADR 0043](../../adr/0043-removal-rating-lookup-queue.md), [AIR-268](https://trello.com/c/7ePpEYev)) a removal event no longer waits for a complete films list. When the EPG commit builds the watchlist diff, it hands the removed films with their Letterboxd film URL to `lookupRemovalRatings`, which runs right after the commit's events are written and before the films list:
 
 - **Queue.** `enrichment/removal-rating-lookups.json` keeps one entry per film id: `url`, `state` (`pending`, `rated`, `not_rated`, `not_found`, `conflict`, `gave_up`), `attempts`, `enqueuedAt`, `nextAttemptAt`, `lastAttemptAt`, `lastResult`, `lastError`, and `rating` once found. A film already in the queue is not added again. Entries older than 14 days are dropped and at most 100 are kept, finished ones first. Every write is a compare-and-swap.
 - **Bounded requests.** One call requests the member page `/<user>/film/<slug>/` of at most five due films, oldest first. The attempt is recorded before the request, so a request killed mid-lookup counts the attempt and retries no sooner than an hour later. A film gets at most three attempts in all.

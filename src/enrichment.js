@@ -719,17 +719,19 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(sync?.error){const prior=integrationTime(report?.watchlistUpdatedAt);if(!prior)return integrationEntry('letterboxd_watchlist','source','unknown','no_data',null,null);return integrationEntry('letterboxd_watchlist','source',fresh(prior),freshCode(prior),prior,null);}
   return integrationEntry('letterboxd_watchlist','source','unknown','no_data',null,null);
  })();
- const ratingEvents=[];
- const statusFailure=ratingsFailureCode(ratings?.state)||ratingsFailureCode(ratings?.attempt?.cause);
- if(integrationTime(ratings?.lastSuccessAt))ratingEvents.push({at:integrationTime(ratings.lastSuccessAt),ok:true});
- if(statusFailure&&integrationTime(ratings?.lastFailureAt))ratingEvents.push({at:integrationTime(ratings.lastFailureAt),ok:false,code:statusFailure});
+ // Current ratings health comes only from the routine EPG commit's sync.json fields. The retired ratings-only refresh's
+ // frozen status document is reported separately as history and never decides the current state (ADR 0040).
+ const ratingEvents=[],ratingPending=sync?.stage==='complete'&&Array.isArray(sync.ratingPending)&&sync.ratingPending.length>0;
  if(integrationTime(sync?.ratingObservedAt))ratingEvents.push({at:integrationTime(sync.ratingObservedAt),ok:true});
  if(typeof sync?.ratingError==='string'&&sync.ratingError&&integrationTime(sync.updatedAt))ratingEvents.push({at:integrationTime(sync.updatedAt),ok:false,code:ratingsMessageCode(sync.ratingError)});
  ratingEvents.sort((a,b)=>Date.parse(a.at)-Date.parse(b.at)||(a.ok===b.ok?0:a.ok?-1:1));
  const latestRating=ratingEvents.at(-1),ratingSuccess=ratingEvents.filter(item=>item.ok).at(-1)?.at||null,ratingFailureAt=ratingEvents.filter(item=>!item.ok).at(-1)?.at||null;
+ const retiredCode=ratingsFailureCode(ratings?.state)||ratingsFailureCode(ratings?.attempt?.cause),retiredRefresh=ratings&&typeof ratings==='object'?{state:'retired',lastOutcome:retiredCode?'failed':integrationTime(ratings.lastSuccessAt)?'succeeded':'unknown',code:retiredCode,lastSuccessAt:integrationTime(ratings.lastSuccessAt),lastFailureAt:retiredCode?integrationTime(ratings.lastFailureAt):null}:null;
  const ratingsSource=(()=>{
-  const entry=(state,code,success,failure)=>({...integrationEntry('letterboxd_ratings','source',state,code,success,failure),manualRefreshEnabled:!!enabled});
-  if(!latestRating)return entry(sync?.stage==='complete'&&Array.isArray(sync.ratingPending)&&sync.ratingPending.length?'degraded':'unknown',sync?.stage==='complete'&&Array.isArray(sync.ratingPending)&&sync.ratingPending.length?'ratings_pending':'no_data',null,null);
+  const entry=(state,code,success,failure,extra={})=>({...integrationEntry('letterboxd_ratings','source',state,code,success,failure),...extra,manualRefreshEnabled:!!enabled,retiredRefresh});
+  const pendingSince=integrationTime(sync?.updatedAt);
+  if(ratingPending&&(!latestRating||latestRating.ok&&(!pendingSince||Date.parse(latestRating.at)<=Date.parse(pendingSince))))return entry('degraded','ratings_pending',ratingSuccess,ratingFailureAt,{pendingSince});
+  if(!latestRating)return entry('unknown','no_data',null,null);
   if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
   return entry(fresh(ratingSuccess),freshCode(ratingSuccess),ratingSuccess,ratingFailureAt);
  })();
