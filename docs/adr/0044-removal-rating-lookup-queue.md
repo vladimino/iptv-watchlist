@@ -1,4 +1,4 @@
-# ADR 0043: Films removed from the watchlist get their rating from a bounded per-film lookup queue, not from the films list
+# ADR 0044: Films removed from the watchlist get their rating from a bounded per-film lookup queue, not from the films list
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-29  
