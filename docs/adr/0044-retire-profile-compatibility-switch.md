@@ -1,9 +1,9 @@
 # ADR 0044: The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired
 
-**Status:** Proposed  
+**Status:** Accepted 2026-10-29  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner flag disposition `retire now`, keeping the behaviour of the current value, given in the AIR-231 session on 2026-10-29; acceptance of this record is pending  
+**Approval source:** explicit owner decision `ADR-0044 — Accepted` in the AIR-231 ChatGPT session on 2026-10-29; earlier flag disposition `retire now` was a separate decision  
 **Related work:** [AIR-231](https://trello.com/c/hrOVxD7v); prerequisite [AIR-206](https://trello.com/c/87mg3VNi) (activation); [ADR-0031](0031-selective-prediction-profile-compatibility.md); [ADR-0035](0035-selective-fingerprint-transition-compatibility.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0031](0031-selective-prediction-profile-compatibility.md) in part: the mode switch and the feature rollback of section 6; the evaluation rule, the publication validation, the trust model and the one-rule-for-every-consumer requirement stay  
 **Superseded by:** None
