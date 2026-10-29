@@ -91,7 +91,7 @@ for(const item of empty.report.flags){
  assert.equal(item.state,'absent',item.name);assert.equal(item.raw,null,item.name);assert.equal(item.redacted,false,item.name);
  assert.equal(item.valid,true,item.name);assert.equal(item.issue,null,item.name);assert.equal(item.effective,item.default,item.name);
 }
-assert.deepEqual(empty.report.summary,{registered:17,set:0,absent:17,invalid:0,redacted:0});
+assert.deepEqual(empty.report.summary,{registered:REGISTERED.length,set:0,absent:REGISTERED.length,invalid:0,redacted:0});
 assert.doesNotMatch(empty.text,new RegExp(SECRET),'no other binding leaks');
 const allowedReads=new Set([...REGISTERED,'MCP_ACCESS_TEAM_DOMAIN','MCP_ACCESS_AUD','BUCKET','then']);
 for(const key of empty.read)assert.ok(allowedReads.has(key),'env read only by registered name: '+key);
@@ -120,7 +120,7 @@ assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.vali
 const writer=l('PREDICTION_VERSION_OBJECTS');
 assert.deepEqual([writer.state,writer.raw,writer.retired,writer.valid,writer.issue,writer.effective],['set','on',true,false,'retired',null],'the retired prediction version writer switch is inert and the production on is visible (ADR 0045)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:17,set:11,absent:6,invalid:9,redacted:0});
+assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:11,absent:REGISTERED.length-11,invalid:9,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
 const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,CATALOG_POSTER_HYDRATION:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
