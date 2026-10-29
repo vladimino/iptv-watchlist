@@ -1,9 +1,9 @@
 # ADR 0043: Films removed from the watchlist get their rating from a bounded per-film lookup queue, not from the films list
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** not yet decided; the card scope was approved on [AIR-268](https://trello.com/c/7ePpEYev)  
+**Approval source:** Owner explicitly accepted ADR 0043 and visually approved the rendered Mermaid diagram in ChatGPT on 2026-10-29 ([AIR-268](https://trello.com/c/7ePpEYev))  
 **Related work:** [AIR-268](https://trello.com/c/7ePpEYev); [AIR-267 evidence](../evidence/letterboxd/air-267-recent-ratings-diagnostics-2026-10-29.md); [AIR-34](https://trello.com/c/0hQjPzIf); [ADR 0018](0018-letterboxd-last-good-ratings.md); [ADR 0040](0040-retire-ratings-only-refresh.md); [ratings contract](../reference/integrations/letterboxd-ratings.md#removed-films)  
 **Supersedes:** None  
 **Superseded by:** None
