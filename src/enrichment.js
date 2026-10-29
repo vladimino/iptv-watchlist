@@ -205,6 +205,57 @@ async function refreshPersonalRating(env,film){
  if(previous?.rating!==rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:observedAt});
  await updateViewIndex(env,id,{actualRating:rating});await enrichRecentRemovalRatings(env,{[id]:rating},observedAt);return {filmId:id,status:'saved',rating};
 }
+// AIR-268: films removed from the watchlist are looked up one by one on their own member page, so a removal event gets
+// its rating without the 31-page films list. Gated by REMOVAL_RATING_LOOKUP (off by default). The queue is bounded,
+// each attempt is recorded before its request (a killed request cannot loop), a 403 or 429 stops the batch, and a
+// film is retried on later EPG commits at most REMOVAL_LOOKUP_MAX_ATTEMPTS times. No rating found never means watched.
+const REMOVAL_LOOKUP_KEY=ENRICHMENT_KEY+'removal-rating-lookups.json';
+const REMOVAL_LOOKUP_BATCH=5,REMOVAL_LOOKUP_MAX_ATTEMPTS=3,REMOVAL_LOOKUP_CAP=100,REMOVAL_LOOKUP_KEEP_MS=14*86400000;
+const REMOVAL_LOOKUP_RETRY_MS={claimed:3600000,failed:3600000,blocked:6*3600000,rate_limited:6*3600000,not_rated:24*3600000};
+const removalLookupEnabled=env=>env?.REMOVAL_RATING_LOOKUP==='on';
+const removalLookupFilm=film=>{const id=String(film?.id??''),url=String(film?.url||'');return /^[a-zA-Z0-9_-]{1,80}$/.test(id)&&/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/.test(url)?{id,url}:null;};
+function pruneRemovalLookups(queue,now){
+ let changed=false;
+ for(const [id,entry] of Object.entries(queue.films))if(!(now-Date.parse(entry.enqueuedAt)<=REMOVAL_LOOKUP_KEEP_MS)){delete queue.films[id];changed=true;}
+ const ids=Object.keys(queue.films);
+ if(ids.length>REMOVAL_LOOKUP_CAP){const order=ids.sort((a,b)=>(queue.films[a].state==='pending')-(queue.films[b].state==='pending')||Date.parse(queue.films[a].enqueuedAt)-Date.parse(queue.films[b].enqueuedAt));for(const id of order.slice(0,ids.length-REMOVAL_LOOKUP_CAP))delete queue.films[id];changed=true;}
+ return changed;
+}
+function removalLookupOutcome(entry,result,error,at){
+ const later=kind=>new Date(Date.parse(at)+REMOVAL_LOOKUP_RETRY_MS[kind]).toISOString(),last=entry.attempts>=REMOVAL_LOOKUP_MAX_ATTEMPTS;
+ if(error){const code=/HTTP 403\b/.test(error)?'blocked':/HTTP 429\b/.test(error)?'rate_limited':'failed';return {...entry,state:last?'gave_up':'pending',lastResult:code,lastError:String(error).slice(0,120),nextAttemptAt:last?null:later(code)};}
+ if(result.status==='saved'||result.status==='unchanged')return {...entry,state:'rated',rating:result.rating,lastResult:result.status,checkedAt:at,nextAttemptAt:null,lastError:null};
+ if(result.status==='not_rated')return {...entry,state:last?'not_rated':'pending',lastResult:'not_rated',checkedAt:at,nextAttemptAt:last?null:later('not_rated'),lastError:null};
+ return {...entry,state:result.status==='identity_conflict'?'conflict':'not_found',lastResult:result.status,checkedAt:at,nextAttemptAt:null,lastError:null};
+}
+async function lookupRemovalRatings(env,incoming=[],now=Date.now()){
+ if(!removalLookupEnabled(env))return null;
+ const at=new Date(now).toISOString(),summary={checked:0,rated:0,notRated:0,failed:0,stoppedBy:null,pending:0,queued:0};
+ try{
+  const films=(Array.isArray(incoming)?incoming:[]).map(removalLookupFilm).filter(Boolean);
+  let queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,{schemaVersion:1,films:{}},q=>{
+   let changed=false;
+   for(const {id,url} of films)if(!q.films[id]){q.films[id]={url,state:'pending',attempts:0,enqueuedAt:at,nextAttemptAt:at,lastAttemptAt:null,lastResult:null};changed=true;}
+   return pruneRemovalLookups(q,now)||changed?q:null;
+  });
+  // A 403 or 429 is about the source, not the film: the whole queue waits until the backoff ends.
+  if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>now){summary.stoppedBy=queue.pausedBy||'blocked';summary.pausedUntil=queue.pausedUntil;}
+  const due=summary.stoppedBy?[]:Object.entries(queue.films).filter(([,entry])=>entry.state==='pending'&&entry.attempts<REMOVAL_LOOKUP_MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)
+   .sort(([,a],[,b])=>Date.parse(a.enqueuedAt)-Date.parse(b.enqueuedAt)).slice(0,REMOVAL_LOOKUP_BATCH).map(([id])=>id);
+  for(const id of due){
+   // Claim first: a request killed mid-lookup leaves a counted attempt and a later retry time, never a free retry.
+   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,{schemaVersion:1,films:{}},q=>{const entry=q.films[id];if(!entry||entry.state!=='pending'||Date.parse(entry.nextAttemptAt)>now)return null;q.films[id]={...entry,attempts:entry.attempts+1,lastAttemptAt:at,nextAttemptAt:new Date(now+REMOVAL_LOOKUP_RETRY_MS.claimed).toISOString(),lastResult:'claimed'};return q;});
+   const claimed=queue.films[id];if(claimed?.lastAttemptAt!==at||claimed.lastResult!=='claimed')continue;
+   let result=null,error=null;try{result=await refreshPersonalRating(env,{id,url:claimed.url});}catch(e){error=String(e.message);}
+   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,{schemaVersion:1,films:{}},q=>{const entry=q.films[id];if(!entry)return null;const next=removalLookupOutcome(entry,result,error,at);q.films[id]=next;if(next.lastResult==='blocked'||next.lastResult==='rate_limited'){q.pausedUntil=new Date(now+REMOVAL_LOOKUP_RETRY_MS[next.lastResult]).toISOString();q.pausedBy=next.lastResult;}return q;});
+   const entry=queue.films[id];summary.checked++;
+   if(entry?.state==='rated')summary.rated++;else if(entry?.lastResult==='not_rated')summary.notRated++;else if(error)summary.failed++;
+   if(entry?.lastResult==='blocked'||entry?.lastResult==='rate_limited'){summary.stoppedBy=entry.lastResult;summary.pausedUntil=queue.pausedUntil;break;}
+  }
+  summary.queued=Object.keys(queue.films).length;summary.pending=Object.values(queue.films).filter(entry=>entry.state==='pending').length;
+  return {...summary,at};
+ }catch(e){return {...summary,at,error:String(e.message).slice(0,160)};}
+}
 async function recordRatingObservation(env,observation){if(!await loadJSON(env,diagnosticSnapshotKey))return;await appendRatingObservations(env,[observation]);}
 function parsePublicFilmsPage(html,username){
  const count=html.match(/title="([\d,]+)&nbsp;films"/i),total=count?Number(count[1].replaceAll(',','')):null;

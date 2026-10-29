@@ -1,6 +1,6 @@
 # Letterboxd ingestion and last-good ratings
 
-This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
+This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0042-removal-rating-lookup-queue.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
 
 ```mermaid
 sequenceDiagram
@@ -11,10 +11,24 @@ sequenceDiagram
     participant R2 as Authoritative R2
     participant Retired as Retired ratings refresh route
     Owner->>Sync: Authorized EPG/watchlist sync
-    Sync->>LB: Fetch watchlist and films ratings
+    Sync->>LB: Fetch watchlist
+    LB-->>Sync: Complete watchlist
+    Sync->>R2: Commit EPG generation, watchlist and its events
+    opt REMOVAL_RATING_LOOKUP=on and the diff removed films
+        Sync->>R2: Queue removed films, record the attempt
+        Sync->>LB: Member page of each due removed film, at most 5
+        alt Rating found
+            LB-->>Sync: Owner's rating
+            Sync->>R2: Rating fact, view index, removal event
+        else 403 or 429
+            LB-->>Sync: Challenge or rate limit
+            Sync->>R2: Pause the whole queue for 6 hours
+        end
+    end
+    Sync->>LB: Fetch films ratings list
     alt Films list available
-        LB-->>Sync: Watchlist and ratings snapshot
-        Sync->>R2: Commit eligible watchlist and ratings projections
+        LB-->>Sync: Ratings snapshot
+        Sync->>R2: Commit ratings projections
     else Films list HTTP 403 / incomplete
         LB-->>Sync: 403 or incomplete data
         Sync->>R2: Preserve last valid rating observations
@@ -24,6 +38,8 @@ sequenceDiagram
     Retired-->>Owner: 410 Gone, whatever RATINGS_REFRESH holds
     Note over Retired,R2: No Letterboxd request, no R2 read or write
 ```
+
+The optional block is the **removal lookup** of [ADR 0042](../adr/0042-removal-rating-lookup-queue.md) (Proposed, off by default): after the commit's events are written and before the films list, the films the watchlist diff removed are looked up on their own member pages through a bounded queue in `enrichment/removal-rating-lookups.json`; it never fails the commit ([contract](../reference/integrations/letterboxd-ratings.md#removed-films)).
 
 The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
 
