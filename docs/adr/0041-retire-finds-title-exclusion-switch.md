@@ -1,9 +1,9 @@
 # ADR 0041: The Finds display-only title exclusion runs without a switch, and FINDS_TITLE_EXCLUSION is retired
 
-**Status:** Proposed  
+**Status:** Accepted 2026-10-29 (explicit owner approval; documentation decision, no production configuration authorization)  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner flag disposition `retire now`, with one behaviour branch equal to the current value, given in the AIR-229 session on 2026-10-29; acceptance of this record is pending  
+**Approval source:** owner flag disposition `retire now`, with one behaviour branch equal to the current value, given in the AIR-229 session on 2026-10-29; ADR-0041 explicitly Accepted and Mermaid visually approved by owner in AIR-229 PR #219 conversation on 2026-10-29  
 **Related work:** [AIR-229](https://trello.com/c/ubOHtAgi); prerequisites [AIR-198](https://trello.com/c/9xpmq2fc) (rollout) and [AIR-218](https://trello.com/c/lmToHh5p) (v2 list); [ADR-0028](0028-finds-display-only-watched-exclusion.md); [ADR-0033](0033-finds-exclusion-namesake-relaxation.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0028](0028-finds-display-only-watched-exclusion.md) in part: the switch of decision 5 and the switch-based rollback; the fail-open rule of decision 5 stays  
 **Superseded by:** None
