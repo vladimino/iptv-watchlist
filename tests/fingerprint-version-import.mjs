@@ -1,5 +1,5 @@
 // AIR-264: the offline importer reads the immutable fingerprint storage of ADR-0035 section 2 (AIR-210). The objects are written by
-// the Worker's own writeFingerprint with FINGERPRINT_VERSION_OBJECTS=on. The body and generation record that the current
+// the Worker's own writeFingerprint, which writes them for every accepted fingerprint (ADR-0046). The body and generation record that the current
 // fingerprint.json names are mapped through it; valid objects nothing current names are unreferenced; every malformed or
 // inconsistent object is a blocker before any write. The hash rule is the Worker's own canonical content hash.
 import assert from 'node:assert/strict';
@@ -18,7 +18,7 @@ const writeFingerprint=vm.runInContext('writeFingerprint',ctx),contentHash=vm.ru
 
 // R2 conditional put: the writer's create-only objects keep their first bytes, as they do in production.
 class CreateOnlyBucket extends MemoryBucket{async put(key,body,options={}){if(options.onlyIf?.etagDoesNotMatch==='*'&&this.objects.has(key))return null;await super.put(key,body,options);return {key};}}
-const bucket=new CreateOnlyBucket(),env={BUCKET:bucket,FINGERPRINT_VERSION_OBJECTS:'on'};
+const bucket=new CreateOnlyBucket(),env={BUCKET:bucket};
 const first={fingerprintSchemaVersion:1,mechanics:['heist'],execution:{pace:'fast'}};
 const second={fingerprintSchemaVersion:1,mechanics:['heist','chase_escape'],execution:{pace:'medium'}};
 const one=await writeFingerprint(env,'tmdb_1',first,null,'generated');
@@ -82,7 +82,7 @@ const current=id=>base.bodies['enrichment/films/'+id+'/fingerprint.json'];
 // 4a. A film id that needs encoding keeps its pair mapped: the segment is the Worker's encodeURIComponent of the id.
 {
  const encoded=new CreateOnlyBucket(),id='film:the-thing';
- await writeFingerprint({BUCKET:encoded,FINGERPRINT_VERSION_OBJECTS:'on'},id,first,null,'generated');
+ await writeFingerprint({BUCKET:encoded},id,first,null,'generated');
  const bodies={};for(const [key,item] of encoded.objects)bodies[key]=JSON.parse(item.text);
  const keys=[...encoded.objects.keys()].sort();
  assert.equal(keys.filter(isFingerprintVersionKey).length,2);assert.ok(keys.filter(isFingerprintVersionKey).every(key=>key.startsWith('enrichment/films/film%3Athe-thing/')));
@@ -93,7 +93,7 @@ const current=id=>base.bodies['enrichment/films/'+id+'/fingerprint.json'];
 // 4b. A rewrite of identical content (a restore or a regeneration with the same result) reuses the body and record: the pointer's
 // generatedAt, produced and previous differ from the record's first values, and the pair is still mapped.
 {
- const reuse=new CreateOnlyBucket(),reuseEnv={BUCKET:reuse,FINGERPRINT_VERSION_OBJECTS:'on'};
+ const reuse=new CreateOnlyBucket(),reuseEnv={BUCKET:reuse};
  const a=await writeFingerprint(reuseEnv,'tmdb_5',first,null,'generated');
  const b=await writeFingerprint(reuseEnv,'tmdb_5',second,a,'generated');
  await new Promise(resolve=>setTimeout(resolve,5));
