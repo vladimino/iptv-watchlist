@@ -32,20 +32,16 @@ const env={TMDB_REQUEST_INTERVAL_MS:0,BUCKET:store};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/prediction-versions.js','utf8')+'\n'+fs.readFileSync('src/domain/profile-impact.js','utf8')+'\n'+fs.readFileSync('src/domain/prediction-compatibility.js','utf8')+'\n'+fs.readFileSync('src/domain/fingerprint-compatibility.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
-vm.runInContext('globalThis.testApi={writePredictionVersion,contentHash,predictionVersionBody,predictionVersionText,predictionVersionKey,predictionVersionLinked,parsePredictionVersionKey,predictionMaterializationPlan,predictionVersionsEnabled};',ctx);
+vm.runInContext('globalThis.testApi={writePredictionVersion,contentHash,predictionVersionBody,predictionVersionText,predictionVersionKey,predictionVersionLinked,parsePredictionVersionKey,predictionMaterializationPlan};',ctx);
 const api=async(path,method='GET',body)=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};
 const read=key=>JSON.parse(records.get(key));
 const sha256=text=>createHash('sha256').update(Buffer.from(text,'utf8')).digest('hex');
 const versionKeys=id=>[...records.keys()].filter(key=>key.startsWith('enrichment/films/'+id+'/predictions/versions/'));
 
-// Flag parsing: only the literal 'on' enables the writer.
-// Flag parsing is strict: the exact string 'on' and nothing else; whitespace, case and non-string values stay off.
-assert.equal(ctx.testApi.predictionVersionsEnabled({}),false);
-assert.equal(ctx.testApi.predictionVersionsEnabled(undefined),false);
-assert.equal(ctx.testApi.predictionVersionsEnabled({PREDICTION_VERSION_OBJECTS:'on'}),true);
-for(const value of ['shadow',' on ','on ',' on','ON','On','yes','true','1',1,true,['on'],{value:'on'},null,undefined,''])assert.equal(ctx.testApi.predictionVersionsEnabled({PREDICTION_VERSION_OBJECTS:value}),false,JSON.stringify(value));
-// The runner path honours the same strictness: a padded value writes no version object.
-env.PREDICTION_VERSION_OBJECTS=' on ';
+// The writer has no switch any more (ADR 0045): no code path reads PREDICTION_VERSION_OBJECTS, and a stale binding is inert.
+for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','scripts/prediction-versions-materialize.mjs'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_VERSION_OBJECTS|predictionVersionsEnabled|version_objects_off/,file+' reads no version writer switch');
+// The runner path ignores a stale binding: even 'off' writes a version object.
+env.PREDICTION_VERSION_OBJECTS='off';
 
 // Pure rules: canonical body, key shape, linkage.
 {
@@ -78,7 +74,7 @@ env.PREDICTION_VERSION_OBJECTS=' on ';
  records.delete(first.r2Key);etags.delete(first.r2Key);
 }
 
-// The runner protocol end to end, flag off then on.
+// The runner protocol end to end, first with a stale 'off' binding, then without any binding.
 const profile={ratingScale:'Letterboxd half-star steps',positiveSignals:['Good plans'],negativeSignals:['Stupid choices'],characterLogic:'Characters reason clearly',pace:'Prefer momentum',payoffEnding:'Payoff matters',genrePreferences:'Mysteries welcome',comedyPreferences:'Smart humor',horrorPreferences:'Consistent rules',scifiAdventurePreferences:'Plot driven ideas',actionPreferences:'Readable action',anchorFilms:[{title:'Example',rating:4.5,reason:'Clever'}],hardSkips:['Cruelty for spectacle'],calibration:'Use full scale, be conservative'};
 assert.equal((await api('enrichment/profile','PUT',{version:1,schemaVersion:1,profile})).status,200);
 const now=Date.now(),film=id=>({id,title:id,original:id,url:'https://letterboxd.com/film/'+id+'/',year:2020,genres:['Боевик'],synopsis:'A plot',directors:[],actors:[],shows:[{start:now}]});
@@ -90,17 +86,16 @@ const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',mat
 async function startRun(){const started=await api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'});assert.equal(started.status,200);return started.data.runId;}
 async function submit(runId,filmId,extra={}){const result=await api('enrichment/submit','POST',{runId,items:[{filmId,fingerprint,prediction:{...prediction,...extra}}]});assert.equal(result.status,200);return result.data.results[0];}
 
-// Flag not exactly 'on': the bundle keeps its shape, no version object is written.
+// A stale 'off' binding changes nothing: the version object is written and the bundle current points at it.
 let runId=await startRun();
 assert.equal((await submit(runId,'film000')).status,'created');
-assert.equal(read('enrichment/films/film000/predictions.json').current.r2Key,undefined);
-assert.equal(versionKeys('film000').length,0);
-assert.equal([...records.keys()].some(key=>key.includes('/predictions/versions/')),false);
+assert.equal(versionKeys('film000').length,1);
+assert.equal(read('enrichment/films/film000/predictions.json').current.r2Key,versionKeys('film000')[0]);
+assert.equal(ctx.testApi.predictionVersionLinked(read('enrichment/films/film000/predictions.json').current,'film000'),true);
 await api('enrichment/complete','POST',{runId,reason:'model_error'});
 delete env.PREDICTION_VERSION_OBJECTS;
 
-// Flag on: a version object is written first, the bundle current points at it, the view index carries the same record.
-env.PREDICTION_VERSION_OBJECTS='on';
+// No binding: a version object is written first, the bundle current points at it, the view index carries the same record.
 runId=await startRun();
 assert.equal((await submit(runId,'film001')).status,'created');
 const bundle1=read('enrichment/films/film001/predictions.json');
@@ -217,4 +212,4 @@ await api('enrichment/complete','POST',{runId,reason:'model_error'});
  assert.equal(spawnSync(process.execPath,['scripts/prediction-versions-plan.mjs','--snapshot','relative'],{encoding:'utf8'}).status,2);
  fs.rmSync(root,{recursive:true,force:true});
 }
-console.log('Prediction versions: flag gate, canonical bytes and shared hash, write-once retry and conflict, version-first commit order, history links, partial commit without a dangling pointer, backward compatibility and the materialization plan passed');
+console.log('Prediction versions: no writer switch (a stale binding is inert), canonical bytes and shared hash, write-once retry and conflict, version-first commit order, history links, partial commit without a dangling pointer, backward compatibility and the materialization plan passed');

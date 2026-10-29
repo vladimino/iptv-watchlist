@@ -26,7 +26,7 @@ split.approval={approvedBy:'owner',approvedAt:'2026-01-01T00:00:00.000Z',reviewR
 function release(patch){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,encodeURIComponent,decodeURIComponent,crypto:webcrypto,console});
  vm.runInContext(domain,ctx);
- for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
+ for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
  vm.runInContext('globalThis.T={loadPredictionDiagnosticSnapshot,predictionFilmDiagnostic,predictionQueueOverview,GENERAL_EXECUTION,EXECUTION};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
  const diagnostics=async(id,flags={})=>plain(ctx.T.predictionFilmDiagnostic(await ctx.T.loadPredictionDiagnosticSnapshot({...baseEnv,...flags},id),id,Date.now()));

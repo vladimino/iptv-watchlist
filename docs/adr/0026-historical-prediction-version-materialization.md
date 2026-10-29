@@ -6,7 +6,7 @@
 **Approval source:** pending owner and coordinator review of [AIR-179](https://trello.com/c/vdLts7tJ)  
 **Related work:** [AIR-179](https://trello.com/c/vdLts7tJ), [AIR-164](https://trello.com/c/iZzON44A), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0019](0019-live-d1-backfill-boundaries.md) item 4, [prediction versions runbook](../runbooks/prediction-versions.md), [AIR-74 dry-runs after ADR-0022](../evidence/d1-migration/air-74-real-baseline-dry-run-2026-10-27.md)  
 **Supersedes:** None (it implements the design in section 2 of the runbook)  
-**Superseded by:** None
+**Superseded by:** [ADR-0045](0045-retire-prediction-version-objects-switch.md) (Proposed) in part: the second gate of decision 3; a write batch needs `PREDICTION_MATERIALIZATION=on` only, because the version writer has no switch
 
 ## Context
 

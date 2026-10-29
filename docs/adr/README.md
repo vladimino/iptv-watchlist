@@ -53,7 +53,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| Record | Status and boundary | Related work |
+| --- | --- | --- |
+| [0045 — Every committed prediction is written as an immutable version object, and PREDICTION_VERSION_OBJECTS is retired](0045-retire-prediction-version-objects-switch.md) | Proposed 2026-10-29 (owner flag disposition `retire now`; ADR acceptance pending; binding removal separately gated) | [AIR-226](https://trello.com/c/Upzk5DqR) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

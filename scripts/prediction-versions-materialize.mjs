@@ -84,7 +84,7 @@ export async function rehearse({snapshot,output}){
  const snapshotPath=outside(snapshot,'--snapshot'),{origin,batches,outputPath}=await loadPlan(output);
  const manifest=JSON.parse(await readFile(path.join(snapshotPath,'manifest.json'),'utf8'));
  if(manifest.totals?.aggregateSha256!==origin.planId)throw new MaterializeError('The snapshot is not the one the plan was made from',3);
- const bucket=snapshotBucket(snapshotPath,manifest),env={BUCKET:bucket,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'},ctx=workerContext();
+ const bucket=snapshotBucket(snapshotPath,manifest),env={BUCKET:bucket,PREDICTION_MATERIALIZATION:'on'},ctx=workerContext();
  const before=new Map([...bucket.records].filter(([key])=>key.endsWith('/predictions.json')).map(([key,text])=>[key,{text,bundle:JSON.parse(text)}]));
  const plannedKeys=new Set(batches.flat().map(item=>'enrichment/films/'+encodeURIComponent(item.filmId)+'/predictions.json'));
  const outcomes={},statuses={},replays={},incomplete=[];
