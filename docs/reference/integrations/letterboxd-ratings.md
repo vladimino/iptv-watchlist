@@ -12,9 +12,24 @@ The integration footer does not use this document for current ratings health; th
 
 ## Where ratings come from
 
-- The EPG commit still reads the public films list once, with its existing three tries on HTTP 403, and projects ratings into the view index. A 403 there leaves the previous ratings in place and marks `ratingPending` on the sync ([enrichment API](../api/enrichment.md)).
+- The EPG commit still reads the public films list once, with its existing three tries on HTTP 403, and projects ratings into the view index. A 403 there leaves the previous ratings in place and records `ratingError` on the sync while `ratingPending` stays ([enrichment API](../api/enrichment.md)); the attempt itself is traced as below.
 - The per-film lookup and the owner `PUT /api/enrichment/actual-ratings` write single ratings, and with `LETTERBOXD_FACTS=on` the fact records ([user facts contract](letterboxd-user-facts.md)).
 - A watchlist removal event still receives a half-star rating when the per-film lookup records one.
+
+## Ratings attempt
+
+[AIR-270](https://trello.com/c/DJ6Jvg4F). The ratings work after an EPG commit carries a durable marker, `sync.json` `ratingAttempt`, also returned by the sync status:
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `startedAt` | One attempt per commit that still has `ratingPending` |
+| `phase`, `at` | The phase entered last and when: `post_commit` (saved with `stage: complete`, covers the prediction queue refresh), `removal_lookup` (only with a removal hand-over), `films_list`, `repair` (baseline and diary repairs after a failed list) |
+| `state` | `started`, `finished` (list read and applied), `error` (list failed; `cause` is `blocked`, `rate_limited`, `incomplete` or `failed`, and `ratingError` holds the message), `unknown` (closed after an interruption) |
+| `finishedAt`, `closedAt`, `cause`, `interruptedPhase` | End of a finished or failed attempt; for `unknown`, when it was closed and the phase it died in |
+
+Each phase is saved before its work starts and logged as `{"event":"epg_ratings_phase","runId",…,"phase"}`, so Workers Observability shows the last phase before an `exceededMemory` or time-limit end of the request.
+
+**Recovery.** A later `/api/sync/epg` step on the completed run, before the discovery continuation, closes an attempt that is still `started` and whose last phase is older than five minutes (or, for a run written before this marker, `ratingPending` on a run updated more than five minutes ago): `state: unknown`, `cause: interrupted`, `interruptedPhase`, `ratingError` "Ratings step interrupted during <phase>; no outcome recorded", and `ratingPending` removed. It never repeats the films-list scan or the repairs, writes no programme, generation or event, and leaves a finished or failed attempt alone; further steps change nothing. The next EPG commit makes its one routine films-list attempt as before. An interruption is reported as a failure, never as a success.
 
 ## Removed films
 

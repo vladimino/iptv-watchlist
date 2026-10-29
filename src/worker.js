@@ -461,19 +461,43 @@ async function resumeRemovalLookups(env,run){
  const lookup=await lookupRemovalRatings(env,run.removalLookups);if(!lookup)return null;
  if(!lookup.error)delete run.removalLookups;run.removalRatingLookup=lookup;await saveJSON(env,'sync.json',run);return lookup;
 }
+// AIR-270: the post-commit ratings work carries a durable attempt marker in sync.json. Each phase is saved (and logged)
+// before it starts, so a request killed for memory or time leaves `state: started` with the phase it died in. The next
+// step on the completed run closes such an attempt as `unknown` once it is stale; it never repeats the films-list scan.
+const RATINGS_ATTEMPT_STALE_MS=5*60000;
+async function ratingsPhase(env,run,phase,save=true){
+ const at=new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,phase,at};
+ console.log(JSON.stringify({event:'epg_ratings_phase',runId:run.runId,attemptId:run.ratingAttempt.id,phase,at}));
+ if(save)await saveJSON(env,'sync.json',run);
+}
+function ratingsAttemptCause(message){if(/403|anti-bot/i.test(message))return 'blocked';if(/429/.test(message))return 'rate_limited';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'incomplete';return 'failed';}
+async function closeInterruptedRatings(env,run,now=Date.now()){
+ if(run.stage!=='complete'||!run.ratingPending?.length)return null;
+ const attempt=run.ratingAttempt,since=Date.parse(attempt?.at||run.updatedAt);
+ if(attempt&&attempt.state!=='started'||!(now-since>RATINGS_ATTEMPT_STALE_MS))return null;
+ const at=new Date(now).toISOString(),phase=attempt?.phase||'not_recorded';
+ run.ratingAttempt={...(attempt||{id:null,startedAt:null}),state:'unknown',cause:'interrupted',interruptedPhase:phase,closedAt:at};
+ run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;delete run.ratingPending;
+ await saveJSON(env,'sync.json',run);return run.ratingAttempt;
+}
 async function completeWithRatings(env,run,report){
+ if(run.ratingPending?.length)run.ratingAttempt={id:crypto.randomUUID(),state:'started',startedAt:new Date().toISOString()};
+ if(run.ratingAttempt?.state==='started')await ratingsPhase(env,run,'post_commit',false);
  const result=await finishSync(env,run,report);
  // The removed films first, so a films-list failure or a killed request later on does not cost their ratings.
+ if(run.ratingAttempt?.state==='started'&&run.removalLookups)await ratingsPhase(env,run,'removal_lookup');
  const lookup=await resumeRemovalLookups(env,run);
  if(!run.ratingPending?.length)return lookup?{...result,removalRatings:lookup}:result;
- try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;run.ratingObservedAt=ratings.observedAt||new Date().toISOString();await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
- catch(e){let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
+ await ratingsPhase(env,run,'films_list');
+ try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;run.ratingObservedAt=ratings.observedAt||new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,state:'finished',finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
+ catch(e){run.ratingError=String(e.message).slice(0,200);run.ratingAttempt={...run.ratingAttempt,state:'error',cause:ratingsAttemptCause(run.ratingError)};await ratingsPhase(env,run,'repair');
+  let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
   try{diary=await repairRecentDiaryRatings(env,report);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
-  const repair={removed,diary};run.ratingError=String(e.message).slice(0,200);run.ratingRepair=repair;await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
+  const repair={removed,diary};run.ratingRepair=repair;run.ratingAttempt={...run.ratingAttempt,finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
 }
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
- return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
+ return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
 }
 // Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step. `caller` names the
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
@@ -492,7 +516,7 @@ async function syncStep(env,pathname,body,step){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';if(run.removalLookups)await resumeRemovalLookups(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';if(run.removalLookups)await resumeRemovalLookups(env,run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const discovery=await queueDiscovery(env,'epg_committed',run.runId);step.discovery=discoverySummary(discovery);return json({...result,discovery});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
