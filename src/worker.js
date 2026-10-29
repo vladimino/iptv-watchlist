@@ -502,9 +502,35 @@ async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
  return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
 }
+// AIR-273, temporary (cleanup AIR-274): with TEST_ORDERED_RATINGS=on the sync entry is diagnostic only. A start makes
+// exactly one GET of the owner's rated-date page 1 and returns what it saw; a step answers 409. Neither reads or writes
+// storage, creates a run or touches the watchlist, EPG, discovery or queues. Any other value keeps the normal path.
+const testOrderedRatingsEnabled=env=>env?.TEST_ORDERED_RATINGS==='on';
+async function sha256Short(text){const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));return [...digest.slice(0,4)].map(byte=>byte.toString(16).padStart(2,'0')).join('');}
+async function testOrderedRatings(env){
+ const url=`https://letterboxd.com/${sourceConfig(env).letterboxdUsername}/films/by/rated-date/`,requestedAt=new Date().toISOString(),started=Date.now();
+ const report={mode:'test_ordered_ratings',source:'rated_date_page_1',requestedAt,requests:1};
+ let response;
+ try{response=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},redirect:'manual',signal:AbortSignal.timeout(15000)});}
+ catch(e){report.durationMs=Date.now()-started;report.error=String(e.message).slice(0,160);console.log(JSON.stringify({event:'test_ordered_ratings',...report}));return report;}
+ const html=await response.text(),header=name=>response.headers.get(name);
+ const items=[...html.matchAll(/<li\b[^>]*class="[^"]*\bgriditem\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi)].map(match=>({id:match[1].match(/data-postered-identifier='[^']*?&quot;lid&quot;:&quot;([a-zA-Z0-9_-]+)&quot;/)?.[1]||null,stars:match[1].match(/\brated-(10|[1-9])\b/)?.[1]||null}));
+ const ordered=[];for(const item of items)ordered.push({idHash:item.id?await sha256Short(item.id):null,rating:item.stars?Number(item.stars)/2:null});
+ const selected=html.match(/smenu-subselected"><a class="item" href="([^"]+)"/)?.[1]||'';
+ Object.assign(report,{durationMs:Date.now()-started,status:response.status,headers:{cfMitigated:header('cf-mitigated'),contentType:header('content-type'),cacheControl:header('cache-control'),cfCacheStatus:header('cf-cache-status'),server:header('server'),location:header('location')?'present':null},
+  bytes:html.length,challenge:/<title>\s*Just a moment/i.test(html),validPage:items.length>0&&/title="[\d,]+&nbsp;films"/i.test(html),total:html.match(/title="([\d,]+)&nbsp;films"/i)?.[1]||null,
+  sortIsRatedDate:/\/films\/by\/rated-date\/$/.test(selected),next:/<a\b[^>]*class="next"/i.test(html),items:items.length,rated:ordered.filter(item=>item.rating!=null).length,
+  unrated:ordered.filter(item=>item.rating==null).length,missingId:ordered.filter(item=>!item.idHash).length,order:ordered});
+ console.log(JSON.stringify({event:'test_ordered_ratings',...report,order:undefined,orderLength:ordered.length}));
+ return report;
+}
 // Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step. `caller` names the
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
 async function postSync(env,execution,pathname,body,caller='http'){
+ if(testOrderedRatingsEnabled(env)){
+  if(pathname==='/api/sync/start')return json(await testOrderedRatings(env));
+  return json({mode:'test_ordered_ratings',error:'Sync steps are disabled while TEST_ORDERED_RATINGS is on; a start makes the one diagnostic request.'},409);
+ }
  if(pathname==='/api/sync/start')return json(await beginSync(env));
  const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=()=>pathname==='/api/sync/epg'||step.branch==='run_mismatch';
  await openContinuationStep(env,step,persisted());

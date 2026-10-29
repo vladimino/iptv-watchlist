@@ -15,6 +15,7 @@ const FEATURE_FLAGS=[
  onOff('LETTERBOXD_BASELINE_IMPORT',env=>env?.LETTERBOXD_BASELINE_IMPORT==='on'?'on':'off',{requires:{LETTERBOXD_FACTS:'on'}}),
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
  onOff('REMOVAL_RATING_LOOKUP',env=>removalLookupEnabled(env)?'on':'off'),
+ onOff('TEST_ORDERED_RATINGS',env=>testOrderedRatingsEnabled(env)?'on':'off'),
  // Retired: the code ignores the binding whatever it holds. Reported so a stale binding is visible.
  {name:'SCORED_RESOLUTION',modes:[],default:null,tokens:['off','shadow','on'],retired:true,effective:()=>null},
  {name:'RATINGS_REFRESH',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
