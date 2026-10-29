@@ -1,9 +1,9 @@
 # ADR 0042: The owner's «Смотрел» mark has no switch of its own, and FINDS_WATCHED_MARK is retired
 
-**Status:** Proposed  
+**Status:** Accepted 2026-10-29 (explicit owner approval; no production configuration authorization)  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner flag disposition `retire now`, keeping the behaviour of the current value, given in the AIR-230 session on 2026-10-29; acceptance of this record is pending  
+**Approval source:** owner flag disposition `retire now`, keeping the behaviour of the current value, given in the AIR-230 session on 2026-10-29; owner explicitly accepted ADR-0042 in the AIR-230 PR #220 conversation on 2026-10-29; separate approval is required to delete the production binding  
 **Related work:** [AIR-230](https://trello.com/c/AW2GqqQL); prerequisites [AIR-214](https://trello.com/c/dX5YZlFY) (implementation) and [AIR-215](https://trello.com/c/MC9Ku87Z) (rollout); [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md); [ADR-0023](0023-letterboxd-user-facts.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md) in part: the mark's own switch in decision 6 and the switch-based disable; the `LETTERBOXD_FACTS` gate of decision 6 and every other guard stay  
 **Superseded by:** None
