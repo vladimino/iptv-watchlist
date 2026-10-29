@@ -15,10 +15,11 @@ AIR-34 adds the owner's rating to a watchlist-removal event, but the rating usua
 ## Decision
 
 1. **Per-film, for the current diff only.** When the EPG commit builds the watchlist diff, it hands over the removed films with their Letterboxd film URL. Right after the commit's events are written and before the films list, `lookupRemovalRatings` queues them and looks them up through the existing per-film path.
-2. **A durable, bounded queue.** `enrichment/removal-rating-lookups.json`, one entry per film id, written by compare-and-swap. At most five requests per commit, at most three attempts per film, entries kept 14 days and at most 100. The attempt is recorded before the request, so a killed request cannot cause a free retry.
-3. **Upstream blocks stop everything.** A 403 or 429 ends the batch and pauses the whole queue for six hours; no request is repeated and no challenge is solved.
-4. **No new meaning.** A missing rating is never "watched"; the first confirmed rating on an event stays; rating facts follow the existing greater-observation rule.
-5. **Gated and independent.** Behind `REMOVAL_RATING_LOOKUP`, off by default. The lookup never fails the commit; its summary is stored in `sync.json` as `removalRatingLookup`.
+2. **A durable, bounded queue.** `enrichment/removal-rating-lookups.json`, one entry per film id, written by compare-and-swap. At most five requests per call, at most three attempts per film; films beyond five stay pending for later calls. A pending film is never dropped: after 14 days it is kept as `expired`; finished entries are kept 14 days and at most 100. The attempt is recorded before the request, so a killed request cannot cause a free retry.
+3. **Replay after a killed commit.** The hand-over stays in `sync.json` until the queue holds it; the next sync step on the completed run replays it once before the discovery continuation.
+4. **Upstream blocks stop everything.** A 403 or 429 ends the batch and pauses the whole queue for six hours; no request is repeated and no challenge is solved.
+5. **No new meaning.** A missing rating is never "watched"; the first confirmed rating on an event stays; rating facts follow the existing greater-observation rule.
+6. **Gated and independent.** Behind `REMOVAL_RATING_LOOKUP`, off by default. The lookup never fails the commit; its summary is stored in `sync.json` as `removalRatingLookup`.
 
 Not decided here: the films-list scan itself, its recovery after a killed request ([AIR-270](https://trello.com/c/DJ6Jvg4F)), the footer reading ([AIR-269](https://trello.com/c/4BDoPQfg)), removing the frozen-baseline fallback, and the production activation of the switch.
 
@@ -41,7 +42,7 @@ Code only, behind an off-by-default switch; switching it off stops queueing and 
 ## Evidence
 
 - **Original decision:** this record, proposed with AIR-268.
-- **Implementation:** `src/enrichment.js` (`lookupRemovalRatings`), `src/worker.js` (hand-over and call order), `src/feature-flags.js`, `tests/removal-rating-lookup.mjs`.
+- **Implementation:** `src/enrichment.js` (`lookupRemovalRatings`), `src/worker.js` (hand-over, call order, `resumeRemovalLookups` on the next step), `src/feature-flags.js`, `tests/removal-rating-lookup.mjs`.
 - **Dated verification:** none yet; production behavior is a follow-up after an approved activation.
 - **Uncertainty:** whether Letterboxd challenges member film pages from the Worker as it does the films list was not measured; the queue pauses rather than retries if it does.
 

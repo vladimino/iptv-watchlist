@@ -214,11 +214,16 @@ const REMOVAL_LOOKUP_BATCH=5,REMOVAL_LOOKUP_MAX_ATTEMPTS=3,REMOVAL_LOOKUP_CAP=10
 const REMOVAL_LOOKUP_RETRY_MS={claimed:3600000,failed:3600000,blocked:6*3600000,rate_limited:6*3600000,not_rated:24*3600000};
 const removalLookupEnabled=env=>env?.REMOVAL_RATING_LOOKUP==='on';
 const removalLookupFilm=film=>{const id=String(film?.id??''),url=String(film?.url||'');return /^[a-zA-Z0-9_-]{1,80}$/.test(id)&&/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/.test(url)?{id,url}:null;};
+// A film still pending is never dropped: past 14 days it becomes `expired` (visible, no more requests); the cap and the
+// 14-day retention apply to finished entries only.
 function pruneRemovalLookups(queue,now){
- let changed=false;
- for(const [id,entry] of Object.entries(queue.films))if(!(now-Date.parse(entry.enqueuedAt)<=REMOVAL_LOOKUP_KEEP_MS)){delete queue.films[id];changed=true;}
- const ids=Object.keys(queue.films);
- if(ids.length>REMOVAL_LOOKUP_CAP){const order=ids.sort((a,b)=>(queue.films[a].state==='pending')-(queue.films[b].state==='pending')||Date.parse(queue.films[a].enqueuedAt)-Date.parse(queue.films[b].enqueuedAt));for(const id of order.slice(0,ids.length-REMOVAL_LOOKUP_CAP))delete queue.films[id];changed=true;}
+ let changed=false;const old=entry=>!(now-Date.parse(entry.enqueuedAt)<=REMOVAL_LOOKUP_KEEP_MS);
+ for(const [id,entry] of Object.entries(queue.films)){
+  if(entry.state==='pending'){if(old(entry)){queue.films[id]={...entry,state:'expired',nextAttemptAt:null};changed=true;}continue;}
+  if(entry.state!=='expired'&&old(entry)||entry.state==='expired'&&now-Date.parse(entry.enqueuedAt)>2*REMOVAL_LOOKUP_KEEP_MS){delete queue.films[id];changed=true;}
+ }
+ const finished=Object.keys(queue.films).filter(id=>queue.films[id].state!=='pending');
+ if(finished.length>REMOVAL_LOOKUP_CAP){for(const id of finished.sort((a,b)=>Date.parse(queue.films[a].enqueuedAt)-Date.parse(queue.films[b].enqueuedAt)).slice(0,finished.length-REMOVAL_LOOKUP_CAP))delete queue.films[id];changed=true;}
  return changed;
 }
 function removalLookupOutcome(entry,result,error,at){
@@ -230,7 +235,7 @@ function removalLookupOutcome(entry,result,error,at){
 }
 async function lookupRemovalRatings(env,incoming=[],now=Date.now()){
  if(!removalLookupEnabled(env))return null;
- const at=new Date(now).toISOString(),summary={checked:0,rated:0,notRated:0,failed:0,stoppedBy:null,pending:0,queued:0};
+ const at=new Date(now).toISOString(),summary={checked:0,rated:0,notRated:0,failed:0,stoppedBy:null,pending:0,expired:0,queued:0};
  try{
   const films=(Array.isArray(incoming)?incoming:[]).map(removalLookupFilm).filter(Boolean);
   let queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,{schemaVersion:1,films:{}},q=>{
@@ -252,7 +257,7 @@ async function lookupRemovalRatings(env,incoming=[],now=Date.now()){
    if(entry?.state==='rated')summary.rated++;else if(entry?.lastResult==='not_rated')summary.notRated++;else if(error)summary.failed++;
    if(entry?.lastResult==='blocked'||entry?.lastResult==='rate_limited'){summary.stoppedBy=entry.lastResult;summary.pausedUntil=queue.pausedUntil;break;}
   }
-  summary.queued=Object.keys(queue.films).length;summary.pending=Object.values(queue.films).filter(entry=>entry.state==='pending').length;
+  summary.queued=Object.keys(queue.films).length;summary.pending=Object.values(queue.films).filter(entry=>entry.state==='pending').length;summary.expired=Object.values(queue.films).filter(entry=>entry.state==='expired').length;
   return {...summary,at};
  }catch(e){return {...summary,at,error:String(e.message).slice(0,160)};}
 }

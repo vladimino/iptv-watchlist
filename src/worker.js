@@ -455,10 +455,16 @@ async function publishGenerationWithLedger(env,runId,discovery,meta,files){
  if(old)return publishEpgGeneration(env,runId,{...files,'discovery-latest.json':{...meta,items:mergeDiscoveryCandidates(old.items,discovery,{replaceShows:true,programmeRunId:runId})}});
  return publishEpgGeneration(env,runId,files,{latest:discovery,meta,mode});
 }
+// AIR-268: queue and look up the films this run's watchlist diff removed. The hand-over stays in sync.json until the
+// queue holds it, so a request killed after finishSync is replayed by the next step on the completed run (syncStep).
+async function resumeRemovalLookups(env,run){
+ const lookup=await lookupRemovalRatings(env,run.removalLookups);if(!lookup)return null;
+ if(!lookup.error)delete run.removalLookups;run.removalRatingLookup=lookup;await saveJSON(env,'sync.json',run);return lookup;
+}
 async function completeWithRatings(env,run,report){
  const result=await finishSync(env,run,report);
- // AIR-268: the removed films first, so a films-list failure or a killed request later on does not cost their ratings.
- const lookup=await lookupRemovalRatings(env,run.removalLookups);if(lookup){if(!lookup.error)delete run.removalLookups;run.removalRatingLookup=lookup;await saveJSON(env,'sync.json',run);}
+ // The removed films first, so a films-list failure or a killed request later on does not cost their ratings.
+ const lookup=await resumeRemovalLookups(env,run);
  if(!run.ratingPending?.length)return lookup?{...result,removalRatings:lookup}:result;
  try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;run.ratingObservedAt=ratings.observedAt||new Date().toISOString();await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
  catch(e){let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
@@ -486,7 +492,7 @@ async function syncStep(env,pathname,body,step){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';if(run.removalLookups)await resumeRemovalLookups(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const discovery=await queueDiscovery(env,'epg_committed',run.runId);step.discovery=discoverySummary(discovery);return json({...result,discovery});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
@@ -503,7 +509,7 @@ async function epgSync(env,run){
  const matched=[...fresh.values()].map(f=>({...f,shows:f.shows.sort((a,b)=>a.start-b.start)}));const currentById=new Map(matched.map(f=>[String(f.id),f]));const films=run.watchlist.map(f=>withAvailability({...f,...currentById.get(String(f.id)),shows:currentById.get(String(f.id))?.shows||[]}));const countShows=matched.reduce((n,f)=>n+f.shows.length,0);
  const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
- if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];if(removalLookupEnabled(env)){const removed=new Set(run.events[0].removed.map(film=>String(film.id)));run.removalLookups=(before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean).slice(0,REMOVAL_LOOKUP_CAP);}await saveJSON(env,'sync.json',run);}
+ if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];if(removalLookupEnabled(env)){const removed=new Set(run.events[0].removed.map(film=>String(film.id)));run.removalLookups=(before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);}await saveJSON(env,'sync.json',run);}
  try{await publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report});}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
  await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
