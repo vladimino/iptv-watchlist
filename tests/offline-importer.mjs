@@ -212,6 +212,7 @@ assert.equal(classifyObject('epg/generations/run-old/programme.json'),'r2_only')
 assert.equal(classifyObject('started/zz.json'),'r2_only');
 assert.equal(classifyObject('letterboxd/facts/films/tmdb-1.json'),'r2_only');
 assert.equal(classifyObject('sync.json'),'r2_only');
+assert.equal(classifyObject('enrichment/removal-rating-lookups.json'),'r2_only','the removal rating lookup queue is runtime coordination (ADR 0043)');
 assert.equal(classifyObject('letterboxd/display-exclusion.json'),'r2_only','the owner-approved Finds display-only exclusion list is user state (owner decision of 28 October 2026)');
 assert.equal(classifyObject('mystery/zz.json'),'unmapped');
 assert.equal(classifyObject('epg/raw/guide.xml'),'excluded');
