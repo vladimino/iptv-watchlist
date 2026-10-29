@@ -10,7 +10,7 @@
 - [Letterboxd user facts contract](../reference/integrations/letterboxd-user-facts.md), [catalog API](../reference/api/catalog.md)
 
 **Supersedes:** [ADR-0023](0023-letterboxd-user-facts.md) in part: the boundary that every fact record carries a Letterboxd id. This record allows one owner-only writer to create a record with only a trusted TMDB alias.  
-**Superseded by:** [ADR-0042](0042-retire-finds-watched-mark-switch.md) (Proposed) in part: the mark's own switch in decision 6 is retired; the `LETTERBOXD_FACTS` gate and every other guard stay
+**Superseded by:** [ADR-0042](0042-retire-finds-watched-mark-switch.md) (Accepted) in part: the mark's own switch in decision 6 is retired; the `LETTERBOXD_FACTS` gate and every other guard stay
 
 ## Context
 
