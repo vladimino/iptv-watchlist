@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','PREDICTION_FINGERPRINT_COMPATIBILITY','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -102,7 +102,9 @@ const live=await flags({PREDICTION_PROFILE_COMPATIBILITY:'selective',PREDICTION_
 const l=name=>entry(live.report,name);
 assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROFILE_COMPATIBILITY').raw,l('PREDICTION_PROFILE_COMPATIBILITY').retired,l('PREDICTION_PROFILE_COMPATIBILITY').issue,l('PREDICTION_PROFILE_COMPATIBILITY').effective],['set','selective',true,'retired',null],'the retired profile-rule switch is inert and the production selective is visible (ADR 0044)');
 assert.deepEqual([l('PREDICTION_FINGERPRINT_COMPATIBILITY').state,l('PREDICTION_FINGERPRINT_COMPATIBILITY').raw,l('PREDICTION_FINGERPRINT_COMPATIBILITY').valid,l('PREDICTION_FINGERPRINT_COMPATIBILITY').effective],['set','selective',true,'selective']);
-assert.equal(l('FINGERPRINT_VERSION_OBJECTS').effective,'on');
+const fingerprintWriter=l('FINGERPRINT_VERSION_OBJECTS');
+assert.deepEqual([fingerprintWriter.state,fingerprintWriter.raw,fingerprintWriter.retired,fingerprintWriter.valid,fingerprintWriter.issue,fingerprintWriter.effective],['set','on',true,false,'retired',null],'the retired fingerprint writer switch is inert and the production on is visible (ADR 0046)');
+assert.deepEqual([l('PREDICTION_FINGERPRINT_COMPATIBILITY').retired,l('PREDICTION_FINGERPRINT_COMPATIBILITY').valid,l('PREDICTION_FINGERPRINT_COMPATIBILITY').effective],[false,true,'selective'],'the fingerprint compatibility switch stays active');
 assert.equal(l('DISCOVERY_LEDGER_MODE').effective,'bounded');
 assert.match(l('DISCOVERY_LEDGER_MODE').note,/does not read storage/);
 const mark=l('FINDS_WATCHED_MARK');
@@ -118,10 +120,10 @@ assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.vali
 const writer=l('PREDICTION_VERSION_OBJECTS');
 assert.deepEqual([writer.state,writer.raw,writer.retired,writer.valid,writer.issue,writer.effective],['set','on',true,false,'retired',null],'the retired prediction version writer switch is inert and the production on is visible (ADR 0045)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:16,set:11,absent:5,invalid:7,redacted:0});
+assert.deepEqual(live.report.summary,{registered:16,set:11,absent:5,invalid:8,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
-const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,CATALOG_POSTER_HYDRATION:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',FINGERPRINT_VERSION_OBJECTS:'on'.repeat(150)});
+const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,CATALOG_POSTER_HYDRATION:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
 assert.doesNotMatch(leaky.text,new RegExp(SECRET),'a value outside the known tokens never leaves the Worker');
 const k=name=>entry(leaky.report,name);
 assert.deepEqual([k('CANDIDATE_DISCOVERY').raw,k('CANDIDATE_DISCOVERY').redacted,k('CANDIDATE_DISCOVERY').shape,k('CANDIDATE_DISCOVERY').issue,k('CANDIDATE_DISCOVERY').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
@@ -129,7 +131,7 @@ assert.deepEqual([k('CATALOG_POSTER_HYDRATION').raw,k('CATALOG_POSTER_HYDRATION'
 assert.deepEqual([k('PREDICTION_MATERIALIZATION').raw,k('PREDICTION_MATERIALIZATION').shape,k('PREDICTION_MATERIALIZATION').issue,k('PREDICTION_MATERIALIZATION').effective],[null,{type:'object'},'not_string','off']);
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
 assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective],['bounded ','case_or_whitespace','full'],'a padded known token is shown, and it is invalid where the code does not trim');
-assert.deepEqual([k('FINGERPRINT_VERSION_OBJECTS').raw,k('FINGERPRINT_VERSION_OBJECTS').shape],[null,{type:'string',length:300}],'an over-long value is shape only');
+assert.deepEqual([k('REMOVAL_RATING_LOOKUP').raw,k('REMOVAL_RATING_LOOKUP').shape],[null,{type:'string',length:300}],'an over-long value is shape only');
 assert.equal(leaky.report.summary.redacted,5);
 // The code trims CANDIDATE_DISCOVERY, so a padded on is known content, valid and on.
 const padded=entry((await flags({CANDIDATE_DISCOVERY:' on '})).report,'CANDIDATE_DISCOVERY');
@@ -149,7 +151,7 @@ for(const [name,needs] of [['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS']]){
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
  PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",
- PREDICTION_FINGERPRINT_COMPATIBILITY:'fingerprintCompatibilityMode(env)',FINGERPRINT_VERSION_OBJECTS:"fingerprintVersionsEnabled(env)?'on':'off'",DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
+ PREDICTION_FINGERPRINT_COMPATIBILITY:'fingerprintCompatibilityMode(env)',DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
 };
 const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);
@@ -170,7 +172,7 @@ for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS'];
+const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');
@@ -184,8 +186,8 @@ assert.equal(withArgs.body.result.isError,true);
 assert.match(withArgs.body.result.content[0].text,/no arguments/);
 assert.doesNotMatch(JSON.stringify(withArgs.body),new RegExp(SECRET));
 assert.equal((await tool(guarded({}).env,'feature_flags',{},{assertion:null})).response.status,403,'behind the Access JWT');
-const bare=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,FINGERPRINT_VERSION_OBJECTS:'on'},'feature_flags',{});
-assert.equal(entry(bare.body.result.structuredContent,'FINGERPRINT_VERSION_OBJECTS').effective,'on','answers without a bucket binding');
+const bare=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,LETTERBOXD_FACTS:'on'},'feature_flags',{});
+assert.equal(entry(bare.body.result.structuredContent,'LETTERBOXD_FACTS').effective,'on','answers without a bucket binding');
 assert.doesNotMatch(fs.readFileSync('src/feature-flags.js','utf8'),/Object\.(keys|entries|getOwnPropertyNames)\(env|for\s*\(\s*const\s+\w+\s+in\s+env/,'the readout never enumerates env');
 
 console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and the retired switch, unmet requirements, effective modes equal to every consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');

@@ -51,6 +51,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0043 — Films removed from the watchlist get their rating from a bounded per-film lookup queue, not from the films list](0043-removal-rating-lookup-queue.md) | Accepted 2026-10-29; owner ADR and Mermaid approval; behind `REMOVAL_RATING_LOOKUP`, off by default | [AIR-268](https://trello.com/c/7ePpEYev); no activation authorized |
 | [0044 — The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired](0044-retire-profile-compatibility-switch.md) | Accepted 2026-10-29; replaces ADR-0031 mode switch in part; no production binding change authorized | [AIR-231](https://trello.com/c/hrOVxD7v); owner ADR acceptance 2026-10-29 |
 | [0045 — Every committed prediction is written as an immutable version object, and PREDICTION_VERSION_OBJECTS is retired](0045-retire-prediction-version-objects-switch.md) | Accepted 2026-10-29; supersedes ADR-0026 gate in part; no binding removal authorized | [AIR-226](https://trello.com/c/Upzk5DqR); explicit owner ADR acceptance |
+| [0046 — Every accepted fingerprint is written as an immutable body and generation record, and FINGERPRINT_VERSION_OBJECTS is retired](0046-retire-fingerprint-version-objects-switch.md) | Accepted 2026-10-29; preserves ADR-0035, no production binding removal authorized | [AIR-266](https://trello.com/c/QsP4wGQ8); explicit owner acceptance 2026-10-29 |
 
 ## Proposed records
 
