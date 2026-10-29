@@ -6,7 +6,7 @@
 **Approval source:** owner decision for option A on [AIR-32](https://trello.com/c/eKFV3v2j), recorded in the [final review](https://github.com/vladimino/iptv-watchlist/pull/162#pullrequestreview-5673703349)  
 **Related work:** [AIR-32](https://trello.com/c/eKFV3v2j); successors [AIR-202](https://trello.com/c/POMLJNUx), [AIR-203](https://trello.com/c/2mnvn1hd), [AIR-204](https://trello.com/c/wFArDNnm), [AIR-205](https://trello.com/c/bjx64Z6X), [AIR-206](https://trello.com/c/87mg3VNi); [AIR-33](https://trello.com/c/rBFiUUZQ) (fingerprint schema, builds on this model); [equality guard audit](../evidence/prediction/air-32-profile-equality-guards-audit-2026-10-27.md); [specification fixtures](../../tests/fixtures/profile-compatibility/cases.json)  
 **Supersedes:** [ADR-0013](0013-versioned-taste-profile.md) and [ADR-0014](0014-fingerprint-prediction-lifecycle.md) **in part, from activation**: the sentence "a new profile version makes predictions stale" becomes "a new profile version makes stale exactly the predictions its published impact reaches". Immutable versions, server-computed hashes, fingerprint independence and prediction history stay as decided there  
-**Superseded by:** [ADR-0044](0044-retire-profile-compatibility-switch.md) (Proposed) in part: the mode switch and feature rollback of section 6; the rule itself stays
+**Superseded by:** [ADR-0044](0044-retire-profile-compatibility-switch.md) (Accepted 2026-10-29) in part: the mode switch and feature rollback of section 6; the rule itself stays
 
 ## Context
 
