@@ -52,12 +52,11 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0044 — The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired](0044-retire-profile-compatibility-switch.md) | Accepted 2026-10-29; replaces ADR-0031 mode switch in part; no production binding change authorized | [AIR-231](https://trello.com/c/hrOVxD7v); owner ADR acceptance 2026-10-29 |
 | [0045 — Every committed prediction is written as an immutable version object, and PREDICTION_VERSION_OBJECTS is retired](0045-retire-prediction-version-objects-switch.md) | Accepted 2026-10-29; supersedes ADR-0026 gate in part; no binding removal authorized | [AIR-226](https://trello.com/c/Upzk5DqR); explicit owner ADR acceptance |
 | [0046 — Every accepted fingerprint is written as an immutable body and generation record, and FINGERPRINT_VERSION_OBJECTS is retired](0046-retire-fingerprint-version-objects-switch.md) | Accepted 2026-10-29; preserves ADR-0035, no production binding removal authorized | [AIR-266](https://trello.com/c/QsP4wGQ8); explicit owner acceptance 2026-10-29 |
+| [0047 — The fingerprint transition rule always decides, and PREDICTION_FINGERPRINT_COMPATIBILITY is retired](0047-retire-fingerprint-compatibility-switch.md) | Accepted 2026-10-29; supersedes ADR-0035 section 7 in part; binding removal separately gated | [AIR-265](https://trello.com/c/x7esHy4V); explicit owner acceptance |
 
 ## Proposed records
 
-| Record | Status and boundary | Related work |
-| --- | --- | --- |
-| [0047 — The fingerprint transition rule always decides, and PREDICTION_FINGERPRINT_COMPATIBILITY is retired](0047-retire-fingerprint-compatibility-switch.md) | Proposed 2026-10-29 (owner flag disposition `retire now`; ADR acceptance pending; binding removal separately gated) | [AIR-265](https://trello.com/c/x7esHy4V) |
+No proposed records currently.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
