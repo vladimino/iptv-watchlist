@@ -30,7 +30,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
   if(href.startsWith('https://query.wikidata.org/sparql'))return Response.json({results:{bindings:[]}});
   throw new Error('Unexpected network access '+href);
  }});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/enrichment.js','src/migration-export.js','src/prediction-diagnostics.js','src/feature-flags.js','src/mcp.js','src/continuation.js','src/worker.js']){
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/feature-flags.js','src/mcp.js','src/continuation.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -151,7 +151,7 @@ for(const [name,needs] of [['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS']]){
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
  PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",
- DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
+ DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",LETTERBOXD_DIARY_HISTORY:"LetterboxdDiary.enabled(env)?'on':'off'",
 };
 const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);

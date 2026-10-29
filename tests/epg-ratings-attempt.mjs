@@ -28,7 +28,7 @@ const ctx=vm.createContext({Response,Request,URL,Date:Clock,Map,Set,JSON,TextEnc
   return {ok:false,status:404,text:async()=>''};
  }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket};
 const STALE=vm.runInContext('RATINGS_ATTEMPT_STALE_MS',ctx);
 const at=new Date(clock).toISOString();

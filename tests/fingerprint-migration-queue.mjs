@@ -31,7 +31,7 @@ split.approval={approvedBy:'owner',approvedAt:'2026-01-01T00:00:00.000Z',reviewR
 function release(patch){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
  vm.runInContext(domain,ctx);
- for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
+ for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
  vm.runInContext('globalThis.T={writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
  return {ctx,T:ctx.T,api};
@@ -45,9 +45,9 @@ const SELECTIVE={PREDICTION_FINGERPRINT_COMPATIBILITY:'selective'},STRICT={PREDI
 
 // Flags: only the exact strings.
 // The fingerprint rule has no switch any more (ADR 0047): no code path reads PREDICTION_FINGERPRINT_COMPATIBILITY.
-for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','src/prediction-diagnostics.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_FINGERPRINT_COMPATIBILITY|fingerprintCompatibilityMode/,file+' reads no fingerprint rule switch');
+for(const file of ['src/enrichment.js','src/letterboxd-diary.js','src/worker.js','src/sources.js','src/discovery.js','src/prediction-diagnostics.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_FINGERPRINT_COMPATIBILITY|fingerprintCompatibilityMode/,file+' reads no fingerprint rule switch');
 // The immutable fingerprint writer has no switch any more (ADR 0046): no code path reads FINGERPRINT_VERSION_OBJECTS.
-for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','src/prediction-diagnostics.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.FINGERPRINT_VERSION_OBJECTS|fingerprintVersionsEnabled/,file+' reads no fingerprint writer switch');
+for(const file of ['src/enrichment.js','src/letterboxd-diary.js','src/worker.js','src/sources.js','src/discovery.js','src/prediction-diagnostics.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.FINGERPRINT_VERSION_OBJECTS|fingerprintVersionsEnabled/,file+' reads no fingerprint writer switch');
 
 // The registry applied to the frozen schema-1 base reproduces the live vocabulary of each release.
 for(const [name,R] of [['release 1',R1],['release 2',R2]]){

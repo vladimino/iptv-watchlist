@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 
 const source=fs.readFileSync('src/domain/scored-resolution.js','utf8');
 assert.doesNotMatch(source,/\b(fetch|import|export|BUCKET|wrangler)\b/);
-for(const file of ['src/worker.js','src/enrichment.js','src/sources.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/scoreFilmResolution/,file);
+for(const file of ['src/worker.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/scoreFilmResolution/,file);
 assert.match(fs.readFileSync('src/discovery.js','utf8'),/scoreFilmResolution/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/scored-resolution\.js/);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/SCORED_RESOLUTION/);

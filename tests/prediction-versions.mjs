@@ -31,7 +31,7 @@ const store={
 const env={TMDB_REQUEST_INTERVAL_MS:0,BUCKET:store};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/prediction-versions.js','utf8')+'\n'+fs.readFileSync('src/domain/profile-impact.js','utf8')+'\n'+fs.readFileSync('src/domain/prediction-compatibility.js','utf8')+'\n'+fs.readFileSync('src/domain/fingerprint-compatibility.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 vm.runInContext('globalThis.testApi={writePredictionVersion,contentHash,predictionVersionBody,predictionVersionText,predictionVersionKey,predictionVersionLinked,parsePredictionVersionKey,predictionMaterializationPlan};',ctx);
 const api=async(path,method='GET',body)=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};
 const read=key=>JSON.parse(records.get(key));
@@ -39,7 +39,7 @@ const sha256=text=>createHash('sha256').update(Buffer.from(text,'utf8')).digest(
 const versionKeys=id=>[...records.keys()].filter(key=>key.startsWith('enrichment/films/'+id+'/predictions/versions/'));
 
 // The writer has no switch any more (ADR 0045): no code path reads PREDICTION_VERSION_OBJECTS, and a stale binding is inert.
-for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','scripts/prediction-versions-materialize.mjs'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_VERSION_OBJECTS|predictionVersionsEnabled|version_objects_off/,file+' reads no version writer switch');
+for(const file of ['src/enrichment.js','src/letterboxd-diary.js','src/worker.js','src/sources.js','src/discovery.js','scripts/prediction-versions-materialize.mjs'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_VERSION_OBJECTS|predictionVersionsEnabled|version_objects_off/,file+' reads no version writer switch');
 // The runner path ignores a stale binding: even 'off' writes a version object.
 env.PREDICTION_VERSION_OBJECTS='off';
 

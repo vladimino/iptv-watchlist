@@ -15,6 +15,7 @@ The integration footer does not use this document for current ratings health; th
 - The EPG commit still reads the public films list once, with its existing three tries on HTTP 403, and projects ratings into the view index. A 403 there leaves the previous ratings in place and records `ratingError` on the sync while `ratingPending` stays ([enrichment API](../api/enrichment.md)); the attempt itself is traced as below.
 - The per-film lookup and the owner `PUT /api/enrichment/actual-ratings` write single ratings, and with `LETTERBOXD_FACTS=on` the fact records ([user facts contract](letterboxd-user-facts.md)).
 - A watchlist removal event still receives a half-star rating when the per-film lookup records one.
+- After a failed films list, the diary repair confirms rating changes of Diary page 1 rows on each film's own page. It parses the page with the one diary reader (`LetterboxdDiary.parsePage`). With `LETTERBOXD_DIARY_HISTORY=on` it reuses the rows the [diary history stage](letterboxd-diary-history.md) read in the same commit, and makes no request of its own. The history itself never writes a rating.
 
 ## Ratings attempt
 
@@ -23,7 +24,7 @@ The integration footer does not use this document for current ratings health; th
 | Field | Meaning |
 | --- | --- |
 | `id`, `startedAt` | One attempt per commit that still has `ratingPending` |
-| `phase`, `at` | The phase entered last and when: `post_commit` (saved with `stage: complete`, covers the prediction queue refresh), `removal_lookup` (only with a removal hand-over), `films_list`, `repair` (baseline and diary repairs after a failed list) |
+| `phase`, `at` | The phase entered last and when: `post_commit` (saved with `stage: complete`, covers the prediction queue refresh), `removal_lookup` (only with a removal hand-over), `diary` (only with `LETTERBOXD_DIARY_HISTORY=on`), `films_list`, `repair` (baseline and diary repairs after a failed list) |
 | `state` | `started` (work in progress, including the repairs after a failed list), `finished` (list read and applied), `error` (terminal: the list failed **and** the repairs completed; `cause` is `blocked`, `rate_limited`, `incomplete` or `failed`, and `ratingError` holds the list message), `unknown` (closed after an interruption) |
 | `listCause` | Set as soon as the films list fails, while the attempt is still `started` in phase `repair`: the list outcome is known, the attempt is not |
 | `finishedAt`, `closedAt`, `cause`, `interruptedPhase` | End of a finished or failed attempt; for `unknown`, when it was closed and the phase it died in |

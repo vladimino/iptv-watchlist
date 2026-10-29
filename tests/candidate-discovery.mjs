@@ -27,7 +27,7 @@ function harness(flags,response,date=Date){
  if(flags.scored)env.SCORED_RESOLUTION=flags.scored;
  if(flags.discovery)env.CANDIDATE_DISCOVERY=flags.discovery;
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{calls++;urls.push(String(input));return response(String(input),records);}});
- for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+ for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
  ctx.env=env;ctx.records=records;
  return {ctx,records,calls:()=>calls,urls};
 }
@@ -153,7 +153,7 @@ function phasedHarness(flags,advance,response){
  const records=new Map(),etags=new Map();let revision=0;const urls=[];
  const env={CANDIDATE_DISCOVERY:flags.discovery,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:Clock,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async input=>{const url=String(input);urls.push(url);now+=advance(url);return response(url);}});
- for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+ for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
  ctx.env=env;
  return {ctx,records,urls};
 }

@@ -25,7 +25,7 @@ const store={
 const env={TMDB_REQUEST_INTERVAL_MS:0,BUCKET:store};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+domain+'\n'+fs.readFileSync('src/domain/prediction-compatibility.js','utf8')+'\n'+fs.readFileSync('src/domain/fingerprint-compatibility.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 vm.runInContext('globalThis.testApi={validateProfileImpact,profileDeclarationText,profileChangedFields,profileLineage,vocabulary:{mechanics:MECHANICS,execution:EXECUTION},fieldRules:PROFILE_FIELD_RULES};',ctx);
 const T=ctx.testApi;
 const api=async(path,method='GET',body)=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};
