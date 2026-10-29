@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','SCORED_RESOLUTION','RATINGS_REFRESH'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_VERSION_OBJECTS','PREDICTION_MATERIALIZATION','CATALOG_POSTER_HYDRATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_FINGERPRINT_COMPATIBILITY','FINGERPRINT_VERSION_OBJECTS','DISCOVERY_LEDGER_MODE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -111,8 +111,10 @@ const retired=l('SCORED_RESOLUTION');
 assert.deepEqual([retired.state,retired.raw,retired.retired,retired.valid,retired.issue,retired.effective],['set','on',true,false,'retired',null],'a stale retired binding is visible');
 const ratings=l('RATINGS_REFRESH');
 assert.deepEqual([ratings.state,ratings.raw,ratings.retired,ratings.valid,ratings.issue,ratings.effective],['set','on',true,false,'retired',null],'the retired ratings refresh switch is inert and a stale on is visible (ADR 0040)');
+const exclusion=l('FINDS_TITLE_EXCLUSION');
+assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.valid,exclusion.issue,exclusion.effective],['set','on',true,false,'retired',null],'the retired Finds exclusion switch is inert and the production on is visible (ADR 0041)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:15,set:11,absent:4,invalid:3,redacted:0});
+assert.deepEqual(live.report.summary,{registered:15,set:11,absent:4,invalid:4,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
 const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,PREDICTION_VERSION_OBJECTS:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',FINGERPRINT_VERSION_OBJECTS:'on'.repeat(150)});
@@ -139,7 +141,7 @@ for(const [name,needs] of [['FINDS_WATCHED_MARK','LETTERBOXD_FACTS'],['LETTERBOX
 // 5. Parity: the effective mode is what each consumer computes, for every value shape.
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',PREDICTION_VERSION_OBJECTS:"predictionVersionsEnabled(env)?'on':'off'",
- PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",FINDS_TITLE_EXCLUSION:"findsTitleExclusionEnabled(env)?'on':'off'",
+ PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",CATALOG_POSTER_HYDRATION:"catalogPosterHydrationEnabled(env)?'on':'off'",
  PREDICTION_PROFILE_COMPATIBILITY:'predictionCompatibilityMode(env)',PREDICTION_FINGERPRINT_COMPATIBILITY:'fingerprintCompatibilityMode(env)',FINGERPRINT_VERSION_OBJECTS:"fingerprintVersionsEnabled(env)?'on':'off'",DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',
 };
 const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
@@ -161,7 +163,7 @@ for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH'];
+const RETIRED=['SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');

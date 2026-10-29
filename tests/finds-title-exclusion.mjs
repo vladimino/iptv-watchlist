@@ -1,6 +1,6 @@
 // Finds display-only exclusion (ADR-0028, relaxed by ADR-0033 for the v2 rule tag): the offline builder and the read path of GET /api/catalog/available. Strict
 // original title + exact year, uniqueness in the export and the catalog, identity wins, per-generation evaluation, the
-// FINDS_TITLE_EXCLUSION switch, fail-open on any invalid list, and no per-film data or list hash in the response. Synthetic data only.
+// retired FINDS_TITLE_EXCLUSION binding (inert, ADR 0041), fail-open on any invalid list, and no per-film data or list hash in the response. Synthetic data only.
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
 import fs from 'node:fs';
@@ -62,9 +62,9 @@ const get=async env=>{const response=await worker.fetch(new Request('https://ipt
 const ids=body=>body.films.map(item=>item.id).sort();
 const ALL=Object.keys(CATALOG).sort();
 
-// 1. Switch on, valid list: only the strict matches are hidden; the response says state and a count, nothing more.
+// 1. Valid list, no variable: only the strict matches are hidden; the response says state and a count, nothing more.
 {
- seed();const r=await get({FINDS_TITLE_EXCLUSION:'on'});
+ seed();const r=await get({});
  assert.equal(r.status,200,JSON.stringify(r.body));
  assert.deepEqual(ids(r.body),ALL.filter(id=>!['tmdb_1','tmdb_12'].includes(id)),'exact original title + year hidden; remake, ±1, alias, localized, linked, no-year and alias namesake shown');
  assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2});
@@ -76,16 +76,23 @@ const ALL=Object.keys(CATALOG).sort();
 // 2. A new generation is evaluated afresh: a namesake entering the catalog shows the film again.
 {
  seed({catalog:{...CATALOG,tmdb_13:film(13,'Exact Film',1980)},generation:G2});
- const r=await get({FINDS_TITLE_EXCLUSION:'on'});
+ const r=await get({});
  assert.ok(ids(r.body).includes('tmdb_1')&&ids(r.body).includes('tmdb_13'),'a remake in the new generation blocks the rule');
  assert.ok(!ids(r.body).includes('tmdb_12'));assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:1});
 }
-// 3. Switch off (absent, any other value, a non-string): the object is not read and nothing is hidden.
-for(const value of [undefined,'off','On',' on','on ',true,1]){
+// 3. The retired switch is inert (ADR 0041): absent, on, off or any other value, the list is read and applied the same way.
+for(const value of [undefined,'on','off','On',' on','on ',true,1]){
  seed();const r=await get(value===undefined?{}:{FINDS_TITLE_EXCLUSION:value});
- assert.deepEqual(ids(r.body),ALL,'switch '+String(value));assert.deepEqual(r.body.displayExclusion,{state:'off',excluded:0});
- assert.ok(!gets.includes(KEY),'switch off does not read the list');
+ assert.deepEqual(ids(r.body),ALL.filter(id=>!['tmdb_1','tmdb_12'].includes(id)),'binding '+String(value));
+ assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2},'binding '+String(value));
+ assert.ok(gets.includes(KEY),'the list is read whatever the binding holds');
 }
+// With no list placed nothing is hidden, whatever the binding holds: the only way to show every film is to remove the list.
+for(const value of [undefined,'off']){
+ seed({exclusion:null});const r=await get(value===undefined?{}:{FINDS_TITLE_EXCLUSION:value});
+ assert.deepEqual(ids(r.body),ALL);assert.deepEqual(r.body.displayExclusion,{state:'unavailable',excluded:0});
+}
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/env\??\.FINDS_TITLE_EXCLUSION/,'no code path reads the retired binding');
 // 4. Fail-open: a missing, oversized or invalid list hides nothing and the route still answers 200.
 const resign=entries=>list(entries,{counts:{entries:entries.length}});
 const invalid={
@@ -117,24 +124,24 @@ const invalid={
  'too many entries':resign(Array.from({length:20001},(_,i)=>({title:'film '+String(i).padStart(5,'0'),year:2000}))),
 };
 for(const [name,value] of Object.entries(invalid)){
- seed({exclusion:value});const r=await get({FINDS_TITLE_EXCLUSION:'on'});
+ seed({exclusion:value});const r=await get({});
  assert.equal(r.status,200,name);assert.deepEqual(ids(r.body),ALL,name+': every film shown');assert.deepEqual(r.body.displayExclusion,{state:'unavailable',excluded:0},name);
 }
 // The size cap is checked from the object size before the body is read or parsed.
 {
- seed();sizeOverride=2*1024*1024+1;const r=await get({FINDS_TITLE_EXCLUSION:'on'});
+ seed();sizeOverride=2*1024*1024+1;const r=await get({});
  assert.deepEqual(r.body.displayExclusion,{state:'unavailable',excluded:0});assert.equal(textReads,0,'an oversized list is not read');
 }
 // A storage error reading the list is not a route error.
 {
  seed();const original=bucket.get;bucket.get=async key=>{if(key===KEY)throw new Error('R2 down');return original(key);};
- try{const r=await get({FINDS_TITLE_EXCLUSION:'on'});assert.equal(r.status,200);assert.deepEqual(r.body.displayExclusion,{state:'unavailable',excluded:0});}
+ try{const r=await get({});assert.equal(r.status,200);assert.deepEqual(r.body.displayExclusion,{state:'unavailable',excluded:0});}
  finally{bucket.get=original;}
 }
 // A film already excluded for another reason (rated) is not counted as hidden.
 {
  seed();const view=JSON.parse(raw.get(constant('ENRICHMENT_KEY')+'view-index.json'));view.tmdb_1={...current,actualRating:4};raw.set(constant('ENRICHMENT_KEY')+'view-index.json',JSON.stringify(view));
- const r=await get({FINDS_TITLE_EXCLUSION:'on'});assert.ok(!ids(r.body).includes('tmdb_1'));assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:1});
+ const r=await get({});assert.ok(!ids(r.body).includes('tmdb_1'));assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:1});
 }
 
 // 5. Rule tag v2 (ADR-0033): title namesakes still block in any year; an alias-only namesake blocks only within a year of the
@@ -157,7 +164,7 @@ for(const [name,value] of Object.entries(invalid)){
  const V2_ENTRIES=[['dark night',2008],['local clash',2015],['mixed clash',2015],['near alias',2015],['own alias two',2015],['same alias',2015],['solo twin',1990],['solo twin',2010],['split alias',2015],['title clash',2015],['twin years',1990],['twin years',2010],['year drift',2008],['yearless alias',2015]].map(([title,year])=>({title,year}));
  const v2=entries=>list(entries,{rule:RULE,counts:{entries:entries.length,keptExportNamesake:4}});
  seed({catalog:V2_CATALOG,exclusion:v2(V2_ENTRIES)});
- const r=await get({FINDS_TITLE_EXCLUSION:'on'});
+ const r=await get({});
  assert.equal(r.status,200);
  // Compared by TMDB identity: two records of one TMDB film come back as one entry.
  const identities=body=>new Set(body.films.map(item=>item.canonicalIdentity)),hiddenFrom=body=>[...new Set(Object.values(V2_CATALOG).map(item=>item.canonicalIdentity))].filter(identity=>!identities(body).has(identity)).sort();
@@ -165,18 +172,18 @@ for(const [name,value] of Object.entries(invalid)){
  assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2});
  // The same catalog and entries with the legacy tag: the far alias still blocks, exactly as ADR-0028.
  seed({catalog:V2_CATALOG,exclusion:list(V2_ENTRIES)});
- const legacy=await get({FINDS_TITLE_EXCLUSION:'on'});
+ const legacy=await get({});
  assert.deepEqual(hiddenFrom(legacy.body),['tmdb:48'],'legacy tag: any alias namesake blocks');
  // A v2 list with the identity rule: a linked film is decided by identity, not by the relaxed guard.
  seed({catalog:{tmdb_6:film(6,'Linked Film',2006),tmdb_60:film(60,'Far',1950,{aliases:['Linked Film']})},exclusion:v2([{title:'linked film',year:2006}])});
- assert.deepEqual(ids((await get({FINDS_TITLE_EXCLUSION:'on'})).body),['tmdb_6','tmdb_60']);
+ assert.deepEqual(ids((await get({})).body),['tmdb_6','tmdb_60']);
  // Unknown rule tags fail open; the extra count is accepted, a wrong entries count is not.
  for(const rule of ['strict_original_exact_year_v3','strict_original_exact_year_V2','']){
-  seed({catalog:V2_CATALOG,exclusion:list(V2_ENTRIES,{rule})});const u=await get({FINDS_TITLE_EXCLUSION:'on'});
+  seed({catalog:V2_CATALOG,exclusion:list(V2_ENTRIES,{rule})});const u=await get({});
   assert.deepEqual(u.body.displayExclusion,{state:'unavailable',excluded:0},rule);assert.deepEqual(hiddenFrom(u.body),[]);
  }
  seed({catalog:V2_CATALOG,exclusion:list(V2_ENTRIES,{rule:RULE,counts:{entries:V2_ENTRIES.length+1,keptExportNamesake:4}})});
- assert.deepEqual((await get({FINDS_TITLE_EXCLUSION:'on'})).body.displayExclusion,{state:'unavailable',excluded:0});
+ assert.deepEqual((await get({})).body.displayExclusion,{state:'unavailable',excluded:0});
  const text=JSON.stringify(r.body);for(const secret of ['dark night','solo twin',v2(V2_ENTRIES).contentSha256])assert.ok(!text.includes(secret),'response leaks '+secret);
  assert.deepEqual(puts,[],'GET writes nothing');
 }
@@ -246,7 +253,7 @@ try{
  assert.doesNotMatch(fs.readFileSync(output,'utf8'),/Ab1|Gh3|boxd\.it|"rating"|2024-05/,'no codes, URIs, ratings or dates');
  // The built list is accepted by the Worker as is.
  seed({catalog:{tmdb_20:film(20,'Unique Seen',2003),tmdb_21:film(21,'Rated Only',2008),tmdb_22:film(22,'Twin Name',2011),tmdb_23:film(23,'Other',2020,{aliases:['Unique Seen']})},exclusion:built});
- const r=await get({FINDS_TITLE_EXCLUSION:'on'});assert.deepEqual(ids(r.body),['tmdb_21','tmdb_23']);assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2});
+ const r=await get({});assert.deepEqual(ids(r.body),['tmdb_21','tmdb_23']);assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2});
  // Binding: a snapshot that does not reproduce the plan, a tampered plan, an existing or in-repository output are refused.
  const other=await snapshot('other',[]);
  await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:other,output:path.join(scratch,'o1.json'),now:buildNow}),/does not reproduce the baseline plan/);
@@ -257,4 +264,4 @@ try{
  assert.ok(!fs.existsSync(path.join(scratch,'o1.json'))&&!fs.existsSync(path.join(scratch,'o2.json')),'a refused build writes nothing');
 }finally{await rm(scratch,{recursive:true,force:true});}
 
-console.log('Finds title exclusion: strict match, uniqueness, identity wins, generation recompute, switch, fail-open, privacy, the v2 namesake guards with legacy-tag parity and the bound offline builder passed');
+console.log('Finds title exclusion: strict match, uniqueness, identity wins, generation recompute, retired switch inert, fail-open, privacy, the v2 namesake guards with legacy-tag parity and the bound offline builder passed');
