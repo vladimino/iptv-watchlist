@@ -55,6 +55,8 @@ assert.equal(objects.get('sync.json'),before);
 const report=start.data;
 assert.equal(report.mode,'test_ordered_ratings');
 assert.equal(report.runId,undefined,'no run is created');
+assert.equal(report.source,'diary_page_1');
+assert.equal(report.sortIsRatedDate,undefined,'diary has no rated-date sort claim');
 assert.deepEqual([report.status,report.challenge,report.validPage,report.next,report.items,report.rated,report.unrated,report.missingId,report.requests],[200,false,true,true,3,2,1,0,1]);
 assert.deepEqual(report.order.map(item=>item.rating),[3.5,null,5]);
 assert.match(report.order[0].idHash,/^[0-9a-f]{8}$/);
