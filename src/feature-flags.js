@@ -9,8 +9,7 @@ const onOff=(name,effective,extra={})=>({name,modes:['off','on'],default:'off',t
 const FEATURE_FLAGS=[
  onOff('CANDIDATE_DISCOVERY',env=>candidateDiscoveryMode(env),{trims:true}),
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
- onOff('PREDICTION_VERSION_OBJECTS',env=>predictionVersionsEnabled(env)?'on':'off'),
- onOff('PREDICTION_MATERIALIZATION',env=>predictionMaterializationEnabled(env)?'on':'off',{requires:{PREDICTION_VERSION_OBJECTS:'on'}}),
+ onOff('PREDICTION_MATERIALIZATION',env=>predictionMaterializationEnabled(env)?'on':'off'),
  onOff('CATALOG_POSTER_HYDRATION',env=>catalogPosterHydrationEnabled(env)?'on':'off'),
  onOff('LETTERBOXD_FACTS',env=>env?.LETTERBOXD_FACTS==='on'?'on':'off'),
  onOff('LETTERBOXD_BASELINE_IMPORT',env=>env?.LETTERBOXD_BASELINE_IMPORT==='on'?'on':'off',{requires:{LETTERBOXD_FACTS:'on'}}),
@@ -24,6 +23,7 @@ const FEATURE_FLAGS=[
  {name:'FINDS_TITLE_EXCLUSION',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'FINDS_WATCHED_MARK',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'PREDICTION_PROFILE_COMPATIBILITY',modes:[],default:null,tokens:['strict','selective'],retired:true,effective:()=>null},
+ {name:'PREDICTION_VERSION_OBJECTS',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
 ];
 const featureFlagNames=()=>FEATURE_FLAGS.map(flag=>flag.name);
 function featureFlagRaw(flag,value){

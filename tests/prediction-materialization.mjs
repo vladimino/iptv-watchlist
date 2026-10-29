@@ -27,18 +27,21 @@ const PLAN='a'.repeat(64);
 {
  const b=bucket(),item=seed(b,'tmdb_1');
  assert.equal((await post({BUCKET:b},{planId:PLAN,batch:0,items:[item]})).data.reason,'materialization_off');
- assert.equal((await post({BUCKET:b,PREDICTION_MATERIALIZATION:'on'},{planId:PLAN,batch:0,items:[item]})).data.reason,'version_objects_off','writing needs the version writer on too');
+ // The version writer has no switch (ADR 0045): a stale binding neither opens the route nor closes it; only the own gate does.
+ assert.equal((await post({BUCKET:b,PREDICTION_VERSION_OBJECTS:'on'},{planId:PLAN,batch:0,items:[item]})).data.reason,'materialization_off','the retired writer switch does not open the route');
+ {const s=bucket(),stale=await post({BUCKET:s,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'off'},{planId:PLAN,batch:0,items:[seed(s,'tmdb_s')]});
+  assert.equal(stale.status,200,'a stale off binding does not close the route');assert.deepEqual(stale.data.outcomes,{materialized:1});}
  const dry=await post({BUCKET:b},{planId:PLAN,batch:0,items:[item],dryRun:true});
  assert.equal(dry.status,200);assert.deepEqual(dry.data.outcomes,{would_materialize:1});
  assert.deepEqual([...b.records.keys()],[bundleKey('tmdb_1')],'a dry run writes nothing, not even the lease');
- const on={BUCKET:b,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'};
+ const on={BUCKET:b,PREDICTION_MATERIALIZATION:'on'};
  for(const bad of [{planId:'x',batch:0,items:[item]},{planId:PLAN,batch:-1,items:[item]},{planId:PLAN,batch:0,items:[]},{planId:PLAN,batch:0,items:[item,item]},{planId:PLAN,batch:0,items:[{...item,expectedSha256:'nope'}]},{planId:PLAN,batch:0,items:Array.from({length:51},(_,i)=>({...item,filmId:'f'+i}))},{planId:PLAN,batch:0,items:[{...item,filmId:'a/b'}]}])
   assert.equal((await post(on,bad)).status,400,JSON.stringify(bad).slice(0,60));
 }
 
 // 2. Materialize: every record gets its object and pointer; bodies, order and replacedAt are unchanged; provenance is recorded.
 {
- const b=bucket(),on={BUCKET:b,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'},item=seed(b,'tmdb_7'),before=JSON.parse(b.records.get(bundleKey('tmdb_7')));
+ const b=bucket(),on={BUCKET:b,PREDICTION_MATERIALIZATION:'on'},item=seed(b,'tmdb_7'),before=JSON.parse(b.records.get(bundleKey('tmdb_7')));
  const result=await post(on,{planId:PLAN,batch:0,items:[item]});
  assert.equal(result.status,200);assert.deepEqual(result.data.outcomes,{materialized:1});
  const after=JSON.parse(b.records.get(bundleKey('tmdb_7')));
@@ -68,7 +71,7 @@ const PLAN='a'.repeat(64);
 
 // 3. Stop conditions: a changed bundle is skipped, a differing existing object stops the film, a busy writer refuses the batch.
 {
- const b=bucket(),on={BUCKET:b,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'};
+ const b=bucket(),on={BUCKET:b,PREDICTION_MATERIALIZATION:'on'};
  const changed=seed(b,'changed');b.etags.set(bundleKey('changed'),'after-a-submit');
  const mismatch=seed(b,'mismatch'),text=rules.predictionVersionText(legacy('mismatch').current);
  b.records.set(rules.predictionVersionKey('mismatch',sha256(text)),'{"different":true}');
@@ -90,7 +93,7 @@ const PLAN='a'.repeat(64);
 
 // 4. A lost bundle write: the objects are kept, the bundle is untouched, and the retry finishes the film.
 {
- const b=bucket(),on={BUCKET:b,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'},item=seed(b,'lost');
+ const b=bucket(),on={BUCKET:b,PREDICTION_MATERIALIZATION:'on'},item=seed(b,'lost');
  b.failOnce(key=>key===bundleKey('lost'));
  assert.equal((await post(on,{planId:PLAN,batch:0,items:[item]})).status,502,'the failed batch reports an error and writes no receipt');
  assert.ok(!b.records.has('enrichment/predictions-materialization/'+PLAN+'/0.json'));
@@ -117,7 +120,7 @@ try{
  assert.equal(rehearsal.ok,true,JSON.stringify(rehearsal));assert.deepEqual(rehearsal.outcomes,{materialized:60});assert.equal(rehearsal.check.linked,122);
  assert.deepEqual({bundles:rehearsal.check.bundles,planned:rehearsal.check.planned,outsidePlan:rehearsal.check.outsidePlan,outsidePlanChanged:rehearsal.check.outsidePlanChanged,provenance:rehearsal.check.provenance},{bundles:61,planned:60,outsidePlan:1,outsidePlanChanged:0,provenance:60},'provenance is expected on the planned bundles only; the already linked one stays as it was');
  const b=bucket();for(const [key,text] of Object.entries(bodies)){b.records.set(key,text);b.etags.set(key,entries.find(e=>e.key===key).metadata.etag.replace(/"/g,''));}
- const fetchImpl=async(url,init)=>{const response=await ctx.worker.fetch(new Request(url,init),{BUCKET:b,PREDICTION_MATERIALIZATION:'on',PREDICTION_VERSION_OBJECTS:'on'});return {ok:response.ok,status:response.status,json:()=>response.json()};};
+ const fetchImpl=async(url,init)=>{const response=await ctx.worker.fetch(new Request(url,init),{BUCKET:b,PREDICTION_MATERIALIZATION:'on'});return {ok:response.ok,status:response.status,json:()=>response.json()};};
  const changedKey=bundleKey('film59'),changedEtag=b.etags.get(changedKey);b.etags.set(changedKey,'after-a-submit');
  const validate=await remote({mode:'validate',output:out,endpoint:'https://site.example',fetchImpl,env:{}});
  assert.deepEqual(validate.totals,{would_materialize:59,bundle_changed:1});assert.deepEqual(validate.incomplete,[{batch:1,classes:{done:9,replan:1,stop:0}}]);assert.equal([...b.records.keys()].filter(key=>key.includes('/versions/')).length,2,'a dry validate writes nothing: only the two objects of the already linked film exist');
@@ -136,4 +139,4 @@ try{
  fs.appendFileSync(path.join(out,'plan.jsonl'),'\n');await assert.rejects(loadPlan(out),/plan.jsonl differs/);
  await assert.rejects(plan({snapshot,output:path.resolve('tests','private-out')}),/outside the Git repository/);
 }finally{fs.rmSync(root,{recursive:true,force:true});}
-console.log('Prediction version materialization: both gates and strict input, read-only dry run, objects and pointers with unchanged bodies, provenance and receipts, replay bound to the exact items, recognition after a lost response, a later plan, unsealed mixed batches, changed bundle, checksum mismatch, busy writer, CLI plan, offline rehearsal, remote validate/apply/resume with incomplete batches and tamper refusal passed');
+console.log('Prediction version materialization: its own gate (the retired writer switch is inert) and strict input, read-only dry run, objects and pointers with unchanged bodies, provenance and receipts, replay bound to the exact items, recognition after a lost response, a later plan, unsealed mixed batches, changed bundle, checksum mismatch, busy writer, CLI plan, offline rehearsal, remote validate/apply/resume with incomplete batches and tamper refusal passed');

@@ -907,7 +907,7 @@ async function enrichmentSubmit(env,body){
    // that produced it. Records written before carry none of the three; readers treat them as unknown, never as the current run.
    else{const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}const at=new Date().toISOString(),generated={...item.prediction,filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual'},old=state.predictions?.current,history=[...(state.predictions?.history||[])];
     // The version object is written first (write-once, keyed by checksum); a crash before the bundle write leaves an unreferenced object and an unchanged bundle, never a pointer to a missing object.
-    const prediction=predictionVersionsEnabled(env)?{...generated,...(await writePredictionVersion(env,id,generated))}:generated;
+    const prediction={...generated,...(await writePredictionVersion(env,id,generated))};
     if(old)history.push({...old,replacedAt:at});await saveJSON(env,filmKey(id)+'predictions.json',{current:prediction,history});await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});delete run.failures[id];run.results[id]=old?'recalculated':'created';results.push({filmId:id,status:run.results[id]});}
    if(['created','recalculated'].includes(run.results[id]))run.firstSubmitAt||=new Date().toISOString();run.formatFailureStreak=0;
   }catch(e){const at=new Date().toISOString(),retryable=failureStage==='parse_error',previous=await loadJSON(env,predictionQueueKey),attempts=(previous?.retries?.[id]?.attempts||0)+1,retryAt=Date.now()+Math.min(6*3600000,3600000*2**(attempts-1));
@@ -984,9 +984,8 @@ const RATINGS_PENDING_KEY=ENRICHMENT_KEY+'ratings/pending.json';
 const ratingsGenerationKey=id=>ENRICHMENT_KEY+'ratings/generations/'+encodeURIComponent(id)+'.json';
 // The owner-triggered ratings-only refresh is retired (ADR 0040): the route answers 410 Gone and nothing reads RATINGS_REFRESH.
 // Stored ratings objects (status, published pointer, pending, generations) are kept and stay readable.
-// Immutable prediction versions are written only when the owner has enabled the flag; the bundle stays the runtime record either way.
-// Strict: only the exact string 'on'. No trimming, no case folding, no non-string truthiness: this flag is a production write-authority boundary.
-const predictionVersionsEnabled=env=>env?.PREDICTION_VERSION_OBJECTS==='on';
+// Every committed prediction is written as an immutable version object; the bundle stays the runtime record. The former
+// PREDICTION_VERSION_OBJECTS switch is retired (ADR 0045) and a stale binding is inert.
 // Immutable fingerprint storage (ADR-0035 section 2). The content body is one object per distinct content, keyed by its
 // hash; the generation record is one object per (hash, schema version, prompt version) and holds the provenance; both are
 // create-only and never rewritten. fingerprint.json stays the full current record every reader already understands, plus
@@ -1136,9 +1135,8 @@ const MATERIALIZATION_CLASSES={materialized:'done',already_materialized:'done',n
 const materializationDigest=request=>textSha256(JSON.stringify({planId:request.planId,batch:request.batch,items:request.items.map(item=>[item.filmId,item.expectedEtag,item.expectedSha256])}));
 async function materializePredictionVersions(env,body){
  let request;try{request=materializationRequest(body);}catch(error){return json({error:error.message},error.status||400);}
- // Writing also needs the version writer on: otherwise the next submit would put an unlinked record back into the bundle.
+ // The version writer has no switch (ADR 0045), so a submit after the batch keeps the bundle linked; only this gate remains.
  if(!request.dryRun&&!predictionMaterializationEnabled(env))return json({error:'Prediction version materialization is off',reason:'materialization_off'},409);
- if(!request.dryRun&&!predictionVersionsEnabled(env))return json({error:'Prediction version objects are off',reason:'version_objects_off'},409);
  const receiptKey=MATERIALIZATION_RECEIPTS+request.planId+'/'+request.batch+'.json',itemsSha256=await materializationDigest(request);
  const sealed=async()=>{
   const prior=await loadJSON(env,receiptKey);if(!prior)return null;
