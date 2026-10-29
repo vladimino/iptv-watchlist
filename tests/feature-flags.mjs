@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','TEST_ORDERED_RATINGS','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','PREDICTION_MATERIALIZATION','LETTERBOXD_FACTS','LETTERBOXD_BASELINE_IMPORT','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -91,7 +91,7 @@ for(const item of empty.report.flags){
  assert.equal(item.state,'absent',item.name);assert.equal(item.raw,null,item.name);assert.equal(item.redacted,false,item.name);
  assert.equal(item.valid,true,item.name);assert.equal(item.issue,null,item.name);assert.equal(item.effective,item.default,item.name);
 }
-assert.deepEqual(empty.report.summary,{registered:17,set:0,absent:17,invalid:0,redacted:0});
+assert.deepEqual(empty.report.summary,{registered:REGISTERED.length,set:0,absent:REGISTERED.length,invalid:0,redacted:0});
 assert.doesNotMatch(empty.text,new RegExp(SECRET),'no other binding leaks');
 const allowedReads=new Set([...REGISTERED,'MCP_ACCESS_TEAM_DOMAIN','MCP_ACCESS_AUD','BUCKET','then']);
 for(const key of empty.read)assert.ok(allowedReads.has(key),'env read only by registered name: '+key);
@@ -122,7 +122,7 @@ assert.deepEqual([writer.state,writer.raw,writer.retired,writer.valid,writer.iss
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
 const posters=l('CATALOG_POSTER_HYDRATION');
 assert.deepEqual([posters.state,posters.raw,posters.retired,posters.valid,posters.issue,posters.effective],['set','off',true,false,'retired',null],'the retired poster hydration switch is inert and the production off is visible (ADR 0048)');
-assert.deepEqual(live.report.summary,{registered:17,set:12,absent:5,invalid:10,redacted:0});
+assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:12,absent:REGISTERED.length-12,invalid:10,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
 const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,LETTERBOXD_FACTS:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
@@ -153,7 +153,7 @@ for(const [name,needs] of [['LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS']]){
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
  PREDICTION_MATERIALIZATION:"predictionMaterializationEnabled(env)?'on':'off'",
- DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",TEST_ORDERED_RATINGS:"testOrderedRatingsEnabled(env)?'on':'off'",
+ DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
 };
 const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);
