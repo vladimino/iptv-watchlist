@@ -477,7 +477,7 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
  if(attempt&&attempt.state!=='started'||!(now-since>RATINGS_ATTEMPT_STALE_MS))return null;
  const at=new Date(now).toISOString(),phase=attempt?.phase||'not_recorded';
  run.ratingAttempt={...(attempt||{id:null,startedAt:null}),state:'unknown',cause:'interrupted',interruptedPhase:phase,closedAt:at};
- run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;delete run.ratingPending;
+ run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`+(attempt?.listCause&&run.ratingError?`; films list: ${run.ratingError}`:'');run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
 }
 async function completeWithRatings(env,run,report){
@@ -490,10 +490,13 @@ async function completeWithRatings(env,run,report){
  if(!run.ratingPending?.length)return lookup?{...result,removalRatings:lookup}:result;
  await ratingsPhase(env,run,'films_list');
  try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;run.ratingObservedAt=ratings.observedAt||new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,state:'finished',finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
- catch(e){run.ratingError=String(e.message).slice(0,200);run.ratingAttempt={...run.ratingAttempt,state:'error',cause:ratingsAttemptCause(run.ratingError)};await ratingsPhase(env,run,'repair');
+ catch(e){
+  // The list outcome is known now, the attempt is not: it stays `started` through the repairs, so a request killed
+  // during them is still closed by the next step. It becomes terminal `error` only once the repairs are done.
+  run.ratingError=String(e.message).slice(0,200);run.ratingAttempt={...run.ratingAttempt,listCause:ratingsAttemptCause(run.ratingError)};await ratingsPhase(env,run,'repair');
   let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
   try{diary=await repairRecentDiaryRatings(env,report);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
-  const repair={removed,diary};run.ratingRepair=repair;run.ratingAttempt={...run.ratingAttempt,finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
+  const repair={removed,diary};run.ratingRepair=repair;run.ratingAttempt={...run.ratingAttempt,state:'error',cause:run.ratingAttempt.listCause,finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
 }
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');

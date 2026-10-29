@@ -62,6 +62,30 @@ assert.equal(lbFetches().filter(url=>url.includes('/films/')).length,3,'the exis
 const status=await ctx.syncStatus(env);
 assert.equal(status.ratingAttempt.state,'error');
 
+// 2b. Killed during the repairs after a 403: the attempt is still `started` (list outcome known, attempt not), so the
+// next stale step closes it as unknown, keeps the list error and requests nothing from Letterboxd.
+logs.length=0;fetches.length=0;records.set('programme.json',report('run-repair'));
+let repairPhase=null;
+const originalRepair=ctx.repairRemovedBaselineRatings;
+ctx.repairRemovedBaselineRatings=async()=>{repairPhase=structuredClone(records.get('sync.json').ratingAttempt);throw Object.assign(new Error('isolate killed'),{kill:true});};
+// Emulate the kill: the repair hook records what was durable, then the request ends before anything else is written.
+const killDuringRepair=newRun('run-repair');
+const realSave=bucket.put;let stopped=false;
+bucket.put=async function(key,value,options){if(stopped)throw new Error('isolate gone');return realSave.call(this,key,value,options);};
+const repairHook=ctx.repairRemovedBaselineRatings;
+ctx.repairRemovedBaselineRatings=async(...args)=>{try{return await repairHook(...args);}finally{stopped=true;}};
+try{await ctx.completeWithRatings(env,killDuringRepair,report('run-repair'));}catch{}
+bucket.put=realSave;ctx.repairRemovedBaselineRatings=originalRepair;
+assert.deepEqual([repairPhase.state,repairPhase.phase,repairPhase.listCause],['started','repair','blocked'],'still recoverable during the repairs');
+assert.deepEqual([sync().ratingAttempt.state,sync().ratingAttempt.phase],['started','repair']);
+assert.match(sync().ratingError,/HTTP 403/);
+clock+=STALE+1;fetches.length=0;
+await step('run-repair');
+assert.deepEqual([sync().ratingAttempt.state,sync().ratingAttempt.interruptedPhase,sync().ratingAttempt.listCause],['unknown','repair','blocked']);
+assert.equal(sync().ratingPending,undefined);
+assert.match(sync().ratingError,/interrupted during repair; no outcome recorded; films list: Letterboxd films HTTP 403/);
+assert.equal(lbFetches().length,0,'closing never retries Letterboxd');
+
 // 3. Killed after the commit, before the films list: finishSync saved `stage: complete` with the attempt in post_commit.
 logs.length=0;fetches.length=0;records.set('programme.json',report('run-kill'));
 const killed=newRun('run-kill');
