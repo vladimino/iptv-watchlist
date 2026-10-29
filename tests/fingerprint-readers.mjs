@@ -152,7 +152,7 @@ assert.deepEqual(queue.pending,['D','B','E']);
 }
 
 // Profile version 2 (an approved selective edit of horror preferences): the fingerprint rule is judged before the profile
-// rule. The profile rule has no switch any more (ADR 0043): a stale PREDICTION_PROFILE_COMPATIBILITY binding is inert.
+// rule. The profile rule has no switch any more (ADR 0044): a stale PREDICTION_PROFILE_COMPATIBILITY binding is inert.
 {
  const h1=read('enrichment/profile/current.json').profileHash,changed={...profile,horrorPreferences:'Rules and causality matter'},h2=sha256(JSON.stringify(canonical(changed)));
  const impact={impactSchemaVersion:1,from:{version:1,profileHash:h1},scope:'selective',changedFields:['horrorPreferences'],selectors:[{kind:'genre',values:['horror']}]};

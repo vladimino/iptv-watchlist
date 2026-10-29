@@ -100,7 +100,7 @@ assert.ok(!empty.read.has('TMDB_API_READ_ACCESS_TOKEN')&&!empty.read.has('LETTER
 // 2. A production-like set, including retired tokens and the retired resolver switch.
 const live=await flags({PREDICTION_PROFILE_COMPATIBILITY:'selective',PREDICTION_FINGERPRINT_COMPATIBILITY:'selective',PREDICTION_VERSION_OBJECTS:'on',FINGERPRINT_VERSION_OBJECTS:'on',LETTERBOXD_FACTS:'on',FINDS_TITLE_EXCLUSION:'on',FINDS_WATCHED_MARK:'on',LIFECYCLE_LOCALIZATION:'on:programme,on:watchlist,on:epg',SCORED_RESOLUTION:'on',RATINGS_REFRESH:'on',DISCOVERY_LEDGER_MODE:'bounded'});
 const l=name=>entry(live.report,name);
-assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROFILE_COMPATIBILITY').raw,l('PREDICTION_PROFILE_COMPATIBILITY').retired,l('PREDICTION_PROFILE_COMPATIBILITY').issue,l('PREDICTION_PROFILE_COMPATIBILITY').effective],['set','selective',true,'retired',null],'the retired profile-rule switch is inert and the production selective is visible (ADR 0043)');
+assert.deepEqual([l('PREDICTION_PROFILE_COMPATIBILITY').state,l('PREDICTION_PROFILE_COMPATIBILITY').raw,l('PREDICTION_PROFILE_COMPATIBILITY').retired,l('PREDICTION_PROFILE_COMPATIBILITY').issue,l('PREDICTION_PROFILE_COMPATIBILITY').effective],['set','selective',true,'retired',null],'the retired profile-rule switch is inert and the production selective is visible (ADR 0044)');
 assert.deepEqual([l('PREDICTION_FINGERPRINT_COMPATIBILITY').state,l('PREDICTION_FINGERPRINT_COMPATIBILITY').raw,l('PREDICTION_FINGERPRINT_COMPATIBILITY').valid,l('PREDICTION_FINGERPRINT_COMPATIBILITY').effective],['set','selective',true,'selective']);
 assert.equal(l('FINGERPRINT_VERSION_OBJECTS').effective,'on');
 assert.equal(l('DISCOVERY_LEDGER_MODE').effective,'bounded');
@@ -116,7 +116,7 @@ assert.deepEqual([ratings.state,ratings.raw,ratings.retired,ratings.valid,rating
 const exclusion=l('FINDS_TITLE_EXCLUSION');
 assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.valid,exclusion.issue,exclusion.effective],['set','on',true,false,'retired',null],'the retired Finds exclusion switch is inert and the production on is visible (ADR 0041)');
 assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
-assert.deepEqual(live.report.summary,{registered:15,set:11,absent:4,invalid:5,redacted:0});
+assert.deepEqual(live.report.summary,{registered:15,set:11,absent:4,invalid:6,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
 const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,PREDICTION_VERSION_OBJECTS:'On',PREDICTION_MATERIALIZATION:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',FINGERPRINT_VERSION_OBJECTS:'on'.repeat(150)});

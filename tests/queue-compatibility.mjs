@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 
-// The prediction queue and the shared compatibility evaluator (ADR-0031): the selective rule always decides (ADR 0043:
+// The prediction queue and the shared compatibility evaluator (ADR-0031): the selective rule always decides (ADR 0044:
 // the PREDICTION_PROFILE_COMPATIBILITY switch is retired and inert), the strict outcome is counted beside it, an unknown
 // or unapproved change fails closed, and impact features come from the full fingerprint, bound to its hash.
 const records=new Map(),etags=new Map();let revision=0;

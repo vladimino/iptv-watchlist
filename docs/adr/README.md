@@ -54,7 +54,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 | Record | Status and boundary | Related work |
 | --- | --- | --- |
-| [0043 — The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired](0043-retire-profile-compatibility-switch.md) | Proposed 2026-10-29 (owner disposition `retire now`; acceptance pending; no binding change) | [AIR-231](https://trello.com/c/hrOVxD7v) |
+| [0044 — The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired](0044-retire-profile-compatibility-switch.md) | Proposed 2026-10-29 (owner disposition `retire now`; acceptance pending; no binding change) | [AIR-231](https://trello.com/c/hrOVxD7v) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

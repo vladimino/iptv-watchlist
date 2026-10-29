@@ -1,4 +1,4 @@
-# ADR 0043: The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired
+# ADR 0044: The taste-profile compatibility rule is always selective, and PREDICTION_PROFILE_COMPATIBILITY is retired
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-29  

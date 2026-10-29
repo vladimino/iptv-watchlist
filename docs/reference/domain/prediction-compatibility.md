@@ -2,7 +2,7 @@
 
 `src/domain/prediction-compatibility.js` is the one rule that decides whether a stored prediction is still usable after the taste profile moves on, as decided in [ADR-0031](../../adr/0031-selective-prediction-profile-compatibility.md). It is a pure function with no storage, network or clock access, built on the selector and approval rules of `src/domain/profile-impact.js` (the publisher's rules, see [taste-profile publication](../api/enrichment.md#taste-profile-publication)).
 
-**Consumers.** Every consumer uses the selective rule ([below](#one-rule-for-every-consumer)). No variable selects it: the former `PREDICTION_PROFILE_COMPATIBILITY` switch is retired and inert ([ADR 0043](../../adr/0043-retire-profile-compatibility-switch.md)). The strict outcome is still computed beside it for the queue's counters.
+**Consumers.** Every consumer uses the selective rule ([below](#one-rule-for-every-consumer)). No variable selects it: the former `PREDICTION_PROFILE_COMPATIBILITY` switch is retired and inert ([ADR 0044](../../adr/0044-retire-profile-compatibility-switch.md)). The strict outcome is still computed beside it for the queue's counters.
 
 ## Call
 
@@ -107,7 +107,7 @@ Two consumers stay strict by contract:
 
 ## Rollback
 
-There is no runtime rollback to strict equality: the switch is retired ([ADR 0043](../../adr/0043-retire-profile-compatibility-switch.md)). Returning to strict is a code revert to a version that reads the switch, with `PREDICTION_PROFILE_COMPATIBILITY` unset or `strict`; it returns every non-exact prediction as stale and requeues it, without touching any record. Once the leftover binding has been removed, a revert that should keep today's behaviour needs `selective` restored. A profile republished with earlier content is `content_identical` for predictions made under that content.
+There is no runtime rollback to strict equality: the switch is retired ([ADR 0044](../../adr/0044-retire-profile-compatibility-switch.md)). Returning to strict is a code revert to a version that reads the switch, with `PREDICTION_PROFILE_COMPATIBILITY` unset or `strict`; it returns every non-exact prediction as stale and requeues it, without touching any record. Once the leftover binding has been removed, a revert that should keep today's behaviour needs `selective` restored. A profile republished with earlier content is `content_identical` for predictions made under that content.
 
 ## Tests
 

@@ -17,7 +17,7 @@ Four observations are kept apart. **Run completion** is `status: complete` (or `
 
 Run counters and film outcomes persist after each submission. Current-batch film reads stay bounded; completed batches are counted from saved outcomes rather than loading every completed film on every next request.
 
-Which films are outstanding after a taste-profile change is decided by the queue rule in [prediction compatibility](../domain/prediction-compatibility.md#prediction-queue): the selective profile rule, with no switch ([ADR 0043](../../adr/0043-retire-profile-compatibility-switch.md)). The runner's own checks (pending count, completion, `already_current`) use the same rule, so a kept prediction is never recalculated.
+Which films are outstanding after a taste-profile change is decided by the queue rule in [prediction compatibility](../domain/prediction-compatibility.md#prediction-queue): the selective profile rule, with no switch ([ADR 0044](../../adr/0044-retire-profile-compatibility-switch.md)). The runner's own checks (pending count, completion, `already_current`) use the same rule, so a kept prediction is never recalculated.
 
 Tests: node tests/continuous-drain.mjs; node tests/queue-compatibility.mjs; node tests/fingerprint-migration-queue.mjs; node tests/throughput.mjs; node tests/enrichment.mjs. The multi-batch integration test uses an isolated R2 implementation and deterministic validated model outputs; it is not a production LLM throughput benchmark.
 

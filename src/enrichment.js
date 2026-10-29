@@ -336,7 +336,7 @@ function hourlyTaskRunAt(from=Date.now(),schedule=HOURLY_TASK_SCHEDULE){
 const scheduledRunFields=()=>{const at=hourlyTaskRunAt();return {nextCatchUpAt:at,nextScheduledRunAt:at};};
 // The profile rule (ADR-0031) is always selective: the shared evaluator keeps a prediction that no published, owner-approved
 // change impact reaches, and an unknown or unapproved change fails closed (stale). No variable selects it: the former
-// PREDICTION_PROFILE_COMPATIBILITY switch is retired (ADR 0043) and a stale binding is inert. The strict outcome is still
+// PREDICTION_PROFILE_COMPATIBILITY switch is retired (ADR 0044) and a stale binding is inert. The strict outcome is still
 // counted beside it in the queue's diagnostic block.
 const PREDICTION_PROFILE_MODE='selective';
 // SHA-256 of every lineage link's declaration, computed once, so the pure evaluator can re-check each approval.
