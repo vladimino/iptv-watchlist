@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {MemoryBucket} from './memory-bucket.mjs';
 
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto,console,encodeURIComponent,decodeURIComponent});
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 
 const examples=[[2257,2260,99.9],[1829,1832,99.8],[2234,2239,99.8],[9999,10000,99.9],[2260,2260,100]];
 for(const [current,total,expected] of examples){

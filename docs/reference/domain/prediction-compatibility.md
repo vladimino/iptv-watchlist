@@ -2,7 +2,7 @@
 
 `src/domain/prediction-compatibility.js` is the one rule that decides whether a stored prediction is still usable after the taste profile moves on, as decided in [ADR-0031](../../adr/0031-selective-prediction-profile-compatibility.md). It is a pure function with no storage, network or clock access, built on the selector and approval rules of `src/domain/profile-impact.js` (the publisher's rules, see [taste-profile publication](../api/enrichment.md#taste-profile-publication)).
 
-**Consumers.** One switch, `PREDICTION_PROFILE_COMPATIBILITY`, chooses the rule for every consumer ([below](#one-rule-for-every-consumer)); the default `strict` keeps exact profile version and hash equality everywhere.
+**Consumers.** Every consumer uses the selective rule ([below](#one-rule-for-every-consumer)). No variable selects it: the former `PREDICTION_PROFILE_COMPATIBILITY` switch is retired and inert ([ADR 0043](../../adr/0043-retire-profile-compatibility-switch.md)). The strict outcome is still computed beside it for the queue's counters.
 
 ## Call
 
@@ -56,42 +56,42 @@ Stored genre names are mapped case-insensitively, after trimming, by `PROFILE_GE
 Every queue refresh evaluates each queue film against the current profile:
 
 - **Inputs.** The fingerprint and features come from the film's `impactFeatures` in `enrichment/view-index.json`: `{fingerprintHash, fingerprintSchemaVersion, invalidatedAt, plotMechanics, execution}`. They are copied from the full fingerprint whenever the index receives it: on submit, on runner repair and by the fingerprint-view backfill. The display facet is never used as input. An entry whose `impactFeatures` is missing, or carries another fingerprint hash, has unknown features. The genres are the film's stored genres. Lineage approvals are re-checked with the SHA-256 of each link's declaration, computed once per refresh.
-- **Decision.** Under `strict` the queue keeps exact version and hash equality; under `selective` a `current` or `compatible` prediction stays out of the queue and every other predicted film is queued again. The runner chooses the work per film: `prediction_only` while the fingerprint is current.
-- **Counters.** `enrichment/prediction-queue.json` and `GET /api/enrichment/queue/status` carry `compatibility` in both modes:
+- **Decision.** A `current` or `compatible` prediction stays out of the queue and every other predicted film is queued again. The runner chooses the work per film: `prediction_only` while the fingerprint is current.
+- **Counters.** `enrichment/prediction-queue.json` and `GET /api/enrichment/queue/status` carry `compatibility`:
 
   ```json
-  {"mode": "strict", "evaluatorVersion": 1, "profileVersion": 2, "films": 4, "missing": 1,
+  {"mode": "selective", "evaluatorVersion": 1, "profileVersion": 2, "films": 4, "missing": 1,
    "strict": {"current": 0, "stale": 3}, "selective": {"current": 0, "compatible": 1, "stale": 2},
    "reasons": {"profile_unaffected": 1, "profile_impacted": 1, "film_features_unknown": 1},
    "wouldKeep": 1, "wouldRequeue": 0, "strictDisagreements": 0}
   ```
 
   - `missing` counts films without a prediction; they are excluded from the other counts.
-  - `wouldKeep` counts predictions strict equality queues but the evaluator keeps.
+  - `wouldKeep` counts predictions the selective rule keeps that strict equality would queue.
   - `wouldRequeue` counts the reverse; it should stay 0, because an exact match is always current.
   - `strictDisagreements` compares the evaluator in strict mode with the plain equality check; it should stay 0.
 
-  The same refresh records `fingerprintCompatibility` and a `work` map for the fingerprint transition rule, decided by its own switch ([fingerprint compatibility](fingerprint-compatibility.md#queue-and-runner)). Under that rule's `selective` mode one verdict per film decides, with this profile rule applied in the mode of `PREDICTION_PROFILE_COMPATIBILITY`.
+  The same refresh records `fingerprintCompatibility` and a `work` map for the fingerprint transition rule, decided by its own switch ([fingerprint compatibility](fingerprint-compatibility.md#queue-and-runner)). Under that rule's `selective` mode one verdict per film decides, with this profile rule applied in its selective mode.
 ## One rule for every consumer
 
-`predictionFreshness(env, profile)` fixes the mode and the profile snapshot (version, hash, lineage, approval digests) once per request. Its two checks are what every consumer calls:
+`predictionFreshness(env, profile)` fixes the profile snapshot (version, hash, lineage, approval digests) once per request. Its two checks are what every consumer calls:
 
 - `state(prediction, fingerprint, genres)` takes the stored prediction and the **full** fingerprint file;
 - `indexed(item, film)` takes the view-index entry and its `impactFeatures` (above), with the catalog or programme film for the genres.
 
-Under `strict` both run the exact equality checks the consumers used before, unchanged. Under `selective` both ask the evaluator in `selective` mode.
+Both ask the evaluator in `selective` mode.
 
 | Consumer | Check |
 | --- | --- |
 | Prediction queue | `indexed` (with the counters above) |
-| View `GET /api/enrichment/view` (`stale`; under `selective` it also reads the programme and catalog for genres) | `indexed` |
+| View `GET /api/enrichment/view` (`stale`; it also reads the programme and catalog for genres) | `indexed` |
 | Coverage in the footer status and the prediction Events | `indexed` |
 | Catalog `GET /api/catalog/available` and therefore Finds | `indexed` |
 | Runner `start` (pending count), `next` (completion, retried failures, index repair, work selection), `submit` (`already_current`, caller-reported failure) and `complete` (pending count) | `state`, genres from the run's source metadata |
 | Diagnostics and MCP `prediction_film_diagnostics`, `prediction_queue_overview`, `prediction_pending` | `state` for the file, `indexed` for index agreement and `index_ahead_of_queue` |
 | Film/Person lifecycle reader and domain | an optional evaluator verdict per film (`predictionCompatible(id)` on the store); without one, strict |
 
-The same `state` and `indexed` checks apply the fingerprint transition rule in the same call ([fingerprint compatibility](fingerprint-compatibility.md#readers-and-diagnostics)); each rule follows its own switch, and the fingerprint is judged before the profile.
+The same `state` and `indexed` checks apply the fingerprint transition rule in the same call ([fingerprint compatibility](fingerprint-compatibility.md#readers-and-diagnostics)); the fingerprint rule follows its own switch, and the fingerprint is judged before the profile.
 
 Two consumers stay strict by contract:
 
@@ -103,24 +103,22 @@ Two consumers stay strict by contract:
 - A kept prediction is never rewritten: its record and every reader keep its own `tasteProfileVersion` and `tasteProfileHash`.
 - Diagnostics report `cause: compatible` and the `mode`. The lifecycle domain records the original profile as provenance and the evaluated one as `evaluatedAgainst`.
 - The queue, the view, coverage and the catalog read the same index entry, so they agree.
-- The runner reads the full fingerprint. For an entry written before `impactFeatures` existed it may therefore keep a prediction that the index-based consumers still treat as stale. Under `selective` its `next` step then repairs the entry (record and impact facet), and every consumer agrees from the next refresh on. Under `strict` the repair is unchanged (a missing or outdated record only).
+- The runner reads the full fingerprint. For an entry written before `impactFeatures` existed it may therefore keep a prediction that the index-based consumers still treat as stale. Its `next` step then repairs the entry (record and impact facet), and every consumer agrees from the next refresh on.
 
 ## Rollback
 
-Setting the switch back to `strict` restores exact equality in every consumer on the next request; the queue follows on its next refresh. Strict mode returns every non-exact prediction as stale, so the selective rule can be turned off without touching any record. A profile republished with earlier content is `content_identical` for predictions made under that content.
+There is no runtime rollback to strict equality: the switch is retired ([ADR 0043](../../adr/0043-retire-profile-compatibility-switch.md)). Returning to strict is a code revert to a version that reads the switch, with `PREDICTION_PROFILE_COMPATIBILITY` unset or `strict`; it returns every non-exact prediction as stale and requeues it, without touching any record. Once the leftover binding has been removed, a revert that should keep today's behaviour needs `selective` restored. A profile republished with earlier content is `content_identical` for predictions made under that content.
 
 ## Tests
 
 `tests/queue-compatibility.mjs` covers the consumers end to end:
 
-- the exact mode values;
+- no code path reads a profile-rule switch, and a stale binding of any value changes no queue or reader decision;
 - impact features written on submit;
-- the strict default with its counters, and queue/view agreement under strict;
-- under `selective`:
-  - the same kept film in the queue, view, coverage, diagnostics, catalog and runner (`already_current`, no recomputation, version kept), while the reached film is recalculated;
-  - the runner keeping an entry without impact features and repairing it;
-  - rollback to strict everywhere;
-  - a tampered approval;
-  - a global edit.
+- the counters with the strict outcome beside the decision, and queue/view agreement;
+- the same kept film in the queue, view, coverage, diagnostics, catalog and runner (`already_current`, no recomputation, version kept), while the reached film is recalculated;
+- the runner keeping an entry without impact features and repairing it;
+- a tampered approval;
+- a global edit.
 
 `tests/film-person-reader.mjs` covers the lifecycle verdict. `tests/prediction-compatibility.mjs` checks every case of `tests/fixtures/profile-compatibility/cases.json` against the live vocabulary, together with negative cases (missing or wrong digest, tampered or unapproved links, broken or unordered lineage, features with a missing, null or foreign fingerprint hash, stored values outside the vocabulary, absent genre-specific dimensions in and outside their genre, unknown mode), feature extraction, and a lineage built by the publisher's own functions.

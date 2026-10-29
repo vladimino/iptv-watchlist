@@ -3,9 +3,9 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 
-// The prediction queue and the shared compatibility evaluator (ADR-0031): strict equality decides by default, the
-// selective outcome is always counted, PREDICTION_PROFILE_COMPATIBILITY=selective lets it decide, and impact features
-// come from the full fingerprint, bound to its hash. Readers stay strict here.
+// The prediction queue and the shared compatibility evaluator (ADR-0031): the selective rule always decides (ADR 0043:
+// the PREDICTION_PROFILE_COMPATIBILITY switch is retired and inert), the strict outcome is counted beside it, an unknown
+// or unapproved change fails closed, and impact features come from the full fingerprint, bound to its hash.
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
@@ -17,14 +17,14 @@ const env={TMDB_REQUEST_INTERVAL_MS:0,BUCKET:store};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
 vm.runInContext(['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
-vm.runInContext('globalThis.T={fingerprintImpactFacet,predictionCompatibilityMode,EXECUTION,GENERAL_EXECUTION};',ctx);
+vm.runInContext('globalThis.T={fingerprintImpactFacet,EXECUTION,GENERAL_EXECUTION};',ctx);
 const T=ctx.T;
 const api=async(path,method='GET',body)=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};
 const read=key=>records.has(key)?JSON.parse(records.get(key)):null;
 const write=(key,value)=>{records.set(key,JSON.stringify(value));etags.set(key,'etag-'+(++revision));};
 
-// Mode: only the exact string 'selective'.
-for(const [value,mode] of [[undefined,'strict'],['strict','strict'],['selective','selective'],['Selective','strict'],[' selective','strict'],['on','strict'],[true,'strict']])assert.equal(T.predictionCompatibilityMode({PREDICTION_PROFILE_COMPATIBILITY:value}),mode,String(value));
+// No selector: the retired switch is not read anywhere in the Worker.
+for(const file of ['src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_PROFILE_COMPATIBILITY|predictionCompatibilityMode/,file+' reads no profile-rule switch');
 
 // Impact features: a copy of the full fingerprint, bound to its hash; nothing without a hash.
 const execution=Object.fromEntries(T.GENERAL_EXECUTION.map(key=>[key,T.EXECUTION[key][0]]));
@@ -52,7 +52,7 @@ const reconcile=async()=>{const r=await api('enrichment/queue/reconcile','POST',
 const pending=queue=>[...queue.pending].sort();
 let queue=await reconcile();
 assert.deepEqual(pending(queue),['film003']);
-assert.deepEqual(JSON.parse(JSON.stringify(queue.compatibility)),{mode:'strict',evaluatorVersion:1,profileVersion:1,films:4,missing:1,strict:{current:3,stale:0},selective:{current:3,compatible:0,stale:0},reasons:{exact:3},wouldKeep:0,wouldRequeue:0,strictDisagreements:0});
+assert.deepEqual(JSON.parse(JSON.stringify(queue.compatibility)),{mode:'selective',evaluatorVersion:1,profileVersion:1,films:4,missing:1,strict:{current:3,stale:0},selective:{current:3,compatible:0,stale:0},reasons:{exact:3},wouldKeep:0,wouldRequeue:0,strictDisagreements:0});
 assert.deepEqual((await api('enrichment/queue/status')).data.compatibility,queue.compatibility,'queue status exposes the counters');
 
 // v2: an approved selective edit of horror preferences.
@@ -62,18 +62,19 @@ const dry=await api('enrichment/profile','PUT',{version:2,schemaVersion:1,profil
 assert.equal(dry.data.code,'selective_requires_owner_approval');
 const approved={...horror,approval:{approvedBy:'owner',approvedAt:'2026-10-27T22:00:00.000Z',reviewRef:'trello-comment:test',declarationSha256:dry.data.declarationSha256}};
 assert.equal((await api('enrichment/profile','PUT',{version:2,schemaVersion:1,profile:changed,changeImpact:approved})).status,200);
-// Strict (default): every predicted film is pending again; the shadow shows which ones selective would keep.
+// Selective decides with no variable: the unaffected drama keeps its prediction; the shadow shows what strict would requeue.
 queue=read('enrichment/prediction-queue.json');
 assert.equal(queue.trigger,'profile_updated');
-assert.deepEqual(pending(queue),['film000','film001','film002','film003']);
-assert.deepEqual(JSON.parse(JSON.stringify(queue.compatibility)),{mode:'strict',evaluatorVersion:1,profileVersion:2,films:4,missing:1,strict:{current:0,stale:3},selective:{current:0,compatible:1,stale:2},reasons:{profile_unaffected:1,profile_impacted:1,film_features_unknown:1},wouldKeep:1,wouldRequeue:0,strictDisagreements:0});
-// Queue/reader agreement under strict: a predicted film is pending exactly when the view calls its prediction stale.
+assert.deepEqual(pending(queue),['film001','film002','film003']);
+assert.deepEqual(JSON.parse(JSON.stringify(queue.compatibility)),{mode:'selective',evaluatorVersion:1,profileVersion:2,films:4,missing:1,strict:{current:0,stale:3},selective:{current:0,compatible:1,stale:2},reasons:{profile_unaffected:1,profile_impacted:1,film_features_unknown:1},wouldKeep:1,wouldRequeue:0,strictDisagreements:0});
+// Queue/reader agreement: a predicted film is pending exactly when the view calls its prediction stale.
 const view=(await api('enrichment/view')).data.films;
 for(const id of ['film000','film001','film002'])assert.equal(queue.pending.includes(id),view[id].prediction.stale===true,id);
 
-// Selective: the unaffected drama keeps its prediction (no recomputation), the horror film and the film without
-// impact features are pending, the film without a prediction stays pending.
-env.PREDICTION_PROFILE_COMPATIBILITY='selective';
+// The unaffected drama keeps its prediction (no recomputation), the horror film and the film without impact features are
+// pending, the film without a prediction stays pending. A stale binding of any value changes nothing.
+for(const value of ['strict','selective','Selective',' strict',true]){env.PREDICTION_PROFILE_COMPATIBILITY=value;queue=await reconcile();assert.equal(queue.compatibility.mode,'selective',String(value));assert.deepEqual(pending(queue),['film001','film002','film003'],'binding '+String(value));}
+delete env.PREDICTION_PROFILE_COMPATIBILITY;
 queue=await reconcile();
 assert.equal(queue.compatibility.mode,'selective');
 assert.deepEqual(pending(queue),['film001','film002','film003']);
@@ -111,13 +112,13 @@ queue=await reconcile();
 assert.deepEqual(pending(queue),['film003']);
 const afterRepair=(await api('enrichment/view')).data.films;
 for(const id of ['film000','film001','film002'])assert.equal(afterRepair[id].prediction.stale,false,id);
-// Strict rollback with this state: the carried prediction is stale again everywhere, nothing was rewritten.
-delete env.PREDICTION_PROFILE_COMPATIBILITY;
+// The former strict rollback no longer exists: a binding strict keeps the carried prediction current everywhere.
+env.PREDICTION_PROFILE_COMPATIBILITY='strict';
 queue=await reconcile();
-assert.deepEqual(pending(queue),['film000','film002','film003']);
-assert.equal((await api('enrichment/view')).data.films.film000.prediction.stale,true);
-assert.deepEqual([...await offered()],[]);
-env.PREDICTION_PROFILE_COMPATIBILITY='selective';
+assert.deepEqual(pending(queue),['film003']);
+assert.equal((await api('enrichment/view')).data.films.film000.prediction.stale,false);
+assert.deepEqual([...await offered()],['tmdb_900']);
+delete env.PREDICTION_PROFILE_COMPATIBILITY;
 queue=await reconcile();
 
 // An approval that no longer matches its declaration in the stored lineage is unknown, i.e. global.
@@ -135,8 +136,9 @@ queue=read('enrichment/prediction-queue.json');
 assert.deepEqual(pending(queue),['film000','film001','film002','film003']);assert.deepEqual(JSON.parse(JSON.stringify(queue.compatibility.reasons)),{profile_global_change:3});
 assert.equal(queue.compatibility.selective.compatible,0);
 
-// Back to strict (the rollback): decisions return to plain equality, no record changed.
-delete env.PREDICTION_PROFILE_COMPATIBILITY;
+// A binding strict after the global edit: still selective, every prediction stays pending.
+env.PREDICTION_PROFILE_COMPATIBILITY='strict';
 queue=await reconcile();
-assert.equal(queue.compatibility.mode,'strict');assert.deepEqual(pending(queue),['film000','film001','film002','film003']);
-console.log('Queue and reader compatibility: exact mode switch, impact features from the full fingerprint, strict default with shadow counters, queue/reader agreement, selective keeps the unaffected film in queue, view, coverage, diagnostics, catalog and runner, facet repair, unbound features and tampered approvals stale, global edit and strict rollback passed');
+assert.equal(queue.compatibility.mode,'selective');assert.deepEqual(pending(queue),['film000','film001','film002','film003']);
+delete env.PREDICTION_PROFILE_COMPATIBILITY;
+console.log('Queue and reader compatibility: no profile-rule switch (retired binding inert), impact features from the full fingerprint, selective decides with strict shadow counters, queue/reader agreement, selective keeps the unaffected film in queue, view, coverage, diagnostics, catalog and runner, facet repair, unbound features and tampered approvals stale, global edit with a stale strict binding passed');

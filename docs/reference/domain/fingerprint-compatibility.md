@@ -198,11 +198,11 @@ The transition registry is the code constant `FINGERPRINT_TRANSITIONS` in `src/e
 | --- | --- |
 | Prediction queue | `indexed`, with the `fingerprintCompatibility` block and the `work` map ([above](#queue-and-runner)) |
 | Runner `start`, `next`, `submit`, `complete` | `state`, `fingerprintUsable` and `work` ([above](#queue-and-runner)) |
-| View `GET /api/enrichment/view` | `indexed` decides `stale` for every film; the programme and catalog genres are read when either switch is on; `compatibility` carries `profileMode`, `fingerprintMode` and the three target versions |
+| View `GET /api/enrichment/view` | `indexed` decides `stale` for every film; the programme and catalog genres are always read, for the selective profile rule; `compatibility` carries `profileMode`, `fingerprintMode` and the three target versions |
 | Coverage in the status route and the prediction events | `indexed` |
 | Catalog `GET /api/catalog/available` and therefore Finds | `indexed` |
 | Queue status `GET /api/enrichment/queue/status`, MCP `enrichment_queue` | the stored `fingerprintCompatibility` block and the schema, prompt and prediction prompt versions the queue was built with (the per-film `work` map stays in the queue object) |
-| Status `GET /api/enrichment/status`, MCP `enrichment_status` | `fingerprintPromptVersion` next to the schema and prediction prompt versions, and `compatibility: {profileMode, fingerprintMode}` |
+| Status `GET /api/enrichment/status`, MCP `enrichment_status` | `fingerprintPromptVersion` next to the schema and prediction prompt versions, and `compatibility: {profileMode, fingerprintMode}`; `profileMode` is always `selective` ([ADR 0043](../../adr/0043-retire-profile-compatibility-switch.md)) |
 | Queue overview, MCP `prediction_queue_overview` | `snapshot.fingerprint`: the mode in force, the target versions and registry digest, and the stored block's classes and migration counts; `snapshot.reasons` gains `fingerprint_schema_differs`, `fingerprint_prompt_differs`, `prediction_prompt_differs` and `fingerprint_registry_differs` when the stored queue was built under other versions than the Worker's |
 | Film diagnostics, MCP `prediction_film_diagnostics` | `fingerprint`: `current` (exact schema), `usable` (the verdict in force), `reason`, `migration`, `mode`, `promptVersion`, `produced`, `previous`; `prediction`: `reason` and `requiredWork` of the combined verdict, `fingerprintMode`, and `cause` judged with the usable fingerprint (`fingerprint_not_current` only when the fingerprint is not usable under the rule in force) |
 | Index agreement and `index_ahead_of_queue` | `indexed` against `state` |
