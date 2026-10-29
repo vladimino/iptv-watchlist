@@ -516,13 +516,31 @@ async function testOrderedRatings(env){
  const html=await response.text(),header=name=>response.headers.get(name);
  const rows=[...html.matchAll(/<tr\b[^>]*class="[^"]*\bdiary-entry-row\b[^"]*"[^>]*>([\s\S]*?)<\/tr>/gi)];
  const ordered=[];for(const row of rows){
-  const id=row[1].match(/data-postered-identifier="[^"]*?&quot;lid&quot;:&quot;([a-zA-Z0-9_-]+)&quot;/)?.[1]||null;
+  // Diary rows need not contain the LazyPoster lid used by the watchlist. A permalink supplies
+  // a stable fallback slug, but a slug is NOT a canonical Letterboxd lid for the facts store.
+  const poster=row[0].match(/data-postered-identifier=(["'])(.*?)\1/i)?.[2]||'';
+  const lid=poster.match(/(?:&quot;|&#34;|")lid(?:&quot;|&#34;|")\s*:\s*(?:&quot;|&#34;|")([a-zA-Z0-9_-]{1,80})(?:&quot;|&#34;|")/)?.[1]||null;
+  let slug=null,watchedDate=null;
+  for(const anchor of row[1].matchAll(/<a\b[^>]*\shref=(["'])(.*?)\1/gi)){
+   let link;try{link=new URL(anchor[2].replaceAll('&amp;','&'),'https://letterboxd.com');}catch{continue;}
+   if(link.origin!=='https://letterboxd.com')continue;
+   const film=link.pathname.match(/^\/(?:[a-zA-Z0-9_-]+\/)?film\/([a-z0-9][a-z0-9-]*)\/$/i);
+   if(film&&!slug)slug=film[1].toLowerCase();
+   const day=link.pathname.match(/^\/[a-zA-Z0-9_-]+\/diary\/films\/for\/(\d{4})\/(\d{1,2})\/(\d{1,2})\/$/);
+   if(day&&!watchedDate){
+    const value=day[1]+'-'+day[2].padStart(2,'0')+'-'+day[3].padStart(2,'0');
+    const timestamp=Date.parse(value+'T00:00:00Z');
+    if(Number.isFinite(timestamp)&&new Date(timestamp).toISOString().slice(0,10)===value)watchedDate=value;
+   }
+  }
   const stars=row[1].match(/\brated-(10|[1-9])\b/)?.[1]||null;
-  ordered.push({idHash:id?await sha256Short(id):null,rating:stars?Number(stars)/2:null});
+  const identity=lid||slug,identitySource=lid?'lid':slug?'slug':null;
+  ordered.push({idHash:identity?await sha256Short(identitySource+':'+identity):null,identitySource,watchedDate,rating:stars?Number(stars)/2:null});
  }
  Object.assign(report,{durationMs:Date.now()-started,status:response.status,headers:{cfMitigated:header('cf-mitigated'),contentType:header('content-type'),cacheControl:header('cache-control'),cfCacheStatus:header('cf-cache-status'),server:header('server'),location:header('location')?'present':null},
   bytes:html.length,challenge:/<title>\s*Just a moment/i.test(html),validPage:response.ok&&rows.length>0,next:/<a\b[^>]*class="next"/i.test(html),items:ordered.length,rated:ordered.filter(item=>item.rating!=null).length,
-  unrated:ordered.filter(item=>item.rating==null).length,missingId:ordered.filter(item=>!item.idHash).length,order:ordered});
+  unrated:ordered.filter(item=>item.rating==null).length,canonicalIds:ordered.filter(item=>item.identitySource==='lid').length,slugIdentities:ordered.filter(item=>item.identitySource==='slug').length,
+  missingId:ordered.filter(item=>!item.idHash).length,missingDate:ordered.filter(item=>!item.watchedDate).length,order:ordered});
  console.log(JSON.stringify({event:'test_ordered_ratings',...report,order:undefined,orderLength:ordered.length}));
  return report;
 }
