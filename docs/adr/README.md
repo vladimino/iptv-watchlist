@@ -49,7 +49,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| Record | Status and boundary | Related work |
+| --- | --- | --- |
+| [0041 — The Finds display-only title exclusion runs without a switch, and FINDS_TITLE_EXCLUSION is retired](0041-retire-finds-title-exclusion-switch.md) | Proposed 2026-10-29 (owner disposition `retire now`; acceptance pending; no binding change) | [AIR-229](https://trello.com/c/ubOHtAgi) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

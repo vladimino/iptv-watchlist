@@ -76,11 +76,11 @@ function catalogConsumedTmdb({index,metadata,watchlist,programme,catalog}){
  return consumed;
 }
 // Display-only exclusion of watched export films without a proven identity (ADR-0028). It reads one private list of normalized
-// export names and years, only while FINDS_TITLE_EXCLUSION is exactly `on`, and removes a catalog film from this response only:
-// it writes nothing and is never identity, a fact or a rating. A missing, oversized or invalid list hides nothing, and the
+// export names and years on every request, and removes a catalog film from this response only. No variable selects it: the
+// former FINDS_TITLE_EXCLUSION switch is retired (ADR 0041) and a stale binding is inert. The rule
+// writes nothing and is never identity, a fact or a rating. A missing, oversized or invalid list hides nothing, and the
 // response says only `state` and a count, never a title, an id or a hash of the list.
 const FINDS_TITLE_EXCLUSION_KEY='letterboxd/display-exclusion.json',FINDS_TITLE_EXCLUSION_MAX_BYTES=2*1024*1024,FINDS_TITLE_EXCLUSION_MAX_ENTRIES=20000;
-const findsTitleExclusionEnabled=env=>env?.FINDS_TITLE_EXCLUSION==='on';
 // The rule tag selects the catalog guard: the legacy tag keeps the ADR-0028 guard exactly, the v2 tag the ADR-0033 one; any
 // other tag makes the list unavailable. A deploy therefore changes nothing until a list with the v2 tag is placed.
 const FINDS_TITLE_RULES=new Set(['strict_original_exact_year','strict_original_exact_year_v2']);
@@ -115,9 +115,8 @@ async function findsTitleExclusionKeys(list,now){
  if([...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,'0')).join('')!==list.contentSha256)return null;
  return {keys,rule:list.rule};
 }
-// With the switch off the object is not read. The size check uses the R2 object size before the body is read or parsed.
+// The size check uses the R2 object size before the body is read or parsed.
 async function loadFindsTitleExclusion(env,now){
- if(!findsTitleExclusionEnabled(env))return {state:'off',keys:null};
  const unavailable={state:'unavailable',keys:null};
  try{
   const object=await env.BUCKET.get(FINDS_TITLE_EXCLUSION_KEY);
@@ -158,7 +157,7 @@ function findsTitleSuppressor({keys,rule,catalog,metadata,watchlist,programme}){
   return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId)&&(!relaxed||aliasFar(key,tmdbId,film.year));
  };
 }
-function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'off',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'unavailable',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const consumedTmdb=catalogConsumedTmdb({index,metadata,watchlist,programme,catalog});

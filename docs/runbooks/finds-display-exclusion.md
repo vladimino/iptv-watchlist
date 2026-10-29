@@ -33,7 +33,7 @@ The Finds section can hide watched Letterboxd export films that have no accepted
    - when the new list replaces one with the legacy `strict_original_exact_year` tag, the films the new list hides that the old one did not, for the owner's private review, and the distribution of `|Letterboxd year − TMDB year|` over the accepted identities (the year-drift risks B and C of ADR-0033).
    Per-film samples stay private.
 4. **Place the list (owner approval).** Upload the file unchanged as `letterboxd/display-exclusion.json` in the production bucket, out of band with the owner's credentials, for example `wrangler r2 object put iptv/letterboxd/display-exclusion.json --file <file> --content-type application/json --remote`. No Worker route or MCP tool does this.
-5. **Switch on (owner approval).** Set `FINDS_TITLE_EXCLUSION=on` and record the observation in the [flag register](../reference/feature-flags.md). Then confirm `displayExclusion.state` is `applied` and check the `excluded` count in a read of `GET /api/catalog/available`. `unavailable` means the object is missing or invalid, and nothing is hidden.
+5. **Confirm.** The rule runs as soon as the object is in place; there is no switch ([ADR 0041](../adr/0041-retire-finds-title-exclusion-switch.md)). Confirm `displayExclusion.state` is `applied` and check the `excluded` count in a read of `GET /api/catalog/available`. `unavailable` means the object is missing or invalid, and nothing is hidden.
 6. **Accept.** The owner checks Finds visually on real data.
 
 ## Replace, disable, roll back
@@ -41,10 +41,9 @@ The Finds section can hide watched Letterboxd export films that have no accepted
 A deploy of a Worker that reads both tags changes nothing on its own: the list in R2 keeps its tag, and a legacy list is read with the legacy guard. The relaxed guard starts only when a list with the `strict_original_exact_year_v2` tag is placed. Before that upload, keep the private copy of the list it replaces, outside the repository with mode `600`.
 
 - **Replace:** build a new list after every export or identity import (a newer plan), then upload it over the old object. The object is replaced as a whole; a reader sees either the old or the new list.
-- **Disable at once:** set `FINDS_TITLE_EXCLUSION` to anything other than `on`. The next request shows every film, and the object is no longer read.
-- **Remove the input:** delete `letterboxd/display-exclusion.json`. With the switch still on, the state becomes `unavailable` and nothing is hidden.
+- **Disable at once:** delete `letterboxd/display-exclusion.json` (owner approval, out of band, after keeping a private copy). The next request reports `unavailable` and shows every film. The former `FINDS_TITLE_EXCLUSION` variable no longer disables anything.
 - **Back to the legacy guard:** upload the kept legacy list over the object. The next request reads it with the legacy guard.
-- **Code rollback:** reverting the code removes the rule. A Worker that knows only the legacy tag treats a `strict_original_exact_year_v2` list as `unavailable` and hides nothing until a legacy list is placed again. No other data was written, so nothing needs restoring.
+- **Code rollback:** reverting the retirement brings the `FINDS_TITLE_EXCLUSION` switch back, and the leftover binding `on` keeps the rule running; reverting further removes the rule. A Worker that knows only the legacy tag treats a `strict_original_exact_year_v2` list as `unavailable` and hides nothing until a legacy list is placed again. No other data was written, so nothing needs restoring.
 
 Stop and switch off on any of these:
 - a film the owner has not seen is hidden;
