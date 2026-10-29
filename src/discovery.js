@@ -245,12 +245,13 @@ async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films);}
  if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films);return true;
 }
-// Owner-triggered poster hydration for catalog records that were stored without a poster. It touches only the `poster`
+// Owner-triggered poster hydration for catalog records that were stored without a poster: a permanent owner-only maintenance
+// route behind the Worker's Cloudflare Access, with no switch of its own (the former CATALOG_POSTER_HYDRATION is retired, ADR
+// 0048; `enabled` stays in the answers and is always true). It touches only the `poster`
 // field of records with a verified TMDB identity, takes the asset from TMDB movie detail by that id (the same w342 form the
 // discovery writer stores), and writes under the resolver lease with a separate compare-and-swap on each catalog copy. A dry run
 // reads and counts only. Identity, aliases, shows, decisions, the generation pointer and every other key stay untouched.
 const CATALOG_POSTER_LIMIT=20,CATALOG_POSTER_DEFAULT_LIMIT=10,CATALOG_POSTER_ID_SAMPLE=50;
-const catalogPosterHydrationEnabled=env=>env?.CATALOG_POSTER_HYDRATION==='on';
 function catalogPosterPresent(value){return typeof value==='string'&&value.startsWith('https://');}
 function catalogPosterVerified(film){return !!film&&typeof film==='object'&&film.tmdbId!=null&&film.tmdbId!==''&&/^\d+$/.test(String(film.tmdbId))&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId);}
 function catalogPosterFromDetail(movie){const path=movie?.poster_path;return typeof path==='string'&&/^\/[A-Za-z0-9._-]+$/.test(path)?'https://image.tmdb.org/t/p/w342'+path:null;}
@@ -324,8 +325,7 @@ async function catalogPosterHydration(env,body={}){
  if(programmeRunId)sources.push(await catalogPosterObject(env,epgGenerationKey(programmeRunId,'discovered-films.json')));
  const counts=catalogPosterMissing(sources);
  const summary={programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length};
- if(dryRun)return json({dryRun:true,enabled:catalogPosterHydrationEnabled(env),...summary,ids:counts.verified.slice(0,CATALOG_POSTER_ID_SAMPLE).map(row=>row.id)});
- if(!catalogPosterHydrationEnabled(env))return json({dryRun:false,enabled:false,error:'Catalog poster hydration is off',...summary},409);
+ if(dryRun)return json({dryRun:true,enabled:true,...summary,ids:counts.verified.slice(0,CATALOG_POSTER_ID_SAMPLE).map(row=>row.id)});
  if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({error:'TMDB is not configured'},503);
  const lease=await acquireDiscoveryLease(env);
  if(!lease)return json({dryRun:false,enabled:true,error:'Resolver is writing the catalog',...summary},409);
