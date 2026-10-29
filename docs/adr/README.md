@@ -57,8 +57,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-| Record | Status and boundary | Related work |
-| --- | --- | --- |
+No proposed records currently.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
