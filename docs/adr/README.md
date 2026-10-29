@@ -57,7 +57,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| Record | Status and boundary | Related work |
+| --- | --- | --- |
+| [0050 — The one-time prediction version materialization route and PREDICTION_MATERIALIZATION are retired](0050-retire-prediction-materialization-route.md) | Proposed 2026-10-29 (owner decision `retire now` recorded on AIR-227; ADR acceptance pending; no binding exists) | [AIR-227](https://trello.com/c/KjFwF0Zp) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
