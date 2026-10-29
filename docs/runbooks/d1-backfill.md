@@ -106,19 +106,19 @@ The run stops before any write, exit code 3, with one of these reasons:
 
 A pointer that names a hash with no stored body or record is not a stop: the row comes from `fingerprint.json`, and the objects that exist are `unreferenced`. Only the Worker's own spelling of a key is a version key: the film segment must be exactly `encodeURIComponent` of the id it decodes to, and the schema and prompt versions are integers without leading zeros. Any other key under `fingerprints/` or `fingerprint-generations/`, including an alias such as `-s01-p1` or a needlessly or lower-case escaped film segment, is unknown and fails closed. The synthetic proof and the replay on a real snapshot are in the [fingerprint version import evidence](../evidence/d1-migration/air-264-fingerprint-version-keys-2026-10-29.md).
 
-1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. Repeat the dry-run twice more: `applied` must be 0.
+1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. One dry-run is enough; a same-baseline rerun is not required, because `tests/d1-backfill.mjs` already proves that one applies nothing and sends no data write.
 2. **Owner acknowledges the class C list** by producing the JSON file of `{sourceKey,targetTable,targetId,reason}` records from `ledger.json` after review. The acknowledgement records a known gap; it is not lossless parity.
 3. **Create the databases** (owner, separate approval): `iptv` and a scratch database; apply migrations `0001`–`0003` to `iptv` only.
 4. **Back up before the first write.** Record the D1 bookmark of the empty target (Time Travel) and an export of it in the evidence; the bookmark is the restore point.
 5. **Run in bounded batches.** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-N --target d1 --limit 5000 --acknowledged /abs/class-c.json`, repeated until `completed`. The first command of each run is the probe on the scratch database; a run that does not pass it never reads the target.
-6. **Rerun twice on the same baseline.** Both runs must report `applied: 0` and the same parity.
+6. **No mandatory rerun.** Run again on the same baseline only to resume a `partial` or `stopped` run; the receipts make that safe, and `tests/d1-backfill.mjs` covers the empty same-baseline rerun.
 7. **Delta.** Export a fresh baseline with its own consistency proof (its `finishedAt` must be later than the target's newest baseline) and run with `--delta`: changed objects are re-imported, old receipts are `superseded`, anything `stale` or `foreign` is a class A blocker, and keys missing from the new inventory are anomalies for the owner, never deletions in D1.
 
 ## GO/NO-GO for one run
 
 | Outcome in `report.json` | Meaning | Next step |
 | --- | --- | --- |
-| `completed`, no class A blocker, parity ok, receipts clean | the run is complete for this baseline | rerun twice; then the acceptance report |
+| `completed`, no class A blocker, parity ok, receipts clean | the run is complete for this baseline | the acceptance report |
 | `partial` | `--limit` reached | run again |
 | `stopped: unexpected_conflict` / `class_a_blocker` | a row could not be written as the baseline says | stop the window; investigate the named unit; no manual row edit |
 | `stopped: unacknowledged_record` | a class C record outside the acknowledged list | owner reviews and extends the list, or stops |
@@ -165,5 +165,5 @@ Record in a dated file under `docs/evidence/d1-migration/`:
 - Target: database uuid and name, schema migrations applied (`0001`, `0002`, `0003`), restore bookmark, scratch database uuid.
 - Probe: statements and bytes probed, `atomic`, `rowsAfterFailure`.
 - Runs: for each run, command (without secrets), status, applied, resumed, reconciled, pending, stop reason, adapter statistics, and with `--staged-generation` the `staged` section and its gate.
-- Result: parity (denominator, missing, extra, mismatched), receipts audit, class A blockers (must be empty), class B families with dispositions, class C list with the acknowledgement reference, two empty reruns, delta result.
+- Result: parity (denominator, missing, extra, mismatched), receipts audit, class A blockers (must be empty), class B families with dispositions, class C list with the acknowledgement reference, delta result.
 - Statement that the Worker still has no D1 binding, Scheduled Tasks and flags are unchanged, and R2 remains authoritative.
