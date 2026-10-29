@@ -1,6 +1,6 @@
 # Immutable fingerprint version keys in the offline importer (AIR-264)
 
-**Captured:** 2026-10-29, 05:12–07:10 UTC, in the agent container; code at branch `claude/air-264-fingerprint-version-keys` commit `7e6d7f8` (from `main` `f1c9dbd`).  
+**Captured:** 2026-10-29, 05:12–10:14 UTC, in the agent container; code at branch `claude/air-264-fingerprint-version-keys` commits `7e6d7f8` and, after review, `e44460f` (both from `main` `f1c9dbd`).  
 **Input:** the private post-materialization production snapshot taken for [AIR-74](https://trello.com/c/5AdAmKPe) at 22:58–23:08 UTC on 28 October: `consistent_fenced`, 11,544 objects, 741,370,844 bytes, aggregate `7a0117e7b5a05749039167e28fc96d84af6104586e3bf55999652146d7f3af58`, `manifest.json` SHA-256 `8d1dbc0855d2ed8f64ee08c5ad62e68e6fb158179493cf82b8ebd986f3429612`. No new export.  
 **Scope:** private files and local SQLite only. No R2 or D1 request, no flag, Task or migration change. The AIR-210 writer is unchanged.  
 **Card:** [AIR-264](https://trello.com/c/P0elt7dL); follows blocker 1 of the [post-split replay](air-261-post-split-replay-2026-10-28.md).  
@@ -50,7 +50,17 @@ Fixtures are written by the Worker's own `writeFingerprint` on a create-only buc
 | 2, rerun | 06:23:50–06:45:40 | exit 0; **applied 0**, resumed 33,811 |
 | 3, rerun | 06:45:40–07:09:46 | exit 0; **applied 0**, resumed 33,811; output byte-identical to run 2 |
 
-Every run:
+After review, `e44460f` accepts only the Worker's own key spelling (no leading zeros in the versions; the film segment exactly `encodeURIComponent` of its id). The replay was repeated on a fresh SQLite database:
+
+| Run at `e44460f` | Window (UTC) | Result |
+| --- | --- | --- |
+| 1 | 07:20:17–08:52:56 | exit 0; 33,811 units applied; output byte-identical to run 1 at `7e6d7f8` |
+| 2, rerun | 09:20:24–09:45:54 | exit 0; **applied 0**, resumed 33,811 |
+| 3, rerun | 09:45:54–10:13:13 | exit 0; **applied 0**, resumed 33,811; output byte-identical to run 2 and to the reruns at `7e6d7f8` |
+
+A first attempt at rerun 2 (08:52:56–09:20) was stopped by the agent's background time limit during the read-back, before any write (the database was unchanged since 08:33); it was started again.
+
+Every run, at both commits:
 - **Coverage:** 11,544 = 7,558 mapped + 3,986 R2-only; 0 excluded, **0 unmapped**.
 - **`fingerprintVersions`:** bodies 19, generations 19, **mapped 38**, unreferenced 0, blocked 0. All 38 parity records are `mapped` via `fingerprint_pointer`.
 - **Parity:** ok; denominator 87,506; 0 missing, 0 extra, 0 mismatched, 0 unprojected.
