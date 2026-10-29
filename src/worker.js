@@ -502,55 +502,9 @@ async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
  return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
 }
-// AIR-273, temporary (cleanup AIR-274): with TEST_ORDERED_RATINGS=on the sync entry is diagnostic only. A start makes
-// exactly one GET of the owner's diary page 1 and returns what it saw; a step answers 409. Neither reads or writes
-// storage, creates a run or touches the watchlist, EPG, discovery or queues. Any other value keeps the normal path.
-const testOrderedRatingsEnabled=env=>env?.TEST_ORDERED_RATINGS==='on';
-async function sha256Short(text){const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));return [...digest.slice(0,4)].map(byte=>byte.toString(16).padStart(2,'0')).join('');}
-async function testOrderedRatings(env){
- const url=`https://letterboxd.com/${sourceConfig(env).letterboxdUsername}/diary/`,requestedAt=new Date().toISOString(),started=Date.now();
- const report={mode:'test_ordered_ratings',source:'diary_page_1',requestedAt,requests:1};
- let response;
- try{response=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},redirect:'manual',signal:AbortSignal.timeout(15000)});}
- catch(e){report.durationMs=Date.now()-started;report.error=String(e.message).slice(0,160);console.log(JSON.stringify({event:'test_ordered_ratings',...report}));return report;}
- const html=await response.text(),header=name=>response.headers.get(name);
- const rows=[...html.matchAll(/<tr\b[^>]*class="[^"]*\bdiary-entry-row\b[^"]*"[^>]*>([\s\S]*?)<\/tr>/gi)];
- const ordered=[];for(const row of rows){
-  // Diary rows need not contain the LazyPoster lid used by the watchlist. A permalink supplies
-  // a stable fallback slug, but a slug is NOT a canonical Letterboxd lid for the facts store.
-  const poster=row[0].match(/data-postered-identifier=(["'])(.*?)\1/i)?.[2]||'';
-  const lid=poster.match(/(?:&quot;|&#34;|")lid(?:&quot;|&#34;|")\s*:\s*(?:&quot;|&#34;|")([a-zA-Z0-9_-]{1,80})(?:&quot;|&#34;|")/)?.[1]||null;
-  let slug=null,watchedDate=null;
-  for(const anchor of row[1].matchAll(/<a\b[^>]*\shref=(["'])(.*?)\1/gi)){
-   let link;try{link=new URL(anchor[2].replaceAll('&amp;','&'),'https://letterboxd.com');}catch{continue;}
-   if(link.origin!=='https://letterboxd.com')continue;
-   const film=link.pathname.match(/^\/(?:[a-zA-Z0-9_-]+\/)?film\/([a-z0-9][a-z0-9-]*)\/$/i);
-   if(film&&!slug)slug=film[1].toLowerCase();
-   const day=link.pathname.match(/^\/[a-zA-Z0-9_-]+\/diary\/films\/for\/(\d{4})\/(\d{1,2})\/(\d{1,2})\/$/);
-   if(day&&!watchedDate){
-    const value=day[1]+'-'+day[2].padStart(2,'0')+'-'+day[3].padStart(2,'0');
-    const timestamp=Date.parse(value+'T00:00:00Z');
-    if(Number.isFinite(timestamp)&&new Date(timestamp).toISOString().slice(0,10)===value)watchedDate=value;
-   }
-  }
-  const stars=row[1].match(/\brated-(10|[1-9])\b/)?.[1]||null;
-  const identity=lid||slug,identitySource=lid?'lid':slug?'slug':null;
-  ordered.push({idHash:identity?await sha256Short(identitySource+':'+identity):null,identitySource,watchedDate,rating:stars?Number(stars)/2:null});
- }
- Object.assign(report,{durationMs:Date.now()-started,status:response.status,headers:{cfMitigated:header('cf-mitigated'),contentType:header('content-type'),cacheControl:header('cache-control'),cfCacheStatus:header('cf-cache-status'),server:header('server'),location:header('location')?'present':null},
-  bytes:html.length,challenge:/<title>\s*Just a moment/i.test(html),validPage:response.ok&&rows.length>0,next:/<a\b[^>]*class="next"/i.test(html),items:ordered.length,rated:ordered.filter(item=>item.rating!=null).length,
-  unrated:ordered.filter(item=>item.rating==null).length,canonicalIds:ordered.filter(item=>item.identitySource==='lid').length,slugIdentities:ordered.filter(item=>item.identitySource==='slug').length,
-  missingId:ordered.filter(item=>!item.idHash).length,missingDate:ordered.filter(item=>!item.watchedDate).length,order:ordered});
- console.log(JSON.stringify({event:'test_ordered_ratings',...report,order:undefined,orderLength:ordered.length}));
- return report;
-}
 // Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step. `caller` names the
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
 async function postSync(env,execution,pathname,body,caller='http'){
- if(testOrderedRatingsEnabled(env)){
-  if(pathname==='/api/sync/start')return json(await testOrderedRatings(env));
-  return json({mode:'test_ordered_ratings',error:'Sync steps are disabled while TEST_ORDERED_RATINGS is on; a start makes the one diagnostic request.'},409);
- }
  if(pathname==='/api/sync/start')return json(await beginSync(env));
  const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=()=>pathname==='/api/sync/epg'||step.branch==='run_mismatch';
  await openContinuationStep(env,step,persisted());
