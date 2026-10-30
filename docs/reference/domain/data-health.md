@@ -17,13 +17,13 @@ Related contracts: [Film/Person lifecycle](film-person.md) for the dimension env
 
 ```js
 evaluateDataHealth(snapshot, {thresholds}) -> result | {error}
-diffHealthIssues(previous, current) -> {appeared, persisting, resolved}
+diffHealthIssues(previous, current) -> {appeared, persisting, resolved, unobserved}
 healthIssueId(subsystem, category, subject) -> string
 compareHealthIssues(left, right) -> number
 progressOf(facts, clock, thresholds, maxBackoffMs) -> progress
 ```
 
-Errors, checked in this order, return `{error}` and nothing else: `invalid_snapshot` (not a plain object), `invalid_clock` (`now` missing or unparseable), `invalid_thresholds` (an unknown key, or a value that is not a positive integer), `invalid_films`, `invalid_observations` (present and not an array). Any other field is optional. Entries of `films` that are not objects with a string `id`, and observations without a string `key`, are skipped.
+Errors, checked in this order, return `{error}` and nothing else: `invalid_snapshot` (not a plain object), `invalid_clock` (`now` missing or unparseable), `invalid_thresholds` (an unknown key, or a value that is not a positive integer), `invalid_films`, `invalid_observations` (present and not an array), `invalid_coverage` (not an object, a key other than `films` / `observations`, or a value other than `complete` / `partial`). Any other field is optional. Entries of `films` that are not objects with a string `id`, and observations without a string `key`, are skipped.
 
 ### Snapshot
 
@@ -31,6 +31,7 @@ Errors, checked in this order, return `{error}` and nothing else: `invalid_snaps
 | --- | --- | --- |
 | `now` | the caller's clock, ISO string or milliseconds | required; every age and every "in the future" is relative to it |
 | `pin` | the caller's snapshot pin | `programmeRunId`; a non-object is ignored |
+| `coverage` | the caller's declaration of each list | `films`, `observations`: `complete` (the whole population) or `partial` (a bounded page); undeclared is `partial` |
 | `published` | `epg/published-generation.json` | `programmeRunId`, `phase`, `publishedAt`, `observedAt` |
 | `films[]` | Film records in the admin read contract shape | `id`, `programmeRunId`, `observedAt`, `identity`, `metadata`, `localization`, `localizationConflicts`, `externalIds`, `fingerprint`, `prediction`, `poster` |
 | `observations[]` | unresolved entries of the discovery resolution ledger, already bounded by the caller | `key`, `status`, `attempts`, `retryAt`, `lastAttemptAt`, `checkedAt`, `terminalReason`, `programmeRunId`, `observedAt` |
@@ -51,6 +52,7 @@ A dimension envelope (`identity`, `metadata`, `fingerprint`, `prediction`) is re
   now,                                   // the caller's clock as ISO
   clock: {skewToleranceMs, anomalies},   // anomalies: ['clock_skew'] when any evidence time lies in the future
   published: {programmeRunId, phase, publishedAt},
+  scope: {programmeRunId, coverage: {films, observations}, sources: {<source>: evidence}, subjects: {films: [ids], observations: [keys]}},
   subsystems: {<name>: {evidence, status, issues, worst}},
   counts: {bySeverity: {critical, warning, info}, byCategory: {...}},
   thresholds,                            // the thresholds in force
@@ -58,7 +60,9 @@ A dimension envelope (`identity`, `metadata`, `fingerprint`, `prediction`) is re
 }
 ```
 
-`subsystems[name].evidence` is `observed`, `not_supplied` or `object_missing`; `status` is `clear` (observed, no issue), `attention` (observed, at least one issue) or `unknown` (not observed, whatever the issue count). The subsystems are `programme`, `identity`, `metadata`, `localization`, `fingerprint`, `prediction`, `prediction_queue`, `discovery`, `poster` and `letterboxd_archive`. The film dimensions and `poster` are observed when `films` is supplied; `programme` reads `published`, `prediction_queue` reads `predictionQueue`, `discovery` reads `discovery`, `letterboxd_archive` reads `letterboxd`. The `posters` summary and `observations` add issues to `poster` and `identity` without being a subsystem of their own.
+`scope` says what the evaluation actually saw: the published generation, the declared coverage of each list, the evidence of every source (`observed`, `not_supplied`, `object_missing`) and the sorted ids of the films and observations that were read. It is what `diffHealthIssues` uses to tell a resolved issue from one whose subject merely left the snapshot.
+
+`subsystems[name].evidence` is `observed`, `not_supplied` or `object_missing`; `status` is `clear` (observed, no issue, and every list the subsystem reads is declared `complete`), `clear_in_scope` (observed, no issue, but the evaluation saw a bounded page, so nothing is claimed about subjects outside it), `attention` (observed, at least one issue) or `unknown` (not observed, whatever the issue count). `identity` is `clear` only with complete films **and** complete observations; `poster` only with complete films and the poster summary; the other film dimensions with complete films. A page of 25 films can never make a subsystem `clear`. The subsystems are `programme`, `identity`, `metadata`, `localization`, `fingerprint`, `prediction`, `prediction_queue`, `discovery`, `poster` and `letterboxd_archive`. The film dimensions and `poster` are observed when `films` is supplied; `programme` reads `published`, `prediction_queue` reads `predictionQueue`, `discovery` reads `discovery`, `letterboxd_archive` reads `letterboxd`. The `posters` summary and `observations` add issues to `poster` and `identity` without being a subsystem of their own.
 
 ### Issue
 
@@ -94,7 +98,7 @@ Vocabularies are closed and exported (`DATA_HEALTH_*`):
 | `action.eligible` | `true` (the subject's state allows the named action now), `false` (it does not; `reason` says why), `null` (the evidence cannot tell) |
 | `action.reason` | `eligible`, `no_action_defined`, `in_backoff`, `awaiting_progress`, `evidence_incomplete`, `generation_changed`, `manual_review_required`, `identity_unverified`, `terminal`, `owner_input_required`, `already_queued` |
 
-`action` is a suggestion and an eligibility statement about the subject, nothing more. An `eligible: true` does not run anything and does not replace the owner gate of the action it names; a guarded action contract decides execution. `eligible` is `true` only with `reason: eligible`, and never when the evidence is `missing`.
+`action` is a suggestion and an eligibility statement about the subject, nothing more. An `eligible: true` does not run anything and does not replace the owner gate of the action it names; a guarded action contract decides execution. `eligible` is `true` only with `reason: eligible` and only on `complete` evidence: when a rule would call the subject eligible but the issue's evidence is `partial` (no `observedAt`, a skewed timestamp, another generation) or `missing`, the action is downgraded to `suggested: investigate`, `eligible: null`, `reason: evidence_incomplete`, and `code` still names the action that would apply. This guard sits in the issue constructor, so every rule obeys it.
 
 `affected.count` is the number of records the issue stands for: `1` for one film or observation, the eligible or deferred count for the queue, the stored count for the poster summary, the number of held conflicts for a localization conflict, `0` for a coverage issue. `affected.sample` holds at most `sampleSize` ids, sorted.
 
@@ -171,10 +175,11 @@ Issues are sorted by severity (`critical`, `warning`, `info`), then category (`c
 
 Two issues with one id describe one problem: the more severe is kept; on equal severity the one with weaker evidence, then the earlier in input order; the kept issue carries `duplicate_subject` in its anomalies and its count is not doubled. A repeated Film record therefore yields one issue per subsystem and category, and the same film in `stuck` and `incomplete` of one subsystem stays two issues, because they are two categories.
 
-`diffHealthIssues(previous, current)` compares two results by id and returns `appeared`, `persisting` and `resolved`, each sorted the same way. It is how a consumer tells a resolved problem from a renamed one.
+`diffHealthIssues(previous, current)` compares two results by id and returns `appeared`, `persisting`, `resolved` and `unobserved`, each sorted the same way (`unobserved` entries are `{reason, issue}`). An issue that disappeared is **resolved only when its subject was observed again** in `current`: a film or an observation when its id is in `current.scope.subjects`; a whole-object subject (`generation`, `queue`, `continuation`, `catalog`, `archive`) when its source is `observed`, and for the generation-bound ones also under the same `scope.programmeRunId`; a coverage issue when its source is now `observed`. Otherwise it is `unobserved` with `subject_not_observed` (another page of films), `source_not_observed` (the projection was not read, or `current` has no `scope`) or `generation_changed`. Comparing two bounded pages therefore never reports a film as resolved because it fell off the page, and a missing projection never resolves anything it used to report.
 
 ## Boundaries
 
 - The library has no I/O and no clock. `build.mjs` does not bundle it into the Worker, `public/app.js` and the admin fixture do not import it. Its first consumer, when one is approved, builds the snapshot from a bounded read and passes it in.
 - The model does not rank films, does not compute a health score, does not retry, does not reset a lease, does not touch flags or Tasks. `action.eligible` is a statement about the subject, not an authorization.
-- Tests: `node tests/data-health.mjs` covers the vocabularies, errors, empty snapshots in both senses, stale, stalled, backoff at the edges, missing evidence and clock skew, identity and queue conflicts, resolved issues and the diff, a stale pin and a changed generation, the queue, the continuation, posters, thresholds and determinism. No network, no clock.
+- A consumer that reads a bounded page passes `coverage: {films: 'partial'}` (or nothing) and shows `clear_in_scope` for what it is; only a reader of the whole population may declare `complete`.
+- Tests: `node tests/data-health.mjs` covers the vocabularies, errors, coverage and scope, empty snapshots in both senses, stale, stalled, backoff at the edges, missing evidence and clock skew, the eligibility guard on every path, identity and queue conflicts, resolved and unobserved issues in the diff across pages, missing projections and generations, a stale pin and a changed generation, the queue, the continuation, posters, thresholds and determinism. No network, no clock.

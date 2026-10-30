@@ -27,6 +27,9 @@ export const DATA_HEALTH_ELIGIBILITY_REASONS = [
   'manual_review_required', 'identity_unverified', 'terminal', 'owner_input_required', 'already_queued',
 ];
 export const DATA_HEALTH_ANOMALIES = ['clock_skew', 'projection_generation_differs', 'duplicate_subject'];
+export const DATA_HEALTH_COVERAGE = ['complete', 'partial'];
+export const DATA_HEALTH_SUBSYSTEM_STATUSES = ['clear', 'clear_in_scope', 'attention', 'unknown'];
+export const DATA_HEALTH_UNOBSERVED_REASONS = ['subject_not_observed', 'source_not_observed', 'generation_changed'];
 
 const HOUR = 3600000;
 const DAY = 86400000;
@@ -67,8 +70,26 @@ const SNAPSHOT_SOURCES = {
   letterboxd_archive: 'letterboxd',
 };
 
+const SNAPSHOT_SOURCE_NAMES = ['published', 'films', 'observations', 'predictionQueue', 'discovery', 'posters', 'letterboxd'];
+const LIST_SOURCES = ['films', 'observations'];
+
 function failure(error) {
   return {error};
+}
+
+// The caller declares whether a list is the whole population or a bounded page. Undeclared is `partial`: a page
+// cannot prove that a subject outside it is healthy or gone.
+function coverageOf(snapshot) {
+  const declared = snapshot.coverage;
+  if (declared !== undefined && declared !== null && !isObject(declared)) return null;
+  const coverage = {};
+  for (const source of LIST_SOURCES) {
+    const value = declared?.[source];
+    if (value !== undefined && !DATA_HEALTH_COVERAGE.includes(value)) return null;
+    coverage[source] = value ?? 'partial';
+  }
+  for (const key of Object.keys(declared || {})) if (!LIST_SOURCES.includes(key)) return null;
+  return coverage;
 }
 
 function isObject(value) {
@@ -189,9 +210,14 @@ function evidenceOf(completeness, source, extra) {
   return {completeness, source, missing: extra?.missing ?? [], anomalies: extra?.anomalies ?? []};
 }
 
-// One issue. Every field is explicit so a consumer never has to guess a default.
+// One issue. Every field is explicit so a consumer never has to guess a default. An action is eligible only on
+// complete evidence: a missing observation time or a skewed timestamp downgrades it to `investigate` with
+// `eligible: null`; the code still names the action that would apply.
 function issue(fields) {
   const subject = {kind: fields.subject.kind, id: String(fields.subject.id)};
+  const action = fields.action.eligible === true && fields.evidence.completeness !== 'complete'
+    ? {suggested: 'investigate', code: fields.action.code, eligible: null, reason: 'evidence_incomplete'}
+    : fields.action;
   return {
     schemaVersion: DATA_HEALTH_SCHEMA_VERSION,
     id: healthIssueId(fields.subsystem, fields.category, subject),
@@ -208,7 +234,7 @@ function issue(fields) {
     threshold: fields.threshold ?? null,
     provenance: fields.provenance,
     affected: fields.affected ?? {count: 1, sample: [subject.id]},
-    action: fields.action,
+    action,
   };
 }
 
@@ -705,19 +731,27 @@ export function evaluateDataHealth(snapshot, options) {
   if (!thresholds) return failure('invalid_thresholds');
   if (snapshot.films !== undefined && snapshot.films !== null && !Array.isArray(snapshot.films)) return failure('invalid_films');
   if (snapshot.observations !== undefined && snapshot.observations !== null && !Array.isArray(snapshot.observations)) return failure('invalid_observations');
+  const coverage = coverageOf(snapshot);
+  if (!coverage) return failure('invalid_coverage');
 
   const clock = createClock(nowMs, thresholds);
   const published = publishedView(snapshot.published);
   const context = {snapshot, clock, thresholds, published: published ?? null, queue: queueView(snapshot.predictionQueue), discovery: snapshot.discovery};
 
   const collected = [];
+  const filmIds = new Set(), observationKeys = new Set();
   collected.push(...coverageIssues(context));
   if (published) collected.push(...programmeIssues(snapshot, context));
   for (const record of snapshot.films || []) {
     if (!isObject(record) || typeof record.id !== 'string' || !record.id) continue;
+    filmIds.add(record.id);
     collected.push(...filmIssues(record, context));
   }
-  for (const entry of snapshot.observations || []) collected.push(...observationIssues(entry, context));
+  for (const entry of snapshot.observations || []) {
+    if (!isObject(entry) || typeof entry.key !== 'string' || !entry.key) continue;
+    observationKeys.add(entry.key);
+    collected.push(...observationIssues(entry, context));
+  }
   collected.push(...queueIssues(context));
   collected.push(...discoveryIssues(context));
   collected.push(...posterSummaryIssues(context));
@@ -728,12 +762,21 @@ export function evaluateDataHealth(snapshot, options) {
     bySeverity: Object.fromEntries(DATA_HEALTH_SEVERITIES.map(value => [value, 0])),
     byCategory: Object.fromEntries(DATA_HEALTH_CATEGORIES.map(value => [value, 0])),
   };
+  const sources = {};
+  for (const source of SNAPSHOT_SOURCE_NAMES) {
+    const value = snapshot[source];
+    sources[source] = value === undefined ? 'not_supplied' : value === null ? 'object_missing' : 'observed';
+  }
+  const scope = {
+    programmeRunId: published?.programmeRunId ?? null,
+    coverage,
+    sources,
+    subjects: {films: [...filmIds].sort(compareText), observations: [...observationKeys].sort(compareText)},
+  };
   const subsystems = {};
   for (const subsystem of DATA_HEALTH_SUBSYSTEMS) {
-    const source = SNAPSHOT_SOURCES[subsystem];
-    const value = snapshot[source];
-    const evidence = value === undefined ? 'not_supplied' : value === null ? 'object_missing' : 'observed';
-    subsystems[subsystem] = {evidence, status: evidence === 'observed' ? 'clear' : 'unknown', issues: 0, worst: null};
+    const evidence = sources[SNAPSHOT_SOURCES[subsystem]];
+    subsystems[subsystem] = {evidence, status: evidence !== 'observed' ? 'unknown' : subsystemComplete(subsystem, scope) ? 'clear' : 'clear_in_scope', issues: 0, worst: null};
   }
   for (const item of issues) {
     counts.bySeverity[item.severity]++;
@@ -748,6 +791,7 @@ export function evaluateDataHealth(snapshot, options) {
     now: iso(nowMs),
     clock: {skewToleranceMs: thresholds.skewToleranceMs, anomalies: [...clock.anomalies].sort()},
     published: published ? {programmeRunId: published.programmeRunId, phase: published.phase, publishedAt: iso(clock.at(published.raw.publishedAt).ms)} : {programmeRunId: null, phase: null, publishedAt: null},
+    scope,
     subsystems,
     counts,
     thresholds,
@@ -755,12 +799,56 @@ export function evaluateDataHealth(snapshot, options) {
   };
 }
 
-// Two evaluations compared by issue id: what appeared, what persists and what is resolved.
+// `clear` claims the whole subsystem: every list the subsystem reads must be declared complete. A bounded page
+// of films can only be `clear_in_scope`.
+function subsystemComplete(subsystem, scope) {
+  if (SNAPSHOT_SOURCES[subsystem] === 'films') {
+    if (scope.coverage.films !== 'complete') return false;
+    if (subsystem === 'identity') return scope.sources.observations === 'observed' && scope.coverage.observations === 'complete';
+    if (subsystem === 'poster') return scope.sources.posters === 'observed';
+    return true;
+  }
+  return true;
+}
+
+// Two evaluations compared by issue id: what appeared, what persists, what is resolved and what merely left the
+// snapshot. An issue is resolved only when its subject was observed again in the current evaluation: a film or an
+// observation by id in `scope.subjects`, a whole-object subject by its source being observed under the same
+// published generation, a coverage issue by its source being observed. Anything else is `unobserved`, with the
+// reason, and is not a claim of health.
 export function diffHealthIssues(previous, current) {
   const before = new Map((previous?.issues || []).map(item => [item.id, item]));
   const after = new Map((current?.issues || []).map(item => [item.id, item]));
-  const appeared = [], persisting = [], resolved = [];
+  const appeared = [], persisting = [], resolved = [], unobserved = [];
   for (const [id, item] of after) (before.has(id) ? persisting : appeared).push(item);
-  for (const [id, item] of before) if (!after.has(id)) resolved.push(item);
-  return {appeared: appeared.sort(compareHealthIssues), persisting: persisting.sort(compareHealthIssues), resolved: resolved.sort(compareHealthIssues)};
+  for (const [id, item] of before) {
+    if (after.has(id)) continue;
+    const reason = unobservedReason(item, previous, current);
+    if (reason) unobserved.push({reason, issue: item});
+    else resolved.push(item);
+  }
+  const byIssue = (left, right) => compareHealthIssues(left.issue, right.issue);
+  return {appeared: appeared.sort(compareHealthIssues), persisting: persisting.sort(compareHealthIssues), resolved: resolved.sort(compareHealthIssues), unobserved: unobserved.sort(byIssue)};
+}
+
+const SUBJECT_SOURCES = {generation: 'published', queue: 'predictionQueue', continuation: 'discovery', catalog: 'posters', archive: 'letterboxd'};
+const GENERATION_BOUND = new Set(['generation', 'queue', 'continuation', 'catalog']);
+
+function unobservedReason(item, previous, current) {
+  const scope = current?.scope;
+  const kind = item.subject?.kind;
+  if (!scope) return 'source_not_observed';
+  if (kind === 'film' || kind === 'observation') {
+    const list = kind === 'film' ? 'films' : 'observations';
+    if (scope.sources?.[list] !== 'observed') return 'source_not_observed';
+    return (scope.subjects?.[list] || []).includes(item.subject.id) ? null : 'subject_not_observed';
+  }
+  if (kind === 'subsystem') return scope.sources?.[item.provenance?.source] === 'observed' ? null : 'source_not_observed';
+  const source = SUBJECT_SOURCES[kind];
+  if (scope.sources?.[source] !== 'observed') return 'source_not_observed';
+  if (GENERATION_BOUND.has(kind)) {
+    const before = previous?.scope?.programmeRunId ?? null, now = scope.programmeRunId ?? null;
+    if (before !== null && now !== null && before !== now) return 'generation_changed';
+  }
+  return null;
 }

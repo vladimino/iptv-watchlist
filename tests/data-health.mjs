@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
-  DATA_HEALTH_ACTIONS, DATA_HEALTH_ACTION_CODES, DATA_HEALTH_ANOMALIES, DATA_HEALTH_CATEGORIES, DATA_HEALTH_ELIGIBILITY_REASONS,
+  DATA_HEALTH_ACTIONS, DATA_HEALTH_ACTION_CODES, DATA_HEALTH_ANOMALIES, DATA_HEALTH_CATEGORIES, DATA_HEALTH_COVERAGE, DATA_HEALTH_ELIGIBILITY_REASONS,
   DATA_HEALTH_EVIDENCE, DATA_HEALTH_FRESHNESS, DATA_HEALTH_PROGRESS, DATA_HEALTH_REASONS, DATA_HEALTH_SEVERITIES, DATA_HEALTH_SUBJECT_KINDS,
-  DATA_HEALTH_SUBSYSTEMS, DATA_HEALTH_THRESHOLDS, compareHealthIssues, diffHealthIssues, evaluateDataHealth, healthIssueId, progressOf,
+  DATA_HEALTH_SUBSYSTEMS, DATA_HEALTH_SUBSYSTEM_STATUSES, DATA_HEALTH_THRESHOLDS, DATA_HEALTH_UNOBSERVED_REASONS, compareHealthIssues, diffHealthIssues,
+  evaluateDataHealth, healthIssueId, progressOf,
 } from '../src/domain/data-health.js';
 
 // Pure and offline: no storage, network or clock of its own, and not part of the Worker bundle or the public pages.
@@ -21,7 +22,7 @@ const deepFreeze = value => {if (value && typeof value === 'object') {Object.fre
 const published = {programmeRunId: 'gen-2', phase: 'published', publishedAt: at(-5 * H), observedAt: NOW};
 const film = (id, fields) => ({id, programmeRunId: 'gen-2', observedAt: NOW, identity: {status: 'resolved'}, metadata: {status: 'fresh'}, localization: {status: 'reviewed'}, localizationConflicts: [], externalIds: [{scheme: 'tmdb', value: '1', trusted: true, conflicting: false}], fingerprint: {status: 'current'}, prediction: {status: 'current'}, poster: 'https://image.example/poster.jpg', ...fields});
 const queue = fields => ({observedAt: NOW, programmeRunId: 'gen-2', hotPending: [], coldPending: [], retries: {}, lastCheckAt: at(-H), lastBatch: {finishedAt: at(-H), stage: 'noop', reason: null}, ...fields});
-const complete = fields => ({now: NOW, published, films: [], observations: [], predictionQueue: queue(), discovery: {stage: 'complete', reason: null, at: at(-2 * H), programmeRunId: 'gen-2', observedAt: NOW}, letterboxd: {observedAt: NOW, baseline: {confirmedAt: at(-10 * D), sha256: 'a'.repeat(64)}}, ...fields});
+const complete = fields => ({now: NOW, published, coverage: {films: 'complete', observations: 'complete'}, films: [], observations: [], predictionQueue: queue(), discovery: {stage: 'complete', reason: null, at: at(-2 * H), programmeRunId: 'gen-2', observedAt: NOW}, posters: {observedAt: NOW, programmeRunId: 'gen-2', missingPoster: 0, verifiedMissing: 0, unverifiedMissing: 0}, letterboxd: {observedAt: NOW, baseline: {confirmedAt: at(-10 * D), sha256: 'a'.repeat(64)}}, ...fields});
 const evaluate = (snapshot, options) => evaluateDataHealth(deepFreeze(structuredClone(snapshot)), options);
 const only = (result, subsystem) => result.issues.filter(item => item.subsystem === subsystem);
 const one = (result, id) => {const found = result.issues.filter(item => item.id === id); assert.equal(found.length, 1, id); return found[0];};
@@ -52,6 +53,7 @@ function checkIssue(item, result) {
   assert.equal(typeof item.provenance.source, 'string');
   assert.equal(typeof item.provenance.rule, 'string');
   if (item.action.eligible === true) assert.equal(item.action.reason, 'eligible');
+  if (item.action.eligible === true) assert.equal(item.evidence.completeness, 'complete', item.id + ': eligible only on complete evidence');
   if (item.evidence.completeness === 'missing') assert.equal(item.action.eligible, null, 'missing evidence never makes an action eligible');
 }
 function checkResult(result) {
@@ -68,9 +70,13 @@ function checkResult(result) {
   assert.equal(Object.values(result.counts.byCategory).reduce((sum, value) => sum + value, 0), result.issues.length);
   for (const [name, entry] of Object.entries(result.subsystems)) {
     assert.equal(entry.issues, only(result, name).length, name);
+    assert(DATA_HEALTH_SUBSYSTEM_STATUSES.includes(entry.status), entry.status);
     if (entry.evidence !== 'observed') assert.equal(entry.status, 'unknown', name + ' without evidence is unknown');
-    else assert.equal(entry.status, entry.issues ? 'attention' : 'clear', name);
+    else if (entry.issues) assert.equal(entry.status, 'attention', name);
+    else assert(['clear', 'clear_in_scope'].includes(entry.status), name);
   }
+  for (const [list, value] of Object.entries(result.scope.coverage)) assert(DATA_HEALTH_COVERAGE.includes(value), list);
+  assert.deepEqual(result.scope.subjects.films, [...result.scope.subjects.films].sort((a, b) => a.localeCompare(b, 'en')));
   assert.equal(Object.hasOwn(result, 'score'), false, 'no aggregate score');
   return result;
 }
@@ -85,6 +91,9 @@ assert.deepEqual(evaluateDataHealth({now: NOW}, {thresholds: {unknownMs: 5}}), {
 assert.deepEqual(evaluateDataHealth({now: NOW}, {thresholds: {stalledMs: 1.5}}), {error: 'invalid_thresholds'});
 assert.deepEqual(evaluateDataHealth({now: NOW, films: {}}), {error: 'invalid_films'});
 assert.deepEqual(evaluateDataHealth({now: NOW, observations: 'x'}), {error: 'invalid_observations'});
+assert.deepEqual(evaluateDataHealth({now: NOW, coverage: 'complete'}), {error: 'invalid_coverage'});
+assert.deepEqual(evaluateDataHealth({now: NOW, coverage: {films: 'all'}}), {error: 'invalid_coverage'});
+assert.deepEqual(evaluateDataHealth({now: NOW, coverage: {posters: 'complete'}}), {error: 'invalid_coverage'});
 assert.equal(evaluateDataHealth({now: Date.parse(NOW), films: []}).now, NOW, 'milliseconds are an accepted clock');
 
 // Empty, two senses. Nothing supplied: every subsystem is unknown, reported, and nothing is clear.
@@ -101,6 +110,17 @@ assert.deepEqual(clear.counts.bySeverity, {critical: 0, warning: 0, info: 0});
 assert.deepEqual(clear.thresholds, DATA_HEALTH_THRESHOLDS);
 assert.deepEqual(clear.published, {programmeRunId: 'gen-2', phase: 'published', publishedAt: at(-5 * H)});
 assert.deepEqual(clear.clock, {skewToleranceMs: 5 * 60000, anomalies: []});
+assert.deepEqual(clear.scope, {programmeRunId: 'gen-2', coverage: {films: 'complete', observations: 'complete'}, sources: {published: 'observed', films: 'observed', observations: 'observed', predictionQueue: 'observed', discovery: 'observed', posters: 'observed', letterboxd: 'observed'}, subjects: {films: [], observations: []}});
+// A bounded page is clear only in its own scope: undeclared coverage is partial, and `clear` needs every list the
+// subsystem reads to be complete.
+const page = checkResult(evaluate(complete({coverage: undefined, films: [film('film:ok')]})));
+assert.deepEqual(page.scope.coverage, {films: 'partial', observations: 'partial'});
+assert.deepEqual(page.scope.subjects.films, ['film:ok']);
+for (const name of ['identity', 'metadata', 'localization', 'fingerprint', 'prediction', 'poster']) assert.equal(page.subsystems[name].status, 'clear_in_scope', name);
+for (const name of ['programme', 'prediction_queue', 'discovery', 'letterboxd_archive']) assert.equal(page.subsystems[name].status, 'clear', name);
+const filmsOnly = evaluate(complete({coverage: {films: 'complete'}, observations: undefined, posters: undefined}));
+assert.deepEqual([filmsOnly.subsystems.metadata.status, filmsOnly.subsystems.identity.status, filmsOnly.subsystems.poster.status, filmsOnly.scope.coverage.observations], ['clear', 'clear_in_scope', 'clear_in_scope', 'partial'], 'identity needs the observations and poster needs the summary to claim clear');
+assert.equal(evaluate(complete({coverage: {films: 'complete', observations: 'partial'}})).subsystems.identity.status, 'clear_in_scope');
 // An object the caller read and found absent is missing evidence, more severe than one the caller did not supply.
 const absent = checkResult(evaluate(complete({published: null, predictionQueue: null, letterboxd: undefined})));
 assert.equal(one(absent, 'programme/incomplete/subsystem:programme').severity, 'critical');
@@ -120,7 +140,30 @@ const diff = diffHealthIssues(earlier, later);
 assert.deepEqual(diff.resolved.map(item => item.id), ['metadata/incomplete/film:film:ok']);
 assert.deepEqual(diff.persisting.map(item => item.id), ['localization/conflict/film:film:other']);
 assert.deepEqual(diff.appeared.map(item => item.id), ['metadata/incomplete/film:film:new']);
-assert.deepEqual(diffHealthIssues(null, null), {appeared: [], persisting: [], resolved: []});
+assert.deepEqual(diff.unobserved, []);
+assert.deepEqual(diffHealthIssues(null, null), {appeared: [], persisting: [], resolved: [], unobserved: []});
+// A subject that left the snapshot is not resolved: another page, a missing projection or a changed generation
+// are `unobserved` with their reason; a subject observed again in a bounded page is resolved.
+const firstPage = evaluate(complete({coverage: undefined, films: [film('film:p1', {poster: null}), film('film:both', {metadata: {status: 'missing'}})], predictionQueue: queue({hotPending: ['film:x'], lastCheckAt: at(-30 * H), lastBatch: {finishedAt: at(-30 * H), stage: 'complete', reason: null}})}));
+const secondPage = evaluate(complete({coverage: undefined, films: [film('film:p2'), film('film:both')]}));
+const paged = diffHealthIssues(firstPage, secondPage);
+assert.deepEqual(paged.resolved.map(item => item.id), ['prediction_queue/stuck/queue:prediction', 'metadata/incomplete/film:film:both'], 'a film seen again on the next page, and a whole object re-read under the same generation, are resolved');
+assert.deepEqual(paged.unobserved.map(entry => [entry.reason, entry.issue.id]), [['subject_not_observed', 'poster/missing_asset/film:film:p1']]);
+assert.deepEqual(paged.appeared, []);
+const withoutFilms = diffHealthIssues(firstPage, evaluate(complete({films: undefined})));
+assert.deepEqual(withoutFilms.resolved.map(item => item.id), ['prediction_queue/stuck/queue:prediction']);
+assert.deepEqual(withoutFilms.unobserved.map(entry => [entry.reason, entry.issue.id]), [['source_not_observed', 'metadata/incomplete/film:film:both'], ['source_not_observed', 'poster/missing_asset/film:film:p1']]);
+assert.deepEqual(withoutFilms.appeared.map(item => item.id), ['identity/incomplete/subsystem:identity', 'metadata/incomplete/subsystem:metadata', 'localization/incomplete/subsystem:localization', 'fingerprint/incomplete/subsystem:fingerprint', 'prediction/incomplete/subsystem:prediction', 'poster/incomplete/subsystem:poster']);
+const regained = diffHealthIssues(evaluate(complete({films: undefined})), evaluate(complete({films: []})));
+assert.equal(regained.resolved.length, 6, 'a coverage issue is resolved once its source is observed');
+assert.deepEqual(regained.unobserved, []);
+const nextGeneration = diffHealthIssues(firstPage, evaluate(complete({published: {...published, programmeRunId: 'gen-3'}, films: [film('film:p1', {programmeRunId: 'gen-3'}), film('film:both', {programmeRunId: 'gen-3'})]})));
+assert.deepEqual(nextGeneration.resolved.map(item => item.id), ['metadata/incomplete/film:film:both', 'poster/missing_asset/film:film:p1'], 'films observed again are comparable across generations');
+assert.deepEqual(nextGeneration.unobserved.map(entry => [entry.reason, entry.issue.id]), [['generation_changed', 'prediction_queue/stuck/queue:prediction']]);
+const queueGone = diffHealthIssues(firstPage, evaluate(complete({films: [film('film:p1', {poster: null}), film('film:both', {metadata: {status: 'missing'}})], predictionQueue: null})));
+assert.deepEqual(queueGone.unobserved.map(entry => [entry.reason, entry.issue.id]), [['source_not_observed', 'prediction_queue/stuck/queue:prediction']]);
+assert.deepEqual(diffHealthIssues(firstPage, {issues: []}).unobserved.length, 3, 'a result without a scope observes nothing');
+for (const entry of [...paged.unobserved, ...withoutFilms.unobserved, ...nextGeneration.unobserved]) assert(DATA_HEALTH_UNOBSERVED_REASONS.includes(entry.reason), entry.reason);
 
 // Stale: the programme generation, the metadata and the Letterboxd baseline age against their own thresholds.
 const stale = checkResult(evaluate(complete({
@@ -222,6 +265,28 @@ const unobserved = checkResult(evaluate(complete({
 })));
 const partial = one(unobserved, 'metadata/incomplete/film:film:unobserved');
 assert.deepEqual([partial.evidence.completeness, partial.evidence.missing, partial.observedAt, partial.reason], ['partial', ['observedAt'], null, 'metadata_partial']);
+assert.deepEqual(partial.action, {suggested: 'investigate', code: 'metadata_refresh', eligible: null, reason: 'evidence_incomplete'}, 'no observation time: the refresh is named but not eligible');
+// Eligibility needs complete evidence on every path that can claim it: metadata, a film poster, the poster summary
+// and a due retry.
+const skewedEvidence = checkResult(evaluate(complete({
+  films: [
+    film('film:poster-skew', {poster: null, observedAt: at(10 * 60000)}),
+    film('film:poster-unobserved', {poster: null, observedAt: undefined}),
+    film('film:meta-skew', {metadata: {status: 'missing'}, observedAt: at(10 * 60000)}),
+    film('film:retry-unobserved', {observedAt: undefined, identity: {status: 'unresolved', retryAt: at(-H), attempts: 1, updatedAt: at(-D)}}),
+    film('film:retry-complete', {identity: {status: 'unresolved', retryAt: at(-H), attempts: 1, updatedAt: at(-D)}}),
+  ],
+  posters: {observedAt: at(10 * 60000), programmeRunId: 'gen-2', missingPoster: 3, verifiedMissing: 3, unverifiedMissing: 0},
+})));
+assert.deepEqual(one(skewedEvidence, 'poster/missing_asset/film:film:poster-skew').action, {suggested: 'investigate', code: 'poster_hydration', eligible: null, reason: 'evidence_incomplete'});
+assert.deepEqual(one(skewedEvidence, 'poster/missing_asset/film:film:poster-skew').evidence.anomalies, ['clock_skew']);
+assert.deepEqual(one(skewedEvidence, 'poster/missing_asset/film:film:poster-unobserved').action, {suggested: 'investigate', code: 'poster_hydration', eligible: null, reason: 'evidence_incomplete'});
+assert.deepEqual(one(skewedEvidence, 'metadata/incomplete/film:film:meta-skew').action, {suggested: 'investigate', code: 'metadata_refresh', eligible: null, reason: 'evidence_incomplete'});
+assert.deepEqual(one(skewedEvidence, 'identity/incomplete/film:film:retry-unobserved').action, {suggested: 'investigate', code: 'discovery_retry', eligible: null, reason: 'evidence_incomplete'});
+assert.deepEqual(one(skewedEvidence, 'identity/incomplete/film:film:retry-complete').action, {suggested: 'bounded_action', code: 'discovery_retry', eligible: true, reason: 'eligible'});
+assert.deepEqual(one(skewedEvidence, 'poster/missing_asset/catalog:published').action, {suggested: 'investigate', code: 'poster_hydration', eligible: null, reason: 'evidence_incomplete'});
+assert.deepEqual(one(checkResult(evaluate(complete({posters: {observedAt: undefined, programmeRunId: 'gen-2', missingPoster: 3, verifiedMissing: 3, unverifiedMissing: 0}}))), 'poster/missing_asset/catalog:published').action.eligible, null);
+assert.equal(skewedEvidence.issues.filter(item => item.action.eligible === true).length, 1);
 const future = one(unobserved, 'identity/incomplete/film:film:future');
 assert.deepEqual([future.progress.status, future.progress.sinceProgressMs, future.evidence.anomalies, future.action], ['unknown', null, ['clock_skew'], {suggested: 'investigate', code: 'supply_evidence', eligible: null, reason: 'evidence_incomplete'}]);
 assert.deepEqual(unobserved.clock.anomalies, ['clock_skew']);
@@ -401,4 +466,4 @@ assert.equal(healthIssueId('identity', 'stuck', {kind: 'film', id: 'film:x'}), '
 assert.equal(compareHealthIssues({severity: 'warning', category: 'stuck', subsystem: 'identity', subject: {kind: 'film', id: 'a'}, id: '1'}, {severity: 'info', category: 'conflict', subsystem: 'programme', subject: {kind: 'generation', id: 'a'}, id: '0'}) < 0, true, 'severity first');
 assert.equal(compareHealthIssues({severity: 'info', category: 'stuck', subsystem: 'prediction', subject: {kind: 'film', id: 'a'}, id: '1'}, {severity: 'info', category: 'conflict', subsystem: 'identity', subject: {kind: 'film', id: 'a'}, id: '0'}) > 0, true, 'then category');
 
-console.log('Data health: schema, thresholds, empty, stale, stalled, backoff, no evidence, conflicts, resolved, stale pin, queue, discovery, posters and determinism passed');
+console.log('Data health: schema, thresholds, coverage, empty, stale, stalled, backoff, no evidence, eligibility guard, conflicts, resolved and unobserved, stale pin, queue, discovery, posters and determinism passed');
