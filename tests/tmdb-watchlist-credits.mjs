@@ -89,7 +89,7 @@ const before=rows('select count(*) n from film_person_credit')[0].n;
 let plan=await buildPlan({db,dir});
 assert.equal(rows('select count(*) n from film_person_credit')[0].n,before,'plan writes nothing');
 assert.deepEqual(plan.missing,[]);assert.deepEqual(plan.notFound,[{filmId:'film:lb:gone',tmdbId:'404',letterboxdUrl:null,reason:'tmdb_404'}]);
-assert.deepEqual(plan.totals,{films:3,skippedFilms:1,missingArtifacts:0,notFound:1,plannedFilms:2,resolvedSources:0,tmdbCredits:10,existingTmdbCredits:0,newCredits:10,newPersons:8,newAliases:7,reusedPersons:1,unnamedPersons:1,filmsWithoutTmdbCredits:0,expectedPairs:2});
+assert.deepEqual(plan.totals,{films:3,skippedFilms:1,missingArtifacts:0,notFound:1,plannedFilms:2,resolvedSources:0,typedTvSources:0,tmdbCredits:10,existingTmdbCredits:0,newCredits:10,newPersons:8,newAliases:7,reusedPersons:1,unnamedPersons:1,filmsWithoutTmdbCredits:0,expectedPairs:2});
 const heatPlan=plan.films.find(film=>film.filmId==='film:lb:heat');
 assert.deepEqual(heatPlan.writes.slice(0,3).map(w=>[w.personId,w.role,w.ordinal,w.newPerson]),[['person:tmdb_director/638','director',1,true],['person:tmdb_actor/1158','actor',2,true],['person:tmdb_actor/380','actor',3,false]]);
 // Same Film, same role, same name only: Mann through his accepted localization, De Niro on both Films. Pacino and
@@ -179,6 +179,27 @@ assert.equal((await buildPlan({db,dir})).totals.newCredits,0);
 fs.renameSync(path.join(dir,'tmdb','tv-1457.json'),path.join(root,'tv-1457.json'));
 assert.deepEqual((await buildPlan({db,dir})).missing.map(f=>f.filmId),['film:lb:gone']);
 fs.renameSync(path.join(root,'tv-1457.json'),path.join(dir,'tmdb','tv-1457.json'));
+// AIR-290 replay: once the Film's identity is corrected, its trusted `tmdb_tv` is the source. The retired movie id is not
+// asked again and Letterboxd is not read; the saved TV entry replays offline and the credits stay as they are.
+sqlite(`UPDATE film_external_id SET trusted=0 WHERE film_id='film:lb:gone' AND scheme='tmdb';
+INSERT INTO film_external_id VALUES('film:lb:gone','tmdb_tv','1457',1,0,NULL);`);
+listed=await watchlistFilms(db);
+assert.deepEqual(listed.films.find(f=>f.filmId==='film:lb:gone'),{filmId:'film:lb:gone',tmdbId:null,tvId:'1457',letterboxdUrl:URL_GONE});
+calls.length=0;
+report=await fetchCredits({films:listed.films,dir,token:'tok',fetchImpl,intervalMs:0});
+assert.equal(calls.length,0,'the TV entry is replayed from the artifact');
+plan=await buildPlan({db,dir});
+assert.deepEqual([plan.totals.typedTvSources,plan.totals.resolvedSources,plan.totals.newCredits,plan.notFound],[1,0,0,[]]);
+// A trusted TV identity whose entry answers 404 is reported; it never falls back to the movie id or to Letterboxd.
+fs.renameSync(path.join(dir,'tmdb','tv-1457.json'),path.join(root,'tv-1457.json'));
+calls.length=0;answers['1457']={status:404};
+report=await fetchCredits({films:listed.films,dir,token:'tok',fetchImpl,intervalMs:0});
+assert.deepEqual([report.notFound.map(f=>f.filmId),calls.map(c=>c.url.replace('https://api.themoviedb.org/3/',''))],[['film:lb:gone'],['tv/1457?language=ru-RU&append_to_response=credits,aggregate_credits']]);
+fs.rmSync(path.join(dir,'tmdb','tv-1457.json'));fs.renameSync(path.join(root,'tv-1457.json'),path.join(dir,'tmdb','tv-1457.json'));
+// Two trusted TV ids on one Film are ambiguous.
+sqlite(`INSERT INTO film_external_id VALUES('film:lb:gone','tmdb_tv','1458',1,0,NULL);`);
+assert.deepEqual((await watchlistFilms(db)).skipped.find(f=>f.filmId==='film:lb:gone'),{filmId:'film:lb:gone',reason:'ambiguous_tmdb_tv_id'});
+sqlite(`DELETE FROM film_external_id WHERE film_id='film:lb:gone' AND value='1458';`);
 // A saved response for the wrong movie stops the plan instead of crediting another Film.
 fs.writeFileSync(path.join(dir,'tmdb','8195.json'),JSON.stringify({response:{id:1}}));
 await assert.rejects(buildPlan({db,dir}),{reason:'artifact_mismatch'});

@@ -28,11 +28,21 @@ export const tmdbTvPath=tvId=>'tv/'+tvId+'?language=ru-RU&append_to_response=cre
 export const sourceOf=(kind,id)=>kind==='tv'?{kind,id:String(id),path:tmdbTvPath(id),file:'tv-'+id+'.json'}:{kind:'movie',id:String(id),path:tmdbPath(id),file:id+'.json'};
 export class CreditsStop extends Error{constructor(reason,details={}){super('Stopped: '+reason);this.name='CreditsStop';this.reason=reason;this.details=details;}}
 
-// Watchlist Films are the Films with a Letterboxd id; only one trusted, non-conflicting TMDB id per Film is usable.
+// Watchlist Films are the Films with a Letterboxd id. A trusted `tmdb_tv` identity (AIR-290) is the Film's TMDB entry and its
+// credits are read from the TV entry, never from the retired movie id; otherwise exactly one trusted, non-conflicting TMDB
+// movie id is usable. Several trusted ids of one scheme are ambiguous and skipped.
 export async function watchlistFilms(db){
- const rows=await db.all(`SELECT l.film_id AS filmId,MIN(t.value) AS tmdbId,COUNT(DISTINCT t.value) AS ids,MIN(m.url) AS letterboxdUrl FROM film_external_id l LEFT JOIN film_external_id t ON t.film_id=l.film_id AND t.scheme='tmdb' AND t.trusted=1 AND t.conflicting=0 LEFT JOIN film_metadata m ON m.film_id=l.film_id WHERE l.scheme='letterboxd' GROUP BY l.film_id ORDER BY l.film_id`);
- return {films:rows.filter(row=>row.ids===1&&/^\d+$/.test(String(row.tmdbId))).map(row=>({filmId:row.filmId,tmdbId:String(row.tmdbId),letterboxdUrl:row.letterboxdUrl??null})),skipped:rows.filter(row=>row.ids!==1||!/^\d+$/.test(String(row.tmdbId))).map(row=>({filmId:row.filmId,reason:row.ids===0?'no_trusted_tmdb_id':'ambiguous_tmdb_id'}))};
+ const rows=await db.all(`SELECT l.film_id AS filmId,MIN(t.value) AS tmdbId,COUNT(DISTINCT t.value) AS ids,MIN(v.value) AS tvId,COUNT(DISTINCT v.value) AS tvIds,MIN(m.url) AS letterboxdUrl FROM film_external_id l LEFT JOIN film_external_id t ON t.film_id=l.film_id AND t.scheme='tmdb' AND t.trusted=1 AND t.conflicting=0 LEFT JOIN film_external_id v ON v.film_id=l.film_id AND v.scheme='tmdb_tv' AND v.trusted=1 AND v.conflicting=0 LEFT JOIN film_metadata m ON m.film_id=l.film_id WHERE l.scheme='letterboxd' GROUP BY l.film_id ORDER BY l.film_id`);
+ const films=[],skipped=[],number=value=>/^\d+$/.test(String(value));
+ for(const row of rows){
+  if(row.tvIds===1&&number(row.tvId))films.push({filmId:row.filmId,tmdbId:null,tvId:String(row.tvId),letterboxdUrl:row.letterboxdUrl??null});
+  else if(row.tvIds===0&&row.ids===1&&number(row.tmdbId))films.push({filmId:row.filmId,tmdbId:String(row.tmdbId),letterboxdUrl:row.letterboxdUrl??null});
+  else skipped.push({filmId:row.filmId,reason:row.tvIds>1?'ambiguous_tmdb_tv_id':row.ids===0?'no_trusted_tmdb_id':'ambiguous_tmdb_id'});
+ }
+ return {films,skipped};
 }
+// The entry a Film's credits are read from first: its trusted TV entry, else its movie id.
+export const primarySource=film=>film.tvId?sourceOf('tv',film.tvId):sourceOf('movie',film.tmdbId);
 
 // TMDB retires the movie entry of a miniseries once it lives as a TV series, and Letterboxd's data-tmdb-* attributes can keep
 // the retired movie id while the TMDB link it shows already points at the live entry. The link is used only when the page
@@ -79,11 +89,13 @@ export async function fetchCredits({films,dir,token,fetchImpl=fetch,intervalMs=D
   write(source.file,{tmdbId:source.id,kind:source.kind,path:source.path,fetchedAt:now().toISOString(),response:body});report.fetched++;return 'saved';
  };
  for(const film of films){
-  const movie=sourceOf('movie',film.tmdbId),movieFile=path.join(store,movie.file);
+  const movie=primarySource(film),movieFile=path.join(store,movie.file);
   if(fs.existsSync(movieFile))report.reused++;
   else{const result=await tmdb(movie);if(!['saved','not_found'].includes(result)){report.stopped={reason:result,filmId:film.filmId,...report.stopDetails};break;}}
   let saved=JSON.parse(fs.readFileSync(movieFile,'utf8'));
   if(saved.status!==404)continue;
+  // Only a retired movie id is looked up on Letterboxd; a missing TV identity is reported, not guessed around.
+  if(movie.kind!=='movie'){report.notFound.push(film);continue;}
   if(!saved.letterboxd){
    if(!LETTERBOXD_FILM.test(String(film.letterboxdUrl||''))){saved={...saved,letterboxd:{url:film.letterboxdUrl,status:'no_url',links:[]}};}
    else{
@@ -127,8 +139,8 @@ export async function buildPlan({db,dir}){
  const missing=[],notFound=[],planned=[];
  const read=file=>fs.existsSync(path.join(dir,'tmdb',file))?JSON.parse(fs.readFileSync(path.join(dir,'tmdb',file),'utf8')):null;
  for(const film of films){
-  let source=sourceOf('movie',film.tmdbId),saved=read(source.file);
-  if(saved?.status===404&&saved.tmdbId===source.id){
+  let source=primarySource(film),saved=read(source.file);
+  if(saved?.status===404&&saved.tmdbId===source.id&&source.kind==='movie'){
    // A retired movie id: the Letterboxd TMDB link names the live entry, or the Film has no TMDB credits in this run.
    if(!saved.letterboxd){missing.push(film);continue;}
    source=resolvedSource(film,saved);
@@ -150,7 +162,7 @@ export async function buildPlan({db,dir}){
  for(const part of chunks(nameIds,200))for(const row of await db.all(NAMES_SQL(part),[...part,...part])){if(!names.has(row.id))names.set(row.id,new Set());names.get(row.id).add(row.name);}
  const fold=value=>String(value).replace(/[A-Z]/g,c=>c.toLowerCase());
  const newPersons=new Map(),pairs=new Map(),out=[];
- const totals={films:films.length,skippedFilms:skipped.length,missingArtifacts:missing.length,notFound:notFound.length,plannedFilms:planned.length,resolvedSources:planned.filter(film=>film.source!=='movie/'+film.tmdbId).length,tmdbCredits:0,existingTmdbCredits:0,newCredits:0,newPersons:0,newAliases:0,reusedPersons:0,unnamedPersons:0,filmsWithoutTmdbCredits:0};
+ const totals={films:films.length,skippedFilms:skipped.length,missingArtifacts:missing.length,notFound:notFound.length,plannedFilms:planned.length,resolvedSources:planned.filter(film=>film.source!==primarySource(film).kind+'/'+primarySource(film).id).length,typedTvSources:planned.filter(film=>film.tvId).length,tmdbCredits:0,existingTmdbCredits:0,newCredits:0,newPersons:0,newAliases:0,reusedPersons:0,unnamedPersons:0,filmsWithoutTmdbCredits:0};
  for(const film of planned){
   const filmCredits=credits.filter(row=>row.filmId===film.filmId),writes=[];
   for(const role of ['director','actor']){

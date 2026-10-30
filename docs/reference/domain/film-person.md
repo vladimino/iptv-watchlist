@@ -20,6 +20,7 @@ Production content continues to use existing watchlist, metadata, programme, pub
 - `canonicalFilmId()` is the one rule from a stored spelling back to the canonical id: `tmdb_<n>` → `film:tmdb:<n>`, a Letterboxd `lid` → `film:<lid>`, a `film:` id unchanged, an empty value `null`. It never mints: a result that names no stored Film is left unresolved by its caller. The offline importer loads this function from the domain source rather than keeping a copy.
 - `externalIds` carry scheme, value, trusted/conflicting flags and provenance. Two different verified TMDB identities or distinct Letterboxd identities are collisions, **not** automatic merges. `canonicalIdentity` becomes `tmdb:<id>` only after identity is resolved against trusted evidence; an accepted score or search hit alone does not promote it.
 - **Letterboxd slug alias** ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md), [AIR-276](https://trello.com/c/PeWwEti8)): see [below](#letterboxd-slug-alias). A slug is never an identity and never links two records.
+- **TMDB TV identity** ([ADR 0055](../../adr/0055-tmdb-tv-identity-and-retired-movie-ids.md), Proposed, [AIR-290](https://trello.com/c/70ldvbUB)): see [below](#tmdb-tv-identity-and-retired-movie-ids). `tmdb` is a movie id and `tmdb_tv` a TV id; an equal number in the two schemes is never evidence.
 - `linkFilms(existing, incoming, at, evidence)` preserves the existing entity ID, payloads and reviewed localization. Linking separate entities requires matching Letterboxd evidence, the same *trusted* TMDB identity on both sides, or `evidence.verified === true`. Shared **proposed/untrusted** TMDB IDs are insufficient. Conflicts yield `identity_collision` or `unverified`/`unrelated` without changing entities.
 - A successful link adds aliases and an old→surviving ID redirect, preserving existing fingerprint, prediction and metadata; incoming prediction and history are retained as history/preserved results, without repeat duplicates. A reviewed value must not be silently replaced with an automatic or conflicting incoming value.
 - `localPersonId()` prefixes the **role-specific** ID: `person:actor/<slug>`, `person:director/<slug>`, `person:role/<name>`, `person:tmdb_actor/<id>`, or `person:tmdb_director/<id>`. Same real human appearing under different roles/authorities is **not** automatically merged. Embedded credits and localized names are not by themselves a canonical Person repository.
@@ -41,6 +42,40 @@ A Letterboxd film slug is kept as its own `externalIds` entry: `{scheme: 'letter
 - **Unchanged by the alias:** `id`, `canonicalIdentity`, the lid, TMDB trust, readiness, fingerprint, prediction and the Film count.
 - **Storage.** The alias is part of `externalIds`: the R2 lifecycle sidecars and the D1 `film_external_id` rows hold it without a schema change. `trusted: false` keeps it outside the unique index on trusted identities.
 - **Inventory.** `scripts/letterboxd-slug-inventory.mjs --snapshot <dir>` counts the aliases a snapshot's stored records would yield. It makes no request and writes nothing; running it on a production export needs owner approval for that export.
+
+## TMDB TV identity and retired movie ids
+
+A miniseries that TMDB keeps as a TV entry is identified by `{scheme: 'tmdb_tv', value, trusted, conflicting, provenance}` ([ADR 0055](../../adr/0055-tmdb-tv-identity-and-retired-movie-ids.md), Proposed). The functions live in `src/domain/tmdb-tv-identity.js`, which is loaded beside this file and is not in the Worker bundle yet; the runtime integration is a separate card.
+
+- **Separate namespaces.**
+  - `tmdb` (movie) and `tmdb_tv` values are never compared.
+  - `tmdbTvCollisions(films)` reports a trusted `tmdb_tv` held by two Films as a collision for owner review, and the same number as a movie id on another Film as a `numericOverlap` only.
+  - `linkFilms` keeps refusing a Film whose `tmdb` value differs (`identity_collision`). It never links on a TV value.
+- **Letterboxd link.**
+  - `letterboxdTmdbLink(html)` returns the single visible `https://www.themoviedb.org/(movie|tv)/<id>` link, typed, with the page's `data-tmdb-type`/`data-tmdb-id` attributes.
+  - The status is `resolved` only when exactly one link agrees with exactly one attribute pair.
+  - The status is `review` for `link_disagrees_with_attributes`, `multiple_tmdb_links`, `contradictory_attributes` or `attributes_missing`.
+  - With no link the status is `unresolved` (`no_tmdb_link`).
+  - It never corrects a Film.
+- **Retirement.**
+  - `tmdbRetirement(entry)` validates an owner-confirmed retirement: `filmId` `film:<lid>`, `lid`, `movieId`, `tvId`, `evidence` and `confirmation` (`by: owner`, `at`, `source`).
+  - The evidence must contain:
+    - `movieStatus: 404` and `movieCheckedAt`;
+    - the Letterboxd permalink in `letterboxdUrl`;
+    - `link: tv/<tvId>` and `linkCheckedAt`;
+    - `tvResponseId` equal to `tvId`, and `tvCheckedAt`.
+  - Each missing or different piece is a named reason.
+- **Applying it.**
+  - `applyTmdbRetirement(film, retirement, at)` changes only that Film:
+    - the `tmdb` entry becomes `trusted: false`, keeping its value; its provenance gets `status: retired`, `reason: tmdb_movie_404`, `retiredAt`, `replacement`, `evidence`, `confirmation` and `previous`;
+    - a trusted `tmdb_tv` entry is added after it, with provenance `source: letterboxd_tmdb_link`;
+    - `canonicalIdentity` becomes `tmdb_tv:<id>`;
+    - the identity dimension stays `resolved`, with `sourceVersion` `tmdb_tv:<id>` and both ids in its provenance.
+  - Everything else is unchanged.
+  - A Film already carrying the result is returned with `changed: false`.
+  - These states are refused, not repaired: `film_mismatch`, `lid_mismatch`, `identity_not_resolved`, `conflicting_tmdb`, `movie_id_mismatch`, `tv_id_mismatch`, `partial_correction`, `movie_not_trusted_identity`.
+- **Storage.** The retirements are one owner-approved R2 object, `identity/tmdb-retirements.json`, applied by the projection (runtime card). The records keep the movie id Letterboxd shows. D1 holds the untrusted retired `tmdb` row, the trusted `tmdb_tv` row and `canonical_identity` `tmdb_tv:<id>`; the unique index on trusted `(scheme, value)` separates the namespaces without a schema change.
+- **Plan.** `scripts/tmdb-tv-identity-plan.mjs` plans exactly the four confirmed Films from the private AIR-286 artifact. It reads either D1 or a snapshot, and executes nothing ([runbook](../../runbooks/tmdb-tv-identity-correction.md)).
 
 ## Lifecycle dimensions and transition rules
 

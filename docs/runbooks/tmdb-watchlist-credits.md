@@ -6,7 +6,7 @@ The script only adds rows. It merges, links or renames no person, matches nothin
 
 ## What it writes
 
-- Films: every Film with a `letterboxd` external id and exactly one trusted, non-conflicting `tmdb` external id, read from D1.
+- Films: every Film with a `letterboxd` external id and either exactly one trusted, non-conflicting `tmdb_tv` TV identity ([ADR 0055](../adr/0055-tmdb-tv-identity-and-retired-movie-ids.md)) or, without one, exactly one trusted, non-conflicting `tmdb` movie id, read from D1. A Film with a `tmdb_tv` identity is read from `tv/<id>` directly: its retired movie id is never asked, and a `404` on the TV entry is reported, not worked around.
 - Request: `GET https://api.themoviedb.org/3/movie/<tmdbId>?language=ru-RU&append_to_response=credits`, the request and language discovery uses.
 - Persons: discovery's format. Directors are the crew with `job` `Director`, actors the cast, the first ten of each in TMDB order, one credit per person and role. A missing person gets `person` (`person:tmdb_director/<id>` or `person:tmdb_actor/<id>`, `role_id` without the prefix, contract version 1) and one `person_alias` of kind `name` with the TMDB credit name and provenance `{"source":"tmdb","task":"AIR-286"}`. An existing person is reused unchanged.
 - Credits: `film_person_credit` rows numbered after the Film's existing credits of the same role, in TMDB order.
