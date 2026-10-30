@@ -1,9 +1,9 @@
 # ADR 0057: A TMDB TV entry is a typed `tmdb_tv` identity, and a confirmed retired TMDB movie id leaves the trusted identity
 
-**Status:** Proposed  
-**Original decision date:** 2026-10-30 (direction chosen by the owner on [AIR-290](https://trello.com/c/70ldvbUB); acceptance pending)  
+**Status:** Accepted  
+**Original decision date:** 2026-10-30 (owner selected the typed TV identity architecture for [AIR-290](https://trello.com/c/70ldvbUB))  
 **Recorded at:** 2026-10-30  
-**Approval source:** not yet decided; the owner's ADR decision gate applies before merge  
+**Approval source:** explicit owner acceptance in the AIR-290 PR #251 conversation on 2026-10-30, following positive independent review of HEAD `c864a3f68919d70335b55091fb93668b107a132c` ([review](https://github.com/vladimino/iptv-watchlist/pull/251#pullrequestreview-5714516473)). Acceptance approves the architecture and offline tooling only; no R2/D1 production writes, runtime identity correction, snapshot, flag change or migration is authorized.  
 **Related work:** [AIR-290](https://trello.com/c/70ldvbUB) (this contract and offline tooling); [AIR-291](https://trello.com/c/OWV3rL9q) (the production correction); [AIR-286](https://trello.com/c/EswNQuv8) (TMDB credits for watchlist Films, where the retired ids surfaced); [AIR-275](https://trello.com/c/4x7hH0gI) (D1); [ADR 0009](0009-canonical-film-person-identity.md); [ADR 0051](0051-d1-domain-r2-blobs.md); [ADR 0052](0052-letterboxd-slug-film-alias.md); [contract](../reference/domain/film-person.md#tmdb-tv-identity-and-retired-movie-ids)  
 **Supersedes:** None  
 **Superseded by:** None

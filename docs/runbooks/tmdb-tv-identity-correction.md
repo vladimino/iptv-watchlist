@@ -76,7 +76,6 @@ Each step needs its own explicit owner approval. A code deploy authorizes none o
 - **D1.** No hand-written inverse SQL. After the R2 rollback, the next projector run writes the four Films' previous identity back from R2. `d1Readback` against the preflight plan must then show them `pending`.
 - **Whole-database restore.** A D1 Time Travel restore to the bookmark is a separate, separately authorized recovery for the whole database. It also discards every other D1 write made after the bookmark, including the projector's.
 
-  A restore also discards any other D1 write made after the bookmark.
 - Code rollback restores neither R2 nor D1. The retired movie ids are never deleted, so no rollback needs them back.
 
 ## Credits replay
