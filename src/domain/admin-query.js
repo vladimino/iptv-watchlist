@@ -293,6 +293,39 @@ export function personQueue(records, options) {
   return queue(records, options, PERSON_QUEUES, 'person-queue');
 }
 
+function queueRecords(records, queue, allowed) {
+  if (!Array.isArray(records)) return {error: 'invalid_records'};
+  if (typeof queue !== 'string' || !allowed.has(queue)) return {error: 'unknown_queue'};
+  return records.filter(record => record && typeof record === 'object' && queueMatch(record, queue)).sort(byId);
+}
+
+function queueCounts(records, allowed) {
+  if (!Array.isArray(records)) return {error: 'invalid_records'};
+  const counts = {};
+  for (const code of allowed) counts[code] = 0;
+  for (const record of records) {
+    if (!record || typeof record !== 'object') continue;
+    for (const code of allowed) if (queueMatch(record, code)) counts[code] += 1;
+  }
+  return counts;
+}
+
+export function filmQueueRecords(records, queue) {
+  return queueRecords(records, queue, FILM_QUEUES);
+}
+
+export function personQueueRecords(records, queue) {
+  return queueRecords(records, queue, PERSON_QUEUES);
+}
+
+export function filmQueueCounts(records) {
+  return queueCounts(records, FILM_QUEUES);
+}
+
+export function personQueueCounts(records) {
+  return queueCounts(records, PERSON_QUEUES);
+}
+
 export function getFilm(records, id) {
   if (!Array.isArray(records)) return null;
   return records.find(record => record?.id === id) ?? null;
