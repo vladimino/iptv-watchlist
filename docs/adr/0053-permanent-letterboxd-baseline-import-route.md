@@ -6,7 +6,7 @@
 **Approval source:** explicit owner acceptance of ADR-0053 in AIR-181 PR #245 conversation on 2026-10-30, following the `retire now` decision on AIR-181; deletion of the production binding requires separate owner approval  
 **Related work:** [AIR-181](https://trello.com/c/d6x0pvuc); prerequisites [AIR-171](https://trello.com/c/uvGt48sq) (importer) and [AIR-173](https://trello.com/c/w2bVRb72) (first production import); [AIR-285](https://trello.com/c/FFMUP4qm) (planned admin client); [ADR-0023](0023-letterboxd-user-facts.md) decision 6; [ADR 0048](0048-permanent-catalog-poster-maintenance-route.md) (the same pattern for poster hydration); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** None. ADR-0023 decides the import protocol (decision 6) but no switch for it; the switch was the rollout gate of the AIR-171 implementation, and this record retires that gate only. The `LETTERBOXD_FACTS` requirement and every part of the protocol stay  
-**Superseded by:** None
+**Superseded by:** [ADR 0055](0055-retire-letterboxd-facts-switch.md) (Proposed) in part: decision 3, the `LETTERBOXD_FACTS` requirement; every other decision stays
 
 ## Context
 
