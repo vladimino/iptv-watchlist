@@ -38,8 +38,7 @@
       "mcp__Cloudflare_Observability__observability_values",
       "mcp__Cloudflare_Observability__workers_list",
       "mcp__Cloudflare_Observability__workers_get_worker",
-      "mcp__Cloudflare_Observability__search_cloudflare_documentation",
-      "Bash(NODE_USE_ENV_PROXY=1 node --no-warnings scripts/tmdb-watchlist-credits.mjs --apply --dir /root/iptv-private/air286 --database-id 3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb)"
+      "mcp__Cloudflare_Observability__search_cloudflare_documentation"
     ]
   },
   "hooks": {
