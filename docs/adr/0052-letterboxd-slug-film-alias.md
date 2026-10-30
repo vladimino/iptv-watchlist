@@ -1,4 +1,4 @@
-# ADR 0051: A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid
+# ADR 0052: A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-30  

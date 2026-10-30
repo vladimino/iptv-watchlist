@@ -1,6 +1,6 @@
 # AIR-276: Letterboxd slug alias coverage on a production snapshot (2026-10-30)
 
-**Card:** [AIR-276](https://trello.com/c/PeWwEti8). **Decision:** [ADR 0051](../../adr/0051-letterboxd-slug-film-alias.md). **Related:** [AIR-275](https://trello.com/c/4x7hH0gI) (D1).
+**Card:** [AIR-276](https://trello.com/c/PeWwEti8). **Decision:** [ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md). **Related:** [AIR-275](https://trello.com/c/4x7hH0gI) (D1).
 **Code:** PR #243 head `cd470bd`, merged locally over `main` `137de6a` in the AIR-275 session.
 **Snapshot:** owner-approved `consistent_fenced` R2 export, 11,811 objects, aggregate SHA-256 prefix `062c98125b41c465`, exported 2026-10-29 19:31:42–19:58:26 UTC. The snapshot itself stays private.
 **Scope:** read-only `scripts/letterboxd-slug-inventory.mjs`. No Letterboxd or TMDB request, no R2 or D1 write. The run reported `writes: 0` and `requests: 0`.

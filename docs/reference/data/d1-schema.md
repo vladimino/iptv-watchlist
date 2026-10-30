@@ -30,7 +30,7 @@ Until the write cutover, the R2 column is what production reads and writes. The 
 
 | R2 key or source | Future D1 | Role until cutover |
 | --- | --- | --- |
-| `watchlist.json` | `film`, `watchlist_film`, `film_metadata`, `film_person_credit`; `film_external_id` for the lid and the `letterboxd_slug` alias of the film permalink ([ADR 0051](../../adr/0051-letterboxd-slug-film-alias.md), `trusted=0`, so outside `film_external_id_one_trusted`) | R2 is the published watchlist |
+| `watchlist.json` | `film`, `watchlist_film`, `film_metadata`, `film_person_credit`; `film_external_id` for the lid and the `letterboxd_slug` alias of the film permalink ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md), `trusted=0`, so outside `film_external_id_one_trusted`) | R2 is the published watchlist |
 | `programme.json` shows | `programme_generation`, `film_generation`, `film_show` | R2 is the published generation |
 | `programme.json` film body | `film_metadata`, `film_person_credit` | Same catalog record as the watchlist film |
 | `epg/published-generation.json` | `published_generation` | R2 is the one current pointer |
