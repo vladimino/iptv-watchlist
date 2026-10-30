@@ -1,9 +1,9 @@
 # ADR 0054: EPG ratings are Diary-first: diary evidence becomes facts, the films list is no longer scanned
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-30  
 **Recorded at:** 2026-10-30  
-**Approval source:** not yet decided; the card scope was approved on [AIR-287](https://trello.com/c/kOZlT8UE)  
+**Approval source:** Owner explicitly Accepted ADR 0054 and visually approved both changed Mermaid diagrams on 2026-10-30 after a positive independent review of [PR #247](https://github.com/vladimino/iptv-watchlist/pull/247#pullrequestreview-5712268139) at `fd074c5` and successful CI. [AIR-287 owner-gate decision](https://trello.com/c/kOZlT8UE#comment-6ae49031a74e2ded1b2f15a3). Architecture acceptance and visual approval authorize ordinary PR delivery only; no production flag, Scheduled Task, EPG or writer operation was authorized.  
 **Related work:** [AIR-287](https://trello.com/c/kOZlT8UE); [AIR-288](https://trello.com/c/bpXgN1nV) (production activation); [AIR-51](https://trello.com/c/33d4hKJ3); [AIR-276](https://trello.com/c/PeWwEti8); [AIR-272](https://trello.com/c/Oezn5dLP); [AIR-267 evidence](../evidence/letterboxd/air-267-recent-ratings-diagnostics-2026-10-29.md); [ADR 0023](0023-letterboxd-user-facts.md); [ADR 0024](0024-letterboxd-scan-summary.md); [ADR 0043](0043-removal-rating-lookup-queue.md); [ADR 0049](0049-letterboxd-diary-viewing-history.md); [ADR 0052](0052-letterboxd-slug-film-alias.md)  
 **Supersedes:** [ADR 0049](0049-letterboxd-diary-viewing-history.md) in part: decision 1's "never a rating, watched or watchlist fact" and decision 2's diary repair; [ADR 0043](0043-removal-rating-lookup-queue.md) in part: decision 1's order (the lookup now runs after the diary, for films the diary gave no rating)  
 **Superseded by:** None
@@ -75,7 +75,7 @@ Setting either switch in production is a separate owner-approved change ([AIR-28
 
 ## Evidence
 
-- **Original decision:** [AIR-287](https://trello.com/c/kOZlT8UE).
+- **Original decision:** [AIR-287](https://trello.com/c/kOZlT8UE); Accepted by the owner on 2026-10-30 after [independent positive re-review](https://github.com/vladimino/iptv-watchlist/pull/247#pullrequestreview-5712268139) and explicit [owner-gate confirmation](https://trello.com/c/kOZlT8UE#comment-6ae49031a74e2ded1b2f15a3), including visual approval of both Mermaid diagrams.
 - **Implementation:**
   - `src/worker.js` (`diaryRatingsStage`, `completeWithRatings`);
   - `src/letterboxd-diary.js` (`ratingEvidence`, the `afterPage` hook);
