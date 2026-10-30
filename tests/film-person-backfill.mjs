@@ -7,7 +7,7 @@ const reader=fs.readFileSync('src/domain/film-person-reader.js','utf8');
 const backfill=fs.readFileSync('src/domain/film-person-backfill.js','utf8');
 assert.doesNotMatch(backfill,/\b(fetch|import|export|BUCKET|wrangler)\b/);
 assert.doesNotMatch(backfill,/chris-pratt|Крис Прэтт/);
-for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-backfill|backfillLifecycle|personParity/,file);
+for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-backfill|backfillLifecycle|personParity/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
 vm.runInContext(domain+'\n'+reader+'\n'+backfill+'\nglobalThis.api={backfillLifecycle,reconcileSidecars};',ctx);

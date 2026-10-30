@@ -16,7 +16,7 @@ function load(intl=Intl){
  class Clock extends Date{constructor(...args){super(...(args.length?args:[state.now]));}static now(){return state.now;}}
  const context=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date:Clock,Intl:intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
- for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+ for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
  return {context,env,records,state,run:source=>vm.runInContext(source,context)};
 }
 const at=iso=>Date.parse(iso);
@@ -63,7 +63,7 @@ assert(Object.isFrozen(run('HOURLY_TASK_SCHEDULE')));
 // The expected recurrence is stated once and agrees with the maintained Scheduled Task contract.
 const contract=fs.readFileSync('docs/reference/scheduled-tasks.md','utf8');
 assert.match(contract,/\*\*hourly, nominally :20 Europe\/Madrid\*\*/);
-const sources=['src/enrichment.js','src/discovery.js','src/worker.js','src/mcp.js','public/app.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n');
+const sources=['src/enrichment.js','src/letterboxd-diary.js','src/discovery.js','src/worker.js','src/mcp.js','public/app.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n');
 assert.equal((sources.match(/minute:20\b/g)||[]).length,1,'the :20 minute appears only in HOURLY_TASK_SCHEDULE');
 
 // The discovery gate is unchanged: next whole UTC hour, independent of the schedule.

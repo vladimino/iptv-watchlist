@@ -109,6 +109,6 @@ assert.equal(query("SELECT epg_title FROM candidate_show WHERE observation_key='
 assert.equal(query("SELECT epg_title FROM candidate_show WHERE observation_key='heat|1995' AND programme_run_id='run-next'"),'Title ZZ Late');
 assert.equal(query('SELECT COUNT(*) FROM film'),'2');
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/d1_databases/);
-for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/0001_schema_v1|schema_contract|d1_databases/,file);
+for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js','src/mcp.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/0001_schema_v1|schema_contract|d1_databases/,file);
 fs.rmSync(root,{recursive:true});
 console.log('D1 schema v1 passed.');

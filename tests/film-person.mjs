@@ -6,7 +6,7 @@ const source=fs.readFileSync('src/domain/film-person.js','utf8');
 assert.doesNotMatch(source,/\b(fetch|import|export|BUCKET|wrangler)\b/);
 assert.doesNotMatch(source,/resolutionActionability|candidateActivity|candidateEvidence/);
 assert.doesNotMatch(source,/chris-pratt|Крис Прэтт/);
-for(const file of ['src/worker.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/domain\/film-person|filmView|invalidatePredictionForProfile|availabilityProjection/,file);
+for(const file of ['src/worker.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/domain\/film-person|filmView|invalidatePredictionForProfile|availabilityProjection/,file);
 const sources=fs.readFileSync('src/sources.js','utf8');
 assert.match(sources,/applyReviewedLocalization/);
 assert.match(sources,/applyAutomaticLocalization/);
