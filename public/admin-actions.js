@@ -29,7 +29,7 @@ function startActionDemo() {
       if (scenario.afterPreview) scenario.afterPreview(store);
       return preview;
     },
-    confirm: (preview, accepted) => confirmAction(preview, {now: new Date().toISOString(), idempotencyKey: actionDemoKey(), accepted}),
+    confirm: (preview, accepted) => issueFixtureConfirmation(store, preview, {now: new Date().toISOString(), idempotencyKey: actionDemoKey(), accepted}),
     execute: async confirmation => {
       const {receipt, replay} = await executeFixtureAction(store, registry, confirmation, {principal: {owner: true}, now: new Date().toISOString(), apply: scenario.apply});
       return {...receipt, replay};

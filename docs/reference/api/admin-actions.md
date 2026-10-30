@@ -20,14 +20,19 @@ Source: [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (t
 | `id`, `version` | `[a-z][a-z0-9_]{1,40}`, integer ≥ 1. Another version is another capability |
 | `subjectKinds` | the data health subject kinds it may act on (`film`, `catalog`, …) |
 | `healthActionCode` | the data health `action.code` it answers (`metadata_refresh`, `poster_hydration`, `prediction_retry`, …) |
-| `budget` | `maxRecords` (1–50, default 10), `maxWritesPerRecord` (default 1), `externalCallsPerRecord` (default 0) |
-| `retry` | `maxAttempts` (1–5), `backoffMs`; only `failed` and `not_attempted` records are retryable, never `unknown` |
+| `budget.maxRecords` | integer 1–50, default 10 |
+| `budget.maxWritesPerRecord` | integer 1–10, default 1 |
+| `budget.externalCallsPerRecord` | integer 0–10, default 0 |
+| `retry.maxAttempts` | integer 1–5, default 1; only `failed` and `not_attempted` records are retryable, never `unknown` |
+| `retry.backoffMs` | integer 0–604 800 000 (7 days), default 0 |
 | `compensation` | `kind`: `none`, `restore_before_image` or `manual`, and the owner-facing `guidance` |
-| `confirmTtlMs` | 1 s – 60 min, default 10 min |
+| `confirmTtlMs` | integer 1 000–3 600 000 (1 s – 60 min), default 10 min |
+
+Every numeric field must be a finite integer inside its range; a string, a fraction, a negative number, `NaN` or `Infinity` makes `defineCapability` throw, so a preview's budget and cost figures are always bounded. `budget`, `retry` and `compensation`, when given, must be objects.
 
 ## Preview (dry run)
 
-`previewAction(registry, request, observation)` with `request = {capability, version, subject: {kind, id}, pin, ids?}` and `observation = {pin, now, records: [{id, version}], issues}`, where `issues` are data health issues the caller evaluated. Each record is judged by the issue that names the capability's action code: `eligible: true` on `complete` evidence is eligible; `eligible: false` is `ineligible` with the model's reason; `eligible: null` (or eligible on partial evidence, which the model already downgrades) is `unknown`; no such issue is `ineligible` / `no_issue`. A record without a version is `unknown` / `version_unknown`; a requested id that was not read is `unknown` / `record_not_read`.
+`previewAction(registry, request, observation)` with `request = {capability, version, subject: {kind, id}, pin, ids?}` and `observation = {pin, now, records: [{id, version}], issues}`, where `issues` are data health issues the caller evaluated. Each record is judged by the issue whose `subject.kind` equals the request's subject kind, whose `subject.id` equals the record id and whose `action.code` is the capability's code (an observation and a film with the same textual id never share evidence or eligibility; a record that declares another `kind` is `unsupported` / `subject_kind_differs`): `eligible: true` on `complete` evidence is eligible; `eligible: false` is `ineligible` with the model's reason; `eligible: null` (or eligible on partial evidence, which the model already downgrades) is `unknown`; no such issue is `ineligible` / `no_issue`. A record without a version is `unknown` / `version_unknown`; a requested id that was not read is `unknown` / `record_not_read`.
 
 | `status` | When |
 | --- | --- |
@@ -40,31 +45,42 @@ Source: [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (t
 
 The preview returns `affected` (id and version of every record a confirmation would cover), `excluded` with status and reason, `budget` (`records`, `maxRecords`, `writes`, `externalCalls`), `atomic: false`, `retry`, `compensation`, and the **scope key**: the canonical JSON of capability, version, subject, pin and every affected record with its version. `scopeFingerprint` is a short display hash of it; matching always compares the full key.
 
-## Confirmation
+## Confirmation and issuance
 
-`confirmAction(preview, {now, idempotencyKey, accepted})` succeeds only for an `eligible` preview, only with `accepted: true` (the owner ticked the exact-scope box), and only with an idempotency key of 16–80 letters, digits, `_` or `-`. It returns `{capability, version, subject, pin, scopeKey, scopeFingerprint, ids, idempotencyKey, confirmedAt, expiresAt}`. Errors: `not_eligible`, `confirmation_missing`, `invalid_request`.
+`confirmAction(preview, {now, idempotencyKey, accepted})` succeeds only for an `eligible` preview, only with `accepted: true`, and only with an idempotency key of 16–80 letters, digits, `_` or `-`. It returns `{schemaVersion, capability, version, subject, pin, scopeKey, scopeFingerprint, ids, idempotencyKey, confirmedAt, expiresAt}`. Errors: `not_eligible`, `confirmation_missing`, `invalid_request`.
+
+What is a guarantee and what is not:
+
+- **UI acknowledgement, not security.** The checkbox and `accepted: true` record that the owner looked at the scope. A page can send anything, so nothing about the submitted value is trusted on its own.
+- **Security guarantee: issuance.** A confirmation is honoured only when the issuer holds the record it issued under that idempotency key and the submission equals it in every field. The issuer is the server for a live action and the fixture store here (`issueFixtureConfirmation` keeps a frozen copy; one key is issued once). The expiry enforced is the **issued** `expiresAt`: a submission that extends it is `confirmation_mismatch`, and one presented after the issued expiry is `confirmation_expired`. A live action may replace the server-held record with a MAC over the scope key, `confirmedAt` and `expiresAt` under a server-held key, with the same rule: the expiry comes from what the server issued or signed, never from the submission.
+- **Security guarantee: freshness.** At submission the scope must still be what an eligible preview over a fresh read produces (pin, record versions, eligibility, budget); the confirmation alone is never sufficient.
+- **Not a guarantee of this contract: the caller's identity.** That is the Worker's owner-only Cloudflare Access; the contract only refuses a `principal` that is not the owner.
+
+`validateConfirmation(value)` is the fail-closed parser for submitted values. It returns `null` (refused as `invalid_request`) for anything but an object with exactly the confirmation fields, a known schema version, a capability id, an integer version, a `{kind, id}` subject, a pin, an idempotency key, parseable `confirmedAt` / `expiresAt`, 1–50 distinct ids, a scope key of at most 20 000 characters that parses to exactly the canonical scope (capability, version, subject and pin equal to the fields, one `{id, version}` record per id in order, re-serialized byte for byte) and a fingerprint that matches it. It never throws.
 
 ## Submission checks
 
-`checkSubmission(registry, confirmation, fresh, {principal})` runs against a read made at submission time, in this order; the first failure refuses the whole submission before any write:
+`checkSubmission(registry, confirmation, fresh, {principal, issued})` runs against a read made at submission time, in this order; the first failure refuses the whole submission before any write, and no input makes it throw:
 
 | Refusal | Check |
 | --- | --- |
 | `access_denied` | `principal.owner !== true` |
-| `confirmation_missing` | no confirmation |
-| `invalid_request` | malformed idempotency key or clock |
+| `confirmation_missing` | no confirmation submitted |
+| `invalid_request` | `validateConfirmation` rejects the submitted value (any malformed or inconsistent field, including a capability that disagrees with the scope key), or the fresh read lacks a clock, records or issues |
 | `unsupported_capability` | the capability version is not registered |
-| `confirmation_expired` | `now` is after `expiresAt` (exactly at the expiry is valid) |
+| `confirmation_missing` | the issuer holds no (valid) record for this idempotency key |
+| `confirmation_mismatch` | the submission differs from the issued record in any field (for example an extended `expiresAt` or a narrowed `ids`) |
+| `confirmation_expired` | `now` is after the issued `expiresAt` (exactly at the expiry is valid) |
 | `stale_pin` | the fresh pin differs from the confirmed one |
 | `record_changed` | a confirmed record is missing or its version changed (CAS precondition) |
 | `budget_exceeded` | the fresh preview exceeds the budget |
-| `eligibility_changed` | the fresh preview's scope key differs: a record left or joined the eligible set |
+| `eligibility_changed` | the fresh preview is not `eligible` or its scope key differs: a record left or joined the eligible set |
 
 An executor adds three checks of its own: `idempotency_conflict` (the key was used for another scope), a concurrent submission with the same key waits for and replays the same run, and `lease_held` (another key holds the executor's lease).
 
 ## Execution and receipt
 
-An executor takes a lease with a fencing number, then handles the confirmed records in scope order, one CAS write each: a record whose version no longer matches is `skipped_changed`, never overwritten; a lost fence stops further writes; an abort between records leaves the rest `not_attempted`; a write that throws is `failed`; a write that may or may not have landed (a timeout) is `unknown`. The before-image of each written record is kept for compensation. The lease is released in every case.
+An executor takes a lease with a fencing number, then handles the confirmed records in scope order. For each record it checks the version, computes the new value (which may await an external call), and then **commits with a compare-and-swap on both the record version and the lease fence at commit time**, in one step that nothing can interleave with (in the fixture, `store.commit` is synchronous; a live executor uses a conditional write such as an R2 `onlyIf.etagMatches` plus a fence check inside the same guarded write). A record changed while the value was computed is `skipped_changed` with `conflict`, never overwritten; a lease lost or revoked meanwhile writes nothing, marks that record and the rest `not_attempted` with `fence_lost`, and ends the run as `aborted`. An abort between records leaves the rest `not_attempted` with `aborted`; a computation that throws is `failed`; one that may or may not have had an effect (a timeout) is `unknown`. The before-image of each written record is kept for compensation. The lease is released only by its own holder.
 
 `receiptOf(...)` derives the run state from the outcomes and never from a hope:
 
@@ -77,7 +93,7 @@ An executor takes a lease with a fencing number, then handles the confirmed reco
 | `partial` | some records done, others not |
 | `failed` | no record done |
 
-A receipt carries `idempotencyKey`, capability and version, subject, pin, `scopeFingerprint` (not the full key), per-record `outcomes` with a short error code, `counts`, `retry` (`retryable` ids, `maxAttempts`), `compensation`, `atomic: false` and `audit` (`actor: "owner"`, `confirmedAt`). It never contains a token, an e-mail or another identity. A repeated submission with the same key returns the stored receipt with `replay: true` and writes nothing.
+A receipt carries `idempotencyKey`, capability and version, subject, pin, `scopeFingerprint` (not the full key) — echoed only when the confirmation passes `validateConfirmation`, otherwise `null` — per-record `outcomes` with an error **code** from the closed vocabulary `provider_error`, `timeout`, `rate_limited`, `conflict`, `fence_lost`, `validation_error`, `storage_error`, `aborted`, `internal_error` (anything else, including any exception message, becomes `internal_error`; `actionErrorCode` does the classification), `counts`, `retry` (`retryable` ids, `maxAttempts`), `compensation`, `atomic: false` and `audit` (`actor: "owner"`, `confirmedAt`). It never contains a token, an exception message, an e-mail or another identity; an unknown refusal is reported as `invalid_request`. A repeated submission with the same key returns the stored receipt with `replay: true` and writes nothing.
 
 ## Transport shape
 
