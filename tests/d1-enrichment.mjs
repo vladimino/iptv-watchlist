@@ -183,7 +183,7 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
 }
 
 // 13. Inputs fail closed: a missing or malformed object, an unpublished pointer, a missing generation copy or a pointer that
-// moves during the reads stops the run before any D1 write. An empty but present dataset is data, guarded by the absent limit.
+// moves during the reads stops (or defers) the run before any D1 write. An empty but present dataset is data, guarded by the absent limit.
 {
  const keys=()=>db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
  const before=keys(),batches=db.calls.batches;
@@ -204,34 +204,93 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
    assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['failed',reason,key],key+' '+mode);
   }
  }
- // The pointer moves to another generation between the first and the second read.
- const moving=r2({heat:[PACINO]});let pointerReads=0;const get=moving.get.bind(moving);
- moving.get=async key=>{if(key==='epg/published-generation.json'&&++pointerReads===2)await moving.put(key,JSON.stringify({phase:'published',programmeRunId:'run-2'}));return get(key);};
- assert.equal((await run({DB:db,BUCKET:moving,D1_ENRICHMENT_WRITE:'on'})).reason,'generation_moved');
+ // The pointer moves to another generation during the reads: its etag check defers the run.
+ const moving=r2({heat:[PACINO]});const get=moving.get.bind(moving);let moved=false;
+ moving.get=async key=>{const object=await get(key);if(key==='watchlist.json'&&!moved){moved=true;await moving.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-2'}));}return object;};
+ const movedRun=await run({DB:db,BUCKET:moving,D1_ENRICHMENT_WRITE:'on'});
+ assert.deepEqual([movedRun.outcome,movedRun.reason,movedRun.inputKey],['deferred','input_changed','epg/published-generation.json']);
  // A diary history that is absent is fine: its switch can be off.
  assert.equal(bucket.objects.has('letterboxd/diary/history.json'),false);
  assert.equal(db.calls.batches,batches,'no failed input reached a batch');
  assert.deepEqual(keys(),before);
  // An empty but present watchlist is a real dataset; past the absent limit it is held as suspect and nothing is written.
- const values=Array.from({length:30},(_,index)=>`('enrichment','person','person:actor/ghost-${index}','k','${T}')`).join(',');
+ const values=Array.from({length:26},(_,index)=>`('enrichment','film','film:ghost-${index}','k','${T}')`).join(',');
  db.sql('INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES '+values);
  const guarded=await run(env);
- assert.deepEqual([guarded.outcome,guarded.absent,guarded.absentLimit],['absent_guard',30,25]);
+ assert.deepEqual([guarded.outcome,guarded.absentFilms,guarded.absentLimit.films],['absent_guard',26,25]);
  assert.equal(db.calls.batches,batches);
+ db.sql("DELETE FROM projection_state WHERE id LIKE 'film:ghost-%'");
+ const people=Array.from({length:251},(_,index)=>`('enrichment','person','person:actor/ghost-${index}','k','${T}')`).join(',');
+ db.sql('INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES '+people);
+ assert.deepEqual([(await run(env)).outcome,db.calls.batches],['absent_guard',batches]);
  db.sql("DELETE FROM projection_state WHERE id LIKE 'person:actor/ghost-%'");
  assert.equal((await run(env)).outcome,'complete');
 }
 
-// 14. Status: a database without schema v4 has no projector; with it, checkpoints and the last run.
+// 14. A consistent cut: no run while a writer works, and none when an object changes during the reads, even under the same
+// published generation (the catalog and the resolution are updated in place). Each defers before any D1 write.
+{
+ const batches=db.calls.batches,keysBefore=db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
+ const deferred=async(prepare,reason,key)=>{
+  for(const mode of ['dry','on']){const next=r2({heat:[DE_NIRO],collateral:true,catalogActors:[person('tmdb_actor/2','Jean Reno')]});prepare(next);const summary=await run({DB:db,BUCKET:next,D1_ENRICHMENT_WRITE:mode});assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred',reason,key],reason+' '+key+' '+mode);}
+ };
+ await deferred(bucket=>bucket.put('epg/resolver-lease.json',JSON.stringify({id:'chunk',expiresAt:Date.now()+60000})),'writer_active','epg/resolver-lease.json');
+ await deferred(bucket=>bucket.put('sync.json',JSON.stringify({stage:'metadata',updatedAt:new Date().toISOString()})),'writer_active','sync.json');
+ const during=(key,mutate)=>bucket=>{const get=bucket.get.bind(bucket);let done=false;bucket.get=async name=>{const object=await get(name);if(name===key&&!done){done=true;await mutate(bucket);}return object;};};
+ await deferred(during('epg/generations/run-1/discovered-films.json',bucket=>bucket.put('epg/generations/run-1/discovered-films.json',JSON.stringify({}))),'input_changed','epg/generations/run-1/discovered-films.json');
+ await deferred(during('epg/discovery-resolution.json',bucket=>bucket.put('epg/discovery-resolution.json',JSON.stringify({moved:{status:'verified',tmdbId:'7'}}))),'input_changed','epg/discovery-resolution.json');
+ await deferred(during('watchlist.json',bucket=>bucket.put('epg/resolver-lease.json',JSON.stringify({id:'late',expiresAt:Date.now()+60000}))),'writer_active','epg/resolver-lease.json');
+ // A finished or stale writer state does not hold the run.
+ const idle=r2({heat:[DE_NIRO],collateral:true,catalogActors:[person('tmdb_actor/2','Jean Reno')]});
+ await idle.put('epg/resolver-lease.json',JSON.stringify({id:'old',expiresAt:0}));
+ await idle.put('sync.json',JSON.stringify({stage:'metadata',updatedAt:new Date(Date.now()-3600000).toISOString()}));
+ assert.equal((await run({DB:db,BUCKET:idle,D1_ENRICHMENT_WRITE:'dry'})).outcome,'dry');
+ assert.equal(db.calls.batches,batches);
+ assert.deepEqual(db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),keysBefore);
+}
+
+// 15. Watchlist membership at production scale: 394 listed Films. An empty or truncated watchlist that leaves the Films in the
+// programme and catalog loses no membership and writes nothing; a routine removal of a few Films goes through.
+{
+ const {db:big}=migrated();
+ const films=Array.from({length:394},(_,index)=>film('w'+index,'Film '+index,String(10000+index),[MANN],[]));
+ const scaled=(listed)=>{
+  const bucket=new MemoryBucket();const put=(key,value)=>bucket.put(key,JSON.stringify(value));
+  put('watchlist.json',{updatedAt:T,films:listed});put('metadata.json',Object.fromEntries(films.map(item=>[item.id,meta(item)])));
+  put('titles.json',{});put('people.json',{});put('epg/discovery-resolution.json',{});
+  put('epg/published-generation.json',{phase:'published',programmeRunId:'run-9'});
+  put('epg/generations/run-9/programme.json',{updatedAt:T,films:films.map(item=>({...item,shows:[]}))});
+  put('epg/generations/run-9/discovered-films.json',{});
+  return bucket;
+ };
+ const first=await run({DB:big,BUCKET:scaled(films),D1_ENRICHMENT_WRITE:'on'},{queryBudget:1e6,wallMs:6e5});
+ assert.equal(first.outcome,'complete',JSON.stringify(first));
+ assert.equal(one(big,'SELECT COUNT(*) FROM watchlist_film'),394);
+ for(const listed of [[],films.slice(0,300)]){
+  const before=big.calls.batches;
+  for(const mode of ['dry','on']){
+   const summary=await run({DB:big,BUCKET:scaled(listed),D1_ENRICHMENT_WRITE:mode});
+   assert.deepEqual([summary.outcome,summary.members,summary.membershipRemoved,summary.membershipLimit,summary.absent],['membership_guard',394,394-listed.length,8,0]);
+  }
+  assert.equal(big.calls.batches,before,'zero D1 batches');
+  assert.equal(one(big,'SELECT COUNT(*) FROM watchlist_film'),394);
+ }
+ const routine=await run({DB:big,BUCKET:scaled(films.slice(3)),D1_ENRICHMENT_WRITE:'on'},{queryBudget:1e6});
+ assert.deepEqual([routine.outcome,routine.membershipRemoved],['complete',3]);
+ assert.equal(one(big,'SELECT COUNT(*) FROM watchlist_film'),391);
+}
+
+// 16. Status: a database without schema v4 has no projector; with it, checkpoints and the last run.
 {
  const {db:v3}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity']);
  assert.deepEqual({...await projector.d1EnrichmentStatus(v3,{})},{mode:'off',schema:false});
+ assert.equal((await run(env)).outcome,'complete');
  const status=await projector.d1EnrichmentStatus(db,{D1_ENRICHMENT_WRITE:'on'});
  assert.deepEqual([status.mode,status.schema,status.checkpoints,status.absent,status.lastRun.outcome,status.lastRun.leaseHeld],['on',true,one(db,'SELECT COUNT(*) FROM projection_state'),one(db,"SELECT COUNT(*) FROM projection_state WHERE change_key='absent'"),'complete',false]);
  assert.ok(status.checkpoints>9&&status.absent>0);
 }
 
-// 15. The seed writes keys only for entities the database holds and replaces the projection's earlier keys.
+// 17. The seed writes keys only for entities the database holds and replaces the projection's earlier keys.
 {
  const {file:seedFile}=migrated();fs.copyFileSync(file,seedFile);
  const sqlite=openSqlite(seedFile);
@@ -242,4 +301,4 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  await assert.rejects(seedProjection(openSqlite(bare),{at:T,keys:[]}),/apply migrations\/0004/);
 }
 
-console.log('D1 enrichment projector (ADR 0056): off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed');
+console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed');

@@ -12,7 +12,10 @@ const D1_ENRICHMENT_LEASE_MS=10*60000;
 const D1_ENRICHMENT_QUERY_BUDGET=800;
 const D1_ENRICHMENT_WALL_MS=60000;
 const D1_ENRICHMENT_PERSON_BATCH=25;
-const D1_ENRICHMENT_ABSENT_MIN=25,D1_ENRICHMENT_ABSENT_SHARE=0.02;
+// Guards against input that is well formed but incomplete, such as an empty or truncated watchlist. Both are absolute: the size
+// of the projection does not widen them. A run past either writes nothing; a real mass removal goes through a reload instead.
+const D1_ENRICHMENT_ABSENT_FILMS=25,D1_ENRICHMENT_ABSENT_PEOPLE=250;
+const D1_ENRICHMENT_MEMBERSHIP_MIN=5,D1_ENRICHMENT_MEMBERSHIP_SHARE=0.02;
 const D1_ENRICHMENT_FENCE='INSERT INTO projection_fence (held) SELECT COUNT(*) FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?';
 const D1_ENRICHMENT_STATE="INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES (?,?,?,?,?) ON CONFLICT(projection,kind,id) DO UPDATE SET change_key=excluded.change_key,projected_at=excluded.projected_at";
 
@@ -38,38 +41,49 @@ function d1EnrichmentAdapter(binding){
 }
 
 // The inputs fail closed. Every object the view needs must be present and of its shape: a missing object stops the run before
-// any D1 write, while a present, empty one is a real empty dataset. The programme and the catalog are read from the one published
-// generation the pointer names, never from the root copies, and the pointer must name that same generation after the reads, so
-// a run never mixes two generations. Only the Letterboxd diary is optional: it is absent while its own switch is off.
+// any D1 write, while a present, empty one is a real empty dataset. Only the Letterboxd diary is optional: it is absent while its
+// own switch is off. The read must also be one consistent cut of R2:
+// - it does not start while a writer of these objects is at work: a live discovery lease, or a sync in its metadata or EPG stage;
+// - the programme and the catalog come from the copies of the one generation the pointer names as published, never the root ones;
+// - after every read, each object is checked again by its etag, and the writer checks are repeated. The published generation's
+//   catalog and the resolution are updated in place, so the same programmeRunId does not prove the same content. Any change
+//   defers the run before any D1 write; the next hourly run reads again.
 class D1EnrichmentInputError extends Error{constructor(reason,key){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;}}
+const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed'];
 const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
-async function d1EnrichmentRead(env,key,shape,required=true){
+async function d1EnrichmentRead(env,etags,key,shape,required=true){
  const object=await env.BUCKET.get(key);
+ etags.set(key,object?.etag??null);
  if(!object){if(required)throw new D1EnrichmentInputError('input_missing',key);return null;}
  let value;
  try{value=await object.json();}catch{throw new D1EnrichmentInputError('input_invalid',key);}
  if(!shape(value))throw new D1EnrichmentInputError('input_invalid',key);
  return value;
 }
-async function d1EnrichmentGeneration(env){
- const pointer=await d1EnrichmentRead(env,EPG_GENERATION_KEY,d1EnrichmentRecord);
- if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
- return pointer.programmeRunId;
+async function d1EnrichmentWritersIdle(env,now=Date.now()){
+ const [lease,sync]=await Promise.all([DISCOVERY_LEASE_KEY,'sync.json'].map(async key=>{const object=await env.BUCKET.get(key);try{return object?await object.json():null;}catch{return null;}}));
+ if(Number(lease?.expiresAt)>now)throw new D1EnrichmentInputError('writer_active',DISCOVERY_LEASE_KEY);
+ if(['metadata','epg'].includes(sync?.stage)&&now-Date.parse(sync.updatedAt)<15*60000)throw new D1EnrichmentInputError('writer_active','sync.json');
 }
 async function d1EnrichmentStore(env){
- const runId=await d1EnrichmentGeneration(env);
+ const etags=new Map();
+ await d1EnrichmentWritersIdle(env);
+ const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
+ if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
+ const runId=pointer.programmeRunId;
  const [watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory]=await Promise.all([
-  d1EnrichmentRead(env,'watchlist.json',d1EnrichmentFilmList),
-  d1EnrichmentRead(env,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
-  d1EnrichmentRead(env,'metadata.json',d1EnrichmentRecord),
-  d1EnrichmentRead(env,'titles.json',d1EnrichmentRecord),
-  d1EnrichmentRead(env,'people.json',d1EnrichmentRecord),
-  d1EnrichmentRead(env,epgGenerationKey(runId,'discovered-films.json'),d1EnrichmentRecord),
-  d1EnrichmentRead(env,'epg/discovery-resolution.json',d1EnrichmentRecord),
-  d1EnrichmentRead(env,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
+  d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
+  d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
+  d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,etags,'titles.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,etags,'people.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,etags,epgGenerationKey(runId,'discovered-films.json'),d1EnrichmentRecord),
+  d1EnrichmentRead(env,etags,'epg/discovery-resolution.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
  ]);
- if(await d1EnrichmentGeneration(env)!==runId)throw new D1EnrichmentInputError('generation_moved',EPG_GENERATION_KEY);
+ for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);
+ await d1EnrichmentWritersIdle(env);
  const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
  return {store,programmeRunId:runId};
 }
@@ -105,16 +119,16 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
  if(mode==='on'&&!(await d1EnrichmentLease(db,leaseId)))return {...summary,skipped:'lease_held'};
  try{
   const plan=await d1EnrichmentDiff(env,db,now,summary);
-  // More absences than a routine sync explains point at broken input, not at real removals: nothing is written.
-  const absentLimit=Math.max(D1_ENRICHMENT_ABSENT_MIN,Math.ceil(summary.stored*D1_ENRICHMENT_ABSENT_SHARE));
-  if(plan.absent.length>absentLimit){summary.outcome='absent_guard';summary.absentLimit=absentLimit;return summary;}
+  // More absences or lost watchlist memberships than a routine sync explains point at broken input: nothing is written.
+  const guard=d1EnrichmentGuard(plan,summary);
+  if(guard){summary.outcome=guard;return summary;}
   if(mode==='dry'){summary.outcome='dry';return summary;}
   const written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs});
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
   return summary;
  }catch(error){
   summary.outcome='failed';summary.error=String(error?.message||error).slice(0,200);
-  if(error instanceof D1EnrichmentInputError){summary.reason=error.reason;summary.inputKey=error.key;}
+  if(error instanceof D1EnrichmentInputError){summary.reason=error.reason;summary.inputKey=error.key;if(D1_ENRICHMENT_DEFERRED.includes(error.reason))summary.outcome='deferred';}
   return summary;
  }finally{
   summary.queries=db.queries;summary.durationMs=Date.now()-started;
@@ -134,8 +148,20 @@ async function d1EnrichmentDiff(env,db,now,summary){
  summary.viewMs=Date.now()-started-summary.loadMs;
  const stored=new Map((await db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
  const plan=d1EnrichmentPlan(inputs,stored,nowIso);
- Object.assign(summary,{films:inputs.films.length,people:inputs.people.length,stored:stored.size,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
+ // Membership is guarded on its own: a Film can stay in the view and still drop off the watchlist.
+ const listed=new Set(inputs.films.filter(film=>film.watchlist).map(film=>film.id));
+ const members=(await db.all('SELECT film_id FROM watchlist_film')).map(row=>row.film_id);
+ plan.membership={members:members.length,removed:members.filter(id=>!listed.has(id)).length};
+ Object.assign(summary,{members:plan.membership.members,membershipRemoved:plan.membership.removed,films:inputs.films.length,people:inputs.people.length,stored:stored.size,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
  return plan;
+}
+
+function d1EnrichmentGuard(plan,summary){
+ const absentFilms=plan.absent.filter(item=>item.kind==='film').length,absentPeople=plan.absent.length-absentFilms;
+ if(absentFilms>D1_ENRICHMENT_ABSENT_FILMS||absentPeople>D1_ENRICHMENT_ABSENT_PEOPLE){Object.assign(summary,{absentFilms,absentPeople,absentLimit:{films:D1_ENRICHMENT_ABSENT_FILMS,people:D1_ENRICHMENT_ABSENT_PEOPLE}});return 'absent_guard';}
+ const membershipLimit=Math.max(D1_ENRICHMENT_MEMBERSHIP_MIN,Math.ceil(plan.membership.members*D1_ENRICHMENT_MEMBERSHIP_SHARE));
+ if(plan.membership.removed>membershipLimit){summary.membershipLimit=membershipLimit;return 'membership_guard';}
+ return null;
 }
 
 // The lease and its fence run on the wall clock, whatever time the view is built for.

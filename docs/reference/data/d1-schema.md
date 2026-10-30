@@ -154,7 +154,7 @@ None of these methods reads back.
 
 A projected `film_metadata` row has `r2_key` `metadata.json` and `content_sha256` NULL: it comes from a live read, not from a pinned object version. A row the reload wrote keeps the snapshot object's checksum until the projector rewrites it.
 
-The projector fails closed on its R2 inputs: missing, malformed, unpublished or moved inputs stop a run before any write. It also holds a run with more absences than the larger of 25 and 2 % of the stored keys (`absent_guard`). See [ADR 0056](../../adr/0056-d1-enrichment-write-through.md).
+The projector fails closed on its R2 inputs. Missing, malformed or unpublished inputs stop a run before any write. A live writer, or an object whose etag changed during the reads, defers it. It also holds a run with more than 25 absent Films or 250 absent Persons (`absent_guard`), or more lost watchlist memberships than the larger of 5 and 2 % of the members (`membership_guard`). See [ADR 0056](../../adr/0056-d1-enrichment-write-through.md).
 
 `scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
 

@@ -128,8 +128,9 @@ Once the [enrichment projector](../adr/0056-d1-enrichment-write-through.md) writ
 5. **Replay the D1-only steps** in their recorded order, each reproducible from its private artifact. Today that is the AIR-286 TMDB credits of the watchlist Films; the AIR-44 person links will join it. The projector keeps those credits on later rewrites, but a reload drops them until they are replayed.
 6. **Verify** per-table counts against the build, plus the replayed rows.
 7. **Projector.** Set `D1_ENRICHMENT_WRITE=dry` and read the summary in the Worker logs (`event: d1_enrichment_projection`). The changed counts should be only what R2 changed since the snapshot. The outcomes that stop a run:
-   - `failed` with `reason` `input_missing`, `input_invalid`, `generation_unpublished` or `generation_moved` names the R2 input (`inputKey`) that was not complete. Nothing was written; the next hourly run tries again.
-   - `absent_guard` means more Films or Persons vanished than a routine sync explains. Look at R2 before setting `on`.
+   - `failed` with `reason` `input_missing`, `input_invalid` or `generation_unpublished` names the R2 input (`inputKey`) that was not complete. Nothing was written; the next hourly run tries again.
+   - `deferred` with `writer_active` or `input_changed` means a sync or discovery chunk was writing, or an object changed during the reads. Nothing was written. This is normal now and then; a run that never gets through needs a look.
+   - `absent_guard` or `membership_guard` means more Films, Persons or watchlist memberships vanished than a routine sync explains. Look at R2 before setting `on`. An intended mass removal goes through a reload.
 
    Then set `on`. Unsetting the flag stops it; rows it wrote stay until a Time Travel restore.
 

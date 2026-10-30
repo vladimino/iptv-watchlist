@@ -48,6 +48,7 @@ Retained heap after a forced collection, at each stage:
 | No keys, one run with an unlimited budget | 17,344 Persons and 2,402 Films written, 0 errors. 28,437 queries and 3,096 batches (238,250 statements), 196 s on the stand-in. |
 | The next run after that | 0 changed |
 | After the review fixes (inputs from the published generation's copies, NULL metadata checksum), keys re-seeded from the snapshot's root copies, then a `dry` run | 0 Persons, 0 Films and 0 absent changed: the snapshot's root and generation copies give the same keys |
+| After the second review (writer checks, etag fence, membership guard), the same `dry` run | The snapshot's writer state is idle. 394 watchlist members, 0 memberships lost, 0 changed |
 
 **Reload comparison.** After the unlimited run, 13 tables were compared with the reload build, row for row, without their `updated_at` columns: `film`, `film_external_id`, `film_alias`, `film_dimension`, `film_metadata`, `film_person_credit`, `watchlist_film`, `film_redirect`, `person`, `person_alias`, `person_external_id`, `person_dimension` and `localization_conflict`.
 

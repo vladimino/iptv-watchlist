@@ -36,7 +36,7 @@ Not decided here: the order and mechanics of each write flip, the person merge m
 ## Consequences
 
 - The relational model becomes usable at once (person filmographies, duplicate queues) without touching existing pages.
-- Until a domain flips, D1 does not follow R2 changes. A reload uses the [backfill runbook](../runbooks/d1-backfill.md).
+- Until a domain flips, D1 does not follow R2 changes. A reload uses the [backfill runbook](../runbooks/d1-backfill.md). Qualified by [ADR 0056](0056-d1-enrichment-write-through.md) (Proposed), if accepted: enrichment follows R2 through its projector before its flip.
 - During a flip, two copies of one domain exist: the D1 truth and the R2 cache. The writer keeps them together; a cache that drifts is a bug, not a second authority.
 - Without shadow stages, a defect can reach the user. It is caught by tests, by the owner using the app, and by recomputation from R2 blobs or from reproducible discovery.
 
