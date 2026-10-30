@@ -109,6 +109,6 @@ assert.equal(query("SELECT epg_title FROM candidate_show WHERE observation_key='
 assert.equal(query("SELECT epg_title FROM candidate_show WHERE observation_key='heat|1995' AND programme_run_id='run-next'"),'Title ZZ Late');
 assert.equal(query('SELECT COUNT(*) FROM film'),'2');
 // The Worker reads D1 through src/catalog-d1.js only; no bundled module applies or rewrites the schema.
-for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/0001_schema_v1|CREATE TABLE|INSERT INTO schema_contract/,file);
+for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js','src/mcp.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/0001_schema_v1|CREATE TABLE|INSERT INTO schema_contract/,file);
 fs.rmSync(root,{recursive:true});
 console.log('D1 schema v1 passed.');

@@ -124,7 +124,7 @@ assert.equal(splitSummary.production,false);
 assert.equal(JSON.stringify(splitSummary).includes(filmId),false);
 assert.equal(JSON.stringify(splitSummary).includes('tmdb_9001'),false);
 
-for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/lifecycle-diagnostics|presentDiagnosis/,file);
+for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/lifecycle-diagnostics|presentDiagnosis/,file);
 const refused=spawnSync(process.execPath,['scripts/lifecycle-diagnostics.mjs','--snapshot',process.cwd(),'--summary'],{encoding:'utf8'});
 assert.equal(refused.status,2);
 assert.equal(refused.stdout.includes(filmId),false);

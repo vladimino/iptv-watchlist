@@ -10,6 +10,8 @@ flowchart TD
     importer["Offline importer and parity"]
     local[("Local SQLite / D1-compatible schema")]
     gate["Owner approval and live evidence gates"]
+    snapshot["Fenced R2 snapshot (read-only export)"]
+    reload["Offline executor build, loaded by D1 Import API"]
     d1[("D1 iptv: backfilled domain copy")]
     flipWrite["Future write flips, per domain"]
     flipRead["Future page reads on SQL"]
@@ -18,8 +20,9 @@ flowchart TD
     worker -->|read-only /api/d1| d1
     archive --> importer --> local
     local -.-> gate
-    r2 -->|backfill, done| d1
-    gate -.-> flipWrite --> flipRead --> retire
+    r2 -->|one-off export| snapshot --> reload -->|one-off load, no live flow| d1
+    gate -.-> flipWrite -.->|future: Worker writes D1| d1
+    flipWrite --> flipRead --> retire
     classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
     class gate,flipWrite,flipRead,retire future
 ```
@@ -31,5 +34,7 @@ The prediction family is portable only when every prediction record links an imm
 A fingerprint or prediction bundle stored under a retired Film id, whose survivor holds its own newer payload, is not imported: the importer records it as superseded by the canonical payload and leaves the object in R2 ([ADR-0029](../adr/0029-superseded-redirect-payloads.md)). This is a ledger rule inside the offline import and changes no node or arrow above.
 
 The immutable fingerprint body and generation record ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md) section 2) that the current `fingerprint.json` names are mapped through it and add no row; older generations stay in R2 as unreferenced history. This is also a ledger rule inside the offline import and changes no node or arrow above.
+
+The D1 data came through a one-off path, not a live flow: a fenced read-only snapshot of R2, a local build by the backfill executor, and one load through the D1 Import API ([runbook](../runbooks/d1-backfill.md)). D1 does not follow R2 until a write flip makes the Worker write D1 directly, or until a separately approved reload repeats that path.
 
 **Not deployed:** any D1 writer in the Worker and any existing page reading D1. The remaining steps are the phases of [AIR-275](https://trello.com/c/4x7hH0gI): per-domain write flips (D1 becomes the truth, the R2 JSON stays a cache for pages not yet moved), page reads on SQL, then a cleanup that leaves R2 holding blobs only. The earlier shadow-write and shadow-read stages were dropped by the owner as disproportionate for this project. Each orange node is a planned step, not a claim that it is done or an instruction to perform it.

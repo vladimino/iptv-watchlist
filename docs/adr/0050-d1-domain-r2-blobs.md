@@ -1,4 +1,4 @@
-# ADR 0049: D1 is the home of the relational domain and R2 the home of blobs; the migration runs as per-domain flips without shadow stages
+# ADR 0050: D1 is the home of the relational domain and R2 the home of blobs; the migration runs as per-domain flips without shadow stages
 
 **Status:** Accepted  
 **Original decision date:** 2026-10-29  

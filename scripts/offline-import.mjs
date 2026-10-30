@@ -137,10 +137,14 @@ function scopedStore(store,byKey){
  }
  return next;
 }
+// The source records of one Film: its own id as written, its Letterboxd id, and the catalog spelling tmdb_<id> of each
+// trusted, non-conflicting TMDB id, which is how epg/discovered-films.json keys a catalog film. Without that spelling a
+// catalog film got no credits, and a watchlist film with the same verified TMDB id lost the catalog's TMDB credits.
 function recordsFor(store,film){
  const ids=new Set([film.id.replace(/^film:/,'')]);
  const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value;
  if(letterboxd)ids.add(letterboxd);
+ for(const item of film.externalIds||[])if(item.scheme==='tmdb'&&item.trusted===true&&!item.conflicting&&/^\d+$/.test(String(item.value)))ids.add('tmdb_'+item.value);
  return [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})].filter(record=>record&&ids.has(String(record.id)));
 }
 function metadataRecord(body,film){

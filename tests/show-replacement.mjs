@@ -70,7 +70,7 @@ const bucket={
  async put(key,value,options={}){if(key===failKey)throw new Error('injected put failure');const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}
 };
 const live=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async()=>new Response('{}',{status:500})});
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),live);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),live);
 const env={TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:bucket};
 live.env=env;live.records=records;
 const clock=Date.now();
@@ -142,7 +142,7 @@ const startAt=Date.now()+9*3600000,stopAt=startAt+2*3600000;
 const xml=`<?xml version="1.0"?><tv><channel id="c1"><display-name>One</display-name></channel><programme start="${stamp(startAt)}" stop="${stamp(stopAt)}" channel="c1"><title>Новый фильм (2020)</title><desc>Сюжет</desc></programme></tv>`;
 const scanEnv={LETTERBOXD_USERNAME:'me',EPG_XML_URL:'https://example.test/epg.xml',TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:scanBucket};
 const scanCtx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,fetch:async()=>{fetches++;return new Response(xml);}});
-for(const file of ['src/domain/scored-resolution.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),scanCtx);
+for(const file of ['src/domain/scored-resolution.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),scanCtx);
 scanCtx.env=scanEnv;
 await vm.runInContext(`publishEpgGeneration(env,'run-a',{
  'programme.json':{runId:'run-a',updatedAt:new Date().toISOString(),films:[{id:'other',title:'Другой',original:'Other',year:1999,tmdbId:'1',shows:[]}]},

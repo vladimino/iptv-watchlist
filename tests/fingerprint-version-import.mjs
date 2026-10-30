@@ -13,7 +13,7 @@ import {loadDomainRules} from '../scripts/offline-import.mjs';
 const rules=loadDomainRules();
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,encodeURIComponent,decodeURIComponent,crypto:webcrypto,console});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const writeFingerprint=vm.runInContext('writeFingerprint',ctx),contentHash=vm.runInContext('contentHash',ctx);
 
 // R2 conditional put: the writer's create-only objects keep their first bytes, as they do in production.
