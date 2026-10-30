@@ -21,9 +21,15 @@ function predictionFacts(file,failure,compatible){
  return {present:true,tasteProfileVersion:current.tasteProfileVersion,tasteProfileHash:current.tasteProfileHash,fingerprintHash:current.fingerprintHash,fingerprintSchemaVersion:current.fingerprintSchemaVersion,predictionPromptVersion:current.predictionPromptVersion,failure,...(typeof compatible==='boolean'?{compatible}:{})};
 }
 function resolutionEntries(resolution){return Object.entries(resolution||{}).filter(([key,value])=>key!=='__canonicalizedAt'&&value&&typeof value==='object');}
+// Per-object indexes for the lookups the reader repeats once per Film. Each keeps the first match and the original order, so a
+// lookup returns what the linear scan returned; without them one full view costs tens of seconds of CPU (AIR-275 phase 2).
+const READER_INDEXES=new WeakMap();
+function readerIndex(source,build){if(!source||typeof source!=='object')return build(source);let cached=READER_INDEXES.get(source);if(!cached){cached=build(source);READER_INDEXES.set(source,cached);}return cached;}
+function decisionsByTmdb(resolution){return readerIndex(resolution,value=>{const index=new Map();for(const [,decision] of resolutionEntries(value)){if(decision.tmdbId==null)continue;const key=String(decision.tmdbId);if(!index.has(key))index.set(key,[]);index.get(key).push(decision);}return index;});}
+function recordsById(records){return readerIndex(records,value=>{const index=new Map();for(const record of listOf(value))if(record){const key=String(record.id);if(!index.has(key))index.set(key,record);}return index;});}
 function decisionForFilm(film,resolution){
  if(!String(film?.id||'').startsWith('tmdb_'))return null;
- const matches=resolutionEntries(resolution).map(([,decision])=>decision).filter(decision=>decision.tmdbId!=null&&String(decision.tmdbId)===String(film.tmdbId)&&(!decision.filmId||decision.filmId===film.id));
+ const matches=(decisionsByTmdb(resolution).get(String(film.tmdbId))||[]).filter(decision=>!decision.filmId||decision.filmId===film.id);
  const verified=matches.find(decision=>decision.status==='verified');
  if(verified)return verified;
  const specific=matches.find(decision=>decision.filmId===film.id&&['ambiguous','no_confident_match','duration_mismatch'].includes(decision.status));
@@ -32,8 +38,8 @@ function decisionForFilm(film,resolution){
 function syncFailure(sync,id){return (sync?.failures||[]).find(failure=>failure&&failure.id===id)||null;}
 function predictionFailure(store,id){return store.predictionRun?.failures?.[id]||store.predictionQueue?.retries?.[id]||null;}
 function peopleOn(record){return [...(record?.directors||[]),...(record?.actors||[]),...(record?.people?.directors||[]),...(record?.people?.actors||[])];}
-function recordById(records,id){return (records||[]).find(record=>record&&String(record.id)===id)||null;}
-function catalogRecord(store,id){return listOf(store.discoveredFilms).find(record=>record&&String(record.id)===id)||null;}
+function recordById(records,id){return records?recordsById(records).get(id)||null:null;}
+function catalogRecord(store,id){return recordsById(store.discoveredFilms).get(id)||null;}
 function presentTmdb(value){return value==null||value===''?null:String(value);}
 // Null does not hide a later id. Programme, metadata, watchlist, then the record itself. Two different ids stay a conflict.
 function identityEvidence(sources){
@@ -212,7 +218,9 @@ function personFacts(person,store,now){
  const roleId=person.id,dictionary=store.personOverrides?.[roleId]||store.personNameIndex?.[roleId]||null,cache=store.people?.[roleId]||null;
  return {roleId,original:person.original||cache?.original||null,dictionary,cacheName:cache?.name||null,now};
 }
-function readLifecycle(store,now){
+// options.entitiesOnly returns the Films and People alone, without the sidecars and the legacy parity: the D1 enrichment projector
+// (AIR-275 phase 2, ADR 0056) needs nothing else, and building the rest roughly doubles the memory of one view.
+function readLifecycle(store,now,options={}){
  const filmTitleIndex=store.filmTitleIndex||indexRecords(store.filmTitles,'id'),personNameIndex=store.personNameIndex||indexRecords(store.personNames,'id');
  const context={...store,filmTitleIndex,personNameIndex,diarySlugs:diarySlugIndex(store.diaryHistory)};
  const resolution=store.discoveryResolution||{};
@@ -230,6 +238,7 @@ function readLifecycle(store,now){
  }
  const candidates=[],conflicts=[];
  const items=new Map((store.discoveryLatest?.items||[]).map(item=>[item.key,item]));
+ const storedIds=new Set([...films.values()].map(storedFilmId)),viewIds=new Set([...films.values()].map(film=>film.id));
  for(const [key,decision] of resolutionEntries(resolution)){
   if(Array.isArray(decision.conflictingTmdbIds)&&decision.conflictingTmdbIds.length>1){
    const view=projectFilm({conflictingTmdbIds:decision.conflictingTmdbIds,now,decision,title:{original:items.get(key)?.title||null},metadata:{present:false},fingerprint:{present:false},prediction:{present:false},shows:[]});
@@ -237,7 +246,7 @@ function readLifecycle(store,now){
    candidates.push({key,film:view,identity:view?.identity||null,excluded:false});
    continue;
   }
-  const matched=[...films.values()].some(film=>decision.filmId&&(storedFilmId(film)===decision.filmId||film.id==='film:'+decision.filmId));
+  const matched=!!decision.filmId&&(storedIds.has(decision.filmId)||viewIds.has('film:'+decision.filmId));
   if(decision.status==='excluded_nonfilm'){candidates.push({key,film:null,identity:null,excluded:true});continue;}
   if(matched)continue;
   candidates.push({key,film:null,identity:identityState({now,decision,discovery:decision.discovery||null,tmdbId:decision.tmdbId?String(decision.tmdbId):null}),excluded:false,missingCatalog:decision.status==='verified'});
@@ -247,6 +256,8 @@ function readLifecycle(store,now){
  for(const person of embedded){if(!person?.id||people.has(person.id))continue;const view=personView(personFacts(person,context,now));if(view)people.set(person.id,view);}
  const filmList=[...films.values()].sort((a,b)=>storedFilmId(a).localeCompare(storedFilmId(b),'en'));
  const aliasConflicts=markSlugCollisions(filmList);
+ const sortedPeople=()=>[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en'));
+ if(options.entitiesOnly)return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:sortedPeople(),candidates,conflicts};
  const legacyIds=legacyEnrichmentIds(store),lifecycleIds=filmList.map(storedFilmId),idParity=shadowParity(legacyIds,lifecycleIds);
  const shared=new Set(idParity.legacy),mismatches=semanticMismatches(context,filmList.filter(film=>shared.has(storedFilmId(film))),now);
  const sidecars={};
@@ -266,5 +277,5 @@ function readLifecycle(store,now){
   if(film)sidecars['enrichment/films/'+encodeURIComponent(String(id))+'/fingerprint'+LIFECYCLE_SIDECAR]={id:film.id,storedId:storedFilmId(film),fingerprint:film.fingerprint};
  }
  for(const key of Object.keys(sidecars))if(FORBIDDEN_LIFECYCLE_KEYS.includes(key)||key.includes('discovery-latest')||key.includes('predictions'))throw new Error('lifecycle sidecar overwrites '+key);
- return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en')),candidates,conflicts,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
+ return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:sortedPeople(),candidates,conflicts,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
 }

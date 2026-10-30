@@ -567,7 +567,10 @@ async function epgSync(env,run){
  await queueCommittedDiscovery(env,run);
  await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
-export default {async fetch(request,env,execution){
+export default {
+// AIR-275 phase 2 (ADR 0056): the cron trigger runs only the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
+async scheduled(controller,env,execution){execution.waitUntil(runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}));},
+async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
  if(url.pathname==='/mcp')return await mcpRoute(request,env,execution);
