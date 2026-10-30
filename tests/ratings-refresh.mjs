@@ -14,7 +14,7 @@ const bucket={
 };
 const ctx=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout,fetch:async url=>{fetches.push(String(url));throw new Error('no network in this test');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket};
 
 const status={schemaVersion:1,state:'blocked',lastSuccessAt:'2026-10-23T18:00:00.000Z',lastFailureAt:'2026-10-28T09:00:00.000Z',nextRetryAt:null,generationId:'g-1',pages:2,watched:120,attempt:{kind:'full',outcome:'failed',cause:'anti_bot'},diary:{state:'unchecked',cause:null,error:null}};

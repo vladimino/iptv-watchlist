@@ -11,7 +11,7 @@ assert.doesNotMatch(review,/linkFilms\(|localFilmId\(|externalIds\(|mergeExterna
 const topLevelNames=source=>new Set([...source.matchAll(/^(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map(match=>match[1]));
 const lifecycleNames=topLevelNames(domain);
 for(const name of topLevelNames(review))assert.equal(lifecycleNames.has(name),false,`${name} is already defined by film-person.js`);
-for(const file of ['build.mjs','src/worker.js','src/sources.js','src/discovery.js','src/enrichment.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/fixtures.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-title-review|applyTitleReview|titleReviewState/,file);
+for(const file of ['build.mjs','src/worker.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/fixtures.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-title-review|applyTitleReview|titleReviewState/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,Math});
 vm.runInContext(domain+'\n'+review+'\nglobalThis.api={filmView,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,transition,TITLE_REVIEW_CONTRACT_VERSION,TITLE_REVIEW_MODES,titleReviewVersion,titleReviewOptions,titleReviewState,titleReviewProjection,validateTitleReview,applyTitleReview};',ctx);

@@ -8,7 +8,7 @@ const diagnostics=fs.readFileSync('src/domain/film-person-diagnostics.js','utf8'
 assert.doesNotMatch(diagnostics,/\b(fetch|import|export|BUCKET|wrangler)\b/);
 assert.doesNotMatch(diagnostics,/scored-resolution|resolution-acceptance|discovery\.js/);
 assert.doesNotMatch(diagnostics,/chris-pratt|Крис Прэтт/);
-for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-diagnostics|diagnoseFilm|diagnosePerson|lifecycleCounts/,file);
+for(const file of ['build.mjs','src/worker.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-diagnostics|diagnoseFilm|diagnosePerson|lifecycleCounts/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
 vm.runInContext(domain+'\n'+reader+'\n'+diagnostics+'\nglobalThis.api={diagnoseFilm,diagnosePerson,lifecycleCounts,presentDiagnosis,readLifecycle};',ctx);

@@ -7,7 +7,7 @@ assert.doesNotMatch(source,/\b(fetch|import|export|BUCKET|wrangler)\b/);
 assert.doesNotMatch(source,/chris-pratt|Крис Прэтт|example\.invalid/);
 
 const context=vm.createContext({Date,Map,Set,JSON,encodeURIComponent,decodeURIComponent});
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/prediction-diagnostics.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
 const NOW=Date.parse('2026-10-24T08:00:00.000Z');
 const PROFILE={version:3,profileHash:'hash-zz',updatedAt:'2026-10-24T07:00:00.000Z',profile:'CANARY-PROFILE-TEXT'};
 const IDS=['film-zz-1','film-zz-2','film-zz-3','film-zz-4','film-zz-5'];

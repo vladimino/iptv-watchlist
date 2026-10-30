@@ -15,7 +15,7 @@ const bucket={
 };
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout,fetch:async url=>{fetches.push(String(url));throw new Error('no network in this test');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/domain/prediction-versions.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/domain/prediction-versions.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={BUCKET:bucket};
 
 // A legacy bundle without pointers and a receipt of the completed run stay exactly as they are.
@@ -40,7 +40,7 @@ for(const flag of [undefined,'on','off','On',' on',true])for(const method of ['P
 assert.equal(stored(),before,'no bundle, version object, receipt or lease was written');
 
 // No code path reads the retired switch or keeps the handler; the CLI that called the route is gone.
-for(const file of ['src/enrichment.js','src/worker.js','src/sources.js','src/discovery.js','src/feature-flags.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_MATERIALIZATION|predictionMaterializationEnabled|materializePredictionVersions|materializeFilm/,file);
+for(const file of ['src/enrichment.js','src/letterboxd-diary.js','src/worker.js','src/sources.js','src/discovery.js','src/feature-flags.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_MATERIALIZATION|predictionMaterializationEnabled|materializePredictionVersions|materializeFilm/,file);
 assert.equal(fs.existsSync('scripts/prediction-versions-materialize.mjs'),false);
 assert.doesNotMatch(fs.readFileSync('package.json','utf8'),/prediction-versions-materialize/);
 // The shared plan rule stays for the offline tools.

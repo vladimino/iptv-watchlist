@@ -26,7 +26,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
   return new Response(JSON.stringify(reply),{status:200});
  }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker;
 const baseEnv={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
 const post=async(body,env={},headers={})=>{const response=await worker.fetch(new Request('https://iptv.example/api/enrichment/catalog/posters',{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)}),{...baseEnv,...env},{waitUntil(){}});return {status:response.status,body:await response.json()};};

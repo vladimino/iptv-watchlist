@@ -488,6 +488,14 @@ async function completeWithRatings(env,run,report){
  if(run.ratingAttempt?.state==='started'&&run.removalLookups)await ratingsPhase(env,run,'removal_lookup');
  const lookup=await resumeRemovalLookups(env,run);
  if(!run.ratingPending?.length)return lookup?{...result,removalRatings:lookup}:result;
+ // AIR-51: the diary history stage, behind LETTERBOXD_DIARY_HISTORY. Bounded and never fatal; its page-1 rows feed the
+ // diary repair below, so the diary is read once per commit.
+ let diaryRows=null;
+ if(LetterboxdDiary.enabled(env)){
+  await ratingsPhase(env,run,'diary');
+  try{const diary=await LetterboxdDiary.syncHistory(env);diaryRows=diary.firstPageRows;run.diaryHistory={outcome:diary.lastOutcome,stopReason:diary.stopReason,counts:diary.counts,resumePage:diary.resumePage,at:diary.lastAttemptAt};}
+  catch(e){diaryRows=[];run.diaryHistory={outcome:'failed',stopReason:'error:'+String(e.message).slice(0,120),at:new Date().toISOString()};}
+ }
  await ratingsPhase(env,run,'films_list');
  try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;run.ratingObservedAt=ratings.observedAt||new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,state:'finished',finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
  catch(e){
@@ -495,12 +503,12 @@ async function completeWithRatings(env,run,report){
   // during them is still closed by the next step. It becomes terminal `error` only once the repairs are done.
   run.ratingError=String(e.message).slice(0,200);run.ratingAttempt={...run.ratingAttempt,listCause:ratingsAttemptCause(run.ratingError)};await ratingsPhase(env,run,'repair');
   let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
-  try{diary=await repairRecentDiaryRatings(env,report);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
+  try{diary=await repairRecentDiaryRatings(env,report,diaryRows);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
   const repair={removed,diary};run.ratingRepair=repair;run.ratingAttempt={...run.ratingAttempt,state:'error',cause:run.ratingAttempt.listCause,finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
 }
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
- return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
+ return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),...(run.diaryHistory?{diaryHistory:run.diaryHistory}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
 }
 // Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step. `caller` names the
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
@@ -551,6 +559,7 @@ export default {async fetch(request,env,execution){
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
   if(url.pathname.startsWith('/api/letterboxd/baseline/'))return await LetterboxdFacts.handleBaselineRequest(request,env,url.pathname);
+  if(url.pathname==='/api/letterboxd/diary'&&request.method==='GET'){const filmId=url.searchParams.get('filmId');if(filmId!=null&&!/^[A-Za-z0-9_-]{1,80}$/.test(filmId))return json({error:'Invalid filmId'},400);return json(await LetterboxdDiary.readHistory(env,{filmId}));}
   if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});

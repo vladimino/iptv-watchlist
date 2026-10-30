@@ -10,7 +10,7 @@ const fetch=async(url,options)=>{
  return new Response(upstreamStatus===200?JSON.stringify({id:11}):'{}',{status:upstreamStatus});
 };
 const context=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,fetch,console});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const request=new Request('https://site.example/api/integrations/tmdb/status');
 const bucket={get:async()=>null};
 let response=await context.worker.fetch(request,{BUCKET:bucket});

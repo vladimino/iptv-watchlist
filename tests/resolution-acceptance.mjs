@@ -6,7 +6,7 @@ const scorer=fs.readFileSync('src/domain/scored-resolution.js','utf8');
 const gate=fs.readFileSync('src/domain/resolution-acceptance.js','utf8');
 assert.doesNotMatch(gate,/\b(fetch|import|export|BUCKET|wrangler)\b/);
 assert.doesNotMatch(gate,/resolutionActionability|candidateActivity|candidateEvidence/);
-for(const file of ['src/worker.js','src/enrichment.js','src/sources.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/acceptScoredIdentity/,file);
+for(const file of ['src/worker.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/acceptScoredIdentity/,file);
 assert.match(fs.readFileSync('src/discovery.js','utf8'),/acceptScoredIdentity/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/resolution-acceptance\.js/);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/SCORED_RESOLUTION/);
