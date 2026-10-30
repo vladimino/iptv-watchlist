@@ -141,8 +141,9 @@ function pairKey(left, right) {
 
 // Owner decisions, latest first: a pair the owner called the same human and later different (or the reverse) takes the later
 // verdict; at the same time, or with no time, `different` wins. AIR-126 role links recorded on a record are owner `same`
-// decisions with the review's time.
-function ownerVerdicts(decisions, persons, known, issues) {
+// decisions with the review's time. Two entries of one verdict at the same time are one decision told twice: an explicit
+// decision is kept over a role link, then the smaller basis text, so the recorded provenance never depends on input order.
+function ownerVerdicts(decisions, persons, known, excluded, issues) {
   const entries = [];
   for (const decision of Array.isArray(decisions) ? decisions : []) {
     const ids = Array.isArray(decision?.personIds) ? decision.personIds : [];
@@ -150,9 +151,9 @@ function ownerVerdicts(decisions, persons, known, issues) {
       issues.push({code: 'invalid_decision', personIds: ids.slice(0, 2)});
       continue;
     }
-    const missing = ids.filter(id => !known.has(id));
+    const missing = ids.filter(id => !known.has(id)).sort(personText);
     if (missing.length) {
-      issues.push({code: 'unknown_person', personIds: missing, from: 'decision'});
+      if (missing.some(id => !excluded.has(id))) issues.push({code: 'unknown_person', personIds: missing.filter(id => !excluded.has(id)), from: 'decision'});
       continue;
     }
     entries.push({personIds: [...ids].sort(personText), verdict: decision.verdict, at: decision.at ?? null, basis: decision.basis ?? null, origin: 'decision'});
@@ -167,10 +168,24 @@ function ownerVerdicts(decisions, persons, known, issues) {
   for (const entry of entries) {
     const key = pairKey(...entry.personIds);
     const held = verdicts.get(key);
-    const later = !held || personText(entry.at, held.at) > 0 || (personText(entry.at, held.at) === 0 && entry.verdict === 'different' && held.verdict === 'same');
-    if (later) verdicts.set(key, entry);
+    if (!held || ownerPrecedes(entry, held)) verdicts.set(key, entry);
   }
   return [...verdicts.values()].sort((a, b) => personText(pairKey(...a.personIds), pairKey(...b.personIds)));
+}
+
+function ownerPrecedes(entry, held) {
+  const time = personText(entry.at, held.at);
+  if (time) return time > 0;
+  if (entry.verdict !== held.verdict) return entry.verdict === 'different';
+  if (entry.origin !== held.origin) return entry.origin === 'decision';
+  return personText(entry.basis, held.basis) < 0;
+}
+
+// Sorted keys, so two records that differ only in key order compare equal.
+function personStable(value) {
+  if (Array.isArray(value)) return '[' + value.map(personStable).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + personStable(value[key])).join(',') + '}';
+  return JSON.stringify(value ?? null);
 }
 
 // The canonical humans of a set of Person records. Input:
@@ -187,17 +202,23 @@ function ownerVerdicts(decisions, persons, known, issues) {
 //    one source (conflicting_keys) or refused by the owner (owner_different).
 export function canonicalPersons({persons = [], credits = [], films = [], decisions = []} = {}) {
   const issues = [];
-  const byId = new Map();
+  // Records supplied twice: identical copies count once; copies that differ are left out entirely, with their credits and
+  // decisions, because no rule can pick one without depending on input order. Nothing is joined on a record in doubt.
+  const copies = new Map();
   for (const person of Array.isArray(persons) ? persons : []) {
     if (!personObject(person) || !personKey(person.id)) {
       issues.push({code: 'invalid_person', personId: personObject(person) ? person.id ?? null : null});
       continue;
     }
-    if (byId.has(person.id)) {
-      issues.push({code: 'duplicate_person', personId: person.id});
-      continue;
-    }
-    byId.set(person.id, person);
+    if (!copies.has(person.id)) copies.set(person.id, []);
+    copies.get(person.id).push(person);
+  }
+  const byId = new Map();
+  const excluded = new Set();
+  for (const [id, list] of copies) {
+    const forms = new Set(list.map(personStable));
+    if (list.length > 1) issues.push({code: 'duplicate_person', personId: id, copies: list.length, conflicting: forms.size > 1});
+    if (forms.size > 1) excluded.add(id); else byId.set(id, list[0]);
   }
   const ids = [...byId.keys()].sort(personText);
   const records = ids.map(id => byId.get(id));
@@ -206,7 +227,7 @@ export function canonicalPersons({persons = [], credits = [], films = [], decisi
   for (const id of ids) groups.find(nodeOf(id));
 
   // 1 and 2: owner verdicts over source keys.
-  const verdicts = ownerVerdicts(decisions, records, byId, issues);
+  const verdicts = ownerVerdicts(decisions, records, byId, excluded, issues);
   const refused = [];
   for (const verdict of verdicts) {
     const [left, right] = verdict.personIds;
@@ -244,7 +265,7 @@ export function canonicalPersons({persons = [], credits = [], films = [], decisi
       continue;
     }
     if (!byId.has(credit.personId)) {
-      issues.push({code: 'unknown_person', personIds: [credit.personId], from: 'credit'});
+      if (!excluded.has(credit.personId)) issues.push({code: 'unknown_person', personIds: [credit.personId], from: 'credit'});
       continue;
     }
     const once = credit.filmId + '\n' + credit.role + '\n' + credit.personId;
@@ -367,6 +388,7 @@ export function canonicalPersons({persons = [], credits = [], films = [], decisi
   }
   candidates.sort((a, b) => PERSON_CANDIDATE_REASONS.indexOf(a.reason) - PERSON_CANDIDATE_REASONS.indexOf(b.reason) || personText((a.personIds || a.humanIds).join(' '), (b.personIds || b.humanIds).join(' ')) || personText(a.names.join(' '), b.names.join(' ')) || personText((a.films || []).join(' '), (b.films || []).join(' ')));
 
+  issues.sort((a, b) => personText(personStable(a), personStable(b)));
   const totals = {persons: ids.length, humans: humans.length, joined: humans.filter(human => human.memberIds.length > 1).length, links: {same_key: 0, owner: 0, co_credit: 0}, candidates: {}, issues: issues.length};
   for (const human of humans) for (const link of human.links) totals.links[link.basis] += 1;
   for (const reason of PERSON_CANDIDATE_REASONS) totals.candidates[reason] = candidates.filter(item => item.reason === reason).length;

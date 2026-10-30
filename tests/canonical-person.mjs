@@ -232,15 +232,45 @@ const across={
  assert.equal(tm.id,'human:tmdb:11','the split part gets back the id it had alone');
 }
 
+// Order independence where inputs disagree: same-verdict owner entries at one time, and one id supplied twice.
+{
+ const persons=[person('person:actor/x','X'),person('person:tmdb_actor/7','X',null,{roleLinks:[{id:'person:actor/x',reason:'owner_same_person',at:'2026-10-30T09:00:00.000Z'}]})];
+ const decisions=[{personIds:['person:actor/x','person:tmdb_actor/7'],verdict:'same',at:'2026-10-30T09:00:00.000Z',basis:'b checked'},{personIds:['person:tmdb_actor/7','person:actor/x'],verdict:'same',at:'2026-10-30T09:00:00.000Z',basis:'a checked'}];
+ const forward=canonicalPersons({persons,decisions}),backward=canonicalPersons({persons:[...persons].reverse(),decisions:[...decisions].reverse()});
+ assert.deepEqual(plain(backward),plain(forward),'equal-time same decisions give one output in any order');
+ assert.deepEqual(plain(forward.humans[0].links),[{basis:'owner',personIds:['person:actor/x','person:tmdb_actor/7'],at:'2026-10-30T09:00:00.000Z',decision:'decision',reason:'a checked'}],'an explicit decision over a role link, then the smaller basis');
+ const roleOnly=[persons[0],{...persons[1],roleLinks:[{id:'person:actor/x',reason:'owner_same_person',at:null},{id:'person:actor/x',reason:'another_reason',at:null}]}];
+ assert.deepEqual(plain(canonicalPersons({persons:roleOnly}).humans[0].links[0].reason),'another_reason');
+ assert.deepEqual(plain(canonicalPersons({persons:[roleOnly[0],{...roleOnly[1],roleLinks:[...roleOnly[1].roleLinks].reverse()}]})),plain(canonicalPersons({persons:roleOnly})));
+}
+{
+ const a=person('person:actor/jane-doe','Jane Doe',provisional('Джейн Доу'));
+ const b=person('person:actor/jane-doe','Jane Doe',owner('Джейн Доу-Смит'));
+ const base={credits:across.credits,films:across.films,decisions:[{personIds:['person:actor/jane-doe','person:tmdb_actor/12'],verdict:'same',at:'2026-10-30T09:00:00.000Z'}]};
+ const others=across.persons.filter(item=>item.id!=='person:actor/jane-doe');
+ const forward=canonicalPersons({...base,persons:[a,...others,b]}),backward=canonicalPersons({...base,persons:[b,...others,a]});
+ assert.deepEqual(plain(backward),plain(forward),'conflicting copies of one id give one output in any order');
+ assert.equal(forward.humanOf['person:actor/jane-doe'],undefined,'a record in doubt is left out');
+ assert.deepEqual(humanOf(forward,'person:director/jane-doe').memberIds,['person:director/jane-doe'],'and nothing is joined through it');
+ assert.notEqual(humanOf(forward,'person:director/jane-doe').id,humanOf(forward,'person:tmdb_actor/11').id);
+ assert.deepEqual(plain(forward.issues),[{code:'duplicate_person',personId:'person:actor/jane-doe',copies:2,conflicting:true}],'its credits and decisions are skipped, not reported as unknown');
+ // Identical copies, key order aside, count once.
+ const same=canonicalPersons({...across,persons:[...across.persons,{localization:a.localization,aliases:[],original:'Jane Doe',id:'person:actor/jane-doe'}]});
+ assert.equal(same.humanOf['person:actor/jane-doe'],'human:letterboxd:jane-doe');
+ assert.deepEqual(plain(same.issues),[{code:'duplicate_person',personId:'person:actor/jane-doe',copies:2,conflicting:false}]);
+ assert.deepEqual(plain(same.humans),plain(canonicalPersons(across).humans));
+}
+
 // Invalid input is reported, never guessed.
 {
  const model=canonicalPersons({
-  persons:[person('person:actor/a','A'),person('person:actor/a','A again'),{id:'person:writer/x'},null],
-  credits:[credit('film:a','person:actor/a','writer'),credit('film:a','person:actor/missing'),{filmId:'film:a'}],
-  decisions:[{personIds:['person:actor/a'],verdict:'same'},{personIds:['person:actor/a','person:actor/zzz'],verdict:'same'},{personIds:['person:actor/a','person:actor/a'],verdict:'same'},{personIds:['person:actor/a','person:actor/b'],verdict:'maybe'}]
+  persons:[person('person:actor/a','A'),person('person:actor/a','A again'),person('person:actor/b','B'),{id:'person:writer/x'},null],
+  credits:[credit('film:a','person:actor/b','writer'),credit('film:a','person:actor/missing'),{filmId:'film:a'},credit('film:a','person:actor/a')],
+  decisions:[{personIds:['person:actor/b'],verdict:'same'},{personIds:['person:actor/b','person:actor/zzz'],verdict:'same'},{personIds:['person:actor/b','person:actor/b'],verdict:'same'},{personIds:['person:actor/b','person:actor/a'],verdict:'maybe'},{personIds:['person:actor/b','person:actor/a'],verdict:'same'}]
  });
- assert.equal(model.humans.length,1);
- assert.equal(model.humans[0].original,'A','the first record of a duplicated id is kept');
+ assert.deepEqual(model.humans.map(human=>human.id),['human:letterboxd:b'],'conflicting copies of person:actor/a are left out');
+ const reversed=canonicalPersons({persons:[null,{id:'person:writer/x'},person('person:actor/b','B'),person('person:actor/a','A again'),person('person:actor/a','A')],credits:[credit('film:a','person:actor/a'),{filmId:'film:a'},credit('film:a','person:actor/missing'),credit('film:a','person:actor/b','writer')],decisions:[{personIds:['person:actor/b','person:actor/a'],verdict:'same'},{personIds:['person:actor/b','person:actor/a'],verdict:'maybe'},{personIds:['person:actor/b','person:actor/b'],verdict:'same'},{personIds:['person:actor/b','person:actor/zzz'],verdict:'same'},{personIds:['person:actor/b'],verdict:'same'}]});
+ assert.deepEqual(plain(reversed),plain(model),'issues too are sorted, so invalid input gives one output in any order');
  assert.deepEqual(plain(model.issues.map(issue=>issue.code)).sort(),['duplicate_person','invalid_credit','invalid_credit','invalid_decision','invalid_decision','invalid_decision','invalid_person','invalid_person','unknown_person','unknown_person'].sort());
  for(const issue of model.issues)assert.ok(PERSON_ISSUES.includes(issue.code));
  for(const reason of new Set(model.candidates.map(item=>item.reason)))assert.ok(PERSON_CANDIDATE_REASONS.includes(reason));

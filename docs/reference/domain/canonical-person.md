@@ -51,7 +51,7 @@ Groups form in three steps. Each step does not depend on input order.
 
 1. **`same_key`.** Records of one source key under different roles are one human. A Letterboxd slug is one person page whatever role it is credited in, and a TMDB person id is one TMDB person.
 2. **`owner`.** An owner `same` joins two groups, and an owner `different` forbids a join:
-   - For one pair, the later decision wins. At an equal time, or with no time, `different` wins.
+   - For one pair, the later decision wins. At an equal time, or with no time, `different` wins. Two entries of one verdict at an equal time are one decision told twice: an explicit decision is kept over a role link, then the smaller basis text, so the recorded provenance never depends on input order.
    - A `same` that would join two groups the owner already called `different` is refused as `invalid_decision`.
    - The owner cannot split one source key. Such a `different` is reported as `owner_split_same_key`, and the key stays one human.
 3. **`co_credit`.** A Letterboxd group and a TMDB group join when both hold:
@@ -87,12 +87,12 @@ Pairs with evidence that do not join become **candidates**, never links:
 | `links` | Why the members are one human: `same_key` (the key), `owner` (time, decision or role link, reason), `co_credit` (records, Films, roles and folded names) |
 | `credits` | The `{filmId, role}` pairs of all members |
 
-`humanOf` maps each record id to its human. `issues` reports invalid, duplicate or unknown records, credits and decisions; nothing is guessed from them. `totals` counts records, humans, joined humans, links by basis, candidates by reason and issues.
+`humanOf` maps each record id to its human. `issues` reports invalid, duplicate or unknown records, credits and decisions, sorted; nothing is guessed from them. A record id supplied twice counts once when the copies are identical (key order aside). When they differ, the id is left out entirely, with its credits and decisions, and reported as `duplicate_person` with `conflicting: true`: no rule could choose a copy without depending on input order, and nothing is joined on a record in doubt. `totals` counts records, humans, joined humans, links by basis, candidates by reason and issues.
 
 ## Invariants
 
 - **Non-destructive.** Every member record, name and key stays in the output. A later owner `different` splits a join, and each part gets back its own id and data.
-- **Deterministic.** The same input in any order gives the same output.
+- **Deterministic.** The same input in any order gives the same output, including owner entries of one verdict at one time and conflicting copies of one record.
 - **Evidence or owner.** A name never joins two keys on its own; only a verified Film or the owner does ([ADR 0009](../../adr/0009-canonical-film-person-identity.md)).
 - **Reviewed precedence.** An owner review is never replaced by a dictionary or automatic name, and a reviewed name never by a provisional one.
 

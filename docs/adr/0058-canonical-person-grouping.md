@@ -22,7 +22,7 @@ A canonical human is a **derived grouping** of Person records, computed by the p
 
 1. **Same source key.** Records with one Letterboxd slug, or one TMDB person id, under different roles are one human. The source names one person page or person whatever the role.
 2. **Owner decision.** An owner `same` joins two groups; an owner `different` forbids a join.
-   - For one pair, the later decision wins; at an equal time, `different` wins.
+   - For one pair, the later decision wins; at an equal time, `different` wins, and between entries of one verdict an explicit decision wins over a role link, then the smaller basis text.
    - AIR-126 role links are owner `same` decisions.
    - The owner cannot split one source key.
 3. **Verified coCredit.** A Letterboxd group and a TMDB group join when both hold:
@@ -37,6 +37,8 @@ Everything else with evidence or a shared name is a **review candidate**, never 
 - namesakes within one source.
 
 The human id is derived from the strongest key: `human:letterboxd:<slug>`, else `human:tmdb:<id>`, else `human:record:<…>`. The ids the other member keys would have alone are kept as `formerIds`.
+
+A record id supplied twice with different contents is left out, with its credits and decisions, and reported. The grouping never depends on input order.
 
 Names follow reviewed precedence across members: owner review, then reviewed (dictionary), then provisional. Differing names of one rank are kept as conflicts.
 
