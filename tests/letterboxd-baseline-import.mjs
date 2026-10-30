@@ -85,13 +85,27 @@ try{
  const other=path.join(scratch,'letterboxd-demo-user-2026-10-26-13-48-utc-copy');await mkdir(other);const otherZip=path.join(other,'letterboxd-demo-user-2026-10-26-13-48-utc.zip');
  await writeFile(otherZip,zip({...exportFiles,'ratings.csv':exportFiles['ratings.csv'].replace('4.5','3')}));await assert.rejects(loadVerifiedPlan({zip:otherZip,output,now}),/differs from origin.json/);
 
- // The route is inert until the gate is on.
- const b=bucket(),off={BUCKET:b},on={BUCKET:b,LETTERBOXD_BASELINE_IMPORT:'on',LETTERBOXD_FACTS:'on'};
- let summary=await remote({mode:'validate',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(off),env:{},now});
- assert.equal(summary.failed.status,409);assert.equal(b.puts,0);
- // The import gate alone is not enough: without the facts writers the next sync would clear imported ratings by absence.
- summary=await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch({BUCKET:b,LETTERBOXD_BASELINE_IMPORT:'on'}),env:{},now});
- assert.equal(summary.failed.status,409);assert.equal(summary.failed.error,'facts_disabled');assert.equal(b.puts,0);
+ for(const file of ['src/letterboxd-facts.js','src/worker.js','src/enrichment.js','src/sources.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.LETTERBOXD_BASELINE_IMPORT|baselineEnabled|import_disabled/,file+' reads no baseline import switch');
+ // The route has no switch of its own (ADR 0053); the facts gate stays: without the facts writers the next sync would clear
+ // imported ratings by absence. A stale LETTERBOXD_BASELINE_IMPORT of any value neither opens nor closes it.
+ const b=bucket(),on={BUCKET:b,LETTERBOXD_FACTS:'on'};
+ let summary;
+ for(const stale of [undefined,'off','on','ON',{token:'x'}]){
+  for(const mode of ['validate','commit']){
+   summary=await remote({mode,zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(stale===undefined?{BUCKET:b}:{BUCKET:b,LETTERBOXD_BASELINE_IMPORT:stale}),env:{},now});
+   assert.equal(summary.failed.status,409,mode+' '+JSON.stringify(stale));assert.equal(summary.failed.error,'facts_disabled');assert.equal(b.puts,0);
+  }
+ }
+ {
+  const answers=[];
+  for(const stale of [undefined,'off','on','ON',{token:'x'}]){
+   const bs=bucket(),envs=stale===undefined?{BUCKET:bs,LETTERBOXD_FACTS:'on'}:{BUCKET:bs,LETTERBOXD_FACTS:'on',LETTERBOXD_BASELINE_IMPORT:stale};
+   const v=await remote({mode:'validate',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(envs),env:{},now});
+   assert.equal(v.failed,null,'validate runs with stale '+JSON.stringify(stale));assert.equal(bs.puts,0,'validate writes nothing');
+   answers.push(JSON.stringify(v.totals));
+  }
+  assert.equal(new Set(answers).size,1,'the stale binding changes nothing');
+ }
  await assert.rejects(remote({mode:'commit',zip:zipPath,output,endpoint:'http://site.example',fetchImpl:workerFetch(on),env:{},now}),/HTTPS/);
  // Legacy view values exist before the import; validate writes nothing.
  await b.put('enrichment/view-index.json',JSON.stringify({Cd2:{actualRating:3}}));const putsBefore=b.puts;
@@ -124,7 +138,7 @@ try{
  // Rollback is crash-recoverable: a failure after the fact writes and before the view restoration, and a failure between two
  // records, both converge on retry with the same counts; an owner edit made between attempts is kept.
  for(const failAt of ['view','record']){
-  const bx=bucket(),onx={BUCKET:bx,LETTERBOXD_BASELINE_IMPORT:'on',LETTERBOXD_FACTS:'on'};
+  const bx=bucket(),onx={BUCKET:bx,LETTERBOXD_FACTS:'on'};
   await bx.put('enrichment/view-index.json',JSON.stringify({Cd2:{actualRating:3}}));
   await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
   let views=0;
@@ -140,7 +154,7 @@ try{
   const repeat=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});assert.equal(repeat.failed,null);
  }
  {
-  const bx=bucket(),onx={BUCKET:bx,LETTERBOXD_BASELINE_IMPORT:'on',LETTERBOXD_FACTS:'on'};
+  const bx=bucket(),onx={BUCKET:bx,LETTERBOXD_FACTS:'on'};
   await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
   bx.failOnce(key=>key===F.recordKey('tmdb-949'));
   await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now}).catch(()=>{});
@@ -150,12 +164,12 @@ try{
   assert.equal(bx.records.get('enrichment/view-index.json').Ab1.actualRating,1);
  }
  // The summary floor: an export older than the latest films-list scan does not override it.
- const b2=bucket(),on2={BUCKET:b2,LETTERBOXD_BASELINE_IMPORT:'on',LETTERBOXD_FACTS:'on'};
+ const b2=bucket(),on2={BUCKET:b2,LETTERBOXD_FACTS:'on'};
  await F.applyFilmsListScan(on2,{scanId:'s1',observedAt:'2026-10-26T20:00:00.000Z',films:{Ab1:3},total:1},{watchlistFilms:[{id:'Ab1',tmdbId:'949'}]});
  summary=await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on2),env:{},now});
  assert.equal(b2.records.get(F.recordKey('tmdb-949')).rating.value,3);assert.ok(summary.totals.older>=2);
  // A film the latest scan saw that has no record yet: the export loses to the floor and the commit still completes.
- const b3=bucket(),on3={BUCKET:b3,LETTERBOXD_BASELINE_IMPORT:'on',LETTERBOXD_FACTS:'on'};
+ const b3=bucket(),on3={BUCKET:b3,LETTERBOXD_FACTS:'on'};
  await F.applyFilmsListScan(on3,{scanId:'s1',observedAt:'2026-10-26T20:00:00.000Z',films:{Cd2:2},total:1},{watchlistFilms:[]});
  assert.equal(b3.records.has(F.recordKey('lb-Cd2')),false);
  summary=await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on3),env:{},now});
@@ -169,4 +183,4 @@ try{
   assert.equal((await post(bad)).status,400,JSON.stringify(bad).slice(0,80));
  assert.equal((await F.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/validate',{method:'GET'}),on,'/api/letterboxd/baseline/validate')).status,405);
 }finally{await rm(scratch,{recursive:true,force:true});}
-console.log('Letterboxd baseline import: ZIP reader and archive name, plan of accepted films, private outputs, origin binding and tamper refusal, gated route, validate without writes, crash-safe idempotent commit, chunk conflict, rollback with superseded owner edit and view before-image, crash-recoverable rollback, both gates required, summary floor, strict input passed');
+console.log('Letterboxd baseline import: ZIP reader and archive name, plan of accepted films, private outputs, origin binding and tamper refusal, facts-gated route with no switch of its own (stale bindings inert), validate without writes, crash-safe idempotent commit, chunk conflict, rollback with superseded owner edit and view before-image, crash-recoverable rollback, both gates required, summary floor, strict input passed');

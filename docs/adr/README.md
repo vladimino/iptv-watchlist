@@ -61,7 +61,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No proposed records currently.
+| Record | Status and boundary | Related work |
+| --- | --- | --- |
+| [0053 — The Letterboxd baseline import is a permanent owner-only maintenance route, and LETTERBOXD_BASELINE_IMPORT is retired](0053-permanent-letterboxd-baseline-import-route.md) | Proposed 2026-10-30 (owner decision `retire now` recorded on AIR-181; ADR acceptance pending; binding removal separately gated) | [AIR-181](https://trello.com/c/d6x0pvuc) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

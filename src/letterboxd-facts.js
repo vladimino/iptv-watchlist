@@ -333,11 +333,11 @@ const LetterboxdFacts=(()=>{
   return {factKey:result.factKey,outcome:outcome==='new'||outcome==='replaces'?'saved':outcome==='older'?'older':'unchanged',watched:current?current.value:null};
  }
 
- // ---- Baseline import (contract "Baseline import protocol"), owner-only, behind LETTERBOXD_BASELINE_IMPORT.
+ // ---- Baseline import (contract "Baseline import protocol"): a permanent owner-only maintenance route behind the Worker's
+ // Cloudflare Access, with no switch of its own (the former LETTERBOXD_BASELINE_IMPORT is retired, ADR 0053).
  const VIEW_FIELDS={rating:'actualRating',watched:'watched',watchlist:'watchlist'};
  const HEX64=/^[0-9a-f]{64}$/,DAY=/^\d{4}-\d{2}-\d{2}$/,MAX_ITEMS=200,MAX_CHUNK=10000;
  const importKey=(sha,chunk,kind)=>FACTS_PREFIX.replace('facts/','imports/')+sha+'/chunks/'+chunk+'.'+kind+'.json';
- const baselineEnabled=env=>env?.LETTERBOXD_BASELINE_IMPORT==='on';
  // Strict input: the origin binds the request to one archive; items name trusted ids and the facts the export showed.
  function validateBaselineRequest(body,{needItems=true,now=Date.now()}={}){
   const fail=message=>{throw new FactsError('invalid_request',message);};
@@ -497,11 +497,10 @@ const LetterboxdFacts=(()=>{
   return {...result,replay:false};
  }
 
- // Owner-only route (the whole Worker is behind Cloudflare Access); the gate keeps it inert until the owner enables it.
+ // Owner-only route (the whole Worker is behind Cloudflare Access); every production commit or rollback is a separate owner-approved operation.
  async function handleBaselineRequest(request,env,pathname){
   const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
   // Fail closed unless the routine writers record facts too: otherwise the next sync would clear imported ratings by absence.
-  if(!baselineEnabled(env))return json({error:'Letterboxd baseline import is disabled',code:'import_disabled'},409);
   if(!factsEnabled(env))return json({error:'Letterboxd baseline import requires LETTERBOXD_FACTS=on',code:'facts_disabled'},409);
   if(request.method!=='POST')return json({error:'Method not allowed'},405);
   if(!/^application\/json\b/i.test(request.headers.get('Content-Type')||''))return json({error:'Expected application/json'},415);

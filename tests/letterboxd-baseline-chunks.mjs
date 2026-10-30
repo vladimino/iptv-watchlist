@@ -34,7 +34,7 @@ const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,S
 const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);
 const handle=(env,url,init)=>F.handleBaselineRequest(new Request(url,init),env,new URL(url).pathname);
 const workerFetch=(env,seen=[])=>async(url,init)=>{const body=JSON.parse(init.body);seen.push(body.chunk);const response=await handle(env,url,init);return {ok:response.ok,status:response.status,json:()=>response.json()};};
-const gates=b=>({BUCKET:b,LETTERBOXD_BASELINE_IMPORT:'on',LETTERBOXD_FACTS:'on'});
+const gates=b=>({BUCKET:b,LETTERBOXD_FACTS:'on'});
 const endpoint='https://site.example',now=Date.parse('2026-10-27T00:00:00Z');
 
 const scratch=await mkdtemp(path.join(os.tmpdir(),'iptv-lb-chunks-'));
