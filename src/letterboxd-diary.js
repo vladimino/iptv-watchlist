@@ -186,12 +186,17 @@ const LetterboxdDiary=(()=>{
  // before where it stopped (overlap), and reads on from there until the page budget or the last page. Each page is
  // committed before the next request; the state is written last, so a killed run only repeats reads. Errors stop the
  // run and are reported, never thrown.
- async function syncHistory(env,{now=Date.now(),maxPages=MAX_PAGES,afterPage=null}={}){
+ // AIR-263: `trace(phase, edge, fields)` receives compact phase markers (enter and exit, page, counts and byte sizes the
+ // step already holds); a failing trace never changes the run.
+ async function syncHistory(env,{now=Date.now(),maxPages=MAX_PAGES,afterPage=null,trace=null}={}){
+  const mark=(phase,edge,fields={})=>{try{trace?.(phase,edge,fields);}catch{}};
   const startedAt=new Date(now).toISOString(),username=sourceConfig(env).letterboxdUsername;
+  mark('diary_state_load','enter');
   const previous=await loadJSON(env,KEYS.state)||{schemaVersion:1,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null};
   const counts={pages:0,rows:0,unresolved:0,undated:0};
   const coverage={newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false,...previous.coverage};
   const tally={seen:new Set(),added:new Set(),updated:new Set(),conflicts:new Set()};
+  mark('diary_state_load','exit',{found:previous.lastAttemptAt!=null});
   let page=1,mode='incremental',outcome=null,stopReason=null,moreAfter=null,firstRows=[];
   const fail=(kind,reason)=>{outcome=kind;stopReason=reason;moreAfter=page;};
   while(true){
@@ -199,10 +204,14 @@ const LetterboxdDiary=(()=>{
    // Request, body and parse are one bounded step: any failure of it is a reported outcome, not an exception.
    let parsed;
    try{
+    mark('diary_page_fetch','enter',{page});
     const response=await fetch(pageUrl(username,page),{headers:HEADERS,redirect:'manual',signal:AbortSignal.timeout(15000)});
-    if(response.status!==200){fail(outcomeOf(response.status),'http_'+response.status+'_page_'+page);break;}
-    let html;try{html=await response.text();}catch(e){fail('failed','read:'+String(e.message).slice(0,120)+'_page_'+page);break;}
+    if(response.status!==200){mark('diary_page_fetch','exit',{page,status:response.status});fail(outcomeOf(response.status),'http_'+response.status+'_page_'+page);break;}
+    let html;try{html=await response.text();}catch(e){mark('diary_page_fetch','error',{page,status:200});fail('failed','read:'+String(e.message).slice(0,120)+'_page_'+page);break;}
+    mark('diary_page_fetch','exit',{page,status:200,bytes:html.length});
+    mark('diary_page_parse','enter',{page});
     parsed=parsePage(html);
+    mark('diary_page_parse','exit',{page,rows:parsed.rows.length,challenge:parsed.challenge});
    }catch(e){fail('failed','fetch:'+String(e.message).slice(0,120));break;}
    if(parsed.challenge){fail('blocked','challenge_page_'+page);break;}
    // A page without rows is never read as an empty diary: no layout for that is known, so it is a failure that keeps
@@ -214,13 +223,15 @@ const LetterboxdDiary=(()=>{
    const groups=dayGroups(rows,{page,last:!parsed.next}),pageKeys=new Set(rows.filter(usable).map(row=>row.key));
    const knownBefore=new Set([...pageKeys].filter(key=>!tally.added.has(key)&&tally.seen.has(key)));
    const observedAt=new Date(now).toISOString();
+   mark('diary_history_merge','enter',{page});
    const merged=await mergeStoredJSON(env,KEYS.history,emptyHistory(),history=>{
     for(const key of pageKeys)if(history.entries[key]&&!tally.added.has(key))knownBefore.add(key);
     mergeRows(history,rows,groups,observedAt,page,tally);return pageKeys.size?history:null;
    });
    // AIR-287: the page's consequences (rating facts) run after its history commit and before the next request. A failure
    // stops the run at this page, so the next run reads it again; the facts writer is idempotent.
-   if(afterPage){try{await afterPage({page,rows,next:parsed.next,history:merged});}catch(e){fail('failed','after_page:'+String(e.message).slice(0,120)+'_page_'+page);break;}}
+   mark('diary_history_merge','exit',{page,entries:Object.keys(merged?.entries||{}).length});
+   if(afterPage){mark('diary_facts_apply','enter',{page});try{await afterPage({page,rows,next:parsed.next,history:merged});}catch(e){mark('diary_facts_apply','error',{page});fail('failed','after_page:'+String(e.message).slice(0,120)+'_page_'+page);break;}mark('diary_facts_apply','exit',{page});}
    for(const row of rows.filter(row=>row.watchedDate)){
     if(!coverage.newestWatchedDate||row.watchedDate>coverage.newestWatchedDate)coverage.newestWatchedDate=row.watchedDate;
     if(!coverage.oldestWatchedDate||row.watchedDate<coverage.oldestWatchedDate)coverage.oldestWatchedDate=row.watchedDate;
@@ -242,7 +253,9 @@ const LetterboxdDiary=(()=>{
   const failed=['failed','blocked','rate_limited'].includes(outcome);
   const state={schemaVersion:1,lastAttemptAt:startedAt,lastSuccessAt:failed?previous.lastSuccessAt||null:startedAt,lastFailureAt:failed?startedAt:previous.lastFailureAt||null,
    lastOutcome:outcome,stopReason,counts,coverage,resumePage};
+  mark('diary_state_save','enter');
   await saveJSON(env,KEYS.state,state);
+  mark('diary_state_save','exit',{outcome});
   return {...state,firstPageRows:firstRows};
  }
  // Read side: state, per-film aggregates and, for one film, its entries. Never writes or fetches.
