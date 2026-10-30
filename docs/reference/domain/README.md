@@ -10,7 +10,7 @@ Maintained source-verified domain contracts, distinct from dated rollout evidenc
 - [Candidate discovery and optional search variants](candidate-discovery.md)
 - [Prediction compatibility across taste-profile versions](prediction-compatibility.md) — pure evaluator `src/domain/prediction-compatibility.js` (ADR-0031); not yet called by any consumer
 - [Fingerprint compatibility across schema and prompt versions](fingerprint-compatibility.md) — transition declarations, the fingerprint rule and the prediction boundary (ADR-0035); pure evaluator `src/domain/fingerprint-compatibility.js`, not yet called by any consumer
-- [Data health: quality rules and the issue model](data-health.md) — pure evaluator `src/domain/data-health.js` that turns bounded stored projections into sorted, deduplicated health issues with stable ids, separate completeness/freshness/progress, formal thresholds and suggested actions; not yet called by any consumer
+- [Data health: quality rules and the issue model](data-health.md) — pure evaluator `src/domain/data-health.js` that turns bounded stored projections into sorted, deduplicated health issues with stable ids, separate completeness/freshness/progress, formal thresholds and suggested actions; the limbo inventory view `src/domain/limbo-inventory.js` names the cause each stuck or waiting film is in, behind the owner route `/api/admin/limbo`
 - [EPG non-film screening](nonfilm-screening.md) — `nonFilmEPGReason()` reason codes, identity precedence and reversible `excluded_nonfilm` decisions
 
 Current rollout status belongs in Trello and production observations. See [the main documentation map](../../README.md) and [historical evidence](../../evidence/README.md).

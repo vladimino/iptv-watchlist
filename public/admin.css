@@ -91,6 +91,30 @@
 .admin-health-note{font-size:13px;margin-top:18px}
 @media(max-width:800px){.admin-health-head{flex-wrap:wrap}.health-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.health-group-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.health-group-count{margin-left:0;width:100%}}
 @media(max-width:340px){.health-cards{grid-template-columns:minmax(0,1fr)}}
+/* Limbo inventory */
+.admin-page .brand{white-space:nowrap}
+.limbo-filters h2{margin-bottom:4px}
+.limbo-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px;margin:10px 0 0}
+.limbo-field{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);min-width:0}
+.limbo-field select,.limbo-field input{font:inherit;font-size:14px;color:var(--text);background:var(--surface);border:1px solid #465044;border-radius:6px;padding:8px;max-width:100%;min-width:0}
+.limbo-field select:focus-visible,.limbo-field input:focus-visible,.admin-page button:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.limbo-apply,.limbo-reset{width:auto;margin:0}
+.limbo-total{font-weight:400;letter-spacing:0;color:#7f8a7e;font-size:14px}
+.limbo-item{cursor:default}
+.limbo-facts{margin:10px 0 0}
+.limbo-facts div{display:grid;grid-template-columns:minmax(0,10rem) minmax(0,1fr);gap:8px;padding:4px 0;border-bottom:1px solid #242b24;font-size:13px}
+.limbo-facts dt{color:var(--muted)}
+.limbo-facts dd{margin:0;overflow-wrap:anywhere}
+.limbo-links{margin:10px 0 0;font-size:13px}
+.limbo-link{color:var(--lime)}
+.limbo-context h2{font-size:20px;letter-spacing:-.3px}
+.limbo-context p{font-size:14px;line-height:1.5}
+.limbo-context h3{margin:14px 0 6px;font-size:13px}
+.limbo-context ul{margin:0;padding-left:18px;font-size:13px}
+.limbo-context li{margin:0 0 4px}
+.limbo-unavailable{color:#e6d9a6;font-size:13px}
+@media(max-width:800px){.limbo-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.limbo-form{flex-direction:column;align-items:stretch}}
+@media(max-width:520px){.admin-views{overflow-x:auto}.admin-views a{padding:10px 10px;white-space:nowrap}}
 .action-scenario{display:flex;flex-direction:column;gap:6px;max-width:420px;margin:0 0 16px;font-size:14px;color:var(--muted)}
 .action-scenario select{font:inherit;color:var(--text);background:var(--surface);border:1px solid #465044;border-radius:8px;padding:8px 10px}
 .action-panel h4{margin:14px 0 6px;font-size:13px;color:var(--muted)}
