@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ручные операции — демонстрация</title>
+  <meta name="description" content="Демонстрация контракта безопасных ручных операций на синтетических данных: превью, подтверждение объёма, квитанция. Страница ничего не пишет и не делает запросов.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ операции</span></div>
+    <a class="admin-home" href="/admin">К данным</a>
+  </header>
+  <main class="admin-shell">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">ДЕМОНСТРАЦИЯ · СИНТЕТИЧЕСКИЕ ДАННЫЕ</p>
+        <h1>Ручные операции</h1>
+        <p class="admin-intro">Как будет выглядеть любое действие восстановления: превью затрагиваемых записей, явное подтверждение именно этого объёма, квитанция с честным результатом.</p>
+      </div>
+    </section>
+    <p id="action-demo-note" class="demo-note"><span class="info-icon" aria-hidden="true">i</span><span>Это демонстрация. Хранилище, исполнитель и квитанции живут только в этой вкладке; страница не делает запросов и ничего не меняет в данных сайта.</span></p>
+    <label class="action-scenario"><span>Сценарий</span><select id="action-scenario"></select></label>
+    <p id="action-receipt-reset" class="muted" aria-live="polite"></p>
+    <section id="action-root" class="admin-card" aria-label="Действие"></section>
+  </main>
+  <script src="/admin-actions.js"></script>
+</body>
+</html>
