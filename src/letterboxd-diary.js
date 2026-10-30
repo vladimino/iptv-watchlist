@@ -146,10 +146,20 @@ const LetterboxdDiary=(()=>{
  const emptyHistory=()=>({schemaVersion:1,entries:{}});
  // AIR-287: what the stored diary proves about one film, by lid only. Watched: any entry of the lid. Rating: the rating at
  // the film's latest watched date, and only when that date's rows are all known and agree: one viewing-id entry or day
- // entry per row, every row rated, one value, the day count proved by one page. An unrated, ambiguous or partial latest
- // date proves no rating; an older entry never stands in for it. The observation time is the watched date (the rating
- // held at least from that day), so a newer observation from any source always wins over it.
- function ratingEvidence(history,lids){
+ // entry per row, every row rated, one value, the day count proved by one page. With `page` (the page just read), the
+ // latest date must also lie inside that page: the film has a row of that date on it, and the date touches no open page
+ // edge (the top of a page after the first, the bottom of a page with a next one), where the same film's day may go on
+ // across a page another request returns. Otherwise the date is `partial`. An unrated, ambiguous or partial latest date
+ // proves no rating; an older entry never stands in for it. The observation time is the watched date (the rating held at
+ // least from that day), so a newer observation from any source always wins over it.
+ function ratingEvidence(history,lids,page=null){
+  const open=new Set(),onPage=new Map();
+  if(page){
+   const dated=page.rows.filter(row=>row.watchedDate);
+   if(page.page>1&&dated.length)open.add(dated[0].watchedDate);
+   if(page.next&&dated.length)open.add(dated.at(-1).watchedDate);
+   for(const row of dated)if(row.lid){const days=onPage.get(row.lid)||new Set();days.add(row.watchedDate);onPage.set(row.lid,days);}
+  }
   const byLid=new Map();
   for(const entry of Object.values(history?.entries||{})){
    const lid=entry?.identity?.type==='letterboxd_lid'?String(entry.identity.value||''):'';
@@ -161,7 +171,8 @@ const LetterboxdDiary=(()=>{
    const latest=entries.reduce((max,entry)=>entry.watchedDate>max?entry.watchedDate:max,'');
    const day=entries.filter(entry=>entry.watchedDate===latest).sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
    const ratings=day.flatMap(entry=>entry.keyBasis==='viewing_id'?[entry.ratingAtEntry]:Array.isArray(entry.ratingsAtEntry)?entry.ratingsAtEntry:[null]);
-   const certain=day.every(entry=>entry.viewingsCertain!==false&&(entry.keyBasis==='viewing_id'||(entry.ratingsAtEntry||[]).length===entry.viewings));
+   const fenced=!page||onPage.get(lid)?.has(latest)&&!open.has(latest);
+   const certain=fenced&&day.every(entry=>entry.viewingsCertain!==false&&(entry.keyBasis==='viewing_id'||(entry.ratingsAtEntry||[]).length===entry.viewings));
    const values=[...new Set(ratings)];
    const state=!certain?'partial':values.length===1&&values[0]!=null?'rated':values.every(value=>value==null)?'unrated':'ambiguous';
    out.push({lid,watchedDate:latest,rating:state==='rated'?values[0]:null,ratingState:state,sourceRef:'diary:'+day.map(entry=>entry.key).join(',')});
@@ -209,7 +220,7 @@ const LetterboxdDiary=(()=>{
    });
    // AIR-287: the page's consequences (rating facts) run after its history commit and before the next request. A failure
    // stops the run at this page, so the next run reads it again; the facts writer is idempotent.
-   if(afterPage){try{await afterPage({page,rows,history:merged});}catch(e){fail('failed','after_page:'+String(e.message).slice(0,120)+'_page_'+page);break;}}
+   if(afterPage){try{await afterPage({page,rows,next:parsed.next,history:merged});}catch(e){fail('failed','after_page:'+String(e.message).slice(0,120)+'_page_'+page);break;}}
    for(const row of rows.filter(row=>row.watchedDate)){
     if(!coverage.newestWatchedDate||row.watchedDate>coverage.newestWatchedDate)coverage.newestWatchedDate=row.watchedDate;
     if(!coverage.oldestWatchedDate||row.watchedDate<coverage.oldestWatchedDate)coverage.oldestWatchedDate=row.watchedDate;

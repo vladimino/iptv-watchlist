@@ -90,7 +90,7 @@ After each page's history commit, and before the next page is requested, the fil
 | `rated` | The film's latest watched date has every row known and rated with one value: viewing-id entries, and day entries whose count is proved by one page | `watched: true` and `rating` |
 | `unrated` | The latest date's rows have no rating | `watched: true` only |
 | `ambiguous` | The latest date's rows disagree | `watched: true` only |
-| `partial` | The latest date's day count is a lower bound (cut by a page boundary) | `watched: true` only |
+| `partial` | The latest date's day count is a lower bound, or the date is not inside the page just read: the film has no row of that date on it, or the date touches an open page edge (the top of a page after the first, the bottom of a page with a next one). Viewing-id rows are fenced the same way | `watched: true` only |
 
 - **Never an older entry.** An older entry never stands in for the latest one.
 - **Unresolved entries.** An entry without a lid links nothing, and a slug never links ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md)).
@@ -104,7 +104,7 @@ After each page's history commit, and before the next page is requested, the fil
   - one view-index projection.
 - **Failure.** A failed write stops the run at that page (`stopReason: after_page:<message>_page_<n>`), so the next run reads the page again.
 - **`LETTERBOXD_FACTS` off.** Nothing is written, but the proved ratings still reach this commit's removal event.
-- **Removal events.** They get the proved ratings first. The removal lookup then runs only for removed films without one.
+- **Removal events.** They get the proved ratings first, as the film's effective rating. The removal lookup then runs only for removed films without one. A stored rating without diary proof does not spare the lookup.
 
 ## Read API
 

@@ -127,4 +127,47 @@ records.set('programme.json',report('r9'));await ctx.completeWithRatings({...env
 assert.equal(writes.some(key=>key.startsWith('letterboxd/facts/')||key==='enrichment/view-index.json'),false);
 assert.equal(records.get('sync.json').diaryHistory.facts.enabled,false);
 
-console.log('Diary-first ratings (AIR-287): rule on latest watched date, 60 rows over two pages as facts with no cap, no films list, replay without writes, newer observation wins either way, re-rating once, unrated/ambiguous/watched-only prove no rating, blocked page 2 resumes, failed facts write re-reads its page, facts gate passed');
+// 8. Review fixes. Two viewing ids of one film on one day split by the page boundary, with different ratings: page 1
+// alone never publishes its row's rating; with page 2 read the day is ambiguous; with page 2 blocked it stays unrated.
+const fill=n=>Array.from({length:n},(_,i)=>({lid:'P'+i,date:day(i)}));
+for(const blocked of [false,true]){
+ records.clear();etags.clear();
+ publish([...fill(49),{lid:'Split',date:day(60),stars:8,viewing:'901'},{lid:'Split',date:day(60),stars:10,viewing:'902'},...fill(10).map(e=>({...e,lid:'Q'+e.lid,date:day(61)}))]);
+ if(blocked)site.set(url(2),()=>respond(403,'<title>Just a moment...</title>'));
+ await commit('split-'+blocked);
+ assert.deepEqual([record('Split').watched.value,record('Split').rating],[true,undefined],'no rating from half a day, blocked='+blocked);
+ assert.equal(view().Split.actualRating,undefined);
+}
+// Whole on one page later: the two viewings disagree, so still no rating; agreeing viewings inside a page are rated.
+records.clear();etags.clear();
+publish([...fill(10),{lid:'Split',date:day(60),stars:8,viewing:'901'},{lid:'Split',date:day(60),stars:10,viewing:'902'},{lid:'Same',date:day(61),stars:6,viewing:'903'},{lid:'Same',date:day(61),stars:6,viewing:'904'},{lid:'Last',date:day(62),stars:4}]);
+await commit('split-whole');
+assert.equal(record('Split').rating,undefined);assert.equal(record('Same').rating.value,3);
+
+// 9. A removed film with a stored rating whose latest diary entry proves none is not spared the per-film lookup, and
+// the stored rating is not reported as diary proof.
+records.clear();etags.clear();
+const lookupEnv={...env,REMOVAL_RATING_LOOKUP:'on'};
+publish([{lid:'Old',date:day(1),stars:6},{lid:'Gone',date:day(30),stars:8},{lid:'Tail',date:day(40)}]);
+await commit('prior');
+assert.equal(record('Gone').rating.value,4,'rated at the time it was the latest');
+publish([{lid:'Gone',date:'2026-10-30'},{lid:'Old',date:day(1),stars:6},{lid:'Gone',date:day(30),stars:8},{lid:'Tail',date:day(40)}]);
+requests.length=0;
+const removalRun={...run('rm'),removalLookups:[{id:'Gone',url:'https://letterboxd.com/film/gone/'}],events:[{id:'rm-watchlist',type:'watchlist',at:new Date().toISOString(),total:0,added:[],removed:[{id:'Gone',title:'Gone',year:2001}]}]};
+records.set('programme.json',report('rm'));await ctx.completeWithRatings(lookupEnv,removalRun,report('rm'));
+assert.ok(requests.some(u=>u.includes(`/${USER}/film/gone/`)),'the lookup still runs');
+assert.equal(records.get('sync.json').removalDiaryResolved,undefined);
+assert.equal(record('Gone').rating.value,4,'the stored rating stays');
+
+// 10. Worst case for one commit: three full pages of films never seen (150 facts records), bounded R2 operations.
+records.clear();etags.clear();let ops=0;const realGet=bucket.get,realPut=bucket.put;
+bucket.get=async function(...a){ops++;return realGet.apply(this,a);};bucket.put=async function(...a){ops++;return realPut.apply(this,a);};
+publish(Array.from({length:200},(_,i)=>({lid:'W'+i,date:day(i),stars:(i%10)+1})));requests.length=0;
+const started=Date.now();await commit('worst');const elapsed=Date.now()-started;
+bucket.get=realGet;bucket.put=realPut;
+assert.deepEqual(requests,[url(1),url(2),url(3)]);
+assert.equal(Object.keys(records.get('letterboxd/diary/history.json').entries).length,150);
+assert.ok(ops<=700,'R2 operations for 150 new films: '+ops);
+fs.writeFileSync(process.env.DIARY_WORST_CASE_OUT||'/dev/null',JSON.stringify({films:150,r2Operations:ops,ms:elapsed}));
+
+console.log('Diary-first ratings (AIR-287): rule on latest watched date, 60 rows over two pages as facts with no cap, no films list, replay without writes, newer observation wins either way, re-rating once, unrated/ambiguous/watched-only prove no rating, blocked page 2 resumes, failed facts write re-reads its page, facts gate, no rating from half a page-split day with viewing ids (read or blocked), stored rating never taken as diary proof, bounded R2 operations for 150 new films passed');

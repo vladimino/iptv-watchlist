@@ -486,15 +486,17 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
 // the commit; with LETTERBOXD_DIARY_HISTORY off, only the removal lookup runs.
 async function diaryRatingsStage(env,run){
  const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0},ratings={};
- const afterPage=async({rows,history})=>{
+ const afterPage=async({page,rows,next,history})=>{
   const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
-  const evidence=LetterboxdDiary.ratingEvidence(history,lids);
+  const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next});
   for(const item of evidence)facts[item.ratingState]++;
-  // Without LETTERBOXD_FACTS nothing is written; the proved ratings still reach this commit's removal event.
-  if(env.LETTERBOXD_FACTS!=='on'){for(const item of evidence)if(item.rating!=null)ratings[item.lid]=item.rating;return;}
+  // Only a rating the diary proved counts: it reaches the removal event (as the film's effective rating, which a newer
+  // observation may hold) and spares the per-film lookup. A stored rating without diary proof does neither.
+  for(const item of evidence)if(item.rating!=null)ratings[item.lid]=item.rating;
+  if(env.LETTERBOXD_FACTS!=='on')return;
   const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
   for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
-  Object.assign(ratings,result.ratings);
+  for(const lid of Object.keys(ratings))if(result.ratings[lid]!=null)ratings[lid]=result.ratings[lid];
  };
  try{
   const diary=await LetterboxdDiary.syncHistory(env,{afterPage});

@@ -23,6 +23,7 @@ The diary history of ADR 0049 already reads up to three diary pages per commit. 
 2. **What the diary proves, by lid only.** `LetterboxdDiary.ratingEvidence` decides it from the stored history:
    - **Watched:** any entry of the lid proves watched.
    - **Rating:** the rating at the film's latest watched date, only when every row of that date is known and they agree. Each row is a viewing-id entry or a counted row of a day entry, and the day count must be proved by one page.
+   - **Page fence:** the latest date must also lie inside the page just read. The film has a row of that date on it, and the date touches no open page edge: the top of a page after the first, or the bottom of a page with a next one. This holds for viewing-id rows too, so half of a day split across pages, read or blocked, never publishes a rating.
    - **No rating:** an unrated latest date, disagreeing ratings or a day cut by a page boundary prove no rating. An older entry never stands in for the latest one.
    - **Unresolved entries:** entries without a lid link nothing. A slug never links (ADR 0052).
 3. **Observed at the watched date.**
@@ -35,7 +36,7 @@ The diary history of ADR 0049 already reads up to three diary pages per commit. 
    - `refreshRatingsFromFilms`, its three 403 tries and the films-list diary and baseline repairs leave the EPG path.
    - A stored films-list summary stays the floor of later observations.
 5. **Fallback after the diary.**
-   - Removal events get the ratings the diary proved.
+   - Removal events get the ratings the diary proved, as the film's effective rating. A stored rating without diary proof neither spares the lookup nor counts as proof.
    - The removal lookup (ADR 0043) then runs only for removed films the diary gave no rating, within its existing bounds: five requests per call, three attempts per film, and a pause on 403 or 429.
    - A blocked diary leaves every removed film to the lookup.
 6. **Honest status.** `sync.json` records:
@@ -62,7 +63,7 @@ Not decided here:
 
 - **What works.** Ratings and watched facts arrive from the source that answers the Worker (page 1 confirmed on 2026-10-29), with no extra per-film requests.
 - **What is missed.** A rating set without a diary entry, or edited on an old entry, is not seen until another source observes it. A day split by a page boundary gets its rating once a later read holds it within one page.
-- **Load.** Facts writes are bounded by the pages read: at most 150 films per commit, mostly skipped once projected.
+- **Load.** Facts writes are bounded by the pages read: at most 150 films per commit, mostly skipped once projected. A synthetic worst case (150 films never seen, three pages) takes 489 R2 operations and about 40 ms locally (`tests/diary-first-ratings.mjs`). Production CPU and wall time are not measured.
 
 ## Recovery and migration boundary
 
