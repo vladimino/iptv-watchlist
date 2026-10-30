@@ -1,9 +1,9 @@
 # ADR 0052: A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-30  
 **Recorded at:** 2026-10-30  
-**Approval source:** not yet decided; the direction ("keep the slug wherever it is known") was approved on [AIR-276](https://trello.com/c/PeWwEti8)  
+**Approval source:** Owner explicitly accepted ADR 0052 on 2026-10-30, after positive independent review of [PR #243](https://github.com/vladimino/iptv-watchlist/pull/243#pullrequestreview-5710468864); the decision is recorded on [AIR-276](https://trello.com/c/PeWwEti8). No production import, materialization or feature-flag change was authorized.  
 **Related work:** [AIR-276](https://trello.com/c/PeWwEti8); [AIR-273](https://trello.com/c/TVB01Xm0) (Diary rows carry lid and film permalink); [AIR-51](https://trello.com/c/33d4hKJ3) and [ADR 0049](0049-letterboxd-diary-viewing-history.md) (diary slug observations); [AIR-193](https://trello.com/c/DqBF3HLy) (a slug is not the boxd.it lid); [AIR-275](https://trello.com/c/4x7hH0gI) (D1); [ADR 0009](0009-canonical-film-person-identity.md); [contract](../reference/domain/film-person.md#letterboxd-slug-alias)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -49,7 +49,7 @@ Code only. The Worker bundle gains the pure parser and functions, unused by any 
 
 ## Evidence
 
-- **Original decision:** [AIR-276](https://trello.com/c/PeWwEti8).
+- **Original decision:** Direction approved under [AIR-276](https://trello.com/c/PeWwEti8); ADR 0052 explicitly Accepted by the owner on 2026-10-30, after [independent positive review](https://github.com/vladimino/iptv-watchlist/pull/243#pullrequestreview-5710468864).
 - **Implementation:** `src/domain/film-person.js` (`letterboxdSlugFromUrl`, `markSlugCollisions`), `src/domain/film-person-reader.js`, `src/domain/film-person-backfill.js`, `scripts/letterboxd-slug-inventory.mjs`, `scripts/snapshot-store.mjs`, `tests/letterboxd-slug-alias.mjs`.
 - **Dated verification:** [slug coverage on the 2026-10-29 fenced production snapshot](../evidence/letterboxd/air-276-slug-coverage-2026-10-30.md): all 394 lid Films carry a valid permalink and get a `current` slug; 2,008 TMDB-only Films get none; 0 collisions; read-only, no write or request.
 - **Uncertainty:**
