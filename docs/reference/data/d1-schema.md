@@ -156,7 +156,7 @@ A projected `film_metadata` row has `r2_key` `metadata.json` and `content_sha256
 
 The projector fails closed on its R2 inputs. Missing, malformed or unpublished inputs stop a run before any write. A live writer, or an object whose etag changed during the reads, defers it. It also holds a run with more than 25 absent Films or 250 absent Persons (`absent_guard`), or more lost watchlist memberships than the larger of 5 and 2 % of the members (`membership_guard`). See [ADR 0056](../../adr/0056-d1-enrichment-write-through.md).
 
-`scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
+`scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled: a local SQLite build in one transaction (`--database`), or production D1 through the HTTP API (`--target d1`, read-only without `--apply`). In D1 mode it refuses to write unless the database identity, the full schema v4, the baseline receipt, an idle projector lease, a held entity for every key and agreement with any stored key all hold. With `--apply` it holds the projector's own lease in `projection_run` for the whole run, so the projector refuses to start. Every request fences on that lease, renews it and writes an idempotent chunk of 250 rows; a lost lease fails the request whole. It verifies every key afterwards. It is not one transaction. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
 
 ## Candidate show identity (schema v3)
 
