@@ -1,9 +1,9 @@
 # ADR 0050: The one-time prediction version materialization route and PREDICTION_MATERIALIZATION are retired
 
-**Status:** Proposed (owner decision `retire now` recorded; ADR acceptance pending; no production configuration authorization)  
+**Status:** Accepted 2026-10-30 (architecture only; no production operation authorized)  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** owner decision `retire now` recorded on AIR-227 on 2026-10-29: remove the `PREDICTION_MATERIALIZATION` switch and the one-time route entirely, keep neither as a permanent tool; acceptance of this record is pending  
+**Approval source:** explicit owner acceptance of ADR-0050 in AIR-227 PR #240 conversation on 2026-10-30; original `retire now` decision on AIR-227 on 2026-10-29; no production operation authorized  
 **Related work:** [AIR-227](https://trello.com/c/KjFwF0Zp); prerequisite [AIR-179](https://trello.com/c/vdLts7tJ) (route, CLI and rehearsal); [AIR-74](https://trello.com/c/5AdAmKPe) (the production run); [AIR-226](https://trello.com/c/Upzk5DqR); [ADR-0026](0026-historical-prediction-version-materialization.md); [ADR 0045](0045-retire-prediction-version-objects-switch.md); [ADR 0040](0040-retire-ratings-only-refresh.md) (the precedent for a retired route); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0026](0026-historical-prediction-version-materialization.md) for its route, its gate and its CLI after the completed run: decisions 2, 3 and 7 and the `rehearse`, `validate` and `apply` steps. Its record of how the run was done, the plan rule (decision 1), the per-film rule (decision 4) and the meaning of its receipts (decision 5) stay as history  
 **Superseded by:** None
