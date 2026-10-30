@@ -9,7 +9,6 @@ const onOff=(name,effective,extra={})=>({name,modes:['off','on'],default:'off',t
 const FEATURE_FLAGS=[
  onOff('CANDIDATE_DISCOVERY',env=>candidateDiscoveryMode(env),{trims:true}),
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
- onOff('LETTERBOXD_FACTS',env=>env?.LETTERBOXD_FACTS==='on'?'on':'off'),
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
  onOff('REMOVAL_RATING_LOOKUP',env=>removalLookupEnabled(env)?'on':'off'),
  onOff('LETTERBOXD_DIARY_HISTORY',env=>LetterboxdDiary.enabled(env)?'on':'off'),
@@ -26,6 +25,7 @@ const FEATURE_FLAGS=[
  {name:'CATALOG_POSTER_HYDRATION',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'PREDICTION_MATERIALIZATION',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'LETTERBOXD_BASELINE_IMPORT',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
+ {name:'LETTERBOXD_FACTS',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
 ];
 const featureFlagNames=()=>FEATURE_FLAGS.map(flag=>flag.name);
 function featureFlagRaw(flag,value){

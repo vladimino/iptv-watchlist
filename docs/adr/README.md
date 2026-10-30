@@ -60,8 +60,12 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0052 — A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid](0052-letterboxd-slug-film-alias.md) | Accepted 2026-10-30; owner approval after positive independent review; production import separately gated | [AIR-276](https://trello.com/c/PeWwEti8) |
 | [0053 — The Letterboxd baseline import is a permanent owner-only maintenance route, and LETTERBOXD_BASELINE_IMPORT is retired](0053-permanent-letterboxd-baseline-import-route.md) | Accepted 2026-10-30; explicit owner approval in AIR-181 PR #245 conversation; binding removal separately gated | [AIR-181](https://trello.com/c/d6x0pvuc) |
 | [0054 — EPG ratings are Diary-first: diary evidence becomes facts, the films list is no longer scanned](0054-diary-first-epg-ratings.md) | Accepted 2026-10-30; explicit owner architecture acceptance and visual approval of both Mermaid diagrams; production activation separately gated | [AIR-287](https://trello.com/c/kOZlT8UE); [owner decision](https://trello.com/c/kOZlT8UE#comment-6ae49031a74e2ded1b2f15a3); [review](https://github.com/vladimino/iptv-watchlist/pull/247#pullrequestreview-5712268139) |
+| [0055 — Letterboxd facts are the only model for watched, rating and watchlist, and LETTERBOXD_FACTS is retired](0055-retire-letterboxd-facts-switch.md) | Accepted 2026-10-30; explicit owner approval for AIR-182 PR #248; binding removal separately gated | [AIR-182](https://trello.com/c/Kc2Uif73); supersedes in part the facts gate of 0032, 0042 and 0053 |
 | [0056 — The first phase 2 step keeps R2 authoritative and projects the enrichment domain into D1 from a cron trigger](0056-d1-enrichment-write-through.md) | Accepted 2026-10-30; explicit owner decision in PR #249 conversation; all three Mermaid visually approved; Cloudflare Cron deploy separately authorized with projector off; migration 0004, reload and `dry`/`on` remain gated | [AIR-275](https://trello.com/c/4x7hH0gI); [PR #249](https://github.com/vladimino/iptv-watchlist/pull/249); supersedes ADR 0051 decision 2 in part, for enrichment |
 
+## Proposed records
+
+No proposed records currently.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

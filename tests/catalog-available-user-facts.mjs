@@ -1,6 +1,6 @@
 // Finds exclude every film the owner has watched or rated by identity, whatever id the catalog record uses: watched-unrated
-// films, ratings keyed by the Letterboxd id while the catalog uses tmdb_<n>, with LETTERBOXD_FACTS off (legacy index) and on
-// (projection from fact records). A namesake or remake is never suppressed by title, a conflicting stored id bridges nothing,
+// films, ratings keyed by the Letterboxd id while the catalog uses tmdb_<n>, in index entries written before the facts model
+// (legacy index) and in the projection from fact records; the retired LETTERBOXD_FACTS (ADR 0055) changes nothing. A namesake or remake is never suppressed by title, a conflicting stored id bridges nothing,
 // and the GET writes nothing. Synthetic data only.
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -51,7 +51,7 @@ function seed({index={},metadata=null}={}){
 const metadata={'solaris-1972':{id:'solaris-1972',tmdbId:'593',title:'Solaris',year:1972},twin:{id:'twin',tmdbId:'700'},'twin-copy':{id:'twin',tmdbId:'701'}};
 const snapshot=()=>JSON.stringify([...records.entries()].sort());
 
-// 1. Legacy index (LETTERBOXD_FACTS off): ratings keyed by Letterboxd ids. The stored TMDB id bridges the rating to the
+// 1. Legacy index (entries written before the facts model): ratings keyed by Letterboxd ids. The stored TMDB id bridges the rating to the
 // tmdb_<n> catalog record; a remake with the same title stays; a Letterboxd id with two stored TMDB ids bridges nothing.
 {
  seed({metadata,index:{'solaris-1972':{actualRating:4},twin:{actualRating:3}}});
@@ -79,10 +79,10 @@ const snapshot=()=>JSON.stringify([...records.entries()].sort());
  assert.ok(ids(r.body).includes('tmdb_805'));assert.ok(!ids(r.body).includes('tmdb_2103'));
 }
 
-// 2. Projection from fact records (LETTERBOXD_FACTS on): watched, watched-unrated and rated films under every alias.
+// 2. Projection from fact records: watched, watched-unrated and rated films under every alias.
 {
  seed({metadata:{'rated-2011':{id:'rated-2011',tmdbId:'802'}}});
- const env={BUCKET:bucket,LETTERBOXD_FACTS:'on'},observedAt=new Date(now-hour).toISOString(),written=[];
+ const env={BUCKET:bucket},observedAt=new Date(now-hour).toISOString(),written=[];
  const facts=async(links,values,source='letterboxd_export')=>{
   const factKey=await Facts.linkFilm(env,links);
   const observations=[];for(const [fact,value] of Object.entries(values))observations.push({fact,observation:await Facts.observation({factKey,fact,value,observedAt,source,sourceRef:'synthetic'})});
@@ -99,8 +99,8 @@ const snapshot=()=>JSON.stringify([...records.entries()].sort());
  assert.equal(view['rated-2011'].actualRating,4);assert.equal(view.tmdb_802.actualRating,undefined,'a record without a TMDB link projects under the Letterboxd id only');
  assert.equal(view.tmdb_801.prediction.predictedRating,5,'a 5.0 prediction is still stored for the watched film');
  const watchlist=JSON.stringify(records.get('watchlist.json'));
- for(const flag of ['on','off']){
-  puts=[];const before=snapshot(),r=await get({BUCKET:bucket,LETTERBOXD_FACTS:flag});
+ for(const flag of [undefined,'on','off','On']){
+  puts=[];const before=snapshot(),r=await get(flag===undefined?{BUCKET:bucket}:{BUCKET:bucket,LETTERBOXD_FACTS:flag});
   assert.equal(r.status,200);
   assert.deepEqual(ids(r.body),['tmdb_2103','tmdb_593','tmdb_700','tmdb_803','tmdb_805'],'flag '+flag+': watched, watched-unrated and rated films are excluded by identity');
   assert.ok(r.body.films.every(item=>item.prediction.predictedRating===5));
@@ -114,7 +114,7 @@ const snapshot=()=>JSON.stringify([...records.entries()].sort());
 // 3. No view index, no metadata, no fact records: the list is empty (nothing current), nothing is written.
 {
  seed();records.delete(VIEW);
- const r=await get({BUCKET:bucket,LETTERBOXD_FACTS:'on'});
+ const r=await get({BUCKET:bucket});
  assert.equal(r.status,200);assert.equal(r.body.total,0);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 }
 // No metadata and no facts, legacy index only: unrated films are offered, nothing is bridged or written.

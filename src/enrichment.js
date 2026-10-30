@@ -152,7 +152,6 @@ const fingerprintImpactFacet=f=>f&&typeof f.fingerprintHash==='string'&&f.finger
 const predictionCurrent=(p,profile,f)=>!!p&&!!profile&&fingerprintCurrent(f)&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===f.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;
 async function readFilmState(env,id){const key=filmKey(id);const [fingerprint,predictions]=await Promise.all([loadJSON(env,key+'fingerprint.json'),loadJSON(env,key+'predictions.json')]);return {fingerprint,predictions};}
 function cloneJSON(value){return JSON.parse(JSON.stringify(value));}
-function ratingObservationIdentity(item){return JSON.stringify([item.filmId,item.before??null,item.after??null,item.source||null,item.generationId||null,item.programmeRunId||null,item.sourceUrl||null]);}
 async function mergeStoredJSON(env,key,empty,apply){
  for(let attempt=0;attempt<5;attempt++){
   const object=await env.BUCKET.get(key),current=object?await object.json():cloneJSON(empty),next=await apply(cloneJSON(current));
@@ -161,10 +160,6 @@ async function mergeStoredJSON(env,key,empty,apply){
   if(saved!==null)return next;
  }
  throw new Error('Stored JSON changed during write');
-}
-async function appendRatingObservations(env,incoming){
- if(!incoming?.length)return;
- await mergeStoredJSON(env,ratingObservationsKey,[],current=>{let changed=false;for(const item of incoming)if(!current.some(existing=>ratingObservationIdentity(existing)===ratingObservationIdentity(item))){current.push(item);changed=true;}return changed?current:null;});
 }
 async function updateViewIndex(env,id,changes){
  const key=ENRICHMENT_KEY+'view-index.json';
@@ -195,13 +190,7 @@ async function refreshPersonalRating(env,film){
  try{response=await fetch(sourceUrl,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html'},signal:AbortSignal.timeout(15000)});}catch(e){throw new Error('Rating lookup failed: '+e.message);}
  if(response.status===404)return {filmId:id,status:'not_found'};if(!response.ok)throw new Error('Rating source HTTP '+response.status);
  const rating=parsePersonalRating(await response.text(),film.url,username);if(rating===null)return {filmId:id,status:'not_rated'};
- if(env.LETTERBOXD_FACTS==='on'){const facts=await LetterboxdFacts.recordFilmFacts(env,id,{watched:true,rating},{observedAt:requestedAt,source:'letterboxd_film_page',sourceRef:sourceUrl});if(facts.conflict)return {filmId:id,status:'identity_conflict'};const saved=facts.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces');if(saved&&facts.record.rating?.value===rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:requestedAt});await enrichRecentRemovalRatings(env,{[id]:rating},requestedAt);return {filmId:id,status:saved?'saved':'unchanged',rating};}
- const [previous,index]=await Promise.all([loadJSON(env,filmKey(id)+'actual.json'),ensureInitialRatings(env)]),before=index[id]?.actualRating??null;
- if(previous?.rating===rating&&before===rating){await enrichRecentRemovalRatings(env,{[id]:rating},previous.updatedAt||null);return {filmId:id,status:'unchanged',rating};}
- const observedAt=new Date().toISOString();
- if(before!==rating)await recordRatingObservation(env,{filmId:id,before,after:rating,observedAt,source:'letterboxd_member_film',sourceUrl});
- if(previous?.rating!==rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:observedAt});
- await updateViewIndex(env,id,{actualRating:rating});await enrichRecentRemovalRatings(env,{[id]:rating},observedAt);return {filmId:id,status:'saved',rating};
+ const facts=await LetterboxdFacts.recordFilmFacts(env,id,{watched:true,rating},{observedAt:requestedAt,source:'letterboxd_film_page',sourceRef:sourceUrl});if(facts.conflict)return {filmId:id,status:'identity_conflict'};const saved=facts.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces');if(saved&&facts.record.rating?.value===rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:requestedAt});await enrichRecentRemovalRatings(env,{[id]:rating},requestedAt);return {filmId:id,status:saved?'saved':'unchanged',rating};
 }
 // AIR-268: films removed from the watchlist are looked up one by one on their own member page, so a removal event gets
 // its rating without the 31-page films list. Gated by REMOVAL_RATING_LOOKUP (off by default). The queue is bounded,
@@ -259,7 +248,6 @@ async function lookupRemovalRatings(env,incoming=[],now=Date.now()){
   return {...summary,at};
  }catch(e){return {...summary,at,error:String(e.message).slice(0,160)};}
 }
-async function recordRatingObservation(env,observation){if(!await loadJSON(env,diagnosticSnapshotKey))return;await appendRatingObservations(env,[observation]);}
 function parsePublicFilmsPage(html,username){
  const count=html.match(/title="([\d,]+)&nbsp;films"/i),total=count?Number(count[1].replaceAll(',','')):null;
  const entries=[];
@@ -283,22 +271,13 @@ async function refreshRatingsFromFilms(env,report,extraIds=[]){
   url=page.next?'https://letterboxd.com'+page.next:null;
  }
  if(seen.size!==total)throw new Error('Incomplete Letterboxd films: '+seen.size+'/'+total);
- const baseline=await loadJSON(env,diagnosticSnapshotKey);
- const watchlistIds=new Set((report.films||[]).map(f=>String(f.id))),extra=new Set((extraIds||[]).map(id=>String(id)).filter(id=>/^[a-zA-Z0-9_-]{1,80}$/.test(id))),ids=[...new Set([...watchlistIds,...(baseline?.films||[]).map(f=>String(f.filmId)),...extra])];
- let rated=0;const assignments=[];
- for(const id of ids){const rating=seen.get(id)??null,inWatchlist=watchlistIds.has(id);if(rating!==null&&inWatchlist)rated++;if(!inWatchlist&&rating===null)continue;assignments.push({id,rating});}
+ const watchlistIds=new Set((report.films||[]).map(f=>String(f.id))),extra=new Set((extraIds||[]).map(id=>String(id)).filter(id=>/^[a-zA-Z0-9_-]{1,80}$/.test(id)));
+ let rated=0;for(const id of watchlistIds)if(seen.get(id)!=null)rated++;
  const observedAt=new Date().toISOString(),removedRatings={};
  for(const id of extra){if(!seen.has(id))continue;const rating=confirmedHalfStar(seen.get(id));if(rating!=null)removedRatings[id]=rating;}
- // With LETTERBOXD_FACTS the scan is one summary observation (ADR-0024): absence no longer clears a rating.
- if(env.LETTERBOXD_FACTS==='on'){const facts=await LetterboxdFacts.applyFilmsListScan(env,{scanId:'films-list-'+(report.runId||crypto.randomUUID()),observedAt:scanStartedAt,films:Object.fromEntries(seen),total},{watchlistFilms:report.films||[]});return {pages,watched:total,watchlistRated:rated,changed:facts.written,removedRatings,observedAt,facts:{written:facts.written,carried:facts.carried,conflicts:facts.conflicts,outcomes:facts.outcomes}};}
- const observations=[];let changed=0;
- await mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},index=>{
-  observations.length=0;const seeded=applyRatingsSeed(index);changed=0;
-  for(const {id,rating} of assignments){if(index[id]?.actualRating===rating)continue;const before=index[id]?.actualRating??null;if(baseline)observations.push({filmId:id,before,after:rating,observedAt:new Date().toISOString(),source:'letterboxd_public_films',programmeRunId:report.runId});index[id]={...(index[id]||{}),actualRating:rating};changed++;}
-  return seeded||changed?index:null;
- });
- if(observations.length)await appendRatingObservations(env,observations);
- return {pages,watched:total,watchlistRated:rated,changed,removedRatings,observedAt};
+ // The scan is one summary observation (ADR-0024): absence never clears a rating. Since LETTERBOXD_FACTS was retired
+ // (ADR 0055) the fact records are the only writer of the films list.
+ const facts=await LetterboxdFacts.applyFilmsListScan(env,{scanId:'films-list-'+(report.runId||crypto.randomUUID()),observedAt:scanStartedAt,films:Object.fromEntries(seen),total},{watchlistFilms:report.films||[]});return {pages,watched:total,watchlistRated:rated,changed:facts.written,removedRatings,observedAt,facts:{written:facts.written,carried:facts.carried,conflicts:facts.conflicts,outcomes:facts.outcomes}};
 }
 async function repairRemovedBaselineRatings(env,report){
  const baseline=await loadJSON(env,diagnosticSnapshotKey);if(!baseline)return {attempted:0,saved:0,errors:[]};
@@ -1243,7 +1222,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']});
  if(path==='/api/enrichment/view'&&request.method==='GET')return json(await enrichmentView(env));
  if(path==='/api/enrichment/fingerprint-view/backfill'&&request.method==='POST')return backfillFingerprintView(env,body);
- if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}const updatedAt=new Date().toISOString();if(env.LETTERBOXD_FACTS==='on'){const facts=await LetterboxdFacts.recordFilmFacts(env,id,{rating},{observedAt:updatedAt,source:'owner'});if(facts.conflict){results.push({filmId:id,error:'Identity conflict; recorded for review'});continue;}if(!facts.accepted||facts.record.rating?.value!==rating){results.push({filmId:id,status:'older',rating:facts.record.rating?.value??null});continue;}await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});results.push({filmId:id,status:'saved'});continue;}await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});await updateViewIndex(env,id,{actualRating:rating});results.push({filmId:id,status:'saved'});}return json({results});}
+ if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}const updatedAt=new Date().toISOString();const facts=await LetterboxdFacts.recordFilmFacts(env,id,{rating},{observedAt:updatedAt,source:'owner'});if(facts.conflict){results.push({filmId:id,error:'Identity conflict; recorded for review'});continue;}if(!facts.accepted||facts.record.rating?.value!==rating){results.push({filmId:id,status:'older',rating:facts.record.rating?.value??null});continue;}await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});results.push({filmId:id,status:'saved'});}return json({results});}
  if(path==='/api/enrichment/ratings/backfill'&&request.method==='POST')return ratingsBackfill(env,body);
  return json({error:'Not found'},404);
 }

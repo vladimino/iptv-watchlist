@@ -239,15 +239,16 @@ assert.ok(body.film.entries.every(e=>e.aliases.every(alias=>typeof alias.firstOb
 assert.equal((await ctx.worker.fetch(new Request('https://site.example/api/letterboxd/diary?filmId=../x'),env)).status,400);
 assert.deepEqual(writes,[],'the read writes nothing');
 
-// 13. In the EPG commit: the stage reads the diary once, writes no facts without LETTERBOXD_FACTS, never fails the commit.
+// 13. In the EPG commit: the stage reads the diary once, always writes its facts (LETTERBOXD_FACTS is retired, ADR 0055)
+// and never fails the commit.
 records.clear();etags.clear();requests.length=0;publish(fifty);records.set('programme.json',report('r-on'));
 const completed=await ctx.completeWithRatings(env,run('r-on'),report('r-on'));
 assert.equal(completed.stage,'complete');
 assert.deepEqual(requests.map(r=>r.url),[url(1)],'one diary page and nothing else');
 const sync=records.get('sync.json');
-assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.counts.added,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.enabled],['complete',50,50,false]);
+assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.counts.added,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.enabled],['complete',50,50,true]);
 assert.deepEqual([sync.ratingAttempt.state,sync.ratingAttempt.phase,sync.ratingAttempt.source,sync.ratingPending,sync.ratingError],['finished','diary','letterboxd_diary',undefined,undefined]);
-assert.equal(writes.some(key=>key.includes('facts/')||key.includes('view-index')),false,'no fact without LETTERBOXD_FACTS');
+assert.equal(writes.some(key=>key.includes('facts/films/')),true,'the diary facts are written without any facts switch');
 // A blocked diary: the commit completes, nothing else is requested, the attempt is an error with its cause.
 records.clear();etags.clear();requests.length=0;site.clear();site.set(url(1),()=>respond(403,'<title>Just a moment...</title>'));records.set('programme.json',report('r-block'));
 const blocked=await ctx.completeWithRatings(env,run('r-block'),report('r-block'));

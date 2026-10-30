@@ -200,15 +200,13 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  return {programmeRunId,pinned,watchedMarkEnabled,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,displayExclusion,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
 }
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
-// It writes the owner's `watched` fact through the fact records and nothing else, so it needs LETTERBOXD_FACTS=on. It has no
-// switch of its own: the former FINDS_WATCHED_MARK is retired (ADR 0042) and a stale binding is inert. The request guard is
+// It writes the owner's `watched` fact through the fact records and nothing else. It has no switch: the former
+// FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0055) are retired, and a stale binding of either is inert. The request guard is
 // stricter than the shared one: a same-origin Origin is required, the body must be JSON and hold exactly `tmdbId` and `watched`;
 // a title, year or Letterboxd id is never read.
-const findsWatchedMarkEnabled=env=>env?.LETTERBOXD_FACTS==='on';
 const FINDS_WATCHED_TMDB=/^[1-9]\d{0,11}$/;
 async function catalogWatchedRoute(request,env,url){
  if(request.method!=='POST')return json({error:'Method not allowed'},405);
- if(env.LETTERBOXD_FACTS!=='on')return json({error:'Letterboxd facts are disabled',code:'facts_disabled'},409);
  if(request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
  if(!/^application\/json(\s*;|$)/i.test(request.headers.get('Content-Type')||''))return json({error:'Expected application/json'},415);
  const text=await request.text();
@@ -242,7 +240,7 @@ async function catalogAvailableRoute(env){
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
  const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:findsWatchedMarkEnabled(env)}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
@@ -343,8 +341,8 @@ async function metadataSync(env,run){
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await saveJSON(env,'metadata.json',cache);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
 async function finishSync(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)});
- // A complete watchlist is one observation of every listed film (ADR-0024); gated by LETTERBOXD_FACTS.
- if(env.LETTERBOXD_FACTS==='on'&&report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+ // A complete watchlist is one observation of every listed film (ADR-0024).
+ if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -493,15 +491,14 @@ async function diaryRatingsStage(env,run){
   // Only a rating the diary proved counts: it reaches the removal event (as the film's effective rating, which a newer
   // observation may hold) and spares the per-film lookup. A stored rating without diary proof does neither.
   for(const item of evidence)if(item.rating!=null)ratings[item.lid]=item.rating;
-  if(env.LETTERBOXD_FACTS!=='on')return;
   const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
   for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
   for(const lid of Object.keys(ratings))if(result.ratings[lid]!=null)ratings[lid]=result.ratings[lid];
  };
  try{
   const diary=await LetterboxdDiary.syncHistory(env,{afterPage});
-  run.diaryHistory={outcome:diary.lastOutcome,stopReason:diary.stopReason,counts:diary.counts,resumePage:diary.resumePage,coverage:diary.coverage,facts:{...facts,enabled:env.LETTERBOXD_FACTS==='on'},at:diary.lastAttemptAt};
- }catch(e){run.diaryHistory={outcome:'failed',stopReason:'error:'+String(e.message).slice(0,120),facts:{...facts,enabled:env.LETTERBOXD_FACTS==='on'},at:new Date().toISOString()};}
+  run.diaryHistory={outcome:diary.lastOutcome,stopReason:diary.stopReason,counts:diary.counts,resumePage:diary.resumePage,coverage:diary.coverage,facts:{...facts,enabled:true},at:diary.lastAttemptAt};
+ }catch(e){run.diaryHistory={outcome:'failed',stopReason:'error:'+String(e.message).slice(0,120),facts:{...facts,enabled:true},at:new Date().toISOString()};}
  return ratings;
 }
 async function completeWithRatings(env,run,report){
@@ -574,6 +571,43 @@ export default {
 // AIR-275 phase 2 (ADR 0056): the cron trigger runs only the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
 async scheduled(controller,env,execution){execution.waitUntil(runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}));},
 async fetch(request,env,execution){
+ const url=new URL(request.url);
+ try{
+ if(url.pathname==='/mcp')return await mcpRoute(request,env,execution);
+ if(url.pathname.startsWith('/api/')){
+  if(!env.BUCKET)return json({error:'Storage unavailable'},503);
+  if(url.pathname.startsWith('/api/migration-export/'))return await migrationExportRoute(request,env,url);
+  if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
+  if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
+  if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
+  if(url.pathname.startsWith('/api/letterboxd/baseline/'))return await LetterboxdFacts.handleBaselineRequest(request,env,url.pathname);
+  if(url.pathname==='/api/letterboxd/diary'&&request.method==='GET'){const filmId=url.searchParams.get('filmId');if(filmId!=null&&!/^[A-Za-z0-9_-]{1,80}$/.test(filmId))return json({error:'Invalid filmId'},400);return json(await LetterboxdDiary.readHistory(env,{filmId}));}
+  if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
+  if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
+  if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
+  if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
+  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles));}
+  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};return json(presentLocalized(data,titles));}
+  if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
+  if(url.pathname==='/api/catalog/watched')return await catalogWatchedRoute(request,env,url);
+  if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
+  if(url.pathname==='/api/integrations/tmdb/status'&&request.method==='GET'){
+   if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({connected:false,stage:'missing_secret'},503);
+   const response=await fetch('https://api.themoviedb.org/3/movie/11?language=en-US',{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(10000)});
+   if(!response.ok)return json({connected:false,stage:'tmdb_http',status:response.status},502);
+   const movie=await response.json();return json({connected:movie.id===11,stage:movie.id===11?'ready':'unexpected_response'});
+  }
+  if(url.pathname==='/api/ui/filter-presets'&&request.method==='GET')return await filterPresetsRoute(request,env,url);
+  if(url.pathname==='/api/ui/filter-presets'&&request.method==='POST')return await filterPresetsRoute(request,env,url);
+  if(url.pathname.startsWith('/api/ui/filter-presets/')&&(request.method==='PATCH'||request.method==='DELETE'))return await filterPresetsRoute(request,env,url);
+  if(url.pathname==='/api/sync/start'&&request.method==='POST')return await postSync(env,execution,'/api/sync/start',{});
+  if(['/api/sync/metadata','/api/sync/epg'].includes(url.pathname)&&request.method==='POST'){const body=await request.json();return await postSync(env,execution,url.pathname,body);}
+  return json({error:'Not found'},404);
+ }
+ const page=url.pathname==='/events'?'/':/^\/film\/[A-Za-z0-9_-]{1,80}$/.test(url.pathname)?'/':url.pathname,asset=ASSETS[page];if(asset&&request.method==='GET')return new Response(asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});
+ return json({error:'Not found'},404);
+ }catch(e){return json({error:e.message},502);}
+}}; async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
  if(url.pathname==='/mcp')return await mcpRoute(request,env,execution);
