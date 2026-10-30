@@ -5,7 +5,7 @@
 const LetterboxdFacts=(()=>{
  const FACTS_PREFIX='letterboxd/facts/';
  const FACTS_KEYS={links:FACTS_PREFIX+'links.json',conflicts:FACTS_PREFIX+'conflicts.json',filmsList:FACTS_PREFIX+'scans/films-list.json',watchlist:FACTS_PREFIX+'scans/watchlist.json',viewIndex:'enrichment/view-index.json'};
- const SOURCE_RANK={owner:4,letterboxd_films_list:3,letterboxd_film_page:2,letterboxd_watchlist:2,letterboxd_export:1};
+ const SOURCE_RANK={owner:4,letterboxd_films_list:3,letterboxd_film_page:2,letterboxd_watchlist:2,letterboxd_export:1,letterboxd_diary:1};
  const FACT_NAMES=['watched','rating','watchlist'];
  const factsEnabled=env=>env?.LETTERBOXD_FACTS==='on';
  const recordKey=factKey=>FACTS_PREFIX+'films/'+factKey+'.json';
@@ -307,6 +307,48 @@ const LetterboxdFacts=(()=>{
   return {...result,conflict:false,accepted};
  }
 
+ // AIR-287 (ADR 0054): diary evidence as facts, in one batch per diary page. Each film is linked by its Letterboxd id only
+ // (one links compare-and-swap for the batch); watched: true and, when the diary proves one, the rating are observations
+ // at the watched date with the diary entries as source reference, so a reread is the same observation and a newer
+ // observation from any source (the films-list floor included) always wins. A film whose projection already shows the
+ // same watched and rating is not written. One view-index projection for the batch.
+ async function applyDiaryEvidence(env,evidence){
+  const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
+  const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{}};
+  if(!items.length)return summary;
+  const [{value:viewIndex},{value:filmsList},{value:watchlist}]=await Promise.all([readJSON(env,FACTS_KEYS.viewIndex),readJSON(env,FACTS_KEYS.filmsList),readJSON(env,FACTS_KEYS.watchlist)]);
+  const view=viewIndex||{},due=items.filter(item=>!(view[item.lid]?.watched===true&&(item.rating==null||view[item.lid]?.actualRating===item.rating)));
+  summary.skipped=items.length-due.length;
+  const keys=new Map(),conflicted=[];
+  if(due.length)await casJSON(env,FACTS_KEYS.links,{},index=>{
+   keys.clear();conflicted.length=0;let changed=false;
+   for(const item of due){
+    const alias='letterboxd:'+item.lid,known=index[alias];
+    if(known){keys.set(item.lid,known);continue;}
+    const key=factKeyFor({letterboxd:item.lid});
+    if(Object.entries(index).some(([other,value])=>value===key&&other!==alias)){conflicted.push(item.lid);continue;}
+    index[alias]=key;keys.set(item.lid,key);changed=true;
+   }
+   return changed?index:null;
+  });
+  for(const lid of conflicted){summary.conflicts++;await noteConflict(env,{letterboxd:lid},'alias_conflict');}
+  const records=[];
+  for(const item of due){
+   const factKey=keys.get(item.lid);if(!factKey)continue;
+   const base={factKey,observedAt:item.watchedDate+'T00:00:00.000Z',source:'letterboxd_diary',sourceRef:item.sourceRef||null};
+   const observations=[{fact:'watched',observation:await observation({...base,fact:'watched',value:true})}];
+   if(item.rating!=null)observations.push({fact:'rating',observation:await observation({...base,fact:'rating',value:item.rating})});
+   const floors={...await summaryObservations('films-list',filmsList,item.lid,factKey),...await summaryObservations('watchlist',watchlist,item.lid,factKey)};
+   const result=await recordObservations(env,factKey,{letterboxd:item.lid},observations,{floors});
+   records.push(result.record);
+   if(result.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces'))summary.written++;
+   else if(result.outcomes.some(o=>o.outcome==='older'))summary.older++;else summary.unchanged++;
+  }
+  for(const item of items){const record=records.find(r=>r?.links?.letterboxd===item.lid);const value=record?record.rating?.value:view[item.lid]?.actualRating;if(value!=null)summary.ratings[item.lid]=value;}
+  await projectRecords(env,records.filter(Boolean));
+  return summary;
+ }
+
  // The owner's watched mark on a verified catalog film (ADR-0032) is the one writer that may create a record with only a trusted
  // TMDB alias: the identity is the catalog film the owner marked, never a Letterboxd id, a slug or a title. An existing record
  // that already holds tmdb:<n> is reused; no record is ever merged here.
@@ -516,5 +558,5 @@ const LetterboxdFacts=(()=>{
    throw error;
   }
  }
- return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
 })();
