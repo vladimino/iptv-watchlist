@@ -1,9 +1,9 @@
 # ADR 0049: The Letterboxd Diary is read into a separate viewing history, incrementally and behind a gate
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-29  
 **Recorded at:** 2026-10-29  
-**Approval source:** not yet decided; the card scope and the Diary source strategy were approved on [AIR-51](https://trello.com/c/33d4hKJ3) after [AIR-273](https://trello.com/c/TVB01Xm0)  
+**Approval source:** Owner explicitly accepted ADR 0049 on 2026-10-30 after independent positive review of [PR #239](https://github.com/vladimino/iptv-watchlist/pull/239); decision recorded in the [AIR-51 Trello owner-gates comment](https://trello.com/c/33d4hKJ3#comment-6ae44476be47e8c154b51049). The owner separately visually approved the rendered Mermaid diagram in `docs/architecture/letterboxd-ingestion.md`. No production activation was authorized.  
 **Related work:** [AIR-51](https://trello.com/c/33d4hKJ3); [AIR-273](https://trello.com/c/TVB01Xm0) (production Worker read Diary page 1: HTTP 200, 50 rows, 50 lids, dates and ratings); [AIR-274](https://trello.com/c/CxiAfmZJ) (diagnostic removed); [AIR-272](https://trello.com/c/Oezn5dLP); [AIR-275](https://trello.com/c/4x7hH0gI) (D1); [AIR-276](https://trello.com/c/PeWwEti8) (slug aliases); [ADR 0023](0023-letterboxd-user-facts.md); [ADR 0024](0024-letterboxd-scan-summary.md); [ADR 0038](0038-durable-rating-and-prediction-lineage.md); [contract](../reference/integrations/letterboxd-diary-history.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -74,7 +74,7 @@ The change is code only, behind an off-by-default switch. Switching it off stops
 
 ## Evidence
 
-- **Original decision:** this record, proposed with AIR-51.
+- **Original decision:** this record, proposed with AIR-51 and explicitly Accepted by the owner on 2026-10-30 (see Approval source).
 - **Source facts:** AIR-273 production diagnostic of Diary page 1 (Trello AIR-273), removed by AIR-274.
 - **Implementation:** `src/letterboxd-diary.js`, `src/worker.js` (stage, read route), `src/enrichment.js` (repair on the shared parser), `src/feature-flags.js`, `tests/letterboxd-diary.mjs`.
 - **Uncertainty:**
