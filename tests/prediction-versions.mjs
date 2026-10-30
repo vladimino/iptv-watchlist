@@ -39,7 +39,7 @@ const sha256=text=>createHash('sha256').update(Buffer.from(text,'utf8')).digest(
 const versionKeys=id=>[...records.keys()].filter(key=>key.startsWith('enrichment/films/'+id+'/predictions/versions/'));
 
 // The writer has no switch any more (ADR 0045): no code path reads PREDICTION_VERSION_OBJECTS, and a stale binding is inert.
-for(const file of ['src/enrichment.js','src/letterboxd-diary.js','src/worker.js','src/sources.js','src/discovery.js','scripts/prediction-versions-materialize.mjs'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_VERSION_OBJECTS|predictionVersionsEnabled|version_objects_off/,file+' reads no version writer switch');
+for(const file of ['src/enrichment.js','src/letterboxd-diary.js','src/worker.js','src/sources.js','src/discovery.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.PREDICTION_VERSION_OBJECTS|predictionVersionsEnabled|version_objects_off/,file+' reads no version writer switch');
 // The runner path ignores a stale binding: even 'off' writes a version object.
 env.PREDICTION_VERSION_OBJECTS='off';
 

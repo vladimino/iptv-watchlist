@@ -12,7 +12,7 @@ These pages describe the **currently maintained** operational boundaries; none i
 - [Letterboxd baseline import (owner approval required)](letterboxd-baseline-import.md)
 - [Letterboxd Diary viewing history: activation, observation and rollback (owner approval required to switch on)](letterboxd-diary-history.md)
 - [Finds display-only title exclusion: build, placement and switch (owner approval required)](finds-display-exclusion.md)
-- [Immutable prediction versions: activation and one-time materialization (owner approval required)](prediction-versions.md)
+- [Immutable prediction versions: the writer and the completed historical materialization](prediction-versions.md)
 - [Catalog poster hydration for records stored without a poster (owner approval required)](catalog-poster-hydration.md)
 - [D1 backfill execution and recovery (owner approval required)](d1-backfill.md)
 - [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md)
