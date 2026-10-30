@@ -71,7 +71,7 @@ try{
  assert.deepEqual([...fs.readFileSync('migrations/0002_generation_stage.sql','utf8').matchAll(/CREATE TABLE ([a-z_]+)/g)].map(match=>match[1]),STAGE_TABLES);
  assert.doesNotMatch(fs.readFileSync('migrations/0002_generation_stage.sql','utf8'),/DROP|ALTER|CREATE VIEW|DELETE/);
  assert.equal(one(database('version'),'SELECT version FROM schema_contract;').version,2);
- for(const file of ['src/worker.js','build.mjs','wrangler.jsonc'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/generation-stage|0002_generation_stage|d1_databases/,file);
+ for(const file of ['src/worker.js','build.mjs','wrangler.jsonc'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/generation-stage|0002_generation_stage/,file);
 
  // 1. At 1.25x production cardinality: the plan stays within the proven request size, the staged path writes exactly what the
  // legacy path writes, and the commit is twelve statements of a few KB.

@@ -550,6 +550,7 @@ export default {async fetch(request,env,execution){
   if(url.pathname.startsWith('/api/migration-export/'))return await migrationExportRoute(request,env,url);
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
+  if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
   if(url.pathname.startsWith('/api/letterboxd/baseline/'))return await LetterboxdFacts.handleBaselineRequest(request,env,url.pathname);
   if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
