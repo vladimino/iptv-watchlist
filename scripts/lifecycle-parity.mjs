@@ -24,7 +24,7 @@ async function main(){
  const domain=await readFile(path.join(root,'src/domain/film-person.js'),'utf8');
  const reader=await readFile(path.join(root,'src/domain/film-person-reader.js'),'utf8');
  const backfill=await readFile(path.join(root,'src/domain/film-person-backfill.js'),'utf8');
- const context=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
+ const context=vm.createContext({Date,Map,Set,JSON,Object,URL,encodeURIComponent});
  vm.runInContext(domain+'\n'+reader+'\n'+backfill+'\nglobalThis.api={backfillLifecycle};',context);
  const result=context.api.backfillLifecycle(loaded.store,loaded.now);
  const fieldCounts=items=>{const counts={};for(const item of items||[])counts[item.field]=(counts[item.field]||0)+1;return counts;};

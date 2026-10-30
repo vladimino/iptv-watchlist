@@ -55,13 +55,63 @@ function loadedSources(store,id,record){
 function knownShows(record){return record&&Object.hasOwn(record,'shows')?record.shows:undefined;}
 function observedShows(programme,body){const programmeShows=knownShows(programme);return programmeShows!==undefined?programmeShows:knownShows(body);}
 function observedProgrammeRun(programme,body){if(programme&&Object.hasOwn(programme,'showsProgrammeRunId'))return programme.showsProgrammeRunId||null;if(body&&Object.hasOwn(body,'showsProgrammeRunId'))return body.showsProgrammeRunId||null;return null;}
+// AIR-276: Letterboxd diary slugs by lid. A diary entry links a slug to a Film only through the lid on the same row.
+// Each observation bounds when the slug was first seen: an alias stamped by the writer at its `firstObservedAt`
+// exactly; an older alias only within its entry's reads, `firstObservedAt`..`observedAt`. Across observations of one
+// slug the first sighting lies between the earliest lower bound and the earliest upper bound, so an exact `observedAt`
+// is stated only when that window closes to one instant; otherwise `observedAt: null` and `observedBetween`. A missing
+// bound stays unknown (null).
+function diaryAliasWindow(alias,entry){
+ if(alias.firstObservedAt)return {from:alias.firstObservedAt,to:alias.firstObservedAt};
+ return {from:entry.firstObservedAt||null,to:entry.observedAt||null};
+}
+function diarySlugIndex(history){
+ const index=new Map();
+ for(const entry of Object.values(history?.entries||{})){
+  const lid=entry?.identity?.type==='letterboxd_lid'?String(entry.identity.value||''):'';if(!lid)continue;
+  for(const alias of entry.aliases||[]){
+   if(alias?.type!=='letterboxd_slug'||!/^[a-z0-9][a-z0-9-]{0,199}$/.test(String(alias.value||'')))continue;
+   const slugs=index.get(lid)||new Map(),prior=slugs.get(alias.value),window=diaryAliasWindow(alias,entry);
+   if(!prior)slugs.set(alias.value,{value:alias.value,entry:entry.key||null,from:window.from,to:window.to,fromKnown:!!window.from});
+   else{
+    prior.fromKnown=prior.fromKnown&&!!window.from;
+    if(window.from&&(!prior.from||window.from<prior.from))prior.from=window.from;
+    if(window.to&&(!prior.to||window.to<prior.to)){prior.to=window.to;prior.entry=entry.key||null;}
+   }
+   index.set(lid,slugs);
+  }
+ }
+ for(const slugs of index.values())for(const [value,seen] of slugs){
+  const from=seen.fromKnown?seen.from:null,exact=from&&seen.to&&from===seen.to;
+  slugs.set(value,{value,provenance:{source:'letterboxd_diary',status:'observed',entry:seen.entry,...(exact?{observedAt:from}:{observedAt:null,observedBetween:{from,to:seen.to}})}});
+ }
+ return index;
+}
+// The Film's own permalinks: every stored record of this lid that carries one (programme, watchlist, metadata, then the
+// record itself when it is none of those). One slug across them is `current`. Different slugs (a rename seen by one
+// record and not yet by another) are all kept as `ambiguous`, each naming its records: no record is proved fresher.
+// Diary slugs of the same lid follow as observed aliases. A record without a lid gets none.
+function letterboxdSlugs(letterboxdId,loaded,store,now){
+ if(!letterboxdId)return [];
+ const found=new Map();
+ const sources=[['programme',loaded.programme],['watchlist',loaded.watchlist],['metadata',loaded.metadata]];
+ if(loaded.record&&!sources.some(([,source])=>source===loaded.record))sources.push(['record',loaded.record]);
+ for(const [name,source] of sources){
+  const value=letterboxdSlugFromUrl(source?.url);if(!value)continue;
+  const records=found.get(value)||[];records.push(name);found.set(value,records);
+ }
+ const status=found.size>1?'ambiguous':'current',slugs=[];
+ for(const [value,records] of found)slugs.push({value,provenance:{source:'letterboxd_film_url',status,records,url:'https://letterboxd.com/film/'+value+'/',observedAt:stamp(now)}});
+ for(const slug of store.diarySlugs?.get(letterboxdId)?.values()||[])slugs.push(slug);
+ return slugs;
+}
 function filmFacts(record,store,resolution,now){
  const id=String(record.id),loaded=loadedSources(store,id,record),metadata=loaded.metadata,programme=loaded.programme,body=metadata||record;
  const letterboxdId=id.startsWith('tmdb_')?null:id;
  const evidence=identityEvidence([loaded.programme,metadata,loaded.watchlist,record]);
  const translation=reviewedTranslation([metadata,loaded.programme,loaded.watchlist,record]);
  const decision=decisionForFilm(record,resolution);
- return {letterboxdId,tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id],fingerprintVerdictOf(store,id)),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id),typeof store.predictionCompatible==='function'?store.predictionCompatible(id):undefined),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
+ return {letterboxdId,letterboxdSlugs:letterboxdSlugs(letterboxdId,loaded,store,now),tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id],fingerprintVerdictOf(store,id)),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id),typeof store.predictionCompatible==='function'?store.predictionCompatible(id):undefined),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
 }
 function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,showsProgrammeRunId:facts.showsProgrammeRunId,publishedProgrammeRunId:facts.publishedProgrammeRunId,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
 function lifecycleBody(film){return {contractVersion:film.contractVersion,id:film.id,storedId:storedFilmId(film),canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds,redirects:film.redirects||[],aliases:film.aliases,identity:film.identity,metadata:film.metadata,localization:film.localization,fingerprint:film.fingerprint,prediction:film.prediction,availability:film.availability||null};}
@@ -164,7 +214,7 @@ function personFacts(person,store,now){
 }
 function readLifecycle(store,now){
  const filmTitleIndex=store.filmTitleIndex||indexRecords(store.filmTitles,'id'),personNameIndex=store.personNameIndex||indexRecords(store.personNames,'id');
- const context={...store,filmTitleIndex,personNameIndex};
+ const context={...store,filmTitleIndex,personNameIndex,diarySlugs:diarySlugIndex(store.diaryHistory)};
  const resolution=store.discoveryResolution||{};
  const films=new Map();
  for(const record of store.programme?.films||store.watchlist?.films||[]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
@@ -196,6 +246,7 @@ function readLifecycle(store,now){
  const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn)];
  for(const person of embedded){if(!person?.id||people.has(person.id))continue;const view=personView(personFacts(person,context,now));if(view)people.set(person.id,view);}
  const filmList=[...films.values()].sort((a,b)=>storedFilmId(a).localeCompare(storedFilmId(b),'en'));
+ const aliasConflicts=markSlugCollisions(filmList);
  const legacyIds=legacyEnrichmentIds(store),lifecycleIds=filmList.map(storedFilmId),idParity=shadowParity(legacyIds,lifecycleIds);
  const shared=new Set(idParity.legacy),mismatches=semanticMismatches(context,filmList.filter(film=>shared.has(storedFilmId(film))),now);
  const sidecars={};
@@ -215,5 +266,5 @@ function readLifecycle(store,now){
   if(film)sidecars['enrichment/films/'+encodeURIComponent(String(id))+'/fingerprint'+LIFECYCLE_SIDECAR]={id:film.id,storedId:storedFilmId(film),fingerprint:film.fingerprint};
  }
  for(const key of Object.keys(sidecars))if(FORBIDDEN_LIFECYCLE_KEYS.includes(key)||key.includes('discovery-latest')||key.includes('predictions'))throw new Error('lifecycle sidecar overwrites '+key);
- return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,people:[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en')),candidates,conflicts,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
+ return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en')),candidates,conflicts,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
 }

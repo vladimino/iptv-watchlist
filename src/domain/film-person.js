@@ -55,12 +55,42 @@ function canonicalFilmId(storedId){
  return tmdb?'film:tmdb:'+tmdb[1]:'film:'+id;
 }
 function localPersonId(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
-function externalIds({letterboxdId,tmdbId,conflictingTmdbIds,tmdbTrusted,provenance}={}){
+// AIR-276: the slug of a Letterboxd film permalink, https://letterboxd.com/film/<slug>/ or /<member>/film/<slug>/, and
+// nothing else: same origin, no query or fragment, lowercase. A title, a lid or a Wikidata value never yields one.
+const LETTERBOXD_SLUG_SCHEME='letterboxd_slug';
+function letterboxdSlugFromUrl(url){
+ if(typeof url!=='string')return null;
+ // A context without URL must fail loudly: a missing parser would silently drop every slug.
+ if(typeof URL!=='function')throw new Error('letterboxdSlugFromUrl needs URL');
+ let link;try{link=new URL(url);}catch{return null;}
+ if(link.origin!=='https://letterboxd.com'||link.search||link.hash||link.username||link.password)return null;
+ const match=link.pathname.match(/^\/(?:[A-Za-z0-9_]+\/)?film\/([A-Za-z0-9][A-Za-z0-9-]{0,199})\/$/);
+ return match?match[1].toLowerCase():null;
+}
+// A slug is an alias of the Film that carries the lid it was observed with: never trusted, never an identity, never a
+// reason to link two records. `provenance.status`: `current` (the Film's own permalink), `observed` (another source,
+// such as a diary row with the same lid) or `historical` (kept from an earlier record, no longer observed).
+function slugIds(slugs){
+ const out=[],seen=new Set();
+ for(const slug of slugs||[]){if(!slug?.value||seen.has(slug.value))continue;seen.add(slug.value);out.push({scheme:LETTERBOXD_SLUG_SCHEME,value:String(slug.value),conflicting:false,trusted:false,provenance:slug.provenance??null});}
+ return out;
+}
+// Marks a slug carried by two different Films as conflicting on both and returns the collisions. Nothing is merged.
+function markSlugCollisions(films){
+ const owners=new Map();
+ for(const film of films||[])for(const item of film?.externalIds||[])if(item.scheme===LETTERBOXD_SLUG_SCHEME){const set=owners.get(item.value)||new Set();set.add(film.id);owners.set(item.value,set);}
+ const collisions=[...owners].filter(([,ids])=>ids.size>1).map(([value,ids])=>({scheme:LETTERBOXD_SLUG_SCHEME,value,films:[...ids].sort()}));
+ const colliding=new Set(collisions.map(item=>item.value));
+ for(const film of films||[])for(const item of film?.externalIds||[])if(item.scheme===LETTERBOXD_SLUG_SCHEME&&colliding.has(item.value)){item.conflicting=true;item.trusted=false;}
+ return collisions.sort((a,b)=>a.value.localeCompare(b.value,'en'));
+}
+function externalIds({letterboxdId,tmdbId,conflictingTmdbIds,tmdbTrusted,provenance,letterboxdSlugs}={}){
  const ids=[];
  if(letterboxdId)ids.push({scheme:'letterboxd',value:String(letterboxdId),conflicting:false,trusted:true,provenance:provenance?.letterboxd??null});
  const conflicts=uniqueIds(conflictingTmdbIds);
  if(conflicts.length>1){for(const value of conflicts)ids.push({scheme:'tmdb',value,conflicting:true,trusted:false,provenance:provenance?.tmdb??null});}
  else if(tmdbId)ids.push({scheme:'tmdb',value:String(tmdbId),conflicting:false,trusted:!!tmdbTrusted,provenance:provenance?.tmdb??null});
+ if(letterboxdId)ids.push(...slugIds(letterboxdSlugs));
  return ids;
 }
 function dictionaryApplies(dictionary,tmdbId){return !!dictionary&&(!tmdbId||!dictionary.tmdbId||String(dictionary.tmdbId)===String(tmdbId));}

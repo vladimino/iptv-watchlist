@@ -235,6 +235,7 @@ const read=await ctx.worker.fetch(new Request('https://site.example/api/letterbo
 const body=await read.json();
 assert.deepEqual([read.status,body.enabled,body.entries,body.unresolvedEntries,body.films],[200,true,3,1,1]);
 assert.deepEqual(plain([body.film.viewingCount,body.film.viewingCountExact,body.film.lastWatchedAt,body.film.rewatches,body.film.rewatchesExact,body.film.entries.map(e=>e.watchedDate)]),[2,true,'2026-10-20',1,false,['2026-10-20','2026-01-02']]);
+assert.ok(body.film.entries.every(e=>e.aliases.every(alias=>typeof alias.firstObservedAt==='string')),'each slug alias carries the read that first saw it');
 assert.equal((await ctx.worker.fetch(new Request('https://site.example/api/letterboxd/diary?filmId=../x'),env)).status,400);
 assert.deepEqual(writes,[],'the read writes nothing');
 

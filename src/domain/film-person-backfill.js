@@ -132,11 +132,39 @@ function adoptPersistedIdentity(sidecars,persisted,now){
  }
  return sidecars;
 }
+// AIR-276: a slug already stored on the same Film keeps its stored observation time (exact, or the window it was seen in); a stored slug the Film no longer
+// carries stays as a `historical` alias (a Letterboxd rename keeps the old permalink resolvable). Slug collisions are
+// marked again after the carry-over. Nothing is merged and no other identity changes.
+function carrySlugAliases(sidecars,persisted){
+ const prior=new Map();
+ for(const item of filmRecords(persisted)){const list=prior.get(item.body.id)||[];for(const id of item.body.externalIds||[])if(id.scheme===LETTERBOXD_SLUG_SCHEME&&!list.some(known=>known.value===id.value))list.push(id);prior.set(item.body.id,list);}
+ const bodies=new Map(),copied=new Set();
+ for(const item of filmRecords(sidecars)){
+  if(!bodies.has(item.body.id)){
+   const stored=prior.get(item.body.id)||[],ids=(item.body.externalIds||[]).map(id=>{
+    const known=id.scheme===LETTERBOXD_SLUG_SCHEME&&stored.find(entry=>entry.value===id.value);
+    if(!known?.provenance)return id;
+    // The stored time stays true: an exact first observation wins, otherwise the stored window.
+    if(known.provenance.observedAt){const {observedBetween,...rest}=id.provenance||{};return {...id,provenance:{...rest,observedAt:known.provenance.observedAt}};}
+    if(!id.provenance?.observedAt&&known.provenance.observedBetween)return {...id,provenance:{...id.provenance,observedBetween:known.provenance.observedBetween}};
+    return id;
+   });
+   for(const entry of stored)if(!ids.some(id=>id.scheme===LETTERBOXD_SLUG_SCHEME&&id.value===entry.value))ids.push({...entry,conflicting:false,trusted:false,provenance:{...(entry.provenance||{}),status:'historical'}});
+   bodies.set(item.body.id,{...item.body,externalIds:ids});
+  }
+  const body=bodies.get(item.body.id);
+  if(item.inner==null){sidecars[item.key]=body;continue;}
+  if(!copied.has(item.key)){sidecars[item.key]={...sidecars[item.key]};copied.add(item.key);}
+  sidecars[item.key][item.inner]=body;
+ }
+ return markSlugCollisions([...bodies.values()]);
+}
 function backfillLifecycle(store,now){
  const view=readLifecycle(store,now);
  const sidecars=adoptPersistedIdentity({...view.sidecars,[sidecarKey('people.json')]:Object.fromEntries(view.people.map(person=>[person.roleId,personBody(person)]))},store.persistedSidecars,now);
+ const aliasConflicts=carrySlugAliases(sidecars,store.persistedSidecars);
  for(const key of Object.keys(sidecars))if(key==='people.json'||key==='programme.json'||FORBIDDEN_LIFECYCLE_KEYS.includes(key)||key.includes('predictions')||key.includes('discovery-latest'))throw new Error('lifecycle sidecar overwrites '+key);
  const reconciliation=reconcileSidecars(sidecars,store.persistedSidecars);
  const sidecarKeys=Object.keys(sidecars).sort((a,b)=>a.localeCompare(b,'en'));
- return {contractVersion:view.contractVersion,sidecars,reconciliation,report:{films:view.parity,people:personParity(store,view.people),sidecarKeys}};
+ return {contractVersion:view.contractVersion,sidecars,reconciliation,report:{films:view.parity,aliasConflicts,people:personParity(store,view.people),sidecarKeys}};
 }

@@ -158,7 +158,7 @@ function metadataRecord(body,film){
 function readLifecycle(store,now){
  const domain=fs.readFileSync(path.join(root,'src/domain/film-person.js'),'utf8');
  const reader=fs.readFileSync(path.join(root,'src/domain/film-person-reader.js'),'utf8');
- const context=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
+ const context=vm.createContext({Date,Map,Set,JSON,Object,URL,encodeURIComponent});
  vm.runInContext(domain+'\n'+reader+'\nglobalThis.api={readLifecycle};',context);
  return context.api.readLifecycle(store,now);
 }
