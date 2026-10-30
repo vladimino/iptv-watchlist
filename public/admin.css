@@ -54,3 +54,23 @@
 .admin-status-outside{color:#aeb8ac;background:#1f261f;border:1px dashed #3d473c}
 .admin-outside-note{font-size:13px;margin:8px 0 0}
 @media(max-width:800px){.admin-snapshot{font-size:13px;padding:10px 12px;margin-top:20px}.admin-state-stale{flex-direction:column;align-items:stretch}}
+.action-scenario{display:flex;flex-direction:column;gap:6px;max-width:420px;margin:0 0 16px;font-size:14px;color:var(--muted)}
+.action-scenario select{font:inherit;color:var(--text);background:var(--surface);border:1px solid #465044;border-radius:8px;padding:8px 10px}
+.action-panel h4{margin:14px 0 6px;font-size:13px;color:var(--muted)}
+.action-status{margin:0 0 10px;overflow-wrap:anywhere}
+.action-status-eligible b,.action-status-run-succeeded b{color:#d7e7c4}
+.action-status-stale b,.action-status-unknown b,.action-status-run-partial b,.action-status-run-unknown b,.action-status-run-aborted b{color:#f3dd9a}
+.action-status-ineligible b,.action-status-unsupported b,.action-status-run-failed b,.action-status-run-refused b{color:#ffcfbd}
+.action-facts{margin:0;font-size:13px}
+.action-facts div{display:grid;grid-template-columns:minmax(0,9rem) minmax(0,1fr);gap:8px;padding:4px 0;border-top:1px solid #242b24}
+.action-facts dt{color:var(--muted)}.action-facts dd{margin:0;overflow-wrap:anywhere}
+.action-list{margin:0;padding-left:18px;font-size:14px}.action-list li{margin:3px 0;overflow-wrap:anywhere}.action-list small{color:var(--muted)}
+.action-accept{display:flex;gap:10px;align-items:flex-start;margin:16px 0 10px;font-size:14px}
+.action-accept input{width:18px;height:18px;margin-top:2px;accent-color:var(--lime);flex:none}
+.action-buttons{display:flex;flex-wrap:wrap;gap:8px}
+.action-buttons button{background:var(--surface);color:var(--text);border:1px solid #465044;border-radius:8px;padding:9px 14px;font-size:14px}
+.action-buttons button[data-action-confirm]{background:#303b26;border-color:var(--lime);color:var(--lime)}
+.action-buttons button:disabled{opacity:.5;cursor:not-allowed}
+.action-receipt{margin-top:14px}
+.action-refusal{padding:10px 12px;border:1px solid #88665b;border-radius:8px;color:#ffcfbd;background:#2a1d19}
+@media(max-width:800px){.action-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.action-buttons button{flex:1 1 100%}}
