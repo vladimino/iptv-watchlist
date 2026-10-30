@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {renderSql} from '../scripts/d1-backfill.mjs';
-import {ALIAS_PROVENANCE,applyPlan,buildPlan,coCreditReview,creditSource,fetchCredits,readSources,filmStatements,tmdbCredits,tmdbPath,watchlistFilms} from '../scripts/tmdb-watchlist-credits.mjs';
+import {ALIAS_PROVENANCE,applyPlan,buildPlan,coCreditReview,fetchCredits,letterboxdTmdbLinks,resolvedSource,filmStatements,tmdbCredits,tmdbPath,watchlistFilms} from '../scripts/tmdb-watchlist-credits.mjs';
 
 const source=fs.readFileSync('scripts/tmdb-watchlist-credits.mjs','utf8');
 assert.doesNotMatch(source,/\bBUCKET\b|wrangler|env\.DB\b|\bDELETE\b|\bUPDATE\b|DO UPDATE|REPLACE INTO/,'the script only adds rows, never R2, never a Worker binding');
@@ -42,8 +42,8 @@ INSERT INTO actual_rating VALUES('film:lb:ronin',4.0,'letterboxd','${T}');
 `);
 
 // Watchlist Films: a Letterboxd id and exactly one trusted, non-conflicting TMDB id. The catalog Film is not one of them.
-const listed=await watchlistFilms(db);
-assert.deepEqual(listed.films,[{filmId:'film:lb:gone',tmdbId:'404'},{filmId:'film:lb:heat',tmdbId:'949'},{filmId:'film:lb:ronin',tmdbId:'8195'}]);
+let listed=await watchlistFilms(db);
+assert.deepEqual(listed.films,[{filmId:'film:lb:gone',tmdbId:'404',letterboxdUrl:null},{filmId:'film:lb:heat',tmdbId:'949',letterboxdUrl:null},{filmId:'film:lb:ronin',tmdbId:'8195',letterboxdUrl:null}]);
 assert.deepEqual(listed.skipped,[{filmId:'film:lb:nolink',reason:'no_trusted_tmdb_id'}]);
 
 // Discovery's person format: first ten of each role in TMDB order, one credit per person and role.
@@ -58,7 +58,8 @@ assert.equal(tmdbCredits(ronin).actor[1].name,null);
 
 // Fetch: discovery pace, bearer token, raw response saved privately; 404 booked and skipped, 429 stops, a saved Film is reused.
 const calls=[],answers={'404':{status:404},'949':{status:200,body:heat},'8195':{status:200,body:ronin}};
-const fetchImpl=async(url,init)=>{calls.push({url,auth:init.headers.Authorization});const id=url.match(/(?:movie|tv)\/(\d+)\?/)[1],a=answers[id];return new Response(a.body?JSON.stringify(a.body):'{}',{status:a.status,headers:{'Retry-After':'30'}});};
+const pages={};
+const fetchImpl=async(url,init)=>{calls.push({url,auth:init.headers.Authorization});if(url.startsWith('https://letterboxd.com/')){const page=pages[url];return new Response(page?.html??'',{status:page?.status??404});}const id=url.match(/(?:movie|tv)\/(\d+)\?/)[1],a=answers[id];return new Response(a.body?JSON.stringify(a.body):'{}',{status:a.status,headers:{'Retry-After':'30'}});};
 const sleeps=[];
 let report=await fetchCredits({films:listed.films,dir,token:'tok',fetchImpl,sleep:async ms=>{sleeps.push(ms);},now:()=>new Date(T)});
 assert.deepEqual({fetched:report.fetched,reused:report.reused,notFound:report.notFound.map(f=>f.filmId),stopped:report.stopped},{fetched:2,reused:0,notFound:['film:lb:gone'],stopped:null});
@@ -87,8 +88,8 @@ await assert.rejects(fetchCredits({films:listed.films,dir,token:'',fetchImpl,int
 const before=rows('select count(*) n from film_person_credit')[0].n;
 let plan=await buildPlan({db,dir});
 assert.equal(rows('select count(*) n from film_person_credit')[0].n,before,'plan writes nothing');
-assert.deepEqual(plan.missing,[]);assert.deepEqual(plan.notFound,[{filmId:'film:lb:gone',tmdbId:'404'}]);
-assert.deepEqual(plan.totals,{films:3,skippedFilms:1,missingArtifacts:0,notFound:1,plannedFilms:2,tvSources:0,tmdbCredits:10,existingTmdbCredits:0,newCredits:10,newPersons:8,newAliases:7,reusedPersons:1,unnamedPersons:1,filmsWithoutTmdbCredits:0,expectedPairs:2});
+assert.deepEqual(plan.missing,[]);assert.deepEqual(plan.notFound,[{filmId:'film:lb:gone',tmdbId:'404',letterboxdUrl:null,reason:'tmdb_404'}]);
+assert.deepEqual(plan.totals,{films:3,skippedFilms:1,missingArtifacts:0,notFound:1,plannedFilms:2,resolvedSources:0,tmdbCredits:10,existingTmdbCredits:0,newCredits:10,newPersons:8,newAliases:7,reusedPersons:1,unnamedPersons:1,filmsWithoutTmdbCredits:0,expectedPairs:2});
 const heatPlan=plan.films.find(film=>film.filmId==='film:lb:heat');
 assert.deepEqual(heatPlan.writes.slice(0,3).map(w=>[w.personId,w.role,w.ordinal,w.newPerson]),[['person:tmdb_director/638','director',1,true],['person:tmdb_actor/1158','actor',2,true],['person:tmdb_actor/380','actor',3,false]]);
 // Same Film, same role, same name only: Mann through his accepted localization, De Niro on both Films. Pacino and
@@ -136,27 +137,48 @@ assert.deepEqual(rows(`select value from person_alias where person_id='person:tm
 
 // A Film without a saved answer is missing, and --apply refuses to run on an incomplete artifact.
 fs.renameSync(path.join(dir,'tmdb','404.json'),path.join(root,'404.json'));
-assert.deepEqual((await buildPlan({db,dir})).missing,[{filmId:'film:lb:gone',tmdbId:'404'}]);
-// A miniseries: the owner maps the Film to its TMDB TV entry in sources.json. Actors are the main cast, directors come
-// from aggregate_credits; the Film's own TMDB id and identity stay untouched.
+assert.deepEqual((await buildPlan({db,dir})).missing,[{filmId:'film:lb:gone',tmdbId:'404',letterboxdUrl:null}]);
+// A miniseries: TMDB retired its movie id, and Letterboxd's data-tmdb-* attributes still carry it while the TMDB link the
+// page shows names the live TV entry. That single link is the credits source; actors are the main cast, directors come from
+// aggregate_credits, and the Film's own TMDB id and identity stay untouched.
 const tv={id:1457,credits:{cast:[{id:5472,name:'Колин Ферт'}],crew:[]},aggregate_credits:{cast:[],crew:[{id:126951,name:'Simon Langton',jobs:[{job:'Director'}]},{id:3,name:'Writer',jobs:[{job:'Writer'}]}]}};
 assert.deepEqual(tmdbCredits(tv,'tv').director.map(item=>item.roleId),['tmdb_director/126951']);
 assert.deepEqual(tmdbCredits(tv).director,[],'a movie never reads aggregate_credits');
-assert.equal(creditSource({filmId:'film:lb:gone',tmdbId:'404'},{'film:lb:gone':'tv/1457'}).path,'tv/1457?language=ru-RU&append_to_response=credits,aggregate_credits');
-assert.throws(()=>creditSource({filmId:'film:lb:gone',tmdbId:'404'},{'film:lb:gone':'movie/1'}),{reason:'configuration'});
+const page='<a data-tmdb-type="movie" data-tmdb-id="404"></a><a href="https://www.themoviedb.org/tv/1457/">TMDB</a><a href="https://www.themoviedb.org/tv/1457/">TMDB</a>';
+assert.deepEqual(letterboxdTmdbLinks(page),['tv/1457']);
+const gone={filmId:'film:lb:gone',tmdbId:'404'};
+assert.equal(resolvedSource(gone,{letterboxd:{links:['tv/1457']}}).path,'tv/1457?language=ru-RU&append_to_response=credits,aggregate_credits');
+assert.equal(resolvedSource(gone,{letterboxd:{links:['movie/404']}}),null,'the retired id itself is no source');
+assert.equal(resolvedSource(gone,{letterboxd:{links:['movie/7','tv/1457']}}),null,'two TMDB entries on one page are no source');
 fs.renameSync(path.join(root,'404.json'),path.join(dir,'tmdb','404.json'));
-fs.writeFileSync(path.join(dir,'sources.json'),JSON.stringify({'film:lb:gone':'tv/1457'}));
-assert.deepEqual(readSources(dir),{'film:lb:gone':'tv/1457'});
-calls.length=0;answers['1457']={status:200,body:tv};
-report=await fetchCredits({films:listed.films,dir,token:'tok',sources:readSources(dir),fetchImpl,intervalMs:0});
-assert.deepEqual([report.fetched,report.reused,calls.map(c=>c.url.split('/3/')[1])],[1,2,['tv/1457?language=ru-RU&append_to_response=credits,aggregate_credits']]);
+const URL_GONE='https://letterboxd.com/film/gone-1995/';
+sqlite(`INSERT INTO film_metadata(film_id,schema_version,genres_json,payload_json,updated_at,url) VALUES('film:lb:gone',1,'[]','{}','${T}','${URL_GONE}');`);
+// The saved 404 already records that this Film had no Letterboxd page to read; a fresh 404 without that note is read again.
+fs.writeFileSync(path.join(dir,'tmdb','404.json'),JSON.stringify({tmdbId:'404',kind:'movie',status:404}));
+listed=await watchlistFilms(db);
+// A Letterboxd 429 stops the run like a TMDB one and books nothing.
+calls.length=0;pages[URL_GONE]={status:429};
+report=await fetchCredits({films:listed.films,dir,token:'tok',fetchImpl,intervalMs:0});
+assert.equal(report.stopped.reason,'letterboxd_rate_limited');assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'tmdb','404.json'),'utf8')).letterboxd,undefined);
+calls.length=0;pages[URL_GONE]={status:200,html:page};answers['1457']={status:200,body:tv};
+report=await fetchCredits({films:listed.films,dir,token:'tok',fetchImpl,intervalMs:0,now:()=>new Date(T)});
+assert.deepEqual([report.fetched,report.reused,report.letterboxdResolved,report.notFound,calls.map(c=>c.url.replace('https://api.themoviedb.org/3/',''))],[1,3,1,[],[URL_GONE,'tv/1457?language=ru-RU&append_to_response=credits,aggregate_credits']]);
+assert.equal(calls[0].auth,undefined,'the TMDB token never goes to Letterboxd');
+assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir,'tmdb','404.json'),'utf8')).letterboxd,{url:URL_GONE,checkedAt:T,status:200,links:['tv/1457']});
+calls.length=0;
+report=await fetchCredits({films:listed.films,dir,token:'tok',fetchImpl,intervalMs:0});
+assert.equal(calls.length,0,'the resolution is saved and never asked again');
 const identity=snapshot('film_external_id');
 plan=await buildPlan({db,dir});
-assert.equal(plan.totals.tvSources,1);assert.deepEqual(plan.notFound,[]);
+assert.equal(plan.totals.resolvedSources,1);assert.deepEqual(plan.notFound,[]);
 assert.deepEqual(plan.films.map(f=>[f.filmId,f.source,f.writes.map(w=>[w.personId,w.ordinal])]),[['film:lb:gone','tv/1457',[['person:tmdb_director/126951',0],['person:tmdb_actor/5472',0]]]]);
 await applyPlan({db,plan});
 assert.deepEqual(snapshot('film_external_id'),identity,'the TV id is a credits source only');
 assert.equal((await buildPlan({db,dir})).totals.newCredits,0);
+// Without the live entry's answer the Film is missing, and --apply refuses.
+fs.renameSync(path.join(dir,'tmdb','tv-1457.json'),path.join(root,'tv-1457.json'));
+assert.deepEqual((await buildPlan({db,dir})).missing.map(f=>f.filmId),['film:lb:gone']);
+fs.renameSync(path.join(root,'tv-1457.json'),path.join(dir,'tmdb','tv-1457.json'));
 // A saved response for the wrong movie stops the plan instead of crediting another Film.
 fs.writeFileSync(path.join(dir,'tmdb','8195.json'),JSON.stringify({response:{id:1}}));
 await assert.rejects(buildPlan({db,dir}),{reason:'artifact_mismatch'});

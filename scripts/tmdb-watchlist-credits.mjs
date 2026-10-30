@@ -3,6 +3,8 @@
 // so the coCredit review queue is empty until one Film carries both. This adds TMDB directors and actors, in the id and name
 // format discovery stores (tmdb_director/<id>, tmdb_actor/<id>, the ru-RU credit name, the first ten of each), next to the
 // existing credits. It merges nothing, matches nothing by name, and leaves Film identity, ratings and predictions alone.
+// A Film whose TMDB movie id is retired (a miniseries now living as a TV series) takes its credits from the one TMDB entry its
+// Letterboxd page links to.
 // Three separate steps: --fetch reads TMDB into a private artifact, --plan diffs that artifact against D1 and writes nothing,
 // --apply writes the missing rows through the D1 HTTP API. Every write is idempotent; a repeated --apply changes nothing.
 // It never touches R2, a Worker binding or the deploy configuration. Writing to production D1 is a separately approved step.
@@ -23,57 +25,84 @@ const sleepFor=milliseconds=>new Promise(resolve=>setTimeout(resolve,millisecond
 export const tmdbPath=tmdbId=>'movie/'+tmdbId+'?language=ru-RU&append_to_response=credits';
 // A miniseries is a TV entry at TMDB; its directors are credited per episode, so only aggregate_credits names them.
 export const tmdbTvPath=tvId=>'tv/'+tvId+'?language=ru-RU&append_to_response=credits,aggregate_credits';
-// Where a Film's credits are read: its D1 TMDB movie id, or an owner-checked TMDB TV id from <dir>/sources.json
-// ({"film:…":"tv/<id>"}). The TV id is a credits source for this run only; Film identity and external ids stay as they are.
-export function creditSource(film,sources={}){
- const override=sources[film.filmId];
- if(override==null)return {kind:'movie',id:film.tmdbId,path:tmdbPath(film.tmdbId),file:film.tmdbId+'.json'};
- const match=/^tv\/(\d+)$/.exec(String(override));
- if(!match)throw new CreditsStop('configuration',{message:'sources.json values must be tv/<id>',filmId:film.filmId});
- return {kind:'tv',id:match[1],path:tmdbTvPath(match[1]),file:'tv-'+match[1]+'.json'};
-}
-export function readSources(dir){
- const file=path.join(dir,'sources.json');
- if(!fs.existsSync(file))return {};
- const sources=JSON.parse(fs.readFileSync(file,'utf8'));
- if(!sources||typeof sources!=='object'||Array.isArray(sources))throw new CreditsStop('configuration',{message:'sources.json must map Film ids to tv/<id>'});
- return sources;
-}
+export const sourceOf=(kind,id)=>kind==='tv'?{kind,id:String(id),path:tmdbTvPath(id),file:'tv-'+id+'.json'}:{kind:'movie',id:String(id),path:tmdbPath(id),file:id+'.json'};
 export class CreditsStop extends Error{constructor(reason,details={}){super('Stopped: '+reason);this.name='CreditsStop';this.reason=reason;this.details=details;}}
 
 // Watchlist Films are the Films with a Letterboxd id; only one trusted, non-conflicting TMDB id per Film is usable.
 export async function watchlistFilms(db){
- const rows=await db.all(`SELECT l.film_id AS filmId,MIN(t.value) AS tmdbId,COUNT(t.value) AS ids FROM film_external_id l LEFT JOIN film_external_id t ON t.film_id=l.film_id AND t.scheme='tmdb' AND t.trusted=1 AND t.conflicting=0 WHERE l.scheme='letterboxd' GROUP BY l.film_id ORDER BY l.film_id`);
- return {films:rows.filter(row=>row.ids===1&&/^\d+$/.test(String(row.tmdbId))).map(row=>({filmId:row.filmId,tmdbId:String(row.tmdbId)})),skipped:rows.filter(row=>row.ids!==1||!/^\d+$/.test(String(row.tmdbId))).map(row=>({filmId:row.filmId,reason:row.ids===0?'no_trusted_tmdb_id':'ambiguous_tmdb_id'}))};
+ const rows=await db.all(`SELECT l.film_id AS filmId,MIN(t.value) AS tmdbId,COUNT(DISTINCT t.value) AS ids,MIN(m.url) AS letterboxdUrl FROM film_external_id l LEFT JOIN film_external_id t ON t.film_id=l.film_id AND t.scheme='tmdb' AND t.trusted=1 AND t.conflicting=0 LEFT JOIN film_metadata m ON m.film_id=l.film_id WHERE l.scheme='letterboxd' GROUP BY l.film_id ORDER BY l.film_id`);
+ return {films:rows.filter(row=>row.ids===1&&/^\d+$/.test(String(row.tmdbId))).map(row=>({filmId:row.filmId,tmdbId:String(row.tmdbId),letterboxdUrl:row.letterboxdUrl??null})),skipped:rows.filter(row=>row.ids!==1||!/^\d+$/.test(String(row.tmdbId))).map(row=>({filmId:row.filmId,reason:row.ids===0?'no_trusted_tmdb_id':'ambiguous_tmdb_id'}))};
 }
 
-// One request per Film at the discovery pace. A transient network or 5xx failure is retried at most twice; 429, a refused
-// token or any other status stops the run. A 404 is saved as that Film's answer and the run goes on. Saved answers are reused,
-// so a stopped run resumes where it stopped and never asks TMDB twice for one Film.
-export async function fetchCredits({films,dir,token,sources={},fetchImpl=fetch,intervalMs=DEFAULT_INTERVAL_MS,sleep=sleepFor,retries=2,now=()=>new Date()}){
+// TMDB retires the movie entry of a miniseries once it lives as a TV series, and Letterboxd's data-tmdb-* attributes can keep
+// the retired movie id while the TMDB link it shows already points at the live entry. The link is used only when the page
+// shows exactly one TMDB entry and it differs from the retired one. It is a credits source for this run only: Film identity
+// and external ids stay as they are.
+const LETTERBOXD_FILM=/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/;
+export function letterboxdTmdbLinks(html){return [...new Set([...String(html).matchAll(/https?:\/\/(?:www\.)?themoviedb\.org\/(movie|tv)\/(\d+)/g)].map(m=>m[1]+'/'+m[2]))].sort();}
+export function resolvedSource(film,saved){
+ const links=saved?.letterboxd?.links||[];
+ if(links.length!==1||links[0]==='movie/'+film.tmdbId)return null;
+ const [kind,id]=links[0].split('/');return sourceOf(kind,id);
+}
+
+// Requests run at the discovery pace. A transient network or 5xx failure is retried at most twice; 429, a refused token or any
+// other status but 404 stops the run.
+async function request(url,headers,{fetchImpl,intervalMs,sleep,retries,report}){
+ let response=null;
+ for(let attempt=0;;attempt++){
+  if(intervalMs>0)await sleep(intervalMs);
+  report.requests++;
+  try{response=await fetchImpl(url,{headers,signal:AbortSignal.timeout(12000)});}
+  catch{response=null;}
+  if((response===null||TRANSIENT.has(response.status))&&attempt<retries)continue;
+  return response;
+ }
+}
+const stopReason=response=>response===null?'network':response.status===429?'rate_limited':'http_'+response.status;
+const stopDetails=response=>response?.status===429?{retryAfter:response.headers.get('Retry-After')}:{};
+
+// One TMDB request per Film. A movie 404 is saved, then the Film's Letterboxd page is read once for its TMDB link and the
+// entry it names is fetched. Every answer is saved and reused, so a stopped run resumes where it stopped and no Film is
+// asked twice.
+export async function fetchCredits({films,dir,token,fetchImpl=fetch,intervalMs=DEFAULT_INTERVAL_MS,sleep=sleepFor,retries=2,now=()=>new Date()}){
  if(!token)throw new CreditsStop('configuration',{message:'TMDB_API_READ_ACCESS_TOKEN is required in the environment'});
  const store=path.join(dir,'tmdb');fs.mkdirSync(store,{recursive:true,mode:0o700});
- const report={fetched:0,reused:0,notFound:[],requests:0,stopped:null};
- for(const film of films){
-  const source=creditSource(film,sources),file=path.join(store,source.file);
-  if(fs.existsSync(file)){report.reused++;continue;}
-  let response=null;
-  for(let attempt=0;;attempt++){
-   if(intervalMs>0)await sleep(intervalMs);
-   report.requests++;
-   try{response=await fetchImpl(TMDB_BASE+source.path,{headers:{Authorization:'Bearer '+token,Accept:'application/json'},signal:AbortSignal.timeout(12000)});}
-   catch{response=null;}
-   if((response===null||TRANSIENT.has(response.status))&&attempt<retries)continue;
-   break;
-  }
-  if(response===null){report.stopped={reason:'network',filmId:film.filmId};break;}
-  if(response.status===404){fs.writeFileSync(file,JSON.stringify({tmdbId:source.id,kind:source.kind,path:source.path,fetchedAt:now().toISOString(),status:404}),{mode:0o600});report.notFound.push(film);continue;}
-  if(!response.ok){report.stopped={reason:response.status===429?'rate_limited':'http_'+response.status,filmId:film.filmId,retryAfter:response.headers.get('Retry-After')};break;}
+ const report={fetched:0,reused:0,notFound:[],letterboxdResolved:0,requests:0,stopped:null},options={fetchImpl,intervalMs,sleep,retries,report};
+ const write=(file,value)=>fs.writeFileSync(path.join(store,file),JSON.stringify(value),{mode:0o600});
+ const tmdb=async source=>{
+  const response=await request(TMDB_BASE+source.path,{Authorization:'Bearer '+token,Accept:'application/json'},options);
+  if(response?.status===404){write(source.file,{tmdbId:source.id,kind:source.kind,path:source.path,fetchedAt:now().toISOString(),status:404});return 'not_found';}
+  if(!response?.ok){report.stopDetails=stopDetails(response);return stopReason(response);}
   const body=await response.json();
-  if(String(body?.id)!==source.id){report.stopped={reason:'unexpected_movie',filmId:film.filmId};break;}
-  fs.writeFileSync(file,JSON.stringify({tmdbId:source.id,kind:source.kind,path:source.path,fetchedAt:now().toISOString(),response:body}),{mode:0o600});
-  report.fetched++;
+  if(String(body?.id)!==source.id)return 'unexpected_entry';
+  write(source.file,{tmdbId:source.id,kind:source.kind,path:source.path,fetchedAt:now().toISOString(),response:body});report.fetched++;return 'saved';
+ };
+ for(const film of films){
+  const movie=sourceOf('movie',film.tmdbId),movieFile=path.join(store,movie.file);
+  if(fs.existsSync(movieFile))report.reused++;
+  else{const result=await tmdb(movie);if(!['saved','not_found'].includes(result)){report.stopped={reason:result,filmId:film.filmId,...report.stopDetails};break;}}
+  let saved=JSON.parse(fs.readFileSync(movieFile,'utf8'));
+  if(saved.status!==404)continue;
+  if(!saved.letterboxd){
+   if(!LETTERBOXD_FILM.test(String(film.letterboxdUrl||''))){saved={...saved,letterboxd:{url:film.letterboxdUrl,status:'no_url',links:[]}};}
+   else{
+    const response=await request(film.letterboxdUrl,{Accept:'text/html','User-Agent':'Mozilla/5.0'},options);
+    if(response?.status===404)saved={...saved,letterboxd:{url:film.letterboxdUrl,checkedAt:now().toISOString(),status:404,links:[]}};
+    else if(!response?.ok){report.stopped={reason:'letterboxd_'+stopReason(response),filmId:film.filmId,...stopDetails(response)};break;}
+    else saved={...saved,letterboxd:{url:film.letterboxdUrl,checkedAt:now().toISOString(),status:200,links:letterboxdTmdbLinks(await response.text())}};
+   }
+   write(movie.file,saved);
+  }
+  const source=resolvedSource(film,saved);
+  if(!source){report.notFound.push(film);continue;}
+  report.letterboxdResolved++;
+  if(fs.existsSync(path.join(store,source.file)))continue;
+  const result=await tmdb(source);
+  if(result==='not_found'){report.notFound.push(film);continue;}
+  if(result!=='saved'){report.stopped={reason:result,filmId:film.filmId,...report.stopDetails};break;}
  }
+ delete report.stopDetails;
  return report;
 }
 
@@ -94,15 +123,23 @@ const NAMES_SQL=ids=>`SELECT person_id AS id,value AS name FROM person_alias WHE
 // New credits follow the Film's existing credits of that role. expectedPairs are the Letterboxd/TMDB pairs that the coCredit
 // queue will show for these Films: same Film, same role, same name (compared as the queue does, SQLite ASCII lower()).
 export async function buildPlan({db,dir}){
- const {films,skipped}=await watchlistFilms(db),sources=readSources(dir);
+ const {films,skipped}=await watchlistFilms(db);
  const missing=[],notFound=[],planned=[];
+ const read=file=>fs.existsSync(path.join(dir,'tmdb',file))?JSON.parse(fs.readFileSync(path.join(dir,'tmdb',file),'utf8')):null;
  for(const film of films){
-  const source=creditSource(film,sources),file=path.join(dir,'tmdb',source.file);
-  if(!fs.existsSync(file)){missing.push(film);continue;}
-  const saved=JSON.parse(fs.readFileSync(file,'utf8'));
-  if(saved?.status===404&&saved.tmdbId===source.id){notFound.push(film);continue;}
+  let source=sourceOf('movie',film.tmdbId),saved=read(source.file);
+  if(saved?.status===404&&saved.tmdbId===source.id){
+   // A retired movie id: the Letterboxd TMDB link names the live entry, or the Film has no TMDB credits in this run.
+   if(!saved.letterboxd){missing.push(film);continue;}
+   source=resolvedSource(film,saved);
+   if(!source){notFound.push({...film,reason:'tmdb_404'});continue;}
+   saved=read(source.file);
+   if(!saved){missing.push(film);continue;}
+   if(saved.status===404&&saved.tmdbId===source.id){notFound.push({...film,reason:'resolved_404'});continue;}
+  }
+  if(!saved){missing.push(film);continue;}
   if(String(saved?.response?.id)!==source.id)throw new CreditsStop('artifact_mismatch',{filmId:film.filmId});
-  planned.push({...film,source:source.kind==='tv'?'tv/'+source.id:undefined,credits:tmdbCredits(saved.response,source.kind)});
+  planned.push({...film,source:source.kind+'/'+source.id,credits:tmdbCredits(saved.response,source.kind)});
  }
  const credits=[];
  for(const part of chunks(planned.map(film=>film.filmId),100))credits.push(...await db.all(`SELECT film_id AS filmId,person_id AS personId,role,ordinal FROM film_person_credit WHERE film_id IN (${marks(part)})`,part));
@@ -113,7 +150,7 @@ export async function buildPlan({db,dir}){
  for(const part of chunks(nameIds,200))for(const row of await db.all(NAMES_SQL(part),[...part,...part])){if(!names.has(row.id))names.set(row.id,new Set());names.get(row.id).add(row.name);}
  const fold=value=>String(value).replace(/[A-Z]/g,c=>c.toLowerCase());
  const newPersons=new Map(),pairs=new Map(),out=[];
- const totals={films:films.length,skippedFilms:skipped.length,missingArtifacts:missing.length,notFound:notFound.length,plannedFilms:planned.length,tvSources:planned.filter(film=>film.source).length,tmdbCredits:0,existingTmdbCredits:0,newCredits:0,newPersons:0,newAliases:0,reusedPersons:0,unnamedPersons:0,filmsWithoutTmdbCredits:0};
+ const totals={films:films.length,skippedFilms:skipped.length,missingArtifacts:missing.length,notFound:notFound.length,plannedFilms:planned.length,resolvedSources:planned.filter(film=>film.source!=='movie/'+film.tmdbId).length,tmdbCredits:0,existingTmdbCredits:0,newCredits:0,newPersons:0,newAliases:0,reusedPersons:0,unnamedPersons:0,filmsWithoutTmdbCredits:0};
  for(const film of planned){
   const filmCredits=credits.filter(row=>row.filmId===film.filmId),writes=[];
   for(const role of ['director','actor']){
@@ -134,7 +171,7 @@ export async function buildPlan({db,dir}){
   }
   if(!film.credits.director.length&&!film.credits.actor.length)totals.filmsWithoutTmdbCredits++;
   totals.newCredits+=writes.length;
-  if(writes.length)out.push({filmId:film.filmId,tmdbId:film.tmdbId,...(film.source?{source:film.source}:{}),writes});
+  if(writes.length)out.push({filmId:film.filmId,tmdbId:film.tmdbId,...(film.source!=='movie/'+film.tmdbId?{source:film.source}:{}),writes});
  }
  totals.newPersons=newPersons.size;
  totals.newAliases=new Set(out.flatMap(film=>film.writes.filter(write=>write.needsName).map(write=>write.personId))).size;
@@ -220,7 +257,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   if(mode[0]==='--fetch'){
    const {films,skipped}=await watchlistFilms(db);
    const intervalMs=process.env.TMDB_REQUEST_INTERVAL_MS==null||process.env.TMDB_REQUEST_INTERVAL_MS===''?DEFAULT_INTERVAL_MS:Math.max(0,Number(process.env.TMDB_REQUEST_INTERVAL_MS)||0);
-   const report=await fetchCredits({films,dir,token:process.env.TMDB_API_READ_ACCESS_TOKEN,sources:readSources(dir),intervalMs});
+   const report=await fetchCredits({films,dir,token:process.env.TMDB_API_READ_ACCESS_TOKEN,intervalMs});
    const summary={mode:'fetch',films:films.length,skipped:skipped.length,...report,notFound:report.notFound.length};
    save(dir,'fetch-'+stamp(started)+'.json',{...summary,notFound:report.notFound,skipped});
    console.log(JSON.stringify(summary));process.exitCode=report.stopped?3:0;
