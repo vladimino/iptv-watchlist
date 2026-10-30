@@ -1,6 +1,6 @@
 # Letterboxd Diary viewing history — activation, observation, rollback
 
-Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decision: [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md). Card: [AIR-51](https://trello.com/c/33d4hKJ3).
+Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decisions: [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), [ADR 0054](../adr/0054-diary-first-epg-ratings.md) (Diary-first ratings). Card: [AIR-51](https://trello.com/c/33d4hKJ3).
 
 A deploy does not activate anything. Each step below that changes production needs its own owner approval.
 
@@ -21,6 +21,8 @@ A deploy does not activate anything. Each step below that changes production nee
   - `outcome` and `stopReason`;
   - `counts`: pages at most 3, rows, added, unchanged, updated, conflicts, unresolved, undated;
   - `resumePage`.
+- **Facts (ADR 0054):** `diaryHistory.facts` shows `rated`, `unrated`, `ambiguous` and `partial`, and the write outcomes `written`, `unchanged`, `older` and `skipped`. `ratingAttempt` ends `finished` with `source: letterboxd_diary`. No request to `/<user>/films/` appears; if one does, stop and report it.
+- **Removed films:** `removalDiaryResolved` lists those rated by the diary. `removalRatingLookup` shows at most five member-page requests, only for the rest.
 - **`ratingAttempt.phase`** passes through `diary`. A `ratingAttempt` that ends `unknown` with `interruptedPhase: diary` means the request died in the stage.
 - **`GET /api/letterboxd/diary`:** `state`, entry counts and, for a film, its viewings.
 - **Workers Observability:** `epg_ratings_phase` with `phase: diary`. The diary requests show as at most three subrequests to `letterboxd.com/<user>/diary/…`.

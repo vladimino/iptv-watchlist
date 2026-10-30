@@ -39,7 +39,7 @@ One object per film: `letterboxd/facts/films/<factKey>.json`.
 
 ## Ordering of observations
 
-Observations of one fact are totally ordered by the tuple **(`observedAt`, source rank, `observationId`)**, compared left to right. Source rank, highest first: `owner` 4, `letterboxd_films_list` 3, `letterboxd_film_page` 2, `letterboxd_watchlist` 2, `letterboxd_export` 1. An incoming observation replaces the stored value only if it is **greater** in that order; an equal `observationId` is the same observation (no-op, `unchanged`). Two different values with the same `observedAt` are therefore decided deterministically, and every such tie is counted as `tie` in the writer's report so it can be reviewed.
+Observations of one fact are totally ordered by the tuple **(`observedAt`, source rank, `observationId`)**, compared left to right. Source rank, highest first: `owner` 4, `letterboxd_films_list` 3, `letterboxd_film_page` 2, `letterboxd_watchlist` 2, `letterboxd_export` 1, `letterboxd_diary` 1. A diary observation is dated at the entry's watched date, so any newer observation wins over it ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md), [diary rating facts](letterboxd-diary-history.md#rating-facts)). An incoming observation replaces the stored value only if it is **greater** in that order; an equal `observationId` is the same observation (no-op, `unchanged`). Two different values with the same `observedAt` are therefore decided deterministically, and every such tie is counted as `tie` in the writer's report so it can be reviewed.
 
 ### Observation time per source
 

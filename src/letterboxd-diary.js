@@ -144,6 +144,30 @@ const LetterboxdDiary=(()=>{
   return films;
  }
  const emptyHistory=()=>({schemaVersion:1,entries:{}});
+ // AIR-287: what the stored diary proves about one film, by lid only. Watched: any entry of the lid. Rating: the rating at
+ // the film's latest watched date, and only when that date's rows are all known and agree: one viewing-id entry or day
+ // entry per row, every row rated, one value, the day count proved by one page. An unrated, ambiguous or partial latest
+ // date proves no rating; an older entry never stands in for it. The observation time is the watched date (the rating
+ // held at least from that day), so a newer observation from any source always wins over it.
+ function ratingEvidence(history,lids){
+  const byLid=new Map();
+  for(const entry of Object.values(history?.entries||{})){
+   const lid=entry?.identity?.type==='letterboxd_lid'?String(entry.identity.value||''):'';
+   if(!lid||!entry.watchedDate||lids&&!lids.has(lid))continue;
+   const list=byLid.get(lid)||[];list.push(entry);byLid.set(lid,list);
+  }
+  const out=[];
+  for(const [lid,entries] of byLid){
+   const latest=entries.reduce((max,entry)=>entry.watchedDate>max?entry.watchedDate:max,'');
+   const day=entries.filter(entry=>entry.watchedDate===latest).sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+   const ratings=day.flatMap(entry=>entry.keyBasis==='viewing_id'?[entry.ratingAtEntry]:Array.isArray(entry.ratingsAtEntry)?entry.ratingsAtEntry:[null]);
+   const certain=day.every(entry=>entry.viewingsCertain!==false&&(entry.keyBasis==='viewing_id'||(entry.ratingsAtEntry||[]).length===entry.viewings));
+   const values=[...new Set(ratings)];
+   const state=!certain?'partial':values.length===1&&values[0]!=null?'rated':values.every(value=>value==null)?'unrated':'ambiguous';
+   out.push({lid,watchedDate:latest,rating:state==='rated'?values[0]:null,ratingState:state,sourceRef:'diary:'+day.map(entry=>entry.key).join(',')});
+  }
+  return out.sort((a,b)=>a.lid<b.lid?-1:a.lid>b.lid?1:0);
+ }
  const outcomeOf=status=>status===403?'blocked':status===429?'rate_limited':'failed';
 
  // One bounded run. Page 1 always. While a page is entirely new, the new entries may continue on the next page, so that
@@ -151,7 +175,7 @@ const LetterboxdDiary=(()=>{
  // before where it stopped (overlap), and reads on from there until the page budget or the last page. Each page is
  // committed before the next request; the state is written last, so a killed run only repeats reads. Errors stop the
  // run and are reported, never thrown.
- async function syncHistory(env,{now=Date.now(),maxPages=MAX_PAGES}={}){
+ async function syncHistory(env,{now=Date.now(),maxPages=MAX_PAGES,afterPage=null}={}){
   const startedAt=new Date(now).toISOString(),username=sourceConfig(env).letterboxdUsername;
   const previous=await loadJSON(env,KEYS.state)||{schemaVersion:1,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null};
   const counts={pages:0,rows:0,unresolved:0,undated:0};
@@ -179,10 +203,13 @@ const LetterboxdDiary=(()=>{
    const groups=dayGroups(rows,{page,last:!parsed.next}),pageKeys=new Set(rows.filter(usable).map(row=>row.key));
    const knownBefore=new Set([...pageKeys].filter(key=>!tally.added.has(key)&&tally.seen.has(key)));
    const observedAt=new Date(now).toISOString();
-   await mergeStoredJSON(env,KEYS.history,emptyHistory(),history=>{
+   const merged=await mergeStoredJSON(env,KEYS.history,emptyHistory(),history=>{
     for(const key of pageKeys)if(history.entries[key]&&!tally.added.has(key))knownBefore.add(key);
     mergeRows(history,rows,groups,observedAt,page,tally);return pageKeys.size?history:null;
    });
+   // AIR-287: the page's consequences (rating facts) run after its history commit and before the next request. A failure
+   // stops the run at this page, so the next run reads it again; the facts writer is idempotent.
+   if(afterPage){try{await afterPage({page,rows,history:merged});}catch(e){fail('failed','after_page:'+String(e.message).slice(0,120)+'_page_'+page);break;}}
    for(const row of rows.filter(row=>row.watchedDate)){
     if(!coverage.newestWatchedDate||row.watchedDate>coverage.newestWatchedDate)coverage.newestWatchedDate=row.watchedDate;
     if(!coverage.oldestWatchedDate||row.watchedDate<coverage.oldestWatchedDate)coverage.oldestWatchedDate=row.watchedDate;
@@ -215,5 +242,5 @@ const LetterboxdDiary=(()=>{
   if(filmId!=null)body.film={filmId,...(films[filmId]||{viewingCount:0,viewingCountExact:true,lastWatchedAt:null,rewatches:0,rewatchesExact:true}),entries:entries.filter(entry=>entry.identity?.value===filmId).sort((a,b)=>a.watchedDate<b.watchedDate?1:a.watchedDate>b.watchedDate?-1:0)};
   return body;
  }
- return {KEYS,MAX_PAGES,enabled,pageUrl,parsePage,keyRows,mergeRows,summarize,syncHistory,readHistory};
+ return {KEYS,MAX_PAGES,enabled,pageUrl,parsePage,keyRows,mergeRows,summarize,ratingEvidence,syncHistory,readHistory,loadHistory:env=>loadJSON(env,KEYS.history)};
 })();
