@@ -6,6 +6,10 @@
 
 The owner-approved existing `IPTV Scheduled Task Drift` automation (`6ade65245de481919b816c5f5026c121`) runs daily at **17:45 Europe/Madrid** as of 30 October 2026 (previously Monday 09:00). Its live schedule has `RRULE:FREQ=DAILY;BYHOUR=17;BYMINUTE=45`, `DTSTART;TZID=Europe/Madrid:20261030T174500`, `default_timezone=Europe/Madrid` and was read back `is_enabled=true`. The maintained contract is [Scheduled Tasks](../reference/scheduled-tasks.md#owner-approved-daily-read-only-drift-audit). The audit is a third automation but only observes the two production tasks; it is not an EPG or prediction scheduler.
 
+## Staged Ratings Task (no active writer)
+
+The owner requested a separate daily Ratings Task. Its ID is `6ae52289ae9481919a68eec9310f5d8c`, and its preliminary 18:00 Madrid flexible recurrence is **disabled** until the separate Worker ratings API is implemented and approved. The current daily Drift Task legitimately monitors only EPG and hourly predictions; the disabled staged Ratings Task must not generate an alarm. Once AIR-295 authorizes activation, update this monitor under a distinct owner decision to check the third producer, its last run and dedicated ratings status; do not use an EPG freshness signal as proof of ratings success. The EPG prompt already disallows any explicit independent ratings tool, but the currently deployed Worker may still execute Diary as part of its inline EPG commit; this is a known temporary code boundary, not proof of successful separation. [Read-only staging evidence](../evidence/ratings-task-staging-2026-10-31.md).
+
 ## Read-only checks
 
 1. Read the **live** Automation records for EPG `Automation_5d50308ce72c8191a50242fa604836b2` and predictions `Automation_25293680bdb08191818ee2db30438f49`, including `is_enabled`, iCalendar recurrence, `default_timezone`, `run_details.last_run` and `latest_result`. Fetch the current `docs/reference/scheduled-tasks.md` from GitHub `main` and compare substantive prompt/tool/permission/stop rules. Do not use a cached conversation summary.
