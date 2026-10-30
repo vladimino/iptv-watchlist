@@ -13,7 +13,7 @@ The integration footer does not use this document for current ratings health; th
 ## Where ratings come from
 
 - The EPG commit still reads the public films list once, with its existing three tries on HTTP 403, and projects ratings into the view index. A 403 there leaves the previous ratings in place and records `ratingError` on the sync while `ratingPending` stays ([enrichment API](../api/enrichment.md)); the attempt itself is traced as below.
-- The per-film lookup and the owner `PUT /api/enrichment/actual-ratings` write single ratings, and with `LETTERBOXD_FACTS=on` the fact records ([user facts contract](letterboxd-user-facts.md)).
+- The per-film lookup and the owner `PUT /api/enrichment/actual-ratings` write single ratings through the fact records ([user facts contract](letterboxd-user-facts.md)); no switch selects a legacy writer ([ADR 0054](../../adr/0054-retire-letterboxd-facts-switch.md)).
 - A watchlist removal event still receives a half-star rating when the per-film lookup records one.
 - After a failed films list, the diary repair confirms rating changes of Diary page 1 rows on each film's own page. It parses the page with the one diary reader (`LetterboxdDiary.parsePage`). With `LETTERBOXD_DIARY_HISTORY=on` it reuses the rows the [diary history stage](letterboxd-diary-history.md) read in the same commit, and makes no request of its own. The history itself never writes a rating.
 

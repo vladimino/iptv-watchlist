@@ -24,8 +24,8 @@ vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context),Facts=constant('LetterboxdFacts');
 const VIEW=constant('ENRICHMENT_KEY')+'view-index.json',ORIGIN='https://iptv.vladimino.workers.dev',G1='11111111-1111-4111-8111-111111111111',G2='22222222-2222-4222-8222-222222222222';
-// No FINDS_WATCHED_MARK: the switch is retired (ADR 0042); only LETTERBOXD_FACTS gates the mark.
-const ON={BUCKET:bucket,LETTERBOXD_FACTS:'on'};
+// No switch: FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0054) are retired; the mark is always available.
+const ON={BUCKET:bucket};
 const hour=3600000,now=Date.now();
 const current={prediction:{predictedRating:4.5,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',impactFeatures:{fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1},fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}};
 const film=(n,title,extra={})=>({id:'tmdb_'+n,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,title,original:title,year:2000,runtime:100,genres:[],poster:null,url:null,directors:[],actors:[],shows:[{channelId:'c1',channel:'One',start:now-hour,end:now+hour}],...extra});
@@ -155,9 +155,6 @@ const links=()=>records.get('letterboxd/facts/links.json')||{};
   [{tmdbId:'10',watched:true},{type:null},415,null],
   [{tmdbId:'10',watched:true},{method:'PUT'},405,null],
   [{tmdbId:'10',watched:true},{method:'GET'},405,null],
-  [{tmdbId:'10',watched:true},{env:{BUCKET:bucket}},409,'facts_disabled'],
-  [{tmdbId:'10',watched:true},{env:{BUCKET:bucket,FINDS_WATCHED_MARK:'on'}},409,'facts_disabled'],
-  [{tmdbId:'10',watched:true},{env:{BUCKET:bucket,LETTERBOXD_FACTS:'On',FINDS_WATCHED_MARK:'on'}},409,'facts_disabled'],
  ];
  for(const [body,options,status,code] of refused){
   const r=await mark(body,options);assert.equal(r.status,status,JSON.stringify([body,options.origin,options.type,options.method,r.body]));
@@ -167,19 +164,19 @@ const links=()=>records.get('letterboxd/facts/links.json')||{};
  // Without a published generation nothing is written.
  records.delete('epg/published-generation.json');
  assert.equal((await mark({tmdbId:'10',watched:true})).body.code,'film_not_in_catalog');
- assert.equal((await available({BUCKET:bucket,LETTERBOXD_FACTS:'on'})).watchedMarkEnabled,undefined);
+ assert.equal((await available()).watchedMarkEnabled,undefined);
 }
-// The Finds response says whether the mark is available: exactly when LETTERBOXD_FACTS is on. The retired
-// FINDS_WATCHED_MARK is inert (ADR 0042): no value opens the mark without the facts gate or closes it with the gate on.
+// The Finds response always offers the mark. The retired FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0054)
+// are inert: no value of either, alone or together, closes the mark or changes what it writes.
 {
- for(const value of [undefined,'on','off','On',' on',true]){
-  seed();const binding=value===undefined?{}:{FINDS_WATCHED_MARK:value};
-  assert.equal((await available({BUCKET:bucket,LETTERBOXD_FACTS:'on',...binding})).watchedMarkEnabled,true,'facts on, binding '+String(value));
-  assert.equal((await available({BUCKET:bucket,...binding})).watchedMarkEnabled,false,'facts off, binding '+String(value));
-  const r=await mark({tmdbId:'10',watched:true},{env:{BUCKET:bucket,LETTERBOXD_FACTS:'on',...binding}});
-  assert.equal(r.status,200,'binding '+String(value)+': '+JSON.stringify(r.body));assert.equal(r.body.watched,true);
+ for(const name of ['FINDS_WATCHED_MARK','LETTERBOXD_FACTS'])for(const value of [undefined,'on','off','On',' on',true,{token:'x'}]){
+  seed();const env={BUCKET:bucket,...(value===undefined?{}:{[name]:value})};
+  assert.equal((await available(env)).watchedMarkEnabled,true,name+' '+JSON.stringify(value));
+  const r=await mark({tmdbId:'10',watched:true},{env});
+  assert.equal(r.status,200,name+' '+JSON.stringify(value)+': '+JSON.stringify(r.body));assert.deepEqual(r.body,{outcome:'saved',watched:true});
+  assert.equal(record('tmdb-10').watched.value,true);
  }
- assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/env\??\.FINDS_WATCHED_MARK|mark_disabled/,'no code path reads the retired binding');
+ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/env\??\.(FINDS_WATCHED_MARK|LETTERBOXD_FACTS)|mark_disabled|facts_disabled/,'no code path reads a retired binding');
 }
 // The route is not an MCP tool and not part of the GET side-effect surface.
 assert.doesNotMatch(fs.readFileSync('src/mcp.js','utf8'),/catalog\/watched|recordOwnerWatchedMark/);

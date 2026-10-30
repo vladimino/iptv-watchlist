@@ -91,7 +91,7 @@ const kinds=record=>JSON.parse(JSON.stringify((record.ratingHistory||[]).map(ent
 // Baseline import: a pre-existing export rating is first_observed with the export as source; a rollback is recorded after it,
 // and the same observation committed again after the rollback is recorded again.
 {
- const b=bucket(),env={BUCKET:b,LETTERBOXD_FACTS:'on'};
+ const b=bucket(),env={BUCKET:b};
  const origin={archiveSha256:'a'.repeat(64),generatedAt:at(0),generatedAtSource:'archive_name'};
  const body={origin,chunk:0,items:[{lid:'alien',tmdb:'348',facts:{watched:true,rating:4.5}},{lid:'heat',tmdb:'949',facts:{watched:true,rating:3}}]};
  await F.recordFilmFacts(env,'heat',{rating:2},{observedAt:at(-1),source:'letterboxd_film_page',sourceRef:'old'});

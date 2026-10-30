@@ -7,7 +7,6 @@ const LetterboxdFacts=(()=>{
  const FACTS_KEYS={links:FACTS_PREFIX+'links.json',conflicts:FACTS_PREFIX+'conflicts.json',filmsList:FACTS_PREFIX+'scans/films-list.json',watchlist:FACTS_PREFIX+'scans/watchlist.json',viewIndex:'enrichment/view-index.json'};
  const SOURCE_RANK={owner:4,letterboxd_films_list:3,letterboxd_film_page:2,letterboxd_watchlist:2,letterboxd_export:1};
  const FACT_NAMES=['watched','rating','watchlist'];
- const factsEnabled=env=>env?.LETTERBOXD_FACTS==='on';
  const recordKey=factKey=>FACTS_PREFIX+'films/'+factKey+'.json';
  const LID=/^[A-Za-z0-9_-]{1,80}$/,TMDB=/^[1-9]\d{0,11}$/,ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
  const clone=value=>value==null?value:JSON.parse(JSON.stringify(value));
@@ -334,7 +333,8 @@ const LetterboxdFacts=(()=>{
  }
 
  // ---- Baseline import (contract "Baseline import protocol"): a permanent owner-only maintenance route behind the Worker's
- // Cloudflare Access, with no switch of its own (the former LETTERBOXD_BASELINE_IMPORT is retired, ADR 0053).
+ // Cloudflare Access, with no switch: the former LETTERBOXD_BASELINE_IMPORT (ADR 0053) and LETTERBOXD_FACTS (ADR 0054) are
+ // retired. The routine writers always record facts, so the next sync cannot clear imported ratings by absence.
  const VIEW_FIELDS={rating:'actualRating',watched:'watched',watchlist:'watchlist'};
  const HEX64=/^[0-9a-f]{64}$/,DAY=/^\d{4}-\d{2}-\d{2}$/,MAX_ITEMS=200,MAX_CHUNK=10000;
  const importKey=(sha,chunk,kind)=>FACTS_PREFIX.replace('facts/','imports/')+sha+'/chunks/'+chunk+'.'+kind+'.json';
@@ -500,8 +500,6 @@ const LetterboxdFacts=(()=>{
  // Owner-only route (the whole Worker is behind Cloudflare Access); every production commit or rollback is a separate owner-approved operation.
  async function handleBaselineRequest(request,env,pathname){
   const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
-  // Fail closed unless the routine writers record facts too: otherwise the next sync would clear imported ratings by absence.
-  if(!factsEnabled(env))return json({error:'Letterboxd baseline import requires LETTERBOXD_FACTS=on',code:'facts_disabled'},409);
   if(request.method!=='POST')return json({error:'Method not allowed'},405);
   if(!/^application\/json\b/i.test(request.headers.get('Content-Type')||''))return json({error:'Expected application/json'},415);
   let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}
@@ -516,5 +514,5 @@ const LetterboxdFacts=(()=>{
    throw error;
   }
  }
- return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,factsEnabled,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,validateBaselineRequest,previewBaselineChunk,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
 })();

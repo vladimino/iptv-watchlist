@@ -27,7 +27,7 @@ const ctx=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,U
  return {ok:false,status:404,text:async()=>''};
 }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket};
 ctx.env=env;
 const at='2026-10-23T10:00:00.000Z';
@@ -54,7 +54,9 @@ assert.notEqual(gone.ratingObservedAt,stored.at);
 assert.equal(Number.isFinite(Date.parse(gone.ratingObservedAt)),true);
 assert.equal(missing.rating,undefined);
 assert.equal(stored.added[0].rating,undefined);
-assert.equal(records.get('enrichment/view-index.json').gone.actualRating,4.5);
+// A removed film's rating lives in the films-list summary observation (ADR-0024); since LETTERBOXD_FACTS is retired
+// (ADR 0054) the scan writes no per-film legacy index entry for a film outside the watchlist.
+assert.equal(records.get('letterboxd/facts/scans/films-list.json').films.gone,4.5);
 assert.equal(records.has('enrichment/diagnostics/baseline.json'),false);
 assert.equal([...records.keys()].filter(key=>key.startsWith('events/items/')&&key.endsWith('run-1-watchlist.json')).length,1);
 await ctx.writeEvent(env,event);

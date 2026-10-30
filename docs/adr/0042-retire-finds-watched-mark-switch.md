@@ -6,7 +6,7 @@
 **Approval source:** owner flag disposition `retire now`, keeping the behaviour of the current value, given in the AIR-230 session on 2026-10-29; owner explicitly accepted ADR-0042 in the AIR-230 PR #220 conversation on 2026-10-29; separate approval is required to delete the production binding  
 **Related work:** [AIR-230](https://trello.com/c/AW2GqqQL); prerequisites [AIR-214](https://trello.com/c/dX5YZlFY) (implementation) and [AIR-215](https://trello.com/c/MC9Ku87Z) (rollout); [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md); [ADR-0023](0023-letterboxd-user-facts.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md) in part: the mark's own switch in decision 6 and the switch-based disable; the `LETTERBOXD_FACTS` gate of decision 6 and every other guard stay  
-**Superseded by:** None
+**Superseded by:** [ADR 0054](0054-retire-letterboxd-facts-switch.md) (Proposed) in part: decisions 1, 3 and 4 as far as they keep the `LETTERBOXD_FACTS` gate; the mark is always available and every other guard stays
 
 ## Context
 
