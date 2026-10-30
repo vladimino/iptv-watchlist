@@ -108,7 +108,7 @@ A pointer that names a hash with no stored body or record is not a stop: the row
 
 1. **Dry-run on SQLite (no production access beyond the approved snapshot).** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-dry --target sqlite --database /abs/dry.sqlite` with a database created from `migrations/0001_schema_v1.sql`, `0002_generation_stage.sql` and `0003_candidate_show_identity.sql`. Review `report.json`: class A blockers, the class C list, class B families with their dispositions, parity, receipts. One dry-run is enough; a same-baseline rerun is not required, because `tests/d1-backfill.mjs` already proves that one applies nothing and sends no data write.
 2. **Owner acknowledges the class C list** by producing the JSON file of `{sourceKey,targetTable,targetId,reason}` records from `ledger.json` after review. The acknowledgement records a known gap; it is not lossless parity.
-3. **Create the databases** (owner, separate approval): `iptv` and a scratch database; apply migrations `0001`–`0004` to `iptv` only (`0004` since [ADR 0054](../adr/0054-d1-enrichment-write-through.md)).
+3. **Create the databases** (owner, separate approval): `iptv` and a scratch database; apply migrations `0001`–`0004` to `iptv` only (`0004` since [ADR 0056](../adr/0056-d1-enrichment-write-through.md)).
 4. **Back up before the first write.** Record the D1 bookmark of the empty target (Time Travel) and an export of it in the evidence; the bookmark is the restore point.
 5. **Run in bounded batches.** `node scripts/d1-backfill.mjs --snapshot /abs/snapshot --output /abs/run-N --target d1 --limit 5000 --acknowledged /abs/class-c.json`, repeated until `completed`. The first command of each run is the probe on the scratch database; a run that does not pass it never reads the target.
 6. **No mandatory rerun.** Run again on the same baseline only to resume a `partial` or `stopped` run; the receipts make that safe, and `tests/d1-backfill.mjs` covers the empty same-baseline rerun.
@@ -116,7 +116,7 @@ A pointer that names a hash with no stored body or record is not a stop: the row
 
 ## Reload with the enrichment projector (AIR-275 phase 2)
 
-Once the [enrichment projector](../adr/0054-d1-enrichment-write-through.md) writes D1, a reload must not restart it from nothing, and it must not lose what only D1 holds. Each production step below is a separate owner approval.
+Once the [enrichment projector](../adr/0056-d1-enrichment-write-through.md) writes D1, a reload must not restart it from nothing, and it must not lose what only D1 holds. Each production step below is a separate owner approval.
 
 1. **Schema v4.** The backfill executor requires schema version 4. Build the local database from `0001`–`0004`; production `iptv` needs `0004` applied before its first reload under this procedure.
 2. **Local build** from a fresh fenced snapshot, as in the procedure above (`--target sqlite --staged-generation --acknowledged …`).
@@ -127,7 +127,11 @@ Once the [enrichment projector](../adr/0054-d1-enrichment-write-through.md) writ
    3. Record the bookmark the import returns.
 5. **Replay the D1-only steps** in their recorded order, each reproducible from its private artifact. Today that is the AIR-286 TMDB credits of the watchlist Films; the AIR-44 person links will join it. The projector keeps those credits on later rewrites, but a reload drops them until they are replayed.
 6. **Verify** per-table counts against the build, plus the replayed rows.
-7. **Projector.** Set `D1_ENRICHMENT_WRITE=dry` and read the summary in the Worker logs (`event: d1_enrichment_projection`): changed counts should be only what R2 changed since the snapshot. Then set `on`. Unsetting the flag stops it; rows it wrote stay until a Time Travel restore.
+7. **Projector.** Set `D1_ENRICHMENT_WRITE=dry` and read the summary in the Worker logs (`event: d1_enrichment_projection`). The changed counts should be only what R2 changed since the snapshot. The outcomes that stop a run:
+   - `failed` with `reason` `input_missing`, `input_invalid`, `generation_unpublished` or `generation_moved` names the R2 input (`inputKey`) that was not complete. Nothing was written; the next hourly run tries again.
+   - `absent_guard` means more Films or Persons vanished than a routine sync explains. Look at R2 before setting `on`.
+
+   Then set `on`. Unsetting the flag stops it; rows it wrote stay until a Time Travel restore.
 
 Do not run a D1-only write step while the projector is `on` without pausing it: the projector reads a watchlist Film's D1-only credits before its batch, so a credit inserted between that read and the batch is dropped.
 

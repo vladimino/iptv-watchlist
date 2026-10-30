@@ -46,7 +46,7 @@ The **one-chunk continuation** is executed inside the explicit step/request that
 
 `wrangler.jsonc` binds `BUCKET` to R2 `iptv` and `DB` to the D1 database `iptv`. R2 stays authoritative for every existing page and writer. Pages read D1 only through the [D1 catalog views](../reference/api/d1-catalog.md) under `/api/d1/`, behind the same Access policy as the rest of `/api/`. The D1 data is the backfilled copy of R2 ([D1 backfill runbook](../runbooks/d1-backfill.md)).
 
-The one Worker cron trigger runs only the [enrichment projector](../adr/0054-d1-enrichment-write-through.md), never a sync, EPG, discovery or prediction step. With `D1_ENRICHMENT_WRITE` unset it returns at once.
+The one Worker cron trigger runs only the [enrichment projector](../adr/0056-d1-enrichment-write-through.md), never a sync, EPG, discovery or prediction step. With `D1_ENRICHMENT_WRITE` unset it returns at once.
 
 - With `dry`, it reads the enrichment objects from R2 and the change keys from D1, and logs the diff.
 - With `on`, it also writes the changed Films and Persons to D1 under its lease. That dashed arrow is the Worker's only D1 write path, and it never writes R2.

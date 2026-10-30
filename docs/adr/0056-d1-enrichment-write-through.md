@@ -1,9 +1,9 @@
-# ADR 0054: The first phase 2 step keeps R2 authoritative and projects the enrichment domain into D1 from a cron trigger
+# ADR 0056: The first phase 2 step keeps R2 authoritative and projects the enrichment domain into D1 from a cron trigger
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-30  
 **Recorded at:** 2026-10-30  
-**Approval source:** Owner decision in the AIR-275 working session on 2026-10-30 (write-through instead of an immediate write flip), recorded by the coordinator on [AIR-275](https://trello.com/c/4x7hH0gI) together with the review invariants  
+**Approval source:** Owner decisions in the AIR-275 working session on 2026-10-30: write-through instead of an immediate write flip, recorded by the coordinator on [AIR-275](https://trello.com/c/4x7hH0gI) together with the review invariants; and, after the first review of [PR #249](https://github.com/vladimino/iptv-watchlist/pull/249), a Worker cron trigger rather than an MCP tool called by the hourly Task or a run after the R2 commit. The ADR itself awaits owner acceptance.  
 **Related work:** [AIR-275](https://trello.com/c/4x7hH0gI), [AIR-286](https://trello.com/c/EswNQuv8), [ADR 0051](0051-d1-domain-r2-blobs.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -28,7 +28,11 @@ On the 2026-10-29 snapshot, one full lifecycle view took about 40 s of CPU. The 
 ## Decision
 
 1. **Write-through projection, R2 stays authoritative.** A projector (`src/d1-enrichment.js`) reads the enrichment records from R2. It builds the whole Film/Person view with the same reader and the same derivation (`src/enrichment-projection.js`) as the offline import. It then writes to D1 every Film and Person whose content changed. The R2 writers are not changed.
-2. **Change keys in D1, written atomically with the rows.** `projection_state` (schema v4, `migrations/0004_projection_state.sql`) holds a change key per Film and Person. The key is written in the same `db.batch` as the rows it describes, so a key never claims a write that did not commit. Time Travel and a reload bring the keys back with the rows. The key ignores values equal to the run's own clock, and the whole-file metadata hash, so an unchanged view converges to zero writes.
+
+   **The inputs fail closed.** Every object the view needs (`watchlist.json`, `metadata.json`, `titles.json`, `people.json`, `epg/discovery-resolution.json`) must be present and of its shape. The programme and the catalog are read only from the copies of the one generation `epg/published-generation.json` names as `published`, never from the root copies. That pointer must name the same generation after all the reads. A missing, malformed, unpublished or moved input stops the run before any D1 write (`input_missing`, `input_invalid`, `generation_unpublished`, `generation_moved`). A present, empty object is a real empty dataset. Only the Letterboxd diary may be absent, because its own switch can be off.
+2. **Change keys in D1, written atomically with the rows.** `projection_state` (schema v4, `migrations/0004_projection_state.sql`) holds a change key per Film and Person. The key is written in the same `db.batch` as the rows it describes, so a key never claims a write that did not commit. Time Travel and a reload bring the keys back with the rows. The key ignores values equal to the run's own clock, so an unchanged view converges to zero writes.
+
+   **Metadata checksum.** The projector writes `film_metadata.content_sha256` as NULL. A projected row comes from a live read, not from a pinned object version, and the whole-file checksum of `metadata.json` would otherwise change with every Film. A row the reload wrote and the projector has not rewritten keeps the snapshot object's checksum, which stays true of that row.
 3. **Ownership in the repository.** `canonical-repository.js` gains `projectFilm`, `projectLink`, `projectPerson` and `releaseFilm` with these rules:
    - **What the projector owns:** the Film row, its external ids and aliases, the identity and metadata dimensions, `film_metadata`, the watchlist membership, the Person rows, and the credits R2 supplies.
    - **What it never writes:** the fingerprint and prediction dimensions.
@@ -39,7 +43,9 @@ On the 2026-10-29 snapshot, one full lifecycle view took about 40 s of CPU. The 
    - a Film also loses its watchlist membership.
 
    The Film row, its credits and its history stay, because they remain true of the Film. Re-canonicalization goes through the existing redirect path (`projectLink`).
-5. **Separate cron trigger, flag-gated.** The projector runs from a Worker cron trigger (`37 * * * *`), never from a sync or discovery step. `D1_ENRICHMENT_WRITE` controls it:
+
+   **Absent guard.** If a run finds more absent entities than the larger of 25 and 2 % of the stored keys, it writes nothing and ends as `absent_guard`. A routine sync removes far fewer. A larger drop points at broken input that still passed the shape checks, such as an empty watchlist, and needs an owner look before the flag stays `on`.
+5. **Separate cron trigger, flag-gated.** The projector runs from a Worker cron trigger (`37 * * * *`), never from a sync or discovery step. The owner chose this over an MCP tool called by the hourly Task and over a run after the R2 commit. The deploy registers the trigger in Cloudflare even while the flag is off. `D1_ENRICHMENT_WRITE` controls it:
    - `off` (the default) reads nothing;
    - `dry` reads R2 and the D1 keys and logs the diff;
    - `on` writes.
@@ -58,6 +64,7 @@ Not decided here: the real write flip of the enrichment writers, the person link
 - **Flip the enrichment writers now (D1 truth, R2 cache).** Deferred: it requires moving `metadataSync` and discovery to read their state from D1, which is phase 3 work inside the hourly EPG cycle.
 - **Change keys in an R2 object.** Rejected: they could not be written atomically with the D1 rows, and a Time Travel restore would not bring them back.
 - **Run the projector at the end of `metadataSync` or discovery.** Rejected: it would add a full view build to steps that already carry the memory-heavy part of the R2 pipeline.
+- **An MCP tool the hourly ChatGPT Task calls.** Rejected by the owner: it changes the Task's prompt (its own approval) and ties the projector to the Task running.
 
 ## Consequences
 

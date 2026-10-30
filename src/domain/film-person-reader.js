@@ -219,7 +219,7 @@ function personFacts(person,store,now){
  return {roleId,original:person.original||cache?.original||null,dictionary,cacheName:cache?.name||null,now};
 }
 // options.entitiesOnly returns the Films and People alone, without the sidecars and the legacy parity: the D1 enrichment projector
-// (AIR-275 phase 2, ADR 0054) needs nothing else, and building the rest roughly doubles the memory of one view.
+// (AIR-275 phase 2, ADR 0056) needs nothing else, and building the rest roughly doubles the memory of one view.
 function readLifecycle(store,now,options={}){
  const filmTitleIndex=store.filmTitleIndex||indexRecords(store.filmTitles,'id'),personNameIndex=store.personNameIndex||indexRecords(store.personNames,'id');
  const context={...store,filmTitleIndex,personNameIndex,diarySlugs:diarySlugIndex(store.diaryHistory)};

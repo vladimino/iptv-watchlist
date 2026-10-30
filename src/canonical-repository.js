@@ -1,5 +1,5 @@
 // AIR-70. D1 repository for canonical Film and Person records. The caller supplies the database and the domain result.
-// The offline import uses it, and since AIR-275 phase 2 (ADR 0054) the Worker bundle carries it for the enrichment projector.
+// The offline import uses it, and since AIR-275 phase 2 (ADR 0056) the Worker bundle carries it for the enrichment projector.
 // R2 stays authoritative. This module does not score a candidate or choose shows.
 
 export function createCanonicalRepository(db){
@@ -9,7 +9,7 @@ export function createCanonicalRepository(db){
   applyLink:input=>applyLink(db,input),
   readFilm:id=>readFilm(db,id),
   readPerson:id=>readPerson(db,id),
-  // AIR-275 phase 2 (ADR 0054): the enrichment projector writes inside its own transaction and reads nothing back.
+  // AIR-275 phase 2 (ADR 0056): the enrichment projector writes inside its own transaction and reads nothing back.
   projectFilm:input=>projectFilm(db,input),
   projectLink:input=>projectLink(db,input),
   projectPerson:input=>projectPerson(db,input),

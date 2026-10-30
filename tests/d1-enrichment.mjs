@@ -1,4 +1,4 @@
-// AIR-275 phase 2 / ADR 0054: the D1 enrichment projector. A D1 stand-in runs the real migrations in the sqlite3 CLI and applies
+// AIR-275 phase 2 / ADR 0056: the D1 enrichment projector. A D1 stand-in runs the real migrations in the sqlite3 CLI and applies
 // each batch as one transaction; R2 is a memory bucket. Covered: off reads nothing, dry writes nothing, on writes and converges,
 // change keys ignore the run's own clock, the D1-only TMDB credits of a watchlist Film survive and are renumbered while
 // Letterboxd credits come and go, the R2 roster wins a duplicate, a catalog Film's credits follow R2, fingerprint and prediction
@@ -42,7 +42,12 @@ function r2({heat=[PACINO,DE_NIRO],collateral=true,catalogActors=[person('tmdb_a
  put('metadata.json',Object.fromEntries(films.map(item=>[item.id,meta(item)])));
  put('titles.json',{});put('people.json',{});
  put('epg/discovery-resolution.json',{});
+ put('epg/published-generation.json',{phase:'published',programmeRunId:'run-1'});
  put('epg/discovered-films.json',{tmdb_100:{id:'tmdb_100',tmdbId:'100',title:'Ronin',original:'Ronin',year:1998,discoveredAt:T,synopsis:'Overview',directors:[person('tmdb_director/1','John Frankenheimer')],actors:catalogActors},...(heatCatalog?{tmdb_949:{id:'tmdb_949',tmdbId:'949',title:'Heat',original:'Heat',year:1995,discoveredAt:T,synopsis:'Overview',directors:[],actors:heatCatalog}}:{})});
+ // The projector reads the published generation's copies, never the root ones.
+ bucket.objects.set('epg/generations/run-1/programme.json',bucket.objects.get('programme.json'));
+ bucket.objects.set('epg/generations/run-1/discovered-films.json',bucket.objects.get('epg/discovered-films.json'));
+ bucket.objects.delete('programme.json');bucket.objects.delete('epg/discovered-films.json');
  return bucket;
 }
 const reads=bucket=>{const counted={count:0};const get=bucket.get.bind(bucket);bucket.get=async key=>{counted.count++;return get(key);};return counted;};
@@ -177,7 +182,47 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  assert.equal(one(failing,"SELECT COUNT(*) FROM projection_state WHERE id='person:actor/robert-de-niro'"),0);
 }
 
-// 13. Status: a database without schema v4 has no projector; with it, checkpoints and the last run.
+// 13. Inputs fail closed: a missing or malformed object, an unpublished pointer, a missing generation copy or a pointer that
+// moves during the reads stops the run before any D1 write. An empty but present dataset is data, guarded by the absent limit.
+{
+ const keys=()=>db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
+ const before=keys(),batches=db.calls.batches;
+ const broken=[
+  ['watchlist.json',bucket=>bucket.objects.delete('watchlist.json'),'input_missing'],
+  ['metadata.json',bucket=>bucket.put('metadata.json','not json'),'input_invalid'],
+  ['people.json',bucket=>bucket.put('people.json','[]'),'input_invalid'],
+  ['watchlist.json',bucket=>bucket.put('watchlist.json',JSON.stringify({films:null})),'input_invalid'],
+  ['epg/generations/run-1/discovered-films.json',bucket=>bucket.objects.delete('epg/generations/run-1/discovered-films.json'),'input_missing'],
+  ['epg/generations/run-1/programme.json',bucket=>bucket.objects.delete('epg/generations/run-1/programme.json'),'input_missing'],
+  ['epg/published-generation.json',bucket=>bucket.put('epg/published-generation.json',JSON.stringify({phase:'staging',programmeRunId:'run-1'})),'generation_unpublished'],
+  ['epg/published-generation.json',bucket=>bucket.objects.delete('epg/published-generation.json'),'input_missing'],
+ ];
+ for(const [key,breakIt,reason] of broken){
+  const next=r2({heat:[PACINO]});breakIt(next);
+  for(const mode of ['dry','on']){
+   const summary=await run({DB:db,BUCKET:next,D1_ENRICHMENT_WRITE:mode});
+   assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['failed',reason,key],key+' '+mode);
+  }
+ }
+ // The pointer moves to another generation between the first and the second read.
+ const moving=r2({heat:[PACINO]});let pointerReads=0;const get=moving.get.bind(moving);
+ moving.get=async key=>{if(key==='epg/published-generation.json'&&++pointerReads===2)await moving.put(key,JSON.stringify({phase:'published',programmeRunId:'run-2'}));return get(key);};
+ assert.equal((await run({DB:db,BUCKET:moving,D1_ENRICHMENT_WRITE:'on'})).reason,'generation_moved');
+ // A diary history that is absent is fine: its switch can be off.
+ assert.equal(bucket.objects.has('letterboxd/diary/history.json'),false);
+ assert.equal(db.calls.batches,batches,'no failed input reached a batch');
+ assert.deepEqual(keys(),before);
+ // An empty but present watchlist is a real dataset; past the absent limit it is held as suspect and nothing is written.
+ const values=Array.from({length:30},(_,index)=>`('enrichment','person','person:actor/ghost-${index}','k','${T}')`).join(',');
+ db.sql('INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES '+values);
+ const guarded=await run(env);
+ assert.deepEqual([guarded.outcome,guarded.absent,guarded.absentLimit],['absent_guard',30,25]);
+ assert.equal(db.calls.batches,batches);
+ db.sql("DELETE FROM projection_state WHERE id LIKE 'person:actor/ghost-%'");
+ assert.equal((await run(env)).outcome,'complete');
+}
+
+// 14. Status: a database without schema v4 has no projector; with it, checkpoints and the last run.
 {
  const {db:v3}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity']);
  assert.deepEqual({...await projector.d1EnrichmentStatus(v3,{})},{mode:'off',schema:false});
@@ -186,7 +231,7 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  assert.ok(status.checkpoints>9&&status.absent>0);
 }
 
-// 14. The seed writes keys only for entities the database holds and replaces the projection's earlier keys.
+// 15. The seed writes keys only for entities the database holds and replaces the projection's earlier keys.
 {
  const {file:seedFile}=migrated();fs.copyFileSync(file,seedFile);
  const sqlite=openSqlite(seedFile);
@@ -197,4 +242,4 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  await assert.rejects(seedProjection(openSqlite(bare),{at:T,keys:[]}),/apply migrations\/0004/);
 }
 
-console.log('D1 enrichment projector (ADR 0054): off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed');
+console.log('D1 enrichment projector (ADR 0056): off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed');

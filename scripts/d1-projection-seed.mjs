@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AIR-275 phase 2 (ADR 0054). After an offline import fills a database from a snapshot, this writes the enrichment projector's
+// AIR-275 phase 2 (ADR 0056). After an offline import fills a database from a snapshot, this writes the enrichment projector's
 // change keys for that snapshot into projection_state, so the first projector run after a reload writes only what R2 changed
 // since the snapshot instead of every Film and Person. A key is written only for a Film or Person the database holds; anything
 // the import left out is written by the projector. The keys come from the same store, reader and derivation the Worker uses.

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-// AIR-275 phase 2 (ADR 0054): a file shared with the offline tools runs in its own scope, so its helpers cannot collide with
+// AIR-275 phase 2 (ADR 0056): a file shared with the offline tools runs in its own scope, so its helpers cannot collide with
 // Worker names. An ES module gives its exports; a plain script names what it hands over. Neither may import anything.
 export function scoped(file,name,names){
  const source=fs.readFileSync(file,'utf8');

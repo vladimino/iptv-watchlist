@@ -1,4 +1,4 @@
-// AIR-275 phase 2 (ADR 0054). The enrichment slice of the Film/Person domain: the film, credit, metadata and person inputs
+// AIR-275 phase 2 (ADR 0056). The enrichment slice of the Film/Person domain: the film, credit, metadata and person inputs
 // derived from R2 records the caller already loaded and from a lifecycle view the caller already built. The offline import and
 // the Worker projector both take their rows from here, so a reload and a live write derive the same rows.
 // This module does not read or write storage. The Worker bundle wraps it in a scope; Node imports it as a module.
@@ -71,6 +71,9 @@ export function enrichmentStore({watchlist=null,programme=null,metadata=null,tit
 // One input per Film of the view and one per Person. A Film keeps only what the enrichment writer owns: fingerprint, prediction,
 // prediction history and availability belong to other writers. Credits stay undefined when a source person id cannot be mapped,
 // as the offline import leaves a Film's credits alone in that case.
+// metadataSha256 names the metadata.json version a row was read from. The offline import passes the snapshot object's checksum;
+// the projector and its seed pass none, so a projected film_metadata row carries content_sha256 NULL: it comes from a live read,
+// not from a pinned object version, and no checksum of another Film's change ever lands on it (ADR 0056).
 export function enrichmentInputs({view,store,metadataSha256=null}){
  const sources=sourceIndex(store);
  const films=view.films.map(film=>{
@@ -109,12 +112,11 @@ function orderedRecords(store,byId,ids){
 }
 
 // The change key of one input. Values equal to the run's own clock are replaced first: the lifecycle reader stamps a dimension
-// with "now" when its source carries no time, and that stamp must not make every Film look changed on every run. The metadata
-// content hash names the whole metadata.json version and changes with any Film; it is written but not compared.
+// with "now" when its source carries no time, and that stamp must not make every Film look changed on every run.
 export function filmChangeKey(entry,nowIso){return projectionKey({film:entry.film,watchlist:entry.watchlist,credits:entry.credits??null,metadata:entry.metadata},nowIso);}
 export function personChangeKey(entry,nowIso){return projectionKey(entry.person,nowIso);}
 export function projectionKey(entry,nowIso){
- const text=JSON.stringify(entry,(key,value)=>value===nowIso?'@now':key==='contentSha256'?undefined:value);
+ const text=JSON.stringify(entry,(key,value)=>value===nowIso?'@now':value);
  return ENRICHMENT_PROJECTION_VERSION+':'+text.length+':'+hash53(text,1)+hash53(text,2);
 }
 function hash53(text,seed){

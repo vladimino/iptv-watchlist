@@ -1,4 +1,4 @@
-// AIR-275 phase 2 (ADR 0054): the enrichment projector. R2 stays authoritative; D1 follows it.
+// AIR-275 phase 2 (ADR 0056): the enrichment projector. R2 stays authoritative; D1 follows it.
 // One run reads the R2 records the enrichment writers keep (watchlist, programme, metadata, people, titles, the catalog of
 // discovered films, the discovery resolution and the Letterboxd diary), builds the whole Film/Person view with the same reader and
 // the same derivation as the offline import, and compares each Film and Person with the change key D1 holds for it. Only a changed
@@ -12,6 +12,7 @@ const D1_ENRICHMENT_LEASE_MS=10*60000;
 const D1_ENRICHMENT_QUERY_BUDGET=800;
 const D1_ENRICHMENT_WALL_MS=60000;
 const D1_ENRICHMENT_PERSON_BATCH=25;
+const D1_ENRICHMENT_ABSENT_MIN=25,D1_ENRICHMENT_ABSENT_SHARE=0.02;
 const D1_ENRICHMENT_FENCE='INSERT INTO projection_fence (held) SELECT COUNT(*) FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?';
 const D1_ENRICHMENT_STATE="INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES (?,?,?,?,?) ON CONFLICT(projection,kind,id) DO UPDATE SET change_key=excluded.change_key,projected_at=excluded.projected_at";
 
@@ -36,13 +37,41 @@ function d1EnrichmentAdapter(binding){
  };
 }
 
+// The inputs fail closed. Every object the view needs must be present and of its shape: a missing object stops the run before
+// any D1 write, while a present, empty one is a real empty dataset. The programme and the catalog are read from the one published
+// generation the pointer names, never from the root copies, and the pointer must name that same generation after the reads, so
+// a run never mixes two generations. Only the Letterboxd diary is optional: it is absent while its own switch is off.
+class D1EnrichmentInputError extends Error{constructor(reason,key){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;}}
+const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
+async function d1EnrichmentRead(env,key,shape,required=true){
+ const object=await env.BUCKET.get(key);
+ if(!object){if(required)throw new D1EnrichmentInputError('input_missing',key);return null;}
+ let value;
+ try{value=await object.json();}catch{throw new D1EnrichmentInputError('input_invalid',key);}
+ if(!shape(value))throw new D1EnrichmentInputError('input_invalid',key);
+ return value;
+}
+async function d1EnrichmentGeneration(env){
+ const pointer=await d1EnrichmentRead(env,EPG_GENERATION_KEY,d1EnrichmentRecord);
+ if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
+ return pointer.programmeRunId;
+}
 async function d1EnrichmentStore(env){
- const metadataObject=await env.BUCKET.get('metadata.json');
- const metadataText=metadataObject?await metadataObject.text():null;
- const metadataSha256=metadataText==null?null:[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(metadataText)))].map(byte=>byte.toString(16).padStart(2,'0')).join('');
- const [watchlist,programme,titles,people,discoveredFilms,discoveryResolution,diaryHistory]=await Promise.all(['watchlist.json','programme.json','titles.json','people.json','epg/discovered-films.json','epg/discovery-resolution.json','letterboxd/diary/history.json'].map(key=>loadJSON(env,key)));
- const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata:metadataText==null?null:JSON.parse(metadataText),titles,people,discoveredFilms,discoveryResolution,diaryHistory,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
- return {store,metadataSha256};
+ const runId=await d1EnrichmentGeneration(env);
+ const [watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory]=await Promise.all([
+  d1EnrichmentRead(env,'watchlist.json',d1EnrichmentFilmList),
+  d1EnrichmentRead(env,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
+  d1EnrichmentRead(env,'metadata.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,'titles.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,'people.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,epgGenerationKey(runId,'discovered-films.json'),d1EnrichmentRecord),
+  d1EnrichmentRead(env,'epg/discovery-resolution.json',d1EnrichmentRecord),
+  d1EnrichmentRead(env,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
+ ]);
+ if(await d1EnrichmentGeneration(env)!==runId)throw new D1EnrichmentInputError('generation_moved',EPG_GENERATION_KEY);
+ const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
+ return {store,programmeRunId:runId};
 }
 
 // The plan of one run: every Person and Film whose change key differs from the stored one, and every stored entity the view
@@ -76,12 +105,16 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
  if(mode==='on'&&!(await d1EnrichmentLease(db,leaseId)))return {...summary,skipped:'lease_held'};
  try{
   const plan=await d1EnrichmentDiff(env,db,now,summary);
+  // More absences than a routine sync explains point at broken input, not at real removals: nothing is written.
+  const absentLimit=Math.max(D1_ENRICHMENT_ABSENT_MIN,Math.ceil(summary.stored*D1_ENRICHMENT_ABSENT_SHARE));
+  if(plan.absent.length>absentLimit){summary.outcome='absent_guard';summary.absentLimit=absentLimit;return summary;}
   if(mode==='dry'){summary.outcome='dry';return summary;}
   const written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs});
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
   return summary;
  }catch(error){
   summary.outcome='failed';summary.error=String(error?.message||error).slice(0,200);
+  if(error instanceof D1EnrichmentInputError){summary.reason=error.reason;summary.inputKey=error.key;}
   return summary;
  }finally{
   summary.queries=db.queries;summary.durationMs=Date.now()-started;
@@ -91,12 +124,13 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
 }
 
 // The R2 records, the view and every input live only inside this function: once it returns, only the changed entries remain,
-// so the write phase does not hold the whole view (about 50 MB of heap on the 2026-10-29 snapshot, ADR 0054).
+// so the write phase does not hold the whole view (about 50 MB of heap on the 2026-10-29 snapshot, ADR 0056).
 async function d1EnrichmentDiff(env,db,now,summary){
  const started=Date.now(),nowIso=new Date(now).toISOString();
- const {store,metadataSha256}=await d1EnrichmentStore(env);
+ const {store,programmeRunId}=await d1EnrichmentStore(env);
+ summary.programmeRunId=programmeRunId;
  summary.loadMs=Date.now()-started;
- const inputs=EnrichmentProjection.enrichmentInputs({view:LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),store,metadataSha256});
+ const inputs=EnrichmentProjection.enrichmentInputs({view:LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),store});
  summary.viewMs=Date.now()-started-summary.loadMs;
  const stored=new Map((await db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
  const plan=d1EnrichmentPlan(inputs,stored,nowIso);

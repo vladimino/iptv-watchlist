@@ -1,6 +1,6 @@
 # D1 schema v1
 
-[AIR-49](https://trello.com/c/YNaLFwtW) is this schema and the storage boundary. The schema is `migrations/0001_schema_v1.sql` with `0002`, `0003` and `0004` (schema v4). Production D1 database `iptv` holds schema v3 and the backfilled copy of R2, and is bound to the Worker as `DB`. Migration `0004` adds the enrichment projector's checkpoint ([ADR 0054](../../adr/0054-d1-enrichment-write-through.md)); applying it to `iptv` is a separate owner approval. The Worker reads D1 through the [D1 catalog views](../api/d1-catalog.md). Its only write path is the [enrichment projector](#enrichment-projector-schema-v4), which stays inert while `D1_ENRICHMENT_WRITE` is unset. R2 bucket `iptv` remains the authoritative store.
+[AIR-49](https://trello.com/c/YNaLFwtW) is this schema and the storage boundary. The schema is `migrations/0001_schema_v1.sql` with `0002`, `0003` and `0004` (schema v4). Production D1 database `iptv` holds schema v3 and the backfilled copy of R2, and is bound to the Worker as `DB`. Migration `0004` adds the enrichment projector's checkpoint ([ADR 0056](../../adr/0056-d1-enrichment-write-through.md)); applying it to `iptv` is a separate owner approval. The Worker reads D1 through the [D1 catalog views](../api/d1-catalog.md). Its only write path is the [enrichment projector](#enrichment-projector-schema-v4), which stays inert while `D1_ENRICHMENT_WRITE` is unset. R2 bucket `iptv` remains the authoritative store.
 
 [AIR-70](https://trello.com/c/8PRWRx2C), [AIR-71](https://trello.com/c/UAUUQ2jh), and [AIR-72](https://trello.com/c/MfAGc1Dd) are the later repositories. [AIR-73](https://trello.com/c/gX2xdQAz) is the later offline importer. Live backfill starts only at [AIR-74](https://trello.com/c/5AdAmKPe), after [AIR-69](https://trello.com/c/FlcWZX7W). [AIR-42](https://trello.com/c/drLBuWjl) still owns identity transitions, [AIR-43](https://trello.com/c/7NY6n1Az) still owns scoring, and [AIR-48](https://trello.com/c/rVf8rRoJ) still owns which observation is current. This schema does not copy those rules. [AIR-53](https://trello.com/c/gkuy1awG) is not built here.
 
@@ -59,7 +59,7 @@ One publish, decision, or score is one database transaction. A failed statement 
 
 ## Canonical repository
 
-[AIR-70](https://trello.com/c/8PRWRx2C) is `src/canonical-repository.js`. It does not open R2 or a database itself. Since [ADR 0054](../../adr/0054-d1-enrichment-write-through.md), the Worker bundle carries it in its own scope for the enrichment projector only. The caller passes a database and the Film or Person view already produced by the lifecycle contract. [AIR-42](https://trello.com/c/drLBuWjl) still decides a link, a reviewed value, and an identity collision. This module stores that result.
+[AIR-70](https://trello.com/c/8PRWRx2C) is `src/canonical-repository.js`. It does not open R2 or a database itself. Since [ADR 0056](../../adr/0056-d1-enrichment-write-through.md), the Worker bundle carries it in its own scope for the enrichment projector only. The caller passes a database and the Film or Person view already produced by the lifecycle contract. [AIR-42](https://trello.com/c/drLBuWjl) still decides a link, a reviewed value, and an identity collision. This module stores that result.
 
 `saveFilm` and `savePerson` replace the external ids and the dimension rows other than a held localization. Aliases are added to the stored set. A later save does not remove an alias already stored. Credits are replaced only when the call passes `credits`, including an empty list. An omitted `credits` leaves the stored edges. A repeated payload does not add another alias, credit, external id, conflict, or redirect. A stored `reviewed` localization stays in place when the incoming value is weaker. An owner-reviewed value also stays when the incoming value is dictionary-reviewed. That check is part of the write, so a plan that read an older row cannot replace an owner value committed before that write. The rejected value stays as one alias and one conflict. Two records cannot both hold the same trusted external id. The second write is rejected and does not insert that record.
 
@@ -135,7 +135,7 @@ The programme generation unit is the one unit the executor cannot send as one re
 
 ## Enrichment projector (schema v4)
 
-[ADR 0054](../../adr/0054-d1-enrichment-write-through.md): migration `0004` adds three tables.
+[ADR 0056](../../adr/0056-d1-enrichment-write-through.md): migration `0004` adds three tables.
 
 | Table | Holds |
 | --- | --- |
@@ -151,6 +151,10 @@ The repository's projector methods differ from `saveFilm`, `savePerson` and `app
 - **`releaseFilm`** removes only the watchlist membership of a Film no source lists. It skips a redirected id.
 
 None of these methods reads back.
+
+A projected `film_metadata` row has `r2_key` `metadata.json` and `content_sha256` NULL: it comes from a live read, not from a pinned object version. A row the reload wrote keeps the snapshot object's checksum until the projector rewrites it.
+
+The projector fails closed on its R2 inputs: missing, malformed, unpublished or moved inputs stop a run before any write. It also holds a run with more absences than the larger of 25 and 2 % of the stored keys (`absent_guard`). See [ADR 0056](../../adr/0056-d1-enrichment-write-through.md).
 
 `scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
 

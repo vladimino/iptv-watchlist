@@ -41,7 +41,7 @@ INSERT INTO import_receipt VALUES('k','s','film','film:tmdb:1','${T}');
 `);
 
 const ctx=vm.createContext({Response,URL,JSON,Promise,Number,String,Math});
-// The status view also reports the enrichment projector (ADR 0054); its read-only status function comes from its own module.
+// The status view also reports the enrichment projector (ADR 0056); its read-only status function comes from its own module.
 vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+fs.readFileSync('src/d1-enrichment.js','utf8')+'\n'+source+'\nglobalThis.route=catalogD1Route;',ctx);
 const get=async(p,env={DB},method='GET')=>{const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p,{method}),env,new URL('https://iptv.test/api/d1/'+p));return {status:res.status,body:await res.json()};};
 

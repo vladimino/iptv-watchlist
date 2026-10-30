@@ -1,4 +1,4 @@
--- AIR-275 phase 2 schema v4: the checkpoint of the enrichment projector (ADR 0054). Additive; changes nothing of 0001-0003.
+-- AIR-275 phase 2 schema v4: the checkpoint of the enrichment projector (ADR 0056). Additive; changes nothing of 0001-0003.
 -- projection_state holds, per Film and per Person, the change key of the last input the projector wrote to D1. It is written in
 -- the same batch as the rows it describes, so it never claims a write that did not commit, and a Time Travel restore or a reload
 -- brings it back together with those rows. change_key 'absent' marks an entity no R2 source lists any more.

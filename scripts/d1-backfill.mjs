@@ -148,7 +148,7 @@ export async function probeAtomicity(adapter,{statements=DEFAULT_MAX_BATCH_STATE
 }
 
 // Every run needs the whole schema: 0001, the staging tables of 0002, the candidate show identity of 0003 (ADR-0025) and the
-// projection checkpoint of 0004 (ADR 0054). A table a migration creates only to rename it over an older one is not one of its objects.
+// projection checkpoint of 0004 (ADR 0056). A table a migration creates only to rename it over an older one is not one of its objects.
 export const SCHEMA_MIGRATIONS=['migrations/0001_schema_v1.sql','migrations/0002_generation_stage.sql','migrations/0003_candidate_show_identity.sql','migrations/0004_projection_state.sql'];
 export function schemaTables(){
  return [...new Set(SCHEMA_MIGRATIONS.flatMap(file=>{const text=fs.readFileSync(path.join(REPO_ROOT,file),'utf8'),renamed=new Set([...text.matchAll(/ALTER TABLE ([a-z_0-9]+) RENAME TO/g)].map(match=>match[1]));return [...text.matchAll(/CREATE TABLE ([a-z_0-9]+)/g)].map(match=>match[1]).filter(name=>!renamed.has(name));}))].sort();

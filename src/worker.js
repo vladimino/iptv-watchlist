@@ -326,7 +326,7 @@ async function beginSync(env){
  if(films.size!==total)throw new Error(`Incomplete watchlist: ${films.size}/${total}`);
  const verify=parseWatchlist(await getHTML(sources.watchlist));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
  const cache=await loadJSON(env,'metadata.json')||{};const all=[...films.values()].map(f=>cache[f.id]?{...cache[f.id],...f,aliases:cache[f.id].aliases}:f);const pending=all.filter(f=>!f.metadataAt||f.peopleVersion!==1||f.peopleNamesVersion!==2||!f.synopsisFetchedAt||Date.now()-Date.parse(f.metadataAt)>30*86400000).map(f=>f.id);
- const ratingPending=['public-films-list'];
+ const ratingPending=['letterboxd-diary'];
  const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,ratingPending,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
@@ -463,48 +463,69 @@ async function resumeRemovalLookups(env,run){
 }
 // AIR-270: the post-commit ratings work carries a durable attempt marker in sync.json. Each phase is saved (and logged)
 // before it starts, so a request killed for memory or time leaves `state: started` with the phase it died in. The next
-// step on the completed run closes such an attempt as `unknown` once it is stale; it never repeats the films-list scan.
+// step on the completed run closes such an attempt as `unknown` once it is stale; it never repeats the diary read.
 const RATINGS_ATTEMPT_STALE_MS=5*60000;
 async function ratingsPhase(env,run,phase,save=true){
  const at=new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,phase,at};
  console.log(JSON.stringify({event:'epg_ratings_phase',runId:run.runId,attemptId:run.ratingAttempt.id,phase,at}));
  if(save)await saveJSON(env,'sync.json',run);
 }
-function ratingsAttemptCause(message){if(/403|anti-bot/i.test(message))return 'blocked';if(/429/.test(message))return 'rate_limited';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'incomplete';return 'failed';}
 async function closeInterruptedRatings(env,run,now=Date.now()){
  if(run.stage!=='complete'||!run.ratingPending?.length)return null;
  const attempt=run.ratingAttempt,since=Date.parse(attempt?.at||run.updatedAt);
  if(attempt&&attempt.state!=='started'||!(now-since>RATINGS_ATTEMPT_STALE_MS))return null;
  const at=new Date(now).toISOString(),phase=attempt?.phase||'not_recorded';
  run.ratingAttempt={...(attempt||{id:null,startedAt:null}),state:'unknown',cause:'interrupted',interruptedPhase:phase,closedAt:at};
- run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`+(attempt?.listCause&&run.ratingError?`; films list: ${run.ratingError}`:'');run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
+ run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
+}
+// AIR-287 (ADR 0054): the ratings after an EPG commit are Diary-first. The diary history stage reads at most
+// LetterboxdDiary.MAX_PAGES pages; after each page's history commit, every film on that page becomes a watched fact and,
+// where the diary proves it, a rating fact (no cap on rows). Then the bounded per-film removal lookup runs, only for
+// removed films the diary did not give a rating. The public films list is no longer scanned. Nothing here is fatal to
+// the commit; with LETTERBOXD_DIARY_HISTORY off, only the removal lookup runs.
+async function diaryRatingsStage(env,run){
+ const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0},ratings={};
+ const afterPage=async({page,rows,next,history})=>{
+  const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
+  const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next});
+  for(const item of evidence)facts[item.ratingState]++;
+  // Only a rating the diary proved counts: it reaches the removal event (as the film's effective rating, which a newer
+  // observation may hold) and spares the per-film lookup. A stored rating without diary proof does neither.
+  for(const item of evidence)if(item.rating!=null)ratings[item.lid]=item.rating;
+  if(env.LETTERBOXD_FACTS!=='on')return;
+  const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
+  for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
+  for(const lid of Object.keys(ratings))if(result.ratings[lid]!=null)ratings[lid]=result.ratings[lid];
+ };
+ try{
+  const diary=await LetterboxdDiary.syncHistory(env,{afterPage});
+  run.diaryHistory={outcome:diary.lastOutcome,stopReason:diary.stopReason,counts:diary.counts,resumePage:diary.resumePage,coverage:diary.coverage,facts:{...facts,enabled:env.LETTERBOXD_FACTS==='on'},at:diary.lastAttemptAt};
+ }catch(e){run.diaryHistory={outcome:'failed',stopReason:'error:'+String(e.message).slice(0,120),facts:{...facts,enabled:env.LETTERBOXD_FACTS==='on'},at:new Date().toISOString()};}
+ return ratings;
 }
 async function completeWithRatings(env,run,report){
  if(run.ratingPending?.length)run.ratingAttempt={id:crypto.randomUUID(),state:'started',startedAt:new Date().toISOString()};
  if(run.ratingAttempt?.state==='started')await ratingsPhase(env,run,'post_commit',false);
  const result=await finishSync(env,run,report);
- // The removed films first, so a films-list failure or a killed request later on does not cost their ratings.
+ const pending=!!run.ratingPending?.length,diaryOn=pending&&LetterboxdDiary.enabled(env);
+ let diaryRatings={};
+ if(diaryOn){await ratingsPhase(env,run,'diary');diaryRatings=await diaryRatingsStage(env,run);}
+ // Removal events get the ratings the diary proved; the per-film lookup then runs only for the rest.
+ const removed=removalFilmIds(run),proved=Object.fromEntries(removed.filter(id=>diaryRatings[id]!=null).map(id=>[id,diaryRatings[id]]));
+ if(Object.keys(proved).length)await enrichKnownRemovalEvent(env,run,proved,run.diaryHistory?.at||new Date().toISOString());
+ if(run.removalLookups&&Object.keys(proved).length){run.removalLookups=run.removalLookups.filter(film=>proved[film.id]==null);run.removalDiaryResolved=Object.keys(proved);}
  if(run.ratingAttempt?.state==='started'&&run.removalLookups)await ratingsPhase(env,run,'removal_lookup');
  const lookup=await resumeRemovalLookups(env,run);
- if(!run.ratingPending?.length)return lookup?{...result,removalRatings:lookup}:result;
- // AIR-51: the diary history stage, behind LETTERBOXD_DIARY_HISTORY. Bounded and never fatal; its page-1 rows feed the
- // diary repair below, so the diary is read once per commit.
- let diaryRows=null;
- if(LetterboxdDiary.enabled(env)){
-  await ratingsPhase(env,run,'diary');
-  try{const diary=await LetterboxdDiary.syncHistory(env);diaryRows=diary.firstPageRows;run.diaryHistory={outcome:diary.lastOutcome,stopReason:diary.stopReason,counts:diary.counts,resumePage:diary.resumePage,at:diary.lastAttemptAt};}
-  catch(e){diaryRows=[];run.diaryHistory={outcome:'failed',stopReason:'error:'+String(e.message).slice(0,120),at:new Date().toISOString()};}
- }
- await ratingsPhase(env,run,'films_list');
- try{const ratings=await refreshRatingsFromFilms(env,report,removalFilmIds(run));await enrichKnownRemovalEvent(env,run,ratings.removedRatings,ratings.observedAt);delete run.ratingPending;delete run.ratingError;run.ratingObservedAt=ratings.observedAt||new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,state:'finished',finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatings:ratings};}
- catch(e){
-  // The list outcome is known now, the attempt is not: it stays `started` through the repairs, so a request killed
-  // during them is still closed by the next step. It becomes terminal `error` only once the repairs are done.
-  run.ratingError=String(e.message).slice(0,200);run.ratingAttempt={...run.ratingAttempt,listCause:ratingsAttemptCause(run.ratingError)};await ratingsPhase(env,run,'repair');
-  let removed,diary;try{removed=await repairRemovedBaselineRatings(env,report);}catch(repairError){removed={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
-  try{diary=await repairRecentDiaryRatings(env,report,diaryRows);}catch(repairError){diary={attempted:0,saved:0,errors:[{error:String(repairError.message).slice(0,160)}]};}
-  const repair={removed,diary};run.ratingRepair=repair;run.ratingAttempt={...run.ratingAttempt,state:'error',cause:run.ratingAttempt.listCause,finishedAt:new Date().toISOString()};await saveJSON(env,'sync.json',run);return {...result,personalRatingError:run.ratingError,personalRatingRepair:repair};}
+ if(!pending)return lookup?{...result,removalRatings:lookup}:result;
+ const outcome=run.diaryHistory?.outcome||null,failed=diaryOn&&['failed','blocked','rate_limited'].includes(outcome);
+ delete run.ratingPending;
+ if(failed){run.ratingError=('Letterboxd diary '+outcome+': '+(run.diaryHistory.stopReason||'')).slice(0,200);}else delete run.ratingError;
+ if(diaryOn&&!failed)run.ratingObservedAt=run.diaryHistory.at;
+ const cause=!diaryOn?'diary_off':failed?(outcome==='failed'?'failed':outcome):null;
+ run.ratingAttempt={...run.ratingAttempt,state:failed?'error':'finished',source:diaryOn?'letterboxd_diary':'none',...(cause?{cause}:{}),finishedAt:new Date().toISOString()};
+ await saveJSON(env,'sync.json',run);
+ return {...result,diaryHistory:run.diaryHistory||null,...(lookup?{removalRatings:lookup}:{}),...(failed?{personalRatingError:run.ratingError}:{})};
 }
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
@@ -550,7 +571,7 @@ async function epgSync(env,run){
  await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
 export default {
-// AIR-275 phase 2 (ADR 0054): the cron trigger runs only the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
+// AIR-275 phase 2 (ADR 0056): the cron trigger runs only the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
 async scheduled(controller,env,execution){execution.waitUntil(runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}));},
 async fetch(request,env,execution){
  const url=new URL(request.url);

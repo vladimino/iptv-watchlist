@@ -4,7 +4,7 @@
 **Input:** the private production snapshot of 29 October 2026, 19:31–19:58 UTC: `consistent_fenced`, 11,811 objects, 829,729,965 bytes, aggregate `062c9812…250dda`. This is the snapshot the production D1 reload of 30 October was built from.  
 **Database:** a private copy of that reload's local build (schema v3) with `migrations/0004_projection_state.sql` applied.  
 **Scope:** private files and local SQLite only, through the test D1 stand-in (`tests/d1-standin.mjs`). No R2 or D1 request, and no flag, Task or migration change.  
-**Card:** [AIR-275](https://trello.com/c/4x7hH0gI); decision [ADR 0054](../../adr/0054-d1-enrichment-write-through.md).  
+**Card:** [AIR-275](https://trello.com/c/4x7hH0gI); decision [ADR 0056](../../adr/0056-d1-enrichment-write-through.md).  
 **Verdict:** the projector converges and writes what the reload writes. A run fits the Worker's limits in Node. **Not a production measurement:** `dry` in the Worker is the first one.
 
 Aggregates only. Film ids, titles and payloads stay private.
@@ -47,6 +47,7 @@ Retained heap after a forced collection, at each stage:
 | Keys seeded from the snapshot (`scripts/d1-projection-seed.mjs`), then a run | 19,746 keys seeded in 8.7 s. The run changed 0 Persons, 0 Films and 0 absent; 4 D1 queries, no batch. |
 | No keys, one run with an unlimited budget | 17,344 Persons and 2,402 Films written, 0 errors. 28,437 queries and 3,096 batches (238,250 statements), 196 s on the stand-in. |
 | The next run after that | 0 changed |
+| After the review fixes (inputs from the published generation's copies, NULL metadata checksum), keys re-seeded from the snapshot's root copies, then a `dry` run | 0 Persons, 0 Films and 0 absent changed: the snapshot's root and generation copies give the same keys |
 
 **Reload comparison.** After the unlimited run, 13 tables were compared with the reload build, row for row, without their `updated_at` columns: `film`, `film_external_id`, `film_alias`, `film_dimension`, `film_metadata`, `film_person_credit`, `watchlist_film`, `film_redirect`, `person`, `person_alias`, `person_external_id`, `person_dimension` and `localization_conflict`.
 

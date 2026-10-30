@@ -18,11 +18,12 @@ const bucket={
 };
 const review=(slug,rating)=>`<script type="application/ld+json">{"@type":"Review","author":[{"sameAs":"https://letterboxd.com/demo-user/"}],"itemReviewed":{"sameAs":"https://letterboxd.com/film/${slug}/"},"reviewRating":{"ratingValue":${rating}}}</script>`;
 // Per-film page behavior by slug: a number is the owner's rating, 'none' a page without the owner's rating, 404, 403 or 429.
-const pages=new Map();
+const pages=new Map();let diaryPage=null;
+const diaryRow=(lid,stars,date)=>{const [y,m,d]=date.split('-');return `<tr class="diary-entry-row"><td><a href="/demo-user/diary/films/for/${y}/${m}/${d}/">${d}</a></td><td><div data-postered-identifier="{&quot;lid&quot;:&quot;${lid}&quot;}"></div></td><td>${stars?`<span class="rating rated-${stars}"></span>`:''}</td></tr>`;};
 const ctx=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout:fn=>fn(),fetch:async url=>{
  url=String(url);fetches.push(url);
  if(url.includes('/films/'))return {ok:false,status:403,text:async()=>'<title>Just a moment...</title>'};
- if(url.includes('/diary/'))return {ok:true,status:200,text:async()=>'<html>no diary table</html>'};
+ if(url.includes('/diary/'))return diaryPage?{ok:true,status:200,text:async()=>diaryPage}:{ok:false,status:403,text:async()=>'<title>Just a moment...</title>'};
  const slug=url.match(/\/film\/([a-z0-9-]+)\/$/)?.[1],page=pages.get(slug);
  if(page===403||page===429)return {ok:false,status:page,text:async()=>'<title>Just a moment...</title>'};
  if(typeof page==='number')return {ok:true,status:200,text:async()=>review(slug,page)};
@@ -45,19 +46,20 @@ assert.equal(records.has(QUEUE),false);
 assert.equal(fetches.length,0);
 for(const value of [undefined,'off','On',' on','true'])assert.equal(vm.runInContext('removalLookupEnabled',ctx)({REMOVAL_RATING_LOOKUP:value}),false,String(value));
 
-// 2. A removed film is rated through its own page while the films list is blocked; the removal event gets the rating once.
+// 2. With the diary gate off, a removed film is rated through its own page; the films list is never requested (AIR-287);
+// the removal event gets the rating once.
 pages.set('gone',4.5);
 const at='2026-10-29T09:00:00.000Z';
 const event={id:'run-1-watchlist',type:'watchlist',at,total:1,baseline:false,added:[],removed:[{id:'lb-gone',title:'Gone',year:2019}]};
 await ctx.writeEvent(env,event);
 const report={runId:'run-1',updatedAt:at,watchlistCount:1,films:[{id:'stay',title:'Stay',year:2021,shows:[]}],stats:{}};
 records.set('programme.json',report);
-const run={runId:'run-1',stage:'epg',events:[structuredClone(event)],ratingPending:['public-films-list'],watchlist:report.films,pending:[],removalLookups:[film('gone')]};
+const run={runId:'run-1',stage:'epg',events:[structuredClone(event)],ratingPending:['letterboxd-diary'],watchlist:report.films,pending:[],removalLookups:[film('gone')]};
 const completed=await ctx.completeWithRatings(env,run,report);
 assert.equal(completed.stage,'complete');
-assert.match(completed.personalRatingError,/HTTP 403 on page 1/,'the films list still fails as before');
-const firstFilmsList=fetches.findIndex(url=>url.includes('/films/')),firstMember=fetches.findIndex(url=>url.includes('/demo-user/film/gone/'));
-assert.ok(firstMember>=0&&firstMember<firstFilmsList,'the removed film is looked up before the films list');
+assert.equal(completed.personalRatingError,undefined);
+assert.equal(fetches.filter(url=>url.includes('/films/')).length,0,'no films-list request');
+assert.ok(fetches.some(url=>url.includes('/demo-user/film/gone/')),'the removed film is looked up on its own page');
 const stored=records.get([...records.keys()].find(key=>key.endsWith('run-1-watchlist.json')));
 assert.equal(stored.removed[0].rating,4.5);
 assert.equal([...records.keys()].filter(key=>key.startsWith('events/items/')).length,1,'no second event');
@@ -67,7 +69,30 @@ assert.equal(queue().films['lb-gone'].attempts,1);
 const sync=records.get('sync.json');
 assert.equal(sync.removalLookups,undefined,'the hand-over list is cleared once queued');
 assert.deepEqual([sync.removalRatingLookup.checked,sync.removalRatingLookup.rated,sync.removalRatingLookup.pending],[1,1,0]);
-assert.ok(sync.ratingError,'the films-list error is still recorded');
+assert.equal(sync.ratingError,undefined);
+assert.deepEqual([sync.ratingAttempt.state,sync.ratingAttempt.cause],['finished','diary_off']);
+
+// 2b. Diary first (AIR-287): a removed film whose rating the diary proves is not looked up; one the diary does not cover
+// is. A blocked diary leaves every removed film to the bounded lookup.
+const diaryEnv={...env,LETTERBOXD_DIARY_HISTORY:'on'},savedQueue=structuredClone(queue()),savedSync=structuredClone(records.get('sync.json'));
+for(const [label,html,expectLookup] of [['proved','<html><head><title>Diary</title></head><table>'+diaryRow('lb-dproved',8,'2026-10-28')+diaryRow('lb-other',6,'2026-10-27')+'</table></html>',false],['blocked',null,true]]){
+ records.delete(QUEUE);records.delete('letterboxd/diary/history.json');records.delete('letterboxd/diary/state.json');fetches.length=0;diaryPage=html;pages.set('dproved',2.5);pages.set('dmissing',3);
+ const ev={id:'run-d-'+label+'-watchlist',type:'watchlist',at,total:0,baseline:false,added:[],removed:[{id:'lb-dproved',title:'P',year:2001},{id:'lb-dmissing',title:'M',year:2002}]};
+ await ctx.writeEvent(diaryEnv,ev);
+ const dRun={runId:'run-d-'+label,stage:'epg',events:[structuredClone(ev)],ratingPending:['letterboxd-diary'],watchlist:[],pending:[],removalLookups:[film('dproved'),film('dmissing')]};
+ const done=await ctx.completeWithRatings(diaryEnv,dRun,{runId:'run-d-'+label,updatedAt:at,watchlistCount:0,films:[],stats:{}});
+ assert.equal(done.stage,'complete');
+ assert.equal(fetches.filter(url=>url.includes('/films/')).length,0,label+': no films list');
+ assert.equal(fetches.some(url=>url.includes('/demo-user/film/dproved/')),expectLookup,label+': the proved film is looked up only without the diary');
+ assert.ok(fetches.some(url=>url.includes('/demo-user/film/dmissing/')),label+': a film the diary does not cover is looked up');
+ assert.ok(memberPages().length<=5,'at most five per-film requests');
+ const evStored=records.get([...records.keys()].find(key=>key.endsWith('run-d-'+label+'-watchlist.json')));
+ assert.equal(evStored.removed.find(f=>f.id==='lb-dproved').rating,expectLookup?2.5:4,label+': the removal event rating');
+ const dSync=records.get('sync.json');
+ assert.deepEqual(plain(dSync.removalDiaryResolved||[]),expectLookup?[]:['lb-dproved']);
+ if(!expectLookup)assert.equal(dSync.ratingAttempt.state,'finished');else assert.deepEqual([dSync.ratingAttempt.state,dSync.ratingAttempt.cause],['error','blocked']);
+}
+diaryPage=null;records.set(QUEUE,savedQueue);etags.set(QUEUE,String(++revision));records.set('sync.json',savedSync);
 
 // 3. Duplicates and repeats: a rated film is neither queued twice nor fetched again.
 fetches.length=0;
@@ -178,7 +203,7 @@ assert.match(source,/removed\.has\(String\(film\.id\)\)\)\.map\(removalLookupFil
 records.delete(QUEUE);fetches.length=0;pages.set('crash',3.5);
 const crashEvent={id:'run-2-watchlist',type:'watchlist',at,total:0,baseline:false,added:[],removed:[{id:'lb-crash',title:'Crash',year:2018}]};
 const crashReport={runId:'run-2',updatedAt:at,watchlistCount:0,films:[],stats:{}};
-const crashRun={runId:'run-2',stage:'epg',events:[structuredClone(crashEvent)],ratingPending:['public-films-list'],watchlist:[],pending:[],removalLookups:[film('crash')]};
+const crashRun={runId:'run-2',stage:'epg',events:[structuredClone(crashEvent)],ratingPending:['letterboxd-diary'],watchlist:[],pending:[],removalLookups:[film('crash')]};
 await ctx.finishSync(env,crashRun,crashReport);
 let saved=records.get('sync.json');
 assert.equal(saved.stage,'complete');
@@ -211,4 +236,4 @@ try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-3'},{caller:'http',diagno
 assert.equal(memberPages().length,0,'the claimed film waits for its retry time');
 assert.equal(records.get('sync.json').removalLookups,undefined,'queued, so the hand-over is cleared');
 
-console.log('Removal rating lookup (AIR-268): gate off untouched, per-film rating before the films list, one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, crash between commit and queue replayed by the next step passed');
+console.log('Removal rating lookup (AIR-268): gate off untouched, per-film rating with no films list, diary-proved removals skip the lookup and a blocked diary falls back (AIR-287), one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, crash between commit and queue replayed by the next step passed');
