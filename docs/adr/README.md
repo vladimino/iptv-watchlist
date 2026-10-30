@@ -58,12 +58,11 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0050 — The one-time prediction version materialization route and PREDICTION_MATERIALIZATION are retired](0050-retire-prediction-materialization-route.md) | Accepted 2026-10-30; owner approval in AIR-227 session; no binding exists | [AIR-227](https://trello.com/c/KjFwF0Zp) |
 | [0051 — D1 is the domain home, R2 the blob home; per-domain flips without shadow stages](0051-d1-domain-r2-blobs.md) | Accepted 2026-10-29 | [AIR-275](https://trello.com/c/4x7hH0gI); supersedes the post-backfill stages of ADR 0017 |
 | [0052 — A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid](0052-letterboxd-slug-film-alias.md) | Accepted 2026-10-30; owner approval after positive independent review; production import separately gated | [AIR-276](https://trello.com/c/PeWwEti8) |
+| [0053 — The Letterboxd baseline import is a permanent owner-only maintenance route, and LETTERBOXD_BASELINE_IMPORT is retired](0053-permanent-letterboxd-baseline-import-route.md) | Accepted 2026-10-30; explicit owner approval in AIR-181 PR #245 conversation; binding removal separately gated | [AIR-181](https://trello.com/c/d6x0pvuc) |
 
 ## Proposed records
 
-| Record | Status and boundary | Related work |
-| --- | --- | --- |
-| [0053 — The Letterboxd baseline import is a permanent owner-only maintenance route, and LETTERBOXD_BASELINE_IMPORT is retired](0053-permanent-letterboxd-baseline-import-route.md) | Proposed 2026-10-30 (owner decision `retire now` recorded on AIR-181; ADR acceptance pending; binding removal separately gated) | [AIR-181](https://trello.com/c/d6x0pvuc) |
+No proposed records currently.
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 
