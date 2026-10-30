@@ -6,7 +6,7 @@
 **Approval source:** retrospective owner confirmation in AIR-226 ChatGPT session on 2026-10-29, correcting the omitted status after AIR-179 and the subsequently executed materialization; not a claim of formal acceptance on 2026-10-27  
 **Related work:** [AIR-179](https://trello.com/c/vdLts7tJ), [AIR-164](https://trello.com/c/iZzON44A), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0019](0019-live-d1-backfill-boundaries.md) item 4, [prediction versions runbook](../runbooks/prediction-versions.md), [AIR-74 dry-runs after ADR-0022](../evidence/d1-migration/air-74-real-baseline-dry-run-2026-10-27.md)  
 **Supersedes:** None (it implements the design in section 2 of the runbook)  
-**Superseded by:** [ADR-0045](0045-retire-prediction-version-objects-switch.md) (Accepted 2026-10-29) in part: the second gate of decision 3; a write batch needs `PREDICTION_MATERIALIZATION=on` only, because the version writer has no switch
+**Superseded by:** [ADR-0050](0050-retire-prediction-materialization-route.md) (Accepted 2026-10-30) for the route, its gate and the CLI after the completed run; [ADR-0045](0045-retire-prediction-version-objects-switch.md) (Accepted 2026-10-29) in part: the second gate of decision 3; a write batch needs `PREDICTION_MATERIALIZATION=on` only, because the version writer has no switch
 
 ## Context
 
