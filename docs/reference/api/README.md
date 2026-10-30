@@ -12,5 +12,6 @@ Current interface contracts, not a grant of production writer access:
 - [Read-only prediction quality: prospective metrics and calibration](prediction-quality.md)
 - [Read-only D1 catalog views: persons, filmographies, duplicate review](d1-catalog.md)
 - [Owner admin read API: pinned programme snapshot, Film/Person search, quality queues, data health](admin.md)
+- [Guarded owner actions: preview, explicit confirmation, idempotent CAS execution, receipt (contract and fixture exemplar, no production action)](admin-actions.md)
 
 See [runbooks](../../runbooks/README.md) for approved operator procedures, [domain](../domain/README.md) for identity/scoring and [integrations](../integrations/README.md) for Letterboxd. Runtime truth requires separately authorized verification.
