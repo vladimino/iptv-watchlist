@@ -57,7 +57,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0049 — The Letterboxd Diary is read into a separate viewing history, incrementally and behind a gate](0049-letterboxd-diary-viewing-history.md) | Accepted 2026-10-30; owner accepted ADR and visually approved Mermaid; `LETTERBOXD_DIARY_HISTORY` remains off by default | [AIR-51](https://trello.com/c/33d4hKJ3); production activation separately gated |
 | [0050 — The one-time prediction version materialization route and PREDICTION_MATERIALIZATION are retired](0050-retire-prediction-materialization-route.md) | Accepted 2026-10-30; owner approval in AIR-227 session; no binding exists | [AIR-227](https://trello.com/c/KjFwF0Zp) |
 | [0051 — D1 is the domain home, R2 the blob home; per-domain flips without shadow stages](0051-d1-domain-r2-blobs.md) | Accepted 2026-10-29 | [AIR-275](https://trello.com/c/4x7hH0gI); supersedes the post-backfill stages of ADR 0017 |
-| [0052 — A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid](0052-letterboxd-slug-film-alias.md) | Proposed 2026-10-30; owner decision pending | [AIR-276](https://trello.com/c/PeWwEti8) |
+| [0052 — A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid](0052-letterboxd-slug-film-alias.md) | Accepted 2026-10-30; owner approval after positive independent review; production import separately gated | [AIR-276](https://trello.com/c/PeWwEti8) |
 
 ## Proposed records
 
