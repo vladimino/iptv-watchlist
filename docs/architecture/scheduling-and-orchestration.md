@@ -6,8 +6,11 @@ Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron
 sequenceDiagram
     actor Daily as Daily EPG Task (17:00)
     actor Hourly as Hourly Task (hourly)
+    actor Audit as Daily read-only audit (17:45)
+    actor Owner as Owner
     participant Access as Cloudflare Access
     participant MCP as Worker MCP
+    participant Registry as ChatGPT Task registry
     participant EPG as EPG and discovery
     participant Runner as Prediction runner
     participant R2 as Authoritative R2
@@ -69,6 +72,16 @@ sequenceDiagram
         end
     end
     Hourly->>MCP: prediction_complete on allowed owned stop
+    Note over Audit,Registry: Separate daily monitor; no task mutations
+    Audit->>Registry: Read two production task definitions and latest runs
+    Audit->>Access: Authorize read-only EPG status
+    Access->>MCP: JWT verified
+    Audit->>MCP: epg_status (read-only)
+    MCP-->>Audit: Published runId, stage, updatedAt
+    Note over Audit,Registry: Compare expected prompts and schedules in main
+    opt Disabled, drift, failed run or missing today's EPG
+        Audit-->>Owner: Alert with observed status and uncertainty
+    end
     Note over Cron,D1: The one Worker cron trigger, inert while D1_ENRICHMENT_WRITE is unset (ADR 0056)
     Cron->>Projector: Scheduled event, hourly
     opt D1_ENRICHMENT_WRITE is dry or on
@@ -79,6 +92,8 @@ sequenceDiagram
         Projector->>D1: Changed Films and Persons with their keys, one batch each
     end
 ```
+
+The separate 17:45 Europe/Madrid audit is a read-only Scheduled Task that compares the two production tasks' live registry state with the maintained contract and checks EPG publication through owner-only MCP. It cannot edit task state or start an EPG run. The audit can itself silently stop or run late, so its notifications are not a guaranteed service-level alert (see [the monitoring runbook](../runbooks/scheduled-task-drift.md)).
 
 A scheduled trigger does not imply successful completion. `already_running`, `busy`, lease ownership and deferred backoff may prevent new work. Discovery uses **one chunk per explicit request**; it does not recursively self-fetch through an Access bypass or an internal continuation service. The [MCP security boundary](authentication-and-mcp.md) verifies signed identity and restricts tool arguments.
 
