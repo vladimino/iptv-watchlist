@@ -7,6 +7,7 @@ These pages describe the **currently maintained** operational boundaries; none i
 - [Recovery procedures](recovery/README.md)
 - [MCP connection and read-only smoke](mcp-connectivity.md)
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
+- [Daily Scheduled Task drift monitoring and manual owner triage](scheduled-task-drift.md)
 - [Taste-profile publication procedure (owner approval required)](taste-profile-publication.md)
 - [Production R2 snapshot export, read-only (owner approval required)](r2-snapshot-export.md)
 - [Letterboxd baseline import (owner approval required)](letterboxd-baseline-import.md)
