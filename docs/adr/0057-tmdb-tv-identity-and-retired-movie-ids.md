@@ -1,4 +1,4 @@
-# ADR 0055: A TMDB TV entry is a typed `tmdb_tv` identity, and a confirmed retired TMDB movie id leaves the trusted identity
+# ADR 0057: A TMDB TV entry is a typed `tmdb_tv` identity, and a confirmed retired TMDB movie id leaves the trusted identity
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-30 (direction chosen by the owner on [AIR-290](https://trello.com/c/70ldvbUB); acceptance pending)  
@@ -73,7 +73,7 @@ Not decided or delivered here:
   - the projection applying `identity/tmdb-retirements.json`;
   - `tmdb_tv` reaching D1 through the Film projection;
   - every movie-only path checked against TV ids;
-  - compatibility with the AIR-275 D1 projector.
+  - the AIR-275 enrichment projector ([ADR 0056](0056-d1-enrichment-write-through.md)) carrying the corrected identity. That projector owns each Film's row, external ids and identity dimension and rewrites them from R2. It must project the Film with the retirement applied, or its next run reverts a D1-only correction.
 - **The production correction** of the four Films in R2 and D1 ([AIR-291](https://trello.com/c/OWV3rL9q)).
 - **Whether `tmdb_tv` is ever derived** without an owner confirmation.
 
@@ -89,7 +89,8 @@ Not decided or delivered here:
 
 - Miniseries can be a Film with a typed, verifiable TMDB identity, without any risk of being matched to a movie of the same number.
 - A retired movie id stays visible with its evidence, so the change is auditable and reversible.
-- Until the runtime integration ships, R2 and the lifecycle projection still produce the retired movie id as trusted. AIR-291 must not run before the runtime card is delivered, or the next projection undoes the correction.
+- Until the runtime integration ships, R2 and the lifecycle projection still produce the retired movie id as trusted. AIR-291 must not run before the runtime card is delivered, or the next projection undoes the correction. This applies above all to the ADR 0056 projector: it rewrites the external ids and `canonical_identity` of every changed Film from R2.
+- Once the projection applies the retirement, D1 follows R2 through the projector. The planner's guarded D1 statements then serve as the readback contract, and as a fallback if the projector is off. They are not a second writer racing it.
 - `catalogReady` and the other readiness rules keep working, because the four Films keep their Letterboxd lid. Readers that need a TMDB entry must learn `tmdb_tv`; that is part of the runtime card.
 
 ## Recovery and migration boundary

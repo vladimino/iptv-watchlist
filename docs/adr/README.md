@@ -67,7 +67,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
-| [0055 — A TMDB TV entry is a typed `tmdb_tv` identity, and a confirmed retired TMDB movie id leaves the trusted identity](0055-tmdb-tv-identity-and-retired-movie-ids.md) | Proposed 2026-10-30 (owner direction on AIR-290; contract and offline tooling only, no write authorized) | [AIR-290](https://trello.com/c/70ldvbUB); production correction [AIR-291](https://trello.com/c/OWV3rL9q) |
+| [0057 — A TMDB TV entry is a typed `tmdb_tv` identity, and a confirmed retired TMDB movie id leaves the trusted identity](0057-tmdb-tv-identity-and-retired-movie-ids.md) | Proposed 2026-10-30 (owner direction on AIR-290; contract and offline tooling only, no write authorized) | [AIR-290](https://trello.com/c/70ldvbUB); production correction [AIR-291](https://trello.com/c/OWV3rL9q) |
 
 [Platform ADRs](https://trello.com/c/6MHbRFZR) and [domain ADRs](https://trello.com/c/ORglHnul) are recorded here; [prediction/data ADRs](https://trello.com/c/5qf3Zn3p) are recorded here; [agent guide updates](https://trello.com/c/Mvi1pXYL) are next. Never infer an original approval date from a later deployment test.
 

@@ -1,6 +1,6 @@
 # TMDB TV identity correction for four retired movie ids (owner approval required)
 
-This runbook prepares and later executes the correction of [ADR 0055](../adr/0055-tmdb-tv-identity-and-retired-movie-ids.md). Four watchlist miniseries have a retired TMDB movie id. Each one gets its live TMDB TV entry as a trusted `tmdb_tv` identity. The retired movie id is kept, untrusted, with its evidence.
+This runbook prepares and later executes the correction of [ADR 0057](../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md). Four watchlist miniseries have a retired TMDB movie id. Each one gets its live TMDB TV entry as a trusted `tmdb_tv` identity. The retired movie id is kept, untrusted, with its evidence.
 
 | Film | Retired movie id | TV entry | Letterboxd permalink |
 | --- | --- | --- | --- |
@@ -62,7 +62,7 @@ Each step needs its own explicit owner approval. A code deploy authorizes none o
 3. **R2 write.**
    - Write the plan's `r2Retirements.body` to `identity/tmdb-retirements.json`, once, with a conditional put (`onlyIf` absent, or the expected etag).
    - Read it back.
-4. **D1 write.**
+4. **D1.** With the [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector active, D1 follows from the R2 entry: let one projector run carry the four Films, and do not run the statements alongside it. Only if the projector is off, write D1 as follows, each step separately approved.
    - Execute each Film's `d1` statements as one batch per Film.
    - Every statement is guarded by the state it expects, so a repeated batch changes nothing.
 5. **Readback.**
