@@ -123,8 +123,9 @@ The production split replaces the Worker's own first bounded commit, which would
 
 **Reading an `exceededMemory` end.**
 1. In Workers Observability, filter the request id of the `exceededMemory` event.
-2. The last `epg_phase` `enter` without its `exit` is the phase that died. A request that dies before `diary_history_merge` exit has written no diary history.
-3. This is read-only; never repeat the commit to observe it.
+2. The last `epg_phase` `enter` without its `exit` is the phase that died.
+3. A missing `exit` is not evidence of a missing write. A phase logs its `exit` only after its write returned, so a request killed between the two leaves the write done and unlogged. Check what was persisted with a safe read-only read: the sync status, and `GET /api/letterboxd/diary` for the diary `state` and `entries`.
+4. This is read-only; never repeat the commit to observe it.
 
 **Offline profile.** `npm run build`, then `node --expose-gc scripts/epg-memory-profile.mjs [--full] [--gc-at-markers] [--concurrency 2] [--scale 1]`.
 - It replays the built Worker against synthetic objects of the production sizes from an R2 size listing. It makes no request and needs no data.

@@ -70,4 +70,16 @@ const c=harness();
 await assert.rejects(c.ctx.tracedPhase('run-x','generation_copy',async()=>{throw new Error('boom');}),/boom/);
 assert.deepEqual(markers(c.lines).map(m=>m.phase+':'+m.edge),['generation_copy:enter','generation_copy:error']);
 
-console.log('EPG phase markers (AIR-263): ordered enter/exit markers for finish sync, queue refresh, every diary sub-phase and removal, counts and sizes only (no titles, ids, slugs or HTML), a throwing trace changes nothing, blocked page and error edges passed');
+// 5. The EPG scan phase: an ordinary source failure logs `error` (no exit) and the commit fails as before.
+const d=harness();d.records.set('sync.json',{runId:'run-src',stage:'epg'});
+const failingBucket={get:async k=>d.records.has(k)?{etag:'x',json:async()=>structuredClone(d.records.get(k))}:null,put:async(k,v)=>{d.records.set(k,JSON.parse(v));return {etag:'y'};},list:async()=>({objects:[],truncated:false})};
+d.ctx.fetch=async url=>({ok:false,status:500,headers:new Headers(),body:null,text:async()=>''});
+await assert.rejects(d.ctx.epgSync({...env(),BUCKET:failingBucket},{runId:'run-src',stage:'epg',watchlist:[],pending:[]}),/EPG HTTP 500/);
+assert.deepEqual(markers(d.lines).filter(m=>m.phase==='epg_input_scan').map(m=>m.edge),['enter','error']);
+
+// 6. A logger that throws changes nothing: the traced work's result and error pass through.
+const e=harness();e.ctx.console.log=()=>{throw new Error('log sink down');};
+assert.equal(await e.ctx.tracedPhase('run-y','finish_sync',async()=>42),42);
+await assert.rejects(e.ctx.tracedPhase('run-y','finish_sync',async()=>{throw new Error('real');}),/real/);
+
+console.log('EPG phase markers (AIR-263): ordered enter/exit markers for finish sync, queue refresh, every diary sub-phase and removal, counts and sizes only (no titles, ids, slugs or HTML), a throwing trace changes nothing, blocked page and error edges, EPG source failure logged as error, throwing logger ignored passed');
