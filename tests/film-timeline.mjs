@@ -147,6 +147,40 @@ assert.match(text(),/Событий в истории нет/);assert.match(text
  scripted=null;
 }
 
+// The legacy rating log: what one check saw before and after. Every combination keeps its event, date and provenance; an
+// arrow only for two different values; a missing value never reads as removed or unwatched and never becomes a current rating.
+{
+ const t=minute=>'2026-10-12T14:'+String(minute).padStart(2,'0')+':00.000Z';
+ set('enrichment/diagnostics/rating-observations.json',[
+  {filmId:'leg',before:null,after:null,observedAt:t(59),source:'letterboxd_public_films',generationId:'g1'},
+  {filmId:'leg',before:null,after:4,observedAt:t(1),source:'letterboxd_public_films'},
+  {filmId:'leg',before:4,after:4,observedAt:t(2),source:'letterboxd_public_films'},
+  {filmId:'leg',before:4,after:4.5,observedAt:t(3),source:'letterboxd_member_film',sourceUrl:'https://letterboxd.com/tester/film/leg/'},
+  {filmId:'leg',before:4.5,after:null,observedAt:t(4),source:'letterboxd_public_films'},
+  {filmId:'other',before:null,after:1,observedAt:t(5),source:'letterboxd_public_films'}]);
+ run(`films.push({id:'leg',title:'Легаси',genres:[],directors:[],actors:[],shows:[]})`);
+ requests.length=0;await open('leg');
+ assert.deepEqual(requests,['/api/enrichment/history?filmId=leg&limit=100']);
+ order('Зафиксирована оценка 4.0 (ранее данных не было)','Повторно зафиксирована оценка 4.0','Оценка 4.0 → 4.5','При проверке оценка не обнаружена (ранее 4.5)','При проверке оценка не зафиксирована');
+ const plain=text(),page=html();
+ assert.equal((page.match(/<li class="history-event history-legacy_rating/g)||[]).length,5,'every legacy entry of the film stays an event, never another film');
+ assert.equal((plain.match(/старый журнал наблюдений · список фильмов Letterboxd/g)||[]).length,4);assert.match(plain,/старый журнал наблюдений · страница фильма Letterboxd/);
+ assert.match(page,/<time datetime="2026-10-12T14:59:00\.000Z">/,'the null/null check keeps its time');
+ assert.doesNotMatch(plain,/без оценки → без оценки|без оценки →|→ без оценки/,'no arrow between missing values');
+ assert.equal((plain.match(/→/g)||[]).length,1,'an arrow only for a real change');
+ const legacyText=(page.match(/<li class="history-event history-legacy_rating[\s\S]*?<\/li>/g)||[]).join(' ');
+ assert.doesNotMatch(legacyText,/удален|не смотрел/i,'a missing rating is never called removed or unwatched');assert.doesNotMatch(page,/tester/,'no account URL');
+ assert.match(plain,/Оценка наблюдений нет/,'a legacy entry never becomes the current rating');assert.match(plain,/Diary записей нет/);
+ assert.doesNotMatch(page,/history-current">сейчас/,'no legacy entry is marked current');
+}
+// The legacy log of the earlier films is still read; `dia` keeps its real current rating and Diary next to legacy entries.
+{
+ set('enrichment/diagnostics/rating-observations.json',[{filmId:'dia',before:null,after:null,observedAt:d(10),source:'letterboxd_public_films'}]);
+ await open('dia');
+ order('Оценка 4.0 впервые замечена','При проверке оценка не зафиксирована','Прогноз 4.0');
+ assert.match(text(),/Оценка 4\.5 · вручную/);assert.match(text(),/Diary 4\+ просмотра/);
+}
+
 // An id the API would refuse: no request, a plain message.
 requests.length=0;run(`filmScreen='bad.id';renderFilmShell()`);
 assert.match(text(),/История недоступна для этого идентификатора/);assert.doesNotMatch(html(),/data-history-action/);assert.equal(requests.length,0);
@@ -154,4 +188,4 @@ assert.match(text(),/История недоступна для этого ид�
 // The click handler on the film screen routes the history buttons.
 assert.match(fs.readFileSync('public/app.js','utf8'),/closest\?\.\('\[data-history-action\]'\)/);
 assert.match(fs.readFileSync('public/index.html','utf8'),/<div id="film-screen-score"><\/div>\s*<div id="film-screen-history"><\/div>/);
-console.log('Film timeline: on-demand read, prediction → viewing → rating order, current markers, snapshot rationale, Diary day without time shift, Diary-dated rating, day counts and lower bounds, unknown re-watch, rating at entry kept apart, other lid never shown, TMDB id, identity disagreement, unlinked, missing and unreadable Diary, long history folding, 409 restart without duplicates, errors contained, stale answers dropped, invalid id passed');
+console.log('Film timeline: on-demand read, prediction → viewing → rating order, current markers, snapshot rationale, Diary day without time shift, Diary-dated rating, day counts and lower bounds, unknown re-watch, rating at entry kept apart, other lid never shown, TMDB id, identity disagreement, unlinked, missing and unreadable Diary, long history folding, 409 restart without duplicates, errors contained, stale answers dropped, invalid id, legacy log wording for every before/after combination passed');
