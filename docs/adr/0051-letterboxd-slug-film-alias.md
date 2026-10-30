@@ -50,10 +50,10 @@ Code only. The Worker bundle gains the pure parser and functions, unused by any 
 
 - **Original decision:** [AIR-276](https://trello.com/c/PeWwEti8).
 - **Implementation:** `src/domain/film-person.js` (`letterboxdSlugFromUrl`, `markSlugCollisions`), `src/domain/film-person-reader.js`, `src/domain/film-person-backfill.js`, `scripts/letterboxd-slug-inventory.mjs`, `scripts/snapshot-store.mjs`, `tests/letterboxd-slug-alias.mjs`.
-- **Dated verification:** not recorded; no production snapshot was read for this change.
+- **Dated verification:** [slug coverage on the 2026-10-29 fenced production snapshot](../evidence/letterboxd/air-276-slug-coverage-2026-10-30.md): all 394 lid Films carry a valid permalink and get a `current` slug; 2,008 TMDB-only Films get none; 0 collisions; read-only, no write or request.
 - **Uncertainty:**
-  - how many stored records carry a permalink is not measured;
-  - how often Letterboxd renames or reuses a slug is unknown.
+  - how often Letterboxd renames or reuses a slug is unknown;
+  - no diary slug has been observed yet, because the diary history has not run in production.
 
 ## Follow-ups
 
