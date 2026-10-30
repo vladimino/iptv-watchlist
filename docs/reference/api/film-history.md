@@ -4,6 +4,19 @@
 
 Implementation: `filmHistoryRoute` in `src/enrichment.js` (reads), `buildFilmHistory` and `diaryLink` in `src/domain/film-history.js` (linking, ordering and shape, pure). The [prediction quality API](prediction-quality.md) evaluates these events.
 
+## Film page
+
+The film page (`/film/<id>`) shows this chronology in its **История** section, read only when the owner presses «Показать историю»; rendering the page never requests it. The page:
+
+- reads every page of one version (up to 20 pages of 100 events) and keeps each `identity` once; a 409 `history_changed` restarts from the first page (at most two restarts, then an explicit message), so two versions are never mixed;
+- shows the events in the API's order, the latest eight visible and the earlier ones folded under «Ранние события»;
+- marks as current the `position: current` prediction and the last event that applied `current.rating.observationId`;
+- shows a `diary_viewing` date, and a `letterboxd_diary` rating observation's `observedAt`, as a calendar day without a time of day;
+- shows `ratingAtEntry` only on its Diary event and the summary rating only from `current.rating`;
+- lists `notes` as «Ограничения данных».
+
+An invalid id, an error status or an unreadable answer stays inside the section; the rest of the film page is unaffected.
+
 ## Request
 
 | Parameter | Rule |
