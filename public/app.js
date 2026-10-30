@@ -560,7 +560,17 @@ function historyRatingEvent(event){
  const head=event.kind==='first_observed'?`Оценка ${historyRating(event.value)} впервые замечена`:event.kind==='changed'&&event.previous?`Оценка ${historyRating(event.previous.value)} → ${historyRating(event.value)}`:`Оценка ${historyRating(event.value)}`;
  return `<p class="history-headline"><strong>${head}</strong></p><p class="history-meta">${historySource(event.source)}${observed}</p>`;
 }
-function historyLegacyEvent(event){return `<p class="history-headline"><strong>Оценка ${historyRating(event.before)} → ${historyRating(event.after)}</strong></p><p class="history-meta">старый журнал наблюдений · ${historySource(event.source)}</p>`;}
+// A legacy log entry is what one check saw before and after, not proof of a change: an arrow only for two different values,
+// and a missing value is "not found at that check", never "removed" or "not watched".
+function historyLegacyEvent(event){
+ const before=Number.isFinite(event.before)?event.before:null,after=Number.isFinite(event.after)?event.after:null;
+ const head=before===null&&after===null?'При проверке оценка не зафиксирована'
+  :before===null?`Зафиксирована оценка ${historyRating(after)} (ранее данных не было)`
+  :after===null?`При проверке оценка не обнаружена (ранее ${historyRating(before)})`
+  :before===after?`Повторно зафиксирована оценка ${historyRating(after)}`
+  :`Оценка ${historyRating(before)} → ${historyRating(after)}`;
+ return `<p class="history-headline"><strong>${head}</strong></p><p class="history-meta">старый журнал наблюдений · ${historySource(event.source)}</p>`;
+}
 function historyDiaryEvent(event){
  const count=Number.isInteger(event.viewings)?event.viewings:null,lower=event.viewingsCertain!==true;
  const title=count>1?`${count}${lower?'+':''} ${viewingWord(count)} за день`:event.rewatch===true?'Пересмотр':'Просмотр';

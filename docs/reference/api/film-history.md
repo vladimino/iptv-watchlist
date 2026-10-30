@@ -13,6 +13,7 @@ The film page (`/film/<id>`) shows this chronology in its **История** sec
 - marks as current the `position: current` prediction and the last event that applied `current.rating.observationId`;
 - shows a `diary_viewing` date, and a `letterboxd_diary` rating observation's `observedAt`, as a calendar day without a time of day;
 - shows `ratingAtEntry` only on its Diary event and the summary rating only from `current.rating`;
+- shows a `legacy_rating` as what that check saw, never as proof of a change: an arrow only between two different values; a repeated value as recorded again; a value after none as recorded with no earlier data; none after a value as not found at that check (never removed or unwatched); none on both sides as no rating recorded at that check;
 - lists `notes` as «Ограничения данных».
 
 An invalid id, an error status or an unreadable answer stays inside the section; the rest of the film page is unaffected.
