@@ -21,7 +21,7 @@ The documentation is organized by **purpose**, not by the former flat file layou
 - **Runtime / deployment:** [system context](architecture/system-context.md), [deployment and rollback diagram](architecture/deployment-and-rollback.md), [deployment runbook](runbooks/deployment.md).
 - **EPG / discovery:** [EPG publication](architecture/epg-and-availability.md), [discovery and resolution](architecture/discovery-and-resolution.md), [scored-resolution contract](reference/domain/scored-resolution.md), [candidate discovery](reference/domain/candidate-discovery.md).
 - **Film/Person:** [lifecycle diagram](architecture/film-person-lifecycle.md) and [domain contract](reference/domain/film-person.md).
-- **Owner admin:** [read contract](reference/domain/admin-read-contract.md). `/admin` is a fixture page and does not call the live API.
+- **Owner admin:** [read model and queues](reference/domain/admin-read-contract.md), [read-only route `GET /api/admin/*`](reference/api/admin.md). `/admin` reads one pinned published snapshot through the owner's Access session and writes nothing.
 - **Predictions / profiles:** [prediction pipeline](architecture/prediction-pipeline.md), [runner API](reference/api/prediction-runner.md), [enrichment API](reference/api/enrichment.md), [taste-profile publication](runbooks/taste-profile-publication.md).
 - **Storage / migrations:** [persistence architecture](architecture/persistence-and-migration.md), [D1 contract](reference/data/d1-schema.md), [migration ADR](adr/0017-staged-d1-migration.md).
 - **Security / MCP:** [authentication diagram](architecture/authentication-and-mcp.md), [MCP contract](reference/api/mcp.md), [connectivity runbook](runbooks/mcp-connectivity.md).

@@ -27,4 +27,11 @@ assert.equal(index['movie-2'].prediction.tasteProfileHash,byKey.get('enrichment/
 assert.equal(index['movie-3'],undefined);
 assert.equal(objects.find(item=>item.key==='started/movie-1.json').customMetadata.started,'true');
 assert.equal(JSON.stringify(objects).includes('letterboxd.com'),false);
+assert.deepEqual(byKey.get('epg/published-generation.json'),{phase:'published',programmeRunId:'local-fixture',publishedAt:new Date(now).toISOString()});
+assert.deepEqual(byKey.get('epg/generations/local-fixture/programme.json'),programme,'the generation copy is the programme');
+assert.deepEqual(byKey.get('epg/generations/local-fixture/discovered-films.json'),{});
+assert.equal(programme.films[0].tmdbId,'900001');
+assert.equal(programme.films[1].tmdbId,undefined);
+assert.equal(byKey.get('titles.json')['movie-2'].status,'provisional');
+assert.equal(byKey.get('people.json')['actor/actor-2'].name,'Актёр 2');
 console.log('Local fixtures: Movie1, Actor1, Genre1, current broadcast window and no personal data passed');

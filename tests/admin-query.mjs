@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
-import {filmQueue, getFilm, getPerson, personQueue, searchFilms, searchPeople} from '../src/domain/admin-query.js';
+import {filmQueue, filmQueueCounts, filmQueueRecords, getFilm, getPerson, personQueue, personQueueCounts, personQueueRecords, searchFilms, searchPeople} from '../src/domain/admin-query.js';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 const source = fs.readFileSync('src/domain/admin-query.js', 'utf8');
 const sha256 = new Function(`${source.replaceAll('export function', 'function')}\nreturn sha256;`)();
@@ -9,9 +10,15 @@ for (const sample of ['', 'abc', 'ёжик', 'a'.repeat(80)]) {
   assert.equal(sha256(sample), createHash('sha256').update(sample).digest('hex'), sample);
 }
 const buildSource = fs.readFileSync('build.mjs', 'utf8');
+// The Worker script receives the library only as the AdminQuery namespace: none of its helpers becomes a global there.
 const workerBundle = buildSource.slice(buildSource.indexOf("fs.writeFileSync('dist/server/index.js'"));
-assert.equal(workerBundle.includes('admin-query'), false);
-assert.match(buildSource, /src\/domain\/admin-query\.js/);
+assert.match(workerBundle, /scoped\('src\/domain\/admin-query\.js','AdminQuery'\)/);
+assert.equal(workerBundle.includes("fs.readFileSync('src/domain/admin-query.js','utf8')+"), false);
+const scopedSource = scoped('src/domain/admin-query.js', 'AdminQuery');
+const namespace = new Function(`${scopedSource}\nreturn AdminQuery;`)();
+assert.deepEqual(Object.keys(namespace).sort(), Object.keys(await import('../src/domain/admin-query.js')).sort(), 'the namespace lists every export of the module');
+assert.match(scopedSource, /^const AdminQuery=\(\(\)=>\{/);
+assert.doesNotMatch(scopedSource, /^export /m);
 assert.equal(fs.readFileSync('public/app.js', 'utf8').includes('admin-query'), false);
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:fs|film-person-reader|R2|D1/);
 
@@ -219,5 +226,34 @@ assert.equal(getPerson([person], 'role-1'), null);
 const exact = searchFilms([{id: 'film:1', preferred: 'Page'}], {query: 'page', limit: 1});
 assert.equal(exact.nextCursor, null);
 assert.equal(searchFilms(many, {query: 'page', limit: 25}).items.length, 25);
+
+// Queue counts and queue record sets: the same rules as the pages, without a page.
+const counted = [
+  {id: 'film:1', localization: {status: 'missing'}, identity: {status: 'unresolved'}, metadata: {status: 'missing'}, fingerprint: {status: 'current'}, prediction: {status: 'current'}, externalIds: []},
+  {id: 'film:0', localization: {status: 'provisional'}, localizationConflicts: [{value: 'x'}], identity: {status: 'ambiguous'}, metadata: {status: 'stale'}, fingerprint: {status: 'stale'}, externalIds: [{conflicting: true}]},
+  null,
+  'text',
+  {id: 'film:2', localization: {status: 'reviewed'}, identity: {status: 'rejected'}, metadata: {status: 'failed'}, prediction: {status: 'current'}},
+];
+assert.deepEqual(filmQueueCounts(counted), {
+  'localization-missing': 1, 'localization-provisional': 1, 'localization-conflict': 1,
+  'identity-unresolved': 1, 'identity-ambiguous': 1, 'identity-rejected': 1,
+  'metadata-missing': 1, 'metadata-stale': 1, 'metadata-failed': 1,
+  'fingerprint-not-current': 2, 'prediction-not-current': 1, 'external-id-conflict': 1,
+});
+assert.deepEqual(personQueueCounts(counted), {'localization-missing': 1, 'localization-provisional': 1, 'localization-conflict': 1, 'external-id-conflict': 1});
+assert.deepEqual(filmQueueCounts([]), Object.fromEntries(Object.keys(filmQueueCounts(counted)).map(code => [code, 0])));
+assert.equal(filmQueueCounts(null).error, 'invalid_records');
+assert.equal(personQueueCounts('x').error, 'invalid_records');
+assert.deepEqual(filmQueueRecords(counted, 'fingerprint-not-current').map(record => record.id), ['film:0', 'film:2'], 'id order, non-objects skipped');
+assert.deepEqual(filmQueueRecords(counted, 'identity-rejected').map(record => record.id), ['film:2']);
+assert.deepEqual(personQueueRecords(counted, 'external-id-conflict').map(record => record.id), ['film:0']);
+assert.deepEqual(filmQueueRecords(counted, 'metadata-fresh'), {error: 'unknown_queue'});
+assert.deepEqual(personQueueRecords(counted, 'identity-rejected'), {error: 'unknown_queue'});
+assert.deepEqual(filmQueueRecords(undefined, 'identity-rejected'), {error: 'invalid_records'});
+assert.equal(filmQueueRecords(counted, 'identity-rejected')[0], counted[4], 'records are the caller objects, not copies');
+const subset = filmQueueRecords(counted, 'fingerprint-not-current');
+const subsetPage = filmQueue(subset, {queue: 'fingerprint-not-current', limit: 25});
+assert.deepEqual(subsetPage.items.map(record => record.id), subset.map(record => record.id), 'a page over the subset lists the same records');
 
 console.log('Admin query: ranks, folding, collisions, queues, cursors and limit bounds passed');

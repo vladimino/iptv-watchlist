@@ -1,6 +1,6 @@
 # Admin Film/Person read contract
 
-**Role:** maintained contract for the owner admin shell. It records what the current source can already answer and what [AIR-123](https://trello.com/c/uatDiouD), [AIR-52](https://trello.com/c/siWtiRcm), and [AIR-124](https://trello.com/c/Xotv4r2f) must not invent. The read paths were checked against source on GitHub `main` `8596d2f` (24 October 2026). Authority and access statements follow [ADR 0002](../../adr/0002-cloudflare-worker-r2-authority.md) and [ADR 0004](../../adr/0004-mcp-access-boundary.md), recorded in `d4c50e3`. This audit did **not** call production, list R2, or open a GET that can write.
+**Role:** maintained contract for the owner admin shell: the read model, the queue rules and the design constraints behind the pure query library, the `/admin` page and the live read API `GET /api/admin/*` ([route contract](../api/admin.md)). It records what the source can answer and what the admin page must not invent; the stages that built it were [AIR-123](https://trello.com/c/uatDiouD), [AIR-52](https://trello.com/c/siWtiRcm) and [AIR-124](https://trello.com/c/Xotv4r2f). The read paths were checked against source on GitHub `main` `8596d2f` (24 October 2026). Authority and access statements follow [ADR 0002](../../adr/0002-cloudflare-worker-r2-authority.md) and [ADR 0004](../../adr/0004-mcp-access-boundary.md), recorded in `d4c50e3`. This audit did **not** call production, list R2, or open a GET that can write.
 
 Related work: [AIR-122](https://trello.com/c/MouyDTjX), [AIR-69](https://trello.com/c/FlcWZX7W), [Film/Person contract](film-person.md), [D1 schema](../data/d1-schema.md). Upstream admin cards [AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy), and [AIR-65](https://trello.com/c/MKb4JMXi) stay writers and are out of this read contract.
 
@@ -100,7 +100,7 @@ These GETs do not write, and they still are not an admin query:
 - `GET /api/enrichment/diagnostics/export` does not write. `group=global` reads a fixed key list that includes `programme.json` and `epg/discovered-films.json`. `group=films` lists `enrichment/films/` 24 keys at a time. That is a prefix scan, not a search index. Admin search must not use it.
 - MCP reads that stay off the write tools: `probe_read`, `probe_echo`, `epg_status`, `epg_pipeline_status`, `enrichment_schema`, `enrichment_profile`, `enrichment_runner`, `enrichment_queue`, `prediction_queue_overview`, `prediction_film_diagnostics` (one stored film id), `prediction_pending` (one page of queue ids, limit 1–20). None of them is a Film/Person text search. `prediction_pending` is the pagination shape to copy: a pinned snapshot, an opaque cursor, and no storage list.
 
-There is no `/api/admin` route and no in-Worker call to `readLifecycle`.
+The live admin route is `GET /api/admin/*` ([contract](../api/admin.md)). It reads the four snapshot objects below and nothing else; there is still no in-Worker call to `readLifecycle`.
 
 ## Search without a full R2 scan
 
@@ -119,22 +119,23 @@ What is not safe to project on every admin open:
 
 The bounded design is:
 
-1. **AIR-123** searches and classifies arrays the caller already holds. No I/O.
-2. **AIR-52** feeds those functions from a fixture module. No I/O.
-3. **AIR-124**, only after AIR-69, may load one immutable snapshot: the published-generation pointer, `epg/generations/<programmeRunId>/programme.json`, `titles.json`, and `people.json`. It projects that snapshot and runs the AIR-123 functions in memory. A later page is served only when every version in the pin still matches. A warm isolate may keep that projection, keyed by the full version tuple, and must drop it when any version changes. It does not list the bucket, and a matching `programmeRunId` is not proof that the dictionaries are unchanged.
-4. Quality rows that exist only on the discovery ledger (an unresolved observation with no programme film) need a **generation-scoped index object written at EPG publish**, not a GET. That writer is a separate change. It is not part of AIR-123, AIR-52, or the first AIR-124 slice, and it must not land while AIR-69 is watching the publish path.
+1. The pure library (`src/domain/admin-query.js`) searches and classifies arrays the caller already holds. No I/O.
+2. The `/admin` page holds no data of its own: it reads the live route with the owner's browser session and shows what the route returns.
+3. The live route loads one immutable snapshot: the published-generation pointer, `epg/generations/<programmeRunId>/programme.json`, `titles.json`, and `people.json`. It projects that snapshot and runs the library functions in memory. A later page is served only when every version in the pin still matches. A warm isolate keeps that projection, keyed by the full version tuple, and drops it when any version changes. It does not list the bucket, and a matching `programmeRunId` is not proof that the dictionaries are unchanged.
+4. Quality rows that exist only on the discovery ledger (an unresolved observation with no programme film) need a **generation-scoped index object written at EPG publish**, not a GET. That writer is a separate change and is not part of the live route.
 
-## Offline now, live later
+## What is live and what is not
 
-| Work | Now | After AIR-69 |
-| --- | --- | --- |
-| [AIR-123](https://trello.com/c/uatDiouD) pure query | Yes. Storage-neutral functions and deterministic tests | Unchanged library |
-| [AIR-52](https://trello.com/c/siWtiRcm) `/admin` shell | Yes, fixture adapter only | Still no live fetch until AIR-124 is separately accepted |
-| Point read of one prediction via existing MCP `prediction_film_diagnostics` | Already shipped for prediction diagnosis. Not the admin page | Still not a catalog search |
-| [AIR-124](https://trello.com/c/Xotv4r2f) programme-snapshot search | No | Yes, behind the checks below, and only with a separate acceptance |
-| Ledger-wide candidate queues and a publish-time admin index | No | Only as its own card after AIR-69. Not implied by AIR-124's first slice |
-| D1 `readFilm` / `readPerson` as the admin source | No | Only after the D1 cutover that makes those tables authoritative. AIR-69 finishing does not do that |
-| Reviewed-title and reviewed-name writes ([AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy)) | No | Those cards stay behind AIR-69 and the storage gate. This contract does not add them |
+| Work | State |
+| --- | --- |
+| Pure query library | Storage-neutral functions and deterministic tests; bundled into the Worker as the `AdminQuery` namespace (`scoped`) and no longer into the page |
+| `/admin` page | Live client over `GET /api/admin/*` with the owner's Access session; search and queue state in the URL, pin and cursors in memory ([route contract](../api/admin.md)) |
+| Programme-snapshot search and queues | Live, read-only, over the pinned published generation and the two dictionaries |
+| Fingerprint and prediction queues | Not served by the route (`queue_unavailable`): that state is under `enrichment/`, which the snapshot read does not load. A later card decides whether a bounded read of the view index or a publish-time index serves them |
+| Point read of one prediction via MCP `prediction_film_diagnostics` | Prediction diagnosis only. Not a catalog search |
+| Ledger-wide candidate queues and a publish-time admin index | Not implemented; a separate card, never a GET |
+| D1 `readFilm` / `readPerson` as the admin source | No. Only after the D1 cutover that makes those tables authoritative |
+| Reviewed-title and reviewed-name writes ([AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy)) | No. The route has no `POST`; those cards stay behind the storage gate |
 
 ## AIR-123 query contract
 
@@ -151,8 +152,8 @@ getFilm(records, id) -> record | null
 getPerson(records, id) -> record | null
 ```
 
-- `pin` is always `null` offline. AIR-124 fills it. The offline cursor is still bound to the records array the caller passed: a different array is `stale_cursor` even when ids match.
-- `limit` is required and must be an integer from 1 to 25. The function does not substitute a default. A missing, non-integer, or out-of-range value returns `{ error: 'invalid_limit' }` and no `items`. The AIR-52 adapter and the AIR-124 HTTP adapter are the only places that choose 25, and they pass that integer in. The library never sees an omitted limit.
+- `pin` is always `null` from the library. The live route names its own pin beside the page. The offline cursor is still bound to the records array the caller passed: a different array is `stale_cursor` even when ids match.
+- `limit` is required and must be an integer from 1 to 25. The function does not substitute a default. A missing, non-integer, or out-of-range value returns `{ error: 'invalid_limit' }` and no `items`. The HTTP adapter and the page client are the only places that choose 25, and they pass that integer in. The library never sees an omitted limit.
 - `cursor` is opaque. It is valid only for the same records array, the same query or queue, and the same limit. A mismatched cursor returns an error result `{ error: 'stale_cursor' }`, not an empty page.
 - Sort a search by rank, then `id` ascending with `en` comparison. Ranks: `0` exact external id, `1` exact preferred, `2` exact original or alias, `3` prefix of any of those, `4` substring. Tokens of a multi-word query are AND. Fold Latin diacritics, map `ё`/`Ё` to `е`, and compare case-insensitively. Do not score synopsis.
 - Two records with the same folded preferred title are both returned. Each item includes `collision: true` when another item on the full result, not only the page, shares that folded title. Do not merge them. This flag is a search result, not the identity collision in [ADR 0009](../../adr/0009-canonical-film-person-identity.md). It does not authorize linking films or unifying two Person role ids.
@@ -162,12 +163,12 @@ getPerson(records, id) -> record | null
 
 Tests must cover empty query (error, not "all records"), empty records, the rank order, Cyrillic `ё`, a collision, every queue code, a stale cursor, a missing `limit`, and `limit` values `0`, `26`, and `1.5`. `limit` 1 and `limit` 25 succeed. No network. The library tests must not accept a call that omits `limit`.
 
-The library is `src/domain/admin-query.js`. `build.mjs` does not add it to the Worker script. `public/app.js` does not import it. [AIR-52](https://trello.com/c/siWtiRcm) is the first caller and bundles the library only into the static `/admin.js` asset.
+The library is `src/domain/admin-query.js`. `build.mjs` adds it to the Worker script as the `AdminQuery` namespace (`scoped` in `scripts/bundle-scope.mjs` wraps the module in one constant, so none of its helpers becomes a global of the concatenated script). `public/app.js` does not import it, and the `/admin.js` asset no longer carries it: the page reads the route. Beside the paging functions the module exports `filmQueueCounts` / `personQueueCounts` (the count of every queue over an array) and `filmQueueRecords` / `personQueueRecords` (the sorted records of one queue, for a search narrowed by a queue); they follow the same rules as the pages and return `{ error }` for a non-array or an unknown code.
 
 These choices fix points the signature alone leaves open:
 
 - An error result is `{ error, pin: null }` and has no `items`. Check `invalid_records` when `records` is not an array, then `invalid_limit`, then `invalid_query` or `unknown_queue`, then `stale_cursor`. Non-object entries inside the array are skipped.
-- `invalid_query` is a missing, non-string, or blank query, including a query that folds to no tokens. The library does not apply the 200-character HTTP cap and does not coerce `"25"` into a limit. AIR-124 parses the query string before the call.
+- `invalid_query` is a missing, non-string, or blank query, including a query that folds to no tokens. The library does not apply the 200-character HTTP cap and does not coerce `"25"` into a limit. The route parses the query string before the call.
 - Exact ranks 0–2 compare the whole folded query. Otherwise every token must match, and the record rank is the worst token rank. `epgTitle` and a person's `original` rank with original and alias. External ids match `value` only. `roleId` and synopsis are not search fields.
 - Folding strips Latin diacritics, maps `ё` to `е`, folds case, and turns other punctuation into spaces.
 - Queue rows are ordered by `id` with `en` comparison. They are copies without `rank` or `collision`. `fingerprint-not-current` and `prediction-not-current` include a missing status because the rule is `!== 'current'`. The other queues require the listed status. `resolving` is in none of them.
@@ -175,9 +176,9 @@ These choices fix points the signature alone leaves open:
 - The cursor is opaque. It binds the operation, the folded query or queue code, the limit, and a SHA-256 of `JSON.stringify(records)` in caller order. The same ids with a different field, a different key order, or a different array are `stale_cursor`. An unreadable cursor is `stale_cursor` as well.
 - `getFilm` and `getPerson` return the first caller record with that `id`, or `null`. They do not copy it and do not read `redirects`.
 
-## AIR-52 fixture boundary
+## Fixture shell, the superseded boundary
 
-The shell is a local `/admin` page. Its only data import is a fixture module that calls the AIR-123 functions. The production bundle of that page must not call `fetch`, must not reference `/api/`, and must not read `programme.json`.
+This section records the stage in which the page ran on a synthetic fixture module and was forbidden to call any API. The live client replaced that module (`src/admin/fixtures.js` no longer exists), so the rules below are history, kept because they explain why the page was built the way it was; the current page is described in [the route contract](../api/admin.md#the-page). While it applied, the shell was a local `/admin` page. Its only data import is a fixture module that calls the AIR-123 functions. The production bundle of that page must not call `fetch`, must not reference `/api/`, and must not read `programme.json`.
 
 The fixture is synthetic. Do not paste a production watchlist, a private snapshot, or the AIR-86 cohort. Include at least:
 
@@ -197,18 +198,18 @@ Keyboard: the search field, queue controls, and results are reachable in order; 
 
 Deploying the static page is allowed only while the data module stays the fixture. Adding a live client in that PR is a failure of this boundary even if the route is unused.
 
-The page is `public/admin.html`, `public/admin.css`, and `public/admin.js`. `src/admin/fixtures.js` is the only caller of the query library. `build.mjs` serves `/admin` and `/admin.css` as static assets and builds `/admin.js` with `src/admin/bundle.js`, which strips `import` and `export` and concatenates the library, the fixture adapter, and the page script. The existing asset lookup serves `/admin`; `/film/...` and `/events` still map to the movie page. `?loading=1` is the local loading harness and returns before any library call, as does `?error=unavailable`. A blank `q` is not a search. A present query, including whitespace or punctuation, is passed through so an empty or invalid query cannot list every record. Search and queue together are read in full through the library cursor, then intersected by id before the combined page is cut to 25. Queue counts use that full read. Search rows are kept so `collision` stays visible. The page has no size control and always passes `25` into each library call, except a harness call that sets `limit: 0` to show `invalid_limit`.
+The page was `public/admin.html`, `public/admin.css`, and `public/admin.js`, and the fixture adapter `src/admin/fixtures.js` was the only caller of the query library. `build.mjs` served `/admin` and `/admin.css` as static assets and built `/admin.js` with `src/admin/bundle.js`, which strips `import` and `export` and concatenated the library, the fixture adapter, and the page script; today it concatenates the API client and the page script instead. The existing asset lookup serves `/admin`; `/film/...` and `/events` still map to the movie page. `?loading=1` was the local loading harness and returned before any library call, as did `?error=unavailable`; both harness parameters are gone, the live page shows its real loading and error states. A blank `q` is not a search. A present query, including whitespace or punctuation, is passed through so an empty or invalid query cannot list every record. Search and queue together are read in full through the library cursor, then intersected by id before the combined page is cut to 25. Queue counts use that full read. Search rows are kept so `collision` stays visible. The page has no size control and always passes `25` into each library call, except a harness call that sets `limit: 0` to show `invalid_limit`.
 
-## AIR-124 live API requirements
+## Live API requirements
 
-Do not implement this section in AIR-123 or AIR-52. When it is implemented, it is a read-only adapter behind the existing Access application. It is off until a separate acceptance after AIR-69. Suggested routes, all `GET`:
+These are the design constraints the live route satisfies; `src/admin/read.js` implements them and [the route contract](../api/admin.md) is the request-level description. The route is a read-only adapter behind the existing Access application. Routes, all `GET` (the implementation adds `/api/admin/overview` for the queue counts):
 
 - `/api/admin/films?q=&queue=&limit=&cursor=&pin=`
 - `/api/admin/films/:id?pin=`
 - `/api/admin/people?q=&queue=&limit=&cursor=&pin=`
 - `/api/admin/people/:id?pin=`
 
-The handler loads only `epg/published-generation.json`, the generation programme object, `titles.json`, and `people.json`. It builds AIR-123 records from that programme and those dictionaries, then calls the AIR-123 functions with an explicit `limit`. It does not import a write path, does not call `recoverStopEvents`, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
+The handler loads only `epg/published-generation.json`, the generation programme object, `titles.json`, and `people.json`. It builds library records from that programme and those dictionaries, then calls the library functions with an explicit `limit`. It does not import a write path, does not call `recoverStopEvents`, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
 
 The catalogue body is `epg/generations/<programmeRunId>/programme.json`, not the live root `programme.json`. `loadJSON` already prefers the generation object after reading the published pointer. Root `programme.json` can still hold the previous generation until `copyEpgGeneration` finishes, so reading the new pointer together with the root file would join two generations. AIR-124 does not fall back to the root key.
 
@@ -223,7 +224,7 @@ Each version is the raw R2 etag. If the object exists and the etag is empty, has
 
 The handler may keep one immutable in-memory projection, replaced as a whole and keyed by the version tuple. Reuse it only after every version in the tuple has been checked again. A matching `programmeRunId` is not that check. The cache is not a new R2 object and is not written from EPG publish.
 
-Page size follows one rule. AIR-123 requires an integer `limit` from 1 to 25 and does not default. AIR-124 applies the default at the HTTP boundary of the collection routes: a missing `limit` query parameter becomes 25 before AIR-123 is called. A present value that is not an integer from 1 to 25 is 400 `invalid_limit`, and AIR-123 is not called. Detail routes do not take `limit`. The AIR-52 adapter uses the same split: it passes 25 when the page has no size, and it never calls the library without a limit.
+Page size follows one rule. The library requires an integer `limit` from 1 to 25 and does not default. The route applies the default at the HTTP boundary of the collection routes: a missing `limit` query parameter becomes 25 before the library is called. A present value that is not an integer from 1 to 25 is 400 `invalid_limit`, and the library is not called. Detail routes do not take `limit`. The page client uses the same split: it passes 25 and never calls the route without a limit.
 
 Performance:
 
@@ -281,7 +282,7 @@ A 5xx from R2 is a failure of this read. The handler does not retry into a write
 
 `nextCursor` is null on the last page. The cursor encodes the full pin tuple, the query or queue, the limit, and the last item id. It is not an R2 list cursor. A cursor minted for an older titles or people version is `stale_pin` while the request still carries that old pin, and `stale_cursor` when the request pin already matches the new tuple. Either response omits `items`.
 
-Negative cases the AIR-124 tests must cover. This PR does not add those tests or the route.
+Negative cases covered by `tests/admin-read-api.mjs`:
 
 | After the pin was minted | Request | Response |
 | --- | --- | --- |
@@ -291,10 +292,12 @@ Negative cases the AIR-124 tests must cover. This PR does not add those tests or
 | A dictionary clock is older than `programmeUpdatedAt`, and every version is unchanged | No pin, then the pin from that response | 200 with `skew` and `dictionary_older`. The next page sent with that pin is 200 |
 | A loaded object has neither JSON `updatedAt` nor R2 `uploaded`, and its etag is present | No pin | 200 with `skew` and `timestamp_missing`. The next page is stable because the pin matches on etags |
 | The generation programme object is missing, or its `runId` disagrees with the pointer | Any | 503 `programme_unavailable`. Root `programme.json` is not read |
-| `limit` is omitted | A search | 200, and AIR-123 is called with `limit` 25 |
-| `limit` is `0`, `26`, `1.5`, or `abc` | A search | 400 `invalid_limit`, and AIR-123 is not called |
+| `limit` is omitted | A search | 200, and the library is called with `limit` 25 |
+| `limit` is `0`, `26`, `1.5`, or `abc` | A search | 400 `invalid_limit`, and the library is not called |
 
-## Risks and checks before a live route is enabled
+Where the implementation fixes a point this section left open: the pin is one opaque string beside a readable `snapshot` object; the cursor carries the pin it was minted under in front of the library cursor; `now` for every dimension is the programme clock, so a snapshot projects identically on every isolate; the fingerprint and prediction queues answer `queue_unavailable` instead of counting every film as not current; an exception from the R2 binding is 503 `storage_unavailable`.
+
+## Risks and the checks that hold
 
 | Risk | What would go wrong | Check before enablement |
 | --- | --- | --- |
@@ -305,26 +308,15 @@ Negative cases the AIR-124 tests must cover. This PR does not add those tests or
 | Stale continuation | Page 2 keeps generation A after only `titles.json`, only `people.json`, or the generation changes | 409 `stale_pin` and no `items` for each of those three changes. A dictionary that is only older stays 200 |
 | `programmeRunId` used as the whole pin | The same run id with a new titles etag returns the next page | The match key includes `titlesVersion` and `peopleVersion`. The titles-only case expects 409 |
 | Anonymous admin | A new route is excluded from Access | No Access bypass. The route stays on the existing Worker hostname. No token in the client |
-| Fixture leak | AIR-52 ships a `fetch('/api/admin/...')` | Bundle test: admin script contains neither `fetch` nor `/api/` |
-| D1 mistaken for production | Admin reads an empty or stale SQLite | AIR-124 does not open D1. The contract says R2 programme snapshot |
+| Page reaching another API | The page script calls a writer or another route | Bundle test: the page bundle names only `/api/admin`, sends GET with the browser session and carries no token |
+| D1 mistaken for production | Admin reads an empty or stale SQLite | The route does not open D1. The contract says R2 programme snapshot |
 | Schema edit | An alias index is added to frozen `0001` | No migration in the admin PRs |
-| Publish-path change during AIR-69 | A new index object is written from EPG commit | Not in AIR-123, AIR-52, or the first AIR-124 slice |
+| Publish-path change | A new index object is written from EPG commit | Not part of the read route; a separate card |
 | Private data in git | A fixture copies the live watchlist | Fixture ids and titles are synthetic. Review the fixture file |
 | Model or TMDB on search | A miss triggers discovery | No `fetch` to TMDB and no discovery call in the handler |
 
-Rollback of a later AIR-124 is revert of that route. It does not delete R2 objects, because the route must not have written any. Rollback of AIR-52 is revert of the static page.
+Rollback of the live read is a revert of the route and the page. It does not delete R2 objects, because the route has written none.
 
-## Compatibility with AIR-69
+## Resolver independence
 
-[AIR-69](https://trello.com/c/FlcWZX7W) is in progress. This audit did not re-read production. The latest owner checkpoint on that card (24 October 2026) says `SCORED_RESOLUTION` stayed `on`, schedules were 0, a published generation existed, and scored resolver activity for that generation was **not** confirmed. Those statements are the card's checkpoint at that date, not a new measurement; AIR-69 was accepted later and the `SCORED_RESOLUTION` variable was then retired from code ([ADR 0036](../../adr/0036-scored-resolution-only.md)).
-
-That state is compatible with AIR-123 and AIR-52. Both are offline. They do not start sync, a resolver chunk, a prediction, or a migration, and they do not change flags or schedules.
-
-That state is **not** compatible with turning on AIR-124 or with writing an admin index from EPG publish. Reasons:
-
-- AIR-69's acceptance is two ordinary full EPG generations with resolver activity on each. A new reader of the resolution ledger, or a new object written at publish, changes the path being observed.
-- The published pointer is not evidence the resolver finished. An admin page that treated the pointer as a complete Film catalog would over-claim.
-- [ADR 0005](../../adr/0005-external-chatgpt-tasks.md) keeps unattended EPG and prediction on external ChatGPT Scheduled Tasks. `Worker schedules=0` on the AIR-69 checkpoint is the Worker setting only. It is not a reading of that external registry, and this contract must not add Worker cron or enable, disable, or trigger those tasks.
-- Finishing AIR-69 still leaves R2 authoritative. It does not make D1 the admin source and does not authorize AIR-53 or AIR-54 writes.
-
-AIR-124 may start only after AIR-69 is accepted **and** the checks in the risk table pass in that PR. Until then the admin UI shows fixture data only.
+The scored resolver ([AIR-69](https://trello.com/c/FlcWZX7W)) was accepted before the live route landed; the constraints above still hold so that an admin read can never be mistaken for resolver activity: the route reads neither the lease, the continuation, the resolution ledger nor the discovery snapshot, writes nothing at EPG publish, and starts no sync, chunk, prediction or migration. [ADR 0005](../../adr/0005-external-chatgpt-tasks.md) keeps unattended EPG and prediction on external ChatGPT Scheduled Tasks; this contract adds no Worker cron and does not enable, disable or trigger those tasks. R2 stays authoritative; D1 is not the admin source and the route authorizes no reviewed-title or reviewed-name write.

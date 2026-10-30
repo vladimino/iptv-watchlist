@@ -16,15 +16,22 @@ function viewEntry(film){
 }
 export function buildLocalFixtures(catalog,now=Date.now()){
  const at=new Date(now).toISOString();
- const filmBody=film=>({id:film.id,title:film.title,original:film.original,year:film.year,runtime:film.runtime,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,shows:(film.shows||[]).map(show=>{const start=now+show.offsetHours*3600000;return {start,end:start+show.durationHours*3600000,channel:show.channel,channelId:show.channelId};})});
+ const filmBody=film=>({id:film.id,...(film.tmdbId?{tmdbId:String(film.tmdbId)}:{}),title:film.title,original:film.original,year:film.year,runtime:film.runtime,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,shows:(film.shows||[]).map(show=>{const start=now+show.offsetHours*3600000;return {start,end:start+show.durationHours*3600000,channel:show.channel,channelId:show.channelId};})});
  const films=catalog.films.map(filmBody);
  const people={directors:[],actors:[]};
  for(const film of films)for(const key of ['directors','actors'])for(const person of film[key]||[])if(!people[key].some(item=>item.id===person.id))people[key].push(person);
  const programme={runId:'local-fixture',updatedAt:at,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:films.length,films,people,stats:{uniqueFilms:films.filter(film=>film.shows.length).length,channels:1}};
  const watchlist={updatedAt:at,films:films.map(({shows,...film})=>film)};
  const view=Object.fromEntries(catalog.films.filter(film=>film.actualRating!==undefined||film.prediction||film.mechanics||film.moods||film.execution).map(viewEntry));
+ // The published generation the Worker pins its readers to: the pointer, the generation copy of the programme and an
+ // empty generation catalog, plus the two localization dictionaries the owner admin page reads beside the programme.
  const objects=[
   {key:'programme.json',json:programme},
+  {key:'epg/published-generation.json',json:{phase:'published',programmeRunId:programme.runId,publishedAt:at}},
+  {key:`epg/generations/${programme.runId}/programme.json`,json:programme},
+  {key:`epg/generations/${programme.runId}/discovered-films.json`,json:{}},
+  {key:'titles.json',json:{'movie-2':{title:'Фильм 2',status:'provisional',sources:['https://www.wikidata.org/wiki/Q2']}}},
+  {key:'people.json',json:{'actor/actor-2':{name:'Актёр 2',original:'Actor2'}}},
   {key:'watchlist.json',json:watchlist},
   {key:'sync.json',json:{runId:'local-fixture',stage:'complete',updatedAt:at}},
   {key:'enrichment/profile/current.json',json:{...localProfile,updatedAt:at}},

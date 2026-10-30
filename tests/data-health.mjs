@@ -12,7 +12,9 @@ const source = fs.readFileSync('src/domain/data-health.js', 'utf8');
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|R2|D1/);
 assert.equal(fs.readFileSync('build.mjs', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('public/app.js', 'utf8').includes('data-health'), false);
-assert.equal(fs.readFileSync('src/admin/fixtures.js', 'utf8').includes('data-health'), false);
+assert.equal(fs.readFileSync('src/admin/client.js', 'utf8').includes('data-health'), false);
+assert.equal(fs.readFileSync('src/admin/read.js', 'utf8').includes('data-health'), false);
+assert.equal(fs.readFileSync('public/admin.js', 'utf8').includes('data-health'), false);
 
 const NOW = '2026-10-30T12:00:00.000Z';
 const H = 3600000, D = 86400000;

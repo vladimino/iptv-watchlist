@@ -2,14 +2,15 @@
   "films": [
     {
       "id": "movie-1",
+      "tmdbId": "900001",
       "title": "Movie1",
       "original": "Movie1",
       "year": 2020,
       "runtime": 100,
       "genres": ["Genre1"],
       "synopsis": "Dummy synopsis for Movie1.",
-      "directors": [{"id": "director-1", "name": "Director1", "original": "Director1"}],
-      "actors": [{"id": "actor-1", "name": "Actor1", "original": "Actor1"}],
+      "directors": [{"id": "director/director-1", "name": "Director1", "original": "Director1"}],
+      "actors": [{"id": "actor/actor-1", "name": "Actor1", "original": "Actor1"}],
       "shows": [
         {"offsetHours": -5, "durationHours": 2, "channel": "Channel1", "channelId": "channel-1"},
         {"offsetHours": 3, "durationHours": 2, "channel": "Channel1", "channelId": "channel-1"}
@@ -28,8 +29,8 @@
       "runtime": 120,
       "genres": ["Genre2"],
       "synopsis": "Dummy synopsis for Movie2.",
-      "directors": [{"id": "director-1", "name": "Director1", "original": "Director1"}],
-      "actors": [{"id": "actor-2", "name": "Actor2", "original": "Actor2"}],
+      "directors": [{"id": "director/director-1", "name": "Director1", "original": "Director1"}],
+      "actors": [{"id": "actor/actor-2", "name": "Actor2", "original": "Actor2"}],
       "shows": [
         {"offsetHours": 6, "durationHours": 2, "channel": "Channel1", "channelId": "channel-1"}
       ],
@@ -46,8 +47,8 @@
       "runtime": 90,
       "genres": ["Genre1", "Genre2"],
       "synopsis": "Dummy synopsis for Movie3. It has no broadcasts.",
-      "directors": [{"id": "director-1", "name": "Director1", "original": "Director1"}],
-      "actors": [{"id": "actor-1", "name": "Actor1", "original": "Actor1"}, {"id": "actor-2", "name": "Actor2", "original": "Actor2"}],
+      "directors": [{"id": "director/director-1", "name": "Director1", "original": "Director1"}],
+      "actors": [{"id": "actor/actor-1", "name": "Actor1", "original": "Actor1"}, {"id": "actor/actor-2", "name": "Actor2", "original": "Actor2"}],
       "shows": []
     }
   ]
