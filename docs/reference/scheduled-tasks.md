@@ -31,6 +31,14 @@ A caller honors the gate; it reports the nominal trigger as the next scheduled r
 
 ## Operational controls and drift
 
+### Staged independent Ratings Task (not yet active)
+
+On 31 October 2026 the owner explicitly requested to separate Letterboxd Diary/ratings into a dedicated daily Scheduled Task and to remove the EPG Task's ownership of ratings. The existing EPG Task (`Automation_5d50308ce72c8191a50242fa604836b2`) was updated at the **prompt level only**: its schedule stays daily at 17:00 Europe/Madrid and `is_enabled=true`; it retains all programme/discovery steps, and now explicitly forbids calling independent ratings tools. **The currently deployed Worker still invokes Diary within the EPG commit.** Prompt editing cannot stop that server-side call. The change of code and durable orchestration is pending [AIR-296](https://trello.com/c/6lFnWkr8) and [AIR-294](https://trello.com/c/IzWiVABa).
+
+The new automation `Обновление рейтингов «В эфире»` has immutable ID `6ae52289ae9481919a68eec9310f5d8c`. It was created using `default_timezone=Europe/Madrid`, `timing_mode=flexible_schedule`, with provisional `DTSTART;TZID=Europe/Madrid:20261101T180000` and `RRULE:FREQ=DAILY;BYHOUR=18;BYMINUTE=0`, then **immediately disabled**. A subsequent live registry read confirmed `is_enabled=false`. Its prompt contains a strict deployment gate: until a dedicated ratings API and maintained contract exist, it must make no sync/writer call; it must never use `epg_sync_start`/`epg_sync_step` to fetch ratings. This staged task does **not** have production execution authorization. Cutover, exact schedule choice, final prompt and activation are tracked in [AIR-295](https://trello.com/c/VtFZ6cci).
+
+The daily Drift monitor currently checks **only the two active producer tasks** (EPG and hourly predictions). It intentionally does not alert that the staged Ratings Task is disabled. After approved cutover the monitor must be updated to validate three active producer tasks and separate EPG/ratings freshness. See [the dated staging evidence](../evidence/ratings-task-staging-2026-10-31.md).
+
 ### Owner-approved daily read-only drift audit
 
 The separate ChatGPT Scheduled Task `IPTV Scheduled Task Drift` (automation ID `6ade65245de481919b816c5f5026c121`) is a **monitor**, not a third producer of EPG, discovery or predictions. On 30 October 2026 the owner approved changing the existing weekly Monday 09:00 audit to **daily at 17:45 Europe/Madrid**. The live registry was updated and read back with `is_enabled=true`, `default_timezone=Europe/Madrid`, `DTSTART;TZID=Europe/Madrid:20261030T174500` and `RRULE:FREQ=DAILY;BYHOUR=17;BYMINUTE=45`. This is a dated verified configuration; the registry, not this document, remains authoritative. See [AIR-292](https://trello.com/c/CTxq4Khy) and [AIR-293](https://trello.com/c/pUgAE8HU).
