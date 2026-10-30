@@ -36,8 +36,20 @@
 - No historical slugs exist, because no earlier sidecar carried one.
 - No two Films share a slug.
 
+## Local D1 readback
+
+A local SQLite build in the AIR-275 session read the same snapshot. Its code was `main` `137de6a` plus PR #243 at `cd470bd`, run with `--target sqlite --staged-generation`. The build completed: 34,220 statements applied, parity 0/0/0 of 88,878, class A empty.
+
+| `film_external_id` where `scheme = 'letterboxd_slug'` | Count |
+| --- | --- |
+| Rows | 394 |
+| Rows with `trusted = 1` | 0 |
+| Rows with `conflicting = 1` | 0 |
+| Distinct Films | 394 |
+| Films with a slug but no `letterboxd` id | 0 |
+
+This is a local database, not production D1. The `071ed03` inventory rerun gave the same counts. `221d5f4` changes only how diary sighting times merge, and this snapshot has no diary entries.
+
 ## Not established
 
-
-- The D1 readback of `film_external_id` rows with `scheme = 'letterboxd_slug'` is pending a local D1 build in the AIR-275 session.
-- No production D1 write was made; that needs its own owner approval.
+- The production D1 readback: the production load follows the merge of PR #243, with its own owner approval.
