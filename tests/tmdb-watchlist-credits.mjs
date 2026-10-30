@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {renderSql} from '../scripts/d1-backfill.mjs';
-import {ALIAS_PROVENANCE,applyPlan,buildPlan,coCreditReview,fetchCredits,filmStatements,tmdbCredits,tmdbPath,watchlistFilms} from '../scripts/tmdb-watchlist-credits.mjs';
+import {ALIAS_PROVENANCE,applyPlan,buildPlan,coCreditReview,creditSource,fetchCredits,readSources,filmStatements,tmdbCredits,tmdbPath,watchlistFilms} from '../scripts/tmdb-watchlist-credits.mjs';
 
 const source=fs.readFileSync('scripts/tmdb-watchlist-credits.mjs','utf8');
 assert.doesNotMatch(source,/\bBUCKET\b|wrangler|env\.DB\b|\bDELETE\b|\bUPDATE\b|DO UPDATE|REPLACE INTO/,'the script only adds rows, never R2, never a Worker binding');
@@ -58,7 +58,7 @@ assert.equal(tmdbCredits(ronin).actor[1].name,null);
 
 // Fetch: discovery pace, bearer token, raw response saved privately; 404 booked and skipped, 429 stops, a saved Film is reused.
 const calls=[],answers={'404':{status:404},'949':{status:200,body:heat},'8195':{status:200,body:ronin}};
-const fetchImpl=async(url,init)=>{calls.push({url,auth:init.headers.Authorization});const id=url.match(/movie\/(\d+)\?/)[1],a=answers[id];return new Response(a.body?JSON.stringify(a.body):'{}',{status:a.status,headers:{'Retry-After':'30'}});};
+const fetchImpl=async(url,init)=>{calls.push({url,auth:init.headers.Authorization});const id=url.match(/(?:movie|tv)\/(\d+)\?/)[1],a=answers[id];return new Response(a.body?JSON.stringify(a.body):'{}',{status:a.status,headers:{'Retry-After':'30'}});};
 const sleeps=[];
 let report=await fetchCredits({films:listed.films,dir,token:'tok',fetchImpl,sleep:async ms=>{sleeps.push(ms);},now:()=>new Date(T)});
 assert.deepEqual({fetched:report.fetched,reused:report.reused,notFound:report.notFound.map(f=>f.filmId),stopped:report.stopped},{fetched:2,reused:0,notFound:['film:lb:gone'],stopped:null});
@@ -88,7 +88,7 @@ const before=rows('select count(*) n from film_person_credit')[0].n;
 let plan=await buildPlan({db,dir});
 assert.equal(rows('select count(*) n from film_person_credit')[0].n,before,'plan writes nothing');
 assert.deepEqual(plan.missing,[]);assert.deepEqual(plan.notFound,[{filmId:'film:lb:gone',tmdbId:'404'}]);
-assert.deepEqual(plan.totals,{films:3,skippedFilms:1,missingArtifacts:0,notFound:1,plannedFilms:2,tmdbCredits:10,existingTmdbCredits:0,newCredits:10,newPersons:8,newAliases:7,reusedPersons:1,unnamedPersons:1,filmsWithoutTmdbCredits:0,expectedPairs:2});
+assert.deepEqual(plan.totals,{films:3,skippedFilms:1,missingArtifacts:0,notFound:1,plannedFilms:2,tvSources:0,tmdbCredits:10,existingTmdbCredits:0,newCredits:10,newPersons:8,newAliases:7,reusedPersons:1,unnamedPersons:1,filmsWithoutTmdbCredits:0,expectedPairs:2});
 const heatPlan=plan.films.find(film=>film.filmId==='film:lb:heat');
 assert.deepEqual(heatPlan.writes.slice(0,3).map(w=>[w.personId,w.role,w.ordinal,w.newPerson]),[['person:tmdb_director/638','director',1,true],['person:tmdb_actor/1158','actor',2,true],['person:tmdb_actor/380','actor',3,false]]);
 // Same Film, same role, same name only: Mann through his accepted localization, De Niro on both Films. Pacino and
@@ -137,6 +137,26 @@ assert.deepEqual(rows(`select value from person_alias where person_id='person:tm
 // A Film without a saved answer is missing, and --apply refuses to run on an incomplete artifact.
 fs.renameSync(path.join(dir,'tmdb','404.json'),path.join(root,'404.json'));
 assert.deepEqual((await buildPlan({db,dir})).missing,[{filmId:'film:lb:gone',tmdbId:'404'}]);
+// A miniseries: the owner maps the Film to its TMDB TV entry in sources.json. Actors are the main cast, directors come
+// from aggregate_credits; the Film's own TMDB id and identity stay untouched.
+const tv={id:1457,credits:{cast:[{id:5472,name:'Колин Ферт'}],crew:[]},aggregate_credits:{cast:[],crew:[{id:126951,name:'Simon Langton',jobs:[{job:'Director'}]},{id:3,name:'Writer',jobs:[{job:'Writer'}]}]}};
+assert.deepEqual(tmdbCredits(tv,'tv').director.map(item=>item.roleId),['tmdb_director/126951']);
+assert.deepEqual(tmdbCredits(tv).director,[],'a movie never reads aggregate_credits');
+assert.equal(creditSource({filmId:'film:lb:gone',tmdbId:'404'},{'film:lb:gone':'tv/1457'}).path,'tv/1457?language=ru-RU&append_to_response=credits,aggregate_credits');
+assert.throws(()=>creditSource({filmId:'film:lb:gone',tmdbId:'404'},{'film:lb:gone':'movie/1'}),{reason:'configuration'});
+fs.renameSync(path.join(root,'404.json'),path.join(dir,'tmdb','404.json'));
+fs.writeFileSync(path.join(dir,'sources.json'),JSON.stringify({'film:lb:gone':'tv/1457'}));
+assert.deepEqual(readSources(dir),{'film:lb:gone':'tv/1457'});
+calls.length=0;answers['1457']={status:200,body:tv};
+report=await fetchCredits({films:listed.films,dir,token:'tok',sources:readSources(dir),fetchImpl,intervalMs:0});
+assert.deepEqual([report.fetched,report.reused,calls.map(c=>c.url.split('/3/')[1])],[1,2,['tv/1457?language=ru-RU&append_to_response=credits,aggregate_credits']]);
+const identity=snapshot('film_external_id');
+plan=await buildPlan({db,dir});
+assert.equal(plan.totals.tvSources,1);assert.deepEqual(plan.notFound,[]);
+assert.deepEqual(plan.films.map(f=>[f.filmId,f.source,f.writes.map(w=>[w.personId,w.ordinal])]),[['film:lb:gone','tv/1457',[['person:tmdb_director/126951',0],['person:tmdb_actor/5472',0]]]]);
+await applyPlan({db,plan});
+assert.deepEqual(snapshot('film_external_id'),identity,'the TV id is a credits source only');
+assert.equal((await buildPlan({db,dir})).totals.newCredits,0);
 // A saved response for the wrong movie stops the plan instead of crediting another Film.
 fs.writeFileSync(path.join(dir,'tmdb','8195.json'),JSON.stringify({response:{id:1}}));
 await assert.rejects(buildPlan({db,dir}),{reason:'artifact_mismatch'});

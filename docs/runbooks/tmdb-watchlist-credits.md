@@ -10,6 +10,7 @@ The script only adds rows. It merges, links or renames no person, matches nothin
 - Request: `GET https://api.themoviedb.org/3/movie/<tmdbId>?language=ru-RU&append_to_response=credits`, the request and language discovery uses.
 - Persons: discovery's format. Directors are the crew with `job` `Director`, actors the cast, the first ten of each in TMDB order, one credit per person and role. A missing person gets `person` (`person:tmdb_director/<id>` or `person:tmdb_actor/<id>`, `role_id` without the prefix, contract version 1) and one `person_alias` of kind `name` with the TMDB credit name and provenance `{"source":"tmdb","task":"AIR-286"}`. An existing person is reused unchanged.
 - Credits: `film_person_credit` rows numbered after the Film's existing credits of the same role, in TMDB order.
+- Miniseries: a Film whose TMDB entry is a TV series (its movie id answers `404`) can be mapped by the owner in `<dir>/sources.json` as `{"film:<id>": "tv/<tvId>"}`. The script then reads `tv/<tvId>?language=ru-RU&append_to_response=credits,aggregate_credits`, takes the actors from the main cast and the directors from the episode crew in `aggregate_credits`. The TV id is only a credits source: the Film's external ids and identity are not changed. The file is private and is reused by every later run.
 
 ## Steps
 
