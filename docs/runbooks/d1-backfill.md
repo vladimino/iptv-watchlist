@@ -114,6 +114,27 @@ A pointer that names a hash with no stored body or record is not a stop: the row
 6. **No mandatory rerun.** Run again on the same baseline only to resume a `partial` or `stopped` run; the receipts make that safe, and `tests/d1-backfill.mjs` covers the empty same-baseline rerun.
 7. **Delta.** Export a fresh baseline with its own consistency proof (its `finishedAt` must be later than the target's newest baseline) and run with `--delta`: changed objects are re-imported, old receipts are `superseded`, anything `stale` or `foreign` is a class A blocker, and keys missing from the new inventory are anomalies for the owner, never deletions in D1.
 
+## Seeding the projector on the loaded database, without a reload (AIR-275 phase 2)
+
+When D1 still holds what the last reload built from a known snapshot, plus D1-only steps such as AIR-286, the projector's keys can be seeded from that same snapshot. No reload or replay is needed. Each production step is a separate owner approval, and Time Travel restore is an emergency step with its own approval: it rolls back the whole database, not one table.
+
+1. **Read-only preflight.** Compare production with the reload build, table by table and row by row, for the R2-derived Film and Person tables. Confirm:
+   - the baseline receipt (`import_receipt`, `manifest.json`) names the snapshot;
+   - the only extra rows are the D1-only ones (AIR-286: `person:tmdb_*` people with their name aliases, and their credits on watchlist Films);
+   - the watchlist membership count.
+2. **Migration 0004.** Take a bookmark, then apply `migrations/0004_projection_state.sql`. Accept it only when `projection_state`, `projection_run` and `projection_fence` exist and `schema_contract.version` is 4. `/api/d1/status` then reports `projector.schema: true`.
+3. **Seed plan.** Run `D1_BACKFILL_DATABASE_ID=<uuid> node scripts/d1-projection-seed.mjs --snapshot /abs/snapshot --target d1`, with the `D1_BACKFILL_*` credentials in the environment. It only reads, and stops with a reason when any fence fails:
+   - the database identity;
+   - the full schema v4;
+   - the baseline receipt;
+   - a live projector lease;
+   - a key for an entity D1 does not hold;
+   - a stored key that disagrees with the plan or lies outside it.
+
+   It reports the planned keys and the D1-only people, which get no key.
+4. **Seed.** Take a new bookmark, then run the same command with `--apply`. It writes 250 rows per idempotent request and finishes by reading every key back. A run stopped by an uncertain write is finished by running it again. If something else fails, stop with the flag off and look; do not restore by default.
+5. **Projector.** Continue with `dry`, then `on`, as in step 7 of the reload below. Read the Cloudflare Workers memory and CPU metrics too: the run log carries no heap figure, and memory is shared by all requests of one isolate.
+
 ## Reload with the enrichment projector (AIR-275 phase 2)
 
 Once the [enrichment projector](../adr/0056-d1-enrichment-write-through.md) writes D1, a reload must not restart it from nothing, and it must not lose what only D1 holds. Each production step below is a separate owner approval.
