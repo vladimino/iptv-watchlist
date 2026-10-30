@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-24 (retrospective; [AIR-118](https://trello.com/c/5qf3Zn3p))  
 **Approval source:** [AIR-49](https://trello.com/c/YNaLFwtW) and [ADR-0001](0001-d1-schema-v1.md)  
 **Supersedes:** None documented  
-**Superseded by:** None documented
+**Superseded by:** [ADR 0051](0051-d1-domain-r2-blobs.md) for the stages after the backfill (shadow writes, shadow reads and the separate cutovers)
 
 ## Context
 

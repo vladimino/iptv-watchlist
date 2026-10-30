@@ -14,7 +14,9 @@ flowchart TB
         sync["Sync and EPG handlers"]
         prediction["Prediction runner handlers"]
         discovery["One discovery chunk per explicit request"]
+        catalogD1["src/catalog-d1.js: read-only relational views"]
         route --> sync
+        route -->|GET /api/d1/*| catalogD1
         route --> prediction
         route -->|exact /mcp| mcp
         mcp -->|allowlisted tool call| sync
@@ -22,17 +24,19 @@ flowchart TB
         sync -->|explicit step after EPG commit| discovery
     end
     store[("R2 BUCKET: iptv")]
+    d1[("D1 DB: iptv, read-only from the Worker")]
     web --> webAccess --> route
     mcpClient --> mcpAccess --> route
     sync <--> store
     prediction <--> store
     discovery <--> store
+    catalogD1 -->|SELECT only| d1
     classDef current fill:#edf8ef,stroke:#579266,color:#15361e
-    class store current
+    class store,d1 current
 ```
 
 The **one-chunk continuation** is executed inside the explicit step/request that asks for it. `DiscoveryContinuation` is an internal entrypoint, not an unauthenticated public endpoint, a second Worker, a cross-isolate guarantee, or a self-fetch with credentials. Only authorized operations invoke write handlers. Route names such as GET/status cannot universally be assumed read-only: consult [deployment safety notes](../runbooks/deployment.md).
 
-`wrangler.jsonc` binds `BUCKET` to R2 `iptv` and contains no production D1 binding. Local D1 repository code and dry-run migration do not make D1 part of this deployed topology. Runtime mode and configured Cloudflare Access policies must be rechecked for live-state claims.
+`wrangler.jsonc` binds `BUCKET` to R2 `iptv` and `DB` to the D1 database `iptv`. R2 stays authoritative for every existing page and writer; the Worker only reads D1, through the [D1 catalog views](../reference/api/d1-catalog.md) under `/api/d1/`, behind the same Access policy as the rest of `/api/`. The D1 data is the backfilled copy of R2 ([D1 backfill runbook](../runbooks/d1-backfill.md)); nothing in the Worker writes it yet. Runtime mode and configured Cloudflare Access policies must be rechecked for live-state claims.
 
 See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract](../reference/api/mcp.md) and [D1 schema boundary](../reference/data/d1-schema.md).

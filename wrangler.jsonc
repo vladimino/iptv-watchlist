@@ -12,6 +12,13 @@
   "limits": {
     "cpu_ms": 120000
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "iptv",
+      "database_id": "3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb"
+    }
+  ],
   "r2_buckets": [
     {
       "binding": "BUCKET",

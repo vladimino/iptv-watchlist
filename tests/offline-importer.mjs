@@ -531,8 +531,8 @@ assert.equal(legacyRun.conflicts,0,JSON.stringify(legacyRun.ledger));
 
 const legacyHandle=snapshotSqlite(legacyDb);
 // A catalog film keyed tmdb_<id> in epg/discovered-films.json carries its TMDB credits into its Film, and a watchlist Film
-// with the same verified TMDB id gets the catalog's TMDB credits beside its Letterboxd ones (the co-credit evidence of
-// ADR 0049); before the fix both catalog rosters were empty.
+// with the same verified TMDB id gets the catalog's TMDB credits beside its Letterboxd ones (the shared-Film evidence
+// of ADR 0009 and AIR-201); before the fix both catalog rosters were empty.
 const creditsOf=async id=>(await legacyHandle.all('SELECT person_id,role FROM film_person_credit WHERE film_id=? ORDER BY person_id',[id])).map(row=>row.person_id+'/'+row.role);
 assert.deepEqual(await creditsOf('film:tmdb:9'),['person:tmdb_director/50/director']);
 assert.deepEqual(await creditsOf('film:heat-1995'),['person:director/michael-mann/director','person:tmdb_director/638/director']);
