@@ -95,7 +95,7 @@ Rollback of `on` means unsetting the flag. The rows it wrote stay until a Time T
 - **Original decision:** owner decision on 2026-10-30, recorded on [AIR-275](https://trello.com/c/4x7hH0gI)
 - **Implementation:** the AIR-275 phase 2 PR (this ADR's PR)
 - **Dated verification:** [projector measurements on the 2026-10-29 snapshot](../evidence/d1-migration/air-275-enrichment-projector-2026-10-30.md), local, plus the production rollout of 30 October 2026 (section 7)
-- **Uncertainty:** these are Node measurements, not Worker measurements. Production `dry` is the first Worker measurement.
+- **Uncertainty:** the cost figures above are Node measurements. In production (evidence section 7) the runs took 1.8–5.8 s of Worker CPU and 5.6–17.5 s of wall time when complete, and the first `on` run stopped at the 60 s wall budget. Cloudflare does not report the Worker's peak heap, so that stays unmeasured; every invocation ended `ok`.
 
 ## Follow-ups
 
