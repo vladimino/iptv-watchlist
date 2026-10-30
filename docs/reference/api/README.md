@@ -8,7 +8,7 @@ Current interface contracts, not a grant of production writer access:
 - [Continuous prediction runner](prediction-runner.md)
 - [Run-step diagnostic provenance](run-diagnostics.md)
 - [Read-only prediction queue diagnostics](prediction-diagnostics.md)
-- [Read-only per-film prediction and rating history](film-history.md)
+- [Read-only per-film prediction, rating and Diary viewing history](film-history.md)
 - [Read-only prediction quality: prospective metrics and calibration](prediction-quality.md)
 - [Read-only D1 catalog views: persons, filmographies, duplicate review](d1-catalog.md)
 
