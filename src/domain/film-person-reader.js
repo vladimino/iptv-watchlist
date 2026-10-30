@@ -56,15 +56,14 @@ function knownShows(record){return record&&Object.hasOwn(record,'shows')?record.
 function observedShows(programme,body){const programmeShows=knownShows(programme);return programmeShows!==undefined?programmeShows:knownShows(body);}
 function observedProgrammeRun(programme,body){if(programme&&Object.hasOwn(programme,'showsProgrammeRunId'))return programme.showsProgrammeRunId||null;if(body&&Object.hasOwn(body,'showsProgrammeRunId'))return body.showsProgrammeRunId||null;return null;}
 // AIR-276: Letterboxd diary slugs by lid. A diary entry links a slug to a Film only through the lid on the same row.
-// An alias written with its own `firstObservedAt` keeps that time. An older alias has none: it was first seen at some
-// read of its entry, so only `observedBetween` (the entry's first and latest read) is stated, never an exact time.
-function diaryAliasTime(alias,entry){
- if(alias.firstObservedAt)return {observedAt:alias.firstObservedAt};
- return {observedAt:null,observedBetween:{from:entry.firstObservedAt||null,to:entry.observedAt||null}};
-}
-function earlierDiaryTime(next,prior){
- if(next.observedAt||prior.observedAt)return !prior.observedAt||next.observedAt&&next.observedAt<prior.observedAt;
- return !!next.observedBetween.to&&(!prior.observedBetween.to||next.observedBetween.to<prior.observedBetween.to);
+// Each observation bounds when the slug was first seen: an alias stamped by the writer at its `firstObservedAt`
+// exactly; an older alias only within its entry's reads, `firstObservedAt`..`observedAt`. Across observations of one
+// slug the first sighting lies between the earliest lower bound and the earliest upper bound, so an exact `observedAt`
+// is stated only when that window closes to one instant; otherwise `observedAt: null` and `observedBetween`. A missing
+// bound stays unknown (null).
+function diaryAliasWindow(alias,entry){
+ if(alias.firstObservedAt)return {from:alias.firstObservedAt,to:alias.firstObservedAt};
+ return {from:entry.firstObservedAt||null,to:entry.observedAt||null};
 }
 function diarySlugIndex(history){
  const index=new Map();
@@ -72,10 +71,19 @@ function diarySlugIndex(history){
   const lid=entry?.identity?.type==='letterboxd_lid'?String(entry.identity.value||''):'';if(!lid)continue;
   for(const alias of entry.aliases||[]){
    if(alias?.type!=='letterboxd_slug'||!/^[a-z0-9][a-z0-9-]{0,199}$/.test(String(alias.value||'')))continue;
-   const slugs=index.get(lid)||new Map(),prior=slugs.get(alias.value),time=diaryAliasTime(alias,entry);
-   if(!prior||earlierDiaryTime(time,prior.provenance))slugs.set(alias.value,{value:alias.value,provenance:{source:'letterboxd_diary',status:'observed',entry:entry.key||null,...time}});
+   const slugs=index.get(lid)||new Map(),prior=slugs.get(alias.value),window=diaryAliasWindow(alias,entry);
+   if(!prior)slugs.set(alias.value,{value:alias.value,entry:entry.key||null,from:window.from,to:window.to,fromKnown:!!window.from});
+   else{
+    prior.fromKnown=prior.fromKnown&&!!window.from;
+    if(window.from&&(!prior.from||window.from<prior.from))prior.from=window.from;
+    if(window.to&&(!prior.to||window.to<prior.to)){prior.to=window.to;prior.entry=entry.key||null;}
+   }
    index.set(lid,slugs);
   }
+ }
+ for(const slugs of index.values())for(const [value,seen] of slugs){
+  const from=seen.fromKnown?seen.from:null,exact=from&&seen.to&&from===seen.to;
+  slugs.set(value,{value,provenance:{source:'letterboxd_diary',status:'observed',entry:seen.entry,...(exact?{observedAt:from}:{observedAt:null,observedBetween:{from,to:seen.to}})}});
  }
  return index;
 }

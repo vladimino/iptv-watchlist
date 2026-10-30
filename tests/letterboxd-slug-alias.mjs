@@ -98,6 +98,22 @@ const lateAgain=backfillLifecycle({...late,persistedSidecars:lateStored},LATER);
 assert.deepEqual(plain(lateAgain.reconciliation.update),[]);
 assert.deepEqual(plain(lateAgain.sidecars['watchlist.lifecycle.json'].nourl.externalIds.find(item=>item.value==='first-slug').provenance.observedBetween),{from:'2026-10-01T00:00:00.000Z',to:'2026-10-30T00:00:00.000Z'});
 
+// 2e. One slug in two diary entries of one lid. The first sighting lies between the earliest lower bound and the
+// earliest upper bound; an exact time only when that window closes. Both insertion orders give the same answer.
+const day=n=>'2026-10-'+String(n).padStart(2,'0')+'T00:00:00.000Z';
+const twoEntries=(first,second)=>{const store2=store();store2.watchlist.films=store2.watchlist.films.filter(film=>film.id==='nourl');
+ store2.diaryHistory={schemaVersion:1,entries:Object.fromEntries([first,second].map((entry,i)=>['e'+i,{key:'e'+i,identity:{type:'letterboxd_lid',value:'nourl'},...entry}]))};
+ return slugsOf(filmOf(readLifecycle(store2,NOW),'film:nourl')).map(item=>[item.provenance.observedAt,item.provenance.observedBetween??null]);};
+const legacy={firstObservedAt:day(1),observedAt:day(30),aliases:[{type:'letterboxd_slug',value:'same-slug'}]};
+const stamped={firstObservedAt:day(20),observedAt:day(30),aliases:[{type:'letterboxd_slug',value:'same-slug',firstObservedAt:day(25)}]};
+for(const [a,b] of [[legacy,stamped],[stamped,legacy]])assert.deepEqual(twoEntries(a,b),[[null,{from:day(1),to:day(25)}]],'an uncertain earlier sighting keeps the time uncertain');
+const narrow={firstObservedAt:day(5),observedAt:day(20),aliases:[{type:'letterboxd_slug',value:'same-slug'}]};
+for(const [a,b] of [[legacy,narrow],[narrow,legacy]])assert.deepEqual(twoEntries(a,b),[[null,{from:day(1),to:day(20)}]],'overlapping windows');
+const exactEarly={firstObservedAt:day(10),observedAt:day(30),aliases:[{type:'letterboxd_slug',value:'same-slug',firstObservedAt:day(18)}]};
+for(const [a,b] of [[stamped,exactEarly],[exactEarly,stamped]])assert.deepEqual(twoEntries(a,b),[[day(18),null]],'two exact sightings: the earlier');
+const unknownStart={observedAt:day(30),aliases:[{type:'letterboxd_slug',value:'same-slug'}]};
+assert.deepEqual(twoEntries(unknownStart,stamped),[[null,{from:null,to:day(25)}]],'an unknown lower bound stays unknown');
+
 // 3. The alias changes no identity, readiness, fingerprint, prediction or Film count.
 const without=readLifecycle({...store(),watchlist:{films:store().watchlist.films.map(({url,...film})=>film)},diaryHistory:null},NOW);
 assert.equal(view.films.length,without.films.length);
@@ -163,4 +179,4 @@ const inventory=await slugInventory(store(),NOW);
 assert.deepEqual(plain(inventory.films),{films:5,withLid:4,tmdbOnly:1,withSlug:3,withoutSlug:1,current:2,ambiguous:0,observedOnly:1,historical:0,conflicting:0});
 assert.deepEqual(plain(inventory.letterboxdRecords),{records:4,permalink:2,other:1});
 assert.deepEqual([inventory.writes,inventory.requests,inventory.collisions,inventory.diaryEntries],[0,0,0,3]);
-console.log('Letterboxd slug alias (AIR-276): strict permalink parser, current watchlist slug and observed diary slug by lid, metadata-only permalink, disagreeing records kept as ambiguous then settled with the old slug historical, per-alias diary time or an honest window that does not drift, no slug without a lid or URL, identity, readiness, count and parity unchanged, collision marked and never merged, idempotent replay, rename kept as historical, reused slug a collision, sources untouched, offline inventory from stored records only with no write or request passed');
+console.log('Letterboxd slug alias (AIR-276): strict permalink parser, current watchlist slug and observed diary slug by lid, metadata-only permalink, disagreeing records kept as ambiguous then settled with the old slug historical, per-alias diary time or an honest window that does not drift, one slug in two entries merged to the earliest bounds in either order, no slug without a lid or URL, identity, readiness, count and parity unchanged, collision marked and never merged, idempotent replay, rename kept as historical, reused slug a collision, sources untouched, offline inventory from stored records only with no write or request passed');
