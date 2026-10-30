@@ -65,7 +65,7 @@ Retained heap after a forced collection, at each stage:
 
 ## 6. Production D1 preflight before seeding (read-only)
 
-**Captured:** 2026-10-30, about 15:50 UTC. These were SELECT statements against D1 `iptv` (`3fba0e0a…`, schema v3) through the D1 HTTP API, compared with the private reload build of the 29 October snapshot. Nothing was written.
+**Captured:** 2026-10-30, 14:39 UTC (15:39 Madrid). These were SELECT statements against D1 `iptv` (`3fba0e0a…`, schema v3) through the D1 HTTP API, compared with the private reload build of the 29 October snapshot. Nothing was written.
 
 **Baseline.** The one `import_receipt` for `manifest.json` names `062c9812…250dda`, imported at `2026-10-29T19:58:26.568Z`, the same in both.
 

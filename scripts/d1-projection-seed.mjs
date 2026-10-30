@@ -50,12 +50,19 @@ export async function seedProjection(db,{keys,at}){
 // - the database is the configured one, by uuid and name;
 // - it carries all of migration 0004: the three projection tables and schema_contract version SCHEMA_VERSION;
 // - its baseline receipt names the snapshot the keys come from;
-// - no projector run holds the lease;
 // - every key belongs to a Film or Person the database holds. Rows only D1 holds, such as the AIR-286 TMDB people, get no key;
 // - no stored key disagrees with the plan, and no stored key lies outside it.
-// After the writes, every stored key is read back and must equal the plan exactly. Nothing else is written or deleted.
-export const SEED_CHUNK_ROWS=250;
-export async function seedProjectionD1(adapter,target,plan,{apply=false,now=Date.now(),chunkRows=SEED_CHUNK_ROWS}={}){
+// With --apply the seed also excludes the projector and any second seed for its whole run. It takes the projector's own lease in
+// projection_run (lease_id 'seed:<uuid>') before it reads the stored keys, so the projector's lease acquisition refuses to start,
+// and every write request is one batch that first checks the lease through projection_fence, renews it, inserts its chunk and
+// clears the fence row. A batch of a seed that lost its lease fails whole, and the seed stops with no further write. The lease
+// is released on success and on error; a process that dies leaves it to expire after SEED_LEASE_MS, and the next run takes over.
+// After the writes, every stored key is read back and must equal the plan exactly. Nothing but projection_state, the lease row
+// and the transient fence row is written, and nothing is deleted.
+export const SEED_CHUNK_ROWS=250,SEED_LEASE_MS=10*60000;
+const SEED_FENCE='INSERT INTO projection_fence (held) SELECT COUNT(*) FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?';
+export async function seedProjectionD1(adapter,target,plan,{apply=false,now=()=>Date.now(),chunkRows=SEED_CHUNK_ROWS,leaseId='seed:'+crypto.randomUUID()}={}){
+ const clock=typeof now==='function'?now:()=>now;
  const described=await adapter.describe();
  if(described.uuid!==target.databaseId||described.name!==target.databaseName)throw new BackfillStop('target_identity_mismatch',{expected:{uuid:target.databaseId,name:target.databaseName},actual:described});
  const tables=(await adapter.all("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence') ORDER BY name")).map(row=>row.name);
@@ -63,28 +70,59 @@ export async function seedProjectionD1(adapter,target,plan,{apply=false,now=Date
  if(tables.length!==3||version!==SCHEMA_VERSION)throw new BackfillStop('schema_not_v4',{tables,version});
  const receipts=await adapter.all('SELECT source_sha256 FROM import_receipt WHERE source_key=? AND target_table=?',[IDENTITY_SOURCE_KEY,IDENTITY_TARGET_TABLE]);
  if(receipts.length!==1||receipts[0].source_sha256!==plan.aggregateSha256)throw new BackfillStop('baseline_mismatch',{expected:plan.aggregateSha256,receipts:receipts.map(row=>row.source_sha256)});
- const lease=await adapter.get('SELECT lease_until FROM projection_run WHERE projection=?',[PROJECTION]);
- if(lease?.lease_until&&lease.lease_until>new Date(now).toISOString())throw new BackfillStop('projector_running',{leaseUntil:lease.lease_until});
+ const leaseRow=async()=>adapter.get('SELECT lease_id,lease_until FROM projection_run WHERE projection=?',[PROJECTION]);
+ if(!apply){
+  const held=await leaseRow();
+  if(held?.lease_until&&held.lease_until>new Date(clock()).toISOString())throw new BackfillStop('lease_held',{leaseId:held.lease_id,leaseUntil:held.lease_until});
+  const report=await seedPlan(adapter,plan,described,version);delete report.pendingKeys;
+  return {...report,apply,outcome:'plan'};
+ }
+ const at=new Date(clock()).toISOString();
+ await adapter.run('INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES (?,?,?,?) ON CONFLICT(projection) DO UPDATE SET lease_id=excluded.lease_id,lease_until=excluded.lease_until,started_at=excluded.started_at WHERE projection_run.lease_until IS NULL OR projection_run.lease_until<?',[PROJECTION,leaseId,new Date(clock()+SEED_LEASE_MS).toISOString(),at,at]);
+ const taken=await leaseRow();
+ if(taken?.lease_id!==leaseId)throw new BackfillStop('lease_held',{leaseId:taken?.lease_id??null,leaseUntil:taken?.lease_until??null});
+ let outcome='failed';
+ try{
+  const report=await seedPlan(adapter,plan,described,version);
+  const pending=report.pendingKeys;delete report.pendingKeys;
+  Object.assign(report,{apply,leaseId,written:0,requests:0});
+  for(let index=0;index<pending.length;index+=chunkRows){
+   const rows=pending.slice(index,index+chunkRows),moment=clock();
+   try{
+    await adapter.transaction(async()=>{
+     await adapter.run(SEED_FENCE,[PROJECTION,leaseId,new Date(moment).toISOString()]);
+     await adapter.run('UPDATE projection_run SET lease_until=? WHERE projection=? AND lease_id=?',[new Date(moment+SEED_LEASE_MS).toISOString(),PROJECTION,leaseId]);
+     await adapter.run('INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES '+rows.map(()=>'(?,?,?,?,?)').join(',')+' ON CONFLICT(projection,kind,id) DO NOTHING',rows.flatMap(item=>[PROJECTION,item.kind,item.id,item.key,plan.at]));
+     await adapter.run('DELETE FROM projection_fence');
+    });
+   }catch(error){
+    if(/CHECK constraint failed/i.test(String(error?.message)))throw new BackfillStop('lease_lost',{written:report.written});
+    throw error;
+   }
+   report.written+=rows.length;report.requests++;
+  }
+  const after=await stateOf(adapter);
+  const wanted=keyMap(plan);
+  const mismatched=[...wanted].filter(([id,key])=>after.get(id)!==key).length,extra=[...after.keys()].filter(id=>!wanted.has(id)).length;
+  if(mismatched||extra||after.size!==wanted.size)throw new BackfillStop('verify_failed',{mismatched,extra,stored:after.size,planned:wanted.size});
+  outcome='seeded';
+  return {...report,stored:after.size,outcome:'verified'};
+ }finally{
+  // Released only while still ours: a seed that lost its lease must not clear its successor's.
+  await adapter.run('UPDATE projection_run SET lease_id=NULL,lease_until=NULL,finished_at=?,outcome=? WHERE projection=? AND lease_id=?',[new Date(clock()).toISOString(),outcome,PROJECTION,leaseId]).catch(()=>{});
+ }
+}
+const keyMap=plan=>new Map(plan.keys.map(item=>[item.kind+'\n'+item.id,item.key]));
+const stateOf=async adapter=>new Map((await adapter.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
+async function seedPlan(adapter,plan,described,version){
  const films=new Set((await adapter.all('SELECT id FROM film')).map(row=>row.id)),people=new Set((await adapter.all('SELECT id FROM person')).map(row=>row.id));
  const missing=plan.keys.filter(item=>!(item.kind==='film'?films:people).has(item.id));
  if(missing.length)throw new BackfillStop('entity_missing',{count:missing.length,sample:missing.slice(0,5).map(item=>item.kind+':'+item.id)});
- const wanted=new Map(plan.keys.map(item=>[item.kind+'\n'+item.id,item.key]));
- const stateOf=async()=>new Map((await adapter.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
- const stored=await stateOf();
+ const wanted=keyMap(plan),stored=await stateOf(adapter);
  const conflicting=[...stored].filter(([id,key])=>wanted.has(id)&&wanted.get(id)!==key).length,foreign=[...stored.keys()].filter(id=>!wanted.has(id)).length;
  if(conflicting||foreign)throw new BackfillStop('state_conflict',{conflicting,foreign});
- const pending=plan.keys.filter(item=>!stored.has(item.kind+'\n'+item.id));
- const report={databaseId:described.uuid,schemaVersion:version,baseline:plan.aggregateSha256,planned:plan.keys.length,films:plan.keys.filter(item=>item.kind==='film').length,people:plan.keys.filter(item=>item.kind==='person').length,heldFilms:films.size,heldPeople:people.size,dOnlyPeople:[...people].filter(id=>!wanted.has('person\n'+id)).length,alreadyStored:stored.size,pending:pending.length,apply,written:0,requests:0};
- if(!apply)return {...report,outcome:'plan'};
- for(let index=0;index<pending.length;index+=chunkRows){
-  const rows=pending.slice(index,index+chunkRows);
-  await adapter.run('INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES '+rows.map(()=>'(?,?,?,?,?)').join(',')+' ON CONFLICT(projection,kind,id) DO NOTHING',rows.flatMap(item=>[PROJECTION,item.kind,item.id,item.key,plan.at]));
-  report.written+=rows.length;report.requests++;
- }
- const after=await stateOf();
- const mismatched=[...wanted].filter(([id,key])=>after.get(id)!==key).length,extra=[...after.keys()].filter(id=>!wanted.has(id)).length;
- if(mismatched||extra||after.size!==wanted.size)throw new BackfillStop('verify_failed',{mismatched,extra,stored:after.size,planned:wanted.size});
- return {...report,stored:after.size,outcome:'verified'};
+ const pendingKeys=plan.keys.filter(item=>!stored.has(item.kind+'\n'+item.id));
+ return {databaseId:described.uuid,schemaVersion:version,baseline:plan.aggregateSha256,planned:plan.keys.length,films:plan.keys.filter(item=>item.kind==='film').length,people:plan.keys.filter(item=>item.kind==='person').length,heldFilms:films.size,heldPeople:people.size,dOnlyPeople:[...people].filter(id=>!wanted.has('person\n'+id)).length,alreadyStored:stored.size,pending:pendingKeys.length,pendingKeys};
 }
 
 async function main(){

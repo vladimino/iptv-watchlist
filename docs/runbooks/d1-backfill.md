@@ -132,7 +132,12 @@ When D1 still holds what the last reload built from a known snapshot, plus D1-on
    - a stored key that disagrees with the plan or lies outside it.
 
    It reports the planned keys and the D1-only people, which get no key.
-4. **Seed.** Take a new bookmark, then run the same command with `--apply`. It writes 250 rows per idempotent request and finishes by reading every key back. A run stopped by an uncertain write is finished by running it again. If something else fails, stop with the flag off and look; do not restore by default.
+4. **Seed.** Take a new bookmark, keep `D1_ENRICHMENT_WRITE` off, and run the same command with `--apply`.
+   - The seed takes the projector's lease in `projection_run` (`seed:<uuid>`) before it reads the stored keys, so neither the projector nor a second seed can start.
+   - Each request first checks the lease through `projection_fence`, renews it, and writes 250 rows idempotently.
+   - A seed that lost its lease stops with `lease_lost` and writes nothing more.
+   - It releases the lease at the end, and finishes by reading every key back.
+   - A dead seed's lease expires after 10 minutes. A run stopped by an uncertain write is finished by running it again. If something else fails, stop with the flag off and look; do not restore by default.
 5. **Projector.** Continue with `dry`, then `on`, as in step 7 of the reload below. Read the Cloudflare Workers memory and CPU metrics too: the run log carries no heap figure, and memory is shared by all requests of one isolate.
 
 ## Reload with the enrichment projector (AIR-275 phase 2)
