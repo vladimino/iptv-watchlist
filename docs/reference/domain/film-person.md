@@ -19,9 +19,27 @@ Production content continues to use existing watchlist, metadata, programme, pub
 - `localFilmId()` mints `film:<letterboxd lid>`, `film:tmdb:<id>`, or a sorted `film:conflict:<ids>` for conflicting TMDB claims without Letterboxd. A previously assigned `localId` is preserved; it is not recomputed merely because new evidence appears.
 - `canonicalFilmId()` is the one rule from a stored spelling back to the canonical id: `tmdb_<n>` → `film:tmdb:<n>`, a Letterboxd `lid` → `film:<lid>`, a `film:` id unchanged, an empty value `null`. It never mints: a result that names no stored Film is left unresolved by its caller. The offline importer loads this function from the domain source rather than keeping a copy.
 - `externalIds` carry scheme, value, trusted/conflicting flags and provenance. Two different verified TMDB identities or distinct Letterboxd identities are collisions, **not** automatic merges. `canonicalIdentity` becomes `tmdb:<id>` only after identity is resolved against trusted evidence; an accepted score or search hit alone does not promote it.
+- **Letterboxd slug alias** ([ADR 0051](../../adr/0051-letterboxd-slug-film-alias.md), [AIR-276](https://trello.com/c/PeWwEti8)): see [below](#letterboxd-slug-alias). A slug is never an identity and never links two records.
 - `linkFilms(existing, incoming, at, evidence)` preserves the existing entity ID, payloads and reviewed localization. Linking separate entities requires matching Letterboxd evidence, the same *trusted* TMDB identity on both sides, or `evidence.verified === true`. Shared **proposed/untrusted** TMDB IDs are insufficient. Conflicts yield `identity_collision` or `unverified`/`unrelated` without changing entities.
 - A successful link adds aliases and an old→surviving ID redirect, preserving existing fingerprint, prediction and metadata; incoming prediction and history are retained as history/preserved results, without repeat duplicates. A reviewed value must not be silently replaced with an automatic or conflicting incoming value.
 - `localPersonId()` prefixes the **role-specific** ID: `person:actor/<slug>`, `person:director/<slug>`, `person:role/<name>`, `person:tmdb_actor/<id>`, or `person:tmdb_director/<id>`. Same real human appearing under different roles/authorities is **not** automatically merged. Embedded credits and localized names are not by themselves a canonical Person repository.
+
+## Letterboxd slug alias
+
+A Letterboxd film slug is kept as its own `externalIds` entry: `{scheme: 'letterboxd_slug', value, trusted: false, conflicting, provenance}`. It is separate from the lid (`scheme: letterboxd`), from TMDB ids and from title aliases.
+
+- **Source.** `letterboxdSlugFromUrl` accepts only `https://letterboxd.com/film/<slug>/` and `https://letterboxd.com/<member>/film/<slug>/`: same origin, no query, fragment or credentials, lowercased. A title, a lid, a TMDB URL or Wikidata never yields a slug.
+- **Attached only to a Film with a lid:**
+  - `current`: the Film's own permalink, from the programme record, then the watchlist record, then the record itself (`source: letterboxd_film_url`, canonical `url`, `observedAt`);
+  - `observed`: a slug from a Letterboxd Diary entry with the same lid (`source: letterboxd_diary`, `entry`, the entry's first `observedAt`), when the caller passes `store.diaryHistory`;
+  - `historical`: a slug stored on the same Film by an earlier backfill that the Film no longer carries, so a renamed permalink still names it.
+
+  A TMDB-only Film, and a diary row without a lid, get no slug.
+- **Stable.** The backfill keeps each stored slug's first `observedAt`, so a replay with the stored sidecars is unchanged.
+- **Collision.** One slug on two Films marks the entry `conflicting` on both and is reported as `aliasConflicts` by `readLifecycle` and in the backfill report. Nothing is merged, moved or re-rated.
+- **Unchanged by the alias:** `id`, `canonicalIdentity`, the lid, TMDB trust, readiness, fingerprint, prediction and the Film count.
+- **Storage.** The alias is part of `externalIds`: the R2 lifecycle sidecars and the D1 `film_external_id` rows hold it without a schema change. `trusted: false` keeps it outside the unique index on trusted identities.
+- **Inventory.** `scripts/letterboxd-slug-inventory.mjs --snapshot <dir>` counts the aliases a snapshot's stored records would yield. It makes no request and writes nothing; running it on a production export needs owner approval for that export.
 
 ## Lifecycle dimensions and transition rules
 

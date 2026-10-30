@@ -56,6 +56,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0048 — Catalog poster hydration is a permanent owner-only maintenance route, and CATALOG_POSTER_HYDRATION is retired](0048-permanent-catalog-poster-maintenance-route.md) | Accepted 2026-10-29; owner accepted ADR and visually approved Mermaid; binding removal separately gated | [AIR-228](https://trello.com/c/jhRjobcA) |
 | [0049 — The Letterboxd Diary is read into a separate viewing history, incrementally and behind a gate](0049-letterboxd-diary-viewing-history.md) | Accepted 2026-10-30; owner accepted ADR and visually approved Mermaid; `LETTERBOXD_DIARY_HISTORY` remains off by default | [AIR-51](https://trello.com/c/33d4hKJ3); production activation separately gated |
 | [0050 — The one-time prediction version materialization route and PREDICTION_MATERIALIZATION are retired](0050-retire-prediction-materialization-route.md) | Accepted 2026-10-30; owner approval in AIR-227 session; no binding exists | [AIR-227](https://trello.com/c/KjFwF0Zp) |
+| [0051 — A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid](0051-letterboxd-slug-film-alias.md) | Proposed 2026-10-30; owner decision pending | [AIR-276](https://trello.com/c/PeWwEti8) |
 
 ## Proposed records
 
