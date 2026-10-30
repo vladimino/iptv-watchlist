@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
-import {bundleAdmin, bundleAdminQuery} from '../src/admin/bundle.js';
+import {bundleAdmin} from '../src/admin/bundle.js';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 const html = fs.readFileSync('public/admin.html', 'utf8');
 const page = fs.readFileSync('public/admin.js', 'utf8');
@@ -58,7 +59,7 @@ const workerContext = vm.createContext({Response, Request, Headers, URL, URLSear
   PERSON_NAME_DICTIONARY: [{id: 'director/lea-nord', original: 'Lea Nord', name: 'Лея Норд', aliases: ['Л. Норд'], status: 'verified', verification_basis: 'user_supplied', source_url: null}],
   fetch: async () => {throw new Error('the Worker makes no outbound request for the admin page');}});
 for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
-vm.runInContext(bundleAdminQuery(fs.readFileSync('src/domain/admin-query.js', 'utf8')), workerContext);
+vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
 vm.runInContext(worker.replace('export default', 'globalThis.worker='), workerContext);
 

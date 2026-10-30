@@ -1,6 +1,6 @@
 # D1 schema v1
 
-[AIR-49](https://trello.com/c/YNaLFwtW) is this schema and the storage boundary. The schema is `migrations/0001_schema_v1.sql` with `0002` and `0003` (schema v3). It is applied to the production D1 database `iptv`, which holds the backfilled copy of R2 and is bound to the Worker as `DB`. The Worker only reads it, through the [D1 catalog views](../api/d1-catalog.md); no Worker path writes it. R2 bucket `iptv` remains the authoritative store.
+[AIR-49](https://trello.com/c/YNaLFwtW) is this schema and the storage boundary. The schema is `migrations/0001_schema_v1.sql` with `0002`, `0003` and `0004` (schema v4). Production D1 database `iptv` holds schema v3 and the backfilled copy of R2, and is bound to the Worker as `DB`. Migration `0004` adds the enrichment projector's checkpoint ([ADR 0056](../../adr/0056-d1-enrichment-write-through.md)); applying it to `iptv` is a separate owner approval. The Worker reads D1 through the [D1 catalog views](../api/d1-catalog.md). Its only write path is the [enrichment projector](#enrichment-projector-schema-v4), which stays inert while `D1_ENRICHMENT_WRITE` is unset. R2 bucket `iptv` remains the authoritative store.
 
 [AIR-70](https://trello.com/c/8PRWRx2C), [AIR-71](https://trello.com/c/UAUUQ2jh), and [AIR-72](https://trello.com/c/MfAGc1Dd) are the later repositories. [AIR-73](https://trello.com/c/gX2xdQAz) is the later offline importer. Live backfill starts only at [AIR-74](https://trello.com/c/5AdAmKPe), after [AIR-69](https://trello.com/c/FlcWZX7W). [AIR-42](https://trello.com/c/drLBuWjl) still owns identity transitions, [AIR-43](https://trello.com/c/7NY6n1Az) still owns scoring, and [AIR-48](https://trello.com/c/rVf8rRoJ) still owns which observation is current. This schema does not copy those rules. [AIR-53](https://trello.com/c/gkuy1awG) is not built here.
 
@@ -59,7 +59,7 @@ One publish, decision, or score is one database transaction. A failed statement 
 
 ## Canonical repository
 
-[AIR-70](https://trello.com/c/8PRWRx2C) is `src/canonical-repository.js`. The Worker bundle does not include it, and it does not open R2 or a production D1 database. The caller passes a database and the Film or Person view already produced by the lifecycle contract. [AIR-42](https://trello.com/c/drLBuWjl) still decides a link, a reviewed value, and an identity collision. This module stores that result.
+[AIR-70](https://trello.com/c/8PRWRx2C) is `src/canonical-repository.js`. It does not open R2 or a database itself. Since [ADR 0056](../../adr/0056-d1-enrichment-write-through.md), the Worker bundle carries it in its own scope for the enrichment projector only. The caller passes a database and the Film or Person view already produced by the lifecycle contract. [AIR-42](https://trello.com/c/drLBuWjl) still decides a link, a reviewed value, and an identity collision. This module stores that result.
 
 `saveFilm` and `savePerson` replace the external ids and the dimension rows other than a held localization. Aliases are added to the stored set. A later save does not remove an alias already stored. Credits are replaced only when the call passes `credits`, including an empty list. An omitted `credits` leaves the stored edges. A repeated payload does not add another alias, credit, external id, conflict, or redirect. A stored `reviewed` localization stays in place when the incoming value is weaker. An owner-reviewed value also stays when the incoming value is dictionary-reviewed. That check is part of the write, so a plan that read an older row cannot replace an owner value committed before that write. The rejected value stays as one alias and one conflict. Two records cannot both hold the same trusted external id. The second write is rejected and does not insert that record.
 
@@ -131,7 +131,32 @@ The programme generation unit is the one unit the executor cannot send as one re
 - **Stage lifecycle.** `new`, `loading`, `validated`, `published` (committed; for a withheld stage, recorded), `superseded` (a later commit), `failed` (counts or read-back mismatch, or the pointer moved). The owner token is the SHA-256 of the target database id and the baseline checksum: a run of another baseline stops with `stage_baseline_changed`, another token with `stage_owned_elsewhere`, a changed plan (counts, chunking, phase, expected run) with `stage_plan_changed`, a receipt whose checksum differs from the plan with `chunk_conflict`, receipts that are not a prefix with `chunk_receipts_out_of_order`, a failed or superseded stage with `stage_failed` or `stage_superseded`.
 - **Resume and uncertain writes.** A write is sent once. A lost response or a `429`/`5xx` stops the run as `write_uncertain`. The next run resumes at the first chunk without a receipt, re-sends a validation that did not land, and resolves an uncertain commit by reading the final tables: an equal committed generation is a replay, and the unit is receipted as usual.
 - **Cleanup.** Only an approved command removes staged rows: `discardStage` deletes at most a bounded number of rows per table per request, children before parents, only for a `failed` or `superseded` stage; it removes a failed stage's row so the run can be staged again, and keeps a superseded stage's row as the record of its commit. `abandon` first marks a never-committed stage failed; a committed stage is never abandoned. Final tables are never touched.
-- **Executor.** `--staged-generation` routes the generation unit through the stage. Every run, staged or not, requires schema version 3 (below) on the target (`schema_missing`, `schema_version_mismatch`). The report's `staged` section lists, per generation, the chunks planned, sent and already received, rows, bytes, largest chunk and row, read and write requests, phase durations and the commit's statements, bytes and duration, and `staged.gate` compares the slowest commit with the 10-second budget of ADR-0021.
+- **Executor.** `--staged-generation` routes the generation unit through the stage. Every run, staged or not, requires schema version 4 (below) on the target (`schema_missing`, `schema_version_mismatch`). The report's `staged` section lists, per generation, the chunks planned, sent and already received, rows, bytes, largest chunk and row, read and write requests, phase durations and the commit's statements, bytes and duration, and `staged.gate` compares the slowest commit with the 10-second budget of ADR-0021.
+
+## Enrichment projector (schema v4)
+
+[ADR 0056](../../adr/0056-d1-enrichment-write-through.md): migration `0004` adds three tables.
+
+| Table | Holds |
+| --- | --- |
+| `projection_state` | Per projection (`enrichment`), kind (`film`, `person`) and id: the change key of the last input written, or `absent`, and when. |
+| `projection_run` | One row per projection: the lease (`lease_id`, `lease_until`, wall clock) and the last run's start, finish, outcome and summary. |
+| `projection_fence` | Always empty. Every projector batch inserts the count of live leases held by its run and deletes it again at the end. `CHECK (held=1)` fails the whole batch once the run has lost its lease. |
+
+The repository's projector methods differ from `saveFilm`, `savePerson` and `applyLink` in what they own:
+
+- **`projectFilm`** writes the identity and metadata dimensions only, never fingerprint or prediction. On a watchlist Film it keeps the stored `person:tmdb_*` credits the R2 roster does not list. They are appended after the R2 credits of their role in their stored order, in the same batch.
+- **`projectLink`** works like `applyLink` with the same ownership, inside the caller's transaction.
+- **`projectPerson`** works like `savePerson`, inside the caller's transaction.
+- **`releaseFilm`** removes only the watchlist membership of a Film no source lists. It skips a redirected id.
+
+None of these methods reads back.
+
+A projected `film_metadata` row has `r2_key` `metadata.json` and `content_sha256` NULL: it comes from a live read, not from a pinned object version. A row the reload wrote keeps the snapshot object's checksum until the projector rewrites it.
+
+The projector fails closed on its R2 inputs. Missing, malformed or unpublished inputs stop a run before any write. A live writer, or an object whose etag changed during the reads, defers it. It also holds a run with more than 25 absent Films or 250 absent Persons (`absent_guard`), or more lost watchlist memberships than the larger of 5 and 2 % of the members (`membership_guard`). See [ADR 0056](../../adr/0056-d1-enrichment-write-through.md).
+
+`scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
 
 ## Candidate show identity (schema v3)
 

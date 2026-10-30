@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import {filmQueue, filmQueueCounts, filmQueueRecords, getFilm, getPerson, personQueue, personQueueCounts, personQueueRecords, searchFilms, searchPeople} from '../src/domain/admin-query.js';
-import {ADMIN_QUERY_EXPORTS, bundleAdminQuery} from '../src/admin/bundle.js';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 const source = fs.readFileSync('src/domain/admin-query.js', 'utf8');
 const sha256 = new Function(`${source.replaceAll('export function', 'function')}\nreturn sha256;`)();
@@ -12,13 +12,13 @@ for (const sample of ['', 'abc', 'ёжик', 'a'.repeat(80)]) {
 const buildSource = fs.readFileSync('build.mjs', 'utf8');
 // The Worker script receives the library only as the AdminQuery namespace: none of its helpers becomes a global there.
 const workerBundle = buildSource.slice(buildSource.indexOf("fs.writeFileSync('dist/server/index.js'"));
-assert.match(workerBundle, /bundleAdminQuery\(fs\.readFileSync\('src\/domain\/admin-query\.js','utf8'\)\)/);
+assert.match(workerBundle, /scoped\('src\/domain\/admin-query\.js','AdminQuery'\)/);
 assert.equal(workerBundle.includes("fs.readFileSync('src/domain/admin-query.js','utf8')+"), false);
-const namespace = new Function(`${bundleAdminQuery(source)}\nreturn AdminQuery;`)();
-assert.deepEqual(Object.keys(namespace).sort(), ADMIN_QUERY_EXPORTS.slice().sort());
+const scopedSource = scoped('src/domain/admin-query.js', 'AdminQuery');
+const namespace = new Function(`${scopedSource}\nreturn AdminQuery;`)();
 assert.deepEqual(Object.keys(namespace).sort(), Object.keys(await import('../src/domain/admin-query.js')).sort(), 'the namespace lists every export of the module');
-assert.match(bundleAdminQuery(source), /^const AdminQuery=\(\(\)=>\{/);
-assert.doesNotMatch(bundleAdminQuery(source), /^export /m);
+assert.match(scopedSource, /^const AdminQuery=\(\(\)=>\{/);
+assert.doesNotMatch(scopedSource, /^export /m);
 assert.equal(fs.readFileSync('public/app.js', 'utf8').includes('admin-query'), false);
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:fs|film-person-reader|R2|D1/);
 

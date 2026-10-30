@@ -383,5 +383,5 @@ assert.equal((worker.match(/metadataLocalizationMode\(env\)/g)||[]).length,1);
 const flagRead=worker.indexOf('metadataLocalizationMode(env)');
 assert.ok(flagRead>worker.indexOf('async function metadataSync(')&&flagRead<worker.indexOf('async function epgSync('));
 assert.doesNotMatch(worker.slice(worker.indexOf('async function epgSync(')),/LIFECYCLE_LOCALIZATION|localizationMode/);
-assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/film-person-reader|film-person-backfill/);
+assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/film-person-backfill/);
 console.log('Lifecycle localization guard passed.');

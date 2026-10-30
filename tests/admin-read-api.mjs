@@ -5,13 +5,13 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
-import {bundleAdminQuery} from '../src/admin/bundle.js';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 const source=fs.readFileSync('src/admin/read.js','utf8');
 assert.doesNotMatch(source,/loadJSON|saveJSON|recoverStopEvents|enrichmentView|BUCKET\.(?:put|list|delete|head)|\.put\(|\.list\(|\.delete\(|\bfetch\(|waitUntil|resolver-lease|resolver-continuation|discovery-latest|discovery-resolution|discovered-films|enrichment\/|get\('programme\.json'|\.prepare\(/,'the admin read never writes, lists, falls back or reaches another store');
 assert.match(fs.readFileSync('src/worker.js','utf8'),/url\.pathname\.startsWith\('\/api\/admin\/'\)\)return await adminReadRoute\(request,env,url\)/);
 const build=fs.readFileSync('build.mjs','utf8');
-assert.match(build,/bundleAdminQuery\(fs\.readFileSync\('src\/domain\/admin-query\.js','utf8'\)\)/);
+assert.match(build,/scoped\('src\/domain\/admin-query\.js','AdminQuery'\)/);
 assert.match(build,/src\/admin\/read\.js/);
 assert.ok(build.indexOf('src/admin/read.js')<build.indexOf("src/worker.js','utf8'));"),'the read module is loaded before the Worker entry');
 
@@ -38,7 +38,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  PERSON_NAME_DICTIONARY:[{id:'director/alex-brewer',original:'Alex Brewer',name:'Алекс Брюэр',aliases:[],status:'verified',verification_basis:'user_supplied',source_url:null}],
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
 for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
-vm.runInContext(bundleAdminQuery(fs.readFileSync('src/domain/admin-query.js','utf8')),context);
+vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);
 vm.runInContext(source,context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker;

@@ -23,7 +23,7 @@ const ctx=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextE
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const D=vm.runInContext('LetterboxdDiary',ctx);
-const env={LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket,LETTERBOXD_DIARY_HISTORY:'on',LETTERBOXD_FACTS:'on'};
+const env={LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket,LETTERBOXD_DIARY_HISTORY:'on'};
 const plain=value=>JSON.parse(JSON.stringify(value));
 const row=({lid,date,stars=null,viewing=null})=>{const [y,m,d]=date.split('-');return `<tr class="diary-entry-row"${viewing?` data-viewing-id="${viewing}"`:''}><td><a href="/${USER}/diary/films/for/${y}/${m}/${d}/">${d}</a></td><td><div data-postered-identifier="{&quot;lid&quot;:&quot;${lid}&quot;}"></div><h3><a href="/${USER}/film/${lid.toLowerCase()}/">t</a></h3></td><td>${stars?`<span class="rating rated-${stars}"></span>`:''}</td></tr>`;};
 const url=n=>`https://letterboxd.com/${USER}/diary/`+(n>1?`page/${n}/`:'');
@@ -121,11 +121,15 @@ failFactsFor=null;requests.length=0;
 done=await commit('r8');
 assert.deepEqual(requests,[url(1),url(2)],'page 2 is read again');assert.equal(record('R55').rating.value,3);
 
-// 7. Without LETTERBOXD_FACTS: the diary is read, no fact is written.
-records.clear();etags.clear();writes.length=0;publish(sixty.slice(0,10));
-records.set('programme.json',report('r9'));await ctx.completeWithRatings({...env,LETTERBOXD_FACTS:'off'},run('r9'),report('r9'));
-assert.equal(writes.some(key=>key.startsWith('letterboxd/facts/')||key==='enrichment/view-index.json'),false);
-assert.equal(records.get('sync.json').diaryHistory.facts.enabled,false);
+// 7. LETTERBOXD_FACTS is retired (ADR 0055): no stale value of it (absent, off, a near miss, an object) stops the diary
+// facts; each run writes the same fact records and reports the facts as enabled.
+for(const stale of [undefined,'off','On',{token:'x'}]){
+ records.clear();etags.clear();writes.length=0;publish(sixty.slice(0,10));
+ const staleEnv=stale===undefined?env:{...env,LETTERBOXD_FACTS:stale};
+ records.set('programme.json',report('r9'));await ctx.completeWithRatings(staleEnv,run('r9'),report('r9'));
+ assert.equal(writes.some(key=>key.startsWith('letterboxd/facts/films/')),true,'facts written, binding '+JSON.stringify(stale));
+ assert.equal(records.get('sync.json').diaryHistory.facts.enabled,true,JSON.stringify(stale));
+}
 
 // 8. Review fixes. Two viewing ids of one film on one day split by the page boundary, with different ratings: page 1
 // alone never publishes its row's rating; with page 2 read the day is ambiguous; with page 2 blocked it stays unrated.

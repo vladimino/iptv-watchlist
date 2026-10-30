@@ -128,7 +128,7 @@ The bounded design is:
 
 | Work | State |
 | --- | --- |
-| Pure query library | Storage-neutral functions and deterministic tests; bundled into the Worker as the `AdminQuery` namespace and no longer into the page |
+| Pure query library | Storage-neutral functions and deterministic tests; bundled into the Worker as the `AdminQuery` namespace (`scoped`) and no longer into the page |
 | `/admin` page | Live client over `GET /api/admin/*` with the owner's Access session; search and queue state in the URL, pin and cursors in memory ([route contract](../api/admin.md)) |
 | Programme-snapshot search and queues | Live, read-only, over the pinned published generation and the two dictionaries |
 | Fingerprint and prediction queues | Not served by the route (`queue_unavailable`): that state is under `enrichment/`, which the snapshot read does not load. A later card decides whether a bounded read of the view index or a publish-time index serves them |
@@ -163,7 +163,7 @@ getPerson(records, id) -> record | null
 
 Tests must cover empty query (error, not "all records"), empty records, the rank order, Cyrillic `ё`, a collision, every queue code, a stale cursor, a missing `limit`, and `limit` values `0`, `26`, and `1.5`. `limit` 1 and `limit` 25 succeed. No network. The library tests must not accept a call that omits `limit`.
 
-The library is `src/domain/admin-query.js`. `build.mjs` adds it to the Worker script as the `AdminQuery` namespace (`bundleAdminQuery` in `src/admin/bundle.js` wraps the stripped module in one constant, so none of its helpers becomes a global of the concatenated script). `public/app.js` does not import it, and the `/admin.js` asset no longer carries it: the page reads the route. Beside the paging functions the module exports `filmQueueCounts` / `personQueueCounts` (the count of every queue over an array) and `filmQueueRecords` / `personQueueRecords` (the sorted records of one queue, for a search narrowed by a queue); they follow the same rules as the pages and return `{ error }` for a non-array or an unknown code.
+The library is `src/domain/admin-query.js`. `build.mjs` adds it to the Worker script as the `AdminQuery` namespace (`scoped` in `scripts/bundle-scope.mjs` wraps the module in one constant, so none of its helpers becomes a global of the concatenated script). `public/app.js` does not import it, and the `/admin.js` asset no longer carries it: the page reads the route. Beside the paging functions the module exports `filmQueueCounts` / `personQueueCounts` (the count of every queue over an array) and `filmQueueRecords` / `personQueueRecords` (the sorted records of one queue, for a search narrowed by a queue); they follow the same rules as the pages and return `{ error }` for a non-array or an unknown code.
 
 These choices fix points the signature alone leaves open:
 

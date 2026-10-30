@@ -1,6 +1,6 @@
 # Scheduling and orchestration
 
-Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron. The Worker exposes owner-only MCP tools that perform work only when invoked. Expected task behavior: [Scheduled Task contract](../reference/scheduled-tasks.md). Sources: [scheduling ADR](../adr/0005-external-chatgpt-tasks.md), [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP contract](../reference/api/mcp.md) and [prediction operations](../runbooks/prediction-operations.md).
+Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron. The Worker's one cron trigger runs only the D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md)), shown last in the diagram: it reads R2, writes only D1, and stays inert while `D1_ENRICHMENT_WRITE` is unset. The Worker exposes owner-only MCP tools that perform work only when invoked. Expected task behavior: [Scheduled Task contract](../reference/scheduled-tasks.md). Sources: [scheduling ADR](../adr/0005-external-chatgpt-tasks.md), [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP contract](../reference/api/mcp.md) and [prediction operations](../runbooks/prediction-operations.md).
 
 ```mermaid
 sequenceDiagram
@@ -11,6 +11,9 @@ sequenceDiagram
     participant EPG as EPG and discovery
     participant Runner as Prediction runner
     participant R2 as Authoritative R2
+    participant Cron as Worker cron trigger (37 * * * *)
+    participant Projector as D1 enrichment projector
+    participant D1 as D1 iptv
     Note over Daily,R2: External ChatGPT tasks, never Worker Cron
     Daily->>Access: Authorize daily EPG workflow
     Access->>MCP: JWT verified
@@ -66,6 +69,15 @@ sequenceDiagram
         end
     end
     Hourly->>MCP: prediction_complete on allowed owned stop
+    Note over Cron,D1: The one Worker cron trigger, inert while D1_ENRICHMENT_WRITE is unset (ADR 0056)
+    Cron->>Projector: Scheduled event, hourly
+    opt D1_ENRICHMENT_WRITE is dry or on
+        Projector->>R2: Read the enrichment objects of the published generation
+        Projector->>D1: Read change keys
+    end
+    opt D1_ENRICHMENT_WRITE is on and the inputs are complete
+        Projector->>D1: Changed Films and Persons with their keys, one batch each
+    end
 ```
 
 A scheduled trigger does not imply successful completion. `already_running`, `busy`, lease ownership and deferred backoff may prevent new work. Discovery uses **one chunk per explicit request**; it does not recursively self-fetch through an Access bypass or an internal continuation service. The [MCP security boundary](authentication-and-mcp.md) verifies signed identity and restricts tool arguments.

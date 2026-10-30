@@ -77,7 +77,7 @@ With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ra
 - **Summary.** It is stored in `sync.json` as `diaryHistory` and returned by the sync status. It holds `outcome`, `stopReason`, `counts`, `resumePage`, `coverage` and `at`, plus `facts`:
   - `rated`, `unrated`, `ambiguous`, `partial`: the evidence states;
   - `films`, `written`, `unchanged`, `older`, `skipped`, `conflicts`: the write outcomes;
-  - `enabled`: whether `LETTERBOXD_FACTS` is on.
+  - `enabled`: always `true`; the former `LETTERBOXD_FACTS` switch is retired ([ADR 0055](../../adr/0055-retire-letterboxd-facts-switch.md)) and kept in the summary for its readers.
 - **Never fatal.** The stage never fails the commit. A blocked, rate-limited or failed run ends the ratings attempt as `error` with that cause, and keeps every stored fact.
 - **Gate off.** Nothing is read or written by the stage. The ratings attempt ends `finished` with cause `diary_off`.
 
@@ -103,7 +103,6 @@ After each page's history commit, and before the next page is requested, the fil
   - one record compare-and-swap per film whose view index does not already show the same watched and rating;
   - one view-index projection.
 - **Failure.** A failed write stops the run at that page (`stopReason: after_page:<message>_page_<n>`), so the next run reads the page again.
-- **`LETTERBOXD_FACTS` off.** Nothing is written, but the proved ratings still reach this commit's removal event.
 - **Removal events.** They get the proved ratings first, as the film's effective rating. The removal lookup then runs only for removed films without one. A stored rating without diary proof does not spare the lookup.
 
 ## Read API
@@ -116,7 +115,7 @@ It returns:
 
 An invalid `filmId` answers 400.
 
-The [film history API](../api/film-history.md) reads the same history: entries whose `identity` lid is the film's, as `diary_viewing` events in its chronology. Entries without a lid are never attributed to a film there, and a slug alias never links one. Timeline, Finds and predictions do not consume it yet.
+The [film history API](../api/film-history.md) reads the same history: entries whose `identity` lid is the film's, as `diary_viewing` events in its chronology. Entries without a lid are never attributed to a film there, and a slug alias never links one. The film page shows that chronology; Finds and predictions do not consume the Diary history.
 
 ## Storage authority and D1
 

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
-import {bundleAdminQuery} from '../src/admin/bundle.js';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 // GET routes that may write to R2. Each one is documented in README.md; extend both together.
 const WRITING_GET_ROUTES=['/api/enrichment/runs','/api/enrichment/status','/api/enrichment/view','/api/events'];
@@ -28,7 +28,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  ASSETS:{'/':{body:'<!doctype html>',type:'text/html'}},INITIAL_PERSONAL_RATINGS:{w1:4},
  fetch:async input=>{const url=String(input instanceof Request?input.url:input);fetches.push(url);return url.startsWith('https://api.themoviedb.org/3/movie/11')?new Response('{"id":11}'):new Response('unexpected',{status:599});}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
-vm.runInContext(bundleAdminQuery(fs.readFileSync('src/domain/admin-query.js','utf8')),context);vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);
+vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 const constant=name=>vm.runInContext(name,context);
 const execution={waitUntil:()=>{background++;},exports:{DiscoveryContinuation:{fetch:async()=>{dispatches++;return new Response('{}');}}}};
