@@ -27,8 +27,10 @@ assert.equal((await history('filmId=abc&cursor=zzz')).status,400);
 {
  const {status,data}=await history('filmId=nothing');
  assert.equal(status,200);assert.deepEqual(data.events,[]);assert.equal(data.page.total,0);assert.equal(data.page.nextCursor,null);
- assert.deepEqual(data.snapshot.sources,{predictions:{status:'missing'},facts:{status:'missing',factKey:null},legacyRatingLog:{status:'missing'}});
- assert.equal(data.current.prediction,null);assert.equal(data.current.rating,null);assert.equal(data.partial,false);
+ assert.deepEqual(data.snapshot.sources,{predictions:{status:'missing'},facts:{status:'missing',factKey:null},legacyRatingLog:{status:'missing'},
+  diary:{status:'missing',link:{status:'linked',lid:'nothing',via:'requested_id',candidates:['nothing']},unresolvedEntries:0,state:null}});
+ assert.equal(data.current.prediction,null);assert.equal(data.current.rating,null);assert.equal(data.current.diary,null);assert.equal(data.partial,false);
+ assert.deepEqual(data.notes,['diary_absence_is_not_unwatched','diary_history_missing'],'a missing Diary history is said, never read as "not watched"');
 }
 
 // Seed one film: three predictions (an old one without lineage, one linked, one current with a broken object), its fact record
@@ -77,7 +79,8 @@ const full=await history('filmId=alien');
  assert.notEqual(ratings[1].identity,ratings[3].identity,'a re-application is a separate event');
  assert.equal(ratings[2].restored.value,4);assert.equal(ratings[2].value,null);
  assert.deepEqual(data.current.rating,{value:4.5,observedAt:t(30),source:'owner',observationId:'o3',watchedAt:null});
- assert.deepEqual(data.notes,['prediction_lineage_unknown','first_observed_is_not_a_rating_date']);
+ assert.deepEqual(data.notes,['prediction_lineage_unknown','first_observed_is_not_a_rating_date','diary_absence_is_not_unwatched','diary_history_missing']);
+ assert.deepEqual(data.snapshot.sources.diary.link,{status:'linked',lid:'alien',via:'fact_record+requested_id',candidates:['alien']});
  assert.equal(data.snapshot.sources.facts.factKey,'tmdb-348');assert.deepEqual(data.snapshot.profile,{version:2,profileHash:'p2'});
 }
 // The same film through its TMDB id: the same fact record and legacy entries (no predictions are stored under that id).
@@ -130,4 +133,93 @@ const full=await history('filmId=alien');
  const {data}=await history('filmId=conv');
  assert.deepEqual(data.events.map(e=>e.observationId),['s','u']);assert.equal(data.current.rating.value,4);
 }
-console.log('Film history: validation, empty film, chronology, lineage gaps, version links, rationale per version, legacy log by both ids, no account URL, watchedAt unknown, rollback and re-apply, idempotent reads, paging and change refusal, ties, redirect, unreadable bundle and convergence overlay passed');
+// A missing Diary history keeps the cursor of the three earlier sources: digest over bundle, fact record and legacy log only.
+{
+ const one=await history('filmId=alien&limit=4');
+ const parts=['enrichment/films/alien/predictions.json','letterboxd/facts/films/tmdb-348.json','enrichment/diagnostics/rating-observations.json'].map(key=>etags.get(key)).join('|');
+ assert.equal(one.data.page.nextCursor,'4.'+sha(parts).slice(0,16));
+}
+
+// Diary viewings. Film `dia` (lid) with TMDB 501: predictions, a rating observation and its Diary entries, plus entries of
+// another lid with the same slug and an unresolved entry with that slug, which never join this film.
+{
+ const d=(day,h=10)=>'2026-09-'+String(day).padStart(2,'0')+'T'+String(h).padStart(2,'0')+':00:00.000Z';
+ set('enrichment/films/dia/predictions.json',{current:{filmId:'dia',predictedRating:4,matchSignals:['now'],generatedAt:d(20)},history:[{filmId:'dia',predictedRating:3,matchSignals:['then'],generatedAt:d(1),replacedAt:d(20)}]});
+ set('letterboxd/facts/links.json',{...JSON.parse(records.get('letterboxd/facts/links.json')),'letterboxd:dia':'tmdb-501','tmdb:501':'tmdb-501'});
+ set('letterboxd/facts/films/tmdb-501.json',{schemaVersion:1,factKey:'tmdb-501',links:{letterboxd:'dia',tmdb:'501'},rating:{value:4.5,observedAt:d(6),source:'letterboxd_export',observationId:'r1'},
+  ratingHistory:[{kind:'first_observed',recordedAt:d(6),value:4.5,observedAt:d(6),source:'letterboxd_export',observationId:'r1',previous:null}]});
+ const entry=(key,fields)=>({key,source:'letterboxd_diary',identity:{type:'letterboxd_lid',value:'dia'},aliases:[{type:'letterboxd_slug',value:'dia-film',firstObservedAt:d(28)}],firstObservedAt:d(28),observedAt:d(29),page:1,changes:[],...fields});
+ const entries={
+  'viewing:111':entry('viewing:111',{keyBasis:'viewing_id',viewingId:'111',watchedDate:'2026-09-05',viewings:1,viewingsCertain:true,ratingAtEntry:4,ratingsAtEntry:[4],rewatch:false,changes:[{field:'ratingAtEntry',from:3,to:4,observedAt:d(29)}]}),
+  'day:lid:dia|2026-09-20':entry('day:lid:dia|2026-09-20',{keyBasis:'identity_date',viewingId:null,watchedDate:'2026-09-20',viewings:2,viewingsCertain:true,ratingAtEntry:null,ratingsAtEntry:[3.5,4],rewatch:true,rewatchRows:1,rewatchUnknownRows:0}),
+  'viewing:222':entry('viewing:222',{keyBasis:'viewing_id',viewingId:'222',watchedDate:'2026-09-20',viewings:1,viewingsCertain:true,ratingAtEntry:null,ratingsAtEntry:[null],rewatch:'unknown',aliases:[{type:'letterboxd_slug',value:'dia-film'}]}),
+  'day:lid:dia|2026-09-25':entry('day:lid:dia|2026-09-25',{keyBasis:'identity_date',viewingId:null,watchedDate:'2026-09-25',viewings:1,viewingsCertain:false,ratingAtEntry:5,ratingsAtEntry:[5],rewatch:'unknown',rewatchRows:0,rewatchUnknownRows:1}),
+  'viewing:333':entry('viewing:333',{keyBasis:'viewing_id',viewingId:'333',watchedDate:null,viewings:1,viewingsCertain:true,ratingAtEntry:null,ratingsAtEntry:[null],rewatch:false}),
+  'day:lid:other|2026-09-07':{...entry('day:lid:other|2026-09-07',{keyBasis:'identity_date',viewingId:null,watchedDate:'2026-09-07',viewings:1,viewingsCertain:true,ratingAtEntry:1,ratingsAtEntry:[1],rewatch:false,rewatchRows:0,rewatchUnknownRows:0}),identity:{type:'letterboxd_lid',value:'other'}},
+  'day:slug:dia-film|2026-09-08':{...entry('day:slug:dia-film|2026-09-08',{keyBasis:'identity_date',viewingId:null,watchedDate:'2026-09-08',viewings:1,viewingsCertain:true,ratingAtEntry:1,ratingsAtEntry:[1],rewatch:false,rewatchRows:0,rewatchUnknownRows:0}),identity:null}};
+ set('letterboxd/diary/history.json',{schemaVersion:1,entries});
+ set('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'partial',lastSuccessAt:d(29),stopReason:'page_budget',coverage:{newestWatchedDate:'2026-09-25',oldestWatchedDate:'2026-01-01',reachedEnd:false},resumePage:4});
+
+ const {status,data}=await history('filmId=dia');assert.equal(status,200);
+ assert.deepEqual(data.events.map(e=>e.type+':'+(e.sourceKey||e.position||e.kind)),
+  ['prediction:history','diary_viewing:viewing:111','rating:first_observed','prediction:current','diary_viewing:day:lid:dia|2026-09-20','diary_viewing:viewing:222','diary_viewing:day:lid:dia|2026-09-25','diary_viewing:viewing:333'],
+  'prediction, then the viewing, then the rating observation; a day-only date after every instant of that date; an undated entry last');
+ const viewings=data.events.filter(e=>e.type==='diary_viewing');
+ assert.equal(viewings.some(e=>['day:lid:other|2026-09-07','day:slug:dia-film|2026-09-08'].includes(e.sourceKey)),false,'never linked by slug, never another lid');
+ const [v111,day20,v222,day25,v333]=viewings;
+ assert.deepEqual(v111,{type:'diary_viewing',at:'2026-09-05',atPrecision:'day',watchedDate:'2026-09-05',sourceKey:'viewing:111',keyBasis:'viewing_id',viewingId:'111',viewings:1,viewingsCertain:true,
+  ratingAtEntry:4,ratingsAtEntry:[4],rewatch:false,rewatchRows:null,rewatchUnknownRows:null,lid:'dia',linkedVia:'fact_record+requested_id',slugs:[{value:'dia-film',firstObservedAt:d(28)}],
+  firstObservedAt:d(28),observedAt:d(29),page:1,changes:[{field:'ratingAtEntry',from:3,to:4,observedAt:d(29)}],identity:'diary|viewing:111'},'a re-assessed entry keeps its change, and its watched date is not its observation time');
+ assert.equal(day20.viewings,2,'two viewings of one day stay one event with their count');assert.deepEqual(day20.ratingsAtEntry,[3.5,4]);assert.equal(day20.rewatch,true);assert.equal(day20.rewatchRows,1);
+ assert.equal(v222.rewatch,'unknown');assert.deepEqual(v222.slugs,[{value:'dia-film',firstObservedAt:null}],'an older alias without firstObservedAt says null');
+ assert.equal(day25.viewingsCertain,false);assert.equal(v333.at,null);assert.equal(v333.watchedDate,null);
+ assert.deepEqual(data.current.rating,{value:4.5,observedAt:d(6),source:'letterboxd_export',observationId:'r1',watchedAt:null},'a rating at a Diary entry never replaces the rating observation');
+ assert.deepEqual(data.current.diary,{lid:'dia',viewingCount:6,viewingCountExact:false,lastWatchedAt:'2026-09-25',rewatches:1,rewatchesExact:false});
+ assert.deepEqual(data.notes,['prediction_lineage_unknown','first_observed_is_not_a_rating_date','diary_viewings_lower_bound','diary_rewatch_unknown','diary_entry_without_date','diary_same_day_order_unknown','diary_entries_may_overlap','diary_absence_is_not_unwatched','diary_coverage_partial']);
+ assert.deepEqual(data.snapshot.sources.diary,{status:'recorded',link:{status:'linked',lid:'dia',via:'fact_record+requested_id',candidates:['dia']},unresolvedEntries:1,
+  state:{lastOutcome:'partial',lastSuccessAt:d(29),coverage:{newestWatchedDate:'2026-09-25',oldestWatchedDate:'2026-01-01',reachedEnd:false},resumePage:4}});
+ assert.equal(data.partial,false);
+
+ // Through the TMDB id the fact record supplies the lid; the same Diary events, linked by the fact record alone.
+ const byTmdb=await history('filmId=tmdb_501');
+ assert.deepEqual(byTmdb.data.events.filter(e=>e.type==='diary_viewing').map(e=>e.identity),viewings.map(e=>e.identity));
+ assert.equal(byTmdb.data.snapshot.sources.diary.link.via,'fact_record');assert.equal(byTmdb.data.events.filter(e=>e.type==='prediction').length,0);
+
+ // A TMDB id without a fact record has no lid: the Diary stays unlinked, nothing is guessed.
+ const unlinked=await history('filmId=tmdb_999');
+ assert.deepEqual(unlinked.data.events,[]);assert.equal(unlinked.data.snapshot.sources.diary.link.status,'unlinked');assert.ok(unlinked.data.notes.includes('diary_unlinked'));assert.equal(unlinked.data.current.diary,null);
+
+ // The requested lid and the fact record's lid disagree: neither Diary is returned.
+ set('letterboxd/facts/links.json',{...JSON.parse(records.get('letterboxd/facts/links.json')),'letterboxd:dia-old':'tmdb-501'});
+ const disagree=await history('filmId=dia-old');
+ assert.equal(disagree.data.events.some(e=>e.type==='diary_viewing'),false);assert.deepEqual(disagree.data.snapshot.sources.diary.link,{status:'ambiguous',lid:null,via:null,candidates:['dia','dia-old']});
+ assert.ok(disagree.data.notes.includes('diary_identity_disagreement'));assert.equal(disagree.data.current.diary,null);
+ assert.equal(disagree.data.events.filter(e=>e.type==='rating').length,1,'the rating history of the fact record is still returned');
+
+ // During a convergence whose two records name different lids, the Diary is withheld as well.
+ set('letterboxd/facts/links.json',{...JSON.parse(records.get('letterboxd/facts/links.json')),'tmdb:600':'lb-split'});
+ set('letterboxd/facts/films/lb-split.json',{schemaVersion:1,factKey:'lb-split',links:{letterboxd:'dia',tmdb:'600'},migrating:{to:'tmdb-600',token:'k'}});
+ set('letterboxd/facts/films/tmdb-600.json',{schemaVersion:1,factKey:'tmdb-600',links:{letterboxd:'other',tmdb:'600'}});
+ assert.equal((await history('filmId=tmdb_600')).data.snapshot.sources.diary.link.status,'ambiguous');
+
+ // Paging: a page boundary inside the Diary events; re-reading the same Diary (a new object version) refuses the old
+ // cursor and a fresh read has the same events, no duplicates.
+ const one=await history('filmId=dia&limit=5');
+ const two=await history('filmId=dia&limit=5&cursor='+one.data.page.nextCursor);
+ assert.deepEqual([...one.data.events,...two.data.events].map(e=>e.identity),data.events.map(e=>e.identity));
+ set('letterboxd/diary/history.json',{schemaVersion:1,entries});
+ const stale=await history('filmId=dia&limit=5&cursor='+one.data.page.nextCursor);assert.equal(stale.status,409);assert.equal(stale.data.error,'history_changed');
+ const reread=await history('filmId=dia');assert.deepEqual(reread.data.events.map(e=>e.identity),data.events.map(e=>e.identity));
+
+ // A complete Diary coverage drops the partial-coverage note; an unreadable Diary history makes the answer partial.
+ set('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'complete',coverage:{newestWatchedDate:'2026-09-25',oldestWatchedDate:'2010-01-01',reachedEnd:true},resumePage:null});
+ assert.equal((await history('filmId=dia')).data.notes.includes('diary_coverage_partial'),false);
+ set('letterboxd/diary/history.json','{broken');
+ const broken=await history('filmId=dia');
+ assert.equal(broken.data.partial,true);assert.equal(broken.data.snapshot.sources.diary.status,'unreadable');assert.ok(broken.data.notes.includes('diary_history_unreadable'));
+ assert.equal(broken.data.events.some(e=>e.type==='diary_viewing'),false);assert.equal(broken.data.current.diary,null);
+}
+// Prediction quality orders the same events and is unchanged by the Diary sort key: its own events carry instants only.
+assert.equal(ctx.compareHistoryEvents({type:'rating',at:'2026-09-20T23:59:59.999Z',identity:'a'},{type:'diary_viewing',at:'2026-09-20',atPrecision:'day',identity:'b'}),-1);
+assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPrecision:'day',identity:'b'},{type:'prediction',at:'2026-09-21T00:00:00.000Z',identity:'a'}),-1);
+console.log('Film history: validation, empty film, chronology, lineage gaps, version links, rationale per version, legacy log by both ids, no account URL, watchedAt unknown, rollback and re-apply, idempotent reads, paging and change refusal, ties, redirect, unreadable bundle, convergence overlay, Diary viewings by lid only (never slug), day-only ordering, day counts, lower bounds, unknown re-watch, undated entries, identity disagreement, Diary paging and change refusal, coverage and unreadable Diary passed');

@@ -87,7 +87,9 @@ It returns:
 - `enabled`, `state`, `entries`, `unresolvedEntries`, and `films` (how many films have entries);
 - with `filmId`: `film {viewingCount, viewingCountExact, lastWatchedAt, rewatches, rewatchesExact, entries[]}`, newest first. `viewingCount` sums the entries' `viewings`; `viewingCountExact` is false while any of them is a lower bound. `rewatches` counts rows marked re-watch (`rewatchRows` of day entries, `rewatch: true` of viewing-id entries); `rewatchesExact` is false while any count is a lower bound or any counted row has an unknown marker.
 
-An invalid `filmId` answers 400. Timeline, Finds and predictions do not consume it yet.
+An invalid `filmId` answers 400.
+
+The [film history API](../api/film-history.md) reads the same history: entries whose `identity` lid is the film's, as `diary_viewing` events in its chronology. Entries without a lid are never attributed to a film there, and a slug alias never links one. Timeline, Finds and predictions do not consume it yet.
 
 ## Storage authority and D1
 
