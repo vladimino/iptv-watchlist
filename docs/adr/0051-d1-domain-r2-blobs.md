@@ -6,7 +6,7 @@
 **Approval source:** Owner decision recorded on [AIR-275](https://trello.com/c/4x7hH0gI) on 2026-10-29, rejecting [AIR-75](https://trello.com/c/AXPYIVCa), [AIR-76](https://trello.com/c/HHrDozK6), [AIR-77](https://trello.com/c/f3QzcNYf) and [AIR-78](https://trello.com/c/COdMTjqU)  
 **Related work:** [AIR-74](https://trello.com/c/5AdAmKPe) (backfill), [AIR-275](https://trello.com/c/4x7hH0gI), [PR #233](https://github.com/vladimino/iptv-watchlist/pull/233), [PR #241](https://github.com/vladimino/iptv-watchlist/pull/241)  
 **Supersedes:** The stage sequence of [ADR 0017](0017-staged-d1-migration.md) after the backfill (shadow writes, shadow reads, read cutover, write cutover as separate evidence-gated stages); the backfill boundaries of [ADR 0019](0019-live-d1-backfill-boundaries.md) stay in force for any future reload  
-**Superseded by:** [ADR 0056](0056-d1-enrichment-write-through.md) (Proposed 2026-10-30) in part, if accepted: for the enrichment domain, decision 2's immediate "writer writes D1 as the truth" is preceded by an R2-authoritative projection into D1 from a Worker cron trigger. Everything else here stands.
+**Superseded by:** [ADR 0056](0056-d1-enrichment-write-through.md) (Accepted 2026-10-30) in part: for the enrichment domain, decision 2's immediate "writer writes D1 as the truth" is preceded by an R2-authoritative projection into D1 from a Worker cron trigger. Everything else here stands.
 
 ## Context
 
@@ -36,7 +36,7 @@ Not decided here: the order and mechanics of each write flip, the person merge m
 ## Consequences
 
 - The relational model becomes usable at once (person filmographies, duplicate queues) without touching existing pages.
-- Until a domain flips, D1 does not follow R2 changes. A reload uses the [backfill runbook](../runbooks/d1-backfill.md). Qualified by [ADR 0056](0056-d1-enrichment-write-through.md) (Proposed), if accepted: enrichment follows R2 through its projector before its flip.
+- Until a domain flips, D1 does not follow R2 changes. A reload uses the [backfill runbook](../runbooks/d1-backfill.md). Qualified by [ADR 0056](0056-d1-enrichment-write-through.md) (Accepted 2026-10-30): enrichment follows R2 through its projector before its flip.
 - During a flip, two copies of one domain exist: the D1 truth and the R2 cache. The writer keeps them together; a cache that drifts is a bug, not a second authority.
 - Without shadow stages, a defect can reach the user. It is caught by tests, by the owner using the app, and by recomputation from R2 blobs or from reproducible discovery.
 
