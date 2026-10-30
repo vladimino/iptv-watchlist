@@ -342,7 +342,7 @@ async function metadataSync(env,run){
 }
 async function finishSync(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)});
  // A complete watchlist is one observation of every listed film (ADR-0024).
- if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+ if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -463,6 +463,16 @@ async function resumeRemovalLookups(env,run){
 // before it starts, so a request killed for memory or time leaves `state: started` with the phase it died in. The next
 // step on the completed run closes such an attempt as `unknown` once it is stale; it never repeats the diary read.
 const RATINGS_ATTEMPT_STALE_MS=5*60000;
+// AIR-263: compact phase markers for the EPG commit and its post-commit tail, so a memory-limit end of the request can be
+// placed between two lines in Workers Observability. One line per edge: run id, phase, enter, exit or error, elapsed
+// time, and counts or byte sizes the code already holds. Never titles, film ids, HTML or payloads.
+function epgPhase(runId,phase,edge,fields={}){console.log(JSON.stringify({event:'epg_phase',runId:runId||null,phase,edge,at:new Date().toISOString(),...fields}));}
+async function tracedPhase(runId,phase,work,summary=null){
+ const started=Date.now();epgPhase(runId,phase,'enter');
+ let result;try{result=await work();}catch(e){epgPhase(runId,phase,'error',{elapsedMs:Date.now()-started});throw e;}
+ let fields={};try{fields=summary?summary(result)||{}:{};}catch{}
+ epgPhase(runId,phase,'exit',{elapsedMs:Date.now()-started,...fields});return result;
+}
 async function ratingsPhase(env,run,phase,save=true){
  const at=new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,phase,at};
  console.log(JSON.stringify({event:'epg_ratings_phase',runId:run.runId,attemptId:run.ratingAttempt.id,phase,at}));
@@ -492,11 +502,13 @@ async function diaryRatingsStage(env,run){
   // observation may hold) and spares the per-film lookup. A stored rating without diary proof does neither.
   for(const item of evidence)if(item.rating!=null)ratings[item.lid]=item.rating;
   const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
+  epgPhase(run.runId,'diary_facts_result','exit',{attemptId:run.ratingAttempt?.id||null,films:result.films,written:result.written,skipped:result.skipped});
   for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
   for(const lid of Object.keys(ratings))if(result.ratings[lid]!=null)ratings[lid]=result.ratings[lid];
  };
  try{
-  const diary=await LetterboxdDiary.syncHistory(env,{afterPage});
+  const started=Date.now(),trace=(phase,edge,fields)=>epgPhase(run.runId,phase,edge,{attemptId:run.ratingAttempt?.id||null,sinceDiaryMs:Date.now()-started,...fields});
+  const diary=await LetterboxdDiary.syncHistory(env,{afterPage,trace});
   run.diaryHistory={outcome:diary.lastOutcome,stopReason:diary.stopReason,counts:diary.counts,resumePage:diary.resumePage,coverage:diary.coverage,facts:{...facts,enabled:true},at:diary.lastAttemptAt};
  }catch(e){run.diaryHistory={outcome:'failed',stopReason:'error:'+String(e.message).slice(0,120),facts:{...facts,enabled:true},at:new Date().toISOString()};}
  return ratings;
@@ -504,7 +516,7 @@ async function diaryRatingsStage(env,run){
 async function completeWithRatings(env,run,report){
  if(run.ratingPending?.length)run.ratingAttempt={id:crypto.randomUUID(),state:'started',startedAt:new Date().toISOString()};
  if(run.ratingAttempt?.state==='started')await ratingsPhase(env,run,'post_commit',false);
- const result=await finishSync(env,run,report);
+ const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
  const pending=!!run.ratingPending?.length,diaryOn=pending&&LetterboxdDiary.enabled(env);
  let diaryRatings={};
  if(diaryOn){await ratingsPhase(env,run,'diary');diaryRatings=await diaryRatingsStage(env,run);}
@@ -513,7 +525,7 @@ async function completeWithRatings(env,run,report){
  if(Object.keys(proved).length)await enrichKnownRemovalEvent(env,run,proved,run.diaryHistory?.at||new Date().toISOString());
  if(run.removalLookups&&Object.keys(proved).length){run.removalLookups=run.removalLookups.filter(film=>proved[film.id]==null);run.removalDiaryResolved=Object.keys(proved);}
  if(run.ratingAttempt?.state==='started'&&run.removalLookups)await ratingsPhase(env,run,'removal_lookup');
- const lookup=await resumeRemovalLookups(env,run);
+ const lookup=await tracedPhase(run.runId,'removal',()=>resumeRemovalLookups(env,run),value=>({checked:value?.checked??0}));
  if(!pending)return lookup?{...result,removalRatings:lookup}:result;
  const outcome=run.diaryHistory?.outcome||null,failed=diaryOn&&['failed','blocked','rate_limited'].includes(outcome);
  delete run.ratingPending;
@@ -551,19 +563,21 @@ async function syncStep(env,pathname,body,step){
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const discovery=await queueDiscovery(env,'epg_committed',run.runId);step.discovery=discoverySummary(discovery);return json({...result,discovery});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
- if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await copyEpgGeneration(env,run.runId);await queueCommittedDiscovery(env,run);return completeWithRatings(env,run,committed);}}
+ if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await tracedPhase(run.runId,'generation_copy',()=>copyEpgGeneration(env,run.runId));await queueCommittedDiscovery(env,run);return completeWithRatings(env,run,committed);}}
  const titles=await loadJSON(env,'titles.json')||{};
  try{await localizeFilmTitles(run.watchlist,titles,'on');await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  const people=await loadJSON(env,'people.json')||{};
  try{await localizeByLetterboxd(run.watchlist,people);await saveJSON(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  applyEpgLocalization(run.watchlist,people);
- const sources=sourceConfig(env),now=Date.now(),r=await fetch(sources.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
+ epgPhase(run.runId,'epg_input_scan','enter');const scanStarted=Date.now();
+ const sources=sourceConfig(env),now=Date.now(),r=await fetch(sources.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);
+ epgPhase(run.runId,'epg_input_scan','exit',{elapsedMs:Date.now()-scanStarted,films:result.films.length,discovery:result.discovery?.length??0,catalog:Object.keys(cache).length});if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
  const previous=await loadJSON(env,'programme.json');assertEPGContinuity(result,previous,run.watchlist.length,now);const fresh=new Map(result.films.map(f=>[f.id,{...f,shows:dedupeShows(f.shows)}]));
  const matched=[...fresh.values()].map(f=>({...f,shows:f.shows.sort((a,b)=>a.start-b.start)}));const currentById=new Map(matched.map(f=>[String(f.id),f]));const films=run.watchlist.map(f=>withAvailability({...f,...currentById.get(String(f.id)),shows:currentById.get(String(f.id))?.shows||[]}));const countShows=matched.reduce((n,f)=>n+f.shows.length,0);
  const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
  if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];if(removalLookupEnabled(env)){const removed=new Set(run.events[0].removed.map(film=>String(film.id)));run.removalLookups=(before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);}await saveJSON(env,'sync.json',run);}
- try{await publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report});}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
+ try{await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report}));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
  await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }

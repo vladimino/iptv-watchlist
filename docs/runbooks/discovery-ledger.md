@@ -112,3 +112,22 @@ The production split replaces the Worker's own first bounded commit, which would
 ## Offline benchmark
 
 `node scripts/discovery-ledger-benchmark.mjs --output /absolute/dir/outside/repo [--sizes 20,40,63,90]` builds synthetic stores and reports the active and archive sizes, plus the smallest Node old space at which the commit and a chunk complete in each mode. It is offline: no network, no R2, no production data. The numbers are relative to Node, not the Workers isolate limit. See the dated [benchmark evidence](../evidence/discovery-ledger-benchmark-2026-10-27.md).
+
+## Commit memory diagnostics (AIR-263)
+
+**Phase markers.** Every EPG commit logs one `{"event":"epg_phase"}` line per phase edge (`enter`, `exit` or `error`). Each line holds `runId`, `phase`, `at`, `elapsedMs` on exit, and only counts or byte sizes the step already holds. It never holds titles, film ids, slugs, HTML or payloads.
+- **Commit:** `epg_input_scan` (exit: `films`, `discovery`, `catalog`), `generation_publish`, and `generation_copy` (resume path).
+- **Tail:** `finish_sync` and `queue_refresh`.
+- **Diary stage:** each line adds `attemptId` and `sinceDiaryMs`. The phases are `diary_state_load`, `diary_page_fetch` (exit: `page`, `status`, `bytes`), `diary_page_parse` (exit: `rows`), `diary_history_merge` (exit: `entries`), `diary_facts_apply` with `diary_facts_result` (`films`, `written`, `skipped`), and `diary_state_save` (exit: `outcome`).
+- **Removal lookup:** `removal`.
+
+**Reading an `exceededMemory` end.**
+1. In Workers Observability, filter the request id of the `exceededMemory` event.
+2. The last `epg_phase` `enter` without its `exit` is the phase that died. A request that dies before `diary_history_merge` exit has written no diary history.
+3. This is read-only; never repeat the commit to observe it.
+
+**Offline profile.** `npm run build`, then `node --expose-gc scripts/epg-memory-profile.mjs [--full] [--gc-at-markers] [--concurrency 2] [--scale 1]`.
+- It replays the built Worker against synthetic objects of the production sizes from an R2 size listing. It makes no request and needs no data.
+- It prints heap and RSS per phase. With `--gc-at-markers` the enter and exit figures are retained data; without it they include uncollected garbage.
+- Node heap is not workerd's 128 MB isolate limit: the figures rank phases.
+- The 30 October reading is in the [evidence](../evidence/epg-diary-oom-profile-2026-10-30.md).
