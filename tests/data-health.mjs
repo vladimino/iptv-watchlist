@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   DATA_HEALTH_ACTIONS, DATA_HEALTH_ACTION_CODES, DATA_HEALTH_ANOMALIES, DATA_HEALTH_CATEGORIES, DATA_HEALTH_COVERAGE, DATA_HEALTH_ELIGIBILITY_REASONS,
-  DATA_HEALTH_EVIDENCE, DATA_HEALTH_FRESHNESS, DATA_HEALTH_PROGRESS, DATA_HEALTH_REASONS, DATA_HEALTH_SEVERITIES, DATA_HEALTH_SUBJECT_KINDS,
+  DATA_HEALTH_EVIDENCE, DATA_HEALTH_FILM_FIELDS, DATA_HEALTH_FRESHNESS, DATA_HEALTH_PROGRESS, DATA_HEALTH_REASONS, DATA_HEALTH_SEVERITIES, DATA_HEALTH_SUBJECT_KINDS,
   DATA_HEALTH_SUBSYSTEMS, DATA_HEALTH_SUBSYSTEM_STATUSES, DATA_HEALTH_THRESHOLDS, DATA_HEALTH_UNOBSERVED_REASONS, compareHealthIssues, diffHealthIssues,
   evaluateDataHealth, healthIssueId, progressOf,
 } from '../src/domain/data-health.js';
@@ -110,12 +110,15 @@ assert.deepEqual(clear.counts.bySeverity, {critical: 0, warning: 0, info: 0});
 assert.deepEqual(clear.thresholds, DATA_HEALTH_THRESHOLDS);
 assert.deepEqual(clear.published, {programmeRunId: 'gen-2', phase: 'published', publishedAt: at(-5 * H)});
 assert.deepEqual(clear.clock, {skewToleranceMs: 5 * 60000, anomalies: []});
-assert.deepEqual(clear.scope, {programmeRunId: 'gen-2', coverage: {films: 'complete', observations: 'complete'}, sources: {published: 'observed', films: 'observed', observations: 'observed', predictionQueue: 'observed', discovery: 'observed', posters: 'observed', letterboxd: 'observed'}, subjects: {films: [], observations: []}});
+assert.deepEqual(clear.scope, {programmeRunId: 'gen-2', coverage: {films: 'complete', observations: 'complete'}, sources: {published: 'observed', films: 'observed', observations: 'observed', predictionQueue: 'observed', discovery: 'observed', posters: 'observed', letterboxd: 'observed'}, subjects: {films: [], observations: []}, fields: {films: {}}});
 // A bounded page is clear only in its own scope: undeclared coverage is partial, and `clear` needs every list the
 // subsystem reads to be complete.
 const page = checkResult(evaluate(complete({coverage: undefined, films: [film('film:ok')]})));
 assert.deepEqual(page.scope.coverage, {films: 'partial', observations: 'partial'});
 assert.deepEqual(page.scope.subjects.films, ['film:ok']);
+assert.deepEqual(page.scope.fields.films, {'film:ok': ['externalIds', 'fingerprint', 'identity', 'localizationConflicts', 'metadata', 'poster', 'prediction']});
+assert.deepEqual(evaluate(complete({films: [{id: 'film:thin', observedAt: NOW, poster: undefined, identity: null, externalIds: 'x'}]})).scope.fields.films, {'film:thin': []}, 'undefined, null and malformed fields are not observed');
+assert.deepEqual(evaluate(complete({films: [{id: 'film:split', metadata: {status: 'fresh'}}, {id: 'film:split', poster: null}]})).scope.fields.films, {'film:split': ['metadata', 'poster']}, 'a repeated record adds its fields');
 for (const name of ['identity', 'metadata', 'localization', 'fingerprint', 'prediction', 'poster']) assert.equal(page.subsystems[name].status, 'clear_in_scope', name);
 for (const name of ['programme', 'prediction_queue', 'discovery', 'letterboxd_archive']) assert.equal(page.subsystems[name].status, 'clear', name);
 const filmsOnly = evaluate(complete({coverage: {films: 'complete'}, observations: undefined, posters: undefined}));
@@ -163,7 +166,24 @@ assert.deepEqual(nextGeneration.unobserved.map(entry => [entry.reason, entry.iss
 const queueGone = diffHealthIssues(firstPage, evaluate(complete({films: [film('film:p1', {poster: null}), film('film:both', {metadata: {status: 'missing'}})], predictionQueue: null})));
 assert.deepEqual(queueGone.unobserved.map(entry => [entry.reason, entry.issue.id]), [['source_not_observed', 'prediction_queue/stuck/queue:prediction']]);
 assert.deepEqual(diffHealthIssues(firstPage, {issues: []}).unobserved.length, 3, 'a result without a scope observes nothing');
-for (const entry of [...paged.unobserved, ...withoutFilms.unobserved, ...nextGeneration.unobserved]) assert(DATA_HEALTH_UNOBSERVED_REASONS.includes(entry.reason), entry.reason);
+// The same Film seen again is not enough: the field the issue is about must be on the record. A known healthy
+// value resolves the issue; an omitted field leaves it unobserved.
+const dimensionsBefore = evaluate(complete({films: [
+  film('film:dim', {poster: null, metadata: {status: 'missing'}, prediction: {status: 'stale', updatedAt: at(-3 * H)}, localizationConflicts: [{value: 'x'}], externalIds: [{scheme: 'tmdb', value: '1', conflicting: true}, {scheme: 'tmdb', value: '2', conflicting: true}]}),
+]}));
+assert.deepEqual(dimensionsBefore.issues.map(item => item.id).sort(), ['identity/conflict/film:film:dim', 'localization/conflict/film:film:dim', 'metadata/incomplete/film:film:dim', 'poster/missing_asset/film:film:dim', 'prediction/conflict/film:film:dim']);
+const thinRecord = diffHealthIssues(dimensionsBefore, evaluate(complete({films: [{id: 'film:dim', programmeRunId: 'gen-2', observedAt: NOW, identity: {status: 'resolved'}, fingerprint: {status: 'current'}}]})));
+assert.deepEqual(thinRecord.resolved, [], 'an incomplete projection of the same Film resolves nothing');
+assert.deepEqual(thinRecord.unobserved.map(entry => [entry.reason, entry.issue.subsystem]).sort(), [['dimension_not_observed', 'identity'], ['dimension_not_observed', 'localization'], ['dimension_not_observed', 'metadata'], ['dimension_not_observed', 'poster'], ['dimension_not_observed', 'prediction']], 'identity needs externalIds as well');
+const healthyRecord = diffHealthIssues(dimensionsBefore, evaluate(complete({films: [film('film:dim')]})));
+assert.deepEqual(healthyRecord.resolved.map(item => item.subsystem).sort(), ['identity', 'localization', 'metadata', 'poster', 'prediction'], 'known healthy values resolve every issue');
+assert.deepEqual(healthyRecord.unobserved, []);
+const posterOnly = diffHealthIssues(dimensionsBefore, evaluate(complete({films: [{id: 'film:dim', programmeRunId: 'gen-2', observedAt: NOW, poster: 'https://image.example/p.jpg', metadata: {status: 'fresh'}}]})));
+assert.deepEqual(posterOnly.resolved.map(item => item.subsystem).sort(), ['metadata', 'poster']);
+assert.deepEqual(posterOnly.unobserved.map(entry => entry.issue.subsystem).sort(), ['identity', 'localization', 'prediction']);
+assert.deepEqual(diffHealthIssues(dimensionsBefore, evaluate(complete({films: [{id: 'film:dim', observedAt: NOW, poster: null, metadata: {status: 'partial', updatedAt: at(-D)}}]}))).persisting.map(item => item.id).sort(), ['metadata/incomplete/film:film:dim', 'poster/missing_asset/film:film:dim']);
+for (const [subsystem, fields] of Object.entries(DATA_HEALTH_FILM_FIELDS)) for (const field of fields) assert(['identity', 'externalIds', 'metadata', 'localizationConflicts', 'fingerprint', 'prediction', 'poster'].includes(field), subsystem);
+for (const entry of [...paged.unobserved, ...withoutFilms.unobserved, ...nextGeneration.unobserved, ...thinRecord.unobserved]) assert(DATA_HEALTH_UNOBSERVED_REASONS.includes(entry.reason), entry.reason);
 
 // Stale: the programme generation, the metadata and the Letterboxd baseline age against their own thresholds.
 const stale = checkResult(evaluate(complete({

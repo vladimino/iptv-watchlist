@@ -29,7 +29,18 @@ export const DATA_HEALTH_ELIGIBILITY_REASONS = [
 export const DATA_HEALTH_ANOMALIES = ['clock_skew', 'projection_generation_differs', 'duplicate_subject'];
 export const DATA_HEALTH_COVERAGE = ['complete', 'partial'];
 export const DATA_HEALTH_SUBSYSTEM_STATUSES = ['clear', 'clear_in_scope', 'attention', 'unknown'];
-export const DATA_HEALTH_UNOBSERVED_REASONS = ['subject_not_observed', 'source_not_observed', 'generation_changed'];
+export const DATA_HEALTH_UNOBSERVED_REASONS = ['subject_not_observed', 'dimension_not_observed', 'source_not_observed', 'generation_changed'];
+// The Film record fields each film subsystem reads. A field is observed when the record carries it in a usable
+// shape; `undefined` (and a malformed value) is not observed, so a later incomplete projection of the same Film
+// cannot resolve an issue about a field it does not carry.
+export const DATA_HEALTH_FILM_FIELDS = Object.freeze({
+  identity: ['identity', 'externalIds'],
+  metadata: ['metadata'],
+  localization: ['localizationConflicts'],
+  fingerprint: ['fingerprint'],
+  prediction: ['prediction'],
+  poster: ['poster'],
+});
 
 const HOUR = 3600000;
 const DAY = 86400000;
@@ -94,6 +105,11 @@ function coverageOf(snapshot) {
 
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+// A list field in a usable shape, otherwise nothing: a malformed value never proves or disproves a conflict.
+function listOf(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function parseClock(value) {
@@ -348,7 +364,8 @@ function filmIssues(record, context) {
   const provenance = (rule, extra) => ({source: 'films', programmeRunId: record.programmeRunId ?? null, rule, ...extra});
 
   const identity = record.identity;
-  const conflicting = (record.externalIds || []).some(item => item?.conflicting === true) || (identity?.provenance?.conflictingTmdbIds?.length || 0) > 1;
+  const externalIds = listOf(record.externalIds), localizationConflicts = listOf(record.localizationConflicts);
+  const conflicting = externalIds.some(item => item?.conflicting === true) || listOf(identity?.provenance?.conflictingTmdbIds).length > 1;
   if (conflicting || identity?.status === 'ambiguous') {
     issues.push(issue({
       subsystem: 'identity', category: 'conflict', severity: 'warning', reason: conflicting ? 'identity_conflict' : 'identity_ambiguous',
@@ -392,12 +409,12 @@ function filmIssues(record, context) {
     }));
   }
 
-  if ((record.localizationConflicts?.length || 0) > 0) {
+  if (localizationConflicts.length > 0) {
     issues.push(issue({
       subsystem: 'localization', category: 'conflict', severity: 'info', reason: 'localization_conflict',
       subject: {kind: 'film', id}, evidence: base(), observedAt: iso(observed.ms), lastProgressAt: iso(clock.at(record.localization?.updatedAt).ms),
-      provenance: provenance('localization.conflicts', {conflicts: record.localizationConflicts.length}),
-      affected: {count: record.localizationConflicts.length, sample: [id]},
+      provenance: provenance('localization.conflicts', {conflicts: localizationConflicts.length}),
+      affected: {count: localizationConflicts.length, sample: [id]},
       action: action('investigate', 'manual_review', false, 'manual_review_required'),
     }));
   }
@@ -448,7 +465,7 @@ function filmIssues(record, context) {
   }
 
   if (record.poster === null) {
-    const trusted = (record.externalIds || []).some(item => item?.scheme === 'tmdb' && item.trusted === true && item.conflicting !== true);
+    const trusted = externalIds.some(item => item?.scheme === 'tmdb' && item.trusted === true && item.conflicting !== true);
     issues.push(issue({
       subsystem: 'poster', category: 'missing_asset', severity: 'info', reason: 'poster_missing',
       subject: {kind: 'film', id}, evidence: base(), observedAt: iso(observed.ms),
@@ -739,12 +756,13 @@ export function evaluateDataHealth(snapshot, options) {
   const context = {snapshot, clock, thresholds, published: published ?? null, queue: queueView(snapshot.predictionQueue), discovery: snapshot.discovery};
 
   const collected = [];
-  const filmIds = new Set(), observationKeys = new Set();
+  const filmIds = new Set(), observationKeys = new Set(), filmFields = {};
   collected.push(...coverageIssues(context));
   if (published) collected.push(...programmeIssues(snapshot, context));
   for (const record of snapshot.films || []) {
     if (!isObject(record) || typeof record.id !== 'string' || !record.id) continue;
     filmIds.add(record.id);
+    filmFields[record.id] = observedFilmFields(record, filmFields[record.id]);
     collected.push(...filmIssues(record, context));
   }
   for (const entry of snapshot.observations || []) {
@@ -772,6 +790,7 @@ export function evaluateDataHealth(snapshot, options) {
     coverage,
     sources,
     subjects: {films: [...filmIds].sort(compareText), observations: [...observationKeys].sort(compareText)},
+    fields: {films: Object.fromEntries([...filmIds].sort(compareText).map(id => [id, filmFields[id]]))},
   };
   const subsystems = {};
   for (const subsystem of DATA_HEALTH_SUBSYSTEMS) {
@@ -799,6 +818,18 @@ export function evaluateDataHealth(snapshot, options) {
   };
 }
 
+const FILM_FIELD_SHAPES = {
+  identity: isObject, metadata: isObject, fingerprint: isObject, prediction: isObject,
+  externalIds: Array.isArray, localizationConflicts: Array.isArray,
+  poster: value => value === null || typeof value === 'string',
+};
+
+function observedFilmFields(record, previous) {
+  const fields = new Set(previous || []);
+  for (const [field, shape] of Object.entries(FILM_FIELD_SHAPES)) if (shape(record[field])) fields.add(field);
+  return [...fields].sort(compareText);
+}
+
 // `clear` claims the whole subsystem: every list the subsystem reads must be declared complete. A bounded page
 // of films can only be `clear_in_scope`.
 function subsystemComplete(subsystem, scope) {
@@ -812,8 +843,8 @@ function subsystemComplete(subsystem, scope) {
 }
 
 // Two evaluations compared by issue id: what appeared, what persists, what is resolved and what merely left the
-// snapshot. An issue is resolved only when its subject was observed again in the current evaluation: a film or an
-// observation by id in `scope.subjects`, a whole-object subject by its source being observed under the same
+// snapshot. An issue is resolved only when its subject was observed again in the current evaluation: a film by id
+// in `scope.subjects` with the fields its subsystem reads present on the record, an observation by key, a whole-object subject by its source being observed under the same
 // published generation, a coverage issue by its source being observed. Anything else is `unobserved`, with the
 // reason, and is not a claim of health.
 export function diffHealthIssues(previous, current) {
@@ -841,7 +872,13 @@ function unobservedReason(item, previous, current) {
   if (kind === 'film' || kind === 'observation') {
     const list = kind === 'film' ? 'films' : 'observations';
     if (scope.sources?.[list] !== 'observed') return 'source_not_observed';
-    return (scope.subjects?.[list] || []).includes(item.subject.id) ? null : 'subject_not_observed';
+    if (!(scope.subjects?.[list] || []).includes(item.subject.id)) return 'subject_not_observed';
+    if (kind === 'film') {
+      const observed = scope.fields?.films?.[item.subject.id] || [];
+      const required = DATA_HEALTH_FILM_FIELDS[item.subsystem] || [];
+      if (!required.every(field => observed.includes(field))) return 'dimension_not_observed';
+    }
+    return null;
   }
   if (kind === 'subsystem') return scope.sources?.[item.provenance?.source] === 'observed' ? null : 'source_not_observed';
   const source = SUBJECT_SOURCES[kind];
