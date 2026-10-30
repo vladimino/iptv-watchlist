@@ -1,6 +1,6 @@
 # D1 backfill execution and recovery (owner approval required)
 
-`scripts/d1-backfill.mjs` imports one verified production baseline into the D1 database `iptv` without changing the runtime: R2 stays authoritative, the Worker has no D1 binding and keeps serving from R2. The decisions are [ADR-0019](../adr/0019-live-d1-backfill-boundaries.md); the contract (source and target identity, receipts, stop rules) is the [D1 contract](../reference/data/d1-schema.md#backfill-executor). This page is the procedure. None of its production steps is authorised by a merge, a deploy or this page: creating the database, applying the schema, reading production R2, creating credentials, running the import and any destructive recovery each need their own action-specific owner approval.
+`scripts/d1-backfill.mjs` imports one verified production baseline into the D1 database `iptv` without changing the runtime: R2 stays authoritative, the Worker reads D1 only through the read-only catalog views and keeps serving from R2. The decisions are [ADR-0019](../adr/0019-live-d1-backfill-boundaries.md); the contract (source and target identity, receipts, stop rules) is the [D1 contract](../reference/data/d1-schema.md#backfill-executor). This page is the procedure. None of its production steps is authorised by a merge, a deploy or this page: creating the database, applying the schema, reading production R2, creating credentials, running the import and any destructive recovery each need their own action-specific owner approval.
 
 ## Inputs and what each run checks
 
@@ -166,4 +166,4 @@ Record in a dated file under `docs/evidence/d1-migration/`:
 - Probe: statements and bytes probed, `atomic`, `rowsAfterFailure`.
 - Runs: for each run, command (without secrets), status, applied, resumed, reconciled, pending, stop reason, adapter statistics, and with `--staged-generation` the `staged` section and its gate.
 - Result: parity (denominator, missing, extra, mismatched), receipts audit, class A blockers (must be empty), class B families with dispositions, class C list with the acknowledgement reference, delta result.
-- Statement that the Worker still has no D1 binding, Scheduled Tasks and flags are unchanged, and R2 remains authoritative.
+- Statement that no Worker path writes D1, Scheduled Tasks and flags are unchanged, and R2 remains authoritative.

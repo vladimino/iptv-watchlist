@@ -22,7 +22,7 @@ A watchlist Film is stored under its Letterboxd `lid`. Its film permalink `https
 3. **Rename and collision.**
    - The lifecycle backfill keeps a slug's first `observedAt`. A stored slug the Film no longer carries stays as `historical`, so an old permalink still names the Film.
    - One slug on two Films is a collision: both entries become `conflicting`, the collision is reported (`aliasConflicts`), and nothing is merged, moved or re-rated.
-4. **Storage-neutral.** The alias travels in the existing `externalIds` list, so the R2 lifecycle sidecars and the D1 `film_external_id` rows hold it without a schema change. `trusted: false` keeps it outside the D1 unique index on trusted identities. R2 stays the authority.
+4. **Storage-neutral.** The alias travels in the existing `externalIds` list, so the R2 lifecycle sidecars and the D1 `film_external_id` rows hold it without a schema change. `trusted: false` keeps it outside the D1 unique index on trusted identities. Under [ADR 0051](0051-d1-domain-r2-blobs.md) D1 is the future home of external ids; R2 stays authoritative until the Film domain's write flip. Once imported, the read-only `GET /api/d1/films/<id>` lists the alias with the other external ids.
 5. **Offline inventory only.** `scripts/letterboxd-slug-inventory.mjs` counts what a snapshot's stored records would yield. It makes no request and writes nothing.
 
 Not decided here:
