@@ -61,6 +61,7 @@ function adminEscape(value) {
 function adminState() {
   const url = new URL(window.location.href);
   return {
+    view: url.searchParams.get('view') === 'health' ? 'health' : 'catalog',
     q: url.searchParams.get('q') ?? '',
     queue: url.searchParams.get('queue') ?? '',
     kind: url.searchParams.get('kind') === 'person' ? 'person' : 'film',
@@ -70,6 +71,7 @@ function adminState() {
 
 function adminUrl(state) {
   const params = new URLSearchParams();
+  if (state.view === 'health') params.set('view', 'health');
   if (state.q) params.set('q', state.q);
   if (state.queue) params.set('queue', state.queue);
   if (state.id) {
@@ -252,9 +254,61 @@ function adminShow(view, state) {
   adminDetail(view);
 }
 
+function adminShowView(view) {
+  const health = document.querySelector('#admin-health');
+  const catalog = document.querySelector('#admin-catalog');
+  health.hidden = view !== 'health';
+  catalog.hidden = view === 'health';
+  for (const name of ['catalog', 'health']) {
+    const link = document.querySelector('#admin-view-' + name);
+    if (link) link.setAttribute('aria-current', view === name ? 'page' : 'false');
+  }
+}
+
+const adminHealth = {seq: 0, pending: null, body: null, pin: null, stale: false};
+
+// One GET /api/admin/health. The held pin is sent so a changed snapshot shows as stale; a refresh drops the pin and
+// reads whatever is published now. The last answer stays on screen while the next one loads.
+function adminRenderHealth(options = {}) {
+  const seq = ++adminHealth.seq;
+  const pin = options.refresh ? null : adminHealth.pin;
+  healthState('loading');
+  const pending = adminCall('/health', {}, {pin}).then(result => {
+    if (seq !== adminHealth.seq) return result;
+    if (result.status === 409) {
+      adminHealth.stale = true;
+      healthState('stale');
+      return result;
+    }
+    if (!result.ok) {
+      healthState('error', adminErrorText(result.error));
+      return result;
+    }
+    adminHealth.stale = false;
+    adminHealth.body = result.body;
+    adminHealth.pin = result.body.pin || null;
+    adminLive.pin = adminLive.pin || adminHealth.pin;
+    healthState('ready');
+    renderAdminHealth(result.body);
+    return result;
+  });
+  adminHealth.pending = pending;
+  return pending;
+}
+
+function onAdminHealthRefresh() {
+  return adminRenderHealth({refresh: true});
+}
+
 function adminRender() {
   const state = adminState();
   adminLive.state = state;
+  adminShowView(state.view);
+  if (state.view === 'health') {
+    const pending = adminRenderHealth();
+    adminLive.pending = pending;
+    return pending;
+  }
   const seq = ++adminLive.seq;
   if (adminLive.controller) adminLive.controller.abort();
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -346,6 +400,30 @@ function onAdminSearch() {
   adminSchedule();
 }
 
+function onAdminView(event) {
+  const link = event.target.closest ? event.target.closest('[data-admin-view]') : null;
+  if (!link) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button) return;
+  event.preventDefault();
+  const state = adminState();
+  state.view = link.getAttribute('data-admin-view') === 'health' ? 'health' : 'catalog';
+  adminWrite(state, 'push');
+  return adminRender();
+}
+
+function onAdminHealthLink(event) {
+  const link = event.target.closest ? event.target.closest('[data-admin-id]') : null;
+  if (!link) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button) return;
+  event.preventDefault();
+  const state = adminState();
+  state.view = 'catalog';
+  state.kind = link.getAttribute('data-admin-kind');
+  state.id = link.getAttribute('data-admin-id');
+  adminWrite(state, 'push');
+  return adminRender();
+}
+
 function onAdminResult(event) {
   const more = event.target.closest ? event.target.closest('[data-admin-more]') : null;
   if (more) {
@@ -381,7 +459,7 @@ function onAdminQueue(event) {
 function onAdminKey(event) {
   if (event.key !== 'Escape') return;
   const state = adminState();
-  if (!state.q) return;
+  if (state.view === 'health' || !state.q) return;
   event.preventDefault();
   state.q = '';
   adminWrite(state, 'replace');
@@ -406,6 +484,10 @@ function startAdmin() {
   document.querySelector('#admin-results').addEventListener('click', onAdminResult);
   document.querySelector('#admin-queues').addEventListener('click', onAdminQueue);
   document.querySelector('#admin-refresh').addEventListener('click', onAdminRefresh);
+  document.querySelector('.admin-views').addEventListener('click', onAdminView);
+  document.querySelector('#admin-health-refresh').addEventListener('click', onAdminHealthRefresh);
+  document.querySelector('#admin-health-stale-refresh').addEventListener('click', onAdminHealthRefresh);
+  document.querySelector('#admin-health-issues').addEventListener('click', onAdminHealthLink);
   window.addEventListener('keydown', onAdminKey);
   window.addEventListener('popstate', onAdminHistory);
   adminWrite(adminState(), 'replace');

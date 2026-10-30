@@ -10,11 +10,14 @@ import {
 // Pure and offline: no storage, network or clock of its own, and not part of the Worker bundle or the public pages.
 const source = fs.readFileSync('src/domain/data-health.js', 'utf8');
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|R2|D1/);
-assert.equal(fs.readFileSync('build.mjs', 'utf8').includes('data-health'), false);
+// The Worker receives the library only as the DataHealth namespace for the owner health read; the public pages never see it.
+assert.match(fs.readFileSync('build.mjs', 'utf8'), /scoped\('src\/domain\/data-health\.js','DataHealth'\)/);
+assert.equal(fs.readFileSync('build.mjs', 'utf8').includes("fs.readFileSync('src/domain/data-health.js'"), false);
 assert.equal(fs.readFileSync('public/app.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('src/admin/client.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('src/admin/read.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('public/admin.js', 'utf8').includes('data-health'), false);
+assert.equal(fs.readFileSync('src/admin/health-view.js', 'utf8').includes('data-health'), false, 'the page renders the evaluated answer and never evaluates itself');
 
 const NOW = '2026-10-30T12:00:00.000Z';
 const H = 3600000, D = 86400000;
