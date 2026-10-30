@@ -22,14 +22,21 @@ function adminUploaded(object){
  if(uploaded instanceof Date)return Number.isFinite(uploaded.getTime())?uploaded.toISOString():null;
  return typeof uploaded==='string'&&uploaded?uploaded:null;
 }
+// A response body the handler will not read is cancelled rather than left open: R2 `get` returns a live stream, and a
+// warm request that trusts the etag would otherwise keep that stream and its connection until garbage collection.
+async function adminDiscardBody(object){
+ const body=object?.body;
+ if(!body||typeof body.cancel!=='function'||body.locked)return;
+ try{await body.cancel();}catch{}
+}
 // One R2 object with its version: the etag, or a hash of the bytes when the etag is empty. The body is parsed only when the
-// version differs from the cached one; a reused body keeps the earlier parse.
+// version differs from the cached one; a reused body keeps the earlier parse and the fresh stream is cancelled.
 async function adminReadObject(bucket,key,cached){
  const object=await bucket.get(key);
  if(!object)return {present:false,version:null,uploaded:null,body:null,reused:false};
  const uploaded=adminUploaded(object);
  const etag=typeof object.etag==='string'&&object.etag?object.etag:null;
- if(etag&&cached&&cached.version===etag)return {present:true,version:etag,uploaded,body:cached.body,reused:true};
+ if(etag&&cached&&cached.version===etag){await adminDiscardBody(object);return {present:true,version:etag,uploaded,body:cached.body,reused:true};}
  if(etag)return {present:true,version:etag,uploaded,body:await object.json(),reused:false};
  const text=typeof object.text==='function'?await object.text():JSON.stringify(await object.json());
  return {present:true,version:await adminDigest(text),uploaded,body:JSON.parse(text),reused:false};

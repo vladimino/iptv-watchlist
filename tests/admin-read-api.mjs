@@ -15,17 +15,23 @@ assert.match(build,/scoped\('src\/domain\/admin-query\.js','AdminQuery'\)/);
 assert.match(build,/src\/admin\/read\.js/);
 assert.ok(build.indexOf('src/admin/read.js')<build.indexOf("src/worker.js','utf8'));"),'the read module is loaded before the Worker entry');
 
-// R2 stand-in with etags, upload times and counters.
+// R2 stand-in with etags, upload times and counters. Each `get` opens a real ReadableStream, as R2ObjectBody does; `json()`
+// and `text()` consume it, and the stream's own cancel hook counts a cancellation, so an answer that neither reads nor
+// cancels a body is visible as an open stream.
 const records=new Map(),etags=new Map(),uploaded=new Map();
 let gets=[],parses=0,puts=[],lists=0,fetches=[];
 let pointerSequence=null;
+const streams={opened:[],consumed:[],cancelled:[]};
 const bucket={
  async get(key){
   gets.push(key);
   if(key===POINTER&&pointerSequence&&pointerSequence.length){const next=pointerSequence.shift();records.set(POINTER,next.body);etags.set(POINTER,next.etag);}
   if(!records.has(key))return null;
   const text=JSON.stringify(records.get(key)),etag=etags.get(key);
-  return {etag,uploaded:uploaded.has(key)?uploaded.get(key):undefined,json:async()=>{parses++;return JSON.parse(text);},text:async()=>{parses++;return text;}};
+  streams.opened.push(key);
+  const body=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(text));controller.close();},cancel(){streams.cancelled.push(key);}});
+  const read=async()=>{const consumed=await new Response(body).text();streams.consumed.push(key);parses++;return consumed;};
+  return {etag,uploaded:uploaded.has(key)?uploaded.get(key):undefined,body,json:async()=>JSON.parse(await read()),text:read};
  },
  async put(key){puts.push(key);},
  async delete(key){puts.push('delete:'+key);},
@@ -64,14 +70,16 @@ function programmeOf(run){
  return {runId:run,updatedAt:AT,watchlistCount:films.length,films,people:{directors:[director],actors:[mira,noName]},stats:{}};
 }
 function seed({run=G1}={}){
- records.clear();etags.clear();uploaded.clear();gets=[];parses=0;puts=[];lists=0;fetches=[];pointerSequence=null;resetCache();
+ records.clear();etags.clear();uploaded.clear();gets=[];parses=0;puts=[];lists=0;fetches=[];pointerSequence=null;resetCache();resetStreams();
  records.set(POINTER,{phase:'published',programmeRunId:run,publishedAt:AT});etags.set(POINTER,'ptr-'+run);uploaded.set(POINTER,new Date(AT));
  records.set(programmeKey(run),programmeOf(run));etags.set(programmeKey(run),'prog-'+run);uploaded.set(programmeKey(run),new Date(AT));
  records.set('programme.json',{runId:'root-must-not-be-read',films:[]});etags.set('programme.json','root');
  records.set('titles.json',{q2:{tmdbId:'900002',title:'Тихая гавань',status:'provisional',sources:['https://www.wikidata.org/wiki/Q2']}});etags.set('titles.json','titles-1');uploaded.set('titles.json',new Date(AT));
  records.set('people.json',{'actor/mira-sol':{name:'Мира Соль',original:'Mira Sol'}});etags.set('people.json','people-1');uploaded.set('people.json',new Date(AT));
 }
-const call=async(path,init)=>{const response=await worker.fetch(new Request('https://iptv.example'+path,init),env,{waitUntil(){throw new Error('background work on a GET');}});return {status:response.status,body:await response.json()};};
+const openStreams=()=>streams.opened.length-streams.consumed.length-streams.cancelled.length;
+const resetStreams=()=>{streams.opened.length=0;streams.consumed.length=0;streams.cancelled.length=0;};
+const call=async(path,init)=>{const response=await worker.fetch(new Request('https://iptv.example'+path,init),env,{waitUntil(){throw new Error('background work on a GET');}});assert.equal(openStreams(),0,'every opened R2 body is consumed or cancelled after '+path+': '+JSON.stringify(streams));return {status:response.status,body:await response.json()};};
 const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json'];
 
 // 1. Overview: five reads in the contract order, no list, no write, no request; counts and available queues.
@@ -258,19 +266,30 @@ r=await call('/api/admin/films?q=beacon&limit=5&pin='+encodeURIComponent(pinE));
 seed();pointerSequence=[{body:{phase:'published',programmeRunId:G1},etag:'ptr-'+G1},{body:{phase:'published',programmeRunId:G1},etag:'ptr-rewritten'}];
 r=await call('/api/admin/overview');assert.equal(r.status,200,'a rewritten pointer of the same run retries once and succeeds');
 
-// 11. Warm isolate: the same tuple re-reads the five versions and parses nothing; one changed dictionary re-parses that object only.
+// 11. Warm isolate: the same tuple re-reads the five versions, parses only the pointers and cancels the three unread bodies;
+// one changed dictionary re-parses that object only. No body is ever left open.
 seed();
 r=await call('/api/admin/overview');assert.equal(parses,5);
-gets=[];parses=0;
+assert.deepEqual(streams.consumed,SNAPSHOT_KEYS,'a cold read consumes every body');assert.deepEqual(streams.cancelled,[]);
+gets=[];parses=0;resetStreams();
 r=await call('/api/admin/films?q=beacon&limit=5');
 assert.deepEqual(gets,SNAPSHOT_KEYS);assert.equal(parses,2,'only the two small pointer reads are parsed for a held tuple');
+assert.deepEqual(streams.consumed,[POINTER,POINTER],'the pointer bodies are read');
+assert.deepEqual(streams.cancelled,[programmeKey(G1),'titles.json','people.json'],'the reused bodies are cancelled, not left open');
 etags.set('titles.json','titles-3');records.set('titles.json',{...records.get('titles.json'),H11k:{tmdbId:'1137844',title:'Мэйдэй (кэш)',status:'provisional'}});
-gets=[];parses=0;
+gets=[];parses=0;resetStreams();
 r=await call('/api/admin/films?q=mayday');
 assert.deepEqual(gets,SNAPSHOT_KEYS);assert.equal(parses,3,'the two pointer reads and the changed dictionary; the programme body is reused');
+assert.deepEqual(streams.consumed,[POINTER,POINTER,'titles.json'],'the bumped dictionary is read');
+assert.deepEqual(streams.cancelled,[programmeKey(G1),'people.json'],'the two unchanged bodies are cancelled');
 assert.equal(r.body.items[0].localization.status,'reviewed','the reviewed title still wins over a cached one');
-resetCache();gets=[];parses=0;
-r=await call('/api/admin/films?q=mayday');assert.equal(parses,5,'a fresh isolate parses every object');
+gets=[];parses=0;resetStreams();
+r=await call('/api/admin/films?q=mayday');
+assert.deepEqual(streams.cancelled,[programmeKey(G1),'titles.json','people.json'],'the replaced projection is held under the new tuple');
+resetCache();gets=[];parses=0;resetStreams();
+r=await call('/api/admin/films?q=mayday');assert.equal(parses,5,'a fresh isolate parses every object');assert.deepEqual(streams.cancelled,[]);
+const scanned=fs.readFileSync('src/admin/read.js','utf8');
+assert.match(scanned,/await adminDiscardBody\(object\);return \{present:true,version:etag,uploaded,body:cached\.body,reused:true\}/,'a cache hit cancels the fresh body before reusing the parse');
 
 // 12. Empty etags: the version is a hash of the bytes, stable across reads.
 seed();for(const key of records.keys())etags.set(key,'');
