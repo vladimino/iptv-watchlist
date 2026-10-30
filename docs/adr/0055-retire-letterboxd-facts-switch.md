@@ -1,9 +1,9 @@
 # ADR 0055: Letterboxd facts are the only model for watched, rating and watchlist, and LETTERBOXD_FACTS is retired
 
-**Status:** Proposed (owner decision `retire now` recorded; ADR acceptance pending; no production configuration authorization)  
+**Status:** Accepted 2026-10-30 (architecture only; production binding removal separately gated)  
 **Original decision date:** 2026-10-30  
 **Recorded at:** 2026-10-30  
-**Approval source:** owner decision recorded on AIR-182 on 2026-10-30: retire `LETTERBOXD_FACTS` and keep the behaviour of its production value `on` unconditionally; acceptance of this record is pending; separate approval is required to delete the production binding  
+**Approval source:** explicit owner acceptance of ADR-0055 for AIR-182 PR #248, reviewed HEAD `b9235db`, on 2026-10-30; the earlier `retire now` decision is recorded on AIR-182; production binding removal requires separate approval  
 **Related work:** [AIR-182](https://trello.com/c/Kc2Uif73); prerequisites [AIR-170](https://trello.com/c/UaOFSsF9), [AIR-171](https://trello.com/c/uvGt48sq), [AIR-172](https://trello.com/c/FvqqJ8H0), [AIR-173](https://trello.com/c/w2bVRb72) and [AIR-181](https://trello.com/c/d6x0pvuc); [ADR-0023](0023-letterboxd-user-facts.md); [ADR-0024](0024-letterboxd-scan-summary.md); [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md); [ADR 0042](0042-retire-finds-watched-mark-switch.md); [ADR 0053](0053-permanent-letterboxd-baseline-import-route.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** in part, the `LETTERBOXD_FACTS` gate wherever an accepted record keeps it: [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md) decision 6 (the facts requirement and its `409 facts_disabled`), [ADR 0042](0042-retire-finds-watched-mark-switch.md) decisions 1, 3 and 4 (the mark follows the gate; stopping marks by switching it off), [ADR 0053](0053-permanent-letterboxd-baseline-import-route.md) decision 3 (the baseline route's facts requirement) and the Diary-first [ADR 0054](0054-diary-first-epg-ratings.md) decision 7 as far as `LETTERBOXD_FACTS` decides whether diary facts are written. ADR-0023 and ADR-0024 decide the facts model, not a switch for it; the switch was the rollout gate of the AIR-171 implementation. Every other decision of those records stays  
 **Superseded by:** None
