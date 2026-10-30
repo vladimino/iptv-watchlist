@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Лимбо данных</title>
+  <meta name="description" content="Страница владельца: фильмы и наблюдения без прогресса с причиной ожидания, только чтение.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ лимбо</span></div>
+    <a class="admin-home" href="/">К программе</a>
+  </header>
+  <main class="admin-shell">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">ВЛАДЕЛЕЦ · ТОЛЬКО ЧТЕНИЕ</p>
+        <h1>Лимбо данных</h1>
+        <p class="admin-intro">Фильмы, по которым обработка не продвигается, и почему: ждут ли они по правилам, застряли или требуют ручного разбора. Страница ничего не запускает и не меняет.</p>
+      </div>
+    </section>
+    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin?view=health">Здоровье данных</a><a href="/admin/limbo" aria-current="page">Лимбо</a></nav>
+    <p id="limbo-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="limbo-snapshot-text">Снимок ещё не прочитан.</span></p>
+    <section aria-labelledby="limbo-filters-title" class="limbo-filters">
+      <h2 id="limbo-filters-title">Фильтры</h2>
+      <div id="limbo-causes" class="admin-queues" role="group" aria-label="Причина ожидания"></div>
+      <div id="limbo-subsystems" class="admin-queues" role="group" aria-label="Подсистема"></div>
+      <form id="limbo-form" class="limbo-form" action="/admin/limbo">
+        <label class="limbo-field">Вид<select id="limbo-kind" name="kind"><option value="">фильмы и наблюдения</option><option value="film">только фильмы</option><option value="observation">только наблюдения</option></select></label>
+        <label class="limbo-field">Без прогресса не менее, дней<input id="limbo-age" name="age" type="number" inputmode="numeric" min="0" max="365" step="1" placeholder="любой срок"></label>
+        <button type="submit" class="admin-refresh limbo-apply">Применить</button>
+        <button type="button" id="limbo-reset" class="admin-more limbo-reset">Сбросить фильтры</button>
+      </form>
+    </section>
+    <p id="limbo-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем опубликованный снимок и очередь прогнозов…</p>
+    <div id="limbo-stale" class="admin-state admin-state-stale" role="alert" hidden><span id="limbo-stale-text">Снимок изменился. Показанные записи относятся к прежнему снимку.</span><button type="button" id="limbo-refresh" class="admin-refresh">Обновить снимок</button></div>
+    <p id="limbo-error" class="admin-state admin-state-error" role="alert" hidden></p>
+    <div class="admin-layout limbo-layout">
+      <section aria-labelledby="limbo-results-title">
+        <h2 id="limbo-results-title">Записи <small id="limbo-total" class="limbo-total"></small></h2>
+        <p id="limbo-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b>В лимбо ничего нет</b><span id="limbo-empty-text">По этому фильтру в прочитанном снимке нет записей без прогресса.</span></p>
+        <div id="limbo-results"></div>
+      </section>
+      <aside id="limbo-context" class="admin-card limbo-context" aria-labelledby="limbo-context-title"><h2 id="limbo-context-title">Контекст конвейера</h2><div id="limbo-context-body"><p class="muted">Контекст появится после чтения снимка.</p></div></aside>
+    </div>
+  </main>
+  <script src="/admin-limbo.js"></script>
+</body>
+</html>

@@ -7,12 +7,13 @@ import {
   evaluateDataHealth, healthIssueId, progressOf,
 } from '../src/domain/data-health.js';
 
-// Pure and offline: no storage, network or clock of its own, and not part of the Worker bundle or the public pages.
+// Pure and offline: no storage, network or clock of its own.
 const source = fs.readFileSync('src/domain/data-health.js', 'utf8');
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|R2|D1/);
-// The Worker receives the library only as the DataHealth namespace for the owner health read; the public pages never see it.
+// The Worker receives the library only as the DataHealth namespace, for the owner health and limbo reads; the public pages never see it.
 assert.match(fs.readFileSync('build.mjs', 'utf8'), /scoped\('src\/domain\/data-health\.js','DataHealth'\)/);
 assert.equal(fs.readFileSync('build.mjs', 'utf8').includes("fs.readFileSync('src/domain/data-health.js'"), false);
+assert.equal(fs.readFileSync('public/admin-limbo.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('public/app.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('src/admin/client.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('src/admin/read.js', 'utf8').includes('data-health'), false);
@@ -235,6 +236,7 @@ const recent = one(stalled, 'identity/incomplete/film:film:recent');
 assert.deepEqual([recent.severity, recent.reason, recent.progress.status, recent.action], ['info', 'work_pending', 'progressing', {suggested: 'wait', code: 'discovery_retry', eligible: false, reason: 'awaiting_progress'}]);
 const queuedStalled = one(stalled, 'prediction/stuck/film:film:pending');
 assert.deepEqual([queuedStalled.severity, queuedStalled.reason, queuedStalled.provenance.queued], ['warning', 'no_progress', true]);
+assert.deepEqual(queuedStalled.action, {suggested: 'investigate', code: 'prediction_retry', eligible: false, reason: 'already_queued'}, 'a stalled film the queue lists asks for investigation of the queue, not a second enqueue');
 assert.equal(evaluate(complete({films: [film('film:edge', {identity: {status: 'unresolved', updatedAt: at(-14 * D), nextAction: 'wait_new_evidence'}})]})).issues[0].progress.status, 'progressing', 'exactly the threshold is not stalled');
 assert.equal(evaluate(complete({films: [film('film:edge', {identity: {status: 'unresolved', updatedAt: at(-14 * D), nextAction: 'wait_new_evidence'}})]}), {thresholds: {stalledMs: 13 * D}}).issues[0].progress.status, 'stalled');
 
@@ -386,6 +388,25 @@ assert.deepEqual(one(pinned, 'poster/missing_asset/catalog:published').action.re
 assert.equal(evaluate(complete({pin: {programmeRunId: 'gen-2'}})).issues.length, 0, 'a matching pin is silent');
 assert.equal(evaluate(complete({pin: 'gen-1'})).issues.length, 0, 'a malformed pin is ignored');
 assert.equal(evaluate({now: NOW, pin: {programmeRunId: 'gen-1'}, films: [film('film:old', {programmeRunId: 'gen-1', metadata: {status: 'missing'}})]}).issues.find(item => item.id === 'metadata/incomplete/film:film:old').evidence.anomalies.length, 0, 'without a published pointer no generation comparison is made');
+
+// A queue of another generation fails every queue-derived per-film verdict closed, and so does an envelope stamped with
+// another generation; the programme-derived dimensions of the same film keep theirs.
+const queueOtherGeneration = checkResult(evaluate(complete({
+  films: [
+    film('film:qa', {prediction: {status: 'failed', updatedAt: at(-6 * H)}, metadata: {status: 'missing'}}),
+    film('film:qb', {prediction: {status: 'stale', updatedAt: at(-20 * D)}}),
+  ],
+  predictionQueue: queue({programmeRunId: 'gen-1', hotPending: ['film:qa', 'film:qb'], retries: {'film:qa': {attempts: 1, retryAt: Date.parse(NOW) - 5 * H}}}),
+})));
+for (const id of ['prediction/stuck/film:film:qa', 'prediction/stuck/film:film:qb']) {
+  const item = one(queueOtherGeneration, id);
+  assert.deepEqual(item.action, {suggested: 'wait', code: 'reread_snapshot', eligible: false, reason: 'generation_changed'}, id);
+  assert.ok(item.evidence.anomalies.includes('projection_generation_differs'), id);
+}
+assert.deepEqual(one(queueOtherGeneration, 'metadata/incomplete/film:film:qa').action, {suggested: 'bounded_action', code: 'metadata_refresh', eligible: true, reason: 'eligible'});
+const envelopeOtherGeneration = one(checkResult(evaluate(complete({films: [film('film:qc', {prediction: {programmeRunId: 'gen-1', status: 'stale', updatedAt: at(-20 * D)}})]}))), 'prediction/stuck/film:film:qc');
+assert.deepEqual([envelopeOtherGeneration.action.reason, envelopeOtherGeneration.action.eligible], ['generation_changed', false]);
+assert.deepEqual(one(checkResult(evaluate(complete({films: [film('film:qd', {prediction: {programmeRunId: 'gen-2', status: 'failed', updatedAt: at(-6 * H)}})], predictionQueue: queue({hotPending: ['film:qd'], retries: {'film:qd': {attempts: 1, retryAt: Date.parse(NOW) - 5 * H}}})}))), 'prediction/stuck/film:film:qd').action, {suggested: 'bounded_action', code: 'prediction_retry', eligible: true, reason: 'eligible'}, 'an envelope and a queue of the published generation are not blocked');
 
 // The prediction queue as a whole: eligible work nobody takes is stuck after a day; all-deferred work waits;
 // a deferral beyond the policy cap is an anomaly; progress without a recorded check is unknown.
