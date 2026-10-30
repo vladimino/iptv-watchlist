@@ -103,5 +103,5 @@ Identity, external ids, the role id and other records are not part of it: a link
 ## Not in this contract
 
 - No route, no UI, no fixture page changes; `/admin` stays fixture-only ([AIR-52](https://trello.com/c/siWtiRcm)).
-- No canonical Person entity, no automatic dedupe, no id redirects, no alias CRUD, no bulk rename ([AIR-44](https://trello.com/c/ojtZjVc9) covers the canonical Person).
+- No canonical Person entity, no automatic dedupe, no id redirects, no alias CRUD, no bulk rename. The canonical Person is the separate [AIR-44 read model](canonical-person.md), which reads the `roleLinks` this contract records as owner `same` decisions.
 - No change to how `people.json`, `data/person-names.json` or `programme.json` are written today. The runtime still applies reviewed precedence through `src/sources.js`; this contract adds the owner's manual review as a future input to that precedence, not a new runtime path.
