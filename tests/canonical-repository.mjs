@@ -9,7 +9,8 @@ import {createCanonicalRepository} from '../src/canonical-repository.js';
 const source=fs.readFileSync('src/canonical-repository.js','utf8');
 assert.doesNotMatch(source,/d1_databases|\bBUCKET\b|\bfetch\b|\bwrangler\b|INSERT INTO candidate|INSERT INTO programme_generation|INSERT INTO score_result|INSERT INTO prediction_history/);
 assert.doesNotMatch(source,/film-person/);
-assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/canonical-repository/);
+// AIR-275 phase 2 (ADR 0054): the Worker carries the repository in its own scope for the enrichment projector only.
+assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/canonical-repository\.js','CanonicalRepository'\)/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-repository/);
 assert.doesNotMatch(fs.readFileSync('src/domain/film-person.js','utf8'),/canonical-repository/);
 

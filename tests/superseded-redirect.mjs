@@ -95,7 +95,7 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-superseded-'));
 async function run(name,entries,films){
  const file=path.join(root,name+'.sqlite');
  const db=openSqlite(file);
- await db.run(['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(item=>fs.readFileSync(path.join('migrations',item),'utf8')).join('\n').replace(/;\s*$/,''));
+ await db.run(['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql','0004_projection_state.sql'].map(item=>fs.readFileSync(path.join('migrations',item),'utf8')).join('\n').replace(/;\s*$/,''));
  const repositories={canonical:createCanonicalRepository(db),epg:createEpgRepository(db),prediction:createPredictionRepository(db)};
  const identity=identityFor(films),superseded=supersededPayloads({identity,entries});
  const units=[...films.map(item=>({family:'watchlist',kind:'film',sourceKey:'watchlist.json',sourceSha256:sha('f'),targetTable:'film',targetId:item.id,unportable:false,input:{film:item,watchlist:true}})),...entries.map(item=>fingerprintUnit(item,item.body,identity,superseded))];

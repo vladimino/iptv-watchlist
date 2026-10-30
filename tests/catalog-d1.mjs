@@ -19,7 +19,7 @@ const sqlite=(sql,json=false)=>{const r=spawnSync('sqlite3',[...(json?['-json']:
 for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity'])sqlite(fs.readFileSync('migrations/'+name+'.sql','utf8'));
 const literal=v=>v==null?'NULL':typeof v==='number'?String(v):"'"+String(v).replace(/'/g,"''")+"'";
 const DB={prepare(sql){return {bind(...params){let i=0;const text=sql.replace(/\?/g,()=>literal(params[i++]));if(i!==params.length)throw new Error('parameter count');
- return {async all(){const out=sqlite(text+';',true).trim();return {results:out?JSON.parse(out):[]};}};}};}};
+ return {async all(){const out=sqlite(text+';',true).trim();return {results:out?JSON.parse(out):[]};},async first(){return (await this.all()).results[0]??null;}};}};}};
 
 const T='2026-10-29T00:00:00.000Z';
 sqlite(`
@@ -41,13 +41,14 @@ INSERT INTO import_receipt VALUES('k','s','film','film:tmdb:1','${T}');
 `);
 
 const ctx=vm.createContext({Response,URL,JSON,Promise,Number,String,Math});
-vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+source+'\nglobalThis.route=catalogD1Route;',ctx);
+// The status view also reports the enrichment projector (ADR 0054); its read-only status function comes from its own module.
+vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+fs.readFileSync('src/d1-enrichment.js','utf8')+'\n'+source+'\nglobalThis.route=catalogD1Route;',ctx);
 const get=async(p,env={DB},method='GET')=>{const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p,{method}),env,new URL('https://iptv.test/api/d1/'+p));return {status:res.status,body:await res.json()};};
 
 // status
 let r=await get('status');
 assert.equal(r.status,200);
-assert.deepEqual({...r.body},{source:'d1',authoritative:false,films:3,persons:8,credits:5,candidates:0,predictions:1,ratings:1,lastImport:T,schemaVersion:3});
+assert.deepEqual({...r.body},{source:'d1',authoritative:false,films:3,persons:8,credits:5,candidates:0,predictions:1,ratings:1,lastImport:T,schemaVersion:3,projector:{mode:'off',schema:false}});
 // persons: search by original name, by localized name, role filter, keyset paging
 r=await get('persons?q=Pacino');assert.deepEqual(r.body.items.map(x=>x.id),['person:actor/al-pacino','person:tmdb_actor/555']);assert.equal(r.body.items[0].localName,'Аль Пачино');assert.equal(r.body.items[0].films,1);
 r=await get('persons?q='+encodeURIComponent('Пачино'));assert.deepEqual(r.body.items.map(x=>x.id),['person:actor/al-pacino']);

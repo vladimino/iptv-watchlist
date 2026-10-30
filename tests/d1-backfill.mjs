@@ -22,7 +22,7 @@ const sha256=value=>createHash('sha256').update(value).digest('hex');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-backfill-'));
 // Every run needs schema v3: 0001, the staging tables of 0002 and the candidate show identity of 0003.
 const v1Migration=fs.readFileSync('migrations/0001_schema_v1.sql','utf8');
-const migration=['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n');
+const migration=['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql','0004_projection_state.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n');
 const ACCOUNT='0123456789abcdef0123456789abcdef',TOKEN='test-d1-token';
 const TARGET='11111111-1111-4111-8111-111111111111',SCRATCH='22222222-2222-4222-8222-222222222222';
 const at='2026-10-26T01:00:00.000Z',later='2026-10-26T05:00:00.000Z';
@@ -381,7 +381,7 @@ try{
   assert.equal(rerun.staged.generations.length,0,'a receipted generation is not staged again');
   await stagedFake.stop();
 
-  // Schema fence: every run needs migrations 0002 and 0003 and schema version 3.
+  // Schema fence: every run needs migrations 0002, 0003 and 0004 and schema version 4.
   const v1File=path.join(root,'staged-v1.sqlite');fs.rmSync(v1File,{force:true});assert.equal(sqlite(v1File,'PRAGMA foreign_keys=ON;\n'+v1Migration).status,0);
   const v1Only=await runBackfill({snapshot:snapshot.directory,mode:'sqlite',sqliteFile:v1File,output:output('staged-v1'),sleep:noSleep,stagedGeneration:true});
   assert.deepEqual(v1Only.stopReasons,['schema_missing']);

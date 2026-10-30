@@ -2,6 +2,8 @@
 // The Worker does not import this file. It does not read R2, call a model, or apply the schema to production.
 // Identity follows the shared canonicalFilmId rule and evidence keys follow the resolver's candidateEvidence rule;
 // both are supplied by the caller, so this module never carries a second copy of either rule.
+import {catalogMetadata,creditRoster} from './enrichment-projection.js';
+export {catalogMetadata,creditRoster};
 
 // ADR 0034 bounded discovery ledger: the archive pointer, the write-once manifest versions and segment versions are a second source
 // of candidates. The write-once copy of the source ledger kept by the split is a rollback copy and stays in R2.
@@ -230,27 +232,6 @@ function payloadAt(item,links){
 function payloadRecords(body){return [...(Array.isArray(body?.history)?body.history:[]),body?.current];}
 function validTime(value){return typeof value==='string'&&Number.isFinite(Date.parse(value))?value:null;}
 
-export function creditRoster(records){
- const credits=[],unmatched=[];
- const seen=new Set();
- const add=(people,role)=>{
-  for(const person of people||[]){
-   const personId=personIdFor(person?.id);
-   if(!personId){unmatched.push(String(person?.id??''));continue;}
-   const key=personId+'/'+role;
-   if(seen.has(key))continue;
-   seen.add(key);
-   credits.push({personId,role,ordinal:credits.filter(item=>item.role===role).length});
-  }
- };
- for(const record of records||[]){
-  add(record?.directors,'director');
-  add(record?.people?.directors,'director');
-  add(record?.actors,'actor');
-  add(record?.people?.actors,'actor');
- }
- return {credits,unmatched};
-}
 
 // A batch is refused before any write when the snapshot has an unknown key or a stored decision disagrees with the derived evidence.
 export function refusal(batch){
@@ -802,7 +783,6 @@ function isMappedKey(key){
  if(['watchlist.json','programme.json','metadata.json','titles.json','people.json','epg/published-generation.json','epg/discovery-latest.json','epg/discovery-resolution.json','epg/discovered-films.json','enrichment/profile/current.json'].includes(key))return true;
  return /^enrichment\/profile\/versions\/\d+\.json$/.test(key)||/^enrichment\/films\/[^/]+\/(?:fingerprint|predictions|actual)\.json$/.test(key)||VERSION_OBJECT.test(key)||isFingerprintVersionKey(key);
 }
-function personIdFor(roleId){return typeof roleId==='string'&&/^(actor|director|role|tmdb_actor|tmdb_director)\//.test(roleId)?'person:'+roleId:null;}
 function withCredits(unit){
  if(unit.kind!=='film'||!Array.isArray(unit.desiredCredits))return unit;
  return {...unit,input:{...unit.input,credits:unit.desiredCredits}};
@@ -967,12 +947,6 @@ export function projectSource({keys=[],bodies={},films=[],people=[],rosters={},l
  return expected;
 }
 
-export function catalogMetadata(record,key,sha){
- if(!record||typeof record!=='object')return null;
- const updatedAt=record.metadataAt||record.updatedAt||record.synopsisFetchedAt||null;
- if(!updatedAt)return null;
- return {schemaVersion:1,year:record.year??null,runtime:record.runtime??null,synopsis:record.synopsis??null,poster:record.poster??null,url:record.url??null,genres:Array.isArray(record.genres)?record.genres:[],peopleVersion:record.peopleVersion??null,payload:{},r2Key:key,contentSha256:sha,updatedAt};
-}
 
 async function verifyFilms(db,films,missing,extra,mismatched){
  const rows=await db.all('SELECT id,original_title,canonical_identity,contract_version FROM film ORDER BY id');

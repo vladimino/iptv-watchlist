@@ -10,9 +10,10 @@ import {fileURLToPath} from 'node:url';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
-import {actualUnit,catalogMetadata,classifyObject,isArchiveKey,readDiscoveryArchive,creditRoster,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,ratingIdentity,profileUnit,projectSource,readDiscovery,refusal,supersededPayloads} from '../src/offline-importer.js';
+import {actualUnit,classifyObject,isArchiveKey,readDiscoveryArchive,decisionUnits,fingerprintUnit,generationUnit,identityResolver,importBatch,inventory,predictionUnits,ratingIdentity,profileUnit,projectSource,readDiscovery,refusal,supersededPayloads} from '../src/offline-importer.js';
 import {ExportError} from './migration-export.mjs';
 import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
+import {catalogMetadata,creditRoster,metadataRecord,recordsFor} from '../src/enrichment-projection.js';
 
 const root=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 const note='Historical snapshot. Absent families and records that cannot be carried are listed and are not counted as matches. Class A is mapped-domain parity, class B the declared R2-only keys, class C unresolved identity and source-quality records kept in the source, S payloads of retired Film ids superseded by their canonical Film (ADR-0029). This command does not write production R2 or a production D1 database.';
@@ -136,24 +137,6 @@ function scopedStore(store,byKey){
   if(byKey.has('enrichment/films/'+id+'/fingerprint.json')||byKey.has('enrichment/films/'+encodeURIComponent(id)+'/fingerprint.json'))next.fingerprints[id]=body;
  }
  return next;
-}
-// The source records of one Film: its own id as written, its Letterboxd id, and the catalog spelling tmdb_<id> of each
-// trusted, non-conflicting TMDB id, which is how epg/discovered-films.json keys a catalog film. Without that spelling a
-// catalog film got no credits, and a watchlist film with the same verified TMDB id lost the catalog's TMDB credits.
-function recordsFor(store,film){
- const ids=new Set([film.id.replace(/^film:/,'')]);
- const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value;
- if(letterboxd)ids.add(letterboxd);
- for(const item of film.externalIds||[])if(item.scheme==='tmdb'&&item.trusted===true&&!item.conflicting&&/^\d+$/.test(String(item.value)))ids.add('tmdb_'+item.value);
- return [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})].filter(record=>record&&ids.has(String(record.id)));
-}
-function metadataRecord(body,film){
- if(!body||typeof body!=='object')return null;
- const ids=new Set([film.id.replace(/^film:/,'')]);
- const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value;
- if(letterboxd)ids.add(String(letterboxd));
- for(const [key,value] of Object.entries(body))if(ids.has(key)||ids.has(String(value?.id)))return value;
- return null;
 }
 function readLifecycle(store,now){
  const domain=fs.readFileSync(path.join(root,'src/domain/film-person.js'),'utf8');

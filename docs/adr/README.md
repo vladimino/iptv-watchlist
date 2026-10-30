@@ -59,6 +59,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 | [0051 — D1 is the domain home, R2 the blob home; per-domain flips without shadow stages](0051-d1-domain-r2-blobs.md) | Accepted 2026-10-29 | [AIR-275](https://trello.com/c/4x7hH0gI); supersedes the post-backfill stages of ADR 0017 |
 | [0052 — A Letterboxd film slug is a typed, untrusted alias of the Film that carries its lid](0052-letterboxd-slug-film-alias.md) | Accepted 2026-10-30; owner approval after positive independent review; production import separately gated | [AIR-276](https://trello.com/c/PeWwEti8) |
 | [0053 — The Letterboxd baseline import is a permanent owner-only maintenance route, and LETTERBOXD_BASELINE_IMPORT is retired](0053-permanent-letterboxd-baseline-import-route.md) | Accepted 2026-10-30; explicit owner approval in AIR-181 PR #245 conversation; binding removal separately gated | [AIR-181](https://trello.com/c/d6x0pvuc) |
+| [0054 — The first phase 2 step keeps R2 authoritative and projects the enrichment domain into D1 from a cron trigger](0054-d1-enrichment-write-through.md) | Proposed 2026-10-30; owner decision in the AIR-275 session; migration 0004, `dry` and `on` separately gated | [AIR-275](https://trello.com/c/4x7hH0gI) |
 
 ## Proposed records
 

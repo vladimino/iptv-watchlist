@@ -1,5 +1,5 @@
-// AIR-70. Local D1 repository for canonical Film and Person records.
-// The Worker does not import this file. The caller supplies the database and the domain result.
+// AIR-70. D1 repository for canonical Film and Person records. The caller supplies the database and the domain result.
+// The offline import uses it, and since AIR-275 phase 2 (ADR 0054) the Worker bundle carries it for the enrichment projector.
 // R2 stays authoritative. This module does not score a candidate or choose shows.
 
 export function createCanonicalRepository(db){
@@ -9,7 +9,26 @@ export function createCanonicalRepository(db){
   applyLink:input=>applyLink(db,input),
   readFilm:id=>readFilm(db,id),
   readPerson:id=>readPerson(db,id),
+  // AIR-275 phase 2 (ADR 0054): the enrichment projector writes inside its own transaction and reads nothing back.
+  projectFilm:input=>projectFilm(db,input),
+  projectLink:input=>projectLink(db,input),
+  projectPerson:input=>projectPerson(db,input),
+  releaseFilm:id=>releaseFilm(db,id),
  };
+}
+
+// The enrichment writer owns the identity and metadata dimensions, the Film row, its external ids, aliases, metadata, watchlist
+// membership and the credits R2 supplies. It never writes the fingerprint or prediction dimensions, and it keeps the credits
+// only D1 holds: TMDB credits added to a watchlist Film (AIR-286) stay, renumbered after the R2 credits of their role, unless the
+// R2 roster already lists the same person in that role.
+async function projectFilm(db,input){await writeFilm(db,await planFilm(db,{...input,owner:'enrichment'}));}
+async function projectPerson(db,input){await writePerson(db,await planPerson(db,input));}
+async function projectLink(db,input){const {plan,retirement}=await planLink(db,{...input,owner:'enrichment'});await writeLink(db,plan,retirement);}
+// A Film no R2 source lists any more keeps its row, credits and history: they stay true of the Film. Only the membership goes.
+async function releaseFilm(db,id){
+ const filmId=requiredFilm(id);
+ if(await db.get('SELECT to_film_id FROM film_redirect WHERE from_id=?',[filmId]))return;
+ await db.run('DELETE FROM watchlist_film WHERE film_id=?',[filmId]);
 }
 
 async function saveFilm(db,input){
@@ -25,6 +44,12 @@ async function savePerson(db,input){
 }
 
 async function applyLink(db,input){
+ const {plan,retirement}=await planLink(db,input);
+ await db.transaction(async()=>{await writeLink(db,plan,retirement);});
+ return readFilm(db,plan.film.id);
+}
+
+async function planLink(db,input){
  const survivor=input?.survivor;
  if(!survivor?.id)throw new Error('survivor is required');
  const redirect=input.redirect??null;
@@ -35,12 +60,13 @@ async function applyLink(db,input){
  const plan=await planFilm(db,{...input,film:survivor,watchlist,releasing:redirect?.from??null});
  const retirement=redirect?await planRetirement(db,redirect):null;
  if(retirement&&!retirement.release)plan.keepHistory=true;
- await db.transaction(async()=>{
-  if(retirement?.release)await db.run('DELETE FROM film_external_id WHERE film_id=?',[retirement.from]);
-  await writeFilm(db,plan);
-  if(retirement?.release){await adoptRetired(db,retirement);await retireFilm(db,retirement);}
- });
- return readFilm(db,plan.film.id);
+ return {plan,retirement};
+}
+
+async function writeLink(db,plan,retirement){
+ if(retirement?.release)await db.run('DELETE FROM film_external_id WHERE film_id=?',[retirement.from]);
+ await writeFilm(db,plan);
+ if(retirement?.release){await adoptRetired(db,retirement);await retireFilm(db,retirement);}
 }
 
 async function planFilm(db,input){
@@ -55,7 +81,10 @@ async function planFilm(db,input){
   if(owner&&owner.film_id!==id&&owner.film_id!==input.releasing)throw new Error('identity_collision');
  }
  const watchlist=input.watchlist===true?true:input.watchlist===false?false:null;
- return {film:guarded,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits,watchlist,updatedAt:updatedAtOf(guarded)};
+ const owner=input.owner??null;
+ if(owner!==null&&owner!=='enrichment')throw new Error('Unknown write owner');
+ const kept=owner==='enrichment'&&input.credits!==undefined&&watchlist===true?await db.all("SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id=? AND person_id LIKE 'person:tmdb!_%' ESCAPE '!' ORDER BY role,ordinal",[id]):[];
+ return {film:guarded,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits,watchlist,owner,kept,updatedAt:updatedAtOf(guarded)};
 }
 
 async function planPerson(db,input){
@@ -84,13 +113,16 @@ async function writeFilm(db,plan){
  for(const item of film.externalIds||[])await db.run('INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?)',[film.id,required(item.scheme,'scheme'),String(item.value),item.trusted&&!item.conflicting?1:0,item.conflicting?1:0,json(item.provenance)]);
  for(const item of film.aliases||[])await db.run('INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,?,?,?) ON CONFLICT(film_id,kind,value) DO NOTHING',[film.id,item.kind||'title',required(item.value,'alias'),json(item.provenance)]);
  await noteHeldLocalization(db,{table:'film_dimension',column:'film_id',id:film.id,kind:'title',entityKind:'film',incoming:film.localization});
- await db.run("DELETE FROM film_dimension WHERE film_id=? AND dimension<>'localization'",[film.id]);
- for(const dimension of ['identity','metadata','fingerprint','prediction'])await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(film.id,film[dimension]));
+ const dimensions=plan.owner==='enrichment'?['identity','metadata']:['identity','metadata','fingerprint','prediction'];
+ if(plan.owner==='enrichment')await db.run("DELETE FROM film_dimension WHERE film_id=? AND dimension IN ('identity','metadata')",[film.id]);
+ else await db.run("DELETE FROM film_dimension WHERE film_id=? AND dimension<>'localization'",[film.id]);
+ for(const dimension of dimensions)await db.run('INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,last_error,failure_reason,retry_at,attempts,next_action,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',dimensionParams(film.id,film[dimension]));
  await db.run(localizationUpsert('film_dimension','film_id'),dimensionParams(film.id,film.localization));
  if(plan.credits!==undefined)for(const credit of plan.credits){
   if(credit.role!=='director'&&credit.role!=='actor')throw new Error('Credit role is invalid');
   await db.run('INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES (?,?,?,?)'+(plan.keepHistory?' ON CONFLICT(film_id,person_id,role) DO NOTHING':''),[film.id,requiredPerson(credit.personId),credit.role,credit.ordinal]);
  }
+ if(plan.credits!==undefined&&!plan.keepHistory)for(const credit of keptCredits(plan.credits,plan.kept))await db.run('INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES (?,?,?,?)',[film.id,credit.personId,credit.role,credit.ordinal]);
  if(plan.metadata===null)await db.run('DELETE FROM film_metadata WHERE film_id=?',[film.id]);
  if(plan.metadata)await db.run('INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,r2_key,content_sha256,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET schema_version=excluded.schema_version,year=excluded.year,runtime=excluded.runtime,synopsis=excluded.synopsis,poster=excluded.poster,url=excluded.url,genres_json=excluded.genres_json,people_version=excluded.people_version,payload_json=excluded.payload_json,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,updated_at=excluded.updated_at',metadataParams(film.id,plan.metadata));
  if(plan.watchlist===true)await db.run('INSERT INTO watchlist_film (film_id,updated_at) VALUES (?,?) ON CONFLICT(film_id) DO UPDATE SET updated_at=excluded.updated_at',[film.id,plan.updatedAt]);
@@ -168,6 +200,20 @@ async function resolveFilm(db,requested){
   current=row.to_film_id;
  }
  throw new Error('Redirect cycle');
+}
+
+// The D1-only credits that survive a rewrite, numbered after the highest R2 ordinal of their role in their stored order.
+function keptCredits(credits,kept){
+ const listed=new Set(credits.map(credit=>credit.personId+'/'+credit.role)),next={};
+ for(const credit of credits)next[credit.role]=Math.max(next[credit.role]??0,credit.ordinal+1);
+ const out=[];
+ for(const row of kept||[]){
+  if(listed.has(row.person_id+'/'+row.role))continue;
+  const ordinal=next[row.role]??0;
+  next[row.role]=ordinal+1;
+  out.push({personId:row.person_id,role:row.role,ordinal});
+ }
+ return out;
 }
 
 function guardReviewed(entity,stored,kind){

@@ -13,7 +13,9 @@ assert.match(sources,/applyAutomaticLocalization/);
 assert.doesNotMatch(sources,/filmView|invalidatePredictionForProfile|availabilityProjection|readLifecycle|backfillLifecycle/);
 const bundle=fs.readFileSync('build.mjs','utf8');
 assert.match(bundle,/src\/domain\/film-person\.js/);
-assert.doesNotMatch(bundle,/film-person-reader|film-person-backfill/);
+// AIR-275 phase 2 (ADR 0054): the reader is bundled in its own scope for the enrichment projector; the backfill stays offline.
+assert.match(bundle,/scoped\('src\/domain\/film-person-reader\.js','LifecycleReader',\['readLifecycle'\]\)/);
+assert.doesNotMatch(bundle,/film-person-backfill/);
 
 const ctx=vm.createContext({Date,Map,Set,JSON});
 vm.runInContext(source+'\nglobalThis.contract={DOMAIN_CONTRACT_VERSION,FILM_DIMENSIONS,IDENTITY_STATUSES,METADATA_STATUSES,LOCALIZATION_STATUSES,GENERATED_STATUSES,localFilmId,localPersonId,canonicalFilmId,identityState,filmView,personView,transition,displayReady,catalogReady,predictionReady,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,invalidatePredictionForProfile,observeMetadata,availabilityProjection,attachAvailability,mergeAliases};',ctx);

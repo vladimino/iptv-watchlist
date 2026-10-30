@@ -17,9 +17,9 @@ const PERSON_NAMES_CTE=`names as (select person_id id,value name from person_ali
 const PERSON_NAME_SQL=`(select value from person_alias a where a.person_id=p.id and a.kind='name' order by value limit 1)`;
 const PERSON_LOCAL_SQL=`(select value from person_dimension d where d.person_id=p.id and d.dimension='localization' and d.status in ('reviewed','provisional'))`;
 const FILM_TITLE_SQL=`coalesce((select value from film_dimension d where d.film_id=f.id and d.dimension='localization' and d.status in ('reviewed','provisional')),f.original_title)`;
-async function d1Status(db){
+async function d1Status(db,env){
  const counts=await d1First(db,`select (select count(*) from film) films,(select count(*) from person) persons,(select count(*) from film_person_credit) credits,(select count(*) from candidate) candidates,(select count(*) from prediction_current) predictions,(select count(*) from actual_rating) ratings,(select max(imported_at) from import_receipt) lastImport,(select version from schema_contract where id=1) schemaVersion`);
- return {source:'d1',authoritative:false,...counts};
+ return {source:'d1',authoritative:false,...counts,projector:await d1EnrichmentStatus(db,env)};
 }
 async function d1Persons(db,{q='',role='',source='',cursor='',limit}){
  const where=['p.id>?'],params=[String(cursor||'')];
@@ -79,7 +79,7 @@ async function catalogD1Route(request,env,url){
  if(request.method!=='GET')return json({error:'Method not allowed'},405);
  if(!env.DB)return json({error:'D1 is not bound to this Worker'},503);
  const path=url.pathname.slice('/api/d1/'.length),params=url.searchParams;
- if(path==='status')return json(await d1Status(env.DB));
+ if(path==='status')return json(await d1Status(env.DB,env));
  if(path==='persons')return json(await d1Persons(env.DB,{q:params.get('q'),role:params.get('role'),source:params.get('source'),cursor:params.get('cursor'),limit:params.get('limit')}));
  if(path==='persons/review')return json(await d1PersonReview(env.DB,{limit:params.get('limit')}));
  let match=path.match(/^persons\/((?:tmdb_)?(?:actor|director)\/[^/]{1,200})$/);
