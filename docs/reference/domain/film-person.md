@@ -30,12 +30,13 @@ A Letterboxd film slug is kept as its own `externalIds` entry: `{scheme: 'letter
 
 - **Source.** `letterboxdSlugFromUrl` accepts only `https://letterboxd.com/film/<slug>/` and `https://letterboxd.com/<member>/film/<slug>/`: same origin, no query, fragment or credentials, lowercased. A title, a lid, a TMDB URL or Wikidata never yields a slug.
 - **Attached only to a Film with a lid:**
-  - `current`: the Film's own permalink, from the programme record, then the watchlist record, then the record itself (`source: letterboxd_film_url`, canonical `url`, `observedAt`);
-  - `observed`: a slug from a Letterboxd Diary entry with the same lid (`source: letterboxd_diary`, `entry`, the entry's first `observedAt`), when the caller passes `store.diaryHistory`;
+  - `current`: the Film's own permalink, when every stored record of the lid that carries one agrees. The records are the programme, the watchlist, `metadata.json` and the record itself. Provenance: `source: letterboxd_film_url`, `records` (which of them carry it), canonical `url`, `observedAt`.
+  - `ambiguous`: the same records carry different permalinks, such as a rename seen by one record and not yet by another. Every slug is kept with its `records`, and none is current, because no record is proved fresher.
+  - `observed`: a slug from a Letterboxd Diary entry with the same lid (`source: letterboxd_diary`, `entry`), when the caller passes `store.diaryHistory`. An alias stamped by the diary writer keeps its own `firstObservedAt` as `observedAt`. An older alias without one has `observedAt: null` and `observedBetween {from, to}`, the entry's first and latest read; no exact time is claimed;
   - `historical`: a slug stored on the same Film by an earlier backfill that the Film no longer carries, so a renamed permalink still names it.
 
   A TMDB-only Film, and a diary row without a lid, get no slug.
-- **Stable.** The backfill keeps each stored slug's first `observedAt`, so a replay with the stored sidecars is unchanged.
+- **Stable.** The backfill keeps each stored slug's stored time: an exact `observedAt`, otherwise its stored `observedBetween`. A replay with the stored sidecars is therefore unchanged, even after later diary reads.
 - **Collision.** One slug on two Films marks the entry `conflicting` on both and is reported as `aliasConflicts` by `readLifecycle` and in the backfill report. Nothing is merged, moved or re-rated.
 - **Unchanged by the alias:** `id`, `canonicalIdentity`, the lid, TMDB trust, readiness, fingerprint, prediction and the Film count.
 - **Storage.** The alias is part of `externalIds`: the R2 lifecycle sidecars and the D1 `film_external_id` rows hold it without a schema change. `trusted: false` keeps it outside the unique index on trusted identities.

@@ -55,30 +55,45 @@ function loadedSources(store,id,record){
 function knownShows(record){return record&&Object.hasOwn(record,'shows')?record.shows:undefined;}
 function observedShows(programme,body){const programmeShows=knownShows(programme);return programmeShows!==undefined?programmeShows:knownShows(body);}
 function observedProgrammeRun(programme,body){if(programme&&Object.hasOwn(programme,'showsProgrammeRunId'))return programme.showsProgrammeRunId||null;if(body&&Object.hasOwn(body,'showsProgrammeRunId'))return body.showsProgrammeRunId||null;return null;}
-// AIR-276: Letterboxd diary slugs by lid. A diary entry links a slug to a Film only through the lid on the same row;
-// the earliest observation of each slug is kept. An entry without a lid links nothing.
+// AIR-276: Letterboxd diary slugs by lid. A diary entry links a slug to a Film only through the lid on the same row.
+// An alias written with its own `firstObservedAt` keeps that time. An older alias has none: it was first seen at some
+// read of its entry, so only `observedBetween` (the entry's first and latest read) is stated, never an exact time.
+function diaryAliasTime(alias,entry){
+ if(alias.firstObservedAt)return {observedAt:alias.firstObservedAt};
+ return {observedAt:null,observedBetween:{from:entry.firstObservedAt||null,to:entry.observedAt||null}};
+}
+function earlierDiaryTime(next,prior){
+ if(next.observedAt||prior.observedAt)return !prior.observedAt||next.observedAt&&next.observedAt<prior.observedAt;
+ return !!next.observedBetween.to&&(!prior.observedBetween.to||next.observedBetween.to<prior.observedBetween.to);
+}
 function diarySlugIndex(history){
  const index=new Map();
  for(const entry of Object.values(history?.entries||{})){
   const lid=entry?.identity?.type==='letterboxd_lid'?String(entry.identity.value||''):'';if(!lid)continue;
   for(const alias of entry.aliases||[]){
    if(alias?.type!=='letterboxd_slug'||!/^[a-z0-9][a-z0-9-]{0,199}$/.test(String(alias.value||'')))continue;
-   const slugs=index.get(lid)||new Map(),prior=slugs.get(alias.value),at=entry.firstObservedAt||null;
-   if(!prior||at&&(!prior.provenance.observedAt||at<prior.provenance.observedAt))slugs.set(alias.value,{value:alias.value,provenance:{source:'letterboxd_diary',status:'observed',entry:entry.key||null,observedAt:at}});
+   const slugs=index.get(lid)||new Map(),prior=slugs.get(alias.value),time=diaryAliasTime(alias,entry);
+   if(!prior||earlierDiaryTime(time,prior.provenance))slugs.set(alias.value,{value:alias.value,provenance:{source:'letterboxd_diary',status:'observed',entry:entry.key||null,...time}});
    index.set(lid,slugs);
   }
  }
  return index;
 }
-// The Film's own permalink (programme, then watchlist, then the record) is its current slug; diary slugs for the same lid
-// follow as observed aliases. A record without a lid gets none.
+// The Film's own permalinks: every stored record of this lid that carries one (programme, watchlist, metadata, then the
+// record itself when it is none of those). One slug across them is `current`. Different slugs (a rename seen by one
+// record and not yet by another) are all kept as `ambiguous`, each naming its records: no record is proved fresher.
+// Diary slugs of the same lid follow as observed aliases. A record without a lid gets none.
 function letterboxdSlugs(letterboxdId,loaded,store,now){
  if(!letterboxdId)return [];
- const slugs=[];
- for(const source of [loaded.programme,loaded.watchlist,loaded.record]){
-  const value=letterboxdSlugFromUrl(source?.url);
-  if(value){slugs.push({value,provenance:{source:'letterboxd_film_url',status:'current',url:'https://letterboxd.com/film/'+value+'/',observedAt:stamp(now)}});break;}
+ const found=new Map();
+ const sources=[['programme',loaded.programme],['watchlist',loaded.watchlist],['metadata',loaded.metadata]];
+ if(loaded.record&&!sources.some(([,source])=>source===loaded.record))sources.push(['record',loaded.record]);
+ for(const [name,source] of sources){
+  const value=letterboxdSlugFromUrl(source?.url);if(!value)continue;
+  const records=found.get(value)||[];records.push(name);found.set(value,records);
  }
+ const status=found.size>1?'ambiguous':'current',slugs=[];
+ for(const [value,records] of found)slugs.push({value,provenance:{source:'letterboxd_film_url',status,records,url:'https://letterboxd.com/film/'+value+'/',observedAt:stamp(now)}});
  for(const slug of store.diarySlugs?.get(letterboxdId)?.values()||[])slugs.push(slug);
  return slugs;
 }

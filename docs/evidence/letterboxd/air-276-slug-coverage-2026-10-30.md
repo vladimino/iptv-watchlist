@@ -35,5 +35,7 @@
 
 ## Not established
 
+- The run used head `cd470bd`. It predates two reader changes: `metadata.json` as a permalink source, and `ambiguous` for records of one lid that disagree. How many Films those change on this snapshot is not measured; a rerun with the later head would show it.
+
 - The D1 readback of `film_external_id` rows with `scheme = 'letterboxd_slug'` is pending a local D1 build in the AIR-275 session.
 - No production D1 write was made; that needs its own owner approval.

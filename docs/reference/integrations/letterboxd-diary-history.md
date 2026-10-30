@@ -29,7 +29,7 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
 | `key`, `keyBasis` | `viewing:<id>` (`viewing_id`) when the row carries a viewing id: one entry per viewing. Otherwise `day:<lid:…\|slug:…>\|<watchedDate>` (`identity_date`): one entry per film and day that counts its viewings, because without an id two viewings of one film on one day cannot be told apart |
 | `source` | `letterboxd_diary` |
 | `identity` | `{type: 'letterboxd_lid', value}`, or `null` (unresolved: never linked to a film) |
-| `aliases` | `[{type: 'letterboxd_slug', value}]`, an observation of that row only. The lifecycle reader turns a slug of an entry with a lid into an `observed` `letterboxd_slug` alias of that Film ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md)) |
+| `aliases` | `[{type: 'letterboxd_slug', value, firstObservedAt}]`, an observation of that row only. `firstObservedAt` is the read that first saw this slug on the entry; an alias written before it was added has none. The lifecycle reader turns a slug of an entry with a lid into an `observed` `letterboxd_slug` alias of that Film ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md)) |
 | `viewingId` | The viewing id, or `null` |
 | `watchedDate` | `YYYY-MM-DD` from the diary. It is not `observedAt` |
 | `viewings`, `viewingsCertain` | How many diary rows the entry stands for (1 for a viewing-id entry). Counted within one page only, because pages are separate requests and a row can repeat on, or vanish from, the next page. `viewingsCertain` is true once one page held the whole day: page 1 or a first row with another date, and the last diary page or a last row with another date. Otherwise the count is a lower bound |

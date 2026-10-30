@@ -132,7 +132,7 @@ function adoptPersistedIdentity(sidecars,persisted,now){
  }
  return sidecars;
 }
-// AIR-276: a slug already stored on the same Film keeps its first observation time; a stored slug the Film no longer
+// AIR-276: a slug already stored on the same Film keeps its stored observation time (exact, or the window it was seen in); a stored slug the Film no longer
 // carries stays as a `historical` alias (a Letterboxd rename keeps the old permalink resolvable). Slug collisions are
 // marked again after the carry-over. Nothing is merged and no other identity changes.
 function carrySlugAliases(sidecars,persisted){
@@ -143,7 +143,11 @@ function carrySlugAliases(sidecars,persisted){
   if(!bodies.has(item.body.id)){
    const stored=prior.get(item.body.id)||[],ids=(item.body.externalIds||[]).map(id=>{
     const known=id.scheme===LETTERBOXD_SLUG_SCHEME&&stored.find(entry=>entry.value===id.value);
-    return known?.provenance?.observedAt?{...id,provenance:{...id.provenance,observedAt:known.provenance.observedAt}}:id;
+    if(!known?.provenance)return id;
+    // The stored time stays true: an exact first observation wins, otherwise the stored window.
+    if(known.provenance.observedAt){const {observedBetween,...rest}=id.provenance||{};return {...id,provenance:{...rest,observedAt:known.provenance.observedAt}};}
+    if(!id.provenance?.observedAt&&known.provenance.observedBetween)return {...id,provenance:{...id.provenance,observedBetween:known.provenance.observedBetween}};
+    return id;
    });
    for(const entry of stored)if(!ids.some(id=>id.scheme===LETTERBOXD_SLUG_SCHEME&&id.value===entry.value))ids.push({...entry,conflicting:false,trusted:false,provenance:{...(entry.provenance||{}),status:'historical'}});
    bodies.set(item.body.id,{...item.body,externalIds:ids});

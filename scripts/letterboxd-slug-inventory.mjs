@@ -18,7 +18,7 @@ export async function slugInventory(store,now){
  const result=backfillLifecycle(store,now);
  const films=new Map();
  for(const body of Object.values(result.sidecars))for(const record of body&&typeof body==='object'&&!Array.isArray(body)?(body.externalIds?[body]:Object.values(body)):[])if(String(record?.id||'').startsWith('film:')&&record.externalIds)films.set(record.id,record);
- const counts={films:films.size,withLid:0,tmdbOnly:0,withSlug:0,withoutSlug:0,current:0,observedOnly:0,historical:0,conflicting:0};
+ const counts={films:films.size,withLid:0,tmdbOnly:0,withSlug:0,withoutSlug:0,current:0,ambiguous:0,observedOnly:0,historical:0,conflicting:0};
  for(const film of films.values()){
   const lid=film.externalIds.some(item=>item.scheme==='letterboxd'),slugs=film.externalIds.filter(item=>item.scheme===LETTERBOXD_SLUG_SCHEME);
   if(!lid){counts.tmdbOnly++;continue;}
@@ -26,7 +26,7 @@ export async function slugInventory(store,now){
   if(!slugs.length){counts.withoutSlug++;continue;}
   counts.withSlug++;
   const status=new Set(slugs.map(item=>item.provenance?.status));
-  if(status.has('current'))counts.current++;else if(status.has('observed'))counts.observedOnly++;
+  if(status.has('current'))counts.current++;else if(status.has('ambiguous'))counts.ambiguous++;else if(status.has('observed'))counts.observedOnly++;
   if(status.has('historical'))counts.historical++;
   if(slugs.some(item=>item.conflicting))counts.conflicting++;
  }

@@ -47,7 +47,7 @@ const store=()=>({
  profile:{version:3,profileHash:'profile-a'},
  diaryHistory:{schemaVersion:1,entries:{
   'day:lid:28nq|2026-10-01':{key:'day:lid:28nq|2026-10-01',identity:{type:'letterboxd_lid',value:'28nq'},aliases:[{type:'letterboxd_slug',value:'the-legend-of-zorro'}],firstObservedAt:'2026-10-02T00:00:00.000Z'},
-  'day:lid:nourl|2026-09-01':{key:'day:lid:nourl|2026-09-01',identity:{type:'letterboxd_lid',value:'nourl'},aliases:[{type:'letterboxd_slug',value:'no-url-film'}],firstObservedAt:'2026-09-02T00:00:00.000Z'},
+  'day:lid:nourl|2026-09-01':{key:'day:lid:nourl|2026-09-01',identity:{type:'letterboxd_lid',value:'nourl'},aliases:[{type:'letterboxd_slug',value:'no-url-film',firstObservedAt:'2026-09-02T00:00:00.000Z'}],firstObservedAt:'2026-09-02T00:00:00.000Z',observedAt:'2026-10-29T00:00:00.000Z'},
   'day:slug:mystery|2026-08-01':{key:'day:slug:mystery|2026-08-01',identity:null,aliases:[{type:'letterboxd_slug',value:'catalog-only'}],firstObservedAt:'2026-08-02T00:00:00.000Z'}
  }}
 });
@@ -55,13 +55,48 @@ const store=()=>({
 // 2. Reader: the same film in the watchlist and the diary is one slug, current; a member permalink is the canonical
 // slug; a film without a URL takes the diary slug of its lid as observed; no URL and no diary row stays unknown.
 const base=store(),view=readLifecycle(base,NOW);
-assert.deepEqual(slugsOf(filmOf(view,'film:28nq')),[{scheme:'letterboxd_slug',value:'the-legend-of-zorro',conflicting:false,trusted:false,provenance:{source:'letterboxd_film_url',status:'current',url:'https://letterboxd.com/film/the-legend-of-zorro/',observedAt:new Date(NOW).toISOString()}}]);
+assert.deepEqual(slugsOf(filmOf(view,'film:28nq')),[{scheme:'letterboxd_slug',value:'the-legend-of-zorro',conflicting:false,trusted:false,provenance:{source:'letterboxd_film_url',status:'current',records:['watchlist'],url:'https://letterboxd.com/film/the-legend-of-zorro/',observedAt:new Date(NOW).toISOString()}}]);
 assert.deepEqual(slugsOf(filmOf(view,'film:2b0k')).map(item=>[item.value,item.provenance.status,item.provenance.url]),[['member-link','current','https://letterboxd.com/film/member-link/']]);
 assert.deepEqual(slugsOf(filmOf(view,'film:nourl')).map(item=>[item.value,item.provenance.source,item.provenance.status,item.provenance.observedAt]),[['no-url-film','letterboxd_diary','observed','2026-09-02T00:00:00.000Z']]);
 assert.deepEqual(slugsOf(filmOf(view,'film:badurl')),[],'a URL that is not a Letterboxd permalink yields nothing');
 // A TMDB-only Film gets no slug, not even from its own record or a diary row without a lid.
 assert.deepEqual(slugsOf(filmOf(view,'film:tmdb:50')),[]);
 assert.deepEqual(plain(view.aliasConflicts),[]);
+
+// 2b. A permalink kept only in metadata.json (the cached record of the same lid) is that Film's slug too.
+const metaOnly=store();metaOnly.metadata={nourl:{id:'nourl',url:'https://letterboxd.com/film/metadata-only/',metadataAt:fresh}};metaOnly.diaryHistory=null;
+const metaView=readLifecycle(metaOnly,NOW),metaFilm=filmOf(metaView,'film:nourl');
+assert.deepEqual(slugsOf(metaFilm).map(item=>[item.value,item.provenance.status,plain(item.provenance.records)]),[['metadata-only','current',['metadata']]]);
+assert.equal(metaFilm.canonicalIdentity,null,'no identity promotion');
+assert.equal(plain(metaFilm.externalIds).filter(item=>item.trusted).map(item=>item.scheme).join(),'letterboxd');
+// 2c. Two records of one lid with different permalinks (programme old, watchlist new): both slugs are kept, each with
+// its records, as `ambiguous`; neither record is proved fresher.
+const split=store();split.diaryHistory=null;
+split.programme={films:[{...split.watchlist.films[0],url:'https://letterboxd.com/film/old-slug/'},...split.watchlist.films.slice(1)]};
+split.watchlist.films[0].url='https://letterboxd.com/film/new-slug/';
+const splitView=readLifecycle(split,NOW);
+assert.deepEqual(slugsOf(filmOf(splitView,'film:28nq')).map(item=>[item.value,item.provenance.status,plain(item.provenance.records)]),[['old-slug','ambiguous',['programme']],['new-slug','ambiguous',['watchlist']]]);
+assert.deepEqual(plain(splitView.aliasConflicts),[]);
+// Replay keeps both; once the records agree on the new slug, it is current and the old one historical.
+const splitFirst=backfillLifecycle(split,NOW),splitStored=plain(splitFirst.sidecars);
+assert.deepEqual(plain(backfillLifecycle({...split,persistedSidecars:splitStored},LATER).reconciliation.update),[]);
+const settled=store();settled.diaryHistory=null;settled.watchlist.films[0].url='https://letterboxd.com/film/new-slug/';
+settled.programme={films:[{...settled.watchlist.films[0]},...settled.watchlist.films.slice(1)]};
+const settledBody=backfillLifecycle({...settled,persistedSidecars:splitStored},LATER).sidecars['watchlist.lifecycle.json']['28nq'];
+assert.deepEqual(plain(settledBody.externalIds.filter(item=>item.scheme==='letterboxd_slug').map(item=>[item.value,item.provenance.status,item.provenance.observedAt])),[['new-slug','current',new Date(NOW).toISOString()],['old-slug','historical',new Date(NOW).toISOString()]]);
+// 2d. Diary aliases appended at different reads. An alias stamped by the writer keeps its own time; an older alias
+// without one states only the window of its entry's reads, never the entry's first read as an exact time.
+const late=store();late.watchlist.films=late.watchlist.films.filter(film=>film.id==='nourl');
+late.diaryHistory={schemaVersion:1,entries:{'day:lid:nourl|2026-09-01':{key:'day:lid:nourl|2026-09-01',identity:{type:'letterboxd_lid',value:'nourl'},firstObservedAt:'2026-10-01T00:00:00.000Z',observedAt:'2026-10-30T00:00:00.000Z',
+ aliases:[{type:'letterboxd_slug',value:'first-slug'},{type:'letterboxd_slug',value:'later-slug',firstObservedAt:'2026-10-30T00:00:00.000Z'}]}}};
+const lateSlugs=slugsOf(filmOf(readLifecycle(late,NOW),'film:nourl'));
+assert.deepEqual(lateSlugs.map(item=>[item.value,item.provenance.observedAt,item.provenance.observedBetween??null]),[['first-slug',null,{from:'2026-10-01T00:00:00.000Z',to:'2026-10-30T00:00:00.000Z'}],['later-slug','2026-10-30T00:00:00.000Z',null]]);
+// The stored window stays when the entry is read again later; it does not drift with each diary read.
+const lateStored=plain(backfillLifecycle(late,NOW).sidecars);
+late.diaryHistory.entries['day:lid:nourl|2026-09-01'].observedAt='2026-11-05T00:00:00.000Z';
+const lateAgain=backfillLifecycle({...late,persistedSidecars:lateStored},LATER);
+assert.deepEqual(plain(lateAgain.reconciliation.update),[]);
+assert.deepEqual(plain(lateAgain.sidecars['watchlist.lifecycle.json'].nourl.externalIds.find(item=>item.value==='first-slug').provenance.observedBetween),{from:'2026-10-01T00:00:00.000Z',to:'2026-10-30T00:00:00.000Z'});
 
 // 3. The alias changes no identity, readiness, fingerprint, prediction or Film count.
 const without=readLifecycle({...store(),watchlist:{films:store().watchlist.films.map(({url,...film})=>film)},diaryHistory:null},NOW);
@@ -125,7 +160,7 @@ assert.equal(JSON.stringify(source),snapshot);
 // 8. The offline inventory counts from the records alone and writes nothing.
 const {slugInventory}=await import('../scripts/letterboxd-slug-inventory.mjs');
 const inventory=await slugInventory(store(),NOW);
-assert.deepEqual(plain(inventory.films),{films:5,withLid:4,tmdbOnly:1,withSlug:3,withoutSlug:1,current:2,observedOnly:1,historical:0,conflicting:0});
+assert.deepEqual(plain(inventory.films),{films:5,withLid:4,tmdbOnly:1,withSlug:3,withoutSlug:1,current:2,ambiguous:0,observedOnly:1,historical:0,conflicting:0});
 assert.deepEqual(plain(inventory.letterboxdRecords),{records:4,permalink:2,other:1});
 assert.deepEqual([inventory.writes,inventory.requests,inventory.collisions,inventory.diaryEntries],[0,0,0,3]);
-console.log('Letterboxd slug alias (AIR-276): strict permalink parser, current watchlist slug and observed diary slug by lid, no slug without a lid or URL, identity, readiness, count and parity unchanged, collision marked and never merged, idempotent replay, rename kept as historical, reused slug a collision, sources untouched, offline inventory from stored records only with no write or request passed');
+console.log('Letterboxd slug alias (AIR-276): strict permalink parser, current watchlist slug and observed diary slug by lid, metadata-only permalink, disagreeing records kept as ambiguous then settled with the old slug historical, per-alias diary time or an honest window that does not drift, no slug without a lid or URL, identity, readiness, count and parity unchanged, collision marked and never merged, idempotent replay, rename kept as historical, reused slug a collision, sources untouched, offline inventory from stored records only with no write or request passed');

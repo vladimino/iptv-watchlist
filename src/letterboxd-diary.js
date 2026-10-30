@@ -93,7 +93,7 @@ const LetterboxdDiary=(()=>{
  function mergeRows(history,rows,groups,observedAt,page,tally){
   for(const row of rows.filter(row=>row.keyBasis==='viewing_id')){
    tally.seen.add(row.key);const stored=history.entries[row.key];
-   if(!stored){history.entries[row.key]=newEntry({key:row.key,keyBasis:'viewing_id',viewingId:row.viewingId,identity:row.lid?{type:'letterboxd_lid',value:row.lid}:null,aliases:row.slug?[{type:'letterboxd_slug',value:row.slug}]:[],
+   if(!stored){history.entries[row.key]=newEntry({key:row.key,keyBasis:'viewing_id',viewingId:row.viewingId,identity:row.lid?{type:'letterboxd_lid',value:row.lid}:null,aliases:row.slug?[{type:'letterboxd_slug',value:row.slug,firstObservedAt:observedAt}]:[],
     watchedDate:row.watchedDate,viewings:1,viewingsCertain:true,ratingAtEntry:row.ratingAtEntry,ratingsAtEntry:[row.ratingAtEntry],rewatch:row.rewatch},observedAt,page);tally.added.add(row.key);continue;}
    if(row.lid&&stored.identity&&stored.identity.value!==row.lid||row.watchedDate&&stored.watchedDate&&stored.watchedDate!==row.watchedDate){tally.conflicts.add(row.key);continue;}
    const changes=[];
@@ -101,14 +101,14 @@ const LetterboxdDiary=(()=>{
    if(row.rewatch!=='unknown'&&row.rewatch!==stored.rewatch)changes.push({field:'rewatch',from:stored.rewatch,to:row.rewatch,observedAt});
    const next=withChanges(stored,changes,observedAt,page);
    if(!stored.identity&&row.lid)next.identity={type:'letterboxd_lid',value:row.lid};
-   if(row.slug&&!stored.aliases.some(alias=>alias.value===row.slug))next.aliases=[...stored.aliases,{type:'letterboxd_slug',value:row.slug}];
+   if(row.slug&&!stored.aliases.some(alias=>alias.value===row.slug))next.aliases=[...stored.aliases,{type:'letterboxd_slug',value:row.slug,firstObservedAt:observedAt}];
    if(changes.length)tally.updated.add(row.key);
    history.entries[row.key]=next;
   }
   for(const group of groups){
    tally.seen.add(group.key);const stored=history.entries[group.key];
    const fields={viewings:group.count,viewingsCertain:group.certain,ratingAtEntry:group.count===1?group.ratings[0]:null,ratingsAtEntry:group.ratings,rewatch:group.rewatchValue,rewatchRows:group.rewatchRows,rewatchUnknownRows:group.rewatchUnknownRows};
-   if(!stored){history.entries[group.key]=newEntry({key:group.key,keyBasis:'identity_date',viewingId:null,identity:group.lid?{type:'letterboxd_lid',value:group.lid}:null,aliases:group.slug?[{type:'letterboxd_slug',value:group.slug}]:[],watchedDate:group.watchedDate,...fields},observedAt,page);tally.added.add(group.key);continue;}
+   if(!stored){history.entries[group.key]=newEntry({key:group.key,keyBasis:'identity_date',viewingId:null,identity:group.lid?{type:'letterboxd_lid',value:group.lid}:null,aliases:group.slug?[{type:'letterboxd_slug',value:group.slug,firstObservedAt:observedAt}]:[],watchedDate:group.watchedDate,...fields},observedAt,page);tally.added.add(group.key);continue;}
    if(group.certain&&group.count<stored.viewings){tally.conflicts.add(group.key);continue;}
    const changes=[];
    if(group.count>stored.viewings)changes.push({field:'viewings',from:stored.viewings,to:group.count,observedAt});
@@ -123,7 +123,7 @@ const LetterboxdDiary=(()=>{
    }
    const next=withChanges(stored,changes,observedAt,page);
    if(!stored.identity&&group.lid)next.identity={type:'letterboxd_lid',value:group.lid};
-   if(group.slug&&!stored.aliases.some(alias=>alias.value===group.slug))next.aliases=[...stored.aliases,{type:'letterboxd_slug',value:group.slug}];
+   if(group.slug&&!stored.aliases.some(alias=>alias.value===group.slug))next.aliases=[...stored.aliases,{type:'letterboxd_slug',value:group.slug,firstObservedAt:observedAt}];
    if(changes.some(change=>!['viewingsCertain','rewatchRows','rewatchUnknownRows'].includes(change.field)))tally.updated.add(group.key);
    history.entries[group.key]=next;
   }
