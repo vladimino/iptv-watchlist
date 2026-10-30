@@ -54,3 +54,28 @@
 .admin-status-outside{color:#aeb8ac;background:#1f261f;border:1px dashed #3d473c}
 .admin-outside-note{font-size:13px;margin:8px 0 0}
 @media(max-width:800px){.admin-snapshot{font-size:13px;padding:10px 12px;margin-top:20px}.admin-state-stale{flex-direction:column;align-items:stretch}}
+/* Limbo inventory */
+.admin-nav{display:flex;flex-wrap:wrap;gap:8px}
+.admin-page .brand{white-space:nowrap}
+.limbo-filters h2{margin-bottom:4px}
+.limbo-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px;margin:10px 0 0}
+.limbo-field{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);min-width:0}
+.limbo-field select,.limbo-field input{font:inherit;font-size:14px;color:var(--text);background:var(--surface);border:1px solid #465044;border-radius:6px;padding:8px;max-width:100%;min-width:0}
+.limbo-field select:focus-visible,.limbo-field input:focus-visible,.admin-page button:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.limbo-apply,.limbo-reset{width:auto;margin:0}
+.limbo-total{font-weight:400;letter-spacing:0;color:#7f8a7e;font-size:14px}
+.limbo-item{cursor:default}
+.limbo-facts{margin:10px 0 0}
+.limbo-facts div{display:grid;grid-template-columns:minmax(0,10rem) minmax(0,1fr);gap:8px;padding:4px 0;border-bottom:1px solid #242b24;font-size:13px}
+.limbo-facts dt{color:var(--muted)}
+.limbo-facts dd{margin:0;overflow-wrap:anywhere}
+.limbo-links{margin:10px 0 0;font-size:13px}
+.limbo-link{color:var(--lime)}
+.limbo-context h2{font-size:20px;letter-spacing:-.3px}
+.limbo-context p{font-size:14px;line-height:1.5}
+.limbo-context h3{margin:14px 0 6px;font-size:13px}
+.limbo-context ul{margin:0;padding-left:18px;font-size:13px}
+.limbo-context li{margin:0 0 4px}
+.limbo-unavailable{color:#e6d9a6;font-size:13px}
+@media(max-width:800px){.limbo-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.limbo-form{flex-direction:column;align-items:stretch}}
+@media(max-width:520px){.admin-page .masthead{flex-wrap:wrap;gap:10px}.admin-nav{width:100%}.admin-nav .admin-home{flex:1;text-align:center}}

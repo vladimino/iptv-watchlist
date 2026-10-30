@@ -7,10 +7,12 @@ import {
   evaluateDataHealth, healthIssueId, progressOf,
 } from '../src/domain/data-health.js';
 
-// Pure and offline: no storage, network or clock of its own, and not part of the Worker bundle or the public pages.
+// Pure and offline: no storage, network or clock of its own. The Worker bundle carries it in its own scope for the limbo
+// inventory read; the public pages and the admin page scripts never do.
 const source = fs.readFileSync('src/domain/data-health.js', 'utf8');
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|R2|D1/);
-assert.equal(fs.readFileSync('build.mjs', 'utf8').includes('data-health'), false);
+assert.match(fs.readFileSync('build.mjs', 'utf8'), /scoped\('src\/domain\/data-health\.js','DataHealth'\)/);
+assert.equal(fs.readFileSync('public/admin-limbo.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('public/app.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('src/admin/client.js', 'utf8').includes('data-health'), false);
 assert.equal(fs.readFileSync('src/admin/read.js', 'utf8').includes('data-health'), false);
@@ -232,6 +234,7 @@ const recent = one(stalled, 'identity/incomplete/film:film:recent');
 assert.deepEqual([recent.severity, recent.reason, recent.progress.status, recent.action], ['info', 'work_pending', 'progressing', {suggested: 'wait', code: 'discovery_retry', eligible: false, reason: 'awaiting_progress'}]);
 const queuedStalled = one(stalled, 'prediction/stuck/film:film:pending');
 assert.deepEqual([queuedStalled.severity, queuedStalled.reason, queuedStalled.provenance.queued], ['warning', 'no_progress', true]);
+assert.deepEqual(queuedStalled.action, {suggested: 'investigate', code: 'prediction_retry', eligible: false, reason: 'already_queued'}, 'a stalled film the queue lists asks for investigation of the queue, not a second enqueue');
 assert.equal(evaluate(complete({films: [film('film:edge', {identity: {status: 'unresolved', updatedAt: at(-14 * D), nextAction: 'wait_new_evidence'}})]})).issues[0].progress.status, 'progressing', 'exactly the threshold is not stalled');
 assert.equal(evaluate(complete({films: [film('film:edge', {identity: {status: 'unresolved', updatedAt: at(-14 * D), nextAction: 'wait_new_evidence'}})]}), {thresholds: {stalledMs: 13 * D}}).issues[0].progress.status, 'stalled');
 

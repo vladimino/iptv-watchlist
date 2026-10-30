@@ -458,7 +458,7 @@ function filmIssues(record, context) {
       threshold: {code: 'stalledMs', value: thresholds.stalledMs, unit: 'ms'},
       provenance: provenance(dimension + '.status', {status: state.status, nextAction: state.nextAction ?? null, queued}),
       action: blockedByGeneration ? action('wait', 'reread_snapshot', false, 'generation_changed')
-        : waiting ? action('wait', 'prediction_retry', false, 'already_queued')
+        : waiting ? action(progress.status === 'stalled' ? 'investigate' : 'wait', 'prediction_retry', false, 'already_queued')
         : queue ? action('investigate', 'prediction_retry', true, 'eligible')
         : action('investigate', 'supply_evidence', null, 'evidence_incomplete'),
     }));

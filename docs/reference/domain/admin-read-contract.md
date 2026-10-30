@@ -133,7 +133,8 @@ The bounded design is:
 | Programme-snapshot search and queues | Live, read-only, over the pinned published generation and the two dictionaries |
 | Fingerprint and prediction queues | Not served by the route (`queue_unavailable`): that state is under `enrichment/`, which the snapshot read does not load. A later card decides whether a bounded read of the view index or a publish-time index serves them |
 | Point read of one prediction via MCP `prediction_film_diagnostics` | Prediction diagnosis only. Not a catalog search |
-| Ledger-wide candidate queues and a publish-time admin index | Not implemented; a separate card, never a GET |
+| Limbo inventory of stuck and waiting films | Live, read-only: `GET /api/admin/limbo` reads the snapshot plus the prediction queue and the view index and evaluates the [data health model](data-health.md#limbo-inventory) ([route contract](../api/admin.md#limbo-inventory)). Films only |
+| Ledger-wide candidate queues and a publish-time admin index | Not implemented; a separate card, never a GET. The limbo inventory reports unresolved observations as unavailable until that index exists |
 | D1 `readFilm` / `readPerson` as the admin source | No. Only after the D1 cutover that makes those tables authoritative |
 | Reviewed-title and reviewed-name writes ([AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy)) | No. The route has no `POST`; those cards stay behind the storage gate |
 

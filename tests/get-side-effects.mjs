@@ -10,8 +10,8 @@ const WRITING_GET_ROUTES=['/api/enrichment/runs','/api/enrichment/status','/api/
 const sources=['src/worker.js','src/enrichment.js','src/letterboxd-diary.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n');
 const routes=new Set([...sources.matchAll(/(?:url\.pathname|path)==='(\/api\/[^']+)'&&request\.method==='GET'/g)].map(m=>m[1]));
 for(const m of sources.matchAll(/\[((?:'\/api\/[^']+',?)+)\]\.includes\((?:url\.pathname|path)\)&&request\.method==='GET'/g))for(const path of m[1].split(','))routes.add(path.slice(1,-1));
-// Prefix-routed admin reads: overview, a film search, a people queue, a search narrowed by a queue, and both detail routes.
-const ADMIN_GET_ROUTES=['/api/admin/overview','/api/admin/films?q=hot','/api/admin/people?queue=localization-missing','/api/admin/films?q=hot&queue=localization-missing','/api/admin/films/film:w1','/api/admin/people/person:director/one'];
+// Prefix-routed admin reads: overview, a film search, a people queue, a search narrowed by a queue, both detail routes and the limbo inventory.
+const ADMIN_GET_ROUTES=['/api/admin/overview','/api/admin/films?q=hot','/api/admin/people?queue=localization-missing','/api/admin/films?q=hot&queue=localization-missing','/api/admin/films/film:w1','/api/admin/people/person:director/one','/api/admin/limbo','/api/admin/limbo?cause=backoff&subsystem=prediction&kind=film&age=14&limit=5'];
 for(const path of ['/','/api/migration-export/manifest',...ADMIN_GET_ROUTES])routes.add(path);
 assert(routes.size>=20,'route extraction found '+routes.size+' GET routes');
 for(const path of WRITING_GET_ROUTES)assert(routes.has(path),path);
@@ -28,7 +28,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  ASSETS:{'/':{body:'<!doctype html>',type:'text/html'}},INITIAL_PERSONAL_RATINGS:{w1:4},
  fetch:async input=>{const url=String(input instanceof Request?input.url:input);fetches.push(url);return url.startsWith('https://api.themoviedb.org/3/movie/11')?new Response('{"id":11}'):new Response('unexpected',{status:599});}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
-vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);
+vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);vm.runInContext(scoped('src/domain/data-health.js','DataHealth'),context);vm.runInContext(scoped('src/domain/limbo-inventory.js','LimboInventory'),context);vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);vm.runInContext(fs.readFileSync('src/admin/limbo.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 const constant=name=>vm.runInContext(name,context);
 const execution={waitUntil:()=>{background++;},exports:{DiscoveryContinuation:{fetch:async()=>{dispatches++;return new Response('{}');}}}};
@@ -59,10 +59,11 @@ for(const recovery of [false,true])for(const path of [...routes].sort()){
 }
 assert.deepEqual([...writers].sort(),WRITING_GET_ROUTES,'GET routes that write to R2');
 assert.equal(background,0,'no GET schedules background work');assert.equal(dispatches,0,'no GET starts a continuation');
-// The admin reads answer from the published generation and never touch a lease, the ledger, enrichment objects or the root programme.
+// The admin reads answer from the published generation and never touch a lease, the ledger, per-film enrichment objects or the
+// root programme. The limbo inventory adds exactly two bounded enrichment objects: the prediction queue and the view index.
 const reads=[];const trackedGet=bucket.get;bucket.get=async key=>{reads.push(key);return trackedGet(key);};
 seed(true);
-for(const path of ADMIN_GET_ROUTES){reads.length=0;puts=[];const response=await context.worker.fetch(new Request('https://iptv.vladimino.workers.dev'+path),env,execution);assert.ok(response.status===200||response.status===404,path+' returned '+response.status);assert.deepEqual(puts,[]);assert.deepEqual([...new Set(reads)].sort(),['epg/generations/run-1/programme.json','epg/published-generation.json','people.json','titles.json'],path+' read '+reads.join(', '));}
+for(const path of ADMIN_GET_ROUTES){reads.length=0;puts=[];const response=await context.worker.fetch(new Request('https://iptv.vladimino.workers.dev'+path),env,execution);assert.ok(response.status===200||response.status===404,path+' returned '+response.status);assert.deepEqual(puts,[]);const expected=['epg/generations/run-1/programme.json','epg/published-generation.json','people.json','titles.json',...(path.startsWith('/api/admin/limbo')?['enrichment/prediction-queue.json','enrichment/view-index.json']:[])].sort();assert.deepEqual([...new Set(reads)].sort(),expected,path+' read '+reads.join(', '));}
 bucket.get=trackedGet;
 
 console.log(`GET side effects: ${routes.size} routes, writers limited to ${WRITING_GET_ROUTES.join(', ')}, no background work or hidden requests`);
