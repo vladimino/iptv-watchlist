@@ -32,7 +32,7 @@ node scripts/tmdb-tv-identity-plan.mjs --artifact /private/air286 --output /priv
   - a local SQLite copy of D1 (`-readonly`);
   - the D1 HTTP API (`--database-id`, with `D1_BACKFILL_*` in the environment; a production read needs owner approval);
   - a fenced R2 snapshot (`--snapshot`, read-only, via `scripts/snapshot-store.mjs`; a fresh production snapshot needs owner approval).
-- The plan is written to `--output` (mode 600). The command prints counts only. It makes no TMDB or Letterboxd request and executes no statement.
+- The plan is written to `--output` (mode 600). The command prints counts only. It makes no TMDB or Letterboxd request and writes nothing to R2 or D1.
 
 For each Film the plan states:
 - `old` and `new` typed ids, `before` and `after` (`canonicalIdentity`, the `tmdb` and `tmdb_tv` entries with trust and provenance);
@@ -42,11 +42,13 @@ For each Film the plan states:
 - `preserved`: what must not change.
   - credits, split into Letterboxd and AIR-286 TMDB;
   - prediction, rating, watchlist membership, redirects and localization.
-- `d1`: the guarded statements of a later run;
+- `d1Before` and `d1Expected`: the Film's D1 identity before the correction and the identity it must have after it: `canonical_identity`, the `tmdb` and `tmdb_tv` rows with trust and full provenance, and the identity dimension's status, `source_version` and provenance. Timestamps are not compared.
 - `r2`: with `--snapshot`, every record that carries the movie or TV number. These records are reported, not rewritten.
 - `r2Retirements`: the body of `identity/tmdb-retirements.json`, containing only `ready` Films.
 
-`status` is `ready`, `owner_review` (unexpected state, nothing planned) or `refused` (missing evidence, or the Film is missing). `unchanged` counts Films already corrected. A repeated plan after a correct run is all `unchanged`, with no statements.
+`status` is `ready`, `owner_review` (unexpected state, nothing planned) or `refused` (missing evidence, or the Film is missing). `unchanged` counts Films already corrected. A repeated plan after a correct run is all `unchanged`, with the same `d1Expected`.
+
+`d1Readback(db, plan)` compares D1 with a plan and only reads. A Film is `corrected` when it holds exactly `d1Expected`, `pending` when it still holds `d1Before`, and `mismatch` otherwise. A partial or tampered correction is never `corrected`, and a new plan reports it as `owner_review` (`partial_correction`).
 
 ## Production correction (AIR-291)
 
@@ -62,21 +64,17 @@ Each step needs its own explicit owner approval. A code deploy authorizes none o
 3. **R2 write.**
    - Write the plan's `r2Retirements.body` to `identity/tmdb-retirements.json`, once, with a conditional put (`onlyIf` absent, or the expected etag).
    - Read it back.
-4. **D1.** With the [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector active, D1 follows from the R2 entry: let one projector run carry the four Films, and do not run the statements alongside it. Only if the projector is off, write D1 as follows, each step separately approved.
-   - Execute each Film's `d1` statements as one batch per Film.
-   - Every statement is guarded by the state it expects, so a repeated batch changes nothing.
+4. **D1.** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owns each Film's identity rows and rewrites them from R2, so one projector run after the R2 write carries the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
 5. **Readback.**
+   - `d1Readback` against the preflight plan: all four must be `corrected`. A `mismatch` stops for review.
    - Re-run the dry-run: all four must be `unchanged`, `preserved` must equal the preflight values, and there must be no collisions.
    - Check that the `coCredit` pairs of the four Films are unchanged.
 
 ## Rollback
 
 - **R2.** Remove the four entries from `identity/tmdb-retirements.json` (or delete the object if it holds only them). The projection then reads the records' movie ids again.
-- **D1.** Either run the inverse guarded statements or restore D1 to the bookmark. The inverse statements are:
-  - `canonical_identity` back to `tmdb:<movie>`;
-  - the `tmdb` row back to `trusted=1` with its `provenance.previous`;
-  - delete the `tmdb_tv` row;
-  - the identity `source_version` back to `tmdb:<movie>`.
+- **D1.** No hand-written inverse SQL. After the R2 rollback, the next projector run writes the four Films' previous identity back from R2. `d1Readback` against the preflight plan must then show them `pending`.
+- **Whole-database restore.** A D1 Time Travel restore to the bookmark is a separate, separately authorized recovery for the whole database. It also discards every other D1 write made after the bookmark, including the projector's.
 
   A restore also discards any other D1 write made after the bookmark.
 - Code rollback restores neither R2 nor D1. The retired movie ids are never deleted, so no rollback needs them back.

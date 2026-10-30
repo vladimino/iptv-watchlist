@@ -5,13 +5,12 @@ import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {renderSql} from '../scripts/d1-backfill.mjs';
-import {CONFIRMED_RETIREMENTS,RETIREMENTS_KEY,buildPlan,d1Holders,d1State,loadDomain,r2References,sqliteReader} from '../scripts/tmdb-tv-identity-plan.mjs';
+import {CONFIRMED_RETIREMENTS,RETIREMENTS_KEY,buildPlan,d1Expected,d1Holders,d1Readback,d1State,loadDomain,r2References,sqliteReader} from '../scripts/tmdb-tv-identity-plan.mjs';
 
 // Offline only: the domain file stays out of the Worker bundle, and the planner neither requests nor writes.
 assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/tmdb-tv-identity/);
 const planner=fs.readFileSync('scripts/tmdb-tv-identity-plan.mjs','utf8');
-assert.doesNotMatch(planner,/\bfetch\(|\bBUCKET\b|writeFile\(.*objects|\.transaction\(|\.run\(/,'the planner executes no statement and makes no request');
+assert.doesNotMatch(planner,/\bfetch\(|\bBUCKET\b|writeFile\(.*objects|\.transaction\(|\.run\(|\b(INSERT|UPDATE|DELETE|REPLACE)\b/,'the planner writes no statement and makes no request: D1 follows R2 through the projector');
 assert.doesNotMatch(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),/\bfetch\b|\benv\./);
 
 const domain=loadDomain();
@@ -34,9 +33,13 @@ for(const [html,status,reason] of [
  [page('<body>','tv/1457'),'review','attributes_missing'],
  ['<p>see https://www.themoviedb.org/tv/1457/ for details</p><body data-tmdb-type="tv" data-tmdb-id="1457">','unresolved','no_tmdb_link'],
  ['<body data-tmdb-type="tv" data-tmdb-id="1457"><a href="http://www.themoviedb.org/tv/1457/">TMDB</a>','unresolved','no_tmdb_link'],
- [null,'unresolved','no_tmdb_link']
+ [null,'unresolved','no_tmdb_link'],
+ ['<body data-tmdb-type="tv" data-tmdb-id="1457"><link rel="alternate" href="https://www.themoviedb.org/tv/1457/">','unresolved','no_tmdb_link'],
+ ['<body data-tmdb-type="tv" data-tmdb-id="1457"><div data-url="x" href="https://www.themoviedb.org/tv/1457/"></div>','unresolved','no_tmdb_link'],
+ ['<body data-tmdb-type="tv" data-tmdb-id="1457"><area href="https://www.themoviedb.org/tv/1457/">','unresolved','no_tmdb_link']
 ]){const out=letterboxdTmdbLink(html);assert.deepEqual([out.status,out.reason],[status,reason],String(html));}
 assert.equal(letterboxdTmdbLink(page('<b data-tmdb-type="tv" data-tmdb-id="1457">','tv/1457?language=ru')).status,'resolved');
+assert.equal(letterboxdTmdbLink('<b data-tmdb-type="tv" data-tmdb-id="1457"><a class="micro-button" target="_blank" href="https://www.themoviedb.org/tv/1457/">TMDB</a>').status,'resolved','attributes before href');
 
 // 2. A retirement is checked field by field and names exactly one Film.
 const EVIDENCE={movieStatus:404,movieCheckedAt:'2026-10-30T09:44:03.540Z',letterboxdUrl:'https://letterboxd.com/film/the-odyssey/',link:'tv/9687',linkCheckedAt:'2026-10-30T10:33:04.632Z',tvResponseId:'9687',tvCheckedAt:'2026-10-30T10:15:00.000Z'};
@@ -76,7 +79,7 @@ const corrected=applied.film;
 assert.equal(corrected.canonicalIdentity,'tmdb_tv:9687');
 assert.deepEqual(plain(corrected.externalIds.map(item=>[item.scheme,item.value,item.trusted,item.conflicting])),plain(odyssey.externalIds.flatMap(item=>item.scheme==='tmdb'?[['tmdb','17266',false,false],['tmdb_tv','9687',true,false]]:[[item.scheme,item.value,item.trusted,item.conflicting]])));
 const retired=corrected.externalIds.find(item=>item.scheme==='tmdb');
-assert.deepEqual(plain(retired.provenance),{status:TMDB_RETIRED_STATUS,reason:'tmdb_movie_404',retiredAt:AT,replacement:{scheme:'tmdb_tv',value:'9687'},evidence:EVIDENCE,confirmation:CONFIRMATION,previous:odyssey.externalIds.find(item=>item.scheme==='tmdb').provenance??null});
+assert.deepEqual(plain(retired.provenance),{status:TMDB_RETIRED_STATUS,reason:'tmdb_movie_404',replacement:{scheme:'tmdb_tv',value:'9687'},evidence:EVIDENCE,confirmation:CONFIRMATION,previous:odyssey.externalIds.find(item=>item.scheme==='tmdb').provenance??null});
 assert.deepEqual(plain(corrected.externalIds.find(item=>item.scheme==='tmdb_tv').provenance),{source:'letterboxd_tmdb_link',url:EVIDENCE.letterboxdUrl,link:'tv/9687',checkedAt:EVIDENCE.linkCheckedAt,confirmation:CONFIRMATION});
 assert.deepEqual([corrected.identity.status,corrected.identity.sourceVersion,corrected.identity.provenance.tmdbTvId,corrected.identity.provenance.retiredTmdbId],['resolved','tmdb_tv:9687','9687','17266']);
 // Everything but the identity is the Film as it was: id, aliases, localization, fingerprint, prediction, history, redirects.
@@ -94,6 +97,26 @@ refuse({...plain(odyssey),externalIds:[...odyssey.externalIds.map(item=>item.sch
 refuse({...plain(odyssey),externalIds:[...plain(odyssey.externalIds),{scheme:'tmdb_tv',value:'1',trusted:true,conflicting:false}]},'tv_id_mismatch');
 refuse({...plain(odyssey),externalIds:[...plain(odyssey.externalIds),{scheme:'tmdb_tv',value:'9687',trusted:true,conflicting:false}]},'partial_correction');
 refuse({...plain(odyssey),identity:{...odyssey.identity,status:'ambiguous'}},'identity_not_resolved');
+// Only an exact correction is a no-op: each missing or different piece of it is refused as partial, never taken as done.
+const tamper=(change)=>{const film=plain(corrected);change(film);return film;};
+const entry=(film,scheme)=>film.externalIds.find(item=>item.scheme===scheme);
+for(const [label,change] of [
+ ['tv confirmation missing',film=>{delete entry(film,'tmdb_tv').provenance.confirmation;}],
+ ['tv provenance null',film=>{entry(film,'tmdb_tv').provenance=null;}],
+ ['tv untrusted',film=>{entry(film,'tmdb_tv').trusted=false;}],
+ ['retired evidence changed',film=>{entry(film,'tmdb').provenance.evidence={...EVIDENCE,link:'tv/1'};}],
+ ['retired confirmation missing',film=>{delete entry(film,'tmdb').provenance.confirmation;}],
+ ['retired previous missing',film=>{delete entry(film,'tmdb').provenance.previous;}],
+ ['retired status only',film=>{entry(film,'tmdb').provenance={status:TMDB_RETIRED_STATUS};}],
+ ['identity source version',film=>{film.identity.sourceVersion='tmdb:17266';}],
+ ['identity provenance missing tv',film=>{delete film.identity.provenance.tmdbTvId;}],
+ ['identity provenance null',film=>{film.identity.provenance=null;}],
+ ['canonical identity',film=>{film.canonicalIdentity='tmdb:17266';}],
+ ['tv row without retirement',film=>{const movie=entry(film,'tmdb');movie.trusted=true;movie.provenance=null;film.canonicalIdentity='tmdb:17266';}],
+ ['retired row without tv',film=>{film.externalIds=film.externalIds.filter(item=>item.scheme!=='tmdb_tv');}]
+]){const out=applyTmdbRetirement(tamper(change),retirement.retirement,AT);assert.deepEqual([out.ok,out.reason],[false,'partial_correction'],label);}
+// Key order of a stored provenance does not matter.
+assert.equal(applyTmdbRetirement(tamper(film=>{const tv=entry(film,'tmdb_tv');tv.provenance=Object.fromEntries(Object.entries(tv.provenance).reverse());}),retirement.retirement,AT).changed,false);
 
 // 4. Linking: equal numbers in the two schemes never link. Before the correction a catalog record of the retired movie
 // would have joined the Film; after it, the retired id is evidence only.
@@ -150,26 +173,43 @@ const first=plan.films.find(item=>item.filmId==='film:1IUo');
 assert.deepEqual([first.old,first.new,first.before.canonicalIdentity,first.after.canonicalIdentity,first.tvName],[{scheme:'tmdb',value:'17266'},{scheme:'tmdb_tv',value:'9687'},'tmdb:17266','tmdb_tv:9687','Series 1IUo']);
 assert.deepEqual(plain(first.numericOverlaps),[{value:'9687',tvFilms:['film:1IUo'],movieFilms:['film:tmdb:9687']}]);
 assert.deepEqual(first.preserved,{credits:{letterboxd:1,tmdb:1},prediction:1,rating:1,watchlist:1,redirectsTo:1,localization:'Ru 1IUo'});
-assert.equal(first.d1.length,4);
+assert.equal(first.d1Expected.canonicalIdentity,'tmdb_tv:9687');
+assert.deepEqual(first.d1Before.externalIds.map(item=>[item.scheme,item.value,item.trusted]),[['tmdb','17266',true]]);
 assert.deepEqual(plan.r2Retirements.key,RETIREMENTS_KEY);
 assert.deepEqual(plan.r2Retirements.body.retirements.map(entry=>[entry.filmId,entry.movieId,entry.tvId]),CONFIRMED_RETIREMENTS.map(item=>[item.filmId,item.movieId,item.tvId]));
+// Before any write the readback finds every Film pending.
+assert.deepEqual((await d1Readback(db,plan)).map(item=>item.state),['pending','pending','pending','pending']);
 
-// The planned statements, executed here only, change exactly the identity rows: the unique index on trusted ids accepts
-// tmdb_tv 9687 beside the catalog's trusted tmdb 9687, and credits, predictions, ratings, redirects and localization stay.
-const execute=statements=>sqlite('BEGIN;\n'+statements.map(item=>renderSql(item.sql,item.params)+';').join('\n')+'\nCOMMIT;');
-for(const item of plan.films)execute(item.d1);
+// D1 is written by the ADR 0056 projector, not by this tool. This test-only writer stands in for it and writes the expected
+// identity rows: the unique index on trusted ids accepts tmdb_tv 9687 beside the catalog's trusted tmdb 9687, and credits,
+// predictions, ratings, redirects and localization stay.
+const project=item=>{const e=item.d1Expected,q=v=>v==null?'NULL':"'"+String(v).replace(/'/g,"''")+"'";
+ sqlite(`BEGIN;UPDATE film SET canonical_identity=${q(e.canonicalIdentity)} WHERE id=${q(item.filmId)};DELETE FROM film_external_id WHERE film_id=${q(item.filmId)} AND scheme IN ('tmdb','tmdb_tv');
+${e.externalIds.map(x=>`INSERT INTO film_external_id VALUES(${q(item.filmId)},${q(x.scheme)},${q(x.value)},${x.trusted?1:0},${x.conflicting?1:0},${q(JSON.stringify(x.provenance))});`).join('\n')}
+UPDATE film_dimension SET source_version=${q(e.identity.sourceVersion)},provenance_json=${q(JSON.stringify(e.identity.provenance))} WHERE film_id=${q(item.filmId)} AND dimension='identity';COMMIT;`);};
+for(const item of plan.films)project(item);
 const afterAll=snapshotOf();
 for(const [table,body] of afterAll)if(!['film','film_external_id','film_dimension'].includes(table))assert.deepEqual(body,beforeAll.find(([name])=>name===table)[1],table);
 assert.deepEqual(rows(`select id,canonical_identity c from film order by id`).map(row=>[row.id,row.c]),[['film:1IUo','tmdb_tv:9687'],['film:3tCe','tmdb_tv:8042'],['film:daU4','tmdb_tv:64099'],['film:g97G','tmdb_tv:1457'],['film:tmdb:9687','tmdb:9687']]);
 assert.deepEqual(rows(`select scheme,value,trusted from film_external_id where film_id='film:1IUo' order by scheme`).map(row=>[row.scheme,row.value,row.trusted]),[['letterboxd','1IUo',1],['letterboxd_slug','s-1iuo',0],['tmdb','17266',0],['tmdb_tv','9687',1]]);
 assert.equal(JSON.parse(rows(`select provenance_json p from film_external_id where film_id='film:1IUo' and scheme='tmdb'`)[0].p).previous.source,'watchlist','the replaced provenance is kept');
 assert.deepEqual(rows(`select status,source_version v from film_dimension where film_id='film:1IUo' and dimension='identity'`),[{status:'resolved',v:'tmdb_tv:9687'}]);
-// Idempotent: a new plan finds every Film done and plans nothing; replaying the old statements changes nothing.
-plan=await planOnce();
-assert.deepEqual(plan.totals,{films:4,ready:4,unchanged:4,ownerReview:0,refused:0});
-assert.ok(plan.films.every(item=>item.d1.length===0));
-execute(first.d1);
-assert.deepEqual(snapshotOf(),afterAll);
+assert.deepEqual((await d1Readback(db,plan)).map(item=>item.state),['corrected','corrected','corrected','corrected']);
+// Idempotent: a new plan finds every Film done, with the same expected state, and the readback agrees.
+const replan=await planOnce();
+assert.deepEqual(replan.totals,{films:4,ready:4,unchanged:4,ownerReview:0,refused:0});
+assert.deepEqual(plain(replan.films.map(item=>item.d1Expected)),plain(plan.films.map(item=>item.d1Expected)));
+assert.deepEqual(snapshotOf(),afterAll,'re-planning writes nothing');
+// A tampered or partial D1 state is a mismatch in the readback and owner review in a new plan, never a done correction.
+sqlite(`UPDATE film_dimension SET provenance_json='{"letterboxdId":"1IUo","tmdbId":"17266"}' WHERE film_id='film:1IUo' AND dimension='identity';`);
+assert.equal((await d1Readback(db,plan))[0].state,'mismatch');
+assert.deepEqual((await planOnce()).films[0].reasons,['partial_correction']);
+sqlite(`UPDATE film_dimension SET provenance_json=${"'"+JSON.stringify(first.d1Expected.identity.provenance)+"'"} WHERE film_id='film:1IUo' AND dimension='identity';
+UPDATE film_external_id SET provenance_json='{"source":"letterboxd_tmdb_link"}' WHERE film_id='film:1IUo' AND scheme='tmdb_tv';`);
+assert.equal((await d1Readback(db,plan))[0].state,'mismatch');
+assert.deepEqual((await planOnce()).films[0].reasons,['partial_correction']);
+project(first);
+assert.equal((await d1Readback(db,plan))[0].state,'corrected');
 
 // Unexpected state is owner review, never a fix: a second Film already trusting the same TV entry, or still trusting the
 // retired movie id; a Film edited to another movie id; and evidence missing from the artifact refuses the retirement.

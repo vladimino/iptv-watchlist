@@ -1,9 +1,10 @@
 // AIR-290: offline dry-run plan for the four owner-confirmed retired TMDB movie ids of watchlist miniseries. It builds each
 // retirement from the private AIR-286 artifact (the saved movie 404, the Letterboxd TMDB link and the saved TV entry),
 // applies it to the Film as D1 holds it or as a snapshot projects it, and writes a per-record plan: old and new typed ids,
-// trust, collisions, the R2 records that carry the movie id, the D1 statements a later approved run would execute, and what
-// those statements must leave untouched. It executes nothing: no TMDB or Letterboxd request, no R2 or D1 write. The D1 read
-// is a local SQLite file, or the D1 HTTP API only when --database-id is given (a production read needs owner approval).
+// trust, collisions, the R2 records that carry the movie id, the R2 retirement entry, the D1 state the correction must
+// reach and what must stay untouched. It writes nothing anywhere: D1 follows R2 through the enrichment projector
+// (ADR 0056), so the expected D1 state is a readback contract, not a statement list. No TMDB or Letterboxd request. The D1
+// read is a local SQLite file, or the D1 HTTP API only when --database-id is given (a production read needs owner approval).
 // Only the four Films below are ever planned; nothing is inferred for any other Film.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -89,16 +90,22 @@ export function r2References(store,retirement){
  return refs;
 }
 
-// The statements a later, separately approved run executes for one Film. Each is guarded by the state it expects, so a
-// repeated run changes nothing and a Film in any other state is left alone (and the readback reports it).
-export function d1Statements(before,after,at){
- const movie=after.externalIds.find(item=>item.scheme==='tmdb'),tv=after.externalIds.find(item=>item.scheme==='tmdb_tv');
- return [
-  ['UPDATE film SET canonical_identity=?,updated_at=? WHERE id=? AND canonical_identity=?',[after.canonicalIdentity,at,after.id,before.canonicalIdentity]],
-  ["UPDATE film_external_id SET trusted=0,provenance_json=? WHERE film_id=? AND scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0",[JSON.stringify(movie.provenance),after.id,movie.value]],
-  ['INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,1,0,?) ON CONFLICT(film_id,scheme,value) DO NOTHING',[after.id,'tmdb_tv',tv.value,JSON.stringify(tv.provenance)]],
-  ["UPDATE film_dimension SET source_version=?,provenance_json=? WHERE film_id=? AND dimension='identity' AND source_version=?",[after.identity.sourceVersion,JSON.stringify(after.identity.provenance),after.id,before.identity.sourceVersion]]
- ];
+// The D1 identity of one corrected Film, as the projector must leave it: canonical identity, the `tmdb` and `tmdb_tv` rows
+// with trust and provenance, and the identity dimension. Timestamps are not part of it.
+export function d1Expected(film){
+ const pick=item=>({scheme:item.scheme,value:item.value,trusted:item.trusted,conflicting:item.conflicting,provenance:item.provenance??null});
+ return {canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds.filter(item=>item.scheme==='tmdb'||item.scheme==='tmdb_tv').map(pick),identity:{status:film.identity.status,sourceVersion:film.identity.sourceVersion,provenance:film.identity.provenance??null}};
+}
+const stableJson=value=>JSON.stringify(value,(key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a<b?-1:a>b?1:0)):item);
+// Reads D1 back against a plan: `corrected` when a Film holds exactly its expected identity, `pending` when it still holds
+// the identity the plan started from, `mismatch` for anything else. It only reads.
+export async function d1Readback(db,plan){
+ const films=plan.films.filter(item=>item.status==='ready'),{films:current}=await d1State(db,films.map(item=>item.filmId));
+ return films.map(item=>{
+  const film=current.get(item.filmId),now=film?.identity?d1Expected(film):null;
+  const state=!now?'mismatch':stableJson(now)===stableJson(item.d1Expected)?'corrected':stableJson(now)===stableJson(item.d1Before)?'pending':'mismatch';
+  return {filmId:item.filmId,state};
+ });
 }
 
 // The plan for the four Films. `films` maps a Film id to its current view (D1 or snapshot), `holders` lists every Film
@@ -125,7 +132,8 @@ export function buildPlan({domain,artifactDir,films,holders=[],preserved={},stor
    after:{canonicalIdentity:applied.film.canonicalIdentity,externalIds:plain(applied.film.externalIds.filter(item=>item.scheme==='tmdb'||item.scheme==='tmdb_tv'))},
    collisions,numericOverlaps,
    preserved:preserved[confirmed.filmId]??null,
-   d1:applied.changed?d1Statements(film,applied.film,at).map(([sql,params])=>({sql,params})):[],
+   d1Before:film.identity?d1Expected(film):null,
+   d1Expected:d1Expected(applied.film),
    r2:store?r2References(store,checked.retirement):null
   });
   entries.push({...checked.retirement});

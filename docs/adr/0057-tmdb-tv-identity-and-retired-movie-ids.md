@@ -31,7 +31,7 @@ Writing the TV number into the existing `tmdb` slot is unsafe, for three reasons
    - A trusted `tmdb_tv` held by two Films is a collision for owner review, never a merge.
    - D1's existing unique index on trusted `(scheme, value)` already keeps the two namespaces apart, so no schema change is needed.
 2. **The TMDB link is read from the page and compared with the attributes.**
-   - `letterboxdTmdbLink(html)` returns the single visible `https://www.themoviedb.org/(movie|tv)/<id>` link of a Letterboxd film page, typed.
+   - `letterboxdTmdbLink(html)` returns the single visible `https://www.themoviedb.org/(movie|tv)/<id>` link of a Letterboxd film page, typed. Only an anchor's `href` counts.
    - It resolves only when exactly one link agrees with exactly one attribute pair.
    - These cases go to review: a link that disagrees with the attributes, several links, contradictory or missing attributes.
    - A page with no link stays unresolved.
@@ -47,7 +47,7 @@ Writing the TV number into the existing `tmdb` slot is unsafe, for three reasons
      - **The movie id is kept, not trusted.** It stays as an untrusted `tmdb` entry whose provenance records `status: retired`, the reason, the evidence, the confirmation, the replacement and the provenance it replaced. Nothing is deleted.
      - **The TV entry becomes the identity.** It is the trusted `tmdb_tv` identity, with provenance from the Letterboxd link and the confirmation. `canonicalIdentity` becomes `tmdb_tv:<id>`. The identity dimension stays `resolved` and records both ids.
      - **Everything else is kept.** The Film id, lid, slug alias, aliases, localization, fingerprint, prediction, prediction history and redirects are unchanged.
-     - **A repeat is a no-op.** Applying the same retirement again returns the Film unchanged.
+     - **A repeat is a no-op, and only an exact one.** The result depends on the Film and the retirement only, not on the time of the run. A Film carrying exactly that result is returned unchanged. Exactly means: both entries with their full provenance, the canonical identity, and the identity dimension's version and ids. Any other trace of a correction is refused as partial.
      - **Any other state is refused, not repaired.** That covers a different Film, lid, movie id or TV id, a conflict, a half-applied correction and an unresolved identity.
    - Retirement is never inferred for other Films from a disagreement between the link and the attributes.
 4. **Where the retirement lives.**
@@ -90,7 +90,7 @@ Not decided or delivered here:
 - Miniseries can be a Film with a typed, verifiable TMDB identity, without any risk of being matched to a movie of the same number.
 - A retired movie id stays visible with its evidence, so the change is auditable and reversible.
 - Until the runtime integration ships, R2 and the lifecycle projection still produce the retired movie id as trusted. AIR-291 must not run before the runtime card is delivered, or the next projection undoes the correction. This applies above all to the ADR 0056 projector: it rewrites the external ids and `canonical_identity` of every changed Film from R2.
-- Once the projection applies the retirement, D1 follows R2 through the projector. The planner's guarded D1 statements then serve as the readback contract, and as a fallback if the projector is off. They are not a second writer racing it.
+- Once the projection applies the retirement, D1 follows R2 through the projector. The planner writes nothing. It states each Film's expected D1 identity, and `d1Readback` checks D1 against it. There is no hand-written D1 write path to race the projector.
 - `catalogReady` and the other readiness rules keep working, because the four Films keep their Letterboxd lid. Readers that need a TMDB entry must learn `tmdb_tv`; that is part of the runtime card.
 
 ## Recovery and migration boundary
@@ -99,7 +99,7 @@ Code and documentation only. Nothing in this record writes R2 or D1, sends a req
 
 The production correction is AIR-291, with its own preflight, fenced R2 snapshot, D1 Time Travel bookmark and owner approvals. It is reversible:
 - R2 by deleting the retirement entries;
-- D1 by the guarded inverse statements, or by restoring to the bookmark.
+- D1 by the next projector run after the R2 rollback, checked by `d1Readback`. A Time Travel restore to the bookmark is a separate, separately authorized whole-database recovery that also discards every later D1 write.
 
 The retired movie ids are never deleted. This record authorizes no operation.
 

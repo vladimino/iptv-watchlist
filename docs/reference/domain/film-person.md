@@ -52,7 +52,7 @@ A miniseries that TMDB keeps as a TV entry is identified by `{scheme: 'tmdb_tv',
   - `tmdbTvCollisions(films)` reports a trusted `tmdb_tv` held by two Films as a collision for owner review, and the same number as a movie id on another Film as a `numericOverlap` only.
   - `linkFilms` keeps refusing a Film whose `tmdb` value differs (`identity_collision`). It never links on a TV value.
 - **Letterboxd link.**
-  - `letterboxdTmdbLink(html)` returns the single visible `https://www.themoviedb.org/(movie|tv)/<id>` link, typed, with the page's `data-tmdb-type`/`data-tmdb-id` attributes.
+  - `letterboxdTmdbLink(html)` returns the single visible `https://www.themoviedb.org/(movie|tv)/<id>` link, typed. Only an anchor's `href` counts, not a URL in text, a `<link>` or another element, with the page's `data-tmdb-type`/`data-tmdb-id` attributes.
   - The status is `resolved` only when exactly one link agrees with exactly one attribute pair.
   - The status is `review` for `link_disagrees_with_attributes`, `multiple_tmdb_links`, `contradictory_attributes` or `attributes_missing`.
   - With no link the status is `unresolved` (`no_tmdb_link`).
@@ -67,15 +67,16 @@ A miniseries that TMDB keeps as a TV entry is identified by `{scheme: 'tmdb_tv',
   - Each missing or different piece is a named reason.
 - **Applying it.**
   - `applyTmdbRetirement(film, retirement, at)` changes only that Film:
-    - the `tmdb` entry becomes `trusted: false`, keeping its value; its provenance gets `status: retired`, `reason: tmdb_movie_404`, `retiredAt`, `replacement`, `evidence`, `confirmation` and `previous`;
+    - the `tmdb` entry becomes `trusted: false`, keeping its value; its provenance gets `status: retired`, `reason: tmdb_movie_404`, `replacement`, `evidence`, `confirmation` and `previous`;
     - a trusted `tmdb_tv` entry is added after it, with provenance `source: letterboxd_tmdb_link`;
     - `canonicalIdentity` becomes `tmdb_tv:<id>`;
     - the identity dimension stays `resolved`, with `sourceVersion` `tmdb_tv:<id>` and both ids in its provenance.
   - Everything else is unchanged.
-  - A Film already carrying the result is returned with `changed: false`.
+  - The result depends on the Film and the retirement only, never on the time of the run (except the dimension's `updatedAt`), so any writer's correction reads back identically.
+  - A Film carrying exactly the result is returned with `changed: false`. Exactly means all of these: the retired `tmdb` entry with its full provenance (including `previous`), the trusted `tmdb_tv` entry with its full provenance, `canonicalIdentity`, and the identity dimension's `sourceVersion` and both ids. Key order is ignored. Any other trace of a correction is `partial_correction`.
   - These states are refused, not repaired: `film_mismatch`, `lid_mismatch`, `identity_not_resolved`, `conflicting_tmdb`, `movie_id_mismatch`, `tv_id_mismatch`, `partial_correction`, `movie_not_trusted_identity`.
 - **Storage.** The retirements are one owner-approved R2 object, `identity/tmdb-retirements.json`, applied by the projection (runtime card). The records keep the movie id Letterboxd shows. D1 holds the untrusted retired `tmdb` row, the trusted `tmdb_tv` row and `canonical_identity` `tmdb_tv:<id>`; the unique index on trusted `(scheme, value)` separates the namespaces without a schema change.
-- **Plan.** `scripts/tmdb-tv-identity-plan.mjs` plans exactly the four confirmed Films from the private AIR-286 artifact. It reads either D1 or a snapshot, and executes nothing ([runbook](../../runbooks/tmdb-tv-identity-correction.md)).
+- **Plan.** `scripts/tmdb-tv-identity-plan.mjs` plans exactly the four confirmed Films from the private AIR-286 artifact. It reads either D1 or a snapshot, writes nothing, and states each Film's expected D1 identity; `d1Readback` compares D1 with it ([runbook](../../runbooks/tmdb-tv-identity-correction.md)). D1 is written by the enrichment projector ([ADR 0056](../../adr/0056-d1-enrichment-write-through.md)), not by this tool.
 
 ## Lifecycle dimensions and transition rules
 
