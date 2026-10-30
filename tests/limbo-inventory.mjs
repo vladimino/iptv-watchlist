@@ -62,11 +62,13 @@ assert.equal(stalled.evidence.observedAt, NOW);
 assert.equal(items.find(item => item.id === 'identity/incomplete/film:film:nodate').age.ms, null);
 // A film issue without a record still yields an item, with no title claimed.
 const bare = limboItems(evaluation, {films: []}).find(item => item.id === 'identity/stuck/film:film:stalled');
-assert.deepEqual([bare.film.title, bare.film.storedId, bare.film.inProgramme, bare.film.identity, bare.links.film], [null, null, false, null, null]);
+assert.deepEqual([bare.film.title, bare.film.storedId, bare.film.inProgramme, bare.film.identity, bare.links.film, bare.links.filmUnavailable], [null, null, false, null, null, 'record_not_observed']);
+const outside = limboItems(evaluation, {films: films.map(record => record.id === 'film:stalled' ? {...record, inProgramme: false} : record)}).find(item => item.id === 'identity/stuck/film:film:stalled');
+assert.deepEqual([outside.links.film, outside.links.filmUnavailable], [null, 'not_in_programme'], 'a record outside the programme gets no catalogue link');
 // Observations are items of their own kind, never Films.
 const observed = evaluateDataHealth({now: NOW, observations: [{key: 'title|2001', status: 'needs_verification', attempts: 2, retryAt: at(D), lastAttemptAt: at(-D)}]});
 const observation = limboItems(observed, {}).find(item => item.kind === 'observation');
-assert.deepEqual([observation.subjectId, observation.cause, observation.film, observation.links.film], ['title|2001', 'backoff', null, null]);
+assert.deepEqual([observation.subjectId, observation.cause, observation.film, observation.links.film, observation.links.filmUnavailable], ['title|2001', 'backoff', null, null, 'observation']);
 
 // 2. Context: whole-object issues and unread subsystems, never film items.
 const context = limboContext(evaluation);

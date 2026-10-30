@@ -22,7 +22,8 @@ for (const id of ['limbo-snapshot-text', 'limbo-causes', 'limbo-subsystems', 'li
 assert.ok(html.indexOf('id="limbo-causes"') < html.indexOf('id="limbo-results"'), 'filters come before results in tab order');
 assert.match(html, /<script src="\/admin-limbo\.js"><\/script>/);
 assert.match(html, /href="\/admin"/);
-assert.match(shell, /href="\/admin\/limbo"/, 'the catalogue page links to the inventory');
+assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limbo" id="admin-view-limbo">Лимбо<\/a><\/nav>/, 'the admin sections link to the inventory');
+assert.match(html, /<a href="\/admin\/limbo" aria-current="page">Лимбо<\/a>/, 'the inventory is the current section on its own page');
 assert.doesNotMatch(html, /fetch\(|\/api\/|programme\.json/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
 assert.doesNotMatch(bundle, /\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
@@ -69,8 +70,8 @@ function seed() {
   records.set('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: iso(-5 * H), films, people: {directors: [], actors: []}, stats: {}}); etags.set('epg/generations/' + G1 + '/programme.json', 'prog-1');
   records.set('titles.json', {}); etags.set('titles.json', 'titles-1');
   records.set('people.json', {}); etags.set('people.json', 'people-1');
-  records.set('enrichment/prediction-queue.json', {programmeRunId: G1, refreshedAt: iso(-H), lastCheckAt: iso(-H), hotPending: ['stuck', 'later'], coldPending: [], pending: ['stuck', 'later'], retries: {later: {attempts: 1, retryAt: NOW + 2 * H, kind: 'parse_error', scope: 'item', lastRunId: 'run-1'}}, work: {stuck: {requiredWork: 'prediction_only'}}}); etags.set('enrichment/prediction-queue.json', 'queue-1');
-  records.set('enrichment/view-index.json', {stuck: {fingerprintHash: 'f', prediction: {generatedAt: iso(-20 * D)}}, later: {fingerprintHash: 'g', prediction: {generatedAt: iso(-D)}}}); etags.set('enrichment/view-index.json', 'index-1');
+  records.set('enrichment/prediction-queue.json', {programmeRunId: G1, refreshedAt: iso(-H), lastCheckAt: iso(-H), hotPending: ['stuck', 'later'], coldPending: ['tmdb_77'], pending: ['stuck', 'later'], retries: {later: {attempts: 1, retryAt: NOW + 2 * H, kind: 'parse_error', scope: 'item', lastRunId: 'run-1'}}, work: {stuck: {requiredWork: 'prediction_only'}}}); etags.set('enrichment/prediction-queue.json', 'queue-1');
+  records.set('enrichment/view-index.json', {stuck: {fingerprintHash: 'f', prediction: {generatedAt: iso(-20 * D)}}, later: {fingerprintHash: 'g', prediction: {generatedAt: iso(-D)}}, tmdb_77: {fingerprintHash: 'c', prediction: {generatedAt: iso(-25 * D)}}}); etags.set('enrichment/view-index.json', 'index-1');
 }
 seed();
 const fakeFetch = async (input, init = {}) => {
@@ -134,7 +135,10 @@ assert.match(results.innerHTML, /нет прогресса дольше поро
 assert.match(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Astuck"/, 'a link to the film detail');
 assert.match(results.innerHTML, /доверенная идентичность tmdb:1/);
 assert.doesNotMatch(results.innerHTML, /Позже/, 'a valid backoff is not stalled');
-assert.equal(nodes.get('#limbo-total').textContent, '1');
+assert.equal(nodes.get('#limbo-total').textContent, '2');
+assert.match(results.innerHTML, /фильм каталога \(вне программы\)/);
+assert.match(results.innerHTML, /Фильма нет в опубликованной программе: карточки в каталоге данных для него нет\./, 'the missing link is explained');
+assert.equal((results.innerHTML.match(/Открыть в каталоге данных/g) || []).length, 1, 'only the programme film links to the catalogue');
 assert.match(nodes.get('#limbo-snapshot-text').textContent, /Поколение 11111111/);
 assert.match(nodes.get('#limbo-snapshot-text').textContent, /очередь прогнозов от 30\.10\.2026/);
 assert.match(nodes.get('#limbo-causes').innerHTML, /data-limbo-cause="stalled" aria-pressed="true"/);
@@ -181,15 +185,16 @@ await run('limboRender()');
 await settle();
 assert.equal((results.innerHTML.match(/class="admin-hit limbo-item"/g) || []).length, 25);
 assert.match(results.innerHTML, /data-limbo-more="items"/);
-assert.equal(nodes.get('#limbo-total').textContent, '32');
+assert.equal(nodes.get('#limbo-total').textContent, '33');
 requests = [];
 await run('onLimboMore()');
 await settle();
 assert.equal(requests.length, 1);
 assert.match(requests[0].path, /cursor=/);
 assert.match(requests[0].path, /pin=/);
-assert.equal((results.innerHTML.match(/class="admin-hit limbo-item"/g) || []).length, 32);
+assert.equal((results.innerHTML.match(/class="admin-hit limbo-item"/g) || []).length, 33);
 assert.doesNotMatch(results.innerHTML, /data-limbo-more="items"/, 'the last page removes the button');
+assert.doesNotMatch(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Atmdb/, 'no catalogue link for a film outside the programme');
 
 // 6. Empty is not an error: no observation is listed, and the page says why that is not a verdict.
 window.location.href = 'http://127.0.0.1/admin/limbo?kind=observation';

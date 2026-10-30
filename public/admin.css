@@ -92,7 +92,6 @@
 @media(max-width:800px){.admin-health-head{flex-wrap:wrap}.health-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.health-group-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.health-group-count{margin-left:0;width:100%}}
 @media(max-width:340px){.health-cards{grid-template-columns:minmax(0,1fr)}}
 /* Limbo inventory */
-.admin-nav{display:flex;flex-wrap:wrap;gap:8px}
 .admin-page .brand{white-space:nowrap}
 .limbo-filters h2{margin-bottom:4px}
 .limbo-form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px;margin:10px 0 0}
@@ -115,4 +114,4 @@
 .limbo-context li{margin:0 0 4px}
 .limbo-unavailable{color:#e6d9a6;font-size:13px}
 @media(max-width:800px){.limbo-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.limbo-form{flex-direction:column;align-items:stretch}}
-@media(max-width:520px){.admin-page .masthead{flex-wrap:wrap;gap:10px}.admin-nav{width:100%}.admin-nav .admin-home{flex:1;text-align:center}}
+@media(max-width:520px){.admin-views{overflow-x:auto}.admin-views a{padding:10px 10px;white-space:nowrap}}

@@ -170,7 +170,11 @@ assert.equal(all.some(item=>item.subsystem==='poster'),false,'posters are not li
 // A catalog film the programme does not carry: a minimal record with the queue's generation, no programme link claims.
 const catalog=find('prediction/stuck/film:film:tmdb:5551');
 assert.deepEqual([catalog.cause,catalog.film.storedId,catalog.film.inProgramme,catalog.film.title,catalog.film.identity.status,catalog.age.days],['stalled','tmdb_5551',false,null,null,30]);
-assert.equal(catalog.links.film,'/admin?kind=film&id=film%3Atmdb%3A5551');
+assert.deepEqual([catalog.links.film,catalog.links.filmUnavailable],[null,'not_in_programme'],'the catalogue detail reads the programme only: no link that would answer 404');
+assert.deepEqual([stalled.links.film,stalled.links.filmUnavailable],['/admin?kind=film&id=film%3Astalled4',null]);
+// Every film link the inventory gives opens a record in the catalogue detail route.
+for(const item of all.filter(entry=>entry.links.film)){const detail=await call('/api/admin/films/'+encodeURIComponent(item.film.id));assert.equal(detail.status,200,item.links.film);}
+const missingDetail=await call('/api/admin/films/'+encodeURIComponent('film:tmdb:5551'));assert.equal(missingDetail.status,404,'the queue-only film really is absent from the catalogue detail');
 // Counts cover the whole inventory and agree with the items.
 assert.equal(r.body.counts.total,all.length);
 assert.equal(r.body.counts.byCause.stalled,all.filter(item=>item.cause==='stalled').length);
@@ -248,10 +252,22 @@ assert.equal(r.body.snapshot.queueProgrammeRunId,G2);
 const lagging=await walkAll('/api/admin/limbo?limit=25');
 const laggingCatalog=lagging.find(item=>item.id==='prediction/stuck/film:film:tmdb:5551');
 assert.deepEqual([laggingCatalog.cause,laggingCatalog.action.reason,laggingCatalog.evidence.anomalies],['stale_projection','generation_changed',['projection_generation_differs']]);
-const laggingOverdue=lagging.find(item=>item.id==='prediction/stuck/film:film:overdue8');
-assert.equal(laggingOverdue.cause,'retry_eligible','a programme film of the published generation keeps its own generation');
-r=await call('/api/admin/limbo?cause=stale_projection');
-assert.deepEqual(r.body.items.map(item=>item.id),['prediction/stuck/film:film:tmdb:5551']);
+// Fail closed: every per-film diagnosis derived from that queue is a stale projection, never an eligible action, even for a
+// programme film of the published generation (its overdue retry, its stalled prediction, its queued work).
+const queueDerived=lagging.filter(item=>item.subsystem==='prediction'||item.subsystem==='fingerprint');
+assert.ok(queueDerived.length>=6,JSON.stringify(queueDerived.map(item=>item.id)));
+for(const item of queueDerived){
+ assert.equal(item.cause,'stale_projection',item.id);
+ assert.deepEqual(item.action,{suggested:'wait',code:'reread_snapshot',eligible:false,reason:'generation_changed'},item.id);
+ assert.ok(item.evidence.anomalies.includes('projection_generation_differs'),item.id);
+}
+for(const id of ['prediction/stuck/film:film:overdue8','prediction/stuck/film:film:beyond9','prediction/stuck/film:film:stalled4'])assert.ok(queueDerived.some(item=>item.id===id),id);
+assert.equal(lagging.some(item=>item.action.eligible===true&&(item.subsystem==='prediction'||item.subsystem==='fingerprint')),false,'no queue-derived item is actionable');
+// Programme-derived diagnoses of the published generation keep their own verdict.
+const laggingMeta=lagging.find(item=>item.id==='metadata/stale/film:film:stale2');
+assert.deepEqual([laggingMeta.cause,laggingMeta.action.eligible,laggingMeta.evidence.anomalies],['retry_eligible',true,[]]);
+r=await walkAll('/api/admin/limbo?cause=stale_projection&limit=25');
+assert.deepEqual(r.map(item=>item.id).sort(),queueDerived.map(item=>item.id).sort());
 
 // 7. Changing generation: the pointer moves to a generation whose programme object is absent; no root fallback, no items.
 seed();r=await call('/api/admin/limbo');const pinG1=r.body.pin;

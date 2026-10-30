@@ -76,9 +76,13 @@ function limboDiagnostics(issue) {
   return picked;
 }
 
+// The catalogue detail (`/admin?kind=film&id=`) reads the published programme only, so a link is given only for a record that
+// came from it. Anything else names why there is no link instead of pointing at a 404.
 function limboLinks(kind, record) {
-  if (kind === 'film' && record?.id) return {film: '/admin?kind=film&id=' + encodeURIComponent(record.id), identityReview: null};
-  return {film: null, identityReview: null};
+  if (kind !== 'film') return {film: null, filmUnavailable: 'observation', identityReview: null};
+  if (!record?.id) return {film: null, filmUnavailable: 'record_not_observed', identityReview: null};
+  if (record.inProgramme === false || !record.storedId) return {film: null, filmUnavailable: 'not_in_programme', identityReview: null};
+  return {film: '/admin?kind=film&id=' + encodeURIComponent(record.id), filmUnavailable: null, identityReview: null};
 }
 
 // One item per film or observation issue of the inventory subsystems, in the order of the health result. `context.films`

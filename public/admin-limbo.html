@@ -12,7 +12,7 @@
 <body class="admin-page">
   <header class="masthead">
     <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ лимбо</span></div>
-    <nav class="admin-nav" aria-label="Страницы владельца"><a class="admin-home" href="/admin">Каталог данных</a><a class="admin-home" href="/">К программе</a></nav>
+    <a class="admin-home" href="/">К программе</a>
   </header>
   <main class="admin-shell">
     <section class="page-heading">
@@ -22,6 +22,7 @@
         <p class="admin-intro">Фильмы, по которым обработка не продвигается, и почему: ждут ли они по правилам, застряли или требуют ручного разбора. Страница ничего не запускает и не меняет.</p>
       </div>
     </section>
+    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin?view=health">Здоровье данных</a><a href="/admin/limbo" aria-current="page">Лимбо</a></nav>
     <p id="limbo-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="limbo-snapshot-text">Снимок ещё не прочитан.</span></p>
     <section aria-labelledby="limbo-filters-title" class="limbo-filters">
       <h2 id="limbo-filters-title">Фильтры</h2>

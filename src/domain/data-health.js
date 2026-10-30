@@ -419,9 +419,16 @@ function filmIssues(record, context) {
     }));
   }
 
+  // Fingerprint and prediction verdicts rest on the prediction queue (membership, retries) and may carry their own source
+  // generation. When either belongs to another published generation than the one read, the dimension fails closed: its
+  // evidence carries `projection_generation_differs` and its action waits for a re-read, whatever the progress says.
+  const queueStale = Boolean(queue) && projectionGenerationDiffers(queue.programmeRunId, published);
   for (const dimension of ['fingerprint', 'prediction']) {
     const state = record[dimension];
     if (!state || state.status === 'current') continue;
+    const dimensionStale = generationChanged || queueStale || projectionGenerationDiffers(state.programmeRunId, published);
+    const dimensionBlocked = dimensionStale ? 'generation_changed' : null;
+    const dimensionAnomalies = dimensionStale && !generationChanged ? ['projection_generation_differs'] : [];
     const queued = queue ? queue.outstanding.has(id) : null;
     const retry = queue?.retries?.[id];
     if (state.status === 'failed' || retry) {
@@ -429,14 +436,14 @@ function filmIssues(record, context) {
       const progress = progressOf(facts, clock, thresholds, thresholds.predictionMaxBackoffMs);
       issues.push(issue({
         subsystem: dimension, category: progressCategory(progress), severity: progressSeverity(progress, thresholds), reason: reasonOf(progress, thresholds),
-        subject: {kind: 'film', id}, evidence: base({missing: queue ? [] : ['predictionQueue'], anomalies: skewed(progress)}), observedAt: iso(observed.ms), lastProgressAt: progress.lastProgressAt, progress,
+        subject: {kind: 'film', id}, evidence: base({missing: queue ? [] : ['predictionQueue'], anomalies: [...dimensionAnomalies, ...skewed(progress)]}), observedAt: iso(observed.ms), lastProgressAt: progress.lastProgressAt, progress,
         threshold: progress.thresholdMs === null ? null : {code: thresholdCode(progress, 'predictionMaxBackoffMs'), value: progress.thresholdMs, unit: 'ms'},
         provenance: provenance(dimension + '.progress', {status: state.status, failureReason: state.failureReason ?? retry?.kind ?? null, retryScope: retry?.scope ?? null, lastRunId: retry?.lastRunId ?? null}),
-        action: progressAction(progress, 'prediction_retry', blockedByGeneration),
+        action: progressAction(progress, 'prediction_retry', dimensionBlocked),
       }));
       continue;
     }
-    if (queued === false && !generationChanged) {
+    if (queued === false && !dimensionStale) {
       const changed = clock.at(state.updatedAt);
       const refreshed = clock.latest(queue.raw.lastCheckAt, queue.raw.lastBatch?.finishedAt);
       const confirmed = changed.ms !== null && refreshed.ms !== null && !changed.skew && !refreshed.skew && refreshed.ms > changed.ms;
@@ -454,10 +461,10 @@ function filmIssues(record, context) {
       subsystem: dimension, category: progress.status === 'stalled' ? 'stuck' : 'incomplete',
       severity: progress.status === 'stalled' ? 'warning' : 'info',
       reason: progress.status === 'stalled' ? 'no_progress' : waiting ? 'work_queued' : 'work_pending',
-      subject: {kind: 'film', id}, evidence: base({missing: queue ? [] : ['predictionQueue'], anomalies: skewed(progress)}), observedAt: iso(observed.ms), lastProgressAt: progress.lastProgressAt, progress,
+      subject: {kind: 'film', id}, evidence: base({missing: queue ? [] : ['predictionQueue'], anomalies: [...dimensionAnomalies, ...skewed(progress)]}), observedAt: iso(observed.ms), lastProgressAt: progress.lastProgressAt, progress,
       threshold: {code: 'stalledMs', value: thresholds.stalledMs, unit: 'ms'},
       provenance: provenance(dimension + '.status', {status: state.status, nextAction: state.nextAction ?? null, queued}),
-      action: blockedByGeneration ? action('wait', 'reread_snapshot', false, 'generation_changed')
+      action: dimensionBlocked ? action('wait', 'reread_snapshot', false, 'generation_changed')
         : waiting ? action(progress.status === 'stalled' ? 'investigate' : 'wait', 'prediction_retry', false, 'already_queued')
         : queue ? action('investigate', 'prediction_retry', true, 'eligible')
         : action('investigate', 'supply_evidence', null, 'evidence_incomplete'),

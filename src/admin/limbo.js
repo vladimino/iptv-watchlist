@@ -56,9 +56,10 @@ function limboFilms(base,queue,index){
   }
   const entry=index?.[storedId]&&typeof index[storedId]==='object'?index[storedId]:null,retry=retries[storedId]&&typeof retries[storedId]==='object'?retries[storedId]:null,plan=work[storedId]&&typeof work[storedId]==='object'?work[storedId]:null;
   const generatedAt=typeof entry?.prediction?.generatedAt==='string'?entry.prediction.generatedAt:null;
-  record.prediction={status:entry?.prediction?'stale':'missing',updatedAt:generatedAt,attempts:Number.isInteger(retry?.attempts)?retry.attempts:0,failureReason:typeof retry?.kind==='string'?retry.kind:null,nextAction:plan?.requiredWork??null};
-  if(plan?.requiredWork==='prediction_only')record.fingerprint={status:'current',updatedAt:generatedAt};
-  else if(plan?.requiredWork==='fingerprint_and_prediction')record.fingerprint={status:entry?.fingerprintHash?'stale':'missing',updatedAt:generatedAt,nextAction:'fingerprint_and_prediction'};
+  const sourceRunId=typeof queue.programmeRunId==='string'&&queue.programmeRunId?queue.programmeRunId:null;
+  record.prediction={programmeRunId:sourceRunId,status:entry?.prediction?'stale':'missing',updatedAt:generatedAt,attempts:Number.isInteger(retry?.attempts)?retry.attempts:0,failureReason:typeof retry?.kind==='string'?retry.kind:null,nextAction:plan?.requiredWork??null};
+  if(plan?.requiredWork==='prediction_only')record.fingerprint={programmeRunId:sourceRunId,status:'current',updatedAt:generatedAt};
+  else if(plan?.requiredWork==='fingerprint_and_prediction')record.fingerprint={programmeRunId:sourceRunId,status:entry?.fingerprintHash?'stale':'missing',updatedAt:generatedAt,nextAction:'fingerprint_and_prediction'};
  }
  return films;
 }

@@ -389,6 +389,25 @@ assert.equal(evaluate(complete({pin: {programmeRunId: 'gen-2'}})).issues.length,
 assert.equal(evaluate(complete({pin: 'gen-1'})).issues.length, 0, 'a malformed pin is ignored');
 assert.equal(evaluate({now: NOW, pin: {programmeRunId: 'gen-1'}, films: [film('film:old', {programmeRunId: 'gen-1', metadata: {status: 'missing'}})]}).issues.find(item => item.id === 'metadata/incomplete/film:film:old').evidence.anomalies.length, 0, 'without a published pointer no generation comparison is made');
 
+// A queue of another generation fails every queue-derived per-film verdict closed, and so does an envelope stamped with
+// another generation; the programme-derived dimensions of the same film keep theirs.
+const queueOtherGeneration = checkResult(evaluate(complete({
+  films: [
+    film('film:qa', {prediction: {status: 'failed', updatedAt: at(-6 * H)}, metadata: {status: 'missing'}}),
+    film('film:qb', {prediction: {status: 'stale', updatedAt: at(-20 * D)}}),
+  ],
+  predictionQueue: queue({programmeRunId: 'gen-1', hotPending: ['film:qa', 'film:qb'], retries: {'film:qa': {attempts: 1, retryAt: Date.parse(NOW) - 5 * H}}}),
+})));
+for (const id of ['prediction/stuck/film:film:qa', 'prediction/stuck/film:film:qb']) {
+  const item = one(queueOtherGeneration, id);
+  assert.deepEqual(item.action, {suggested: 'wait', code: 'reread_snapshot', eligible: false, reason: 'generation_changed'}, id);
+  assert.ok(item.evidence.anomalies.includes('projection_generation_differs'), id);
+}
+assert.deepEqual(one(queueOtherGeneration, 'metadata/incomplete/film:film:qa').action, {suggested: 'bounded_action', code: 'metadata_refresh', eligible: true, reason: 'eligible'});
+const envelopeOtherGeneration = one(checkResult(evaluate(complete({films: [film('film:qc', {prediction: {programmeRunId: 'gen-1', status: 'stale', updatedAt: at(-20 * D)}})]}))), 'prediction/stuck/film:film:qc');
+assert.deepEqual([envelopeOtherGeneration.action.reason, envelopeOtherGeneration.action.eligible], ['generation_changed', false]);
+assert.deepEqual(one(checkResult(evaluate(complete({films: [film('film:qd', {prediction: {programmeRunId: 'gen-2', status: 'failed', updatedAt: at(-6 * H)}})], predictionQueue: queue({hotPending: ['film:qd'], retries: {'film:qd': {attempts: 1, retryAt: Date.parse(NOW) - 5 * H}}})}))), 'prediction/stuck/film:film:qd').action, {suggested: 'bounded_action', code: 'prediction_retry', eligible: true, reason: 'eligible'}, 'an envelope and a queue of the published generation are not blocked');
+
 // The prediction queue as a whole: eligible work nobody takes is stuck after a day; all-deferred work waits;
 // a deferral beyond the policy cap is an anomaly; progress without a recorded check is unknown.
 const queueStuck = one(checkResult(evaluate(complete({predictionQueue: queue({hotPending: ['film:h1', 'film:h2'], coldPending: ['film:c1'], lastCheckAt: at(-25 * H), lastBatch: {finishedAt: at(-26 * H), stage: 'complete', reason: 'time_budget'}})}))), 'prediction_queue/stuck/queue:prediction');

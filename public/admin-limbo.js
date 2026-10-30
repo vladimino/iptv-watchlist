@@ -222,6 +222,8 @@ function limboItemHtml(item) {
   if (diagnosticParts.length) rows.push(['диагностика', diagnosticParts.join(' · ')]);
   const links = [];
   if (item.links?.film) links.push(`<a class="limbo-link" href="${limboEscape(item.links.film)}">Открыть в каталоге данных</a>`);
+  else if (item.links?.filmUnavailable === 'not_in_programme') links.push('<span class="muted limbo-unlinked">Фильма нет в опубликованной программе: карточки в каталоге данных для него нет.</span>');
+  else if (item.links?.filmUnavailable === 'record_not_observed') links.push('<span class="muted limbo-unlinked">Запись фильма в этом снимке не прочитана: карточку открыть нельзя.</span>');
   if (item.kind === 'observation') links.push('<span class="muted">Identity Review для наблюдений ещё не доступен.</span>');
   return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span><span class="admin-hit-meta">${limboEscape([kindLabel, film?.storedId, film?.year ? String(film.year) : null, item.id].filter(Boolean).join(' · '))}</span><span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || item.cause)}${limboBadge('plain', LIMBO_SUBSYSTEM_LABELS[item.subsystem] || item.subsystem)}${limboBadge(item.severity === 'critical' ? 'conflict' : item.severity === 'warning' ? 'provisional' : 'missing', LIMBO_SEVERITY_TEXT[item.severity] || item.severity)}</span><dl class="limbo-facts">${rows.map(([name, value]) => `<div><dt>${limboEscape(name)}</dt><dd>${limboEscape(value)}</dd></div>`).join('')}</dl>${links.length ? `<p class="limbo-links">${links.join(' ')}</p>` : ''}</article>`;
 }
