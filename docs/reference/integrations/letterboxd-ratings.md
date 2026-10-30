@@ -18,7 +18,7 @@ The integration footer does not use this document for current ratings health; th
   - A blocked or failed diary leaves every stored rating in place and records `ratingError` ([enrichment API](../api/enrichment.md)).
   - With the gate off, the commit writes no rating, except through the removal lookup.
   - The attempt is traced as below.
-- The per-film lookup and the owner `PUT /api/enrichment/actual-ratings` write single ratings, and with `LETTERBOXD_FACTS=on` the fact records ([user facts contract](letterboxd-user-facts.md)).
+- The per-film lookup and the owner `PUT /api/enrichment/actual-ratings` write single ratings through the fact records ([user facts contract](letterboxd-user-facts.md)); no switch selects a legacy writer ([ADR 0055](../../adr/0055-retire-letterboxd-facts-switch.md)).
 - A watchlist removal event still receives a half-star rating when the per-film lookup records one.
 - The films-list scan (`refreshRatingsFromFilms`) and the diary and baseline repairs stay in the code but are not part of the EPG commit. A stored films-list summary remains the floor of later observations.
 

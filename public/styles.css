@@ -132,6 +132,14 @@
 .film-section h2{margin:0 0 10px;color:var(--lime);font-size:12px;font-weight:650;letter-spacing:.14em;text-transform:uppercase}
 .film-page-synopsis{max-width:62ch;margin:0;font-size:16px;line-height:1.6;overflow-wrap:anywhere}
 .film-missing{margin:8px 0 0;color:var(--muted)}
+.history-action{margin-top:10px;min-height:36px;padding:6px 14px;border:1px solid #465044;border-radius:8px;background:var(--surface);color:var(--text);font:inherit;font-size:14px;cursor:pointer}.history-action:hover{border-color:var(--lime);color:var(--lime)}.history-action:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
+.history-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 0 14px}.history-summary div{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.history-summary dt{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase}.history-summary dd{margin:4px 0 0;font-size:14px;overflow-wrap:anywhere}
+.history-list{list-style:none;margin:0;padding:0}.history-event{display:grid;grid-template-columns:150px minmax(0,1fr);gap:4px 14px;padding:10px 0 10px 12px;border-left:3px solid var(--line);border-bottom:1px solid #262d27}
+.history-prediction{border-left-color:var(--lime)}.history-rating,.history-legacy_rating{border-left-color:var(--blue)}.history-diary_viewing{border-left-color:#e3c48e}.history-event.is-current{background:#1d241e}
+.history-when{display:flex;flex-direction:column;gap:2px;color:var(--muted);font-size:13px}.history-type{color:var(--text);font-size:11px;font-weight:650;letter-spacing:.1em;text-transform:uppercase}.history-current{align-self:flex-start;margin-top:2px;padding:1px 7px;border-radius:999px;background:var(--lime);color:#17241b;font-size:11px;font-weight:700}
+.history-body{min-width:0}.history-body p{margin:0 0 4px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}.history-headline strong{font-weight:650}.history-label{color:var(--muted)}.history-meta{color:var(--muted);font-size:12px!important}.history-warn{color:#e3c48e}
+.history-earlier,.history-notes{margin:8px 0}.history-earlier summary,.history-notes summary{min-height:36px;padding:9px 0;cursor:pointer;color:var(--muted);font-size:13px}.history-earlier summary:focus-visible,.history-notes summary:focus-visible{outline:2px solid var(--lime);outline-offset:2px}.history-notes ul{margin:6px 0 0;padding-left:18px;color:var(--muted);font-size:13px;line-height:1.5}
+@media(max-width:760px){.history-summary{grid-template-columns:1fr}.history-event{grid-template-columns:1fr}.history-when{flex-direction:row;flex-wrap:wrap;align-items:baseline;gap:4px 8px}}
 .film-people-row{display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px 12px;align-items:baseline;margin:0 0 10px}
 .film-people-row h3{margin:0;color:var(--muted);font-size:14px;font-weight:600}
 .film-people{display:flex;flex-wrap:wrap;gap:8px 12px;min-width:0}

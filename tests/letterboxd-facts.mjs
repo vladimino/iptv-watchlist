@@ -68,7 +68,7 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
 
 // Storage: alias index, CAS retry under contention, redirects and fences, projection under every id of the film.
 {
- const b=bucket(),env={BUCKET:b,LETTERBOXD_FACTS:'on'};
+ const b=bucket(),env={BUCKET:b};
  assert.equal(await F.linkFilm(env,{letterboxd:'heat',tmdb:'949'}),'tmdb-949');
  assert.equal(await F.linkFilm(env,{letterboxd:'heat'}),'tmdb-949','an existing alias keeps its record');
  assert.equal(await F.resolveAlias(env,'tmdb:949'),'tmdb-949');
@@ -144,24 +144,29 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal(drive.watchlist.value,false,'added by the resumed w3, then removed by w4');assert.equal(drive.watchlist.replaced.observedAt,at(2));
 }
 
-// Worker writers behind LETTERBOXD_FACTS: the EPG films scan no longer clears ratings by absence; off keeps the old path.
-{
+// The EPG films scan always writes through the facts (LETTERBOXD_FACTS retired, ADR 0055): absence never clears a rating,
+// and no value of the stale binding (absent, off, on, a near miss, an object) brings back the legacy path.
+for(const stale of [undefined,'on','off','On',{token:'x'}]){
  const b=bucket(),records=b.records,film=id=>({id,url:'https://letterboxd.com/film/'+id+'/',title:id,original:id,year:2020,genres:[],shows:[]});
  const listing='<h1 title="1&nbsp;films">Watched</h1><li class="griditem"><div data-postered-identifier=\'{&quot;lid&quot;:&quot;seen&quot;}\'></div></li>';
  const ctx2=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout:fn=>fn(),fetch:async()=>({ok:true,status:200,text:async()=>listing}),ASSETS:{},INITIAL_PERSONAL_RATINGS:{}});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx2);
  for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx2);
  await b.put('enrichment/view-index.json',JSON.stringify({kept:{actualRating:4}}));
- ctx2.env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml',BUCKET:b,LETTERBOXD_FACTS:'on'};
+ ctx2.env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml',BUCKET:b,...(stale===undefined?{}:{LETTERBOXD_FACTS:stale})};
  ctx2.report={runId:'r1',films:[film('kept'),film('seen')]};
- const on=await vm.runInContext('refreshRatingsFromFilms(env,report)',ctx2);
- assert.equal(records.get('enrichment/view-index.json').kept.actualRating,4,'absence no longer clears a rating');
- assert.equal(records.get('enrichment/view-index.json').seen.watched,true);assert.equal(on.facts.written,1);
- assert.equal(records.get('letterboxd/facts/scans/films-list.json').total,1);
- ctx2.env={...ctx2.env,LETTERBOXD_FACTS:undefined};records.delete('letterboxd/facts/scans/films-list.json');
- await vm.runInContext('refreshRatingsFromFilms(env,report)',ctx2);
- assert.equal(records.get('enrichment/view-index.json').kept.actualRating,null,'with the gate off the legacy path is unchanged');
- assert.equal(records.has('letterboxd/facts/scans/films-list.json'),false);
+ const label='binding '+JSON.stringify(stale);
+ const scan=await vm.runInContext('refreshRatingsFromFilms(env,report)',ctx2);
+ assert.equal(records.get('enrichment/view-index.json').kept.actualRating,4,'absence does not clear a rating, '+label);
+ assert.equal(records.get('enrichment/view-index.json').seen.watched,true,label);assert.equal(scan.facts.written,1,label);
+ assert.equal(records.get('letterboxd/facts/scans/films-list.json').total,1,label);
+ assert.equal(records.has('enrichment/diagnostics/rating-observations.json'),false,'the legacy observation log is not written, '+label);
+ // A complete watchlist is one observation of every listed film, whatever the stale binding holds.
+ ctx2.run={runId:'r1',stage:'epg',watchlistObservedAt:new Date().toISOString(),events:[]};
+ ctx2.full={runId:'r1',updatedAt:new Date().toISOString(),watchlistCount:2,films:[{...film('kept'),tmdbId:'901'},{...film('seen'),tmdbId:'902'}],stats:{}};
+ await vm.runInContext('finishSync(env,run,full)',ctx2);
+ assert.equal(records.get('letterboxd/facts/scans/watchlist.json').scanId,'r1',label);
+ assert.equal(records.get(F.recordKey('tmdb-901')).watchlist.value,true,label);
 }
 // Staged publication: a crash between the stage and the facts keeps the old summary published and resumes on retry.
 {
@@ -202,13 +207,13 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal(b.records.has(F.recordKey('lb-newfilm')),false);
 }
 
-// Owner rating edit with the gate on: facts first; a rejected observation leaves actual.json alone and says so.
+// Owner rating edit, always through the facts (ADR 0055): facts first; a rejected observation leaves actual.json alone and says so.
 {
  const b=bucket(),records=b.records;
  const ctx3=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout:fn=>fn(),fetch:async()=>{throw new Error('no network');},ASSETS:{},INITIAL_PERSONAL_RATINGS:{}});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx3);
  for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx3);
- const env={BUCKET:b,LETTERBOXD_FACTS:'on',LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml'};
+ const env={BUCKET:b,LETTERBOXD_FACTS:'off',LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml'};
  const put=async items=>{const r=await ctx3.worker.fetch(new Request('https://site.example/api/enrichment/actual-ratings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})}),env);return (await r.json()).results;};
  let results=await put([{filmId:'heat',rating:4}]);assert.equal(results[0].status,'saved');
  assert.equal(records.get('enrichment/films/heat/actual.json').rating,4);assert.equal(records.get('enrichment/view-index.json').heat.actualRating,4);
@@ -216,5 +221,6 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  await b.put('letterboxd/facts/scans/films-list.json',JSON.stringify({schemaVersion:1,scanId:'later',observedAt:future,total:1,films:{heat:2}}));
  results=await put([{filmId:'heat',rating:5}]);
  assert.equal(results[0].status,'older');assert.equal(records.get('enrichment/films/heat/actual.json').rating,4,'a rejected edit does not touch actual.json');
+ assert.ok(records.has(F.recordKey('lb-heat')),'the stale off binding did not bring back the legacy writer');
 }
-console.log('Letterboxd facts: order and ties, null and before-image, rollback and overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, staged publication and crash resume with the stage context, conflict registry, facts-first owner edit, gated writers passed');
+console.log('Letterboxd facts: order and ties, null and before-image, rollback and overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, staged publication and crash resume with the stage context, conflict registry, facts-first owner edit, writers inert to the retired switch passed');

@@ -511,7 +511,149 @@ function filmShowMark(show,nearest){if(!nearest)return '';if(show.start===neares
 function filmShowRow(show,nearest){const time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(new Date(show.start));return `<div class="show-row${filmShowMark(show,nearest)}">${channelControl(show)}<time class="show-time" datetime="${new Date(show.start).toISOString()}">${madridStamp(show.start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`;}
 function filmNowLine(kind,show){return `<p class="film-nearest"><span>${kind}</span> ${channelControl(show)}<time datetime="${new Date(show.start).toISOString()}">${escapeHTML(madridStamp(show.start))}</time></p>`;}
 function filmAvailability(film){const now=viewingClock(),shows=availableShows(film,now),until=availabilityTime(film,now),nearest=nearestAvailable(shows,now),untilText=until?madridStamp(until):'';const facts=`<div class="film-facts">${isLastChance(film,now)?lastChanceBadge(film):''}<p class="film-fact">Осталось показов <strong>${shows.length}</strong></p>${untilText?`<p class="film-fact">Доступно до <time datetime="${new Date(until).toISOString()}">${escapeHTML(untilText)}</time></p>`:'<p class="film-missing">Срок доступности не определён</p>'}</div>`;const calls=nearest?`<div class="film-callouts">${filmNowLine(nearest.label,nearest.show)}${nearest.also?filmNowLine(nearest.nextLabel,nearest.also):''}</div>`:'';const list=shows.length?`<div class="film-show-list">${shows.map(show=>filmShowRow(show,nearest)).join('')}</div>`:'<p class="film-missing">Нет показов в текущем окне программы</p>';return `<section class="film-section film-availability" aria-label="Показы"><h2>Показы</h2><div class="film-availability-summary">${facts}${calls}</div>${list}</section>`;}
-function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability'])setFilmHtml(id,'');if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');if(actions)actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-synopsis',filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));}
+// Film timeline: predictions, rating observations and Diary viewings of one film, read on demand from the read-only
+// GET /api/enrichment/history (contract: docs/reference/api/film-history.md). The rest of the page renders without it,
+// and a failure stays inside this section. Shown in the API's order; nothing is merged, filled or invented here.
+const FILM_HISTORY_PAGE=100,FILM_HISTORY_MAX_PAGES=20,FILM_HISTORY_RESTARTS=2,FILM_HISTORY_VISIBLE=8;
+let filmHistory={filmId:null,status:'idle',events:[],data:null,error:null,truncated:false,token:0};
+const HISTORY_SOURCES={owner:'вручную',letterboxd_export:'экспорт Letterboxd',letterboxd_films_list:'список фильмов Letterboxd',letterboxd_film_page:'страница фильма Letterboxd',letterboxd_member_film:'страница фильма Letterboxd',letterboxd_public_films:'список фильмов Letterboxd',letterboxd_diary:'Diary Letterboxd'};
+const HISTORY_NOTES={
+ prediction_lineage_unknown:'У части прогнозов не сохранено, каким запуском и версией промпта они сделаны.',
+ prediction_without_time:'У части прогнозов нет времени создания — они в конце хронологии.',
+ rating_history_starts_after_current_value:'Текущая оценка поставлена до начала записи истории: её более ранние изменения неизвестны.',
+ first_observed_is_not_a_rating_date:'«Впервые замечена» — дата наблюдения, а не дата, когда поставлена оценка.',
+ diary_absence_is_not_unwatched:'Нет записи в Diary — не значит, что фильм не смотрели; нет истории оценок — не значит, что оценки не было.',
+ diary_history_missing:'История Diary ещё не сохранена.',
+ diary_history_unreadable:'История Diary не читается — просмотры не показаны.',
+ diary_coverage_partial:'Diary прочитан не полностью: более ранние просмотры могут отсутствовать.',
+ diary_unlinked:'У фильма нет подтверждённого Letterboxd lid — просмотры Diary не привязаны.',
+ diary_identity_disagreement:'Идентификаторы Letterboxd расходятся — просмотры Diary не показаны, чтобы не подставить чужую историю.',
+ diary_viewings_lower_bound:'Число просмотров за некоторые дни — нижняя граница.',
+ diary_rewatch_unknown:'Для части записей неизвестно, был ли это пересмотр.',
+ diary_entry_without_date:'У части записей Diary нет даты — они в конце хронологии.',
+ diary_same_day_order_unknown:'Просмотр стоит после событий того же дня: время просмотра неизвестно.',
+ diary_entries_may_overlap:'Записи Diary с номером просмотра и без него за один день могут описывать один и тот же просмотр.'};
+function viewingWord(n){return n%10===1&&n%100!==11?'просмотр':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'просмотра':'просмотров';}
+const historyRating=value=>Number.isFinite(value)?Number(value).toFixed(1):'без оценки';
+// An instant in Madrid time; a Diary calendar day as written, never shifted by a time zone.
+function historyInstant(value){const ms=Date.parse(value);return Number.isFinite(ms)?`<time datetime="${escapeHTML(new Date(ms).toISOString())}">${escapeHTML(madridStamp(ms,{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}))}</time>`:'';}
+function historyDay(value){const day=typeof value==='string'&&/^(\d{4})-(\d{2})-(\d{2})$/.exec(value);if(!day)return '';return `<time datetime="${escapeHTML(value)}">${escapeHTML(new Intl.DateTimeFormat('ru',{timeZone:'UTC',day:'numeric',month:'short',year:'numeric'}).format(new Date(Date.UTC(+day[1],day[2]-1,+day[3]))))}</time>`;}
+// A Diary rating observation is dated at the entry's watched date (midnight UTC): shown as that day, not as a time.
+const historyObserved=(value,source)=>source==='letterboxd_diary'&&typeof value==='string'?historyDay(value.slice(0,10)):historyInstant(value);
+const historySource=value=>value==null?'источник неизвестен':escapeHTML(HISTORY_SOURCES[value]||value);
+function historyPredictionEvent(event,current){
+ const chance=Number.isFinite(event.probability4Plus)?`шанс 4.0+ ${Math.round(event.probability4Plus*100)}%`:'',confidence=confidenceText(event.confidence);
+ const version={linked:'версия подтверждена',none:'без неизменяемой версии',missing:'версия не найдена',mismatch:'версия не совпадает',invalid:'неверная ссылка на версию'}[event.version?.status]||'';
+ const signals=(Array.isArray(event.matchSignals)?event.matchSignals:[]).filter(item=>typeof item==='string'&&item.trim());
+ const moods=(Array.isArray(event.moodLabels)?event.moodLabels:[]).map(item=>MOOD_LABELS[item]||item);
+ const lineage=[event.tasteProfileVersion!=null?`модель вкуса v${event.tasteProfileVersion}`:'',event.fingerprintSchemaVersion!=null?`отпечаток v${event.fingerprintSchemaVersion}`:'',event.predictionPromptVersion!=null?`промпт v${event.predictionPromptVersion}`:'',event.trigger==='scheduled'?'по расписанию':event.trigger==='manual'?'вручную':''].filter(Boolean);
+ return `<p class="history-headline"><strong>Прогноз ${Number.isFinite(event.predictedRating)?Number(event.predictedRating).toFixed(1):'—'}</strong>${chance?` · ${chance}`:''}${confidence?` · уверенность ${escapeHTML(confidence)}`:''}</p>`
+  +(signals.length?`<p><span class="history-label">Совпадает со вкусом</span> ${signals.map(escapeHTML).join(', ')}</p>`:'')
+  +(typeof event.mainRisk==='string'&&event.mainRisk.trim()?`<p><span class="history-label">Основной риск</span> ${escapeHTML(event.mainRisk.trim())}</p>`:'')
+  +(moods.length?`<p><span class="history-label">Настроение</span> ${moods.map(escapeHTML).join(', ')}</p>`:'')
+  +`<p class="history-meta">${[...lineage.map(escapeHTML),version?`<span class="${['missing','mismatch','invalid'].includes(event.version?.status)?'history-warn':''}">${version}</span>`:'',event.replacedAt?`заменён ${historyInstant(event.replacedAt)}`:'',current&&current.matchesCurrentProfile===false?'<span class="history-warn">сделан для прежней модели вкуса</span>':''].filter(Boolean).join(' · ')}</p>`
+  +(Array.isArray(event.missingFields)&&event.missingFields.length?`<p class="history-meta">Не сохранено в этой версии: ${event.missingFields.map(escapeHTML).join(', ')}</p>`:'');
+}
+function historyRatingEvent(event){
+ const observed=event.observedAt?` · ${event.source==='letterboxd_diary'?'дата просмотра':'замечена'} ${historyObserved(event.observedAt,event.source)}`:'';
+ if(event.kind==='rolled_back')return `<p class="history-headline"><strong>Наблюдение оценки отменено</strong>${event.restored?` · восстановлена ${historyRating(event.restored.value)} (${historySource(event.restored.source)})`:''}</p>`;
+ const head=event.kind==='first_observed'?`Оценка ${historyRating(event.value)} впервые замечена`:event.kind==='changed'&&event.previous?`Оценка ${historyRating(event.previous.value)} → ${historyRating(event.value)}`:`Оценка ${historyRating(event.value)}`;
+ return `<p class="history-headline"><strong>${head}</strong></p><p class="history-meta">${historySource(event.source)}${observed}</p>`;
+}
+function historyLegacyEvent(event){return `<p class="history-headline"><strong>Оценка ${historyRating(event.before)} → ${historyRating(event.after)}</strong></p><p class="history-meta">старый журнал наблюдений · ${historySource(event.source)}</p>`;}
+function historyDiaryEvent(event){
+ const count=Number.isInteger(event.viewings)?event.viewings:null,lower=event.viewingsCertain!==true;
+ const title=count>1?`${count}${lower?'+':''} ${viewingWord(count)} за день`:event.rewatch===true?'Пересмотр':'Просмотр';
+ const ratings=count>1&&Array.isArray(event.ratingsAtEntry)?`оценки в записях: ${event.ratingsAtEntry.map(historyRating).join(', ')}`:`оценка в записи: ${historyRating(event.ratingAtEntry)}`;
+ const rewatch=count>1&&Number.isInteger(event.rewatchRows)?`пересмотров ${event.rewatchRows}${event.rewatchUnknownRows?`, без отметки ${event.rewatchUnknownRows}`:''}`:event.rewatch==='unknown'?'пересмотр: неизвестно':event.rewatch===false?'не пересмотр':'';
+ const changes=(Array.isArray(event.changes)?event.changes:[]).filter(change=>change.field==='ratingAtEntry'||change.field==='rewatch'||change.field==='viewings');
+ const changeValue=(field,value)=>field==='ratingAtEntry'?historyRating(value):field==='rewatch'?(value===true?'да':value===false?'нет':'неизвестно'):escapeHTML(String(value));
+ const changeText=changes.map(change=>`${change.field==='ratingAtEntry'?'оценка':change.field==='rewatch'?'пересмотр':'просмотры'}: ${changeValue(change.field,change.from)} → ${changeValue(change.field,change.to)}${change.observedAt?` (${historyInstant(change.observedAt)})`:''}`);
+ const slugs=(Array.isArray(event.slugs)?event.slugs:[]).map(slug=>escapeHTML(slug.value)).filter(Boolean);
+ return `<p class="history-headline"><strong>${title}</strong>${lower&&count===1?' · <span class="history-warn">возможно, больше</span>':''}</p>`
+  +`<p>${escapeHTML(ratings)}${rewatch?` · ${escapeHTML(rewatch)}`:''}</p>`
+  +(changeText.length?`<p class="history-meta">Изменения записи: ${changeText.join('; ')}</p>`:'')
+  +`<p class="history-meta">Diary · lid ${escapeHTML(event.lid||'—')}${slugs.length?` · slug ${slugs.join(', ')}`:''}${event.observedAt?` · прочитано ${historyInstant(event.observedAt)}`:''}</p>`;
+}
+const HISTORY_TYPES={prediction:'Прогноз',rating:'Оценка',legacy_rating:'Оценка',diary_viewing:'Diary'};
+function historyEventHTML(event,currentIds,current){
+ const when=event.atPrecision==='day'?(historyDay(event.at)||'дата неизвестна'):(historyInstant(event.at)||'время неизвестно');
+ const body=event.type==='prediction'?historyPredictionEvent(event,currentIds.has(event.identity)?current.prediction:null):event.type==='rating'?historyRatingEvent(event):event.type==='legacy_rating'?historyLegacyEvent(event):event.type==='diary_viewing'?historyDiaryEvent(event):'';
+ if(!body)return '';
+ const isCurrent=currentIds.has(event.identity);
+ return `<li class="history-event history-${escapeHTML(event.type)}${isCurrent?' is-current':''}"><div class="history-when"><span class="history-type">${HISTORY_TYPES[event.type]}</span>${when}${isCurrent?'<span class="history-current">сейчас</span>':''}</div><div class="history-body">${body}</div></li>`;
+}
+// The current prediction is the bundle's current record; the current rating is the last event that applied its observation.
+function historyCurrentIds(events,current){
+ const ids=new Set(),prediction=events.find(event=>event.type==='prediction'&&event.position==='current');if(prediction)ids.add(prediction.identity);
+ const observation=current?.rating?.observationId;
+ if(observation){const applied=events.filter(event=>event.type==='rating'&&event.kind!=='rolled_back'&&event.observationId===observation).at(-1);if(applied)ids.add(applied.identity);}
+ return ids;
+}
+function historySummary(data,events){
+ const current=data.current||{},prediction=events.find(event=>event.type==='prediction'&&event.position==='current'),diary=current.diary,source=data.snapshot?.sources?.diary;
+ const forecast=prediction&&Number.isFinite(prediction.predictedRating)?`${Number(prediction.predictedRating).toFixed(1)}${prediction.generatedAt?` · ${historyInstant(prediction.generatedAt)}`:''}`:'не сохранён';
+ const rating=current.rating?`${historyRating(current.rating.value)} · ${historySource(current.rating.source)}${current.rating.observedAt?` · ${current.rating.source==='letterboxd_diary'?'дата просмотра':'замечена'} ${historyObserved(current.rating.observedAt,current.rating.source)}`:''}`:'наблюдений нет';
+ const diaryText=diary?(diary.viewingCount?`${diary.viewingCount}${diary.viewingCountExact?'':'+'} ${viewingWord(diary.viewingCount)}${diary.lastWatchedAt?` · последний ${historyDay(diary.lastWatchedAt)}`:''}${diary.rewatches||!diary.rewatchesExact?` · пересмотров ${diary.rewatches}${diary.rewatchesExact?'':'+'}`:''}`:'записей нет')
+  :source?.status==='missing'?'история Diary не сохранена':source?.status==='unreadable'?'история Diary не читается':source?.link?.status==='ambiguous'?'не показан: идентификаторы расходятся':source?.link?.status==='unlinked'?'не привязан к фильму':'нет данных';
+ return `<dl class="history-summary"><div><dt>Прогноз</dt><dd>${forecast}</dd></div><div><dt>Оценка</dt><dd>${rating}</dd></div><div><dt>Diary</dt><dd>${diaryText}</dd></div></dl>`;
+}
+function filmHistoryBody(){
+ const {events,data}=filmHistory,current=data.current||{},currentIds=historyCurrentIds(events,current);
+ const items=events.map(event=>historyEventHTML(event,currentIds,current)).filter(Boolean),hidden=Math.max(0,items.length-FILM_HISTORY_VISIBLE);
+ const notes=(Array.isArray(data.notes)?data.notes:[]).map(note=>`<li>${escapeHTML(HISTORY_NOTES[note]||note)}</li>`).join('');
+ const list=!items.length?'<p class="film-missing">Событий в истории нет</p>'
+  :`${hidden?`<details class="history-earlier"><summary>Ранние события · ${hidden}</summary><ol class="history-list">${items.slice(0,hidden).join('')}</ol></details>`:''}<ol class="history-list"${hidden?` start="${hidden+1}"`:''}>${items.slice(hidden).join('')}</ol>`;
+ return historySummary(data,events)
+  +(data.partial?'<p class="history-warn" role="status">История неполная: часть источников или версий не прочитана.</p>':'')
+  +(filmHistory.truncated?'<p class="history-warn" role="status">Показана только начальная часть длинной истории.</p>':'')
+  +list+(notes?`<details class="history-notes"><summary>Ограничения данных</summary><ul>${notes}</ul></details>`:'');
+}
+function filmHistorySection(film){
+ const id=String(film.id),valid=/^[a-zA-Z0-9_-]{1,80}$/.test(id),mine=filmHistory.filmId===id;
+ const head='<h2 tabindex="-1">История</h2>';
+ if(!valid)return `<section class="film-section film-history" aria-label="История">${head}<p class="film-missing">История недоступна для этого идентификатора</p></section>`;
+ if(!mine||filmHistory.status==='idle')return `<section class="film-section film-history" aria-label="История">${head}<p class="film-missing">Прогнозы, изменения оценки и просмотры из Diary в одной хронологии.</p><button type="button" class="history-action" data-history-action="open">Показать историю</button></section>`;
+ if(filmHistory.status==='loading')return `<section class="film-section film-history" aria-label="История" aria-busy="true">${head}<p class="film-missing" role="status">Загружаем историю…</p></section>`;
+ if(filmHistory.status==='error')return `<section class="film-section film-history" aria-label="История">${head}<p class="film-missing" role="alert">${filmHistory.error===409?'История менялась во время чтения.':filmHistory.error===400||filmHistory.error===404?'История для этого фильма недоступна.':'Не удалось загрузить историю.'}</p><button type="button" class="history-action" data-history-action="open">Повторить</button></section>`;
+ return `<section class="film-section film-history" aria-label="История">${head}${filmHistoryBody()}<button type="button" class="history-action" data-history-action="close">Скрыть историю</button></section>`;
+}
+function renderFilmHistory(){const film=filmScreen?films.find(item=>String(item.id)===String(filmScreen)):null;if(film)setFilmHtml('film-screen-history',filmHistorySection(film));}
+// Reads every page of one consistent version: a 409 (the history changed between pages) restarts from the first page
+// and never mixes two versions. Events are kept once per identity. A newer request or another film discards this one.
+async function loadFilmHistory(filmId){
+ const token=++filmHistory.token;
+ filmHistory={...filmHistory,filmId,status:'loading',events:[],data:null,error:null,truncated:false};renderFilmHistory();
+ try{
+  for(let restarts=0;;restarts++){
+   const seen=new Map();let cursor=null,data=null,pages=0,changed=false;
+   do{
+    const response=await fetch('/api/enrichment/history?filmId='+encodeURIComponent(filmId)+'&limit='+FILM_HISTORY_PAGE+(cursor?'&cursor='+encodeURIComponent(cursor):''));
+    if(token!==filmHistory.token)return;
+    if(response.status===409&&cursor){changed=true;break;}
+    if(!response.ok)throw {status:response.status};
+    const page=await response.json();
+    if(token!==filmHistory.token)return;
+    if(!page||!Array.isArray(page.events)||!page.page)throw {status:null};
+    data=data?{...data,notes:page.notes,partial:data.partial||page.partial}:page;
+    for(const event of page.events)if(event&&typeof event.identity==='string'&&!seen.has(event.identity))seen.set(event.identity,event);
+    cursor=page.page.nextCursor||null;pages++;
+   }while(cursor&&pages<FILM_HISTORY_MAX_PAGES);
+   if(changed){if(restarts>=FILM_HISTORY_RESTARTS)throw {status:409};continue;}
+   filmHistory={...filmHistory,status:'ready',events:[...seen.values()],data,truncated:!!cursor};
+   break;
+  }
+ }catch(error){if(token!==filmHistory.token)return;filmHistory={...filmHistory,status:'error',events:[],data:null,error:error?.status??null};}
+ renderFilmHistory();
+ // The pressed button is gone: keep keyboard focus in the section, on its heading.
+ if(String(filmScreen)===String(filmId))$('#film-screen-history h2')?.focus?.({preventScroll:true});
+}
+function filmHistoryAction(action){
+ if(!filmScreen)return;
+ if(action==='open')return loadFilmHistory(String(filmScreen));
+ if(action==='close'){filmHistory={...filmHistory,token:filmHistory.token+1,status:'idle',events:[],data:null};renderFilmHistory();$('#film-screen-history [data-history-action]')?.focus?.({preventScroll:true});}
+}
+function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability'])setFilmHtml(id,'');if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');if(actions)actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));}
 function creditLinks(people,key){return (people||[]).map(p=>`<button type="button" class="credit-link" data-credit-kind="${key}" data-credit-id="${escapeHTML(p.id)}" title="Показать фильмы: ${escapeHTML(p.name)}">${escapeHTML(p.name)}</button>`).join(', ');}
 function credits(film){return `<div class="film-credits">${film.directors?.length?`<p><span class="credit-label">${film.directors.length>1?'Режиссёры':'Режиссёр'}</span> ${creditLinks(film.directors,'directors')}</p>`:''}${film.actors?.length?`<p><span class="credit-label">В ролях</span> ${creditLinks(film.actors,'actors')}</p>`:''}</div>`;}
 function selectPerson(key,id){const p=report.people?.[key]?.find(person=>person.id===id);if(!p)return;const onFilm=filmIdFromLocation();state[key]=id;const input=$('#'+key+'-input');if(input){input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');}const options=$('#'+key+'-options');if(options)options.hidden=true;if(!onFilm){render();return;}const list=urlForState('https://iptv.local/'),target=list.pathname+list.search+list.hash;window.history.pushState(null,'',target);applyFilmScreen(null);render();input?.focus?.({preventScroll:true});}
@@ -1015,6 +1157,8 @@ function onMovieClick(event){
  if(credit){selectPerson(credit.dataset.creditKind,credit.dataset.creditId);return;}
  const facet=event.target.closest?.('[data-facet-kind]');
  if(facet){selectFacet(facet.dataset.facetKind,facet.dataset.facetValue,facet.dataset.facetDimension);return;}
+ const historyAction=event.target.closest?.('[data-history-action]');
+ if(historyAction){filmHistoryAction(historyAction.dataset.historyAction);return;}
  const compared=event.target.closest?.('[data-compare-open]');
  if(compared){event.preventDefault?.();openComparedFilm(compared.dataset.compareOpen);return;}
  const opener=event.target.closest?.('a.film-open');

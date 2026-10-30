@@ -9,10 +9,10 @@ const onOff=(name,effective,extra={})=>({name,modes:['off','on'],default:'off',t
 const FEATURE_FLAGS=[
  onOff('CANDIDATE_DISCOVERY',env=>candidateDiscoveryMode(env),{trims:true}),
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
- onOff('LETTERBOXD_FACTS',env=>env?.LETTERBOXD_FACTS==='on'?'on':'off'),
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
  onOff('REMOVAL_RATING_LOOKUP',env=>removalLookupEnabled(env)?'on':'off'),
  onOff('LETTERBOXD_DIARY_HISTORY',env=>LetterboxdDiary.enabled(env)?'on':'off'),
+ {name:'D1_ENRICHMENT_WRITE',modes:['off','dry','on'],default:'off',tokens:['off','dry','on'],effective:env=>d1EnrichmentMode(env),note:'AIR-275 phase 2: dry logs the D1 diff without writing; on writes changed Films and Persons from a cron trigger'},
  // Retired: the code ignores the binding whatever it holds. Reported so a stale binding is visible.
  {name:'SCORED_RESOLUTION',modes:[],default:null,tokens:['off','shadow','on'],retired:true,effective:()=>null},
  {name:'RATINGS_REFRESH',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
@@ -25,6 +25,7 @@ const FEATURE_FLAGS=[
  {name:'CATALOG_POSTER_HYDRATION',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'PREDICTION_MATERIALIZATION',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'LETTERBOXD_BASELINE_IMPORT',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
+ {name:'LETTERBOXD_FACTS',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
 ];
 const featureFlagNames=()=>FEATURE_FLAGS.map(flag=>flag.name);
 function featureFlagRaw(flag,value){
