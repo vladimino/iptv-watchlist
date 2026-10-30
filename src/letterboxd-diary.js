@@ -1,5 +1,6 @@
-// Letterboxd Diary viewing history (AIR-51, ADR 0049): one record per confirmed diary row, re-watches included, kept
-// apart from the current actualRating. Read incrementally from the owner's public diary pages, a bounded number per
+// Letterboxd Diary viewing history (AIR-51, ADR 0049): one entry per diary row that carries a viewing id, otherwise
+// one entry per film and day that counts its viewings (a lower bound unless one page proved it), kept apart from the
+// current actualRating. Read incrementally from the owner's public diary pages, a bounded number per
 // run, same origin only, no retry and no challenge handling. A row is never a rating fact and absence from the diary
 // never means "not watched". Contract: docs/reference/integrations/letterboxd-diary-history.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
@@ -59,18 +60,20 @@ const LetterboxdDiary=(()=>{
   });
  }
  const usable=row=>row.key!=null;
- // Day groups of one contiguous read (consecutive pages of one run). The count is certain only when the read holds the
- // whole day: rows of the same date cannot continue above the first page read (unless it is page 1) or below the last
- // one (unless it was the last diary page). Otherwise the group may be cut at the edge and its count is a lower bound.
- function dayGroups(segment){
-  const groups=new Map(),rows=segment.rows,first=rows[0]?.watchedDate,last=rows.at(-1)?.watchedDate;
+ // Day groups of one page. Pages are separate requests, not one snapshot: a row added between two requests repeats on
+ // the next page and a removed one is skipped, so a count is never summed across pages. The count is certain only when
+ // the one page holds the whole day: rows of the same date cannot continue above it (unless it is page 1) or below it
+ // (unless it is the last diary page). Otherwise the group may be cut at the edge and its count is a lower bound.
+ function dayGroups(rows,{page,last:lastPage}){
+  const groups=new Map(),first=rows[0]?.watchedDate,last=rows.at(-1)?.watchedDate;
   for(const row of rows.filter(row=>row.keyBasis==='identity_date')){
    const group=groups.get(row.key)||{key:row.key,lid:row.lid,slug:row.slug,watchedDate:row.watchedDate,count:0,ratings:[],rewatch:[]};
    group.count++;group.ratings.push(row.ratingAtEntry);group.rewatch.push(row.rewatch);if(!group.lid&&row.lid)group.lid=row.lid;groups.set(row.key,group);
   }
   for(const group of groups.values()){
-   const top=segment.startPage===1||first!==group.watchedDate,bottom=segment.reachedEnd||last!==group.watchedDate;
+   const top=page===1||first!==group.watchedDate,bottom=lastPage||last!==group.watchedDate;
    group.certain=top&&bottom;
+   group.rewatchRows=group.rewatch.filter(value=>value===true).length;group.rewatchUnknownRows=group.rewatch.filter(value=>value==='unknown').length;
    group.rewatchValue=group.rewatch.some(value=>value===true)?true:group.rewatch.every(value=>value===false)?false:'unknown';
   }
   return [...groups.values()];
@@ -84,7 +87,9 @@ const LetterboxdDiary=(()=>{
  // Merge into the history. Viewing-id rows: one entry each; a known id keeps its identity and date (a disagreeing row is
  // a conflict and changes nothing); a changed rating or re-watch marker is a recorded change. Day groups: the viewing
  // count only grows (absence proves nothing), a certain count marks the entry certain, and a certain count below the
- // stored one is a conflict. Ratings and the re-watch marker of a day entry follow its latest certain read.
+ // stored one, certain or not, is a conflict that changes nothing. A count grown by an uncertain read is uncertain again.
+ // Ratings and the re-watch rows of a day entry follow its latest certain read; an uncertain read only raises the
+ // re-watch rows, a lower bound like the count.
  function mergeRows(history,rows,groups,observedAt,page,tally){
   for(const row of rows.filter(row=>row.keyBasis==='viewing_id')){
    tally.seen.add(row.key);const stored=history.entries[row.key];
@@ -102,13 +107,16 @@ const LetterboxdDiary=(()=>{
   }
   for(const group of groups){
    tally.seen.add(group.key);const stored=history.entries[group.key];
-   const fields={viewings:group.count,viewingsCertain:group.certain,ratingAtEntry:group.count===1?group.ratings[0]:null,ratingsAtEntry:group.ratings,rewatch:group.rewatchValue};
+   const fields={viewings:group.count,viewingsCertain:group.certain,ratingAtEntry:group.count===1?group.ratings[0]:null,ratingsAtEntry:group.ratings,rewatch:group.rewatchValue,rewatchRows:group.rewatchRows,rewatchUnknownRows:group.rewatchUnknownRows};
    if(!stored){history.entries[group.key]=newEntry({key:group.key,keyBasis:'identity_date',viewingId:null,identity:group.lid?{type:'letterboxd_lid',value:group.lid}:null,aliases:group.slug?[{type:'letterboxd_slug',value:group.slug}]:[],watchedDate:group.watchedDate,...fields},observedAt,page);tally.added.add(group.key);continue;}
-   if(group.certain&&stored.viewingsCertain&&group.count<stored.viewings){tally.conflicts.add(group.key);continue;}
+   if(group.certain&&group.count<stored.viewings){tally.conflicts.add(group.key);continue;}
    const changes=[];
    if(group.count>stored.viewings)changes.push({field:'viewings',from:stored.viewings,to:group.count,observedAt});
    if(group.certain&&!stored.viewingsCertain)changes.push({field:'viewingsCertain',from:false,to:true,observedAt});
-   if(group.certain&&group.count>=stored.viewings){
+   if(!group.certain&&stored.viewingsCertain&&group.count>stored.viewings)changes.push({field:'viewingsCertain',from:true,to:false,observedAt});
+   if(!group.certain&&group.rewatchRows>(stored.rewatchRows||0))changes.push({field:'rewatchRows',from:stored.rewatchRows||0,to:group.rewatchRows,observedAt});
+   if(group.certain){
+    for(const field of ['rewatchRows','rewatchUnknownRows'])if(fields[field]!==stored[field])changes.push({field,from:stored[field],to:fields[field],observedAt});
     if(fields.ratingAtEntry!==stored.ratingAtEntry)changes.push({field:'ratingAtEntry',from:stored.ratingAtEntry,to:fields.ratingAtEntry,observedAt});
     if(JSON.stringify(fields.ratingsAtEntry)!==JSON.stringify(stored.ratingsAtEntry))changes.push({field:'ratingsAtEntry',from:stored.ratingsAtEntry,to:fields.ratingsAtEntry,observedAt});
     if(fields.rewatch!=='unknown'&&fields.rewatch!==stored.rewatch)changes.push({field:'rewatch',from:stored.rewatch,to:fields.rewatch,observedAt});
@@ -116,17 +124,21 @@ const LetterboxdDiary=(()=>{
    const next=withChanges(stored,changes,observedAt,page);
    if(!stored.identity&&group.lid)next.identity={type:'letterboxd_lid',value:group.lid};
    if(group.slug&&!stored.aliases.some(alias=>alias.value===group.slug))next.aliases=[...stored.aliases,{type:'letterboxd_slug',value:group.slug}];
-   if(changes.some(change=>change.field!=='viewingsCertain'))tally.updated.add(group.key);
+   if(changes.some(change=>!['viewingsCertain','rewatchRows','rewatchUnknownRows'].includes(change.field)))tally.updated.add(group.key);
    history.entries[group.key]=next;
   }
  }
- // Per-film aggregates from confirmed entries only: viewings summed over entries, the latest watched date. A film with
- // an uncertain day count reports `viewingCountExact: false`, its count being a lower bound.
+ // Per-film aggregates from confirmed entries only: viewings summed over entries, the latest watched date, rows marked as
+ // re-watches. A film with an uncertain day count reports `viewingCountExact: false`; with an uncertain count or a row
+ // whose re-watch marker is unknown, `rewatchesExact: false`. Either number is then a lower bound.
  function summarize(history){
   const films={};
   for(const entry of Object.values(history?.entries||{})){
-   if(!entry.identity)continue;const id=entry.identity.value,film=films[id]||(films[id]={viewingCount:0,viewingCountExact:true,lastWatchedAt:null,rewatches:0});
-   film.viewingCount+=entry.viewings||1;if(entry.viewingsCertain===false)film.viewingCountExact=false;if(entry.rewatch===true)film.rewatches++;
+   if(!entry.identity)continue;const id=entry.identity.value,film=films[id]||(films[id]={viewingCount:0,viewingCountExact:true,lastWatchedAt:null,rewatches:0,rewatchesExact:true});
+   const day=entry.keyBasis==='identity_date';
+   film.viewingCount+=entry.viewings||1;if(entry.viewingsCertain===false)film.viewingCountExact=false;
+   film.rewatches+=day?entry.rewatchRows||0:entry.rewatch===true?1:0;
+   if(entry.viewingsCertain===false||(day?entry.rewatchUnknownRows!==0:entry.rewatch==='unknown'))film.rewatchesExact=false;
    if(!film.lastWatchedAt||entry.watchedDate>film.lastWatchedAt)film.lastWatchedAt=entry.watchedDate;
   }
   return films;
@@ -145,7 +157,7 @@ const LetterboxdDiary=(()=>{
   const counts={pages:0,rows:0,unresolved:0,undated:0};
   const coverage={newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false,...previous.coverage};
   const tally={seen:new Set(),added:new Set(),updated:new Set(),conflicts:new Set()};
-  let page=1,mode='incremental',outcome=null,stopReason=null,moreAfter=null,firstRows=[],segment=null;
+  let page=1,mode='incremental',outcome=null,stopReason=null,moreAfter=null,firstRows=[];
   const fail=(kind,reason)=>{outcome=kind;stopReason=reason;moreAfter=page;};
   while(true){
    if(counts.pages>=maxPages){moreAfter=page;break;}
@@ -164,9 +176,7 @@ const LetterboxdDiary=(()=>{
    const rows=keyRows(parsed.rows);counts.pages++;
    if(page===1)firstRows=rows;
    counts.rows+=rows.length;counts.unresolved+=rows.filter(row=>!row.lid).length;counts.undated+=rows.filter(row=>!row.watchedDate).length;
-   if(!segment||segment.lastPage!==page-1)segment={startPage:page,lastPage:page,rows:[],reachedEnd:false};
-   segment.lastPage=page;segment.rows.push(...rows);segment.reachedEnd=!parsed.next;
-   const groups=dayGroups(segment),pageKeys=new Set(rows.filter(usable).map(row=>row.key));
+   const groups=dayGroups(rows,{page,last:!parsed.next}),pageKeys=new Set(rows.filter(usable).map(row=>row.key));
    const knownBefore=new Set([...pageKeys].filter(key=>!tally.added.has(key)&&tally.seen.has(key)));
    const observedAt=new Date(now).toISOString();
    await mergeStoredJSON(env,KEYS.history,emptyHistory(),history=>{
@@ -202,7 +212,7 @@ const LetterboxdDiary=(()=>{
   const [state,history]=await Promise.all([loadJSON(env,KEYS.state),loadJSON(env,KEYS.history)]);
   const films=summarize(history),entries=Object.values(history?.entries||{});
   const body={schemaVersion:1,enabled:enabled(env),state:state||null,entries:entries.length,unresolvedEntries:entries.filter(entry=>!entry.identity).length,films:Object.keys(films).length};
-  if(filmId!=null)body.film={filmId,...(films[filmId]||{viewingCount:0,lastWatchedAt:null,rewatches:0}),entries:entries.filter(entry=>entry.identity?.value===filmId).sort((a,b)=>a.watchedDate<b.watchedDate?1:a.watchedDate>b.watchedDate?-1:0)};
+  if(filmId!=null)body.film={filmId,...(films[filmId]||{viewingCount:0,viewingCountExact:true,lastWatchedAt:null,rewatches:0,rewatchesExact:true}),entries:entries.filter(entry=>entry.identity?.value===filmId).sort((a,b)=>a.watchedDate<b.watchedDate?1:a.watchedDate>b.watchedDate?-1:0)};
   return body;
  }
  return {KEYS,MAX_PAGES,enabled,pageUrl,parsePage,keyRows,mergeRows,summarize,syncHistory,readHistory};

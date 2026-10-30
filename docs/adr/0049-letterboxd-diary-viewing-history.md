@@ -17,8 +17,9 @@ The current code already reads Diary page 1, but only inside the films-list repa
 ## Decision
 
 1. **A separate viewing history.**
-   - One record per diary row, kept in `letterboxd/diary/history.json`. Re-watches are separate records.
-   - Each record holds the watched date, the rating at that entry, a re-watch marker (`true`, `false` or `unknown`), the typed identity (`letterboxd_lid`) and slug alias, and when it was first and last observed, with `source: letterboxd_diary`.
+   - Kept in `letterboxd/diary/history.json`. A diary row with a viewing id is its own record. Rows without one are kept as one record per film and day that counts its viewings (§4).
+   - Each record holds the watched date, the rating at each counted row, re-watch information (the marker `true`, `false` or `unknown`, and for a day record how many rows were marked re-watch and how many were unknown), the typed identity (`letterboxd_lid`) and slug alias, and when it was first and last observed, with `source: letterboxd_diary`.
+   - **Granularity lost without a viewing id.** Two viewings of one film on one day are not separate records: their order, which of them was the re-watch and which carried which rating are not kept as per-viewing facts, only as the day's count, its list of ratings in page order and its re-watch row count. Whether the real diary page carries a viewing id is not confirmed, so this may be the common case.
    - It is never a rating, watched or watchlist fact and never changes `actualRating`.
 2. **One reader, one read per commit.**
    - `LetterboxdDiary.parsePage` is the only diary parser. The films-list repair uses it too.
@@ -31,9 +32,10 @@ The current code already reads Diary page 1, but only inside the films-list repa
 4. **Keys that neither merge nor invent viewings.**
    - A row with a viewing id is its own entry.
    - Without an id, two viewings of one film on one day cannot be told apart, so the entry is per film and day and counts its viewings.
-   - The rows of a day are counted together across the consecutive pages of one read. The count is certain only when the read holds the whole day; otherwise it is a lower bound.
-   - The count only grows: a cut read never lowers it, and a page shift never adds a viewing.
-   - A stored viewing id keeps its identity. A disagreeing row, or a certain count below a stored certain count, is a conflict and changes nothing. Rating and re-watch edits are recorded as changes.
+   - Pages are separate requests, not one snapshot: a row added between two requests repeats on the next page, and a removed one is skipped. So a day is counted within one page only, never summed across pages. The count is certain only when one page holds the whole day; a day cut by a page boundary keeps the larger single-page count as a lower bound.
+   - The count only grows: a cut read never lowers it, and a page shift or a repeated row never adds a viewing. A count grown by an uncertain read is a lower bound again.
+   - A stored viewing id keeps its identity. A disagreeing row, or a certain count below any stored count, is a conflict and changes nothing: a stored lower bound is never made exact by a smaller proved count. Rating and re-watch edits are recorded as changes.
+   - **Honest bounds.** Per film, `viewingCount` and `rewatches` are exact only when every entry is certain and every counted row had a known re-watch marker; otherwise `viewingCountExact` or `rewatchesExact` is false and the number is a lower bound. A day split across a page boundary stays a lower bound until a later read finds it within one page.
 5. **Honest coverage.**
    - Outcomes are `complete`, `partial`, `blocked`, `rate_limited` or `failed`, with a stop reason and the per-run counts.
    - The coverage is the newest and oldest dates seen and whether the last page was ever reached.
@@ -41,7 +43,7 @@ The current code already reads Diary page 1, but only inside the films-list repa
 6. **Identity only by lid.** A row without a lid is stored but marked unresolved. A slug alone never links a film.
 7. **Gated.**
    - Behind `LETTERBOXD_DIARY_HISTORY`, off by default. With it off, the stage neither reads nor writes, and the repair keeps its own single page-1 request.
-   - A read-only `GET /api/letterboxd/diary` exposes the state, per-film aggregates (`viewingCount`, `lastWatchedAt`, `rewatches`) and one film's entries. Nothing else consumes the history yet.
+   - A read-only `GET /api/letterboxd/diary` exposes the state, per-film aggregates (`viewingCount`, `viewingCountExact`, `lastWatchedAt`, `rewatches`, `rewatchesExact`) and one film's entries. Nothing else consumes the history yet.
 
 Not decided here:
 - production activation;
