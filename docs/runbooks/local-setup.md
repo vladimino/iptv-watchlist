@@ -14,7 +14,7 @@ The script turns the catalog into the R2 objects the dashboard reads. Dummy data
 
 - `programme.json` and `watchlist.json`
 - `epg/published-generation.json` naming the `local-fixture` generation, with the generation copies `epg/generations/local-fixture/programme.json` and an empty `epg/generations/local-fixture/discovered-films.json`, so the pinned readers (`/api/catalog/available`, `/api/admin/*`) answer locally
-- `titles.json` with one provisional title (`Movie2`) and `people.json` with one cached name (`Actor2`), which the owner page at `http://127.0.0.1:8787/admin` shows as the provisional queue; `Movie1` carries a synthetic TMDB id so it reads as resolved
+- `titles.json` with one provisional title (`Movie2`) and `people.json` with one cached name (`Actor2`), which the owner page at `http://127.0.0.1:8787/admin` shows as the provisional queue; `Movie1` carries a synthetic TMDB id so it reads as resolved. The health view (`/admin?view=health`) reads the same store: the fixture has no prediction queue, continuation record or catalog copy, so those subsystems show as unknown or missing there, which is the honest state of the dummy store
 - `sync.json`
 - `enrichment/profile/current.json`, a local version and hash so the dummy prediction is not marked stale
 - `enrichment/view-index.json`, one record per film id, including `moodLabels`, `fingerprintHash`, and `execution`

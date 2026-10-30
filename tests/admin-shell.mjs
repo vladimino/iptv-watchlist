@@ -16,7 +16,8 @@ const movie = fs.readFileSync('public/app.js', 'utf8');
 const movieHtml = fs.readFileSync('public/index.html', 'utf8');
 const worker = fs.readFileSync('src/worker.js', 'utf8');
 const build = fs.readFileSync('build.mjs', 'utf8');
-const bundle = bundleAdmin([client, page]);
+const healthView = fs.readFileSync('src/admin/health-view.js', 'utf8');
+const bundle = bundleAdmin([client, healthView, page]);
 
 // Static boundary: the page is owner-only through the existing Access session, GET only, no token, no other API.
 assert.doesNotMatch(html, /демонстрационные|Это демонстрационные данные/i);
@@ -28,13 +29,17 @@ assert.doesNotMatch(html, /type="module"|fetch\(|\/api\/|programme\.json/);
 assert.match(client, /const ADMIN_API='\/api\/admin'/);
 assert.doesNotMatch(bundle, /admin-query|\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|programme\.json|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page script reaches the API only through the client');
+assert.doesNotMatch(healthView, /\bfetch\(|\/api\//, 'the health view renders answers and makes no request of its own');
+for (const id of ['admin-health', 'admin-catalog', 'admin-view-catalog', 'admin-view-health', 'admin-health-refresh', 'admin-health-stale-refresh', 'admin-health-summary', 'admin-health-sources', 'admin-health-subsystems', 'admin-health-issues', 'admin-health-empty', 'admin-health-loading', 'admin-health-error', 'admin-health-stale']) assert.match(html, new RegExp(`id="${id}"`), id);
+assert.doesNotMatch(html, /<button[^>]*(?:retry|hydrat|import|запустить|повторить)/i, 'no execution buttons on the health view');
+assert.match(css, /\.health-group-critical/);
 assert.match(bundle, /credentials:'same-origin'/);
 assert.doesNotMatch(movie, /admin-query|\/admin/);
 assert.doesNotMatch(movieHtml, /id="admin-search"|admin-query/);
 assert.match(worker, /url\.pathname==='\/events'\?'\/':\/\^\\\/film\\\/\[A-Za-z0-9_-\]\{1,80\}\$\/\.test\(url\.pathname\)\?'\/':url\.pathname/);
 assert.match(worker, /\/api\/admin\//);
 assert.doesNotMatch(worker, /pathname==='\/admin'\?'\/'/);
-assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
+assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/health-view\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
 assert.match(build, /src\/domain\/admin-query\.js/);
 assert.match(css, /overflow-wrap:anywhere/);
 assert.match(css, /minmax\(0,1fr\)/);
@@ -53,14 +58,16 @@ const bucket = {
   async put() {throw new Error('the admin page never writes');},
   async list() {throw new Error('the admin page never lists');},
 };
-const workerContext = vm.createContext({Response, Request, Headers, URL, URLSearchParams, AbortSignal, Date, Intl, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, Uint32Array, DataView, atob, btoa, crypto: webcrypto, console, setTimeout, structuredClone,
+const workerContext = vm.createContext({Response, Request, Headers, URL, URLSearchParams, AbortSignal, Date, Intl, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, Uint32Array, DataView, atob, btoa, crypto: webcrypto, console, setTimeout, structuredClone, Number, Math,
   ASSETS: {}, INITIAL_PERSONAL_RATINGS: {},
   FILM_TITLE_DICTIONARY: [{id: 'north', tmdbId: '900001', original: 'North Bridge', title: 'Северный мост', sources: ['https://www.wikidata.org/wiki/Q1'], aliases: ['Мост на севере'], status: 'verified'}],
   PERSON_NAME_DICTIONARY: [{id: 'director/lea-nord', original: 'Lea Nord', name: 'Лея Норд', aliases: ['Л. Норд'], status: 'verified', verification_basis: 'user_supplied', source_url: null}],
   fetch: async () => {throw new Error('the Worker makes no outbound request for the admin page');}});
-for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
+for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/ratings-seed.js', 'src/discovery.js', 'src/letterboxd-facts.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
+vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), workerContext);
+vm.runInContext(fs.readFileSync('src/admin/health.js', 'utf8'), workerContext);
 vm.runInContext(worker.replace('export default', 'globalThis.worker='), workerContext);
 
 const G1 = '11111111-1111-4111-8111-111111111111', AT = '2026-10-29T10:00:00.000Z';
@@ -81,6 +88,8 @@ function seed() {
   records.set('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: AT, watchlistCount: films.length, films, people: {directors: [lea], actors: [mira, extra]}, stats: {}}); etags.set('epg/generations/' + G1 + '/programme.json', 'prog-1');
   records.set('titles.json', {quiet: {tmdbId: '900002', title: 'Тихая гавань', status: 'provisional', sources: ['https://www.wikidata.org/wiki/Q2']}}); etags.set('titles.json', 'titles-1');
   records.set('people.json', {'actor/mira-sol': {name: 'Мира Соль', original: 'Mira Sol'}}); etags.set('people.json', 'people-1');
+  records.set('enrichment/prediction-queue.json', {schemaVersion: 3, programmeRunId: G1, hotPending: ['quiet'], coldPending: [], pending: ['quiet'], retries: {}, lastCheckAt: new Date(Date.now() - 3600000).toISOString(), lastBatch: {finishedAt: new Date(Date.now() - 3600000).toISOString(), stage: 'complete'}}); etags.set('enrichment/prediction-queue.json', 'queue-1');
+  records.set('epg/resolver-continuation.json', {stage: 'complete', reason: null, at: new Date(Date.now() - 3600000).toISOString(), remainingChunks: 0, programmeRunId: G1}); etags.set('epg/resolver-continuation.json', 'cont-1');
 }
 seed();
 vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);
@@ -115,7 +124,7 @@ function element(selector) {
     },
   };
 }
-const nodes = new Map(['#admin-search', '#admin-queues', '#admin-queues-note', '#admin-results', '#admin-results-section', '#admin-detail', '#admin-loading', '#admin-error', '#admin-stale', '#admin-refresh', '#admin-empty', '#admin-snapshot', '#admin-snapshot-text', '#admin-detail-title'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#admin-search', '#admin-queues', '#admin-queues-note', '#admin-results', '#admin-results-section', '#admin-detail', '#admin-loading', '#admin-error', '#admin-stale', '#admin-refresh', '#admin-empty', '#admin-snapshot', '#admin-snapshot-text', '#admin-detail-title', '#admin-health', '#admin-catalog', '#admin-view-catalog', '#admin-view-health', '.admin-views', '#admin-health-refresh', '#admin-health-stale-refresh', '#admin-health-summary', '#admin-health-sources', '#admin-health-subsystems', '#admin-health-issues', '#admin-health-empty', '#admin-health-loading', '#admin-health-error', '#admin-health-stale'].map(selector => [selector, element(selector)]));
 const moreButton = element('[data-admin-more="film"]');
 const filmGroup = element('[data-admin-group="film"] .admin-group-items');
 const searchNode = nodes.get('#admin-search');
@@ -345,6 +354,82 @@ assert.deepEqual(requests, []);
 assert.equal(nodes.get('#admin-results-section').hidden, true);
 assert.match(css, /\.admin-state-stale\[hidden\]\{display:none\}/, 'a flex banner still honours hidden');
 
+// 9c. Health view: one GET /api/admin/health, subsystem cards, grouped issues, unknown sources named, links back to the catalogue, stale and error states.
+const healthNode = nodes.get('#admin-health'), catalogNode = nodes.get('#admin-catalog');
+requests = [];
+window.history.pushState(null, '', '/admin?view=health');
+await run('adminRender()');
+await settle();
+assert.equal(healthNode.hidden, false);
+assert.equal(catalogNode.hidden, true);
+assert.equal(attrs.get('#admin-view-health:aria-current'), 'page');
+assert.equal(attrs.get('#admin-view-catalog:aria-current'), 'false');
+assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/health']);
+assert.ok(requests.every(request => request.method === 'GET'));
+assert.match(nodes.get('#admin-health-summary').textContent, /Оценка на .* · поколение 11111111/);
+assert.match(nodes.get('#admin-health-summary').textContent, /Сводного балла нет/);
+assert.match(nodes.get('#admin-health-sources').textContent, /нерешённые наблюдения: не читается здесь/);
+assert.match(nodes.get('#admin-health-sources').textContent, /baseline Letterboxd: не читается здесь/);
+const cards = nodes.get('#admin-health-subsystems').innerHTML;
+assert.match(cards, /Архив Letterboxd<\/span><span class="health-card-status">неизвестно/);
+assert.match(cards, /Отпечатки<\/span><span class="health-card-status">неизвестно/, 'no view index in the store, so the dimension is unknown');
+assert.match(cards, /выводится из индекса отпечатков и прогнозов/);
+assert.match(cards, /Метаданные<\/span><span class="health-card-status">требует внимания/);
+assert.match(cards, /Очередь прогнозов<\/span><span class="health-card-status">требует внимания/, 'a queued film is pending work, reported as information');
+assert.match(cards, /Discovery<\/span><span class="health-card-status">в порядке/);
+assert.match(cards, /Постеры<\/span><span class="health-card-status">в порядке в пределах снимка/, 'no catalog copy, so posters cannot be claimed clear');
+const issuesHtml = nodes.get('#admin-health-issues').innerHTML;
+assert.match(issuesHtml, /health-severity-warning/);
+assert.match(issuesHtml, /Метаданные отсутствуют/);
+assert.match(issuesHtml, /data-admin-id="film:blank"/);
+assert.match(issuesHtml, /Источник не входит в это ограниченное чтение/);
+assert.doesNotMatch(issuesHtml, /<button/, 'no execution controls in the issue list');
+assert.ok(issuesHtml.indexOf('health-severity-warning') < issuesHtml.indexOf('health-severity-info'), 'warnings before information');
+assert.equal(nodes.get('#admin-health-empty').hidden, true);
+assert.equal(nodes.get('#admin-health-loading').hidden, true);
+assert.equal(nodes.get('#admin-health-error').hidden, true);
+assert.equal(nodes.get('#admin-health-stale').hidden, true);
+assert.equal(typeof run('adminHealth.pin'), 'string');
+await run(`onAdminHealthLink({target:{closest(selector){return selector==='[data-admin-id]'?{getAttribute(name){return {'data-admin-id':'film:blank','data-admin-kind':'film'}[name]||null;}}:null;}},preventDefault(){},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
+await settle();
+assert.equal(url().searchParams.get('view'), null);
+assert.equal(url().searchParams.get('id'), 'film:blank');
+assert.equal(healthNode.hidden, true);
+assert.equal(catalogNode.hidden, false);
+assert.match(detail.innerHTML, /Blank Reel/);
+window.history.back();
+await settle();
+assert.equal(url().searchParams.get('view'), 'health');
+assert.equal(healthNode.hidden, false);
+await run(`onAdminView({target:{closest(){return {getAttribute(){return 'catalog';}};}},preventDefault(){},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
+await settle();
+assert.equal(url().searchParams.get('view'), null);
+assert.equal(catalogNode.hidden, false);
+window.location.href = 'http://127.0.0.1/admin?view=health';
+await run('adminRender()');
+await settle();
+const healthPin = run('adminHealth.pin');
+etags.set('people.json', 'people-2');
+await run('adminRenderHealth()');
+await settle();
+assert.equal(nodes.get('#admin-health-stale').hidden, false, 'a changed dictionary under the held pin is a stale answer');
+assert.match(nodes.get('#admin-health-summary').textContent, /Оценка на/, 'the previous evaluation stays on screen');
+await run('onAdminHealthRefresh()');
+await settle();
+assert.equal(nodes.get('#admin-health-stale').hidden, true);
+assert.notEqual(run('adminHealth.pin'), healthPin);
+records.delete('epg/published-generation.json');
+vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);
+await run('onAdminHealthRefresh()');
+await settle();
+assert.equal(nodes.get('#admin-health-error').hidden, false);
+assert.match(nodes.get('#admin-health-error').textContent, /Опубликованная программа сейчас недоступна/);
+seed();
+vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);
+run(`onAdminKey({key:'Escape',preventDefault(){}})`);
+assert.equal(url().searchParams.get('view'), 'health', 'Escape does not leave the health view');
+assert.deepEqual(['1 подсистема', '3 подсистемы', '5 подсистем', '11 подсистем', '21 подсистема'], [1, 3, 5, 11, 21].map(count => run(`healthPlural(${count}, 'подсистема', 'подсистемы', 'подсистем')`)));
+
 // 10. Escape clears the query and keeps focus in the field.
 window.location.href = 'http://127.0.0.1/admin?q=мост';
 await run('adminRender()');
@@ -356,4 +441,4 @@ assert.equal(url().searchParams.get('q'), null);
 assert.equal(searchNode.value, '');
 assert.equal(document.activeElement, searchNode);
 assert.ok(requests.every(request => request.method === 'GET'));
-console.log('Admin shell: live snapshot, URL state, history, pagination, empty, error and stale-pin states passed');
+console.log('Admin shell: live snapshot, URL state, history, pagination, empty, error, stale-pin and health view states passed');

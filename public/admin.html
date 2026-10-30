@@ -22,7 +22,26 @@
         <p class="admin-intro">Поиск фильмов и людей и очереди качества по опубликованной программе. Страница ничего не меняет.</p>
       </div>
     </section>
+    <nav class="admin-views" aria-label="Разделы"><a href="/admin" id="admin-view-catalog" data-admin-view="catalog" aria-current="page">Каталог</a><a href="/admin?view=health" id="admin-view-health" data-admin-view="health">Здоровье данных</a></nav>
     <p id="admin-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="admin-snapshot-text">Снимок программы ещё не прочитан.</span></p>
+    <section id="admin-health" class="admin-health" aria-labelledby="admin-health-title" hidden>
+      <div class="admin-health-head">
+        <h2 id="admin-health-title">Здоровье данных</h2>
+        <button type="button" id="admin-health-refresh" class="admin-refresh">Перечитать</button>
+      </div>
+      <p id="admin-health-summary" class="admin-health-summary">Оценка ещё не прочитана.</p>
+      <p id="admin-health-sources" class="muted admin-health-sources"></p>
+      <p id="admin-health-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем ограниченные источники здоровья…</p>
+      <div id="admin-health-stale" class="admin-state admin-state-stale" role="alert" hidden><span>Опубликованный снимок изменился с прошлого чтения. Оценка ниже относится к прежнему поколению.</span><button type="button" id="admin-health-stale-refresh" class="admin-refresh">Перечитать снимок</button></div>
+      <p id="admin-health-error" class="admin-state admin-state-error" role="alert" hidden></p>
+      <h3 class="admin-health-subtitle">Подсистемы</h3>
+      <div id="admin-health-subsystems" class="health-cards" role="list"></div>
+      <h3 class="admin-health-subtitle">Проблемы по приоритету</h3>
+      <p id="admin-health-empty" class="admin-state admin-health-empty" role="status" hidden></p>
+      <ol id="admin-health-issues" class="health-groups"></ol>
+      <p class="muted admin-health-note">Страница только читает. Предложенное действие и его готовность описывают состояние записи; выполнение действий здесь не предусмотрено.</p>
+    </section>
+    <div id="admin-catalog">
     <form class="search-panel" role="search" action="/admin">
       <label class="search-box"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="admin-search" type="search" name="q" placeholder="Название, имя или внешний id" aria-label="Найти фильм или человека" autocomplete="off" enterkeyhint="search" maxlength="200"></label>
     </form>
@@ -41,6 +60,7 @@
         <div id="admin-results"></div>
       </section>
       <article id="admin-detail" class="admin-card" aria-live="polite" hidden></article>
+    </div>
     </div>
   </main>
   <script src="/admin.js"></script>
