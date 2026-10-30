@@ -6,7 +6,7 @@
 **Approval source:** Owner decision recorded on [AIR-275](https://trello.com/c/4x7hH0gI) on 2026-10-29, rejecting [AIR-75](https://trello.com/c/AXPYIVCa), [AIR-76](https://trello.com/c/HHrDozK6), [AIR-77](https://trello.com/c/f3QzcNYf) and [AIR-78](https://trello.com/c/COdMTjqU)  
 **Related work:** [AIR-74](https://trello.com/c/5AdAmKPe) (backfill), [AIR-275](https://trello.com/c/4x7hH0gI), [PR #233](https://github.com/vladimino/iptv-watchlist/pull/233), [PR #241](https://github.com/vladimino/iptv-watchlist/pull/241)  
 **Supersedes:** The stage sequence of [ADR 0017](0017-staged-d1-migration.md) after the backfill (shadow writes, shadow reads, read cutover, write cutover as separate evidence-gated stages); the backfill boundaries of [ADR 0019](0019-live-d1-backfill-boundaries.md) stay in force for any future reload  
-**Superseded by:** None
+**Superseded by:** [ADR 0056](0056-d1-enrichment-write-through.md) (Proposed 2026-10-30) in part, if accepted: for the enrichment domain, decision 2's immediate "writer writes D1 as the truth" is preceded by an R2-authoritative projection into D1 from a Worker cron trigger. Everything else here stands.
 
 ## Context
 
