@@ -116,7 +116,7 @@ It returns:
 
 An invalid `filmId` answers 400.
 
-The [film history API](../api/film-history.md) reads the same history: entries whose `identity` lid is the film's, as `diary_viewing` events in its chronology. Entries without a lid are never attributed to a film there, and a slug alias never links one. Timeline, Finds and predictions do not consume it yet.
+The [film history API](../api/film-history.md) reads the same history: entries whose `identity` lid is the film's, as `diary_viewing` events in its chronology. Entries without a lid are never attributed to a film there, and a slug alias never links one. The film page shows that chronology; Finds and predictions do not consume the Diary history.
 
 ## Storage authority and D1
 
