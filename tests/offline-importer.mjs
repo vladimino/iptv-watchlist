@@ -494,13 +494,14 @@ assert.equal(await count(refusedDb,'SELECT COUNT(*) AS n FROM film'),0);
 assert.equal(await count(refusedDb,'SELECT COUNT(*) AS n FROM import_receipt'),0);
 
 // End to end through the CLI: legacy ids, a redirect, a derived evidence key, an unresolved key, bounded batches, reruns, stale receipts.
-const ronin={id:'tmdb_9',title:'Ronin',original:'Ronin',tmdbId:9,year:1998};
-const heat={id:'heat-1995',title:'Heat',original:'Heat',tmdbId:7,year:1995};
+const ronin={id:'tmdb_9',title:'Ronin',original:'Ronin',tmdbId:9,year:1998,directors:[{id:'tmdb_director/50',name:'Джон Франкенхаймер',original:'John Frankenheimer'}]};
+const heat={id:'heat-1995',title:'Heat',original:'Heat',tmdbId:7,year:1995,directors:[{id:'director/michael-mann',name:'Майкл Манн',original:'Michael Mann'}]};
+const heatCatalogDirectors=[{id:'tmdb_director/638',name:'Майкл Манн',original:'Майкл Манн'}];
 const roninVersion=(()=>{const record={filmId:'tmdb_9',tasteProfileVersion:1,tasteProfileHash:'profile-a',fingerprintHash:'print-ronin',fingerprintSchemaVersion:1,predictionPromptVersion:1,predictedRating:4,generatedAt:at};const text=rules.predictionVersionText(record);const sha=createHash('sha256').update(Buffer.from(text,'utf8')).digest('hex');return {record,text,pointer:{r2Key:rules.predictionVersionKey('tmdb_9',sha),contentSha256:sha}};})();
 const legacyBodies={
  'watchlist.json':{films:[heat]},
  'programme.json':{runId:'run-legacy',films:[{...heat,shows:[{channelId:'c1',channel:'C1',start:1000,end:2000,title:'Heat'}]},{...ronin,shows:[{channelId:'c2',channel:'C2',start:3000,end:4000,title:'Ronin'}]}]},
- 'epg/discovered-films.json':[{...heat,id:'tmdb_7'},ronin],
+ 'epg/discovered-films.json':[{...heat,id:'tmdb_7',directors:heatCatalogDirectors},ronin],
  'epg/discovery-latest.json':{programmeRunId:'run-legacy',items:[{key:'ronin|1998',title:'Ronin',normalizedTitle:'ronin',year:1998,durations:[122],shows:[{channelId:'c2',start:3000,title:'Ronin'}]},{key:'unknown film|',title:'Unknown Film',normalizedTitle:'unknown film',year:null,durations:[95],shows:[{channelId:'c3',start:5000,title:'Unknown Film'}]}]},
  'epg/discovery-resolution.json':{'ronin|1998':{status:'verified',filmId:'tmdb_9',tmdbId:'9',canonicalIdentity:'tmdb:9',identitySource:'tmdb_detail',checkedAt:at,provenance:{authority:'tmdb_detail'}},'unknown film|':{status:'ambiguous',reason:'ambiguous',checkedAt:at,evidenceKey:rules.candidateEvidence({normalizedTitle:'unknown film',year:null,durations:[95],shows:[{channelId:'c3',start:5000}]})},'gone|2000':{status:'verified',filmId:'tmdb_12',tmdbId:'12',checkedAt:at}},
  'enrichment/profile/current.json':{version:1,profileHash:'profile-a',updatedAt:at},
@@ -527,7 +528,14 @@ assert.equal(legacyRun.stopped,false,JSON.stringify(legacyRun.blockers));
 assert.equal(legacyRun.resumed,bounded.applied);
 assert.equal(legacyRun.ledger.some(item=>item.reason==='reference_missing'),false,JSON.stringify(legacyRun.ledger));
 assert.equal(legacyRun.conflicts,0,JSON.stringify(legacyRun.ledger));
+
 const legacyHandle=snapshotSqlite(legacyDb);
+// A catalog film keyed tmdb_<id> in epg/discovered-films.json carries its TMDB credits into its Film, and a watchlist Film
+// with the same verified TMDB id gets the catalog's TMDB credits beside its Letterboxd ones (the co-credit evidence of
+// ADR 0049); before the fix both catalog rosters were empty.
+const creditsOf=async id=>(await legacyHandle.all('SELECT person_id,role FROM film_person_credit WHERE film_id=? ORDER BY person_id',[id])).map(row=>row.person_id+'/'+row.role);
+assert.deepEqual(await creditsOf('film:tmdb:9'),['person:tmdb_director/50/director']);
+assert.deepEqual(await creditsOf('film:heat-1995'),['person:director/michael-mann/director','person:tmdb_director/638/director']);
 assert.equal((await legacyHandle.get("SELECT film_id FROM fingerprint_payload WHERE r2_key='enrichment/films/tmdb_7/fingerprint.json'")).film_id,'film:heat-1995');
 assert.equal((await legacyHandle.get("SELECT film_id FROM fingerprint_payload WHERE r2_key='enrichment/films/tmdb_9/fingerprint.json'")).film_id,'film:tmdb:9');
 assert.equal((await legacyHandle.get("SELECT rating FROM actual_rating WHERE film_id='film:tmdb:9'")).rating,4);
