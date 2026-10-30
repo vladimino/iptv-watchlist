@@ -68,17 +68,17 @@ assert.equal(D.parsePage('<html><title>Changed layout</title><div class="entry">
 const keyed=D.keyRows(D.parsePage(page([{lid:'Twice'},{lid:'Twice'},{lid:'Vid',viewing:'5'},{lid:'NoDate',date:null},{lid:null,slug:'only-slug'}],false)).rows);
 assert.deepEqual(plain(keyed.map(r=>r.key)),['day:lid:Twice|2026-10-29','day:lid:Twice|2026-10-29','viewing:5',null,'day:slug:only-slug|2026-10-29']);
 
-// 2. Gate off: the stage is inert; the diary repair after a blocked films list reads page 1 itself, once, as before.
+// 2. Gate off: the stage is inert and the commit requests nothing from Letterboxd (AIR-287: no films list, no repair).
 publish(fifty);
 const film=id=>({id,url:`https://letterboxd.com/film/${id.toLowerCase()}/`,title:id,year:2020,shows:[]});
 const report=runId=>({runId,updatedAt:new Date().toISOString(),watchlistCount:1,films:[film('F0')],stats:{}});
-const run=runId=>({runId,stage:'epg',events:[],ratingPending:['public-films-list'],watchlist:[film('F0')],pending:[]});
+const run=runId=>({runId,stage:'epg',events:[],ratingPending:['letterboxd-diary'],watchlist:[film('F0')],pending:[]});
 records.set('programme.json',report('r-off'));
 await ctx.completeWithRatings(off,run('r-off'),report('r-off'));
-assert.equal(diaryRequests().length,1,'the existing repair request');
+assert.equal(requests.length,0,'no Letterboxd request');
 assert.equal(records.has(D.KEYS.history),false);assert.equal(records.has(D.KEYS.state),false);
 assert.equal(records.get('sync.json').diaryHistory,undefined);
-assert.equal(records.get('sync.json').ratingRepair.diary.reused,false);
+assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause],['finished','diary_off']);
 
 // 3. First run with the gate on: bounded to three pages, partial, resumable; no rating or watched fact written.
 records.clear();etags.clear();requests.length=0;writes.length=0;
@@ -239,21 +239,23 @@ assert.ok(body.film.entries.every(e=>e.aliases.every(alias=>typeof alias.firstOb
 assert.equal((await ctx.worker.fetch(new Request('https://site.example/api/letterboxd/diary?filmId=../x'),env)).status,400);
 assert.deepEqual(writes,[],'the read writes nothing');
 
-// 13. In the EPG commit: the stage reads the diary once for both the history and the repair, and never fails the commit.
+// 13. In the EPG commit: the stage reads the diary once, always writes its facts (LETTERBOXD_FACTS is retired, ADR 0055)
+// and never fails the commit.
 records.clear();etags.clear();requests.length=0;publish(fifty);records.set('programme.json',report('r-on'));
 const completed=await ctx.completeWithRatings(env,run('r-on'),report('r-on'));
 assert.equal(completed.stage,'complete');
-assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)],'one diary page, read by the stage; the repair reuses it');
+assert.deepEqual(requests.map(r=>r.url),[url(1)],'one diary page and nothing else');
 const sync=records.get('sync.json');
-assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.counts.added],['complete',50]);
-assert.equal(sync.ratingRepair.diary.reused,true);
-assert.equal(sync.ratingAttempt.state,'error');assert.equal(sync.ratingAttempt.phase,'repair');
-// A blocked diary: the commit completes, the repair does not request the page again.
+assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.counts.added,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.enabled],['complete',50,50,true]);
+assert.deepEqual([sync.ratingAttempt.state,sync.ratingAttempt.phase,sync.ratingAttempt.source,sync.ratingPending,sync.ratingError],['finished','diary','letterboxd_diary',undefined,undefined]);
+assert.equal(writes.some(key=>key.includes('facts/films/')),true,'the diary facts are written without any facts switch');
+// A blocked diary: the commit completes, nothing else is requested, the attempt is an error with its cause.
 records.clear();etags.clear();requests.length=0;site.clear();site.set(url(1),()=>respond(403,'<title>Just a moment...</title>'));records.set('programme.json',report('r-block'));
 const blocked=await ctx.completeWithRatings(env,run('r-block'),report('r-block'));
 assert.equal(blocked.stage,'complete');
-assert.equal(diaryRequests().length,1,'one diary request in the whole commit');
+assert.equal(requests.length,1,'one diary request in the whole commit');
 assert.equal(records.get('sync.json').diaryHistory.outcome,'blocked');
-assert.match(records.get('sync.json').ratingRepair.diary.errors[0].error,/not read in this run/);
+assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause],['error','blocked']);
+assert.match(records.get('sync.json').ratingError,/Letterboxd diary blocked/);
 
 console.log('Letterboxd diary history (AIR-51): parser on a 50-row page, day entries proved by one page, lower bounds across page boundaries, shifts and non-atomic pages, no false exactness, re-watches per row, gate off untouched, bounded resumable backfill with overlap, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery, identity conflict, read API, one diary read per commit passed');

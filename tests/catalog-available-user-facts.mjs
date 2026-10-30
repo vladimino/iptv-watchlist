@@ -1,6 +1,6 @@
 // Finds exclude every film the owner has watched or rated by identity, whatever id the catalog record uses: watched-unrated
 // films, ratings keyed by the Letterboxd id while the catalog uses tmdb_<n>, in index entries written before the facts model
-// (legacy index) and in the projection from fact records; the retired LETTERBOXD_FACTS (ADR 0054) changes nothing. A namesake or remake is never suppressed by title, a conflicting stored id bridges nothing,
+// (legacy index) and in the projection from fact records; the retired LETTERBOXD_FACTS (ADR 0055) changes nothing. A namesake or remake is never suppressed by title, a conflicting stored id bridges nothing,
 // and the GET writes nothing. Synthetic data only.
 import fs from 'node:fs';
 import vm from 'node:vm';

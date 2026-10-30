@@ -144,7 +144,7 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal(drive.watchlist.value,false,'added by the resumed w3, then removed by w4');assert.equal(drive.watchlist.replaced.observedAt,at(2));
 }
 
-// The EPG films scan always writes through the facts (LETTERBOXD_FACTS retired, ADR 0054): absence never clears a rating,
+// The EPG films scan always writes through the facts (LETTERBOXD_FACTS retired, ADR 0055): absence never clears a rating,
 // and no value of the stale binding (absent, off, on, a near miss, an object) brings back the legacy path.
 for(const stale of [undefined,'on','off','On',{token:'x'}]){
  const b=bucket(),records=b.records,film=id=>({id,url:'https://letterboxd.com/film/'+id+'/',title:id,original:id,year:2020,genres:[],shows:[]});
@@ -207,7 +207,7 @@ for(const stale of [undefined,'on','off','On',{token:'x'}]){
  assert.equal(b.records.has(F.recordKey('lb-newfilm')),false);
 }
 
-// Owner rating edit, always through the facts (ADR 0054): facts first; a rejected observation leaves actual.json alone and says so.
+// Owner rating edit, always through the facts (ADR 0055): facts first; a rejected observation leaves actual.json alone and says so.
 {
  const b=bucket(),records=b.records;
  const ctx3=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout:fn=>fn(),fetch:async()=>{throw new Error('no network');},ASSETS:{},INITIAL_PERSONAL_RATINGS:{}});

@@ -86,7 +86,7 @@ try{
  await writeFile(otherZip,zip({...exportFiles,'ratings.csv':exportFiles['ratings.csv'].replace('4.5','3')}));await assert.rejects(loadVerifiedPlan({zip:otherZip,output,now}),/differs from origin.json/);
 
  for(const file of ['src/letterboxd-facts.js','src/worker.js','src/enrichment.js','src/sources.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\??\.(LETTERBOXD_BASELINE_IMPORT|LETTERBOXD_FACTS)|baselineEnabled|factsEnabled|import_disabled|facts_disabled/,file+' reads no baseline import or facts switch');
- // The route has no switch (ADR 0053, ADR 0054): the routine writers always record facts, so the next sync cannot clear
+ // The route has no switch (ADR 0053, ADR 0055): the routine writers always record facts, so the next sync cannot clear
  // imported ratings by absence. A stale LETTERBOXD_BASELINE_IMPORT or LETTERBOXD_FACTS of any value neither opens nor closes it.
  const b=bucket(),on={BUCKET:b};
  let summary;

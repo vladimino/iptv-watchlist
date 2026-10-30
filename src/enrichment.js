@@ -276,7 +276,7 @@ async function refreshRatingsFromFilms(env,report,extraIds=[]){
  const observedAt=new Date().toISOString(),removedRatings={};
  for(const id of extra){if(!seen.has(id))continue;const rating=confirmedHalfStar(seen.get(id));if(rating!=null)removedRatings[id]=rating;}
  // The scan is one summary observation (ADR-0024): absence never clears a rating. Since LETTERBOXD_FACTS was retired
- // (ADR 0054) the fact records are the only writer of the films list.
+ // (ADR 0055) the fact records are the only writer of the films list.
  const facts=await LetterboxdFacts.applyFilmsListScan(env,{scanId:'films-list-'+(report.runId||crypto.randomUUID()),observedAt:scanStartedAt,films:Object.fromEntries(seen),total},{watchlistFilms:report.films||[]});return {pages,watched:total,watchlistRated:rated,changed:facts.written,removedRatings,observedAt,facts:{written:facts.written,carried:facts.carried,conflicts:facts.conflicts,outcomes:facts.outcomes}};
 }
 async function repairRemovedBaselineRatings(env,report){

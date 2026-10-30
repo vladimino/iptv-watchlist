@@ -24,7 +24,7 @@ vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context),Facts=constant('LetterboxdFacts');
 const VIEW=constant('ENRICHMENT_KEY')+'view-index.json',ORIGIN='https://iptv.vladimino.workers.dev',G1='11111111-1111-4111-8111-111111111111',G2='22222222-2222-4222-8222-222222222222';
-// No switch: FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0054) are retired; the mark is always available.
+// No switch: FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0055) are retired; the mark is always available.
 const ON={BUCKET:bucket};
 const hour=3600000,now=Date.now();
 const current={prediction:{predictedRating:4.5,probability4Plus:.9,confidence:'high',matchSignals:[],mainRisk:null,tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1},fingerprintHash:'f',impactFeatures:{fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1},fingerprint:{fingerprintHash:'f',plotMechanics:[],execution:{}}};
@@ -166,7 +166,7 @@ const links=()=>records.get('letterboxd/facts/links.json')||{};
  assert.equal((await mark({tmdbId:'10',watched:true})).body.code,'film_not_in_catalog');
  assert.equal((await available()).watchedMarkEnabled,undefined);
 }
-// The Finds response always offers the mark. The retired FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0054)
+// The Finds response always offers the mark. The retired FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0055)
 // are inert: no value of either, alone or together, closes the mark or changes what it writes.
 {
  for(const name of ['FINDS_WATCHED_MARK','LETTERBOXD_FACTS'])for(const value of [undefined,'on','off','On',' on',true,{token:'x'}]){

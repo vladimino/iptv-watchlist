@@ -161,7 +161,7 @@ for(const [name,expression] of Object.entries(consumer)){
  const compute=vm.runInContext('env=>'+expression,context);
  for(const value of samples){const environment={[name]:value};assert.equal(entry(reportOf(environment),name).effective,compute(environment),name+' = '+JSON.stringify(value));}
 }
-// The retired facts switch (ADR 0054) has no reader left, and the readout reports no mode for any value.
+// The retired facts switch (ADR 0055) has no reader left, and the readout reports no mode for any value.
 for(const file of fs.readdirSync('src',{recursive:true}).filter(name=>name.endsWith('.js')))assert.doesNotMatch(fs.readFileSync('src/'+file,'utf8'),/env\??\.LETTERBOXD_FACTS/,'src/'+file+' does not read LETTERBOXD_FACTS');
 for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),'LETTERBOXD_FACTS');assert.equal(item.effective,null);}
 

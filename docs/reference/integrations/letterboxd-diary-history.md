@@ -2,7 +2,7 @@
 
 [AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0049](../../adr/0049-letterboxd-diary-viewing-history.md). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). Gate: `LETTERBOXD_DIARY_HISTORY`, off by default ([feature flags](../feature-flags.md)).
 
-The owner's public Letterboxd Diary is read into a viewing history. A row with a viewing id is its own entry; rows without one become one entry per film and day that counts its viewings, a lower bound unless one page held the whole day. Without a viewing id the per-viewing granularity is lost: two viewings of a film on one day keep only their count, their ratings in page order and how many rows were marked re-watch, not which viewing was which. It is kept apart from the current rating. It never writes a rating, watched or watchlist fact, never changes `actualRating`, and absence from the diary means nothing.
+The owner's public Letterboxd Diary is read into a viewing history. A row with a viewing id is its own entry; rows without one become one entry per film and day that counts its viewings, a lower bound unless one page held the whole day. Without a viewing id the per-viewing granularity is lost: two viewings of a film on one day keep only their count, their ratings in page order and how many rows were marked re-watch, not which viewing was which. The history is kept apart from the current rating. Under [ADR 0054](../../adr/0054-diary-first-epg-ratings.md) the EPG commit turns what it proves into watched and rating facts ([below](#rating-facts)). Absence from the diary means nothing.
 
 ## Source
 
@@ -72,12 +72,38 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
 
 ## In the EPG commit
 
-With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ratings attempt](letterboxd-ratings.md#ratings-attempt)) after the removal lookup and before the films list.
+With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ratings attempt](letterboxd-ratings.md#ratings-attempt)) right after the commit. The removal lookup follows it, and the public films list is not requested ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md)).
 
-- **Summary.** It is stored in `sync.json` as `diaryHistory` (`outcome`, `stopReason`, `counts`, `resumePage`, `at`) and returned by the sync status.
-- **Never fatal.** The stage never fails the commit.
-- **Shared page 1.** Its page-1 rows feed the diary repair after a failed films list, so a commit reads Diary page 1 once. If the stage could not read page 1, the repair reports that and does not request it again.
-- **Gate off.** Nothing is read or written by the stage, and the repair keeps its own single page-1 request.
+- **Summary.** It is stored in `sync.json` as `diaryHistory` and returned by the sync status. It holds `outcome`, `stopReason`, `counts`, `resumePage`, `coverage` and `at`, plus `facts`:
+  - `rated`, `unrated`, `ambiguous`, `partial`: the evidence states;
+  - `films`, `written`, `unchanged`, `older`, `skipped`, `conflicts`: the write outcomes;
+  - `enabled`: always `true`; the former `LETTERBOXD_FACTS` switch is retired ([ADR 0055](../../adr/0055-retire-letterboxd-facts-switch.md)) and kept in the summary for its readers.
+- **Never fatal.** The stage never fails the commit. A blocked, rate-limited or failed run ends the ratings attempt as `error` with that cause, and keeps every stored fact.
+- **Gate off.** Nothing is read or written by the stage. The ratings attempt ends `finished` with cause `diary_off`.
+
+## Rating facts
+
+After each page's history commit, and before the next page is requested, the films on that page become facts. `LetterboxdDiary.ratingEvidence` reads the stored history, by lid only.
+
+| Evidence | Condition | Fact |
+| --- | --- | --- |
+| `rated` | The film's latest watched date has every row known and rated with one value: viewing-id entries, and day entries whose count is proved by one page | `watched: true` and `rating` |
+| `unrated` | The latest date's rows have no rating | `watched: true` only |
+| `ambiguous` | The latest date's rows disagree | `watched: true` only |
+| `partial` | The latest date's day count is a lower bound, or the date is not inside the page just read: the film has no row of that date on it, or the date touches an open page edge (the top of a page after the first, the bottom of a page with a next one). Viewing-id rows are fenced the same way | `watched: true` only |
+
+- **Never an older entry.** An older entry never stands in for the latest one.
+- **Unresolved entries.** An entry without a lid links nothing, and a slug never links ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md)).
+- **Observation.** Both facts are observations with `source: letterboxd_diary`, `observedAt` set to the watched date at `00:00:00.000Z`, and `sourceRef: diary:<entry keys>`.
+  - A reread is the same observation, so nothing is written.
+  - Any newer observation wins: a film page, the owner, a films-list summary floor, or a newer diary date. The rating is never rolled back to an older diary value.
+  - `ratingHistory` gets `first_observed` or `changed` only when the effective rating changes.
+- **Batch writer.** `LetterboxdFacts.applyDiaryEvidence` writes one batch per page:
+  - one links compare-and-swap;
+  - one record compare-and-swap per film whose view index does not already show the same watched and rating;
+  - one view-index projection.
+- **Failure.** A failed write stops the run at that page (`stopReason: after_page:<message>_page_<n>`), so the next run reads the page again.
+- **Removal events.** They get the proved ratings first, as the film's effective rating. The removal lookup then runs only for removed films without one. A stored rating without diary proof does not spare the lookup.
 
 ## Read API
 
@@ -97,6 +123,7 @@ R2 is the authority for these objects. A D1 projection follows the storage-neutr
 
 ## Rollback
 
-- **Gate off:** no further reads or writes.
+- **Gate off:** no further reads or writes; the commit then requests nothing from Letterboxd except the removal lookup.
+- **Facts written from the diary:** kept. They are ordinary observations that newer ones replace.
 - **Stored history:** kept.
 - **Revert:** removes the stage, the reader and the route. The objects stay and are ignored. Deleting them is a separate owner-approved storage operation.
