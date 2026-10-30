@@ -16,6 +16,7 @@ These pages describe the **currently maintained** operational boundaries; none i
 - [Catalog poster hydration for records stored without a poster (owner approval required)](catalog-poster-hydration.md)
 - [D1 backfill execution and recovery (owner approval required)](d1-backfill.md)
 - [TMDB credits for watchlist Films in D1 (owner approval required)](tmdb-watchlist-credits.md)
+- [TMDB TV identity correction for four retired movie ids: offline plan and production steps (owner approval required)](tmdb-tv-identity-correction.md)
 - [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md)
 - [Letterboxd export reconciliation, offline (complete matching needs an approved R2 snapshot), and identity from film pages (network run needs owner approval)](letterboxd-export-reconciliation.md)
 

@@ -283,7 +283,13 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
 // 16. Status: a database without schema v4 has no projector; with it, checkpoints and the last run.
 {
  const {db:v3}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity']);
- assert.deepEqual({...await projector.d1EnrichmentStatus(v3,{})},{mode:'off',schema:false});
+ const plain=value=>JSON.parse(JSON.stringify(value));
+ assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',schema:false,schemaVersion:3,projectionTables:[]});
+ // A partial 0004 is not schema v4: the three tables without the version, or the version without a table.
+ v3.sql(fs.readFileSync('migrations/0004_projection_state.sql','utf8').replace(/UPDATE schema_contract[^;]*;/,''));
+ assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',schema:false,schemaVersion:3,projectionTables:['projection_fence','projection_run','projection_state']});
+ v3.sql('UPDATE schema_contract SET version=4 WHERE id=1;DROP TABLE projection_fence');
+ assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',schema:false,schemaVersion:4,projectionTables:['projection_run','projection_state']});
  assert.equal((await run(env)).outcome,'complete');
  const status=await projector.d1EnrichmentStatus(db,{D1_ENRICHMENT_WRITE:'on'});
  assert.deepEqual([status.mode,status.schema,status.checkpoints,status.absent,status.lastRun.outcome,status.lastRun.leaseHeld],['on',true,one(db,'SELECT COUNT(*) FROM projection_state'),one(db,"SELECT COUNT(*) FROM projection_state WHERE change_key='absent'"),'complete',false]);

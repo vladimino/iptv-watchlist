@@ -62,3 +62,31 @@ Retained heap after a forced collection, at each stage:
 - Worker heap and CPU on the production isolate, including an isolate also serving a sync request.
 - D1 latency per batch.
 - AIR-286's D1-only credits on the real data. They are covered by `tests/d1-enrichment.mjs` on synthetic data.
+
+## 6. Production D1 preflight before seeding (read-only)
+
+**Captured:** 2026-10-30, 14:39 UTC (15:39 Madrid). These were SELECT statements against D1 `iptv` (`3fba0e0a…`, schema v3) through the D1 HTTP API, compared with the private reload build of the 29 October snapshot. Nothing was written.
+
+**Baseline.** The one `import_receipt` for `manifest.json` names `062c9812…250dda`, imported at `2026-10-29T19:58:26.568Z`, the same in both.
+
+| Table | Production | Build | Only in production | Only in build |
+| --- | --- | --- | --- | --- |
+| `film` | 2,402 | 2,402 | 0 | 0 |
+| `film_external_id` | 3,190 | 3,190 | 0 | 0 |
+| `film_alias` | 2,477 | 2,477 | 0 | 0 |
+| `film_dimension` | 12,010 | 12,010 | 0 | 0 |
+| `film_metadata` | 394 | 394 | 0 | 0 |
+| `watchlist_film` | 394 | 394 | 0 | 0 |
+| `film_redirect`, `localization_conflict` | 0 | 0 | 0 | 0 |
+| `person` | 19,089 | 17,344 | 1,745 | 0 |
+| `person_alias` | 19,091 | 17,346 | 1,745 | 0 |
+| `person_external_id` | 17,344 | 17,344 | 0 | 0 |
+| `person_dimension` | 34,688 | 34,688 | 0 | 0 |
+| `film_person_credit` | 30,478 | 26,133 | 4,345 | 0 |
+
+Rows were compared with all their columns, `updated_at` included. Every extra row in production is AIR-286 data:
+- 1,745 `person:tmdb_*` people with one name alias each;
+- 4,345 credits of `person:tmdb_*` people on watchlist Films, covering all 394.
+
+The seed plan of the snapshot holds 19,746 keys: 17,344 Persons and 2,402 Films. It gives the 1,745 AIR-286 people no key. The seed tool's read-only plan against production stopped, as it must before migration 0004, with `schema_not_v4` (no projection tables, version 3).
+

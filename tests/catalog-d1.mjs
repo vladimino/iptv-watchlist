@@ -48,7 +48,7 @@ const get=async(p,env={DB},method='GET')=>{const res=await ctx.route(new Request
 // status
 let r=await get('status');
 assert.equal(r.status,200);
-assert.deepEqual({...r.body},{source:'d1',authoritative:false,films:3,persons:8,credits:5,candidates:0,predictions:1,ratings:1,lastImport:T,schemaVersion:3,projector:{mode:'off',schema:false}});
+assert.deepEqual({...r.body},{source:'d1',authoritative:false,films:3,persons:8,credits:5,candidates:0,predictions:1,ratings:1,lastImport:T,schemaVersion:3,projector:{mode:'off',schema:false,schemaVersion:3,projectionTables:[]}});
 // persons: search by original name, by localized name, role filter, keyset paging
 r=await get('persons?q=Pacino');assert.deepEqual(r.body.items.map(x=>x.id),['person:actor/al-pacino','person:tmdb_actor/555']);assert.equal(r.body.items[0].localName,'Аль Пачино');assert.equal(r.body.items[0].films,1);
 r=await get('persons?q='+encodeURIComponent('Пачино'));assert.deepEqual(r.body.items.map(x=>x.id),['person:actor/al-pacino']);

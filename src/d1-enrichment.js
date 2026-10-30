@@ -232,11 +232,13 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
  return result;
 }
 
-// The read-only status of the projector for /api/d1/status. A database without schema v4 has no projector tables yet.
+// The read-only status of the projector for /api/d1/status. schema is true only for the whole of migration 0004: its three tables
+// and schema_contract version 4. A partial schema is reported as false with what is present.
 async function d1EnrichmentStatus(binding,env){
  const mode=d1EnrichmentMode(env);
- const present=(await binding.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run')").bind().first())?.n===2;
- if(!present)return {mode,schema:false};
+ const tables=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence')").bind().all()).results||[]).map(row=>row.name).sort();
+ const version=(await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first())?.version??null;
+ if(tables.length!==3||version!==4)return {mode,schema:false,schemaVersion:version,projectionTables:tables};
  const [run,counts]=await Promise.all([
   binding.prepare('SELECT lease_until leaseUntil,started_at startedAt,finished_at finishedAt,outcome,summary_json summary FROM projection_run WHERE projection=?').bind(D1_ENRICHMENT_PROJECTION).first(),
   binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),

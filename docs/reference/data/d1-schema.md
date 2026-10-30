@@ -8,7 +8,7 @@ Versioning and recovery are in [ADR 0001](../../adr/0001-d1-schema-v1.md).
 
 ## What is stored where
 
-An observation key such as `heat|1995` is a `candidate` row. It is not a `film.id`. `film.id` starts with `film:`. A trusted external id is unique. A redirect keeps the retired id without creating a second Film. `accepted_tmdb_id` on a score does not reference `film`.
+An observation key such as `heat|1995` is a `candidate` row. It is not a `film.id`. `film.id` starts with `film:`. A trusted external id is unique per scheme. `tmdb` holds TMDB movie ids and `tmdb_tv` TMDB TV ids ([ADR 0057](../../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md), Accepted): the same number in the two schemes is two different entries, and `film.canonical_identity` is `tmdb:<id>` or `tmdb_tv:<id>`. A retired movie id stays as an untrusted `tmdb` row whose `provenance_json` has `status: retired`. A redirect keeps the retired id without creating a second Film. `accepted_tmdb_id` on a score does not reference `film`.
 
 A generation has a phase of `published` or `withheld`. `published_generation` is the one current pointer, the same role as `epg/published-generation.json`. Moving it from generation A to generation B leaves A's rows in place. `published_film_show` reads only that pointer, and only when the pointed generation is `published`. `film_generation` is the membership row. Zero `film_show` rows under that membership are an explicit empty show list. A film show keeps `channel`, `epg_title`, `basis`, and `match_reason`, so a `title_duration` showing still explains the cautious mark. `film_epg_last_airing` is a historical fact and is not a show.
 
@@ -156,7 +156,7 @@ A projected `film_metadata` row has `r2_key` `metadata.json` and `content_sha256
 
 The projector fails closed on its R2 inputs. Missing, malformed or unpublished inputs stop a run before any write. A live writer, or an object whose etag changed during the reads, defers it. It also holds a run with more than 25 absent Films or 250 absent Persons (`absent_guard`), or more lost watchlist memberships than the larger of 5 and 2 % of the members (`membership_guard`). See [ADR 0056](../../adr/0056-d1-enrichment-write-through.md).
 
-`scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
+`scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled: a local SQLite build in one transaction (`--database`), or production D1 through the HTTP API (`--target d1`, read-only without `--apply`). In D1 mode it refuses to write unless the database identity, the full schema v4, the baseline receipt, an idle projector lease, a held entity for every key and agreement with any stored key all hold. With `--apply` it holds the projector's own lease in `projection_run` for the whole run, so the projector refuses to start. Every request fences on that lease, renews it and writes an idempotent chunk of 250 rows; a lost lease fails the request whole. It verifies every key afterwards. It is not one transaction. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
 
 ## Candidate show identity (schema v3)
 
