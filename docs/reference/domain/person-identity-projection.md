@@ -1,6 +1,6 @@
 # Person identity projection
 
-**Role:** consumer reference for one human across the watchlist and the catalog. Decision: [ADR 0059](../../adr/0059-person-identity-projection.md) (Proposed). Implemented by `src/domain/person-identity-projection.js`, over the grouping in [the canonical Person contract](canonical-person.md). Verified against the source on **2026-10-31**.
+**Role:** consumer reference for one human across the watchlist and the catalog. Decision: [ADR 0059](../../adr/0059-person-identity-projection.md) (Accepted). Implemented by `src/domain/person-identity-projection.js`, over the grouping in [the canonical Person contract](canonical-person.md). Verified against the source on **2026-10-31**.
 
 The projection is a read model. It does not query, write, or load inside the Worker. Programme, watchlist and catalog routes still match the role-specific id on the stored credit. Calling this module from a route is a separate approval.
 
