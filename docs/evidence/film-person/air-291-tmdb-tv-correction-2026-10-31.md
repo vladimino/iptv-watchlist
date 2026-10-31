@@ -2,7 +2,8 @@
 
 **Captured:** 2026-10-31, 07:10–07:40 UTC, in the agent container (Node 22), runtime code at `main` `dab57b9` ([PR #268](https://github.com/vladimino/iptv-watchlist/pull/268)), Worker version `48828515-cba8-48a4-8a53-f7c7ac5d5e7c` (deployed 07:02 UTC).  
 **Card:** [AIR-291](https://trello.com/c/OWV3rL9q); decision [ADR 0057](../../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md); procedure [runbook](../../runbooks/tmdb-tv-identity-correction.md).  
-**Authorizations:** the owner approved the read-only preflight ("начинай", 07:07 UTC), the Cloudflare API write method with its own gate (07:23 UTC), and the single R2 write of the body with SHA-256 `c8aa44c2…` ("разрешаю", 07:36 UTC).  
+**Authorizations:** the owner approved the read-only preflight ("начинай", 07:07 UTC) and the single R2 write of the body with SHA-256 `c8aa44c2…` ("разрешаю", 07:36 UTC).  
+**Write path:** the owner chose the Cloudflare API write (07:23 UTC). No S3 writer credential was available for the runbook's conditional put. He made it subject to an owner gate that shows exactly what is written. The runbook was amended to carry this alternative ([PR #272](https://github.com/vladimino/iptv-watchlist/pull/272)).  
 **Verdict:** **CORRECTED.** The four Films hold their TMDB TV entry as the trusted `tmdb_tv` identity in the R2 projection and in D1. Their retired movie ids remain as untrusted entries. Nothing else changed.
 
 The evidence bodies (the TMDB answers and the Letterboxd pages) stay in the private AIR-286 artifact. Only ids, counts, hashes and timestamps are recorded here.
