@@ -77,7 +77,7 @@ export async function loadLifecycleSnapshot(directory,{asOf}={}){
   else if(prediction)predictions[decodeURIComponent(prediction[1])]=value;
   else persistedSidecars[key]=value;
  }
- const named=['programme.json','watchlist.json','metadata.json','titles.json','people.json','sync.json','epg/discovered-films.json','epg/discovery-resolution.json','epg/discovery-latest.json','enrichment/profile/current.json','letterboxd/diary/history.json'];
+ const named=['programme.json','watchlist.json','metadata.json','titles.json','people.json','sync.json','epg/discovered-films.json','epg/discovery-resolution.json','epg/discovery-latest.json','enrichment/profile/current.json','letterboxd/diary/history.json','identity/tmdb-retirements.json'];
  const loadedNamed={};
  for(const key of named){if(!byKey.has(key))continue;loadedNamed[key]=await loadKey(key);loaded++;}
  const store={
@@ -92,6 +92,8 @@ export async function loadLifecycleSnapshot(directory,{asOf}={}){
   discoveryLatest:loadedNamed['epg/discovery-latest.json']||{items:[]},
   profile:loadedNamed['enrichment/profile/current.json']||null,
   diaryHistory:loadedNamed['letterboxd/diary/history.json']||null,
+  // Optional (ADR 0057): null while absent, and the reader then applies no retirement.
+  tmdbRetirements:loadedNamed['identity/tmdb-retirements.json']??null,
   fingerprints,predictions,persistedSidecars,
   filmTitles:JSON.parse(await readFile(path.join(root,'data/film-titles.json'),'utf8')),
   personNames:JSON.parse(await readFile(path.join(root,'data/person-names.json'),'utf8')),

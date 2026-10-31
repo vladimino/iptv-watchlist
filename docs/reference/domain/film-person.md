@@ -45,7 +45,7 @@ A Letterboxd film slug is kept as its own `externalIds` entry: `{scheme: 'letter
 
 ## TMDB TV identity and retired movie ids
 
-A miniseries that TMDB keeps as a TV entry is identified by `{scheme: 'tmdb_tv', value, trusted, conflicting, provenance}` ([ADR 0057](../../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md), Accepted). The functions live in `src/domain/tmdb-tv-identity.js`, which is loaded beside this file and is not in the Worker bundle yet; the runtime integration is a separate card.
+A miniseries that TMDB keeps as a TV entry is identified by `{scheme: 'tmdb_tv', value, trusted, conflicting, provenance}` ([ADR 0057](../../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md), Accepted). The functions live in `src/domain/tmdb-tv-identity.js`, which is loaded beside this file. The Worker bundle loads it at top level: `parseFilm` keeps the typed link and the lifecycle reader applies the retirements object ([below](#runtime-projection)).
 
 - **Separate namespaces.**
   - `tmdb` (movie) and `tmdb_tv` values are never compared.
@@ -75,8 +75,29 @@ A miniseries that TMDB keeps as a TV entry is identified by `{scheme: 'tmdb_tv',
   - The result depends on the Film and the retirement only, never on the time of the run (except the dimension's `updatedAt`), so any writer's correction reads back identically.
   - A Film carrying exactly the result is returned with `changed: false`. Exactly means all of these: the retired `tmdb` entry with its full provenance (including `previous`), the trusted `tmdb_tv` entry with its full provenance, `canonicalIdentity`, and the identity dimension's `sourceVersion` and both ids. Key order is ignored. Any other trace of a correction is `partial_correction`.
   - These states are refused, not repaired: `film_mismatch`, `lid_mismatch`, `identity_not_resolved`, `conflicting_tmdb`, `movie_id_mismatch`, `tv_id_mismatch`, `partial_correction`, `movie_not_trusted_identity`.
-- **Storage.** The retirements are one owner-approved R2 object, `identity/tmdb-retirements.json`, applied by the projection (runtime card). The records keep the movie id Letterboxd shows. D1 holds the untrusted retired `tmdb` row, the trusted `tmdb_tv` row and `canonical_identity` `tmdb_tv:<id>`; the unique index on trusted `(scheme, value)` separates the namespaces without a schema change.
+- **Storage.** The retirements are one owner-approved R2 object, `identity/tmdb-retirements.json`, applied by the projection ([below](#runtime-projection)). The records keep the movie id Letterboxd shows. D1 holds the untrusted retired `tmdb` row, the trusted `tmdb_tv` row and `canonical_identity` `tmdb_tv:<id>`; the unique index on trusted `(scheme, value)` separates the namespaces without a schema change.
 - **Plan.** `scripts/tmdb-tv-identity-plan.mjs` plans exactly the four confirmed Films from the private AIR-286 artifact. It reads either D1 or a snapshot, writes nothing, and states each Film's expected D1 identity; `d1Readback` compares D1 with it ([runbook](../../runbooks/tmdb-tv-identity-correction.md)). D1 is written by the enrichment projector ([ADR 0056](../../adr/0056-d1-enrichment-write-through.md)), not by this tool.
+
+### Runtime projection
+
+- **The page link in the records.** `parseFilm` adds `tmdbLink`, the full `letterboxdTmdbLink(html)` result, to the record it returns. `tmdbId` is unchanged: it is still the first `data-tmdb-id` number, whatever the link or `data-tmdb-type` says.
+  - The metadata refresh writes the record to `metadata.json` and to the sync run's watchlist. The completed sync writes the run's films to `watchlist.json`, and the EPG commit carries them into `programme.json`.
+  - The field appears on a record only when the regular sync re-parses its page: a stale record (30 days) or a missing synopsis. A record written before has no field and stays valid. A fresh record keeps the field it has.
+  - No Film view, readiness rule or change key reads `tmdbLink`, so the field alone changes nothing in D1.
+- **The retirements object.** `readLifecycle(store, now, options)` applies `store.tmdbRetirements`, the body of `identity/tmdb-retirements.json`, only when it is not `null`.
+  - Absent: the reader calls none of this and the view is exactly what it was. Nothing creates the object; it is written only by an owner-approved run ([runbook](../../runbooks/tmdb-tv-identity-correction.md)).
+  - `tmdbRetirementSet(body)` checks the whole object first: `schemaVersion: 1`, a `retirements` array, every entry valid under `tmdbRetirement`, and no two entries naming the same Film, lid, movie id or TV id. One failure fails the object (`valid: false`, reasons such as `entry_0:owner_confirmation` or `entry_1:duplicate_tvId`), and no retirement of it applies.
+  - `applyTmdbRetirements` runs after the watchlist and programme Films are built and before catalog records are linked, so a retired movie id, no longer trusted, links no catalog record. A retirement is **held**, and its Film stays as the records build it, when:
+    - the Film is not in the view (`film_missing`);
+    - a stored record of its lid (programme, watchlist, `metadata.json`) with a `tmdbLink` no longer shows the confirmed divergence, checked per record by `tmdbLinkChange`. That divergence is exactly one link, `tv/<tvId>`, with exactly one attribute pair, `movie`/`<movieId>`. Anything else is held:
+      - no link, several links, another link or an unreadable field (`link_changed`);
+      - attributes that are missing, several, of another type or another id (`attributes_changed`), including Letterboxd switching only the type, or type and id, to the TV entry;
+    - `applyTmdbRetirement` refuses it (`movie_id_mismatch`, `lid_mismatch` and the other reasons above).
+  - A record without a `tmdbLink` field (written before the field existed) is no evidence either way. The correction uses the identity dimension's own `updatedAt` as its time, so it is the same on every read.
+  - `settleTmdbRetirements` checks the corrections against the whole view once catalog records are linked. A trusted `tmdb_tv` on a second Film (`tmdb_tv_collision`) or a second Film still trusting the retired movie id (`retired_movie_on_other_film`) undoes the correction and holds every Film involved.
+  - The view then carries `tmdbRetirements: {valid, reasons, retirements, applied, held: [{filmId, reason}], numericOverlaps}`, with `entitiesOnly` too. It is absent when the object is absent. `numericOverlaps` (a TV id equal to a movie id on another Film) is reported only.
+- **Consumers.** The corrected Film keeps its id, lid, slug alias, localization, fingerprint, prediction, history and redirects; `catalogReady` and `displayReady` still hold through the lid. Movie-only consumers read the records' `tmdbId`, which keeps the movie number, and never see `tmdb_tv`: EPG matching and discovery `knownTmdb`, catalog keys `tmdb_<n>`, posters, Wikidata P4947 and the model's TMDB URI (for a corrected Film still the retired movie URL, as before the correction). The retired movie ids answer `404`, so no TMDB movie can be verified under them. `recordsFor` adds catalog records only for a trusted `tmdb` id, so a `tmdb_tv` number never pulls the catalog record of an equal movie id into a Film's credits. The admin Film record (`src/admin/read.js`) builds its identity from the records and still shows the movie id; it reads, and writes nothing.
+- **Offline tools.** `scripts/snapshot-store.mjs` loads the object into `store.tmdbRetirements` when a snapshot holds it (`null` otherwise), so the offline import, the projection seed and the lifecycle scripts derive the same corrected view as the Worker.
 
 ## Lifecycle dimensions and transition rules
 

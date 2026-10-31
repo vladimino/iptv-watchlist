@@ -19,14 +19,14 @@ export const PROJECTION='enrichment';
 
 export function lifecycleReader(){
  const context=vm.createContext({Date,Map,Set,WeakMap,JSON,Object,URL,encodeURIComponent});
- vm.runInContext(fs.readFileSync(path.join(ROOT,'src/domain/film-person.js'),'utf8')+'\n'+fs.readFileSync(path.join(ROOT,'src/domain/film-person-reader.js'),'utf8')+'\nglobalThis.api={readLifecycle};',context);
+ vm.runInContext(['src/domain/film-person.js','src/domain/tmdb-tv-identity.js','src/domain/film-person-reader.js'].map(file=>fs.readFileSync(path.join(ROOT,file),'utf8')).join('\n')+'\nglobalThis.api={readLifecycle};',context);
  return (store,now)=>context.api.readLifecycle(store,now,{entitiesOnly:true});
 }
 
 // The change keys of one snapshot: [{kind,id,key}] for every Film and Person of its enrichment view.
 export async function snapshotChangeKeys(directory){
  const {store,now,manifest}=await loadLifecycleSnapshot(directory);
- const lean=enrichmentStore({watchlist:store.watchlist,programme:store.programme,metadata:store.metadata,titles:store.titles,people:store.people,discoveredFilms:store.discoveredFilms,discoveryResolution:store.discoveryResolution,diaryHistory:store.diaryHistory,filmTitles:store.filmTitles,personNames:store.personNames,personOverrides:store.personOverrides});
+ const lean=enrichmentStore({watchlist:store.watchlist,programme:store.programme,metadata:store.metadata,titles:store.titles,people:store.people,discoveredFilms:store.discoveredFilms,discoveryResolution:store.discoveryResolution,diaryHistory:store.diaryHistory,tmdbRetirements:store.tmdbRetirements,filmTitles:store.filmTitles,personNames:store.personNames,personOverrides:store.personOverrides});
  const inputs=enrichmentInputs({view:lifecycleReader()(lean,now),store:lean});
  const nowIso=new Date(now).toISOString();
  return {at:nowIso,aggregateSha256:manifest.aggregateSha256,keys:[...inputs.people.map(entry=>({kind:'person',id:entry.id,key:personChangeKey(entry,nowIso)})),...inputs.films.map(entry=>({kind:'film',id:entry.id,key:filmChangeKey(entry,nowIso)}))]};

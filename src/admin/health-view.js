@@ -128,17 +128,17 @@ function healthGroupRow(group, now) {
   const freshness = healthCounts(group.freshness, HEALTH_FRESHNESS_TEXT);
   const retry = group.retryAt?.earliest ? `ближайший повтор ${healthDate(group.retryAt.earliest)}` : '';
   const since = group.lastProgressAt?.earliest ? `самый старый прогресс ${healthAge(group.lastProgressAt.earliest, now)}` : 'прогресс без отметки времени';
-  const threshold = group.threshold ? `порог ${group.threshold.code} = ${healthDuration(group.threshold.value)}` : '';
+  const threshold = !group.threshold ? '' : group.threshold.unit === 'records' ? `порог ${group.threshold.code} = ${group.threshold.value} записей` : `порог ${group.threshold.code} = ${healthDuration(group.threshold.value)}`;
   const sample = (group.sample || []).map(id => healthSubjectLink(group.subjectKind, id)).join(', ');
   const more = group.issues > (group.sample || []).length ? ` и ещё ${group.issues - group.sample.length}` : '';
-  const navigation = group.subjectKind === 'film' ? 'Открыть фильм в каталоге по ссылке.' : group.subsystem === 'prediction_queue' ? 'Смотреть очередь прогнозов в диагностике предсказаний.' : group.subsystem === 'discovery' ? 'Смотреть статус discovery pipeline.' : group.subsystem === 'poster' ? 'Гидрация постеров — отдельная owner-операция, здесь не запускается.' : group.subsystem === 'letterboxd_archive' ? 'Импорт архива — отдельная owner-операция.' : '';
+  const navigation = group.subjectKind === 'film' ? 'Открыть фильм в каталоге по ссылке.' : group.subsystem === 'prediction_queue' ? 'Смотреть очередь прогнозов в диагностике предсказаний.' : group.subsystem === 'discovery' ? 'Смотреть статус discovery pipeline.' : group.subsystem === 'poster' ? '' : group.subsystem === 'letterboxd_archive' ? 'Импорт архива — отдельная owner-операция.' : '';
   return `<li class="health-group health-group-${healthEscape(group.severity)}" data-group="${healthEscape(group.key)}">
     <div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(HEALTH_CATEGORY_TEXT[group.category] || group.category)}</span><span class="health-group-count">${healthEscape(HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind)}: ${group.issues}${group.affected !== group.issues ? ` · затронуто: ${group.affected}` : ''}</span></div>
     <p class="health-group-why">${healthEscape(HEALTH_REASON_TEXT[group.reason] || group.reason)}</p>
     <dl class="health-group-facts">
       <div><dt>Доказательства</dt><dd>${healthEscape(evidence || '—')}${healthEscape(missing)}${healthEscape(anomalies)} · прочитано ${healthEscape(healthAge(group.observedAt?.latest, now))}</dd></div>
       <div><dt>Свежесть / прогресс</dt><dd>${healthEscape([freshness, progress].filter(Boolean).join(' · ') || '—')}${since ? ' · ' + healthEscape(since) : ''}${retry ? ' · ' + healthEscape(retry) : ''}${threshold ? ' · ' + healthEscape(threshold) : ''}</dd></div>
-      <div><dt>Действие</dt><dd><b>${healthEscape(HEALTH_ACTION_TEXT[action.suggested] || action.suggested)}</b>: ${healthEscape(HEALTH_ACTION_CODE_TEXT[action.code] || action.code)} · ${healthEscape(eligibility)} (${healthEscape(HEALTH_ELIGIBILITY_TEXT[action.reason] || action.reason)})${navigation ? ' · ' + healthEscape(navigation) : ''}</dd></div>
+      <div><dt>Действие</dt><dd><b>${healthEscape(HEALTH_ACTION_TEXT[action.suggested] || action.suggested)}</b>: ${healthEscape(HEALTH_ACTION_CODE_TEXT[action.code] || action.code)} · ${healthEscape(eligibility)} (${healthEscape(HEALTH_ELIGIBILITY_TEXT[action.reason] || action.reason)})${navigation ? ' · ' + healthEscape(navigation) : ''}${group.subsystem === 'poster' && group.subjectKind !== 'film' ? ' · <a href="/admin/posters">Постеры: покрытие и ручная дозагрузка</a> (здесь не запускается)' : ''}</dd></div>
       <div><dt>Субъекты</dt><dd>${sample || '—'}${healthEscape(more)}</dd></div>
     </dl>
   </li>`;

@@ -64,8 +64,9 @@ export function listedOnWatchlist(store,film){
 // The store the enrichment view is built from. Fingerprints, predictions, the profile, the sync state and the discovery ledger
 // change only dimensions the enrichment writer does not own, so they are left out: the view is smaller and the change keys do
 // not move when a prediction does. The Worker projector and the offline seed both build their store here.
-export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,filmTitles=[],personNames=[],personOverrides={}}={}){
- return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
+// tmdbRetirements is the optional identity/tmdb-retirements.json body (ADR 0057); null while the object is absent.
+export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,tmdbRetirements=null,filmTitles=[],personNames=[],personOverrides={}}={}){
+ return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,tmdbRetirements,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
 }
 
 // One input per Film of the view and one per Person. A Film keeps only what the enrichment writer owns: fingerprint, prediction,

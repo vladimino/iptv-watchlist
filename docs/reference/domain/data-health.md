@@ -137,7 +137,7 @@ A record of another generation than the published one cannot be acted on: its ac
 
 **discovery** (`discovery`). A record of another generation: `stale` / `projection_generation_differs`, info, `wait`. `running` older than `continuationRunningStaleMs`: `stuck` / `continuation_running_stale`, warning, `manual_review` (the read-only pipeline status decides whether the writer is orphaned; this rule only says it is old). `paused` or `error` with a gate (`retryAt`, else `nextCatchUpAt`) go through the progress rule: a future gate waits, a gate just passed is `due` (reason `already_queued`: the hourly task takes it), a gate passed by more than the grace or progress older than `stalledMs` is `stuck` / `continuation_not_advanced`, a gate beyond `discoveryMaxBackoffMs` is `backoff_beyond_policy`. `complete`, `idle`, and `paused` with nothing left and no retry yield nothing. `affected.count` is `remainingChunks`.
 
-**poster** (`films[]`, `posters`). A film with `poster: null` is `missing_asset` / `poster_missing`, info; `bounded_action` / `poster_hydration` eligible only with a trusted, non-conflicting TMDB id, otherwise `investigate`, reason `identity_unverified`. `poster: undefined` is not a missing poster. The summary with `missingPoster > 0` is one `missing_asset` / `posters_missing` for the `catalog` subject with the stored counts; eligible when `verifiedMissing > 0`, `identity_unverified` when it is `0`, `supply_evidence` when it is absent. A summary without `missingPoster` is `incomplete` / `progress_unknown`.
+**poster** (`films[]`, `posters`). A film with `poster: null` is `missing_asset` / `poster_missing`, info; `bounded_action` / `poster_hydration` eligible only with a trusted, non-conflicting TMDB id, otherwise `investigate`, reason `identity_unverified`. `poster: undefined` is not a missing poster. The summary with `missingPoster > 0` is one `missing_asset` / `posters_missing` for the `catalog` subject with the stored counts; eligible when `verifiedMissing > 0`, `identity_unverified` when it is `0`, `supply_evidence` when it is absent. Its severity is info, and warning once `verifiedMissing` reaches `posterBacklogCount` (threshold unit `records`): only the count of restorable records escalates, never the time since the last restoration, and records without a verified TMDB id never do. The maintenance route does not store its terminal outcomes (`no_poster_on_tmdb`, `tmdb_id_mismatch`), so such records stay in `verifiedMissing`. A summary without `missingPoster` is `incomplete` / `progress_unknown`; the [poster coverage read](../api/admin.md#poster-coverage) supplies exactly that, with no counts, when a catalog copy or the generation pointer is missing or unreadable, so unknown coverage is never evaluated as zero.
 
 **letterboxd_archive** (`letterboxd`). `baseline: null`: `external_refresh` / `baseline_missing`, warning. A baseline older than `archiveStaleMs`: `external_refresh` / `baseline_stale`, warning. A baseline without a usable `confirmedAt`: `external_refresh` / `baseline_age_unknown`, info, evidence partial. The action is always `bounded_action` / `archive_import` with `eligible: false`, reason `owner_input_required`: the export comes from the owner, the system cannot make it eligible. `provenance.sha256` repeats the stored baseline digest.
 
@@ -145,7 +145,7 @@ A record of another generation than the published one cannot be acted on: its ac
 
 ## Thresholds
 
-`DATA_HEALTH_THRESHOLDS` are the defaults; `options.thresholds` overrides any of them with a positive integer and the result reports the values in force.
+`DATA_HEALTH_THRESHOLDS` are the defaults; `options.thresholds` overrides any of them with a positive integer and the result reports the values in force. Every threshold is milliseconds except the three counts at the end of the table; an issue's `threshold.unit` says which (`ms` or `records`).
 
 | Code | Default | Decides |
 | --- | --- | --- |
@@ -162,6 +162,7 @@ A record of another generation than the published one cannot be acted on: its ac
 | `skewToleranceMs` | 5 min | a timestamp this far ahead of `now` is treated as now |
 | `repeatedFailureAttempts` | 5 | attempts that escalate a waiting retry to warning |
 | `sampleSize` | 5 | ids kept on an aggregate issue |
+| `posterBacklogCount` | 20 records | restorable catalog records without a poster (two full batches of `/admin/posters`) that escalate the poster summary to warning |
 
 ## Clock skew and generations
 

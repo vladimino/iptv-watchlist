@@ -11,7 +11,7 @@ import {loadLifecycleSnapshot,SnapshotError} from './snapshot-store.mjs';
 const root=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 
 export async function slugInventory(store,now){
- const sources=await Promise.all(['src/domain/film-person.js','src/domain/film-person-reader.js','src/domain/film-person-backfill.js'].map(file=>readFile(path.join(root,file),'utf8')));
+ const sources=await Promise.all(['src/domain/film-person.js','src/domain/tmdb-tv-identity.js','src/domain/film-person-reader.js','src/domain/film-person-backfill.js'].map(file=>readFile(path.join(root,file),'utf8')));
  const context=vm.createContext({Date,Map,Set,JSON,Object,URL,encodeURIComponent});
  vm.runInContext(sources.join('\n')+'\nglobalThis.api={backfillLifecycle,letterboxdSlugFromUrl,LETTERBOXD_SLUG_SCHEME};',context);
  const {backfillLifecycle,letterboxdSlugFromUrl,LETTERBOXD_SLUG_SCHEME}=context.api;
