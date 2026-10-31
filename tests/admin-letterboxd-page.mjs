@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {webcrypto} from 'node:crypto';
 import {bundleAdmin} from '../src/admin/bundle.js';
 import {loadArchiveWorker} from './fixtures/letterboxd-archive-worker.mjs';
 import {exportArchive, zipArchive} from './fixtures/letterboxd-archive.mjs';
@@ -27,8 +28,11 @@ for (const file of ['public/admin.html', 'public/admin-limbo.html', 'public/admi
 assert.doesNotMatch(html, /\/api\/|fetch\(/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
 assert.doesNotMatch(bundle, /localStorage|sessionStorage|indexedDB|caches\.|document\.cookie|Authorization|Bearer|history\.(push|replace)State|\/api\/letterboxd\/baseline|\/api\/sync|\/mcp/);
-assert.doesNotMatch(bundle + html, /Импортировать|Применить|\/commit|\/validate|data-archive-apply/i, 'no button applies the proposal');
-assert.equal((html.match(/<button/g) || []).length, 3, 'submit, cancel and reset are the only buttons');
+assert.doesNotMatch(bundle + html, /Импортировать|Применить|\/commit|\/validate|data-archive-apply/i, 'no control commits by itself or calls the service-token route');
+assert.equal((html.match(/<button/g) || []).length, 3, 'submit, cancel and reset are the only buttons in the static page');
+assert.match(bundle, /data-archive-confirm/, 'a preview can offer a separate confirmation');
+assert.match(bundle, /data-archive-commit/, 'recording is a second control');
+assert.doesNotMatch(client, /Cf-Access|service.token|CF-Access-Client/, 'the page never carries an Access token');
 assert.equal((bundle.match(/\bfetchImpl\(/g) || []).length, 1, 'one request site');
 assert.match(client, /method:'POST'/);
 assert.match(client, /credentials:'same-origin'/);
@@ -138,7 +142,10 @@ assert.match(shown, /<details class="archive-details"><summary>Добавитс�
 assert.match(shown, /<details class="archive-details"><summary>В R2 новее <small>1<\/small>/);
 assert.match(shown, /в R2: 5/);
 assert.doesNotMatch(shown, /<details[^>]* open/, 'detail lists start closed');
-assert.doesNotMatch(shown, /<button/, 'the answer offers no action');
+assert.match(shown, /data-archive-confirm="0"/, 'the compared batch can be confirmed');
+assert.doesNotMatch(shown, /data-archive-commit/, 'confirmation is not yet issued, so nothing can be recorded');
+assert.match(shown, /Запись не начинается сама/);
+assert.equal(requests.length, 1, 'showing the confirmation does not send a second request');
 const held = run('archiveLive.answer');
 assert.equal(held.mode, 'preview');
 
@@ -177,4 +184,54 @@ choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
 await submit();
 for (const item of windowListeners) if (item.type === 'pagehide') item.fn();
 assert.equal(run('archiveLive.answer'), null);
+// 6. Confirming a batch is a second request. Recording is a third. Neither follows the preview by itself.
+ctx.crypto = webcrypto;
+choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
+await submit();
+const beforeConfirm = requests.length;
+await run('onArchiveConfirm(0)');
+assert.equal(requests.length, beforeConfirm + 1);
+assert.equal(requests.at(-1).url, '/api/admin/letterboxd-archive/apply-confirm');
+assert.equal(requests.at(-1).headers['X-IPTV-Admin-Action'], 'letterboxd_archive_apply');
+assert.equal(requests.at(-1).headers.Authorization, undefined);
+assert.equal(requests.at(-1).headers['Cf-Access-Jwt-Assertion'], undefined, 'the page does not attach an Access token');
+assert.equal(requests.filter(request => request.url.endsWith('/apply')).length, 0, 'confirm does not commit');
+await run('onArchiveCommit(0)');
+assert.equal(requests.filter(request => request.url.endsWith('/apply')).length, 0, 'without an issued confirmation the record control sends nothing');
+
+// 7. A commit answer is shown by its receipt, not as a full write merely because the HTTP status is 200.
+const counts = (extra) => ({written: 0, already_applied: 0, skipped_changed: 0, failed: 0, unknown: 0, not_attempted: 0, ...extra});
+const paintCommit = async (state, extra, replayed = false) => {
+  const previous = ctx.fetch;
+  ctx.fetch = async () => new Response(JSON.stringify({mode: 'apply', writes: state === 'succeeded', replayed, state, receipt: {state, counts: counts(extra)}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+  run('archiveLive.issued[0] = {idempotencyKey:"lb0123456789abcdef"}; archiveLive.committed = {};');
+  await run('onArchiveCommit(0)');
+  ctx.fetch = previous;
+  return result.innerHTML;
+};
+const failedHtml = await paintCommit('failed', {skipped_changed: 2});
+assert.match(failedHtml, /Факты партии 1 не изменились/);
+assert.match(failedHtml, /пропущено: 2/);
+assert.doesNotMatch(failedHtml, /Партия 1 записана/);
+const partialHtml = await paintCommit('partial', {written: 1, skipped_changed: 1, failed: 1});
+assert.match(partialHtml, /Партия 1 записана частично/);
+assert.match(partialHtml, /записано: 1/);
+assert.match(partialHtml, /пропущено: 1/);
+assert.match(partialHtml, /ошибки: 1/);
+assert.doesNotMatch(partialHtml, /записана полностью/);
+const fullHtml = await paintCommit('succeeded', {written: 2});
+assert.match(fullHtml, /Партия 1 записана полностью/);
+assert.match(fullHtml, /записано: 2/);
+const replayHtml = await paintCommit('succeeded', {already_applied: 2}, true);
+assert.match(replayHtml, /уже была записана/);
+assert.match(replayHtml, /Повтор ничего не меняет/);
+assert.doesNotMatch(replayHtml, /записана полностью/);
+const replayPartial = await paintCommit('partial', {already_applied: 1, skipped_changed: 1}, true);
+assert.match(replayPartial, /Партия 1 записана частично/);
+assert.match(replayPartial, /пропущено: 1/);
+assert.doesNotMatch(replayPartial, /записана полностью/);
+const replayFailed = await paintCommit('failed', {skipped_changed: 2}, true);
+assert.match(replayFailed, /Факты партии 1 не изменились/);
+assert.doesNotMatch(replayFailed, /записана полностью/);
+assert.doesNotMatch(replayFailed, /Партия 1 записана/);
 console.log('admin-letterboxd-page: ok');
