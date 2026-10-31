@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 export const QUEUE='enrichment/removal-rating-lookups.json';
 export const CURSOR='letterboxd/diary/state.json';
@@ -93,6 +94,7 @@ export const SERVER_FILES=['src/sources.js','src/ratings-seed.js','src/discovery
 export function loadContext({net,clock,FakeDate,crypto,root='.',files=SERVER_FILES,extra={}}){
  const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date:FakeDate||Date,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:crypto||webcrypto,console:{log(){},warn(){},error(){}},setTimeout,ASSETS:{},fetch:net.fetch,...extra});
  vm.runInContext(fs.readFileSync(root+'/src/domain/film-person.js','utf8'),context);
+ if(fs.existsSync(root+'/src/domain/discovery-observation-index.js'))vm.runInContext(scoped(root+'/src/domain/discovery-observation-index.js','DiscoveryIndex'),context);
  for(const file of files){
   const path=root+'/'+file;if(!fs.existsSync(path))continue;
   vm.runInContext(fs.readFileSync(path,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context,{filename:file});

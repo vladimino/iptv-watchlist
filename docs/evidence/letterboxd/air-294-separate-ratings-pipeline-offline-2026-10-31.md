@@ -1,7 +1,7 @@
 # AIR-294: separate Letterboxd ratings pipeline, offline verification (2026-10-31)
 
 **Card:** [AIR-294](https://trello.com/c/IzWiVABa). **Decision:** [ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md). **Contract:** [separate ratings pipeline](../../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline).
-**Code:** branch `cursor/air-294-ratings-pipeline-6979` over `main` `0dfcfe8`, measured 2026-10-31 UTC, Node v22.23.4.
+**Code:** branch `cursor/air-294-ratings-pipeline-6979`, started over `main` `0dfcfe8` and merged with `main` `6640735`, measured 2026-10-31 UTC, Node v22.23.4.
 **Scope:** offline only. Synthetic data in an in-memory R2 fake and a fake network. No production read or write, no Letterboxd request, no flag, Task, Access, R2 or D1 change, no `ratings_storage_migrate` (not even `dry_run`), no `ratings_sync_start` or `ratings_sync_step`. Nothing here is a production payload.
 
 ## Test harness
@@ -19,7 +19,7 @@
 
 The existing suites were updated for the new switch (`tests/feature-flags.mjs`), the tool list (`tests/mcp.mjs`) and the module list (`tests/get-side-effects.mjs`).
 
-**Golden method.** `tests/fixtures/ratings-inline-parity.json` was recorded by running `node tests/ratings-epg.mjs --golden <dir>` against the `src/` of `main` `0dfcfe8` extracted with `git archive`, on the same synthetic scenario. It holds synthetic data only.
+**Golden method.** `tests/fixtures/ratings-inline-parity.json` was recorded by running `node tests/ratings-epg.mjs --golden <dir>` against the `src/` of `main` `0dfcfe8` extracted with `git archive`, on the same synthetic scenario. After merging `main` `6640735` into the branch it was recorded again from that `main`: the bytes were identical. It holds synthetic data only.
 
 ## Memory and CPU profile
 

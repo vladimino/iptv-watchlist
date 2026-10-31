@@ -45,3 +45,38 @@ async function loadPredictionRecovery(filmId,options={}){
  if(!result.ok)return {mode:'error',error:result.error};
  return {mode:'ready',changed:false,answer:result.body};
 }
+// The discovery recovery assessment of one observation: the same pin rule as above.
+async function loadDiscoveryRecovery(key,options={}){
+ const common={fetch:options.fetch,signal:options.signal};
+ const result=await adminCall('/discovery-recovery',{key},{...common,pin:options.pin||null});
+ if(result.error==='aborted')return {mode:'aborted'};
+ if(result.status===409&&options.pin){
+  const fresh=await adminCall('/discovery-recovery',{key},common);
+  if(fresh.error==='aborted')return {mode:'aborted'};
+  return fresh.ok?{mode:'ready',changed:true,answer:fresh.body}:{mode:'error',error:fresh.error};
+ }
+ if(!result.ok)return {mode:'error',error:result.error};
+ return {mode:'ready',changed:false,answer:result.body};
+}
+// The two owner POSTs of `discovery_reconsider`. Same-origin JSON with the action named in a header; the Access session
+// is the only credential. A request that does not reach the Worker is `network`: its outcome is unknown, never retried.
+async function discoveryActionPost(path,body,options={}){
+ const fetchImpl=options.fetch||globalThis.fetch;
+ let response;
+ try{response=await fetchImpl(ADMIN_API+'/discovery-recovery/'+path,{method:'POST',headers:{Accept:'application/json','Content-Type':'application/json','X-IPTV-Admin-Action':'discovery_reconsider'},credentials:'same-origin',body:JSON.stringify(body)});}
+ catch{return {ok:false,status:0,error:'network',body:null};}
+ let parsed=null;
+ try{parsed=await response.json();}catch{parsed=null;}
+ if(!response.ok)return {ok:false,status:response.status,error:parsed&&typeof parsed.refusal==='string'?parsed.refusal:parsed&&typeof parsed.error==='string'?parsed.error:'http_'+response.status,body:parsed};
+ return {ok:true,status:response.status,error:null,body:parsed};
+}
+function discoveryIdempotencyKey(){
+ const bytes=crypto.getRandomValues(new Uint8Array(18));
+ return Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+async function confirmDiscoveryReconsider(key,pin,options={}){
+ return await discoveryActionPost('confirm',{key,pin,idempotencyKey:options.idempotencyKey||discoveryIdempotencyKey(),accepted:true},options);
+}
+async function executeDiscoveryReconsider(confirmation,options={}){
+ return await discoveryActionPost('reconsider',{confirmation},options);
+}
