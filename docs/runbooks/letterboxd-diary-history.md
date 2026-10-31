@@ -39,12 +39,14 @@ A deploy does not activate anything. Each step below that changes production nee
 
 - **`switch`, `pipeline`, `migration`.** Before the cutover: `inline`, `inline`, `none`. `separate_pending_migration` means the switch is set but the migration is not complete, so the commit still runs ratings. `migration: regressed` (with `regressedObjects`) is a defect: stop and report it.
 - **`run`.** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`), `outcome`/`cause`, `lease.live` and `stale`. A run with `stale` set is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response.
-- **`removal`.** Queue version, entries, pending, unresolved references, legacy, expired, `droppedRefs`, `pausedUntil`. **`diary`**: cursor coverage, resume page, last outcome.
+- **`removal`.** Queue version, entries, pending, unresolved references, legacy, expired, `droppedRefs`, `pausedUntil`, and `refIssues`: unresolved references by issue. A growing `event_missing` count means removal events that were never written; record it, nothing retries them by hand. **`diary`**: cursor coverage, resume page, last outcome.
 - **`freshness`.** The last finished and the last successful run.
 
 ### Cutover (owner)
 
-A sequence of owner actions. Each step is approved separately and checked before the next one:
+A sequence of owner actions. Each step is approved separately and checked before the next one.
+
+**Gate before the first separate writer (step 4).** The offline profile measures the Diary step's heap at 27.5 MB above the Node baseline with 5,000 history entries and 99.3 MB with 20,000, because every page reads and rewrites the single `letterboxd/diary/history.json` ([evidence](../evidence/letterboxd/air-294-separate-ratings-pipeline-offline-2026-10-31.md)). That does not prove a step fits the 128 MB Worker. Before `RATINGS_PIPELINE=separate`, record the size of `history.json` from the step 1 export, and either verify a maximal Diary step in a Workers-like runtime (workerd) at that size with headroom, or decide a history guard or sharding (a design change: new ADR). Never test this against production without owner permission.
 
 1. Read-only export of `enrichment/removal-rating-lookups.json` and `letterboxd/diary/state.json`, with sizes and hashes recorded outside the repository.
 2. `ratings_storage_migrate` `dry_run`. It writes nothing; its counts (entries, legacy, references, hand-over, cursor coverage and resume page) must match the export.
