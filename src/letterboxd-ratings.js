@@ -170,7 +170,7 @@ const LetterboxdRatings=(()=>{
   const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next&&pagesRead<RUN_PAGES;
   const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts}),
    facts:addCounts(prior?.facts,facts),removalResolved:(prior?.removalResolved||0)+resolved,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
-  return {pages:stepPages,more,next:more?diary.next:null,summary};
+  return {pages:stepPages,more,next:diary.next,summary};
  }
 
  // The removal phase: first the event writes of rated entries with unresolved references, then at most five lookups
