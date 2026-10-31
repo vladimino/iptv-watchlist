@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   POSTER_EVIDENCE_COPY, posterEvidenceText, POSTER_BATCH_MAX, POSTER_CALLS_MAX, POSTER_NO_PROGRESS_MAX, POSTER_CONFIRM_TTL_MS, POSTER_CALL_CHOICES, POSTER_OUTCOME_COPY, POSTER_STOP_COPY, POSTER_PREVIEW_COPY, POSTER_REFUSAL_COPY, POSTER_TERMINAL,
-  posterCoverage, posterPreview, posterConfirm, posterBeginRun, runPosterSweep, posterReceiptSummary, posterOutcomeText, posterStopText,
+  posterTmdbUrl, posterCoverage, posterPreview, posterConfirm, posterBeginRun, runPosterSweep, posterReceiptSummary, posterOutcomeText, posterStopText,
   posterHistoryRead, posterHistoryObserve, posterHistoryRecord, posterResumeCursor,
 } from '../src/admin/posters-run.js';
 
@@ -75,6 +75,10 @@ for (const fields of [{evidence: undefined}, {evidence: {complete: false, proble
 assert.deepEqual(posterCoverage(read({evidence: undefined})).problems, ['evidence_missing']);
 assert.deepEqual(posterCoverage(read({programmeRunId: null})).problems, ['generation_not_published']);
 assert.match(posterEvidenceText('made_up'), /Неизвестная проблема/);
+// TMDB links come only from a numeric id; text, markup, zero, signs and spaces yield no link.
+assert.equal(posterTmdbUrl('603'), 'https://www.themoviedb.org/movie/603');
+assert.equal(posterTmdbUrl(603), 'https://www.themoviedb.org/movie/603');
+for (const value of [null, undefined, '', '0', '012', '-5', '5.0', '12a', '1 2', '603"><script>alert(1)</script>', 'javascript:alert(1)', 'https://evil.example/movie/1', '1234567890123', 1.5, NaN, {id: 1}]) assert.equal(posterTmdbUrl(value), null, String(value));
 const routeSource = fs.readFileSync('src/admin/posters.js', 'utf8');
 const routeProblems = [...routeSource.matchAll(/problems\.push\('([a-z_]+)'\)/g)].map(match => match[1]);
 assert.ok(routeProblems.length >= 7);
@@ -165,6 +169,9 @@ const lost = ok({leaseLost: true, hydrated: 0, outcomes: [{id: 'f0', tmdbId: '1'
 ({receipt, bodies} = await sweep([{...lost, ok: false, status: 409, error: 'Resolver lease lost; see writes for the copies already written'}, ok()]));
 assert.deepEqual([receipt.stop, bodies.length, receipt.summary.partialWrites, receipt.nextCursor], ['lease_lost', 1, true, null]);
 assert.deepEqual(receipt.calls[0].outcomes[0].writtenTo, ['a']);
+// Display fields of an outcome are carried, bounded, into the receipt; anything else becomes null.
+({receipt} = await sweep([ok({outcomes: [{id: 'f0', tmdbId: '1', outcome: 'hydrated', title: 'Сталкер', year: 1979}, {id: 'f1', tmdbId: '2', outcome: 'no_poster_on_tmdb', title: 'x'.repeat(300), year: '1980'}, {id: 'f2', tmdbId: '3', outcome: 'tmdb_id_mismatch', title: {html: '<b>'}}]})], {calls: 1}));
+assert.deepEqual(receipt.summary.outcomes.map(item => [item.id, item.title === null ? null : item.title.length, item.year]), [['f0', 7, 1979], ['f1', 200, null], ['f2', null, null]]);
 // TMDB not configured, an invalid request, a network failure, a thrown call, an unexpected body, an unknown outcome code.
 for (const [answer, stop] of [
   [{ok: false, status: 503, error: 'TMDB is not configured', body: {error: 'TMDB is not configured'}}, 'tmdb_unconfigured'],

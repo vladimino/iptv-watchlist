@@ -89,6 +89,13 @@ const UNVERIFIED_COPY = Object.freeze({
   tmdb_id_missing: 'нет числового TMDB id',
   identity_not_tmdb: 'TMDB id есть, но идентичность не подтверждена этим id',
 });
+// The TMDB page of a film, built only from a numeric id; any other value, or text, yields no link. Callers pass only ids the
+// route has verified as the record's canonical identity: the queue and the outcomes never contain any other record.
+export function posterTmdbUrl(tmdbId) {
+  const id = typeof tmdbId === 'number' && Number.isSafeInteger(tmdbId) ? String(tmdbId) : tmdbId;
+  return typeof id === 'string' && /^[1-9]\d{0,11}$/.test(id) ? `https://www.themoviedb.org/movie/${id}` : null;
+}
+
 export function posterUnverifiedText(reason) {
   return UNVERIFIED_COPY[reason] || 'причина неизвестна';
 }
@@ -181,7 +188,7 @@ function callRecord(index, cursor, answer) {
     index, cursor, httpStatus: Number.isInteger(answer?.status) ? answer.status : 0, error: answer?.error || null,
     programmeRunId: typeof body?.programmeRunId === 'string' ? body.programmeRunId : null,
     processed: count(body?.processed), hydrated: count(body?.hydrated) ?? 0,
-    outcomes: Array.isArray(body?.outcomes) ? body.outcomes.filter(isObject).map(item => ({id: String(item.id), tmdbId: item.tmdbId == null ? null : String(item.tmdbId), outcome: String(item.outcome), ...(Array.isArray(item.writtenTo) && item.writtenTo.length ? {writtenTo: item.writtenTo.map(String)} : {}), ...(typeof item.error === 'string' ? {error: item.error.slice(0, 200)} : {})})) : [],
+    outcomes: Array.isArray(body?.outcomes) ? body.outcomes.filter(isObject).map(item => ({id: String(item.id), tmdbId: item.tmdbId == null ? null : String(item.tmdbId), outcome: String(item.outcome), title: typeof item.title === 'string' && item.title ? item.title.slice(0, 200) : null, year: Number.isInteger(item.year) ? item.year : null, ...(Array.isArray(item.writtenTo) && item.writtenTo.length ? {writtenTo: item.writtenTo.map(String)} : {}), ...(typeof item.error === 'string' ? {error: item.error.slice(0, 200)} : {})})) : [],
     writes: Array.isArray(body?.writes) ? body.writes.filter(isObject).map(write => ({key: String(write.key), written: write.written === true, reason: write.reason == null ? null : String(write.reason), records: count(write.records) ?? 0})) : [],
     nextCursor: body?.nextCursor === null || typeof body?.nextCursor === 'string' ? body.nextCursor : undefined,
     done: body?.done === true, retryAt: body?.retryAt ?? null, generationChanged: body?.generationChanged === true, leaseLost: body?.leaseLost === true,
