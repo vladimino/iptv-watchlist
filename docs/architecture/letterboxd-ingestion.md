@@ -1,6 +1,6 @@
 # Letterboxd ingestion and last-good ratings
 
-This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0043-removal-rating-lookup-queue.md), [diary history ADR](../adr/0049-letterboxd-diary-viewing-history.md), [Diary-first ratings ADR](../adr/0054-diary-first-epg-ratings.md), [archive preview ADR](../adr/0066-ephemeral-letterboxd-archive-preview.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
+This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0043-removal-rating-lookup-queue.md), [diary history ADR](../adr/0049-letterboxd-diary-viewing-history.md), [Diary-first ratings ADR](../adr/0054-diary-first-epg-ratings.md), [archive preview ADR](../adr/0066-ephemeral-letterboxd-archive-preview.md), [archive apply ADR](../adr/0067-letterboxd-archive-confirmed-apply.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
 
 ```mermaid
 sequenceDiagram
@@ -89,7 +89,7 @@ A fact record also carries `ratingHistory`, the append-only list of the film's r
 
 ## Owner archive preview (no write)
 
-**Accepted ([ADR 0066](../adr/0066-ephemeral-letterboxd-archive-preview.md)).** The owner checks an account export from `/admin/letterboxd` before any import. The archive travels in one same-origin POST under the existing Access session, lives only in that request and is never stored; the Worker reads single named R2 objects through a get-only wrapper and answers with a bounded proposal. There is no apply step on this path: the import stays the separately approved [baseline route](../runbooks/letterboxd-baseline-import.md). Contract: [admin API](../reference/api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview).
+**Accepted ([ADR 0066](../adr/0066-ephemeral-letterboxd-archive-preview.md)).** The owner checks an account export from `/admin/letterboxd` before any import. The archive travels in one same-origin POST under the existing Access session, lives only in that request and is never stored; the Worker reads single named R2 objects through a get-only wrapper and answers with a bounded proposal. There is no apply step on this path. A confirmed write is a later request, below, and the CLI import stays the separately approved [baseline route](../runbooks/letterboxd-baseline-import.md). Contract: [admin API](../reference/api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview).
 
 ```mermaid
 sequenceDiagram
@@ -116,7 +116,52 @@ sequenceDiagram
     end
     Page-->>Owner: Freshness, totals, conflicts, adds, updates, held
     Note over Worker,R2: No put, delete or list, no log,<br/>no outbound fetch, nothing kept after the response
-    Note over Page: «Очистить» or leaving the page drops the answer,<br/>there is no import button
+    Note over Page: Clearing the page or leaving it drops the answer.<br/>Recording a batch is a separate request
 ```
 
-The preview's baseline is always `unknown`: the import stores per-chunk receipts and no summary, so the answer only says whether **this** archive's receipt exists. «Нужен свежий архив» appears only when the export is older than the data health threshold or a compared film has a newer rating in R2. When `ratings.csv` is missing, or the match or the proposal is not complete, and nothing proven requires a new archive, the page says the comparison is incomplete and rating freshness is not confirmed. A positive sentence covers only the films that were checked.
+The preview's baseline is always `unknown`: the import stores per-chunk receipts and no summary, so the answer only says whether **this** archive's receipt exists. «Нужен свежий архив» appears only when the export is older than the data health threshold or a compared film has a newer rating in R2. When `ratings.csv` is missing, or the match or the proposal is not complete, and nothing proven requires a new archive, the page says the comparison is incomplete and rating freshness is not confirmed. A positive sentence covers only the films that were checked. A green freshness sentence is not permission to write.
+
+## Confirmed archive apply (proposed)
+
+**Proposed ([ADR 0067](../adr/0067-letterboxd-archive-confirmed-apply.md)).** This is not the preview path above. After the owner has read the proposal, two further requests can record one chunk of films the preview fully compared, at most 50. Each request uploads the ZIP again. The first stores only the issued confirmation. The second is the only one that calls the baseline commit. Rollback is the same two-step shape and sends no ZIP. The archive is still stored nowhere. A rating row is a watched and rated fact whether or not the diary lists that film. A newer stored fact is kept.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Owner
+    participant Page as /admin/letterboxd<br/>(tab memory only)
+    participant Access as Cloudflare Access
+    participant Worker as Worker apply routes
+    participant R2 as Authoritative R2
+    Owner->>Page: After the preview, click «Подтвердить партию N»
+    Page->>Access: POST apply-confirm, same ZIP, same origin, session cookie
+    Access->>Worker: Owner request
+    Worker->>Worker: Assertion present, Origin, action header,<br/>then the preview's ZIP limits
+    Worker->>Worker: Re-parse, check SHA-256, export time,<br/>plan hash and programme pin
+    alt Drift, pin, plan or fingerprint differs
+        Worker-->>Page: 409, no action record, no fact write
+    else The compared chunk still matches
+        Worker->>R2: put only the issued confirmation
+        Worker-->>Page: writes false
+    end
+    Owner->>Page: A separate click, «Записать партию N»
+    Page->>Access: POST apply, same ZIP and the issued confirmation
+    Access->>Worker: Owner request
+    Worker->>R2: get the stored confirmation
+    alt An action receipt is already stored
+        Worker-->>Page: replay, writes false
+    else The fresh comparison still matches
+        Worker->>R2: mark the action running
+        Worker->>R2: baseline commit of this chunk:<br/>intent, facts, view index, receipt
+        Worker->>R2: put the action receipt beside it
+        Worker-->>Page: written, already applied, or skipped because newer
+    end
+    opt The owner later rolls this chunk back
+        Owner->>Page: «Подтвердить откат», then «Откатить»
+        Page->>Worker: JSON only, no ZIP
+        Worker->>R2: baseline rollback from the receipt's origin
+        Note over Worker,R2: A later observation stays
+    end
+    Note over Worker,R2: The ZIP is not stored. Confirm never starts the commit.<br/>A running commit with no receipt is resumed, not frozen
+    Note over Page: The preview request above is unchanged and still writes nothing
+```

@@ -1,6 +1,6 @@
 # Guarded owner actions
 
-This page is the contract every Data Health recovery action must follow before it may write: a versioned capability, a read-only eligibility decision, a dry-run preview, the owner's explicit confirmation of one exact scope with an expiry, checks against a fresh read at submission, bounded execution with CAS per record, an honest receipt, and retry and compensation rules. It is implemented as a pure library, a fixture exemplar and **one production capability**, [`discovery_reconsider@1`](#discovery-reconsideration-discovery_reconsider1). The Worker bundles the library as `AdminActions` for that capability's adapter only, and it is the only capability registered there. No capability is wired to D1, a Scheduled Task, Access, a flag or an external service. The other live owner workflow, poster restoration on `/admin/posters`, follows the same principles over the existing maintenance route without this library; see [the poster page](#the-poster-page).
+This page is the contract every Data Health recovery action must follow before it may write: a versioned capability, a read-only eligibility decision, a dry-run preview, the owner's explicit confirmation of one exact scope with an expiry, checks against a fresh read at submission, bounded execution with CAS per record, an honest receipt, and retry and compensation rules. It is implemented as a pure library, a fixture exemplar and three production capabilities: [`discovery_reconsider@1`](#discovery-reconsideration-discovery_reconsider1), [`letterboxd_archive_apply@1`](#letterboxd-archive-apply-letterboxd_archive_apply1) and [`letterboxd_archive_rollback@1`](#letterboxd-archive-rollback-letterboxd_archive_rollback1). The Worker bundles the library as `AdminActions`. Discovery reconsideration registers its capability in its own adapter. The two archive capabilities are registered in the archive apply adapter. No capability is wired to D1, a Scheduled Task, Access, a flag or an external service. Poster restoration on `/admin/posters` follows the same principles over the existing maintenance route without this library; see [the poster page](#the-poster-page).
 
 Source: [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (the contract, pure), [`src/admin/actions-fixture.js`](../../../src/admin/actions-fixture.js) (in-memory store, executor, GET/POST transport shape), [`src/admin/actions-presentation.js`](../../../src/admin/actions-presentation.js) (the machine-to-human presentation layer), [`src/admin/actions-view.js`](../../../src/admin/actions-view.js) (the reusable panel), [`public/admin-actions.html`](../../../public/admin-actions.html) and [`public/admin-actions.js`](../../../public/admin-actions.js) (the demonstration page at `/admin/actions`). Tests: [`tests/admin-actions.mjs`](../../../tests/admin-actions.mjs), [`tests/admin-actions-presentation.mjs`](../../../tests/admin-actions-presentation.mjs), [`tests/admin-actions-view.mjs`](../../../tests/admin-actions-view.mjs). Eligibility comes from the [data health model](../domain/data-health.md); the pin is the one of the [admin read API](admin.md).
 
@@ -128,7 +128,47 @@ Not covered: `discovery_retry` (a due retry is already taken by the next chunk),
 
 ## Transport shape
 
-`fixtureActionRequest` shows the shape a live owner route keeps, without being one: `GET /preview` only previews; `POST /execute` only executes; any other method is 405, an unknown path 404, a non-owner principal 403 before anything else. A refused submission answers 409 for a concurrency or freshness refusal (`stale_pin`, `record_changed`, `eligibility_changed`, `idempotency_conflict`, `lease_held`, `in_progress`) and 400 otherwise. A production route built on this contract also keeps the Worker's same-origin check for non-GET requests and is subject to its own card, tests, ADR classification and owner approval. The `discovery_reconsider` routes follow this shape with a confirm step in front of the execution: `GET` previews, `POST …/confirm` issues, `POST …/reconsider` executes.
+`fixtureActionRequest` shows the shape a live owner route keeps, without being one: `GET /preview` only previews; `POST /execute` only executes; any other method is 405, an unknown path 404, a non-owner principal 403 before anything else. A refused submission answers 409 for a concurrency or freshness refusal (`stale_pin`, `record_changed`, `eligibility_changed`, `idempotency_conflict`, `lease_held`, `in_progress`) and 400 otherwise. A production route built on this contract also keeps the Worker's same-origin check for non-GET requests and is subject to its own card, tests, ADR classification and owner approval. The `discovery_reconsider` routes follow this shape with a confirm step in front of the execution: `GET` previews, `POST …/confirm` issues, `POST …/reconsider` executes. The archive apply uses the same confirm-then-execute pair and has no GET of its own: the archive preview is the dry run, `POST …/apply-confirm` issues, and `POST …/apply` executes. Rollback is the same pair. A `running` apply that has no receipt is retried, which discovery reconsideration does not do.
+
+## Letterboxd archive apply: `letterboxd_archive_apply@1`
+
+Records one chunk of a previewed Letterboxd archive through the existing baseline commit ([ADR 0067](../../adr/0067-letterboxd-archive-confirmed-apply.md), [admin API](admin.md#letterboxd-archive-apply)). The archive preview remains the dry run and writes nothing.
+
+The declaration is:
+
+- subject kind `letterboxd_archive_chunk`, `healthActionCode: letterboxd_archive_apply`;
+- budget: 50 records, 3 writes per record, 0 external calls;
+- retry: 1 attempt, no backoff;
+- compensation `restore_before_image`: rollback is a separate confirmation of the same chunk, and a later observation is kept;
+- `confirmTtlMs`: 10 minutes.
+
+| Principle | In `letterboxd_archive_apply` |
+| --- | --- |
+| Eligibility | A synthetic issue per compared film, `applyIssue`, with complete evidence. The request subject id is `<archive sha256>:<chunk>`. Each record id is the film's Letterboxd id, and the issue subject id matches that record |
+| Record version | SHA-256 of the planned facts plus the current value, time and source the preview showed |
+| Pin | The published programme run id |
+| Preview | The archive preview's `batches`, still a read. Confirm re-runs that comparison |
+| Issuance | The confirm route stores the issued confirmation as the action record, created only if absent |
+| Executor lease | None. The preview's one-at-a-time isolate slot is the only concurrency gate, and it answers 429 rather than `lease_held` |
+| Commit with CAS | `commitBaselineChunk`: an intent, then one compare-and-swap per fact, then the view index, then the import receipt |
+| Receipt | `receiptOf` on the action record. A stored action receipt replays and writes nothing. A `running` action without a receipt is sent through `commitBaselineChunk` again, because that function completes an open intent and replays a receipt |
+| Retry | No automatic loop inside one request. The owner can send the same confirmation again after `storage_error`. A terminal failed receipt is not stored on that failure, so the resume stays possible |
+
+The action record does not contain the ZIP, CSV text, film names, rating values or a token.
+
+## Letterboxd archive rollback: `letterboxd_archive_rollback@1`
+
+Rolls back one committed chunk. The request is JSON and carries no ZIP. The origin passed to `rollbackBaselineChunk` is the one stored on the import receipt.
+
+The declaration is:
+
+- subject kind `letterboxd_archive_chunk`, `healthActionCode: letterboxd_archive_rollback`;
+- budget: 1 record, 3 writes, 0 external calls;
+- retry: 1 attempt, no backoff;
+- compensation `restore_before_image`;
+- `confirmTtlMs`: 10 minutes.
+
+The single record id is `chunk`. Its version and the pin are the receipt's `itemsHash`. The subject id is `<archive sha256>:rollback:<chunk>`. A later observation is left in place and reported `skipped_changed`. A repeated rollback of the same confirmation replays.
 
 ## Presentation layer (machine to human)
 

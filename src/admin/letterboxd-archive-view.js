@@ -19,8 +19,22 @@ const ARCHIVE_ERROR_TEXT = {
   method_not_allowed: 'Предпросмотр принимает только отправку формы.',
   preview_failed: 'Предпросмотр не удался на сервере. Ничего не записано; повтори проверку.',
   preview_busy: 'Сервер ещё проверяет предыдущий архив. Дождись окончания и повтори.',
-  unexpected_answer: 'Сервер ответил не предпросмотром. Ничего не показано.',
+  unexpected_answer: 'Сервер ответил не тем, что страница ждала. Ничего нового не записано.',
   network: 'Нет ответа от сервера. Проверь соединение и доступ и повтори.',
+  access_denied: 'Запись доступна только владельцу с этой страницы. Ничего не записано.',
+  storage_unavailable: 'Хранилище сейчас недоступно. Ничего не записано.',
+  storage_error: 'Запись не завершилась. Повтори то же подтверждение: уже записанная партия не дублируется.',
+  invalid_request: 'Запрос на запись не сошёлся с проверкой. Ничего не записано. Проверь архив ещё раз.',
+  confirmation_missing: 'Нет подтверждения этой партии. Сначала нажми «Подтвердить партию».',
+  confirmation_mismatch: 'Архив или партия не совпали с подтверждением. Ничего не записано.',
+  confirmation_expired: 'Подтверждение истекло. Проверь архив ещё раз и подтверди партию заново.',
+  stale_pin: 'Опубликованная программа сменилась. Проверь архив ещё раз. Ничего не записано.',
+  record_changed: 'Факты в R2 изменились после проверки. Проверь архив ещё раз. Ничего не записано.',
+  eligibility_changed: 'Партия больше не совпадает с проверкой. Проверь архив ещё раз. Ничего не записано.',
+  not_eligible: 'Эту партию нельзя записать. Ничего не записано.',
+  idempotency_conflict: 'Этот ключ уже использован для другой партии. Ничего нового не записано.',
+  in_progress: 'Эта партия уже записывается. Подожди и повтори то же действие.',
+  preview_busy: 'Сервер ещё занят предыдущим архивом. Дождись окончания и повтори.',
 };
 const ARCHIVE_ZIP_TEXT = {
   not_zip: 'это не ZIP-архив',
@@ -78,6 +92,13 @@ const ARCHIVE_EVIDENCE_TEXT = {observed: 'прочитано', object_missing: '
 const ARCHIVE_SET_TEXT = {watched: 'просмотрено', rated: 'с оценкой', watchedUnrated: 'просмотрено без оценки', ratedNotWatched: 'оценено, но не в watched', watchlist: 'в watchlist', watchlistWatched: 'в watchlist и просмотрено'};
 const ARCHIVE_RECEIPT_TEXT = {committed: 'этот архив уже импортирован', opened: 'импорт этого архива начат, но не завершён', absent: 'этот архив не импортировался', unavailable: 'квитанция не прочиталась', not_read: 'квитанция не читалась'};
 const ARCHIVE_VERDICT_TEXT = {supported: 'подтверждается', mixed: 'смешанная картина', refuted: 'опровергается', inconclusive: 'данных недостаточно'};
+const ARCHIVE_BATCH_REASON = {
+  facts_changed_during_read: 'Данные менялись во время проверки. Повтори проверку, затем подтверждай партию.',
+  programme_unavailable: 'Нет опубликованной программы, поэтому партию подтвердить нельзя.',
+  no_compared_films: 'Нет фильмов, которые предпросмотр полностью сравнил. Непроверенные и спорные в партию не входят.',
+  not_eligible: 'Партия не подходит для записи.',
+  budget_exceeded: 'В партии больше фильмов, чем можно подтвердить за раз.',
+};
 const ARCHIVE_DETAIL_TEXT = {
   adds: ['Добавится', 'факты, которых у фильма в R2 ещё нет'],
   updates: ['Изменится', 'значение в R2 другое и старше архива'],
@@ -153,7 +174,7 @@ function archiveSummaryHtml(answer) {
   ];
   return `<div class="archive-summary-head">${archiveBadge(tone, answer.status === 'complete' ? 'полный предпросмотр' : 'частичный предпросмотр')}${archiveBadge('plain', 'ничего не записано')}<span class="muted">оценка на ${archiveEscape(archiveDate(answer.evaluatedAt))}</span></div>`
     + `<div class="archive-totals">${cards.map(([name, value]) => `<div class="archive-total"><b>${archiveEscape(value)}</b><span>${archiveEscape(name)}</span></div>`).join('')}</div>`
-    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}. «Добавится» и «изменится» считаются по фильмам; «без изменений» — по фактам. Импорт здесь не выполняется: это отдельный шаг с отдельным разрешением.</p>`
+    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}. «Добавится» и «изменится» считаются по фильмам; «без изменений» — по фактам. Эта проверка ничего не пишет. Запись — отдельное подтверждение конкретной партии ниже.</p>`
     + (answer.consistency && answer.consistency.status !== 'stable' ? '<p class="archive-callout archive-callout-warn" role="alert"><b>Данные в R2 менялись во время проверки.</b> Сравнение смешивает два состояния: повтори проверку.</p>' : '')
     + (archive.generatedAtSource === 'owner_declared' ? '<p class="muted archive-note">Время экспорта указано вручную: имя файла нестандартное.</p>' : '');
 }
@@ -238,12 +259,58 @@ function archiveDetailsHtml(answer) {
   }).join('');
 }
 
-function archivePreviewHtml(answer) {
+function archiveChangeLine(changes) {
+  const counts = changes || {};
+  return ['new', 'replaces', 'unchanged', 'older'].filter(code => counts[code]).map(code => ARCHIVE_OUTCOME_TEXT[code] + ': ' + counts[code]).join(' · ') || 'без фактов';
+}
+function archiveBatchesHtml(answer, session) {
+  const batches = answer.batches;
+  if (!batches) return '';
+  const issued = session && session.issued || {};
+  const committed = session && session.committed || {};
+  const rollbackIssued = session && session.rollbackIssued || {};
+  const intro = '<p class="muted archive-apply-note">Запись не начинается сама. Сначала «Подтвердить партию» — сервер запоминает только согласие, без фактов. Затем «Записать партию» отправляет тот же архив ещё раз. Откат — тоже два отдельных шага. Архив нигде не сохраняется.</p>';
+  const chunks = batches.chunks || [];
+  if (!chunks.length) return `<section class="admin-card archive-result" aria-labelledby="archive-apply-title"><h2 id="archive-apply-title">Запись партии</h2>${intro}<p>${archiveEscape(ARCHIVE_BATCH_REASON[batches.reason] || 'Нет партии, которую можно подтвердить.')}</p></section>`;
+  const cards = chunks.map(chunk => {
+    const number = chunk.chunk + 1;
+    const held = issued[chunk.chunk];
+    const done = committed[chunk.chunk];
+    const rollback = rollbackIssued[chunk.chunk];
+    const why = !chunk.confirmable ? `<p class="archive-callout archive-callout-warn" role="status">${archiveEscape(ARCHIVE_BATCH_REASON[chunk.reason] || 'Эту партию сейчас подтвердить нельзя.')}</p>` : '';
+    let actions = '';
+    if (done && done.rolledBack) {
+      const replay = done.replayed ? ' Повтор того же отката ничего не меняет.' : '';
+      actions += `<p role="status">Откат партии ${number} выполнен.${archiveEscape(replay)} Состояние: ${archiveEscape(done.state || '—')}. Более поздняя запись, если она была, сохранена.</p>`;
+    } else if (done) {
+      const replay = done.replayed ? ' Повтор той же партии ничего не меняет.' : '';
+      actions += `<p role="status">Партия ${number} записана.${archiveEscape(replay)} Состояние: ${archiveEscape(done.state || '—')}.</p>`;
+      actions += rollback
+        ? `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback="${chunk.chunk}">Откатить партию ${number}</button></div>`
+        : `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback-confirm="${chunk.chunk}">Подтвердить откат партии ${number}</button></div>`;
+    } else if (chunk.receipt && chunk.receipt.status === 'committed' && chunk.confirmable) {
+      actions += '<p class="muted">Эта партия уже есть в квитанции импорта. Повтор записи идемпотентен. Откат — отдельное подтверждение.</p>';
+      actions += rollback
+        ? `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback="${chunk.chunk}">Откатить партию ${number}</button></div>`
+        : `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback-confirm="${chunk.chunk}">Подтвердить откат партии ${number}</button></div>`;
+    }
+    if (!done && chunk.confirmable) {
+      actions += held
+        ? `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Записать партию ${number}</button></div><p class="muted">Подтверждение выдано и ещё ничего не записало. Запись отправит архив заново.</p>`
+        : `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Подтвердить партию ${number}</button></div>`;
+    }
+    return `<article class="archive-batch"><h3>Партия ${number}</h3><p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p><p class="muted">Отпечаток плана <code>${archiveEscape(String(chunk.planHash || '').slice(0, 12))}</code>${chunk.scopeFingerprint ? ' · область ' + archiveEscape(chunk.scopeFingerprint) : ''}</p>${why}${actions}</article>`;
+  }).join('');
+  return `<section class="admin-card archive-result" aria-labelledby="archive-apply-title"><h2 id="archive-apply-title">Запись партии</h2>${intro}${cards}</section>`;
+}
+
+function archivePreviewHtml(answer, session) {
   return `<section class="admin-card archive-result" aria-labelledby="archive-summary-title"><h2 id="archive-summary-title">Итог предпросмотра</h2>${archiveFreshnessHtml(answer)}${archiveSummaryHtml(answer)}</section>`
     + `<section class="admin-card archive-result" aria-labelledby="archive-file-title"><h2 id="archive-file-title">Архив</h2>${archiveArchiveHtml(answer)}</section>`
     + `<section class="admin-card archive-result" aria-labelledby="archive-baseline-title"><h2 id="archive-baseline-title">Базовая линия</h2>${archiveBaselineHtml(answer)}</section>`
     + `<section class="admin-card archive-result" aria-labelledby="archive-matching-title"><h2 id="archive-matching-title">Сопоставление с R2</h2>${archiveMatchingHtml(answer)}</section>`
     + `<section class="admin-card archive-result" aria-labelledby="archive-proposal-title"><h2 id="archive-proposal-title">Что сделал бы импорт</h2>${archiveProposalHtml(answer)}</section>`
-    + `<section class="admin-card archive-result" aria-labelledby="archive-details-title"><h2 id="archive-details-title">Фильмы</h2><p class="muted">В каждом списке не больше ${archiveEscape(archiveDetailLimit(answer))} строк.</p>${archiveDetailsHtml(answer)}</section>`;
+    + `<section class="admin-card archive-result" aria-labelledby="archive-details-title"><h2 id="archive-details-title">Фильмы</h2><p class="muted">В каждом списке не больше ${archiveEscape(archiveDetailLimit(answer))} строк.</p>${archiveDetailsHtml(answer)}</section>`
+    + archiveBatchesHtml(answer, session || {});
 }
 function archiveDetailLimit(answer) {return answer.details && answer.details.limit || 25;}

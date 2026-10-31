@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {webcrypto} from 'node:crypto';
 import {bundleAdmin} from '../src/admin/bundle.js';
 import {loadArchiveWorker} from './fixtures/letterboxd-archive-worker.mjs';
 import {exportArchive, zipArchive} from './fixtures/letterboxd-archive.mjs';
@@ -27,8 +28,11 @@ for (const file of ['public/admin.html', 'public/admin-limbo.html', 'public/admi
 assert.doesNotMatch(html, /\/api\/|fetch\(/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
 assert.doesNotMatch(bundle, /localStorage|sessionStorage|indexedDB|caches\.|document\.cookie|Authorization|Bearer|history\.(push|replace)State|\/api\/letterboxd\/baseline|\/api\/sync|\/mcp/);
-assert.doesNotMatch(bundle + html, /Импортировать|Применить|\/commit|\/validate|data-archive-apply/i, 'no button applies the proposal');
-assert.equal((html.match(/<button/g) || []).length, 3, 'submit, cancel and reset are the only buttons');
+assert.doesNotMatch(bundle + html, /Импортировать|Применить|\/commit|\/validate|data-archive-apply/i, 'no control commits by itself or calls the service-token route');
+assert.equal((html.match(/<button/g) || []).length, 3, 'submit, cancel and reset are the only buttons in the static page');
+assert.match(bundle, /data-archive-confirm/, 'a preview can offer a separate confirmation');
+assert.match(bundle, /data-archive-commit/, 'recording is a second control');
+assert.doesNotMatch(client, /Cf-Access|service.token|CF-Access-Client/, 'the page never carries an Access token');
 assert.equal((bundle.match(/\bfetchImpl\(/g) || []).length, 1, 'one request site');
 assert.match(client, /method:'POST'/);
 assert.match(client, /credentials:'same-origin'/);
@@ -138,7 +142,10 @@ assert.match(shown, /<details class="archive-details"><summary>Добавитс�
 assert.match(shown, /<details class="archive-details"><summary>В R2 новее <small>1<\/small>/);
 assert.match(shown, /в R2: 5/);
 assert.doesNotMatch(shown, /<details[^>]* open/, 'detail lists start closed');
-assert.doesNotMatch(shown, /<button/, 'the answer offers no action');
+assert.match(shown, /data-archive-confirm="0"/, 'the compared batch can be confirmed');
+assert.doesNotMatch(shown, /data-archive-commit/, 'confirmation is not yet issued, so nothing can be recorded');
+assert.match(shown, /Запись не начинается сама/);
+assert.equal(requests.length, 1, 'showing the confirmation does not send a second request');
 const held = run('archiveLive.answer');
 assert.equal(held.mode, 'preview');
 
@@ -177,4 +184,18 @@ choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
 await submit();
 for (const item of windowListeners) if (item.type === 'pagehide') item.fn();
 assert.equal(run('archiveLive.answer'), null);
+// 6. Confirming a batch is a second request. Recording is a third. Neither follows the preview by itself.
+ctx.crypto = webcrypto;
+choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
+await submit();
+const beforeConfirm = requests.length;
+await run('onArchiveConfirm(0)');
+assert.equal(requests.length, beforeConfirm + 1);
+assert.equal(requests.at(-1).url, '/api/admin/letterboxd-archive/apply-confirm');
+assert.equal(requests.at(-1).headers['X-IPTV-Admin-Action'], 'letterboxd_archive_apply');
+assert.equal(requests.at(-1).headers.Authorization, undefined);
+assert.equal(requests.at(-1).headers['Cf-Access-Jwt-Assertion'], undefined, 'the page does not attach an Access token');
+assert.equal(requests.filter(request => request.url.endsWith('/apply')).length, 0, 'confirm does not commit');
+await run('onArchiveCommit(0)');
+assert.equal(requests.filter(request => request.url.endsWith('/apply')).length, 0, 'without an issued confirmation the record control sends nothing');
 console.log('admin-letterboxd-page: ok');

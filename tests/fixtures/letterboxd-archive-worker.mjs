@@ -13,8 +13,9 @@ export function loadArchiveWorker({now, console: logger, fetch}) {
   vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), context);
   vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), context);
   vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), context);
-  for (const [file, name] of [['src/letterboxd-export.js', 'LetterboxdExport'], ['src/letterboxd-match.js', 'LetterboxdMatch'], ['src/domain/letterboxd-archive-zip.js', 'LetterboxdArchiveZip'], ['src/domain/letterboxd-archive-preview.js', 'LetterboxdArchivePreview']]) vm.runInContext(scoped(file, name), context);
+  for (const [file, name] of [['src/letterboxd-export.js', 'LetterboxdExport'], ['src/letterboxd-match.js', 'LetterboxdMatch'], ['src/domain/letterboxd-archive-zip.js', 'LetterboxdArchiveZip'], ['src/domain/letterboxd-archive-preview.js', 'LetterboxdArchivePreview'], ['src/domain/letterboxd-archive-apply.js', 'LetterboxdArchiveApply'], ['src/domain/admin-actions.js', 'AdminActions']]) vm.runInContext(scoped(file, name), context);
   vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive.js', 'utf8'), context);
+  vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-apply.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), context);
   return {context, worker: context.worker, facts: vm.runInContext('LetterboxdFacts', context), resetCache: () => vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', context)};
 }
