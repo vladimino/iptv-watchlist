@@ -39,7 +39,10 @@ const LetterboxdRatings=(()=>{
   if(run.lease?.step)return Date.parse(run.lease.expiresAt)>now?null:'interrupted';
   return now-Date.parse(run.updatedAt||run.startedAt)>ABANDONED_MS?'abandoned':null;
  }
- const sameCheckpoint=(a,b)=>!!a&&!!b&&['diaryPagesRead','diaryNextPage','diaryMode','removalChecked'].every(key=>(a[key]??null)===(b[key]??null));
+ // An absent legacyPagesLinked is zero: a run recorded before this field still matches a new run that linked no page.
+ // Zero does not match one. Every other checkpoint field still treats absence as null, not as zero.
+ const checkpointValue=(checkpoint,key)=>key==='legacyPagesLinked'?(checkpoint?.[key]??0):(checkpoint?.[key]??null);
+ const sameCheckpoint=(a,b)=>!!a&&!!b&&['diaryPagesRead','diaryNextPage','diaryMode','removalChecked','legacyPagesLinked'].every(key=>checkpointValue(a,key)===checkpointValue(b,key));
  const summaryOf=run=>({runId:run.runId,trigger:run.trigger,state:run.state,outcome:run.outcome??null,cause:run.cause??null,interruptedPhase:run.interruptedPhase??null,startedAt:run.startedAt,endedAt:run.finishedAt||run.closedAt||null,checkpoint:clone(run.checkpoint||{})});
  const withRecent=run=>({...run,recent:[summaryOf(run),...(run.recent||[])].slice(0,RECENT)});
  // Closed as `unknown`, never resumed. Two consecutive interrupted runs that died in the same phase at the same
@@ -70,7 +73,7 @@ const LetterboxdRatings=(()=>{
    if(base?.isolation){if(clearIsolation&&trigger==='manual')base={...base,isolation:null,isolationClearedAt:iso(now)};else reason='isolated';}
    const diaryOn=LetterboxdDiary.enabled(env),at=iso(now);
    const next=reason==='started'?{schemaVersion:RUN_SCHEMA_VERSION,runId:crypto.randomUUID(),trigger,state:'running',phase:diaryOn?'diary':'removal',lease:{step:null,expiresAt:null},
-    startedAt:at,updatedAt:at,lastStepAt:null,finishedAt:null,closedAt:null,checkpoint:{diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0},pinned,
+    startedAt:at,updatedAt:at,lastStepAt:null,finishedAt:null,closedAt:null,checkpoint:{diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0,legacyPagesLinked:0},pinned,
     outcome:null,cause:null,interruptedPhase:null,diary:null,removal:null,isolation:base?.isolation||null,...(base?.isolationClearedAt?{isolationClearedAt:base.isolationClearedAt}:{}),lastStartAt:at,recent:base?.recent||[]}:base!==stored?base:null;
    if(next&&await put(env,KEYS.run,object,next)===null)continue;
    if(reason==='started')return reply(next.runId,true,'continue','started');
@@ -172,18 +175,24 @@ const LetterboxdRatings=(()=>{
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
- // The removal phase: first the event writes of rated entries with unresolved references, at most 100 per step, least
- // recently checked first; the run visits each reference once (those checked since the run started are skipped) and
- // goes on with further steps while unvisited ones are left, so references that never resolve neither keep a run going
- // nor hide later ones. Then the retention rules, then at most five lookups per step with the claim-before-request,
- // three-attempt, 403/429 pause and expiry rules of the queue; the run goes on while due entries remain. Each claim moves
- // the entry's next attempt at least an hour ahead, so a run ends. A paused queue or REMOVAL_RATING_LOOKUP off ends the
- // lookups for this run.
+ // The removal phase: first, while a rated legacy entry still has no finished event scan, one page of `events/items/`
+ // (ADR 0071). That page only adds references for an exact film id and does not reopen the entry. Then the event writes
+ // of rated entries with unresolved references, at most 100 per step, least recently checked first; the run visits each
+ // reference once (those checked since the run started are skipped) and goes on with further steps while unvisited ones
+ // are left, so references that never resolve neither keep a run going nor hide later ones. A legacy scan that has not
+ // finished also continues, and retention does not run until it has: an unmatched legacy entry is still `refs: []` and
+ // the version 1 rules would otherwise delete it. Then the retention rules, then at most five lookups per step with the
+ // claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue; the run goes on while due entries
+ // remain. Each claim moves the entry's next attempt at least an hour ahead, so a run ends. A paused queue or
+ // REMOVAL_RATING_LOOKUP off ends the lookups for this run. No legacy candidate means no event list.
  async function removalPhase(env,run,{own,remaining,clock}){
+  const legacyLink=await linkLegacyRemovalRefs(env,{limit:LEGACY_LINK_PAGE,now:clock()});
+  // The counter moves only when this step's queue write committed. A lost compare-and-swap does not count another scan's page.
+  if(legacyLink.advanced)await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,legacyPagesLinked:(current.checkpoint.legacyPagesLinked||0)+1}}));
   const settled=await settleRemovalRefs(env,{limit:SETTLE_PER_STEP,now:clock(),checkedBefore:run.startedAt});
   const lookup={checked:0,rated:0,notRated:0,failed:0,refused:0,stoppedBy:null,pausedUntil:null};
   let more=false;
-  if(settled.left>0){lookup.stoppedBy='settling';return {settled,lookup,more:true};}
+  if(settled.left>0||legacyLink.more){lookup.stoppedBy=settled.left>0?'settling':'legacy_link';return {settled,lookup,more:true};}
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
   if(!removalLookupEnabled(env)){lookup.stoppedBy='lookup_off';return {settled,lookup,more};}
   const budget=STEP_LOOKUPS;

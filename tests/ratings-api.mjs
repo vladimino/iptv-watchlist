@@ -86,6 +86,8 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
  eq([tools.ratings_sync_step.annotations.readOnlyHint,tools.ratings_sync_step.annotations.openWorldHint],[false,true]);
  assert.match(tools.ratings_sync_step.description,/first Diary page once per run/);
  assert.match(tools.ratings_sync_step.description,/never requests page 2/);
+ assert.match(tools.ratings_sync_step.description,/exact film id/);
+ assert.match(tools.ratings_sync_step.description,/does not list events on a step with nothing left to link/);
  assert.doesNotMatch(tools.ratings_sync_step.description,/3 Diary pages|9 per run/);
  assert.doesNotMatch(tools.ratings_sync_start.description,/too_soon|nextStartAt/);
  eq([tools.ratings_storage_migrate.annotations.readOnlyHint,tools.ratings_storage_migrate.annotations.destructiveHint],[false,false]);

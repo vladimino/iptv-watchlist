@@ -38,7 +38,7 @@ A deploy does not activate anything. Each step below that changes production nee
 `ratings_sync_status` (or `GET /api/letterboxd/ratings/status`) writes nothing, not even a recovery.
 
 - **`switch`, `pipeline`, `migration`.** Before the cutover: `inline`, `inline`, `none`. `separate_pending_migration` means the switch is set but the migration is not complete, so the commit still runs ratings. `migration: regressed` (with `regressedObjects`) is a defect: stop and report it.
-- **`run`.** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`), `outcome`/`cause`, `lease.live` and `stale`. A run with `stale` set is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response.
+- **`run`.** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`, `legacyPagesLinked`), `outcome`/`cause`, `lease.live` and `stale`. A run with `stale` set is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response. `legacyPagesLinked` counts event-list pages saved while linking a rated legacy entry; it is not a request to list events by hand.
 - **`removal`.** Queue version, entries, pending, unresolved references, legacy, expired, `droppedRefs`, `pausedUntil`, and `refIssues`: unresolved references by issue. A growing `event_missing` count means removal events that were never written; record it, nothing retries them by hand. **`diary`**: cursor coverage, `historicalCoverage` (`incomplete` when `coverage.window` is `recent`, otherwise `unknown`), `overflowSuspected`, resume page (not a request), last outcome and `lastSuccessAt`. A finished recent window is `recent_window`, not a complete diary.
 - **`freshness`.** The last finished and the last successful run.
 
@@ -71,6 +71,12 @@ A sequence of owner actions. Each step is approved separately and checked before
 As of the live read-only check on 2026-10-31 the storage is migrated, `RATINGS_PIPELINE=separate` and the Ratings Task is enabled. A later owner-approved registry change the same day set the drift monitor to daily 18:15 Europe/Madrid, DTSTART 2026-10-31, reading the three task entries and read-only `ratings_sync_status` ([Scheduled Tasks](../reference/scheduled-tasks.md#read-only-drift-monitor)). The list above is the sequence that was followed. It is not an instruction to repeat it, and this page does not change the flag or the task.
 
 The expected Ratings Task recurrence is daily at 17:30 Europe/Madrid, flexible, DTSTART 2026-11-01, as recorded in the [Scheduled Tasks contract](../reference/scheduled-tasks.md#ratings-task). A scheduled start is not refused because it follows the previous start ([ADR 0069](../adr/0069-no-scheduled-ratings-start-gap.md)). `busy` and `isolated` still end that invocation. The six-hour pause after a Letterboxd 403 or 429 on the removal queue is unchanged.
+
+### Rated legacy entries and historical removal events
+
+[ADR 0071](../adr/0071-legacy-removal-event-link.md) (Accepted 2026-10-31). A version 1 queue entry that migrated as `legacy: true` with `refs: []` and is already `rated` with a confirmed half-star can be linked to watchlist-removal events of that same film id. The link runs inside a ratings removal step: one page of 20 `events/items/` keys, then the existing settle writes the stored rating. It does not run on deploy, on an EPG commit, or on `ratings_sync_status`. It does not call Letterboxd, does not invent a rating, and does not treat the removal itself as a viewing.
+
+This is not a storage migration and it is not a reason to repeat the cutover above. A production repair happens only when an owner-approved ratings run reaches the removal phase while such an entry exists. Until then the historical events stay as they are. Read-only checks may record `removal.legacy` and `removal.refs`; they must not start the run. The discrepancy observed on 2026-10-31 is in [the evidence note](../evidence/letterboxd/air-303-legacy-removal-events-2026-10-31.md): one legacy entry, no references, two removal events for that film. The scan cost is one page per removal step until `events/items/` is exhausted, and later steps list nothing once `legacyLink.done` is set.
 
 ### Isolation
 

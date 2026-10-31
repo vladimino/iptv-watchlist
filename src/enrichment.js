@@ -324,6 +324,86 @@ async function enqueueRemovalRefs(env,incoming,ref,now=Date.now()){
  await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{schemaVersion=q.schemaVersion;return applyRemovalEnqueue(q,films,ref,at)?q:null;});
  return {films:films.length,schemaVersion,at};
 }
+// A rated legacy entry (ADR 0060 decision 3, the version-1 shape `refs: []`) stored a confirmed rating and named no
+// event. linkLegacyRemovalRefs attaches removal events of that exact film id without reopening the entry and without a
+// Letterboxd request. One list page per call; the cursor lives on the queue (`legacyLink`) until that scan is done.
+// An entry the scan does not match keeps `legacy` and `legacyLink.done`, so a later step does not list again. A match
+// drops `legacy` once the scan is done and leaves the new references unresolved for settleRemovalRefs. A rating already
+// on the entry is not replaced, and a film id that differs (another year, an alias) is not a match. A cleanup deletes
+// only the scan this call read: the same ids and cursor, and only while those ids are still not candidates. A newer
+// cursor stays. `advanced` is true only when this call's queue write commits, so a late step does not count another
+// scan's page. The EPG commit does not call this.
+const LEGACY_LINK_PAGE=20;
+const removalRefOrder=(a,b)=>String(a.at||'')<String(b.at||'')?-1:String(a.at||'')>String(b.at||'')?1:a.eventKey<b.eventKey?-1:a.eventKey>b.eventKey?1:0;
+const legacyLinkCandidate=entry=>!!entry&&entry.legacy===true&&entry.state==='rated'&&confirmedHalfStar(entry.rating)!=null&&entry.legacyLink?.done!==true;
+const legacyLinkCandidates=queue=>Object.entries(queue?.films||{}).filter(([,entry])=>legacyLinkCandidate(entry));
+function attachLegacyRef(queue,id,ref){
+ const entry=queue.films[id];if(!legacyLinkCandidate(entry))return false;
+ const refs=Array.isArray(entry.refs)?entry.refs:[];if(refs.some(item=>item.eventKey===ref.eventKey))return false;
+ const next=[...refs,ref];
+ if(next.length>REMOVAL_LOOKUP_REFS_MAX){
+  const resolved=next.filter(item=>item.resolved===true).sort(removalRefOrder),victim=(resolved.length?resolved:[...next].sort(removalRefOrder))[0];
+  next.splice(next.indexOf(victim),1);queue.droppedRefs=(queue.droppedRefs||0)+1;
+ }
+ queue.films[id]={...entry,refs:next};return true;
+}
+async function linkLegacyRemovalRefs(env,{limit=LEGACY_LINK_PAGE,now=Date.now()}={}){
+ const at=new Date(now).toISOString(),summary={listed:0,linked:0,more:false,done:false,skipped:true,advanced:false,scanning:false};
+ const stored=await loadJSON(env,REMOVAL_LOOKUP_KEY);
+ if(!removalQueueV2(stored))return summary;
+ const open=legacyLinkCandidates(stored),scan=stored.legacyLink&&Array.isArray(stored.legacyLink.ids)?stored.legacyLink:null;
+ if(!scan&&!open.length)return summary;
+ summary.skipped=false;
+ if(scan&&!scan.ids.some(id=>legacyLinkCandidate(stored.films[id]))){
+  let cleared=false;
+  const saved=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
+   cleared=false;
+   const current=q.legacyLink&&Array.isArray(q.legacyLink.ids)?q.legacyLink:null;
+   if(!current||JSON.stringify(current.ids)!==JSON.stringify(scan.ids)||(current.cursor||null)!==(scan.cursor||null))return null;
+   if(current.ids.some(id=>legacyLinkCandidate((q.films||{})[id])))return null;
+   delete q.legacyLink;cleared=true;return q;
+  });
+  summary.advanced=cleared;summary.scanning=!!saved.legacyLink;
+  summary.more=summary.scanning||legacyLinkCandidates(saved).length>0;summary.done=!summary.more;return summary;
+ }
+ if(typeof env.BUCKET.list!=='function')return summary;
+ const scanIds=scan?scan.ids:open.map(([id])=>id).sort(),cursor=scan?.cursor||null,wanted=new Set(scanIds);
+ const page=await env.BUCKET.list({prefix:'events/items/',limit,...(cursor?{cursor}:{})});
+ const objects=page?.objects||[];summary.listed=objects.length;const matches=[];
+ for(const item of objects){
+  if(!REMOVAL_EVENT_KEY.test(item.key))continue;
+  const event=await loadJSON(env,item.key);
+  if(event?.type!=='watchlist'||!Array.isArray(event.removed))continue;
+  const ref=removalRef({eventKey:item.key,at:event.at,sourceRunId:null});if(!ref)continue;
+  const seen=new Set();
+  for(const film of event.removed){const id=String(film?.id??'');if(!wanted.has(id)||seen.has(id))continue;seen.add(id);matches.push({id,ref});}
+ }
+ const truncated=page?.truncated===true&&typeof page.cursor==='string'&&page.cursor.length>0&&page.cursor!==cursor;
+ let linked=0,committed=false;
+ const saved=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
+  linked=0;committed=false;if(!removalQueueV2(q))return null;
+  const current=q.legacyLink&&Array.isArray(q.legacyLink.ids)?q.legacyLink:null;
+  const starting=!current&&!cursor,same=!!current&&JSON.stringify(current.ids)===JSON.stringify(scanIds)&&(current.cursor||null)===(cursor||null);
+  if(!starting&&!same)return null;
+  let changed=false;
+  for(const match of matches)if(attachLegacyRef(q,match.id,match.ref)){linked++;changed=true;}
+  if(!truncated){
+   for(const id of scanIds){
+    const entry=q.films[id];if(!entry||entry.legacy!==true||entry.legacyLink?.done===true||entry.state!=='rated'||confirmedHalfStar(entry.rating)==null)continue;
+    const updated={...entry,legacyLink:{done:true,at,matched:(entry.refs||[]).length}};
+    if((updated.refs||[]).length)delete updated.legacy;
+    if(updated.legacy!==entry.legacy||entry.legacyLink?.done!==true){q.films[id]=updated;changed=true;}
+   }
+   if(q.legacyLink){delete q.legacyLink;changed=true;}
+  }else{q.legacyLink={ids:scanIds,cursor:page.cursor,startedAt:current?.startedAt||at};changed=true;}
+  if(!changed)return null;
+  committed=true;return q;
+ });
+ summary.linked=linked;summary.scanning=!!saved.legacyLink;
+ summary.more=summary.scanning||legacyLinkCandidates(saved).length>0;summary.done=!summary.more;
+ summary.advanced=committed;
+ return summary;
+}
 // Rated version 2 entries with unresolved references: the rating is written to each referenced removal event with the
 // writeEvent compare-and-swap and merge, and the reference is marked resolved only once the stored event lists the film
 // as removed with a confirmed rating. A kill between the two repeats the idempotent event write. Every attempt stamps
