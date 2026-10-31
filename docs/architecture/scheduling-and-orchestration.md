@@ -98,4 +98,59 @@ The drift monitor is a third, read-only automation in the same registry. It comp
 
 A scheduled trigger does not imply successful completion. `already_running`, `busy`, lease ownership and deferred backoff may prevent new work. Discovery uses **one chunk per explicit request**; it does not recursively self-fetch through an Access bypass or an internal continuation service. The [MCP security boundary](authentication-and-mcp.md) verifies signed identity and restricts tool arguments.
 
+## Proposed: a separate ratings pipeline (not implemented)
+
+[ADR 0059](../adr/0059-independent-letterboxd-ratings-pipeline.md) proposes moving the Letterboxd ratings out of the EPG commit. Nothing below is deployed: today ratings run inside the commit as in the diagram above. In the proposal the commit only enqueues removed films, and the Ratings Task drives its own run through three dedicated tools.
+
+```mermaid
+sequenceDiagram
+    actor Daily as Daily EPG Task
+    actor Ratings as Ratings Task (proposed)
+    participant MCP as Worker MCP
+    participant Run as Ratings run record
+    participant LB as Letterboxd
+    participant R2 as Authoritative R2
+    Daily->>MCP: epg_sync_step(runId)
+    MCP->>R2: Watchlist events, then enqueue removed films
+    Note over Daily,R2: The commit reads no Diary and runs no lookup
+    Ratings->>MCP: ratings_sync_start(scheduled)
+    MCP->>Run: Create run, or answer busy, too_soon or isolated
+    loop While nextAction is continue
+        Ratings->>MCP: ratings_sync_step(runId)
+        MCP->>Run: Begin the step: lease by compare-and-swap
+        alt Diary phase
+            MCP->>LB: At most 3 Diary pages
+            MCP->>R2: Per page: history, facts, Diary checkpoint
+            MCP->>R2: Queued films the Diary rated: removal event
+        else Removal phase
+            MCP->>LB: At most 5 member pages, attempt claimed first
+            MCP->>R2: Rating fact, removal event, queue entry
+        end
+        MCP->>Run: Checkpoint, end the step
+        MCP-->>Ratings: continue, wait or stop
+    end
+    Note over Ratings,Run: A stale run is closed unknown, never resumed
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Diary: ratings_sync_start
+    Diary --> Diary: step, up to 3 pages
+    Diary --> Removal: diary ended or run budget used
+    Removal --> Removal: step, up to 5 lookups
+    Removal --> Finished: queue done or paused, diary complete or partial
+    Removal --> Error: queue done or paused, diary blocked, rate-limited or failed
+    Diary --> Unknown: step lease expired or idle 30 min
+    Removal --> Unknown: step lease expired or idle 30 min
+    Unknown --> Isolated: second interruption at same phase and checkpoint
+    Finished --> [*]
+    Error --> [*]
+    Unknown --> [*]
+    Isolated --> [*]: owner-approved manual start with clearIsolation
+```
+
+The run record `letterboxd/ratings/run.json` admits one running run and one active step at a time, and every checkpoint write is fenced by the step's lease. A stale run is closed by the next start or step, never by the status read. The EPG commit and the ratings run share only idempotent or compare-and-swap objects, so neither blocks the other. Ownership, contracts, races and rollback are in the ADR; activation is a separate owner decision.
+
+## Timing and authority
+
 The timetable and enabled status belong to the external automation registry. The Worker states only the expected hourly trigger (`:20` Europe/Madrid) for display and keeps it apart from its own discovery wait gate; see [Scheduled Task timing](../reference/scheduled-tasks.md#timing-nominal-trigger-versus-server-gate). Historical records of successful scheduling are not a live status check; production task changes or manual invocations require separate owner approval. A GitHub deployment does not trigger any of these workflows.
