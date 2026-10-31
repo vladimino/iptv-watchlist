@@ -136,6 +136,22 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(net.memberFetches().length,0);
 }
 
+// 5b. Settlements are bounded per step: 150 unresolved references take two steps, the lookups come after them.
+{
+ const {bucket,env,R,net,ctx}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
+ const films={};
+ for(let r=0;r<15;r++){const eventAt=at(T0-(r+1)*H);await ctx.writeEvent(env,{id:'run-'+r+'-watchlist',type:'watchlist',at:eventAt,total:0,baseline:false,added:[],removed:Array.from({length:10},(_,n)=>({id:'s'+n,title:'S'+n,year:2000}))});}
+ for(let n=0;n<10;n++)films['s'+n]={url:film('s'+n).url,state:'rated',rating:4,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:Array.from({length:15},(_,r)=>({eventKey:eventKeyOf(at(T0-(r+1)*H),'run-'+r+'-watchlist'),sourceRunId:'run-'+r,at:at(T0-(r+1)*H),resolved:false}))};
+ films.todo={url:film('todo').url,state:'pending',attempts:0,enqueuedAt:at(T0-H),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[]};
+ migrated(bucket,{films});net.members.set('todo',2.5);
+ const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ const first=plain(await R.step(env,{runId}));
+ eq([first.nextAction,first.summary.removal.settled.resolved,first.summary.removal.lookup.stoppedBy,net.memberFetches().length],['continue',100,'settling',0]);
+ const second=plain(await R.step(env,{runId}));
+ eq([second.reason,second.summary.removal.settled.resolved,net.memberFetches().length],['finished',150,1]);
+ assert.ok(Object.values(bucket.value(QUEUE).films).every(entry=>entry.refs.every(ref=>ref.resolved)));
+}
+
 // 6. A film the Diary proves resolves its queue entry without a lookup, and its removal events get the rating.
 {
  const {bucket,env,R,net,ctx}=setup({pages:0});

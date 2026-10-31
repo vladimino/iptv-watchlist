@@ -9,7 +9,7 @@ const LetterboxdRatings=(()=>{
  const KEYS={run:'letterboxd/ratings/run.json',migration:'letterboxd/ratings/migration.json'};
  const CONTRACT_VERSION=1,RUN_SCHEMA_VERSION=1;
  const LEASE_MS=3*60000,LEASE_MARGIN_MS=45000,ABANDONED_MS=30*60000,SCHEDULED_GAP_MS=6*3600000;
- const STEP_PAGES=3,RUN_PAGES=9,STEP_LOOKUPS=5,RUN_LOOKUPS=5,SETTLE_PER_STEP=20,RECENT=10;
+ const STEP_PAGES=3,RUN_PAGES=9,STEP_LOOKUPS=5,RUN_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
  const MIGRATION_WRITER={runId:'ratings-storage-migrate',step:'migrate'};
  const DIARY_ERRORS=['failed','blocked','rate_limited'];
  const iso=ms=>new Date(ms).toISOString();
@@ -173,14 +173,17 @@ const LetterboxdRatings=(()=>{
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
- // The removal phase: first the event writes of rated entries with unresolved references, then at most five lookups
- // per run with the claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue. A paused queue or
+ // The removal phase: first the event writes of rated entries with unresolved references, at most 100 per step (the
+ // run goes on with further steps while some are left), then the retention rules, then at most five lookups per run
+ // with the claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue. A paused queue or
  // REMOVAL_RATING_LOOKUP off ends the lookups for this run.
  async function removalPhase(env,run,{own,remaining,clock}){
   const settled=await settleRemovalRefs(env,{limit:SETTLE_PER_STEP});
   const lookup={checked:0,rated:0,notRated:0,failed:0,refused:0,stoppedBy:null,pausedUntil:null};
   const budget=Math.min(STEP_LOOKUPS,RUN_LOOKUPS-(run.checkpoint.removalChecked||0));
   let more=false;
+  if(settled.left>0){lookup.stoppedBy='settling';return {settled,lookup,more:true};}
+  await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
   if(!removalLookupEnabled(env)){lookup.stoppedBy='lookup_off';return {settled,lookup,more};}
   if(budget<=0)return {settled,lookup,more};
   let queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
