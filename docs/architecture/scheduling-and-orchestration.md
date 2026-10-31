@@ -111,22 +111,22 @@ sequenceDiagram
     participant LB as Letterboxd
     participant R2 as Authoritative R2
     Daily->>MCP: epg_sync_step(runId)
-    MCP->>R2: Watchlist events, then enqueue removed films
+    MCP->>R2: Watchlist events, then one queue reference per removal event
     Note over Daily,R2: The commit reads no Diary and runs no lookup
     Ratings->>MCP: ratings_sync_start(scheduled)
     MCP->>Run: Create run, or answer busy, too_soon or isolated
     loop While nextAction is continue
         Ratings->>MCP: ratings_sync_step(runId)
-        MCP->>Run: Begin the step: lease by compare-and-swap
+        MCP->>Run: Begin the step: lease and new epoch by compare-and-swap
         alt Diary phase
             MCP->>LB: At most 3 Diary pages
-            MCP->>R2: Per page: history, facts, Diary checkpoint
-            MCP->>R2: Queued films the Diary rated: removal event
+            MCP->>R2: Per page: history, facts, then Diary cursor fenced by epoch
+            MCP->>R2: Queued films the Diary rated: every referenced removal event
         else Removal phase
             MCP->>LB: At most 5 member pages, attempt claimed first
-            MCP->>R2: Rating fact, removal event, queue entry
+            MCP->>R2: Outcome only if the claim is this epoch's, then fact and events
         end
-        MCP->>Run: Checkpoint, end the step
+        MCP->>Run: Derived checkpoint, end the step
         MCP-->>Ratings: continue, wait or stop
     end
     Note over Ratings,Run: A stale run is closed unknown, never resumed
@@ -149,7 +149,7 @@ stateDiagram-v2
     Isolated --> [*]: owner-approved manual start with clearIsolation
 ```
 
-The run record `letterboxd/ratings/run.json` admits one running run and one active step at a time, and every checkpoint write is fenced by the step's lease. A stale run is closed by the next start or step, never by the status read. The EPG commit and the ratings run share only idempotent or compare-and-swap objects, so neither blocks the other. Ownership, contracts, races and rollback are in the ADR; activation is a separate owner decision.
+The run record `letterboxd/ratings/run.json` admits one running run and one active step at a time. The lease keeps live steps apart; it does not fence writes to other objects, because R2 has no multi-key transaction. Each object therefore guards itself in its own compare-and-swap: the Diary cursor in `letterboxd/diary/state.json` and the removal-queue claims refuse a write from an older epoch, while the history, facts and removal events take only idempotent merges, so a step that outlived its lease cannot move anything back. The Diary cursor and the queue are authoritative; the run record's checkpoint is derived from them. Each removal event keeps its own reference in the queue, and an unresolved one is never pruned. A stale run is closed by the next start or step, never by the status read. The EPG commit and the ratings run share only idempotent or compare-and-swap objects, so neither blocks the other. Ownership, contracts, races and rollback are in the ADR; activation is a separate owner decision.
 
 ## Timing and authority
 
