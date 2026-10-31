@@ -8,6 +8,7 @@
 // the D1 keys and logs the diff without writing; on writes. Every batch starts with the lease fence, so a run that lost its lease
 // writes nothing and an older run cannot overwrite a newer one.
 const D1_ENRICHMENT_PROJECTION='enrichment';
+const METADATA_SYNC_PROJECTION='metadata_sync';
 const D1_ENRICHMENT_LEASE_MS=10*60000;
 const D1_ENRICHMENT_QUERY_BUDGET=800;
 const D1_ENRICHMENT_WALL_MS=60000;
@@ -166,6 +167,53 @@ async function d1EnrichmentDiff(env,db,now,summary){
  const members=(await db.all('SELECT film_id FROM watchlist_film')).map(row=>row.film_id);
  plan.membership={members:members.length,removed:members.filter(id=>!listed.has(id)&&!held.has(id)).length};
  Object.assign(summary,{members:plan.membership.members,membershipRemoved:plan.membership.removed,films:inputs.films.length,people:inputs.people.length,stored:stored.size,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
+ // Schema v4 keeps the plan above and writes nothing else. Sync clocks are written only when migration 0005 has set
+ // version 5 and created film_sync_state. A deploy does not apply that migration, and a version without the table
+ // (or a table without the version) does not write the clocks. The film change key is not involved, so a v4 database
+ // does not rewrite its Films because these fields exist in the input.
+ const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
+ summary.schemaVersion=version;
+ plan.syncReady=version===5&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
+ plan.sync=[];
+ if(plan.syncReady){
+  const storedSync=new Map((await db.all("SELECT id,change_key FROM projection_state WHERE projection=? AND kind='film'",[METADATA_SYNC_PROJECTION])).map(row=>[row.id,row.change_key]));
+  const viewed=new Set();
+  for(const entry of inputs.films){
+   if(held.has(entry.id))continue;
+   viewed.add(entry.id);
+   const key=EnrichmentProjection.filmSyncChangeKey(entry.sync);
+   const previous=storedSync.get(entry.id);
+   if(entry.sync){if(previous!==key)plan.sync.push({id:entry.id,sync:entry.sync,key});}
+   else if(previous&&previous!=='absent')plan.sync.push({id:entry.id,sync:null,key:'absent'});
+  }
+  // Leaving the view releases membership only. metadata.json keeps the cache, and beginSync reads it if the Film returns,
+  // so the sync row follows that entry. The foreign key is an existing film.id: a metadata.json key with no Film row
+  // does not mint a Film and does not get a row. A held Film is left untouched.
+  const known=new Set((await db.all('SELECT id FROM film')).map(row=>row.id));
+  const aliases=new Map();
+  for(const row of await db.all("SELECT film_id,value FROM film_external_id WHERE scheme='letterboxd'")){
+   if(!aliases.has(row.film_id))aliases.set(row.film_id,[]);
+   aliases.get(row.film_id).push(row.value);
+  }
+  const leaving=new Map(plan.absent.filter(item=>item.kind==='film').map(item=>[item.id,item]));
+  for(const id of new Set([...known,...leaving.keys()])){
+   if(viewed.has(id)||held.has(id))continue;
+   const sync=EnrichmentProjection.filmSyncState(EnrichmentProjection.metadataForFilmId(store.metadata,id,aliases.get(id)));
+   const previous=storedSync.get(id);
+   const key=EnrichmentProjection.filmSyncChangeKey(sync);
+   const release=leaving.get(id)||null;
+   if(sync){
+    if(!known.has(id)||previous===key)continue;
+    const item={id,sync,key};
+    if(release)release.syncUpdate=item;
+    else plan.sync.push(item);
+   }else if(previous&&previous!=='absent'){
+    if(release)release.clearSync=true;
+    else plan.sync.push({id,sync:null,key:'absent'});
+   }
+  }
+  summary.changedSync=plan.sync.length+plan.absent.filter(item=>item.syncUpdate||item.clearSync).length;
+ }
  return plan;
 }
 
@@ -192,7 +240,7 @@ async function d1EnrichmentRelease(db,leaseId,summary){
 // clears the fence row. A failed batch writes nothing and its entities keep their old keys, so the next run tries them again.
 async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
  const repository=CanonicalRepository.createCanonicalRepository(db);
- const result={writtenPeople:0,writtenFilms:0,released:0,errorCount:0,errors:[],remaining:0,leaseLost:false};
+ const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false};
  const fenced=async(write)=>{
   await db.transaction(async()=>{
    await db.run(D1_ENRICHMENT_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]);
@@ -201,6 +249,8 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
   });
  };
  const state=(kind,id,key)=>db.run(D1_ENRICHMENT_STATE,[D1_ENRICHMENT_PROJECTION,kind,id,key,new Date().toISOString()]);
+ const syncState=(id,key)=>db.run(D1_ENRICHMENT_STATE,[METADATA_SYNC_PROJECTION,'film',id,key,new Date().toISOString()]);
+ const writeSync=async item=>{await repository.projectFilmSyncState({filmId:item.id,sync:item.sync});await syncState(item.id,item.key);};
  const budgetLeft=()=>db.queries<queryBudget&&Date.now()-started<wallMs;
  const failed=(kind,id,error)=>{
   const message=String(error?.message||error);
@@ -210,8 +260,11 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
  };
  const writePeople=async items=>{await fenced(async()=>{for(const entry of items){await repository.projectPerson({person:entry.person});await state('person',entry.id,entry.key);}});result.writtenPeople+=items.length;};
  const queue=[];
+ const syncById=new Map((plan.sync||[]).map(item=>[item.id,item]));
+ const filmIds=new Set(plan.films.map(film=>film.id));
  for(let i=0;i<plan.people.length;i+=D1_ENRICHMENT_PERSON_BATCH)queue.push({kind:'people',items:plan.people.slice(i,i+D1_ENRICHMENT_PERSON_BATCH)});
  for(const film of plan.films)queue.push({kind:'film',item:film});
+ for(const item of plan.sync||[])if(!filmIds.has(item.id))queue.push({kind:'sync',item});
  for(const entity of plan.absent)queue.push({kind:'absent',item:entity});
  for(let index=0;index<queue.length;index++){
   if(result.leaseLost||!budgetLeft()){result.remaining=queue.slice(index).reduce((sum,task)=>sum+(task.items?.length||1),0);break;}
@@ -226,36 +279,57 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
     }
    }else if(task.kind==='film'){
     const entry=task.item;
+    const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
      await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined});
      for(const redirect of entry.film.redirects||[])await repository.projectLink({survivor:entry.film,redirect});
+     if(pending)await writeSync(pending);
      await state('film',entry.id,entry.key);
     });
     result.writtenFilms++;
+    if(pending)result.syncWrites++;
+   }else if(task.kind==='sync'){
+    await fenced(async()=>{await writeSync(task.item);});
+    result.syncWrites++;
    }else{
     const entity=task.item;
-    await fenced(async()=>{if(entity.kind==='film')await repository.releaseFilm(entity.id);await state(entity.kind,entity.id,'absent');});
+    await fenced(async()=>{
+     if(entity.kind==='film')await repository.releaseFilm(entity.id);
+     if(entity.syncUpdate)await writeSync(entity.syncUpdate);
+     else if(entity.clearSync)await writeSync({id:entity.id,sync:null,key:'absent'});
+     await state(entity.kind,entity.id,'absent');
+    });
     result.released++;
+    if(entity.syncUpdate||entity.clearSync)result.syncWrites++;
    }
   }catch(error){
    if(task.kind==='people')for(const entry of task.items)failed('person',entry.id,error);
-   else failed(task.item.kind||'film',task.item.id,error);
+   else failed(task.kind==='sync'?'film_sync':task.item.kind||'film',task.item.id,error);
   }
  }
  return result;
 }
 
-// The read-only status of the projector for /api/d1/status. schema is true only for the whole of migration 0004: its three tables
-// and schema_contract version 4. A partial schema is reported as false with what is present.
+// The read-only status of the projector for /api/d1/status. schema is true for the whole of migration 0004 (its three tables
+// and schema_contract version 4) and for the whole of migration 0005 (those tables, film_sync_state and version 5).
+// A partial schema is reported as false with the projection tables that are present. Version 4 stays true when the
+// sync table is absent, so a deploy ahead of migration 0005 does not report the live projector as down.
 async function d1EnrichmentStatus(binding,env){
  const mode=d1EnrichmentMode(env);
- const tables=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence')").bind().all()).results||[]).map(row=>row.name).sort();
+ const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state')").bind().all()).results||[]).map(row=>row.name);
+ const tables=present.filter(name=>name!=='film_sync_state').sort();
+ const syncTable=present.includes('film_sync_state');
  const version=(await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first())?.version??null;
- if(tables.length!==3||version!==4)return {mode,schema:false,schemaVersion:version,projectionTables:tables};
+ if(tables.length!==3||!(version===4||(version===5&&syncTable)))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
  const [run,counts]=await Promise.all([
   binding.prepare('SELECT lease_until leaseUntil,started_at startedAt,finished_at finishedAt,outcome,summary_json summary FROM projection_run WHERE projection=?').bind(D1_ENRICHMENT_PROJECTION).first(),
   binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),
  ]);
  let summary=null;try{summary=run?.summary?JSON.parse(run.summary):null;}catch{}
- return {mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
+ const status={mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
+ if(version===5){
+  const sync=await binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(METADATA_SYNC_PROJECTION).first();
+  status.schemaVersion=5;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;
+ }
+ return status;
 }

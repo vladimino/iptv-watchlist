@@ -106,7 +106,7 @@ async function lbaAttachBatches(answer,comparison,now){
    reason=confirmable?null:preview.reason||'not_eligible';
   }
   const source=batch.chunk===0&&comparison.receipt?comparison.receipt:{status:'not_read',committedAt:null};
-  chunks.push({chunk:batch.chunk,films:batch.films.length,planHash,scopeFingerprint,changes:LetterboxdArchiveApply.changeCounts(batch.films),confirmable,reason,receipt:{status:source.status,committedAt:source.committedAt??null}});
+  chunks.push({chunk:batch.chunk,films:batch.films.length,planHash,scopeFingerprint,changes:LetterboxdArchiveApply.changeCounts(batch.films),values:LetterboxdArchivePreview.summarizeFactValues(batch.films),confirmable,reason,receipt:{status:source.status,committedAt:source.committedAt??null}});
  }
  const reason=!chunks.length?'no_compared_films':drift?'facts_changed_during_read':!pin?'programme_unavailable':null;
  answer.batches={size:LetterboxdArchiveApply.APPLY_BATCH_SIZE,programmeRunId:pin,confirmable:chunks.some(chunk=>chunk.confirmable),reason,chunks};
