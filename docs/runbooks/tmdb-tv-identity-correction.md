@@ -68,7 +68,7 @@ Each step needs its own explicit owner approval. A code deploy authorizes none o
 4. **D1.** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owns each Film's identity rows and rewrites them from R2, so one projector run after the R2 write carries the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
    - The run's summary (`GET /api/d1/status`, `lastRun.summary`) carries `tmdbRetirements`. Expect `valid: true`, `applied: 4`, `held: []`.
    - `outcome: failed` with `reason: input_invalid` and `inputKey: identity/tmdb-retirements.json` means the object failed its check: nothing was written. Stop, and roll back R2 or correct the object under a new approval.
-   - A Film in `held` (for example `link_changed`: the Letterboxd page now shows another TMDB link) is owner review. The projector neither writes nor releases it, so its D1 rows stay as they were.
+   - A Film in `held` is owner review. Examples: `link_changed` (the refreshed Letterboxd page shows no TMDB link or another one), `attributes_changed` (its `data-tmdb-*` attributes changed), `film_missing` (no R2 source lists it). The projector neither writes nor releases it, so its D1 rows and watchlist membership stay as they were.
 5. **Readback.**
    - `d1Readback` against the preflight plan: all four must be `corrected`. A `mismatch` stops for review.
    - Re-run the dry-run: all four must be `unchanged`, `preserved` must equal the preflight values, and there must be no collisions.

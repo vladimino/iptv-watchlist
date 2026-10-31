@@ -40,9 +40,9 @@ assert.doesNotMatch(fs.readFileSync('src/d1-enrichment.js','utf8'),/\bBUCKET\.(p
 // 1. parseFilm keeps the typed link beside the unchanged attribute number; a record written before carries no field.
 const SERIES=CONFIRMED_RETIREMENTS.map(item=>({...item,slug:new URL(item.letterboxdUrl).pathname.split('/')[2]}));
 const credit=(role,key)=>({id:role+'/'+key,name:key,original:key});
-const page=({name,tmdbType='movie',tmdbId,links,director,actor})=>`<html><head><meta name="description" content="Synopsis of ${name}.">
+const page=({name,tmdbType='movie',tmdbId,links,director,actor,attributes=`data-tmdb-type="${tmdbType}" data-tmdb-id="${tmdbId}"`,extra=''})=>`<html><head><meta name="description" content="Synopsis of ${name}.">
 <script type="application/ld+json">/* <![CDATA[ */${JSON.stringify({name,director:[{name:director,sameAs:'/director/'+director+'/'}],actor:[{name:actor,sameAs:'/actor/'+actor+'/'}],genre:['Drama'],duration:'PT5H0M'})}/* ]]> */</script></head>
-<body class="film" data-tmdb-type="${tmdbType}" data-tmdb-id="${tmdbId}">${links.map(link=>`<a href="https://www.themoviedb.org/${link}/" class="micro-button track-event">TMDB</a>`).join('')}</body></html>`;
+<body class="film" ${attributes}>${links.map(link=>`<a href="https://www.themoviedb.org/${link}/" class="micro-button track-event">TMDB</a>`).join('')}${extra}</body></html>`;
 const seriesPage=(item,patch={})=>page({name:'Series '+item.lid,tmdbId:item.movieId,links:['tv/'+item.tvId],director:'d-'+item.lid.toLowerCase(),actor:'a-'+item.lid.toLowerCase(),...patch});
 {
  const parsed=api.parseFilm(seriesPage(SERIES[0]),{id:'1IUo',title:'Series 1IUo',url:SERIES[0].letterboxdUrl});
@@ -90,6 +90,11 @@ const ids=SERIES.map(item=>item.filmId);
 const kept=()=>['film_person_credit','prediction_current','actual_rating','film_redirect','watchlist_film','person'].map(table=>[table,db.sql(`SELECT * FROM ${table} ORDER BY 1,2`).map(row=>JSON.stringify(row))]);
 const identityRows=id=>db.sql(`SELECT scheme,value,trusted FROM film_external_id WHERE film_id='${id}' AND scheme IN ('tmdb','tmdb_tv') ORDER BY scheme`).map(row=>row.scheme+':'+row.value+':'+row.trusted);
 const canonical=id=>db.sql(`SELECT canonical_identity c FROM film WHERE id='${id}'`)[0]?.c;
+// Every D1 row of one Film the projector could touch, its change key included.
+const filmRows=id=>['film','film_external_id','film_alias','film_dimension','film_person_credit','watchlist_film','film_metadata','film_redirect','projection_state'].map(table=>{
+ const column=table==='film'||table==='projection_state'?'id':table==='film_redirect'?'to_film_id':'film_id';
+ return [table,db.sql(`SELECT * FROM ${table} WHERE ${column}='${id}' ORDER BY 1,2`).map(row=>JSON.stringify(row)).sort()];
+});
 const view=(retirements)=>{
  const lean=api.EnrichmentProjection.enrichmentStore({watchlist:JSON.parse(bucket.objects.get('watchlist.json').text),programme:JSON.parse(bucket.objects.get('epg/generations/run-1/programme.json').text),metadata:JSON.parse(bucket.objects.get('metadata.json').text),titles:{},people:{},discoveredFilms:JSON.parse(bucket.objects.get('epg/generations/run-1/discovered-films.json').text),discoveryResolution:JSON.parse(bucket.objects.get('epg/discovery-resolution.json').text),tmdbRetirements:retirements});
  return {lean,view:api.LifecycleReader.readLifecycle(lean,NOW,{entitiesOnly:true})};
@@ -238,17 +243,25 @@ const corrected=kept();
 
 // 10. A page that changes is review, not a fix. The Film is held: D1 keeps it as it is, and it is neither written nor released.
 const held=async(pagesFor,expected)=>{
+ const before=filmRows('film:3tCe');
  await refresh(pagesFor);bucket.objects.delete('sync.json');
  const result=await run();
  assert.equal(result.outcome,'complete',JSON.stringify(result));
  assert.deepEqual(plain(result.tmdbRetirements.held),expected);
+ assert.equal(result.tmdbRetirements.applied,3);
  assert.deepEqual((await d1Readback(reader,plan)).map(item=>item.state),['corrected','corrected','corrected','corrected']);
- assert.equal(db.sql(`SELECT change_key k FROM projection_state WHERE kind='film' AND id='film:3tCe'`)[0].k==='absent',false);
+ assert.deepEqual(filmRows('film:3tCe'),before,'the held Film has no D1 write, key change or release');
  return result;
 };
 await held(item=>item.lid==='3tCe'?seriesPage(item,{links:['tv/9999']}):seriesPage(item),[{filmId:'film:3tCe',reason:'link_changed'}]);
 await held(item=>item.lid==='3tCe'?seriesPage(item,{links:['tv/8042','movie/101915']}):seriesPage(item),[{filmId:'film:3tCe',reason:'link_changed'}]);
+// A refreshed page that no longer shows a TMDB link is an explicit observation, not a record written before AIR-297.
+await held(item=>item.lid==='3tCe'?seriesPage(item,{links:[]}):seriesPage(item),[{filmId:'film:3tCe',reason:'link_changed'}]);
 await held(item=>item.lid==='3tCe'?seriesPage(item,{tmdbId:'555'}):seriesPage(item),[{filmId:'film:3tCe',reason:'attributes_changed'}]);
+// The attribute type alone changing to tv, attributes gone, or two attribute types: each contradicts the confirmed evidence.
+await held(item=>item.lid==='3tCe'?seriesPage(item,{tmdbType:'tv'}):seriesPage(item),[{filmId:'film:3tCe',reason:'attributes_changed'}]);
+await held(item=>item.lid==='3tCe'?seriesPage(item,{attributes:''}):seriesPage(item),[{filmId:'film:3tCe',reason:'attributes_changed'}]);
+await held(item=>item.lid==='3tCe'?seriesPage(item,{extra:'<div data-tmdb-type="tv" data-tmdb-id="101915"></div>'}):seriesPage(item),[{filmId:'film:3tCe',reason:'attributes_changed'}]);
 // Letterboxd fixing its attributes to the TV entry makes the record's tmdbId the TV number: held, and that number never
 // reaches D1 as a trusted movie id.
 await held(item=>item.lid==='3tCe'?seriesPage(item,{tmdbType:'tv',tmdbId:'8042'}):seriesPage(item),[{filmId:'film:3tCe',reason:'attributes_changed'}]);
@@ -284,7 +297,35 @@ assert.equal((await run()).tmdbRetirements.held.length,0);
  assert.equal((await run()).changedFilms,0);
 }
 
-// 12. An invalid object fails closed: the run stops before any D1 write and names the key. A changed object defers the run.
+// 12. A projected Film that leaves every R2 source while a retirement names it is held as film_missing: it is not released,
+// keeps its watchlist row, rows and change key. Without the object the same R2 would release it (shown by a dry run).
+{
+ const sources=['watchlist.json','epg/generations/run-1/programme.json','metadata.json'],original=sources.map(key=>[key,bucket.objects.get(key)]);
+ const edit=(key,change)=>bucket.objects.set(key,{text:JSON.stringify(change(JSON.parse(bucket.objects.get(key).text))),customMetadata:{}});
+ edit(sources[0],value=>({...value,films:value.films.filter(film=>film.id!=='3tCe')}));
+ edit(sources[1],value=>({...value,films:value.films.filter(film=>film.id!=='3tCe')}));
+ edit(sources[2],({'3tCe':gone,...rest})=>rest);
+ const before=filmRows('film:3tCe');
+ assert.equal(before.find(([table])=>table==='watchlist_film')[1].length,1);
+ const result=await run();
+ assert.equal(result.outcome,'complete',JSON.stringify(result));
+ assert.deepEqual(plain(result.tmdbRetirements.held),[{filmId:'film:3tCe',reason:'film_missing'}]);
+ assert.equal(result.membershipRemoved,0);
+ assert.deepEqual(filmRows('film:3tCe'),before,'the held Film is neither released nor rewritten');
+ assert.deepEqual((await d1Readback(reader,plan)).map(item=>item.state),['corrected','corrected','corrected','corrected']);
+ // Its two Persons, credited by no other Film, are marked absent either way; the Film itself only without the hold.
+ assert.equal(result.absent,2);
+ bucket.objects.delete(RETIREMENTS_KEY);
+ const unheld=await run('dry');
+ assert.deepEqual([unheld.outcome,unheld.absent,unheld.membershipRemoved],['dry',1,1]);
+ putRetirements(BODY);
+ for(const [key,object] of original)bucket.objects.set(key,object);
+ const back=await run();
+ assert.deepEqual([back.outcome,back.changedFilms,back.tmdbRetirements.held.length],['complete',0,0]);
+ assert.deepEqual(filmRows('film:3tCe'),before);
+}
+
+// 13. An invalid object fails closed: the run stops before any D1 write and names the key. A changed object defers the run.
 {
  const invalid=[
   ['not json','{'],['an array',[]],['schema version',{...BODY,schemaVersion:2}],['no list',{schemaVersion:1}],
@@ -308,7 +349,7 @@ assert.equal((await run()).tmdbRetirements.held.length,0);
  bucket.get=get;putRetirements(BODY);
 }
 
-// 13. Rollback: removing the object puts the records' identity back on the next run, and the other D1 rows stay.
+// 14. Rollback: removing the object puts the records' identity back on the next run, and the other D1 rows stay.
 {
  bucket.objects.delete(RETIREMENTS_KEY);
  const back=await run();

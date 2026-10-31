@@ -93,7 +93,8 @@ async function d1EnrichmentStore(env){
 
 // The plan of one run: every Person and Film whose change key differs from the stored one, and every stored entity the view
 // no longer has. Persons come first so a Film's credits find their people. A held Film (a TMDB retirement under owner review,
-// ADR 0057) is neither written nor released: D1 keeps it as it is until the review settles.
+// ADR 0057) is neither written nor released, whether or not the view still has it: D1 keeps it as it is until the review
+// settles.
 function d1EnrichmentPlan(inputs,stored,nowIso,held=new Set()){
  const people=[],films=[],absent=[],seen=new Set();
  for(const entry of inputs.people){
@@ -110,6 +111,7 @@ function d1EnrichmentPlan(inputs,stored,nowIso,held=new Set()){
  for(const [id,key] of stored){
   if(seen.has(id)||key==='absent')continue;
   const [kind,entityId]=id.split('\n');
+  if(kind==='film'&&held.has(entityId))continue;
   absent.push({kind,id:entityId});
  }
  return {people,films,absent};
@@ -157,11 +159,12 @@ async function d1EnrichmentDiff(env,db,now,summary){
  const inputs=EnrichmentProjection.enrichmentInputs({view,store});
  summary.viewMs=Date.now()-started-summary.loadMs;
  const stored=new Map((await db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
- const plan=d1EnrichmentPlan(inputs,stored,nowIso,new Set((retirements?.held||[]).map(item=>item.filmId)));
- // Membership is guarded on its own: a Film can stay in the view and still drop off the watchlist.
+ const held=new Set((retirements?.held||[]).map(item=>item.filmId));
+ const plan=d1EnrichmentPlan(inputs,stored,nowIso,held);
+ // Membership is guarded on its own: a Film can stay in the view and still drop off the watchlist. A held Film keeps its row.
  const listed=new Set(inputs.films.filter(film=>film.watchlist).map(film=>film.id));
  const members=(await db.all('SELECT film_id FROM watchlist_film')).map(row=>row.film_id);
- plan.membership={members:members.length,removed:members.filter(id=>!listed.has(id)).length};
+ plan.membership={members:members.length,removed:members.filter(id=>!listed.has(id)&&!held.has(id)).length};
  Object.assign(summary,{members:plan.membership.members,membershipRemoved:plan.membership.removed,films:inputs.films.length,people:inputs.people.length,stored:stored.size,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
  return plan;
 }

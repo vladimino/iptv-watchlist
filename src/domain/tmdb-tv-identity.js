@@ -136,24 +136,24 @@ function tmdbRetirementSet(body){
  }
  return reasons.length?{ok:false,reasons,retirements:[]}:{ok:true,reasons:[],retirements};
 }
-// What the Film's stored records last saw on its Letterboxd page: parseFilm's typed `tmdbLink`, as `type/id` links and
-// attribute ids. A record written before AIR-297 has no such field and says nothing; a field of another shape is unreadable
-// and counts as a different link.
-function tmdbLinkObservations(records){
- const links=[],ids=[];
- for(const record of records||[]){
-  const seen=record?.tmdbLink;
-  if(seen==null)continue;
-  if(typeof seen!=='object'||!Array.isArray(seen.links)||!Array.isArray(seen.attributes?.ids)){links.push(null);continue;}
-  for(const link of seen.links)links.push(link&&typeof link==='object'?String(link.type)+'/'+String(link.id):null);
-  for(const id of seen.attributes.ids)ids.push(String(id));
- }
- return {links,ids};
+// Whether what one stored record last saw on the Film's Letterboxd page (parseFilm's typed `tmdbLink`) still supports the
+// retirement: exactly one link, `tv/<tvId>`, and exactly one attribute pair, `movie`/<movieId>, the divergence the owner
+// confirmed. Anything else the page now shows is a change for review: no link, several links, another link
+// (`link_changed`), or attributes that are missing, several, of another type or another id, including Letterboxd switching
+// them to the TV entry (`attributes_changed`). A record written before AIR-297 has no such field and says nothing.
+function tmdbLinkChange(record,retirement){
+ const seen=record?.tmdbLink;
+ if(seen===undefined||seen===null)return null;
+ const links=Array.isArray(seen?.links)?seen.links:null,link=links?.length===1?links[0]:null;
+ if(!link||typeof link!=='object'||link.type!=='tv'||String(link.id)!==retirement.tvId)return 'link_changed';
+ const types=seen.attributes?.types,ids=seen.attributes?.ids;
+ if(!Array.isArray(types)||!Array.isArray(ids)||types.length!==1||ids.length!==1)return 'attributes_changed';
+ return types[0]==='movie'&&String(ids[0])===retirement.movieId?null:'attributes_changed';
 }
 // Applies a retirements object to the Films the records build, before catalog records are linked: the retired movie id is
 // no longer trusted, so no catalog record links through it. `recordsOf(film)` returns the Film's own stored records.
-// A retirement is held, and its Film stays as the records build it, when the Film is missing, when a record saw another
-// TMDB link or another attribute id on the page than the retirement names, or when applyTmdbRetirement refuses. The time of
+// A retirement is held, and its Film stays as the records build it, when the Film is missing, when a record's observation of
+// the page no longer supports it (tmdbLinkChange), or when applyTmdbRetirement refuses. The time of
 // the correction is the identity's own, so a corrected Film is the same on every run. An invalid object applies nothing.
 function applyTmdbRetirements(films,body,recordsOf=()=>[]){
  const set=tmdbRetirementSet(body),corrected=new Map();
@@ -163,9 +163,8 @@ function applyTmdbRetirements(films,body,recordsOf=()=>[]){
  for(const retirement of set.retirements){
   const film=byId.get(retirement.filmId),hold=reason=>report.held.push({filmId:retirement.filmId,reason});
   if(!film){hold('film_missing');continue;}
-  const seen=tmdbLinkObservations(recordsOf(film));
-  if(seen.links.some(link=>link!=='tv/'+retirement.tvId)){hold('link_changed');continue;}
-  if(seen.ids.some(id=>id!==retirement.movieId)){hold('attributes_changed');continue;}
+  const changed=(recordsOf(film)||[]).map(record=>tmdbLinkChange(record,retirement)).filter(Boolean);
+  if(changed.length){hold(changed.includes('link_changed')?'link_changed':'attributes_changed');continue;}
   const applied=applyTmdbRetirement(film,retirement,film.identity?.updatedAt??null);
   if(!applied.ok){hold(applied.reason);continue;}
   corrected.set(film.id,{before:film,film:applied.film,retirement});
