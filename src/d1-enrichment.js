@@ -41,8 +41,10 @@ function d1EnrichmentAdapter(binding){
 }
 
 // The inputs fail closed. Every object the view needs must be present and of its shape: a missing object stops the run before
-// any D1 write, while a present, empty one is a real empty dataset. Only the Letterboxd diary is optional: it is absent while its
-// own switch is off. The read must also be one consistent cut of R2:
+// any D1 write, while a present, empty one is a real empty dataset. Two objects are optional: the Letterboxd diary, absent while its
+// own switch is off, and the owner-approved TMDB retirements (ADR 0057), absent until a correction is approved. A retirements
+// object that is present but fails its check as a whole stops the run as input_invalid. The read must also be one consistent cut
+// of R2:
 // - it does not start while a writer of these objects is at work: a live discovery lease, or a sync in its metadata or EPG stage;
 // - the programme and the catalog come from the copies of the one generation the pointer names as published, never the root ones;
 // - after every read, each object is checked again by its etag, and the writer checks are repeated. The published generation's
@@ -72,7 +74,7 @@ async function d1EnrichmentStore(env){
  const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
  if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
  const runId=pointer.programmeRunId;
- const [watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory]=await Promise.all([
+ const [watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
   d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
@@ -81,16 +83,18 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,epgGenerationKey(runId,'discovered-films.json'),d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'epg/discovery-resolution.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
+  d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
  ]);
  for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);
  await d1EnrichmentWritersIdle(env);
- const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
+ const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
  return {store,programmeRunId:runId};
 }
 
 // The plan of one run: every Person and Film whose change key differs from the stored one, and every stored entity the view
-// no longer has. Persons come first so a Film's credits find their people.
-function d1EnrichmentPlan(inputs,stored,nowIso){
+// no longer has. Persons come first so a Film's credits find their people. A held Film (a TMDB retirement under owner review,
+// ADR 0057) is neither written nor released: D1 keeps it as it is until the review settles.
+function d1EnrichmentPlan(inputs,stored,nowIso,held=new Set()){
  const people=[],films=[],absent=[],seen=new Set();
  for(const entry of inputs.people){
   const key=EnrichmentProjection.personChangeKey(entry,nowIso);
@@ -100,6 +104,7 @@ function d1EnrichmentPlan(inputs,stored,nowIso){
  for(const entry of inputs.films){
   const key=EnrichmentProjection.filmChangeKey(entry,nowIso);
   seen.add('film\n'+entry.id);
+  if(held.has(entry.id))continue;
   if(stored.get('film\n'+entry.id)!==key)films.push({...entry,key});
  }
  for(const [id,key] of stored){
@@ -144,10 +149,15 @@ async function d1EnrichmentDiff(env,db,now,summary){
  const {store,programmeRunId}=await d1EnrichmentStore(env);
  summary.programmeRunId=programmeRunId;
  summary.loadMs=Date.now()-started;
- const inputs=EnrichmentProjection.enrichmentInputs({view:LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),store});
+ const view=LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),retirements=view.tmdbRetirements||null;
+ if(retirements){
+  summary.tmdbRetirements={valid:retirements.valid,applied:retirements.applied.length,held:retirements.held.slice(0,20),reasons:retirements.reasons.slice(0,20)};
+  if(!retirements.valid)throw new D1EnrichmentInputError('input_invalid',TMDB_RETIREMENTS_KEY);
+ }
+ const inputs=EnrichmentProjection.enrichmentInputs({view,store});
  summary.viewMs=Date.now()-started-summary.loadMs;
  const stored=new Map((await db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
- const plan=d1EnrichmentPlan(inputs,stored,nowIso);
+ const plan=d1EnrichmentPlan(inputs,stored,nowIso,new Set((retirements?.held||[]).map(item=>item.filmId)));
  // Membership is guarded on its own: a Film can stay in the view and still drop off the watchlist.
  const listed=new Set(inputs.films.filter(film=>film.watchlist).map(film=>film.id));
  const members=(await db.all('SELECT film_id FROM watchlist_film')).map(row=>row.film_id);

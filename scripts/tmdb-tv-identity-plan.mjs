@@ -27,7 +27,7 @@ export const RETIREMENTS_KEY='identity/tmdb-retirements.json';
 export class PlanStop extends Error{constructor(reason,details={}){super('Stopped: '+reason);this.name='PlanStop';this.reason=reason;this.details=details;}}
 
 export function loadDomain(){
- const source=['src/domain/film-person.js','src/domain/film-person-reader.js','src/domain/tmdb-tv-identity.js'].map(file=>fs.readFileSync(path.join(REPO_ROOT,file),'utf8')).join('\n');
+ const source=['src/domain/film-person.js','src/domain/tmdb-tv-identity.js','src/domain/film-person-reader.js'].map(file=>fs.readFileSync(path.join(REPO_ROOT,file),'utf8')).join('\n');
  const ctx=vm.createContext({Date,Map,Set,JSON,Object,URL,encodeURIComponent});
  vm.runInContext(source+'\nglobalThis.api={readLifecycle,linkFilms,letterboxdTmdbLink,tmdbRetirement,applyTmdbRetirement,tmdbTvCollisions,TMDB_TV_SCHEME,TMDB_RETIRED_STATUS};',ctx);
  return ctx.api;
