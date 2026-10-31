@@ -152,16 +152,64 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.ok(Object.values(bucket.value(QUEUE).films).every(entry=>entry.refs.every(ref=>ref.resolved)));
 }
 
-// 5c. References to events that were never written wait without keeping the run going: 150 of them end in one step.
+// 5c. References to events that were never written neither keep a run going nor hide a valid reference behind them:
+// a run visits each reference once, least recently checked first; the missing ones stay unresolved with their issue.
 {
- const {bucket,env,R,net}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
+ const {bucket,env,R,net,ctx}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
  const films={};
  for(let n=0;n<10;n++)films['w'+n]={url:film('w'+n).url,state:'rated',rating:3,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:Array.from({length:15},(_,r)=>({eventKey:eventKeyOf(at(T0-(r+1)*H),'lost-'+r+'-watchlist'),sourceRunId:'lost-'+r,at:at(T0-(r+1)*H),resolved:false}))};
+ const validAt=at(T0-2*H);
+ await ctx.writeEvent(env,{id:'kept-watchlist',type:'watchlist',at:validAt,total:0,baseline:false,added:[],removed:[{id:'z-valid',title:'Z',year:2000}]});
+ films['z-valid']={url:film('z-valid').url,state:'rated',rating:4.5,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:[{eventKey:eventKeyOf(validAt,'kept-watchlist'),sourceRunId:'kept',at:validAt,resolved:false}]};
  migrated(bucket,{films});
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
  const first=plain(await R.step(env,{runId}));
- eq([first.reason,first.summary.removal.settled.waiting,first.summary.removal.settled.resolved,net.memberFetches().length],['finished',100,0,0]);
- assert.ok(Object.values(bucket.value(QUEUE).films).every(entry=>entry.refs.every(ref=>!ref.resolved)));
+ eq([first.nextAction,first.summary.removal.settled.waiting,first.summary.removal.settled.resolved,first.summary.removal.lookup.stoppedBy],['continue',100,0,'settling'],'100 missing references come first by id');
+ const second=plain(await R.step(env,{runId}));
+ eq([second.reason,second.summary.removal.settled.waiting,second.summary.removal.settled.resolved,net.memberFetches().length],['finished',150,1,0],'the same run reaches the valid reference and ends');
+ const queue=bucket.value(QUEUE);
+ eq([queue.films['z-valid'].refs[0].resolved,bucket.value(eventKeyOf(validAt,'kept-watchlist')).removed[0].rating],[true,4.5]);
+ assert.ok(Object.entries(queue.films).filter(([id])=>id!=='z-valid').every(([,entry])=>entry.refs.every(ref=>!ref.resolved&&ref.issue==='event_missing')));
+ eq(plain(await R.status(env)).removal.refIssues,{event_missing:150,film_not_in_event:0,event_unrated:0});
+}
+
+// 5d. Across runs: a run that stopped after its first settle step leaves the unvisited references first in line, so
+// the next run reaches the valid one in its first step instead of rescanning the same hundred.
+{
+ const {bucket,env,R,clock,ctx}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
+ const films={};
+ for(let n=0;n<10;n++)films['w'+n]={url:film('w'+n).url,state:'rated',rating:3,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:Array.from({length:10},(_,r)=>({eventKey:eventKeyOf(at(T0-(r+1)*H),'lost-'+r+'-watchlist'),sourceRunId:'lost-'+r,at:at(T0-(r+1)*H),resolved:false}))};
+ const validAt=at(T0-2*H);
+ await ctx.writeEvent(env,{id:'kept-watchlist',type:'watchlist',at:validAt,total:0,baseline:false,added:[],removed:[{id:'z-valid',title:'Z',year:2000}]});
+ films['z-valid']={url:film('z-valid').url,state:'rated',rating:2,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:[{eventKey:eventKeyOf(validAt,'kept-watchlist'),sourceRunId:'kept',at:validAt,resolved:false}]};
+ migrated(bucket,{films});
+ const one=plain(await R.start(env,{trigger:'manual'}));
+ const first=plain(await R.step(env,{runId:one.runId}));
+ eq([first.nextAction,first.summary.removal.settled.resolved],['continue',0]);
+ clock.now+=31*MIN;
+ const two=plain(await R.start(env,{trigger:'manual'}));
+ assert.equal(two.reason,'started');assert.equal(bucket.value(RUN).recent[0].cause,'abandoned');
+ const next=plain(await R.step(env,{runId:two.runId}));
+ eq([next.reason,next.summary.removal.settled.resolved,next.summary.removal.settled.waiting],['more_work',1,99],'the valid reference is settled first, then the least recently checked missing ones');
+ const last=plain(await R.step(env,{runId:two.runId}));
+ eq([last.reason,last.summary.removal.settled.resolved,last.summary.removal.settled.waiting],['finished',1,100]);
+ assert.equal(bucket.value(QUEUE).films['z-valid'].refs[0].resolved,true);
+}
+
+// 5e. Five lookups per step, not per run: twelve due films take three steps, each answering continue while due films
+// remain; the run ends once none is due (each claim moves the next attempt an hour ahead).
+{
+ const {bucket,env,R,net}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
+ const films={},ids=Array.from({length:12},(_,n)=>'due'+String(n).padStart(2,'0'));
+ for(const [n,id] of ids.entries()){films[id]={url:film(id).url,state:'pending',attempts:0,enqueuedAt:at(T0-H+n),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[]};net.members.set(id,n%2?'none':3);}
+ migrated(bucket,{films});
+ const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ const replies=await drain(R,env,runId);
+ eq(replies.map(reply=>[reply.nextAction,reply.step.lookups]),[['continue',5],['continue',5],['stop',2]]);
+ assert.equal(replies.at(-1).reason,'finished');
+ eq(net.memberFetches().map(url=>url.split('/').at(-2)),ids,'every due film once, oldest first');
+ assert.equal(bucket.value(RUN).checkpoint.removalChecked,12);
+ assert.equal(plain(await R.status(env)).removal.pending,6,'not-rated films wait 24 hours for their next attempt');
 }
 
 // 6. A film the Diary proves resolves its queue entry without a lookup, and its removal events get the rating.

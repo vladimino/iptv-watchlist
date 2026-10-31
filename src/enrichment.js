@@ -325,28 +325,39 @@ async function enqueueRemovalRefs(env,incoming,ref,now=Date.now()){
  return {films:films.length,schemaVersion,at};
 }
 // Rated version 2 entries with unresolved references: the rating is written to each referenced removal event with the
-// writeEvent compare-and-swap and merge, then the reference is marked resolved. A kill between the two repeats the
-// idempotent event write. A reference whose event is not stored yet (the commit has not written it) waits.
-async function settleRemovalRefs(env,{ids=null,limit=20}={}){
- const summary={written:0,resolved:0,waiting:0,left:0};
+// writeEvent compare-and-swap and merge, and the reference is marked resolved only once the stored event lists the film
+// as removed with a confirmed rating. A kill between the two repeats the idempotent event write. Every attempt stamps
+// the reference's `checkedAt`; one that cannot be resolved keeps `issue`: `event_missing` (the event is not stored,
+// e.g. a commit that never wrote it), `film_not_in_event` or `event_unrated`. Work is taken least recently checked
+// first, so references that never resolve cannot starve later ones; `checkedBefore` skips references already checked
+// since that time (one ratings run visits each reference once).
+const REMOVAL_REF_ISSUES=['event_missing','film_not_in_event','event_unrated'];
+async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBefore=null}={}){
+ const at=new Date(now).toISOString(),summary={written:0,resolved:0,waiting:0,mismatched:0,left:0};
  const object=await env.BUCKET.get(REMOVAL_LOOKUP_KEY),queue=object?await object.json():null;
  if(!removalQueueV2(queue))return summary;
  const work=[];
  for(const [id,entry] of Object.entries(queue.films)){
   if(ids&&!ids.includes(id)||entry.state!=='rated'||confirmedHalfStar(entry.rating)==null)continue;
-  for(const ref of entry.refs||[])if(ref.resolved!==true)work.push({id,eventKey:ref.eventKey,rating:entry.rating,observedAt:entry.checkedAt||null});
+  for(const ref of entry.refs||[])if(ref.resolved!==true&&!(checkedBefore&&ref.checkedAt&&ref.checkedAt>=checkedBefore))work.push({id,eventKey:ref.eventKey,checkedAt:ref.checkedAt||'',rating:entry.rating,observedAt:entry.checkedAt||null});
  }
+ work.sort((a,b)=>a.checkedAt<b.checkedAt?-1:a.checkedAt>b.checkedAt?1:a.id<b.id?-1:a.id>b.id?1:a.eventKey<b.eventKey?-1:a.eventKey>b.eventKey?1:0);
  summary.left=Math.max(0,work.length-limit);
  for(const item of work.slice(0,limit)){
-  const event=await loadJSON(env,item.eventKey);
-  if(!event){summary.waiting++;continue;}
-  const next=withRemovalRatings(event,{[item.id]:item.rating},item.observedAt);
-  if(next){await writeEvent(env,next);summary.written++;}
+  let event=await loadJSON(env,item.eventKey),issue=null;
+  if(event){
+   const next=withRemovalRatings(event,{[item.id]:item.rating},item.observedAt);
+   if(next){event=await writeEvent(env,next);summary.written++;}
+   const film=(event?.type==='watchlist'&&Array.isArray(event.removed)?event.removed:[]).find(value=>String(value?.id)===item.id);
+   issue=!film?'film_not_in_event':removalRating(film)?null:'event_unrated';
+  }else issue='event_missing';
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
    const ref=removalQueueV2(q)?(q.films[item.id]?.refs||[]).find(value=>value.eventKey===item.eventKey):null;
-   if(!ref||ref.resolved===true)return null;ref.resolved=true;return q;
+   if(!ref||ref.resolved===true)return null;
+   ref.checkedAt=at;if(issue)ref.issue=issue;else{ref.resolved=true;delete ref.issue;}
+   return q;
   });
-  summary.resolved++;
+  if(!issue)summary.resolved++;else if(issue==='event_missing')summary.waiting++;else summary.mismatched++;
  }
  return summary;
 }

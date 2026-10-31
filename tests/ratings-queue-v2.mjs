@@ -101,20 +101,31 @@ const removalEvent=(n,ms,ids)=>({id:'run-'+n+'-watchlist',type:'watchlist',at:at
 await ctx.writeEvent(env,removalEvent(1,T0,['s']));
 await ctx.writeEvent(env,removalEvent(2,T0+H,['s','other']));
 bucket.set(QUEUE,v2({s:{url:film('s').url,state:'rated',rating:3.5,checkedAt:at(T0+2*H),attempts:1,enqueuedAt:at(T0),claim:null,refs:[{...ref(1),resolved:false},{...ref(2,T0+H),resolved:false},{...ref(7,T0+3*H),resolved:false}]}}));
-let killed=0;
-bucket.hooks.beforePut=key=>{if(key===QUEUE&&!killed++)throw new Error('killed after the event write');};
+let killed=0,eventWritten=false;
+bucket.hooks.beforePut=key=>{if(key.startsWith('events/items/'))eventWritten=true;else if(key===QUEUE&&eventWritten&&!killed++)throw new Error('killed after the event write');};
 await assert.rejects(fn('settleRemovalRefs')(env,{}),/killed/);
 bucket.hooks.beforePut=null;
-assert.equal(bucket.value(eventKeyOf(at(T0),'run-1-watchlist')).removed[0].rating,3.5,'the event was written before the kill');
+assert.ok([T0,T0+H].some(ms=>bucket.value(eventKeyOf(at(ms),'run-'+(ms===T0?1:2)+'-watchlist')).removed.find(item=>item.id==='s').rating===3.5),'an event was written before the kill');
 assert.equal(bucket.value(QUEUE).films.s.refs.filter(item=>item.resolved).length,0,'the reference is not resolved yet');
 const writesBefore=bucket.writes().filter(item=>item.key.startsWith('events/items/')).length;
 const settled=await fn('settleRemovalRefs')(env,{});
-eq(plain(settled),{written:1,resolved:2,waiting:1,left:0});
-assert.equal(bucket.writes().filter(item=>item.key.startsWith('events/items/')).length,writesBefore+1,'the repeated write of event 1 is a no-op; event 2 is written once');
+eq(plain(settled),{written:1,resolved:2,waiting:1,mismatched:0,left:0});
+assert.equal(bucket.writes().filter(item=>item.key.startsWith('events/items/')).length,writesBefore+1,'the event written before the kill is not written again; the other is written once');
+assert.equal(bucket.value(eventKeyOf(at(T0),'run-1-watchlist')).removed[0].rating,3.5);
 assert.equal(bucket.value(eventKeyOf(at(T0+H),'run-2-watchlist')).removed.find(item=>item.id==='s').rating,3.5);
 assert.equal(bucket.value(eventKeyOf(at(T0+H),'run-2-watchlist')).removed.find(item=>item.id==='other').rating,undefined,'only the film of the entry is rated');
 eq(bucket.value(QUEUE).films.s.refs.map(item=>item.resolved),[true,true,false],'the reference to an unwritten event waits');
-eq(plain(await fn('settleRemovalRefs')(env,{})),{written:0,resolved:0,waiting:1,left:0},'settling again is idempotent');
+eq(plain(await fn('settleRemovalRefs')(env,{})),{written:0,resolved:0,waiting:1,mismatched:0,left:0},'settling again is idempotent');
+eq(bucket.value(QUEUE).films.s.refs.map(item=>item.issue??null),[null,null,'event_missing'],'the waiting reference says why');
+
+// 7b. A reference is resolved only when its event lists the film as removed with a confirmed rating: an event that
+// does not list the film keeps the reference unresolved, with the issue, and writes nothing.
+await ctx.writeEvent(env,removalEvent(8,T0+4*H,['someone-else']));
+bucket.set(QUEUE,v2({s:{url:film('s').url,state:'rated',rating:3.5,checkedAt:at(T0+2*H),attempts:1,enqueuedAt:at(T0),claim:null,refs:[{...ref(8,T0+4*H),resolved:false}]}}));
+const eventWrites=bucket.writes().filter(item=>item.key.startsWith('events/items/')).length;
+eq(plain(await fn('settleRemovalRefs')(env,{})),{written:0,resolved:0,waiting:0,mismatched:1,left:0});
+eq([bucket.value(QUEUE).films.s.refs[0].resolved,bucket.value(QUEUE).films.s.refs[0].issue],[false,'film_not_in_event']);
+assert.equal(bucket.writes().filter(item=>item.key.startsWith('events/items/')).length,eventWrites,'no event write');
 
 // 8. A writer that read version 1 loses its compare-and-swap to the migration and follows version 2 on the retry.
 bucket.set(QUEUE,{schemaVersion:1,films:{}});

@@ -300,7 +300,7 @@ async function writeEvent(env,event){
  for(let attempt=0;attempt<5;attempt++){
   const object=await env.BUCKET.get(key),stored=object?await object.json():null,next=stored?mergeRemovalEvent(stored,event):event;
   const saved=await env.BUCKET.put(key,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
-  if(saved!==null)return;
+  if(saved!==null)return next;
  }
  throw new Error('Watchlist event changed during write');
 }

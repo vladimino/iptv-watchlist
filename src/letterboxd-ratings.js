@@ -9,7 +9,7 @@ const LetterboxdRatings=(()=>{
  const KEYS={run:'letterboxd/ratings/run.json',migration:'letterboxd/ratings/migration.json'};
  const CONTRACT_VERSION=1,RUN_SCHEMA_VERSION=1;
  const LEASE_MS=3*60000,LEASE_MARGIN_MS=45000,ABANDONED_MS=30*60000,SCHEDULED_GAP_MS=6*3600000;
- const STEP_PAGES=3,RUN_PAGES=9,STEP_LOOKUPS=5,RUN_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
+ const STEP_PAGES=3,RUN_PAGES=9,STEP_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
  const MIGRATION_WRITER={runId:'ratings-storage-migrate',step:'migrate'};
  const DIARY_ERRORS=['failed','blocked','rate_limited'];
  const iso=ms=>new Date(ms).toISOString();
@@ -173,20 +173,21 @@ const LetterboxdRatings=(()=>{
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
- // The removal phase: first the event writes of rated entries with unresolved references, at most 100 per step (the
- // run goes on with further steps while some are left and the step resolved at least one, so references waiting for an
- // event that was never written cannot keep a run going), then the retention rules, then at most five lookups per run
- // with the claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue. A paused queue or
- // REMOVAL_RATING_LOOKUP off ends the lookups for this run.
+ // The removal phase: first the event writes of rated entries with unresolved references, at most 100 per step, least
+ // recently checked first; the run visits each reference once (those checked since the run started are skipped) and
+ // goes on with further steps while unvisited ones are left, so references that never resolve neither keep a run going
+ // nor hide later ones. Then the retention rules, then at most five lookups per step with the claim-before-request,
+ // three-attempt, 403/429 pause and expiry rules of the queue; the run goes on while due entries remain. Each claim moves
+ // the entry's next attempt at least an hour ahead, so a run ends. A paused queue or REMOVAL_RATING_LOOKUP off ends the
+ // lookups for this run.
  async function removalPhase(env,run,{own,remaining,clock}){
-  const settled=await settleRemovalRefs(env,{limit:SETTLE_PER_STEP});
+  const settled=await settleRemovalRefs(env,{limit:SETTLE_PER_STEP,now:clock(),checkedBefore:run.startedAt});
   const lookup={checked:0,rated:0,notRated:0,failed:0,refused:0,stoppedBy:null,pausedUntil:null};
-  const budget=Math.min(STEP_LOOKUPS,RUN_LOOKUPS-(run.checkpoint.removalChecked||0));
   let more=false;
-  if(settled.left>0&&settled.resolved>0){lookup.stoppedBy='settling';return {settled,lookup,more:true};}
+  if(settled.left>0){lookup.stoppedBy='settling';return {settled,lookup,more:true};}
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
   if(!removalLookupEnabled(env)){lookup.stoppedBy='lookup_off';return {settled,lookup,more};}
-  if(budget<=0)return {settled,lookup,more};
+  const budget=STEP_LOOKUPS;
   let queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
   if(!removalQueueV2(queue)){lookup.stoppedBy='queue_not_migrated';return {settled,lookup,more};}
   const started=clock();
@@ -203,6 +204,10 @@ const LetterboxdRatings=(()=>{
    if(accepted&&entry?.state==='rated'){lookup.rated++;await settleRemovalRefs(env,{ids:[id]});}else if(accepted&&entry?.lastResult==='not_rated')lookup.notRated++;else if(error)lookup.failed++;
    await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,removalChecked:(current.checkpoint.removalChecked||0)+1}}));
    if(accepted&&(entry?.lastResult==='blocked'||entry?.lastResult==='rate_limited')){lookup.stoppedBy=entry.lastResult;lookup.pausedUntil=queue.pausedUntil;break;}
+  }
+  if(!more&&!lookup.stoppedBy){
+   const after=(await read(env,REMOVAL_LOOKUP_KEY)).value;
+   if(removalQueueV2(after)&&!(after.pausedUntil&&Date.parse(after.pausedUntil)>clock())&&removalDue(after,clock(),1).length)more=true;
   }
   return {settled,lookup,more};
  }
@@ -268,6 +273,7 @@ const LetterboxdRatings=(()=>{
    run:presentRun(run,now),
    diary:{enabled:LetterboxdDiary.enabled(env),migrated:state.cursorV2,lastOutcome:cursor?.lastOutcome??null,stopReason:cursor?.stopReason??null,coverage:cursor?.coverage||null,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null,lastSuccessAt:cursor?.lastSuccessAt??null},
    removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:removalLookupEnabled(env),entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
+    refIssues:Object.fromEntries(REMOVAL_REF_ISSUES.map(issue=>[issue,entries.reduce((n,entry)=>n+(entry.refs||[]).filter(ref=>ref.resolved!==true&&ref.issue===issue).length,0)])),
     legacy:entries.filter(entry=>entry.legacy===true).length,expired:entries.filter(entry=>entry.state==='expired').length,droppedRefs:queue?.droppedRefs||0,pausedUntil:queue?.pausedUntil&&Date.parse(queue.pausedUntil)>now?queue.pausedUntil:null},
    freshness:freshnessOf(run),readAt:iso(now),sideEffects:'none'};
  }
@@ -298,5 +304,5 @@ const LetterboxdRatings=(()=>{
   const error=validate(action,body);if(error)return {status:400,body:{error}};
   return {status:200,body:await (action==='start'?start(env,body):action==='step'?step(env,body):migrate(env,body))};
  }
- return {KEYS,CONTRACT_VERSION,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,SCHEDULED_GAP_MS,STEP_PAGES,RUN_PAGES,STEP_LOOKUPS,RUN_LOOKUPS,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,SCHEDULED_GAP_MS,STEP_PAGES,RUN_PAGES,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();
