@@ -166,7 +166,7 @@ The projector fails closed on its R2 inputs. Missing, malformed or unpublished i
 
 ## Metadata sync clocks (schema v5)
 
-[ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md) (Proposed): migration `0005` adds `film_sync_state`. It is not applied to production by a deploy. The same enrichment projector writes it, and only when `schema_contract.version` is 5 and the table exists. There is no new flag and no new cron. `metadataSync` does not read the table.
+[ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md): migration `0005` adds `film_sync_state`. It is not applied to production by a deploy. The same enrichment projector writes it, and only when `schema_contract.version` is 5 and the table exists. There is no new flag and no new cron. `metadataSync` does not read the table.
 
 | Column | Holds |
 | --- | --- |

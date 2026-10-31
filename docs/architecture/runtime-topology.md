@@ -49,7 +49,7 @@ The **one-chunk continuation** is executed inside the explicit step/request that
 The one Worker cron trigger runs only the [enrichment projector](../adr/0056-d1-enrichment-write-through.md), never a sync, EPG, discovery or prediction step. With `D1_ENRICHMENT_WRITE` unset it returns at once.
 
 - With `dry`, it reads the enrichment objects from R2 and the change keys from D1, and logs the diff.
-- With `on`, it also writes the changed Films and Persons to D1 under its lease. That dashed arrow is the Worker's only D1 write path, and it never writes R2. Sync clocks are included on the same arrow only when the database is schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md), Proposed). A deploy does not apply that migration.
+- With `on`, it also writes the changed Films and Persons to D1 under its lease. That dashed arrow is the Worker's only D1 write path, and it never writes R2. Sync clocks are included on the same arrow only when the database is schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)). A deploy does not apply that migration.
 
 Runtime mode and configured Cloudflare Access policies must be rechecked for live-state claims.
 

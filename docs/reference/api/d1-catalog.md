@@ -2,7 +2,7 @@
 
 `GET /api/d1/*` answers from the D1 database `iptv` (binding `DB`), not from R2. The routes only `SELECT`. The Worker's D1 write is the enrichment projector on its cron trigger ([ADR 0056](../../adr/0056-d1-enrichment-write-through.md)); these routes do not write. R2 stays authoritative. They sit under `/api/`, behind the same Cloudflare Access policy as the rest of the API. Source: [`src/catalog-d1.js`](../../../src/catalog-d1.js), test [`tests/catalog-d1.mjs`](../../../tests/catalog-d1.mjs).
 
-The projector keeps Films, Persons, credits and metadata following R2. Metadata sync clocks follow only after migration `0005` ([ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md), Proposed). Other domains follow R2 through a reload ([D1 backfill runbook](../../runbooks/d1-backfill.md)).
+The projector keeps Films, Persons, credits and metadata following R2. Metadata sync clocks follow only after migration `0005` ([ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md)). Other domains follow R2 through a reload ([D1 backfill runbook](../../runbooks/d1-backfill.md)).
 
 ## Identifiers
 
