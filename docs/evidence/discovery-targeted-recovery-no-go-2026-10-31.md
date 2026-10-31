@@ -49,7 +49,9 @@ From `resolutionActionability` (`:20–32`), `recordUncertain` (`:34–37`) and 
 | Retry time in the future, same evidence | Backoff of 1, 2, 4, 7 days, then terminal | No: the backoff is policy; bypassing it is forbidden |
 | `ambiguous` | Re-scored automatically after each backoff | Unlikely: the same competing candidates come back; it needs identity review |
 | Terminal (`repeated_uncertain_match`, `awaiting_confirmation`) on unchanged evidence | Never retried, after 5 attempts over at least 14 days | Unlikely: the same search on the same evidence; only a change in TMDB data could differ. A new airing resets the attempt series on its own |
-| Series stopped (`interrupted`, `complete`, budget spent) or waiting (lease, budget, TMDB throttling) | Resumes at the next EPG commit or after the gate | Only by a series-level action, not a single-item one |
+| Series waiting (TMDB throttling, budget, error delay) or a live resolver lease | Resumes after the gate or the lease expiry | No: the wait and the lease are fences a retry must respect too |
+| Series stopped (`interrupted`, `complete`, `programme_changed`, `idle`, budget spent) | Resumes at the next EPG commit | Only by a series-level action, not a single-item one |
+| Series stopped for `missing_secret` | Stops again on every new generation | No: owner configuration, not a retry or a new generation, clears it |
 
 So every state in which a retry could change the outcome is already retried by the normal cycle. The only gain of a targeted retry would be ordering. The remaining states are held back for a reason that a retry must not bypass (backoff, series fences) or cannot change (unchanged evidence, ambiguity, no airing).
 

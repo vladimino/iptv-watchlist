@@ -14,7 +14,7 @@ export const DISCOVERY_RECOVERY_VERSION = 1;
 export const DISCOVERY_RECOVERY_VERDICTS = ['resolved', 'excluded_nonfilm', 'not_current', 'queued', 'identity_conflict', 'backoff', 'no_more_evidence', 'stale_generation', 'not_found', 'unknown'];
 export const DISCOVERY_SERIES_STATES = ['continuing', 'waiting', 'live_writer', 'recovering', 'interrupted', 'stopped', 'unknown'];
 export const DISCOVERY_RETRY_HELPS = ['no', 'only_sooner', 'unlikely', 'series_level', 'unknown'];
-export const DISCOVERY_NEXT_ACTORS = ['none', 'scheduled_step', 'epg_commit', 'new_epg_evidence', 'reread'];
+export const DISCOVERY_NEXT_ACTORS = ['none', 'scheduled_step', 'epg_commit', 'new_epg_evidence', 'owner_investigation', 'reread'];
 export const DISCOVERY_RECOVERY_EXECUTE_REASON = 'no_targeted_writer';
 
 const RECOVERY_HOT_BEFORE_MS = 72 * 3600000;
@@ -33,6 +33,40 @@ function recoveryIso(ms) {
 
 function recoveryText(value) {
   return typeof value === 'string' && value ? value : null;
+}
+
+function recoveryAbsent(value) {
+  return value === undefined || value === null;
+}
+
+// The resolver writes `{id, expiresAt}` and releases a lease by setting `expiresAt` to 0; any other shape is not a
+// lease the resolver would have written, so whether a writer holds it cannot be told.
+function leaseWellFormed(lease) {
+  return recoveryObject(lease) && Boolean(recoveryText(lease.id)) && typeof lease.expiresAt === 'number' && Number.isFinite(lease.expiresAt) && lease.expiresAt >= 0;
+}
+
+// The fields of a supplied ledger candidate that the resolver's rules read, in the shapes the EPG commit writes them.
+// Returns the malformed field paths; the rules below assume an empty list.
+function observationShapeFaults(candidate) {
+  const faults = [];
+  const showOk = show => recoveryObject(show) && typeof show.start === 'number' && Number.isFinite(show.start)
+    && (recoveryAbsent(show.channelId) || typeof show.channelId === 'string' || typeof show.channelId === 'number');
+  if (!recoveryAbsent(candidate.shows) && !(Array.isArray(candidate.shows) && candidate.shows.every(showOk))) faults.push('observation.shows');
+  if (!recoveryAbsent(candidate.durations) && !Array.isArray(candidate.durations)) faults.push('observation.durations');
+  if (!recoveryAbsent(candidate.seenInLatestSnapshot) && typeof candidate.seenInLatestSnapshot !== 'boolean') faults.push('observation.seenInLatestSnapshot');
+  for (const field of ['lastSeenAt', 'lastAiring']) {
+    if (!recoveryAbsent(candidate[field]) && !(typeof candidate[field] === 'number' && Number.isFinite(candidate[field]))) faults.push('observation.' + field);
+  }
+  if (!recoveryAbsent(candidate.normalizedTitle) && typeof candidate.normalizedTitle !== 'string') faults.push('observation.normalizedTitle');
+  if (!recoveryAbsent(candidate.year) && typeof candidate.year !== 'number' && typeof candidate.year !== 'string') faults.push('observation.year');
+  if (!recoveryAbsent(candidate.nonfilmReason) && typeof candidate.nonfilmReason !== 'string') faults.push('observation.nonfilmReason');
+  return faults;
+}
+
+function decisionShapeFaults(decision) {
+  return ['status', 'evidenceKey', 'retryAt', 'terminalReason']
+    .filter(field => !recoveryAbsent(decision[field]) && typeof decision[field] !== 'string')
+    .map(field => 'decision.' + field);
 }
 
 // `candidateActivity` of the resolver: only a `current` observation is looked up.
@@ -85,10 +119,10 @@ export function discoverySeriesState(series, publishedRunId, nowMs) {
   if (!recoveryObject(series)) return seriesResult('unknown', 'series_not_supplied', null);
   const {record, health, lease} = series;
   if (lease === undefined) return seriesResult('unknown', 'lease_not_supplied', null);
-  if (lease !== null && !recoveryObject(lease)) return seriesResult('unknown', 'lease_malformed', null);
+  if (lease !== null && !leaseWellFormed(lease)) return seriesResult('unknown', 'lease_malformed', null);
   if (record === undefined) return seriesResult('unknown', 'record_not_supplied', null);
   if (record !== null && !recoveryObject(record)) return seriesResult('unknown', 'record_malformed', null);
-  if (lease && Number(lease.expiresAt) > nowMs) return seriesResult('live_writer', 'lease_live', Number(lease.expiresAt));
+  if (lease && lease.expiresAt > nowMs) return seriesResult('live_writer', 'lease_live', lease.expiresAt);
   if (!record) return seriesResult('continuing', 'no_record', null);
   if (publishedRunId && record.programmeRunId && record.programmeRunId !== publishedRunId) return seriesResult('recovering', 'generation_handoff', null);
   if (record.stage === 'running') {
@@ -110,15 +144,28 @@ export function discoverySeriesState(series, publishedRunId, nowMs) {
   return seriesResult('stopped', 'budget_exhausted', null);
 }
 
+// A series stopped for a missing TMDB secret stops again on every new generation until the owner restores the
+// configuration; no EPG commit or series action clears it.
+function seriesNeedsOwner(series) {
+  return series.state === 'stopped' && series.reason === 'missing_secret';
+}
+
 function nextFromSeries(series) {
   if (series.state === 'continuing' || series.state === 'recovering') return {actor: 'scheduled_step', at: null};
   if (series.state === 'waiting' || series.state === 'live_writer') return {actor: 'scheduled_step', at: series.at};
+  if (seriesNeedsOwner(series)) return {actor: 'owner_investigation', at: null};
   if (series.state === 'interrupted' || series.state === 'stopped') return {actor: 'epg_commit', at: null};
   return {actor: 'none', at: null};
 }
 
+// Only an ordinary queue (the series runs its next step whenever it is next called) could be overtaken by a targeted
+// retry. A protected wait (TMDB 429 backoff, the chunk budget, an error delay) and a live writer's lease are fences a
+// retry must respect, so there it would help nothing.
 function retryFromSeries(series) {
-  if (['continuing', 'recovering', 'waiting', 'live_writer'].includes(series.state)) return {helps: 'only_sooner', reason: 'already_queued'};
+  if (series.state === 'continuing' || series.state === 'recovering') return {helps: 'only_sooner', reason: 'already_queued'};
+  if (series.state === 'waiting') return {helps: 'no', reason: 'series_waiting'};
+  if (series.state === 'live_writer') return {helps: 'no', reason: 'writer_active'};
+  if (seriesNeedsOwner(series)) return {helps: 'no', reason: 'configuration_required'};
   if (series.state === 'interrupted' || series.state === 'stopped') return {helps: 'series_level', reason: 'series_stopped'};
   return {helps: 'unknown', reason: 'series_unknown'};
 }
@@ -192,8 +239,12 @@ export function assessObservationRecovery(input) {
   }
   if (!recoveryObject(observation)) return unknown(target, 'observation_malformed', series, ['observation']);
   if (observation.key !== key) return unknown(target, 'observation_key_differs', series, ['observation']);
+  const observationFaults = observationShapeFaults(observation);
+  if (observationFaults.length) return unknown(target, 'observation_malformed', series, observationFaults);
   if (decision === undefined) return unknown(target, 'decision_not_supplied', series, ['decision']);
   if (decision !== null && !recoveryObject(decision)) return unknown(target, 'decision_malformed', series, ['decision']);
+  const decisionFaults = decision ? decisionShapeFaults(decision) : [];
+  if (decisionFaults.length) return unknown(target, 'decision_malformed', series, decisionFaults);
   const observationRunId = recoveryText(observation.programmeRunId);
   if (!observationRunId) return unknown(target, 'observation_generation_missing', series, ['observation.programmeRunId']);
   if (observationRunId !== publishedRunId) {

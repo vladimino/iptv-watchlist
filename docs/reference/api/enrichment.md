@@ -163,6 +163,8 @@ Whether a retry of one observation would help follows from the resolver's own ru
 - A terminal decision on unchanged evidence would repeat the same search; a new airing resets its attempts on its own.
 - An `ambiguous` decision needs identity review rather than another attempt.
 - A candidate outside the current EPG window is not looked up at all.
+- A series gate (TMDB or storage backoff, the chunk budget, an error delay) and a live resolver lease hold every observation back, and a retry must respect them too.
+- A `missing_secret` stop is cleared only by restoring the TMDB configuration, not by a retry or a new generation.
 
 The [recovery assessment](../domain/discovery-recovery.md) states this per observation.
 

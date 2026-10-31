@@ -41,7 +41,11 @@ In bounded mode no discovery chunk and no status read touches the archive. `POST
 
 There is no per-observation retry, and there is no owner page that shows one observation: the limbo inventory reports observations as unavailable until a bounded projection exists. Do not improvise a targeted retry.
 
-1. **Read the series, read-only.** In `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`), read `continuation`, `continuationHealth` and `lastBatch`. The [recovery assessment](../reference/domain/discovery-recovery.md#series-states) names the series state they add up to. `continuing`, `waiting` and `recovering` mean the next scheduled step takes the queue; `interrupted` and `stopped` mean nothing moves until the next EPG commit.
+1. **Read the series, read-only.** In `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`), read `continuation`, `continuationHealth` and `lastBatch`. The [recovery assessment](../reference/domain/discovery-recovery.md#series-states) names the series state they add up to:
+   - `continuing` and `recovering`: the next scheduled step takes the queue.
+   - `waiting` (TMDB throttling, chunk budget, error delay) and `live_writer` (a live resolver lease): the series moves after the gate or the lease expiry. These are fences: no retry may pass them.
+   - `stopped` for `missing_secret`: nothing moves until the owner restores `TMDB_API_READ_ACCESS_TOKEN` ([MCP connectivity](mcp-connectivity.md)). A new EPG commit stops the same way.
+   - `interrupted` and every other `stopped`: nothing moves until the next EPG commit.
 2. **Judge the observation by the rules, not by hope.**
    - An actionable observation is already queued.
    - A future `retryAt` is policy.

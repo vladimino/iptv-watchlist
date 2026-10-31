@@ -47,6 +47,21 @@ assessObservationRecovery({
   A candidate whose `key` differs from `target.key` is never judged in its place.
 - **`decision`:** the resolution ledger entry for the key: `status`, `attempts`, `retryAt`, `terminalReason`, `evidenceKey`, `lastAttemptAt`.
 - **`series.health`:** what pipeline status reports as `continuationHealth`. It is needed only for a `running` record.
+- **`series.lease`:** `null`, or the lease the resolver writes: a non-empty string `id` and a finite, non-negative number `expiresAt` (a released lease has `expiresAt: 0`).
+
+Supplied parts are checked against the shapes the EPG commit and the resolver write before any rule runs. A malformed part is reported, never read as an absent value or a passed time, and never throws:
+
+- **Observation:**
+  - `shows`: absent, `null`, or an array of objects with a finite number `start` and an optional string or number `channelId`;
+  - `durations`: absent, `null`, or an array;
+  - `seenInLatestSnapshot`: a boolean or absent;
+  - `lastSeenAt` and `lastAiring`: finite numbers or absent;
+  - `normalizedTitle` and `nonfilmReason`: strings or absent;
+  - `year`: a number, a string or absent.
+
+  Anything else is verdict `unknown` with reason `observation_malformed`. `evidence.missing` names the field paths, for example `observation.shows`.
+- **Decision:** `status`, `evidenceKey`, `retryAt` and `terminalReason` are strings or absent. Anything else is `unknown` with reason `decision_malformed`, and `evidence.missing` names the fields. A string `retryAt` that does not parse is not malformed: it is the `retry_at_unparseable` anomaly.
+- **Lease:** any other lease shape (no `id`, a missing, string or negative `expiresAt`) makes the series `unknown` with reason `lease_malformed`. It is not read as expired, because whether a writer holds the resolver cannot be told. A verdict that depends on the series is then `partial` with `missing: ["series"]`.
 
 Errors return `{error}` and nothing else: `invalid_input` (not an object), `invalid_clock` (`now` missing or unparseable), `invalid_target` (no key).
 
@@ -61,7 +76,7 @@ Errors return `{error}` and nothing else: `invalid_input` (not an object), `inva
 | `decision` | The safe subset of the decision: status, attempts, retry time, terminal reason, last attempt |
 | `series` | `{state, reason, at}`: whether the discovery series will run another chunk, and when |
 | `retry` | `{helps, reason}`: `no`, `only_sooner`, `unlikely`, `series_level` or `unknown`. Never `yes` |
-| `next` | `{actor, at}`: `none`, `scheduled_step`, `epg_commit`, `new_epg_evidence` or `reread`, with a time when one is known |
+| `next` | `{actor, at}`: `none`, `scheduled_step`, `epg_commit`, `new_epg_evidence`, `owner_investigation` or `reread`, with a time when one is known |
 | `review` | `{suggested, reason, target, available, unavailableReason}`. Review is suggested for an ambiguous or terminal identity. `available` is `false` until an identity review page exists (`identity_review_not_built`) |
 | `execute` | Always `{available: false, capability: null, reason: "no_targeted_writer"}` |
 | `evidence` | `{completeness, missing, anomalies}`: `missing` when a required part was not supplied; `partial` when the series is unknown for a verdict that depends on it, or the decision has an unparseable retry time |
@@ -73,7 +88,7 @@ Errors return `{error}` and nothing else: `invalid_input` (not an object), `inva
 | `resolved` | The decision is `verified` | `no` | `none` |
 | `excluded_nonfilm` | The title is screened as not a film and the identity is not confirmed | `no` | `none` |
 | `not_current` | `historical` or `expired`: the resolver does not look at it | `no` | `new_epg_evidence` |
-| `queued` | The next chunk may look it up: no decision, retry due, new evidence, a non-film exclusion the screening no longer reproduces, or a known alias the cheap pass verifies | `only_sooner` while the series moves; `series_level` when it stopped | per series |
+| `queued` | The next chunk may look it up: no decision, retry due, new evidence, a non-film exclusion the screening no longer reproduces, or a known alias the cheap pass verifies | per series, below | per series, below |
 | `identity_conflict` | `ambiguous` on unchanged evidence, due or in backoff | `unlikely` (review) | the automatic re-check: its retry time, or per series when due |
 | `backoff` | A future retry time on unchanged evidence | `no` (backoff is policy) | `scheduled_step` at the retry time |
 | `no_more_evidence` | A terminal reason (`repeated_uncertain_match`, `awaiting_confirmation`) on unchanged evidence | `unlikely` (review) | `new_epg_evidence`: a new airing resets the attempts |
@@ -83,16 +98,28 @@ Errors return `{error}` and nothing else: `invalid_input` (not an object), `inva
 
 ### Series states
 
-| `series.state` | When | `next` for a queued observation |
-| --- | --- | --- |
-| `continuing` | The next scheduled step runs a chunk | `scheduled_step` |
-| `waiting` | `chunk_budget`, `backoff` (including TMDB throttling) or an error whose gate is in the future | `scheduled_step` at the gate |
-| `live_writer` | The resolver lease is live (a chunk or the poster maintenance route) | `scheduled_step` at the lease expiry |
-| `recovering` | The next step hands the series to the published generation, or settles or resumes an orphan | `scheduled_step` |
-| `interrupted` | Stopped after repeated interruptions, or an orphan that will fail closed | `epg_commit` |
-| `stopped` | `complete`, `programme_changed`, `missing_secret`, `idle`, or no budget left | `epg_commit` |
-| `unknown` | The record, lease or required health was not supplied or is malformed | `none` |
+| `series.state` | When | `retry` for a queued observation | `next` for a queued observation |
+| --- | --- | --- | --- |
+| `continuing` | The next scheduled step runs a chunk | `only_sooner` (`already_queued`) | `scheduled_step` |
+| `recovering` | The next step hands the series to the published generation, or settles or resumes an orphan | `only_sooner` (`already_queued`) | `scheduled_step` |
+| `waiting` | `chunk_budget`, `backoff` (including TMDB throttling) or an error whose gate is in the future | `no` (`series_waiting`) | `scheduled_step` at the gate |
+| `live_writer` | The resolver lease is live (a chunk or the poster maintenance route) | `no` (`writer_active`) | `scheduled_step` at the lease expiry |
+| `stopped`, reason `missing_secret` | The TMDB secret is missing | `no` (`configuration_required`) | `owner_investigation` |
+| `stopped`, any other reason | `complete`, `programme_changed`, `idle`, or no budget left | `series_level` (`series_stopped`) | `epg_commit` |
+| `interrupted` | Stopped after repeated interruptions, or an orphan that will fail closed | `series_level` (`series_stopped`) | `epg_commit` |
+| `unknown` | The record, lease or required health was not supplied or is malformed | `unknown` (`series_unknown`) | `none` |
+
+### Ordinary queue, protected waits and live fences
+
+`only_sooner` means the observation is in an **ordinary queue**: the series runs its next chunk whenever it is next called, so a targeted retry could at most take the observation before others in the pending order. It applies only to `continuing` and `recovering`.
+
+Two other states keep the observation queued, but a retry would not even be sooner:
+
+- **Protected wait (`waiting`):** the series holds back on purpose, to respect TMDB throttling, the chunk budget or an error delay. A retry must respect that gate too, so `retry.helps` is `no`.
+- **Live fence (`live_writer`):** another writer holds the resolver lease. A retry must wait for the lease like any chunk, so `retry.helps` is `no`.
+
+A missing TMDB secret is not a stop that a generation resets. Each EPG commit starts a series that stops the same way, and a whole-series action fails the same way, until the owner restores the configuration. So `retry.helps` is `no` with reason `configuration_required`, and `next.actor` is `owner_investigation` rather than `epg_commit`. The other stops do reset with the next EPG commit.
 
 ## Relation to the data health model
 
-The [data health model](data-health.md) marks an unresolved observation whose retry time has passed as `discovery_retry` with `eligible: true`. That is necessary but not sufficient for a retry to help. The health model does not see the observation's activity, its evidence key, the screening, the resolver lease or the series state. This assessment adds them, and for an eligible observation it usually finds that the normal cycle already takes it (`queued`, `only_sooner`).
+The [data health model](data-health.md) marks an unresolved observation whose retry time has passed as `discovery_retry` with `eligible: true`. That is necessary but not sufficient for a retry to help. The health model does not see the observation's activity, its evidence key, the screening, the resolver lease or the series state. This assessment adds them, and for an eligible observation it usually finds that the normal cycle already takes it (`queued`). A retry would be at most sooner (`only_sooner`) while the series moves, and would help nothing (`no`) while it waits, while a writer holds the lease, or while the configuration is missing.

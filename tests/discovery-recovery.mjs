@@ -72,6 +72,7 @@ for (const c of candidates) {
     const actionable = observationActionable(screened, decision, NOW_MS);
     assert.equal(actionable, call('resolutionActionability', c, decision, NOW_MS), JSON.stringify({c, decision}));
     const result = assess({observation: screened, decision});
+    assert.notEqual(result.verdict, 'unknown', 'every resolver-shaped row is judged, not refused');
     assert.equal(result.observation.actionable, actionable);
     // The assessment calls an observation queued (or a due conflict) exactly when the next chunk may look it up;
     // a known alias is verified by the chunk's cheap pass without a lookup.
@@ -153,7 +154,21 @@ assert.equal(result.reason, 'observation_key_differs');
 result = assess({series: {...quietSeries, lease: {id: OTHER_HOP, expiresAt: NOW_MS + 45000}}});
 assert.equal(result.series.state, 'live_writer');
 assert.deepEqual(result.next, {actor: 'scheduled_step', at: iso(45000)});
-assert.equal(result.retry.helps, 'only_sooner');
+assert.deepEqual(result.retry, {helps: 'no', reason: 'writer_active'});
+assert.equal(result.execute.available, false);
+
+// A lease the resolver would not have written is not read as expired: who holds the resolver cannot be told.
+for (const lease of [{id: OTHER_HOP}, {id: OTHER_HOP, expiresAt: null}, {id: OTHER_HOP, expiresAt: 'soon'}, {id: OTHER_HOP, expiresAt: String(NOW_MS + 45000)}, {id: OTHER_HOP, expiresAt: -1}, {id: OTHER_HOP, expiresAt: Infinity}, {expiresAt: NOW_MS + 45000}, {id: '', expiresAt: 0}, {id: 7, expiresAt: 0}]) {
+  result = assess({series: {...quietSeries, lease}});
+  assert.deepEqual(result.series, {state: 'unknown', reason: 'lease_malformed', at: null}, JSON.stringify(lease));
+  assert.equal(result.verdict, 'queued');
+  assert.deepEqual(result.retry, {helps: 'unknown', reason: 'series_unknown'});
+  assert.deepEqual(result.next, {actor: 'none', at: null});
+  assert.deepEqual(result.evidence, {completeness: 'partial', missing: ['series'], anomalies: []});
+  assert.equal(result.execute.available, false);
+}
+// A released lease (`expiresAt: 0`) is a lease the resolver wrote.
+assert.equal(assess({series: {...quietSeries, lease: {id: HOP, expiresAt: 0}}}).series.state, 'continuing');
 
 // Orphaned running record: the next ordinary step settles or resumes it.
 const orphanLease = {id: HOP, expiresAt: NOW_MS - 30000};
@@ -185,11 +200,27 @@ result = assess({series: {...quietSeries, record: {...quietSeries.record, progra
 assert.equal(result.series.state, 'recovering');
 assert.equal(result.series.reason, 'generation_handoff');
 
-// Throttling: a TMDB 429 left the series in backoff; the queued observation waits with it.
+// Throttling: a TMDB 429 left the series in backoff; the queued observation waits with it. The wait protects TMDB, so
+// a retry of the observation would not even be sooner.
 result = assess({series: {...quietSeries, record: {stage: 'paused', reason: 'backoff', remainingChunks: 4, retryAt: iso(20 * 60000), nextCatchUpAt: iso(20 * 60000), programmeRunId: RUN}}});
 assert.equal(result.series.state, 'waiting');
 assert.equal(result.series.reason, 'backoff');
+assert.equal(result.verdict, 'queued');
+assert.deepEqual(result.retry, {helps: 'no', reason: 'series_waiting'});
 assert.deepEqual(result.next, {actor: 'scheduled_step', at: iso(20 * 60000)});
+assert.equal(result.execute.available, false);
+// The chunk budget and an error delay are protected waits too; once the gate passes the queue is ordinary again.
+for (const record of [
+  {stage: 'paused', reason: 'chunk_budget', remainingChunks: 0, nextCatchUpAt: iso(H), programmeRunId: RUN},
+  {stage: 'error', reason: 'discovery_failed', remainingChunks: 3, nextCatchUpAt: iso(H), programmeRunId: RUN},
+]) {
+  result = assess({series: {...quietSeries, record}});
+  assert.equal(result.series.state, 'waiting');
+  assert.deepEqual(result.retry, {helps: 'no', reason: 'series_waiting'});
+  result = assess({series: {...quietSeries, record: {...record, nextCatchUpAt: iso(-H)}}});
+  assert.equal(result.series.state, 'continuing');
+  assert.deepEqual(result.retry, {helps: 'only_sooner', reason: 'already_queued'});
+}
 
 // Per-observation backoff is policy: never bypassed, and the time is named.
 const same = evidence(candidate());
@@ -234,6 +265,23 @@ assert.equal(assess({observation: candidate({nonfilmReason: 'news'})}).verdict, 
 result = assess({series: {...quietSeries, record: {stage: 'complete', remainingChunks: 3, programmeRunId: RUN}}});
 assert.deepEqual(result.retry, {helps: 'series_level', reason: 'series_stopped'});
 assert.deepEqual(result.next, {actor: 'epg_commit', at: null});
+for (const reason of ['programme_changed', 'idle']) {
+  result = assess({series: {...quietSeries, record: {stage: 'paused', reason, remainingChunks: 3, programmeRunId: RUN}}});
+  assert.equal(result.series.state, 'stopped');
+  assert.deepEqual(result.next, {actor: 'epg_commit', at: null});
+}
+
+// A missing TMDB secret is not reset by a generation: every new series stops the same way until the owner restores
+// the configuration, so neither a retry nor a whole-series action helps.
+result = assess({series: {...quietSeries, record: {stage: 'error', reason: 'missing_secret', remainingChunks: 0, programmeRunId: RUN}}});
+assert.deepEqual(result.series, {state: 'stopped', reason: 'missing_secret', at: null});
+assert.equal(result.verdict, 'queued');
+assert.deepEqual(result.retry, {helps: 'no', reason: 'configuration_required'});
+assert.deepEqual(result.next, {actor: 'owner_investigation', at: null});
+assert.equal(result.execute.available, false);
+result = assess({series: {...quietSeries, record: {stage: 'error', reason: 'missing_secret', remainingChunks: 0, programmeRunId: RUN}}, decision: {status: 'ambiguous', attempts: 3, evidenceKey: same, retryAt: iso(-H)}});
+assert.equal(result.verdict, 'identity_conflict');
+assert.deepEqual(result.next, {actor: 'owner_investigation', at: null});
 
 // No identity trust escalation: an accepted score awaiting confirmation is not resolved, a known alias is only queued
 // for the resolver's own cheap pass, and only a verified decision is `resolved`.
@@ -267,6 +315,47 @@ for (const series of [undefined, {record: quietSeries.record, health: null}, {re
   assert.equal(result.evidence.completeness, 'partial');
 }
 assert.equal(assess({decision: {status: 'no_confident_match', attempts: 1, evidenceKey: same, retryAt: 'not a time'}}).evidence.anomalies[0], 'retry_at_unparseable');
+
+// A malformed nested field of a supplied projection is unknown, never an exception and never a guess.
+for (const [fields, missing] of [
+  [{shows: {}}, ['observation.shows']],
+  [{shows: [null]}, ['observation.shows']],
+  [{shows: [show(2 * H), 'c1:0']}, ['observation.shows']],
+  [{shows: [{channelId: 'c1'}]}, ['observation.shows']],
+  [{shows: [{channelId: 'c1', start: String(NOW_MS)}]}, ['observation.shows']],
+  [{shows: [{channelId: {}, start: NOW_MS}]}, ['observation.shows']],
+  [{durations: {}}, ['observation.durations']],
+  [{durations: 95}, ['observation.durations']],
+  [{seenInLatestSnapshot: 'yes'}, ['observation.seenInLatestSnapshot']],
+  [{lastSeenAt: 'yesterday'}, ['observation.lastSeenAt']],
+  [{lastAiring: {}}, ['observation.lastAiring']],
+  [{normalizedTitle: ['север']}, ['observation.normalizedTitle']],
+  [{year: {}}, ['observation.year']],
+  [{nonfilmReason: true}, ['observation.nonfilmReason']],
+  [{shows: {}, durations: {}}, ['observation.shows', 'observation.durations']],
+]) {
+  result = assess({observation: candidate(fields)});
+  assert.equal(result.verdict, 'unknown', JSON.stringify(fields));
+  assert.equal(result.reason, 'observation_malformed');
+  assert.deepEqual(result.evidence, {completeness: 'missing', missing, anomalies: []});
+  assert.deepEqual(result.retry, {helps: 'unknown', reason: 'evidence_missing'});
+  assert.equal(result.execute.available, false);
+}
+for (const [decision, missing] of [
+  [{status: ['ambiguous']}, ['decision.status']],
+  [{status: 'no_confident_match', evidenceKey: 7}, ['decision.evidenceKey']],
+  [{status: 'no_confident_match', retryAt: Date.parse(iso(D))}, ['decision.retryAt']],
+  [{status: 'no_confident_match', terminalReason: {}}, ['decision.terminalReason']],
+]) {
+  result = assess({decision});
+  assert.equal(result.verdict, 'unknown', JSON.stringify(decision));
+  assert.equal(result.reason, 'decision_malformed');
+  assert.deepEqual(result.evidence.missing, missing);
+}
+// The shapes the EPG commit writes stay valid: absent and null lists, and a missing optional channel.
+for (const fields of [{shows: null, durations: null}, {shows: undefined, durations: undefined, seenInLatestSnapshot: null, lastSeenAt: null}, {shows: [{start: NOW_MS + H}]}, {year: null}, {year: '2020'}]) {
+  assert.notEqual(assess({observation: candidate(fields)}).verdict, 'unknown', JSON.stringify(fields));
+}
 assert.deepEqual(assessObservationRecovery(null), {error: 'invalid_input'});
 assert.deepEqual(assessObservationRecovery({now: 'yesterday', target: {key: 'k'}}), {error: 'invalid_clock'});
 assert.deepEqual(assessObservationRecovery({now: NOW, target: {key: ''}}), {error: 'invalid_target'});
