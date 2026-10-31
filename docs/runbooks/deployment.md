@@ -50,6 +50,10 @@ A failed test/build, or a failed account-token or Worker-settings check, prevent
 
 **Code-only paths and leftover variables.** The EPG resolver and the localization of the programme and watchlist reads and of the EPG commit have no runtime switch: rolling either back is a redeploy of the previous verified commit through the [Worker rollback procedure](recovery/cloudflare-worker-rollback.md), never a dashboard variable. `keep_vars: true` also preserves variables the code no longer reads (`SCORED_RESOLUTION`; the `epg`, `programme` and `watchlist` tokens of `LIFECYCLE_LOCALIZATION`, which gates the metadata sync alone). They are inert; removing them is a separate owner-approved settings change followed by a read-only check, not part of a deploy. The [flag register](../reference/feature-flags.md) lists what each variable still does.
 
+## Proportionate post-deploy acceptance
+
+For a documentation-only PR with no runtime or configuration changes, **both** required GitHub Actions jobs succeeding and one safe MCP `probe_read` are sufficient operational acceptance unless the card explicitly changes a contract that needs a targeted read. Do not trigger EPG, discovery, predictions, TMDB, imports or full storage parity as a deployment smoke test. A release touching a runtime API or persisted projection gets the **smallest matching safe readback** for that scope, rather than a blanket bucket snapshot, manual replay or speculative incident checklist. Keep both post-merge jobs and report their actual conclusions: they are delivery guarantees, not permission to operate production data writers. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
+
 ## Troubleshooting and recovery
 
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
