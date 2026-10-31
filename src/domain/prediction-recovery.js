@@ -17,7 +17,7 @@ export const PREDICTION_RECOVERY_CAUSES = [
   'profile_missing', 'snapshot_partial', 'film_unreadable', 'queue_unavailable', 'queue_state_unknown',
 ];
 export const PREDICTION_RECOVERY_NEXT = ['none', 'scheduled_run', 'check_scheduled_tasks', 'retry_at', 'hot_drain', 'run_progress', 'queue_refresh', 'owner_investigation', 'reread'];
-export const PREDICTION_RECOVERY_ACTION_REASONS = ['not_needed', 'ordinary_schedule', 'backoff_respected', 'queue_derived', 'caller_contract', 'other_subsystem', 'evidence_incomplete'];
+export const PREDICTION_RECOVERY_ACTION_REASONS = ['not_needed', 'ordinary_schedule', 'backoff_respected', 'queue_derived', 'caller_contract', 'system_failure', 'failure_unclassified', 'other_subsystem', 'evidence_incomplete'];
 export const PREDICTION_RECOVERY_PREREQUISITES = ['taste_profile', 'prediction_queue', 'catalog_membership', 'film_state'];
 export const PREDICTION_RECOVERY_EVIDENCE = ['runner_lease', 'latest_run', 'queue_activity', 'catalog'];
 export const PREDICTION_RECOVERY_REPEATED_ATTEMPTS = 5;
@@ -36,10 +36,13 @@ const RECOVERY_ACTION_REASON_OF = {
   queued_ready: 'ordinary_schedule', waiting_behind_hot: 'ordinary_schedule', in_flight: 'ordinary_schedule', run_active: 'ordinary_schedule', index_ahead_of_queue: 'ordinary_schedule', ready_no_runs: 'ordinary_schedule',
   retry_backoff: 'backoff_respected',
   queue_refresh_pending: 'queue_derived',
-  repeated_failures: 'caller_contract',
   index_inconsistent: 'other_subsystem', not_in_catalog: 'other_subsystem',
   profile_missing: 'evidence_incomplete', snapshot_partial: 'evidence_incomplete', film_unreadable: 'evidence_incomplete', queue_unavailable: 'evidence_incomplete', queue_state_unknown: 'evidence_incomplete',
 };
+// Repeated failures are remedied by what failed: the model's output against the contract, or the infrastructure around
+// the run. `model_error` is the classifier's catch-all for unrecognised text, so it and every other kind stay unclassified.
+export const PREDICTION_RECOVERY_CALLER_FAILURES = ['validation_error', 'parse_error', 'format_error_storm'];
+export const PREDICTION_RECOVERY_SYSTEM_FAILURES = ['storage_error', 'quota', 'time_budget', 'model_unavailable', 'api_error', 'lease_lost', 'lease_expired', 'external_termination'];
 // A snapshot reason computed over every outstanding film says nothing about this one; the film's own index agreement does.
 const RECOVERY_GLOBAL_REASONS = ['index_ahead_of_queue'];
 
@@ -88,17 +91,26 @@ function recoveryRunner(runner, filmId, now) {
   const leaseStatus = runner?.lease === 'recorded' || runner?.lease === 'not_recorded' ? runner.lease : 'unavailable';
   const runStatus = runner?.run === 'recorded' || runner?.run === 'not_recorded' ? runner.run : 'unavailable';
   const expiresAt = recoveryMs(runner?.leaseExpiresAt);
-  const live = leaseStatus === 'recorded' ? expiresAt !== null && expiresAt > now : leaseStatus === 'not_recorded' ? false : null;
   const runId = typeof runner?.leaseRunId === 'string' && runner.leaseRunId ? runner.leaseRunId : null;
-  let filmSelected = null;
+  // A recorded lease without a readable expiry proves nothing about a run, in either direction.
+  const leaseMalformed = leaseStatus === 'recorded' && expiresAt === null;
+  const live = leaseStatus === 'recorded' ? (leaseMalformed ? null : expiresAt > now) : leaseStatus === 'not_recorded' ? false : null;
+  let filmSelected = null, runMalformed = false;
   if (live === false) filmSelected = false;
+  else if (live === true && runStatus === 'not_recorded') filmSelected = false;
   else if (live === true && runStatus === 'recorded') {
-    const sameRun = runId !== null && runner?.runId === runId;
-    const selected = Array.isArray(runner?.selectedIds) && runner.selectedIds.map(String).includes(filmId);
-    const done = Array.isArray(runner?.resultIds) && runner.resultIds.map(String).includes(filmId);
-    filmSelected = sameRun && selected && !done;
+    const latestRunId = typeof runner?.runId === 'string' && runner.runId ? runner.runId : null;
+    const selectedIds = Array.isArray(runner?.selectedIds) ? runner.selectedIds.map(String) : null;
+    const resultIds = Array.isArray(runner?.resultIds) ? runner.resultIds.map(String) : null;
+    if (runId === null || latestRunId === null) runMalformed = latestRunId === null;
+    else if (latestRunId !== runId) filmSelected = false;
+    else if (selectedIds === null) runMalformed = true;
+    else if (!selectedIds.includes(filmId)) filmSelected = false;
+    else if (resultIds === null) runMalformed = true;
+    else filmSelected = !resultIds.includes(filmId);
   }
-  return {live, runId: live ? runId : null, leaseExpiresAt: live ? recoveryIso(expiresAt) : null, filmSelected, leaseStatus, runStatus};
+  const leaseUnknown = leaseMalformed || (live === true && runId === null);
+  return {live, runId: live ? runId : null, leaseExpiresAt: live ? recoveryIso(expiresAt) : null, filmSelected, leaseStatus, runStatus, leaseUnknown, runMalformed};
 }
 
 function recoveryCause(input, facts, runner, now) {
@@ -130,6 +142,12 @@ function recoveryCause(input, facts, runner, now) {
   return 'queue_state_unknown';
 }
 
+function recoveryFailureReason(classification) {
+  if (PREDICTION_RECOVERY_CALLER_FAILURES.includes(classification)) return 'caller_contract';
+  if (PREDICTION_RECOVERY_SYSTEM_FAILURES.includes(classification)) return 'system_failure';
+  return 'failure_unclassified';
+}
+
 function recoveryNext(cause, facts, input) {
   if (cause === 'prediction_current') return {kind: 'none', at: null};
   if (cause === 'queued_ready') return {kind: 'scheduled_run', at: recoveryIso(recoveryMs(input.nominalNextRunAt))};
@@ -155,8 +173,8 @@ function recoveryPrerequisites(cause, input) {
 
 function recoveryEvidence(cause, runner, input) {
   const missing = [];
-  if (runner.leaseStatus === 'unavailable') missing.push('runner_lease');
-  if (runner.runStatus === 'unavailable') missing.push('latest_run');
+  if (runner.leaseStatus === 'unavailable' || runner.leaseUnknown) missing.push('runner_lease');
+  if (runner.runStatus === 'unavailable' || runner.runMalformed) missing.push('latest_run');
   if (recoveryMs(input.queueActivityAt) === null) missing.push('queue_activity');
   if (input.catalogMember !== true && input.catalogMember !== false) missing.push('catalog');
   const status = RECOVERY_STATUS_OF[cause];
@@ -189,7 +207,7 @@ export function assessPredictionRecovery(input) {
     cause,
     work: facts.prediction.current === true ? null : facts.prediction.requiredWork,
     nextExpected: recoveryNext(cause, facts, safe),
-    targetedAction: {available: false, capability: null, reason: RECOVERY_ACTION_REASON_OF[cause]},
+    targetedAction: {available: false, capability: null, reason: cause === 'repeated_failures' ? recoveryFailureReason(facts.retry.classification) : RECOVERY_ACTION_REASON_OF[cause]},
     writer: {...PREDICTION_RECOVERY_WRITER},
     missingPrerequisites: recoveryPrerequisites(cause, safe),
     evidence: recoveryEvidence(cause, runner, safe),

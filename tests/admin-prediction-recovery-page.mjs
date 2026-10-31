@@ -22,8 +22,9 @@ assert.doesNotMatch(viewSource, /\bfetch\(|adminCall|data-limbo-action|<form|met
 for (const code of R.PREDICTION_RECOVERY_STATUSES) assert.ok(V.RECOVERY_STATUS_COPY[code], 'status ' + code);
 for (const code of R.PREDICTION_RECOVERY_CAUSES) {
   const copy = V.RECOVERY_CAUSE_COPY[code];
-  assert.ok(copy && copy.title && copy.what && copy.why, 'cause ' + code);
+  assert.ok(copy && copy.title && copy.what && (copy.why || code === 'repeated_failures'), 'cause ' + code);
 }
+for (const reason of ['caller_contract', 'system_failure', 'failure_unclassified']) assert.ok(V.RECOVERY_REPEATED_WHY[reason], 'repeated ' + reason);
 for (const code of R.PREDICTION_RECOVERY_ACTION_REASONS) assert.ok(V.RECOVERY_ACTION_REASON_COPY[code], 'reason ' + code);
 for (const code of R.PREDICTION_RECOVERY_PREREQUISITES) assert.ok(V.RECOVERY_PREREQUISITE_COPY[code], 'prerequisite ' + code);
 for (const code of R.PREDICTION_RECOVERY_EVIDENCE) assert.ok(V.RECOVERY_EVIDENCE_COPY[code], 'evidence ' + code);
@@ -73,6 +74,29 @@ for (const assessment of cases) {
   assert.doesNotMatch(html, /Повторить<|Поставить в очередь|data-limbo-action|<form/, 'no action control');
   assert.equal((html.match(/<button/g) || []).length, 1, 'the only control is the recheck');
 }
+// Repeated failures: the visible remedy follows the failure kind; infrastructure failures never blame the model output.
+const repeatedOf = kind => assess({diagnostic: {retry: {classification: kind, scope: 'item', attempts: 5, failedAt: iso(-7 * H), retryAt: iso(-H), lastRunId: 'run-0', validation: null}}});
+for (const [kind, label] of [['storage_error', 'ошибка хранилища'], ['quota', 'исчерпана квота модели'], ['time_budget', 'не хватило времени запуска'], ['model_unavailable', 'модель недоступна']]) {
+  const html = V.recoveryPanelHtml(answer(repeatedOf(kind)));
+  assert.match(html, /Сбой на стороне инфраструктуры/, kind);
+  assert.doesNotMatch(outside(html), /Исправлять нужно то, что модель возвращает|исправить ответ модели/, kind + ' does not blame the model output');
+  assert.match(html, new RegExp('последняя ошибка: ' + label), kind);
+  assert.doesNotMatch(outside(html), RAW, kind);
+}
+for (const kind of ['validation_error', 'parse_error']) assert.match(V.recoveryPanelHtml(answer(repeatedOf(kind))), /Сбой в ответе модели: тот же запрос даст ту же ошибку/, kind);
+for (const kind of ['model_error', 'not_recorded']) {
+  const html = V.recoveryPanelHtml(answer(repeatedOf(kind)));
+  assert.match(html, /Вид сбоя не распознан/, kind);
+  assert.doesNotMatch(html, /Сбой в ответе модели|Сбой на стороне инфраструктуры/, kind);
+}
+assert.match(V.recoveryPanelHtml(answer({...repeatedOf('quota'), targetedAction: {available: false, capability: null, reason: 'not_needed'}})), /Невозможно достоверно объяснить/, 'a repeated failure without a failure reason is not explained');
+// A malformed lease is an unknown run state, never "no run".
+const unknownLease = V.recoveryPanelHtml(answer(assess({runner: {lease: 'recorded', leaseRunId: 'run-9', leaseExpiresAt: null, run: 'recorded', runId: 'run-9', selectedIds: ['f1'], resultIds: []}})));
+assert.match(unknownLease, /<dt>запуск<\/dt><dd>состояние запуска неизвестно<\/dd>/);
+assert.doesNotMatch(unknownLease, /сейчас запуска нет/);
+assert.match(unknownLease, /Не удалось прочитать: состояние текущего запуска\./);
+assert.match(V.recoveryPanelHtml(answer(cases[0])), /<dt>запуск<\/dt><dd>сейчас запуска нет<\/dd>/, 'no lease object is a real fact');
+
 // Madrid times, with the zone named.
 const backoffHtml = V.recoveryPanelHtml(answer(cases[3]));
 assert.match(backoffHtml, /не раньше 31\.10\.2026, 13:00 Madrid/, 'retry time in Madrid (UTC+1)');
@@ -246,6 +270,14 @@ await click(selector => selector === '[data-limbo-recovery-recheck]' ? {} : sele
 await settle();
 assert.equal(requests.length, 1);
 assert.doesNotMatch(panel.innerHTML, /Состояние изменилось/);
+
+// A lease without an expiry: the panel says the run state is unknown, never that there is no run.
+set('enrichment/runner-lease.json', {runId: 'run-3', heartbeatAt: iso(-60000)});
+await click(selector => selector === '[data-limbo-recovery-recheck]' ? {} : selector === '[data-limbo-recovery-slot]' ? panel : null);
+await settle();
+assert.match(panel.innerHTML, /<dt>запуск<\/dt><dd>состояние запуска неизвестно<\/dd>/);
+assert.doesNotMatch(panel.innerHTML, /сейчас запуска нет/);
+assert.match(panel.innerHTML, /Не удалось прочитать: состояние текущего запуска/);
 
 // Close: no request, the panel hides.
 requests = [];

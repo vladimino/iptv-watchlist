@@ -93,6 +93,45 @@ assert.equal(repeated.nextExpected.at, iso(6 * H));
 check(assess({diagnostic: {retry: retry(7, iso(-H))}}), 'investigate', 'repeated_failures', 'owner_investigation', 'caller_contract');
 check(assess({diagnostic: {retry: retry(4, iso(-H))}}), 'wait', 'queued_ready', 'scheduled_run', 'ordinary_schedule');
 
+// The remedy of repeated failures follows the validated failure kind: the caller's output, the infrastructure, or unknown.
+const failing = (classification, at) => ({...retry(6, at), classification, validation: null});
+for (const kind of ['validation_error', 'parse_error', 'format_error_storm']) {
+  check(assess({diagnostic: {retry: failing(kind, iso(-H))}}), 'investigate', 'repeated_failures', 'owner_investigation', 'caller_contract');
+}
+for (const kind of ['storage_error', 'quota', 'time_budget', 'model_unavailable', 'api_error', 'lease_lost', 'lease_expired', 'external_termination']) {
+  check(assess({diagnostic: {retry: failing(kind, iso(-H))}}), 'investigate', 'repeated_failures', 'owner_investigation', 'system_failure');
+  check(assess({diagnostic: {eligibleNow: false, cause: 'retry_backoff', retry: failing(kind, iso(2 * H))}}), 'investigate', 'repeated_failures', 'owner_investigation', 'system_failure');
+}
+for (const kind of ['model_error', 'not_recorded', 'unknown', 'profile_changed', 'something_new']) {
+  check(assess({diagnostic: {retry: failing(kind, iso(-H))}}), 'investigate', 'repeated_failures', 'owner_investigation', 'failure_unclassified');
+}
+
+// A recorded lease without a readable expiry, or a live lease of unknown owner, is unknown evidence, never "no run".
+for (const expiry of [null, undefined, 'not a time', '', {}]) {
+  const malformed = assess({runner: {lease: 'recorded', leaseRunId: 'run-9', leaseExpiresAt: expiry, run: 'recorded', runId: 'run-9', selectedIds: ['f1'], resultIds: []}});
+  assert.equal(malformed.runner.live, null, String(expiry));
+  assert.equal(malformed.runner.filmSelected, null);
+  assert.equal(malformed.cause, 'queued_ready', 'an unknown lease is neither in flight nor run active');
+  assert.deepEqual(malformed.evidence.missing, ['runner_lease']);
+  assert.equal(malformed.evidence.completeness, 'partial');
+}
+const ownerless = assess({runner: {lease: 'recorded', leaseRunId: null, leaseExpiresAt: NOW + 600000, run: 'recorded', runId: 'run-9', selectedIds: ['f1'], resultIds: []}});
+assert.equal(ownerless.runner.live, true);
+assert.equal(ownerless.runner.filmSelected, null, 'unknown ownership does not decide whether the film is in flight');
+assert.equal(ownerless.cause, 'run_active');
+assert.deepEqual(ownerless.evidence.missing, ['runner_lease']);
+for (const run of [{runId: null, selectedIds: ['f1'], resultIds: []}, {runId: 'run-9', selectedIds: null, resultIds: []}, {runId: 'run-9', selectedIds: ['f1'], resultIds: null}]) {
+  const torn = assess({runner: {lease: 'recorded', leaseRunId: 'run-9', leaseExpiresAt: NOW + 600000, run: 'recorded', ...run}});
+  assert.equal(torn.runner.filmSelected, null, JSON.stringify(run));
+  assert.equal(torn.cause, 'run_active');
+  assert.deepEqual(torn.evidence.missing, ['latest_run']);
+}
+// A malformed run whose answer is already decided (not selected) stays decided.
+assert.equal(assess({runner: {lease: 'recorded', leaseRunId: 'run-9', leaseExpiresAt: NOW + 600000, run: 'recorded', runId: 'run-9', selectedIds: ['f0'], resultIds: null}}).runner.filmSelected, false);
+const noRun = assess({runner: {lease: 'recorded', leaseRunId: 'run-9', leaseExpiresAt: NOW + 600000, run: 'not_recorded'}});
+assert.equal(noRun.runner.filmSelected, false);
+assert.deepEqual(noRun.evidence.missing, []);
+
 // 7. A live run: the film in flight, or the run still to take it.
 const live = {lease: 'recorded', leaseRunId: 'run-9', leaseExpiresAt: NOW + 10 * 60000, run: 'recorded', runId: 'run-9', selectedIds: ['f0', 'f1'], resultIds: ['f0']};
 const flight = check(assess({runner: live}), 'wait', 'in_flight', 'run_progress', 'ordinary_schedule');

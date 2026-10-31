@@ -61,7 +61,7 @@ async function adminPredictionRecoveryRoute(request,env,url){
   catalogMember:snapshot.filmsById.has(filmId)?true:catalogRead?false:null,
   queueActivityAt:recoveryActivity(snapshot.queue),
   nominalNextRunAt:scheduledRunFields().nextScheduledRunAt,
-  runner:{lease:lease.status,leaseRunId:lease.value?.runId??null,leaseExpiresAt:lease.value?.expiresAt??null,run:run.status,runId:runValue?.runId??null,selectedIds:Array.isArray(runValue?.selectedIds)?runValue.selectedIds:[],resultIds:runValue?.results&&typeof runValue.results==='object'?Object.keys(runValue.results):[]},
+  runner:{lease:lease.status,leaseRunId:lease.value?.runId??null,leaseExpiresAt:lease.value?.expiresAt??null,run:run.status,runId:runValue?.runId??null,selectedIds:Array.isArray(runValue?.selectedIds)?runValue.selectedIds:null,resultIds:runValue?.results&&typeof runValue.results==='object'&&!Array.isArray(runValue.results)?Object.keys(runValue.results):null},
  });
  return json({
   pin:current,

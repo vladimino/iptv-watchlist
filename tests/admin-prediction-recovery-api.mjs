@@ -155,6 +155,33 @@ assert.equal(repeated.status,'investigate');
 assert.equal(repeated.cause,'repeated_failures');
 assert.equal(repeated.targetedAction.reason,'caller_contract');
 
+// Five infrastructure failures are not the caller's contract.
+set(QUEUE,queue({retries:{w1:{attempts:5,retryAt:clockNow-H,kind:'storage_error',scope:'item',failedAt:at(-6*H),lastRunId:'run-28'}}}));
+const infra=(await call('?film=w1')).body.assessment;
+assert.equal(infra.cause,'repeated_failures');
+assert.equal(infra.targetedAction.reason,'system_failure');
+set(QUEUE,queue({retries:{w1:{attempts:5,retryAt:clockNow-H,kind:'quota exhausted',scope:'item',failedAt:at(-6*H),lastRunId:'run-28'}}}));
+assert.equal((await call('?film=w1')).body.assessment.targetedAction.reason,'system_failure','the stored text is classified as quota');
+
+// A recorded lease without an expiry, or with no owner: unknown run state, partial evidence, not "no run".
+seed();
+set(LEASE,{runId:'run-32',heartbeatAt:at(-M)});
+set(LATEST,{runId:'run-32',status:'running',selectedIds:['w1'],results:{}});
+let unknownLease=(await call('?film=w1')).body.assessment;
+assert.deepEqual(unknownLease.runner,{live:null,runId:null,leaseExpiresAt:null,filmSelected:null});
+assert.equal(unknownLease.cause,'queued_ready');
+assert.ok(unknownLease.evidence.missing.includes('runner_lease'));
+set(LEASE,{expiresAt:clockNow+10*M});
+unknownLease=(await call('?film=w1')).body.assessment;
+assert.equal(unknownLease.runner.live,true);
+assert.equal(unknownLease.runner.filmSelected,null,'an ownerless live lease does not decide the film');
+assert.equal(unknownLease.cause,'run_active');
+set(LEASE,{runId:'run-32',expiresAt:clockNow+10*M});
+set(LATEST,{runId:'run-32',status:'running',selectedIds:'w1'});
+unknownLease=(await call('?film=w1')).body.assessment;
+assert.equal(unknownLease.runner.filmSelected,null,'a latest run without a selection list is unknown');
+assert.ok(unknownLease.evidence.missing.includes('latest_run'));
+
 // A live lease and a latest run that selected the film and has no result for it yet: in flight.
 seed();
 set(LEASE,{runId:'run-32',expiresAt:clockNow+10*M,heartbeatAt:at(-M)});
