@@ -516,6 +516,23 @@ function hourlyTaskRunAt(from=Date.now(),schedule=HOURLY_TASK_SCHEDULE){
 }
 // Prediction responses: `nextCatchUpAt` is the compatibility name of the same nominal hourly run, not a gate.
 const scheduledRunFields=()=>{const at=hourlyTaskRunAt();return {nextCatchUpAt:at,nextScheduledRunAt:at};};
+// A paused exhausted chunk_budget is not "running" merely because its checkpoint is younger than 48 hours.
+// It stays waiting until two nominal hourly triggers after nextCatchUpAt, plus this slack, have passed.
+// One missed trigger is ordinary lateness. A live resolver lease is running on its own and is not part of
+// the slack. Exactly at the end the state stays waiting. This clock does not read the task registry or any usage account.
+const RESOLVER_PROGRESS_EPOCHS=2;
+const RESOLVER_PROGRESS_SLACK_MS=45*60*1000;
+function resolverProgressGraceEnd(gateMs,schedule=HOURLY_TASK_SCHEDULE){
+ if(!Number.isFinite(gateMs))return null;
+ let at=gateMs,nominal=null;
+ for(let epoch=0;epoch<RESOLVER_PROGRESS_EPOCHS;epoch++){
+  nominal=hourlyTaskRunAt(at,schedule);
+  if(!nominal)return null;
+  at=Date.parse(nominal)+1;
+ }
+ const end=Date.parse(nominal)+RESOLVER_PROGRESS_SLACK_MS;
+ return Number.isFinite(end)?end:null;
+}
 // The profile rule (ADR-0031) is always selective: the shared evaluator keeps a prediction that no published, owner-approved
 // change impact reaches, and an unknown or unapproved change fails closed (stale). No variable selects it: the former
 // PREDICTION_PROFILE_COMPATIBILITY switch is retired (ADR 0044) and a stale binding is inert. The strict outcome is still
@@ -899,7 +916,7 @@ function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
 function resolverMatches(programmeRunId,reportRunId){if(!programmeRunId||!reportRunId)return true;return programmeRunId===reportRunId;}
-function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null}){
+function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,discoveryReady=null,resolverLease=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
@@ -942,9 +959,37 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  if(continuation?.stage==='complete'){const at=integrationTime(continuation.at);if(at)resolverConfirmed.push({at,current:resolverMatches(continuation.programmeRunId,reportRunId)});}
  const byTime=(a,b)=>Date.parse(a)-Date.parse(b),priorResolverSuccess=resolverConfirmed.map(item=>item.at).sort(byTime).at(-1)||null,currentResolverSuccess=resolverConfirmed.filter(item=>item.current).map(item=>item.at).sort(byTime).at(-1)||null;
  const resolverProgress=()=>{const elapsed=age(continuation?.at);return integrationEntry('resolver','source',elapsed>INTEGRATION_STALE_MS?'stale':'running',elapsed>INTEGRATION_STALE_MS?'stale':'running',priorResolverSuccess,null);};
+ // Exhausted chunk_budget is a schedule gate, not a live writer. Waiting is not attention. The stall code
+ // means a same-generation batch was stored and none newer than the gate was. A missing status, an unusable
+ // checkpoint or batch time, or a batch from another generation is unknown evidence, not that code, and the
+ // code never asserts an external usage quota.
+ const chunkBudgetRecognition=()=>{
+  const skew=5*60*1000,skewed=value=>Number.isFinite(value)&&value>now+skew;
+  const checkpoint=integrationTime(continuation?.at),checkpointMs=checkpoint?Date.parse(checkpoint):NaN,gate=integrationTime(continuation?.nextCatchUpAt),gateMs=gate?Date.parse(gate):NaN;
+  const batchAt=integrationTime(discoveryStatus?.finishedAt),batchMs=batchAt?Date.parse(batchAt):NaN;
+  const pinned=continuation?.programmeRunId,published=reportRunId,sameGeneration=!!(pinned&&published&&pinned===published);
+  const statusGeneration=discoveryStatus?.programmeRunId,batchSameGeneration=!!(statusGeneration&&pinned&&published&&statusGeneration===pinned&&statusGeneration===published);
+  const later=(a,b)=>[a,b].filter(Boolean).sort((x,y)=>Date.parse(x)-Date.parse(y)).at(-1)||null;
+  const success=later(priorResolverSuccess,checkpoint&&!skewed(checkpointMs)?checkpoint:null);
+  const entry=(state,code,extra={})=>({...integrationEntry('resolver','source',state,code,success,null),lastBatchAt:batchSameGeneration&&batchAt&&!skewed(batchMs)?batchAt:null,...extra});
+  if(resolverLease?.expiresAt>now)return resolverProgress();
+  if(continuation?.retryAt&&Date.parse(continuation.retryAt)>now)return integrationEntry('resolver','source','degraded','resolver_backoff',success,checkpoint);
+  if(skewed(checkpointMs)||skewed(batchMs))return entry('unknown','no_data');
+  if(continuation?.remainingChunks>0)return resolverProgress();
+  const epgSettled=sync?.stage==='complete'&&!sync.error,exhausted=continuation?.remainingChunks===0;
+  if(!sameGeneration||!epgSettled||!exhausted||!Number.isFinite(gateMs))return entry('waiting','resolver_waiting');
+  if(gateMs>now)return entry('waiting','resolver_waiting',{gateAt:gate});
+  const graceEnd=resolverProgressGraceEnd(gateMs);
+  if(graceEnd==null||now<=graceEnd)return entry('waiting','resolver_waiting',{gateAt:gate});
+  if(batchSameGeneration&&Number.isFinite(batchMs)&&batchMs>gateMs)return entry('waiting','resolver_waiting',{gateAt:gate});
+  if(!Number.isFinite(checkpointMs)||!batchSameGeneration||!Number.isFinite(batchMs))return entry('unknown','no_data');
+  if(!(Number.isInteger(discoveryReady)&&discoveryReady>0))return currentResolverSuccess?integrationEntry('resolver','source',fresh(currentResolverSuccess),freshCode(currentResolverSuccess),currentResolverSuccess,null):entry('waiting','resolver_waiting',{gateAt:gate});
+  return entry('degraded','resolver_no_recent_progress',{gateAt:gate});
+ };
  const resolver=(()=>{
   if(continuation?.reason==='missing_secret')return integrationEntry('resolver','source','degraded','resolver_unconfigured',priorResolverSuccess,null);
-  if(['epg_committed','chunk_budget','busy'].includes(continuation?.reason)||continuation?.stage==='running')return resolverProgress();
+  if(continuation?.reason==='chunk_budget'&&continuation.stage!=='running')return chunkBudgetRecognition();
+  if(['epg_committed','busy'].includes(continuation?.reason)||continuation?.stage==='running')return resolverProgress();
   if(continuation?.reason==='backoff'||continuation?.retryAt&&Date.parse(continuation.retryAt)>now)return integrationEntry('resolver','source','degraded','resolver_backoff',priorResolverSuccess,integrationTime(continuation.at));
   if(continuation?.stage==='error')return integrationEntry('resolver','source','failed','resolver_failed',priorResolverSuccess,integrationTime(continuation.at));
   if(discoveryStatus?.error&&resolverMatches(discoveryStatus.programmeRunId,reportRunId))return integrationEntry('resolver','source','failed','resolver_failed',priorResolverSuccess,integrationTime(discoveryStatus.finishedAt||discoveryStatus.at));
@@ -959,14 +1004,14 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  const films=report?.watchlistCount||report?.films?.length||0,missing=(report?.stats?.metadataMissing||0)+(report?.stats?.titleMissing||0)+(report?.stats?.titleProvisional||0);
  const sources=[watchlist,ratingsSource,epg,resolver,predictions];
  if(films>=10&&missing/films>=.2)sources.push(integrationEntry('metadata','source','degraded','metadata_attention',null,null));
- const failed=sources.filter(item=>item.state==='failed').length,attention=sources.filter(item=>!['healthy','off','running'].includes(item.state)).length;
+ const failed=sources.filter(item=>item.state==='failed').length,attention=sources.filter(item=>!['healthy','off','running','waiting'].includes(item.state)).length;
  return {aggregate:failed?'failed':attention?'attention':'healthy',attentionCount:attention,failedCount:failed,sources};
 }
 async function footerStatus(env){
  const pinned=await pinEpg(env);
  const ratingsRun=ratingsPipelineSwitch(env)==='separate'&&await LetterboxdRatings.separateActive(env)?LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now()):null;
- const [profile,index,report,catalog,storedQueue,run,lease,source,decisions,sync,ratings,discoveryStatus,continuation,watchlistIngest]=await Promise.all([
-  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,predictionQueueKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json')
+ const [profile,index,report,catalog,storedQueue,run,lease,source,decisions,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease]=await Promise.all([
+  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,predictionQueueKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json'),loadJSON(env,'epg/resolver-lease.json')
  ]);
  const coverage=canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile)),items=source?.items||[],queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
  const recognized=new Set();
@@ -976,7 +1021,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,discoveryReady:counts.readyNow,resolverLease})};
 }
 function queueReadyIds(queue,now=Date.now()){const ids=queue.priorityCount?queue.hotPending:queue.coldPending;return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>now));}
 // The ids a batch takes, in queue order: migration work (ADR-0035 section 6) fills at most FINGERPRINT_MIGRATION_SHARE of the
