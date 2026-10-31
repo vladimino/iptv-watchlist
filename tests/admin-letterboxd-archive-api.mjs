@@ -162,6 +162,12 @@ assert.deepEqual(adds.d4.current.rating, {value: null, observedAt: '2026-02-01T0
 assert.deepEqual(Object.keys(updates), ['b2']);
 assert.deepEqual(updates.b2.outcomes, {watched: 'replaces', rating: 'replaces'});
 assert.equal(updates.b2.current.rating.value, 3);
+assert.equal(updates.b2.valueKind.rating, 'changed', '3.5 replaces 3');
+assert.equal(updates.b2.valueKind.watched, 'same', 'watched true replaces watched true');
+assert.equal(answer.details.sameValue.total, 1);
+assert.equal(answer.proposal.values.changedValues, 1);
+assert.equal(answer.proposal.values.sameValueUpdates, 1);
+assert.equal(answer.proposal.facts.replaces, answer.proposal.values.changedValues + answer.proposal.values.sameValueUpdates);
 assert.deepEqual(Object.keys(held).sort(), ['c3', 'w1']);
 assert.deepEqual(held.c3.outcomes, {watched: 'older', rating: 'older'});
 assert.deepEqual(held.w1.outcomes, {watchlist: 'older'});

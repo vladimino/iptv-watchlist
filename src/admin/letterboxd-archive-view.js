@@ -100,8 +100,9 @@ const ARCHIVE_BATCH_REASON = {
   budget_exceeded: 'В партии больше фильмов, чем можно подтвердить за раз.',
 };
 const ARCHIVE_DETAIL_TEXT = {
-  adds: ['Добавится', 'факты, которых у фильма в R2 ещё нет'],
-  updates: ['Изменится', 'значение в R2 другое и старше архива'],
+  adds: ['Новое значение', 'факты, которых у фильма в R2 ещё нет'],
+  updates: ['Другое значение', 'наблюдение новее и значение отличается от того, что в R2'],
+  sameValue: ['То же значение', 'наблюдение обновится: значение то же, сменятся источник и время'],
   heldNewer: ['В R2 новее', 'архив старше того, что уже известно; импорт это не перепишет'],
   unverified: ['Не проверено', 'запись фактов не читалась или сейчас меняется'],
   conflicts: ['Удержано: конфликт', 'импорт не тронет эти фильмы'],
@@ -147,34 +148,94 @@ function archiveErrorText(error, detail) {
   return text;
 }
 
+function archivePlural(n, one, few, many) {
+  const abs = Math.abs(Number(n) || 0), mod10 = abs % 10, mod100 = abs % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+function archiveAgePhrase(ms) {
+  if (typeof ms !== 'number') return 'время экспорта неизвестно';
+  if (ms < 3600000) return 'создан менее часа назад';
+  return 'создан ' + archiveAge(ms) + ' назад';
+}
+function archiveZipStatusHtml(answer) {
+  const files = answer.export && answer.export.files;
+  if (!files) return '';
+  const list = Object.values(files);
+  const present = list.filter(file => file.present).length;
+  const conflicts = list.reduce((sum, file) => sum + (file.present ? file.conflicts || 0 : 0), 0);
+  const invalid = answer.export.invalidRows || 0;
+  const age = archiveAgePhrase((answer.archive && answer.archive.ageMs) ?? (answer.freshness && answer.freshness.ageMs));
+  const clean = present === list.length && invalid === 0 && conflicts === 0;
+  const title = clean
+    ? `Архив успешно прочитан: ${present}/${list.length} CSV, ошибок нет, ${age}`
+    : `Архив прочитан: ${present}/${list.length} CSV, ${invalid ? 'негодных строк ' + invalid : 'негодных строк нет'}, конфликтов CSV ${conflicts}, ${age}`;
+  return `<div class="archive-callout archive-callout-ok" role="status"><b>${archiveEscape(title)}</b></div>`;
+}
+function archiveCoverageHtml(answer) {
+  const freshness = answer.freshness || {};
+  const reasons = freshness.reasons || [];
+  if (freshness.verdict !== 'inconclusive' && !reasons.includes('ratings_unconfirmed')) return '';
+  const films = answer.proposal && answer.proposal.films || {};
+  const reads = answer.proposal && answer.proposal.recordReads || {};
+  const limit = typeof films.compared === 'number' && typeof films.unverified === 'number' && films.unverified > 0 && reads.limit && reads.done >= reads.limit;
+  let text;
+  if (typeof films.compared === 'number' && typeof films.accepted === 'number' && typeof films.unverified === 'number' && films.unverified > 0) {
+    text = `Сравнение с R2 частичное: проверено ${films.compared} из ${films.accepted} сопоставленного фильма, ещё ${films.unverified} не проверен${limit ? ' из-за лимита чтения' : ''}. Свежесть остальных оценок подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.`;
+  } else text = 'Сравнение с R2 частичное: не все оценки проверены. Свежесть остальных подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.';
+  if (films.heldForIdentity) text += ` Ещё ${films.heldForIdentity} ${archivePlural(films.heldForIdentity, 'фильм', 'фильма', 'фильмов')} архива ${archivePlural(films.heldForIdentity, 'не сопоставлен', 'не сопоставлены', 'не сопоставлены')} и в это сравнение ${archivePlural(films.heldForIdentity, 'не входит', 'не входят', 'не входят')}.`;
+  return `<div class="archive-callout archive-callout-warn" role="status"><b>Сравнение с R2 частичное</b><span>${archiveEscape(text)}</span></div>`;
+}
 function archiveFreshnessHtml(answer) {
   const freshness = answer.freshness || {};
   const verdict = freshness.verdict || (freshness.needsFreshArchive ? 'needs_fresh' : 'verified');
-  const age = `Экспорт сделан ${archiveEscape(archiveAge(freshness.ageMs))} назад (порог ${archiveEscape(archiveAge(freshness.archiveStaleMs))}).`;
-  if (verdict === 'inconclusive') return `<div class="archive-callout archive-callout-warn" role="status"><b>Сравнение неполное, свежесть оценок не подтверждена</b><span>${age} Прочитанных оценок недостаточно, чтобы решить, нужен ли новый экспорт.</span></div>`;
-  if (verdict !== 'needs_fresh') return `<div class="archive-callout archive-callout-ok" role="status"><b>Архив достаточно свежий</b><span>${age} Среди проверенных фильмов ни одна оценка не новее этого архива.</span></div>`;
-  const reasons = (freshness.reasons || []).map(reason => reason === 'archive_stale'
-    ? `<li>Экспорту ${archiveEscape(archiveAge(freshness.ageMs))}: это больше порога ${archiveEscape(archiveAge(freshness.archiveStaleMs))}.</li>`
-    : reason === 'ratings_newer_in_r2' ? `<li>У ${freshness.ratingsNewerInR2} проверенных фильм(ов) оценка в R2 новее этого архива: значит, после экспорта оценки менялись.</li>`
-    : reason === 'ratings_unconfirmed' ? '<li>Остальные оценки не подтверждены: часть записей не прочитана или источники были недоступны. Это число не охватывает все оценки в R2.</li>'
-    : `<li>${archiveEscape(reason)}</li>`).join('');
-  return `<div class="archive-callout archive-callout-warn" role="alert"><b>Нужен свежий архив</b><ul>${reasons}</ul><span>Скачай новый экспорт в настройках Letterboxd и проверь его здесь.</span></div>`;
+  const zip = archiveZipStatusHtml(answer);
+  const coverage = archiveCoverageHtml(answer);
+  if (verdict === 'needs_fresh') {
+    const reasons = (freshness.reasons || []).filter(reason => reason !== 'ratings_unconfirmed').map(reason => reason === 'archive_stale'
+      ? `<li>Экспорту ${archiveEscape(archiveAge(freshness.ageMs))}: это больше порога ${archiveEscape(archiveAge(freshness.archiveStaleMs))}.</li>`
+      : reason === 'ratings_newer_in_r2' ? `<li>У ${freshness.ratingsNewerInR2} проверенных фильм(ов) оценка в R2 новее этого архива: значит, после экспорта оценки менялись.</li>`
+      : `<li>${archiveEscape(reason)}</li>`).join('');
+    return zip + coverage + `<div class="archive-callout archive-callout-warn" role="alert"><b>Нужен свежий архив</b><ul>${reasons}</ul><span>Это отдельная причина, не полнота сравнения. Скачай новый экспорт в настройках Letterboxd и проверь его здесь.</span></div>`;
+  }
+  if (verdict === 'inconclusive') return zip + coverage;
+  const checked = `<div class="archive-callout archive-callout-ok" role="status"><b>Среди проверенных фильмов архив не устарел</b><span>Ни одна проверенная оценка не новее этого архива. Это не суждение о фильмах, которые не сопоставлены.</span></div>`;
+  return zip + coverage + checked;
 }
 
+function archiveValueParagraph(answer) {
+  const values = answer.proposal && answer.proposal.values;
+  if (!values) return '';
+  const by = values.byFact || {};
+  const watched = by.watched && by.watched.sameValueUpdates || 0;
+  const rating = by.rating && by.rating.sameValueUpdates || 0;
+  const watchlist = by.watchlist && by.watchlist.sameValueUpdates || 0;
+  const films = answer.proposal.films || {};
+  const exportFilms = answer.export && answer.export.films;
+  const partial = (typeof exportFilms === 'number' && typeof films.compared === 'number' && exportFilms !== films.compared) || (films.unverified || 0) > 0;
+  const scope = partial ? ' Числа — только проверенные фильмы, не весь архив.' : '';
+  const same = values.sameValueUpdates || 0;
+  const sameText = same
+    ? ` При записи этого архива обновятся ${same} наблюдений без изменения оценок, просмотренного и watchlist (${watched}/${rating}/${watchlist}). Изменятся источник и время подтверждения; это реальные R2 writes и может влиять на последующие синхронизации.`
+    : ' Обновлений наблюдений с тем же значением нет.';
+  return `<p>Изменений значений: ${values.changedValues || 0}. Новых значений: ${values.newValues || 0}.${sameText} Пока ничего не записано.${scope}</p>`;
+}
 function archiveSummaryHtml(answer) {
-  const archive = answer.archive || {}, proposal = answer.proposal || {}, facts = proposal.facts || {}, details = answer.details || {};
+  const archive = answer.archive || {}, proposal = answer.proposal || {}, values = proposal.values || {}, details = answer.details || {};
   const tone = answer.status === 'complete' ? 'reviewed' : 'provisional';
   const cards = [
-    ['добавится', details.adds ? details.adds.total : '—'],
-    ['изменится', details.updates ? details.updates.total : '—'],
-    ['без изменений', facts.unchanged ?? '—'],
-    ['в R2 новее', details.heldNewer ? details.heldNewer.total : '—'],
-    ['удержано', (details.conflicts ? details.conflicts.total : 0) + (details.identity ? details.identity.total : 0)],
+    ['новых значений', values.newValues ?? '—'],
+    ['изменённых значений', values.changedValues ?? '—'],
+    ['то же значение, новое наблюдение', values.sameValueUpdates ?? '—'],
+    ['наблюдение совпало', values.unchanged ?? '—'],
+    ['в R2 новее', values.older ?? '—'],
     ['не проверено', details.unverified ? details.unverified.total : '—'],
   ];
   return `<div class="archive-summary-head">${archiveBadge(tone, answer.status === 'complete' ? 'полный предпросмотр' : 'частичный предпросмотр')}${archiveBadge('plain', 'ничего не записано')}<span class="muted">оценка на ${archiveEscape(archiveDate(answer.evaluatedAt))}</span></div>`
     + `<div class="archive-totals">${cards.map(([name, value]) => `<div class="archive-total"><b>${archiveEscape(value)}</b><span>${archiveEscape(name)}</span></div>`).join('')}</div>`
-    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}. «Добавится» и «изменится» считаются по фильмам; «без изменений» — по фактам. Эта проверка ничего не пишет. Запись — отдельное подтверждение конкретной партии ниже.</p>`
+    + archiveValueParagraph(answer)
+    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}; проверено: ${proposal.films ? proposal.films.compared : '—'}. «Новых» и «изменённых» — факты, у которых значение появится или станет другим. «То же значение, новое наблюдение» — факт с исходом replaces, но прежним значением: запись обновит источник и время. «Наблюдение совпало» — полностью то же наблюдение, это не «значение не менялось». Запись — отдельное подтверждение конкретной партии ниже.</p>`
     + (answer.consistency && answer.consistency.status !== 'stable' ? '<p class="archive-callout archive-callout-warn" role="alert"><b>Данные в R2 менялись во время проверки.</b> Сравнение смешивает два состояния: повтори проверку.</p>' : '')
     + (archive.generatedAtSource === 'owner_declared' ? '<p class="muted archive-note">Время экспорта указано вручную: имя файла нестандартное.</p>' : '');
 }
@@ -229,7 +290,10 @@ function archiveProposalHtml(answer) {
   const rows = Object.entries(proposal.byFact || {}).map(([fact, counts]) => `<tr><th scope="row">${archiveEscape(ARCHIVE_FACT_TEXT[fact] || fact)}</th>${outcomes.map(code => `<td>${counts[code] ?? 0}</td>`).join('')}</tr>`).join('');
   const reads = proposal.recordReads || {};
   const films = proposal.films || {};
+  const values = proposal.values;
+  const split = values ? `<p class="muted">Колонки — исход записи и не меняются. «Без изменений» значит, что наблюдение совпало целиком, а не что значение случайно то же. Среди «заменит наблюдение»: то же значение ${values.sameValueUpdates || 0}, другое значение ${values.changedValues || 0}. Запись по-прежнему видит один исход replaces.</p>` : '';
   return `<div class="archive-table-wrap"><table class="archive-table"><caption>Факты по исходу</caption><thead><tr><th scope="col">факт</th>${outcomes.map(code => `<th scope="col">${archiveEscape(ARCHIVE_OUTCOME_TEXT[code])}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`
+    + split
     + archiveFacts([
       ['фильмы', 'сравнено ' + archiveEscape(films.compared ?? 0) + ' · не проверено ' + archiveEscape(films.unverified ?? 0) + ' · конфликт псевдонимов ' + archiveEscape(films.aliasConflict ?? 0) + ' · недопустимый id ' + archiveEscape(films.invalidIdentity ?? 0) + ' · удержано до идентичности ' + archiveEscape(films.heldForIdentity ?? 0)],
       ['записи фактов', 'прочитано ' + archiveEscape(reads.done ?? 0) + ' из нужных ' + archiveEscape(reads.needed ?? 0) + ' (лимит ' + archiveEscape(reads.limit ?? '—') + ')'],
@@ -237,6 +301,16 @@ function archiveProposalHtml(answer) {
     ]);
 }
 
+function archiveFactOutcome(row, fact, outcome) {
+  if (outcome !== 'replaces') return ARCHIVE_OUTCOME_TEXT[outcome] || outcome;
+  const kind = row.valueKind && row.valueKind[fact];
+  if (kind === 'same') return 'обновит наблюдение, значение то же';
+  if (kind === 'changed') return 'заменит наблюдение, значение другое';
+  const current = row.current && row.current[fact];
+  const proposed = row.facts ? row.facts[fact] : undefined;
+  if (current && JSON.stringify(current.value) === JSON.stringify(proposed)) return 'обновит наблюдение, значение то же';
+  return 'заменит наблюдение, значение другое';
+}
 function archiveRowHtml(kind, row) {
   if (kind === 'invalidRows') return `<li><b>${archiveEscape(row.file)}</b>, запись ${archiveEscape(row.record)}: ${archiveEscape(ARCHIVE_INVALID_TEXT[row.reason] || row.reason)}</li>`;
   const title = archiveEscape(row.name || row.code) + (row.year ? ' (' + archiveEscape(row.year) + ')' : '');
@@ -245,7 +319,7 @@ function archiveRowHtml(kind, row) {
     const current = row.current && row.current[fact];
     const outcome = row.outcomes && row.outcomes[fact];
     const shown = value === null ? 'без оценки' : value === true ? 'да' : String(value);
-    return archiveEscape(ARCHIVE_FACT_TEXT[fact] || fact) + ': ' + archiveEscape(shown) + (outcome ? ' — ' + archiveEscape(ARCHIVE_OUTCOME_TEXT[outcome] || outcome) : '') + (current ? ' (в R2: ' + archiveEscape(current.value === null ? 'без оценки' : current.value === true ? 'да' : current.value === false ? 'нет' : current.value) + ', ' + archiveEscape(archiveDate(current.observedAt)) + ')' : '');
+    return archiveEscape(ARCHIVE_FACT_TEXT[fact] || fact) + ': ' + archiveEscape(shown) + (outcome ? ' — ' + archiveEscape(archiveFactOutcome(row, fact, outcome)) : '') + (current ? ' (в R2: ' + archiveEscape(current.value === null ? 'без оценки' : current.value === true ? 'да' : current.value === false ? 'нет' : current.value) + ', ' + archiveEscape(archiveDate(current.observedAt)) + ')' : '');
   });
   return `<li><b>${title}</b> <small class="muted">${archiveEscape(meta.join(' · '))}</small>${facts.length ? `<br><span class="archive-row-facts">${facts.join('; ')}</span>` : ''}</li>`;
 }
@@ -262,6 +336,12 @@ function archiveDetailsHtml(answer) {
 function archiveChangeLine(changes) {
   const counts = changes || {};
   return ['new', 'replaces', 'unchanged', 'older'].filter(code => counts[code]).map(code => ARCHIVE_OUTCOME_TEXT[code] + ': ' + counts[code]).join(' · ') || 'без фактов';
+}
+function archiveValueLine(values) {
+  if (!values) return '';
+  const fresh = (values.newValues || 0) + (values.changedValues || 0);
+  const same = values.sameValueUpdates || 0;
+  return `<p>Новых или изменённых значений: ${fresh}. Обновлений наблюдений без смены значения: ${same}. Запись в R2 произойдёт только после отдельного подтверждения.</p>`;
 }
 const ARCHIVE_COUNT_TEXT = {written: 'записано', already_applied: 'уже было', skipped_changed: 'пропущено', failed: 'ошибки', unknown: 'неизвестно', not_attempted: 'не начато'};
 function archiveCountLine(counts) {
@@ -319,7 +399,7 @@ function archiveBatchesHtml(answer, session) {
         ? `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Записать партию ${number}</button></div><p class="muted">Подтверждение выдано и ещё ничего не записало. Запись отправит архив заново.</p>`
         : `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Подтвердить партию ${number}</button></div>`;
     }
-    return `<article class="archive-batch"><h3>Партия ${number}</h3><p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p><p class="muted">Отпечаток плана <code>${archiveEscape(String(chunk.planHash || '').slice(0, 12))}</code>${chunk.scopeFingerprint ? ' · область ' + archiveEscape(chunk.scopeFingerprint) : ''}</p>${why}${actions}</article>`;
+    return `<article class="archive-batch"><h3>Партия ${number}</h3><p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p>${archiveValueLine(chunk.values)}<p class="muted">Отпечаток плана <code>${archiveEscape(String(chunk.planHash || '').slice(0, 12))}</code>${chunk.scopeFingerprint ? ' · область ' + archiveEscape(chunk.scopeFingerprint) : ''}</p>${why}${actions}</article>`;
   }).join('');
   return `<section class="admin-card archive-result" aria-labelledby="archive-apply-title"><h2 id="archive-apply-title">Запись партии</h2>${intro}${cards}</section>`;
 }
