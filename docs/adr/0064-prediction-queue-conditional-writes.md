@@ -1,9 +1,9 @@
 # ADR 0064: Every prediction queue writer writes conditionally and rebuilds on conflict
 
-**Status:** Proposed  
+**Status:** Accepted 2026-10-31 (architecture only; no manual production operation authorized)  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** not documented (awaiting the owner's decision)  
+**Approval source:** explicit owner decision on 2026-10-31 (Europe/Madrid): ADR 0064 **Accepted**, both GitHub-rendered Mermaid diagrams in `docs/architecture/prediction-pipeline.md` **visually approved**, after independent PASS review of PR #271 at `8fca456` ([owner decision](https://trello.com/c/VBVLAbuW#comment-6ae5d948481f3132e371ae82))  
 **Related work:** [AIR-298](https://trello.com/c/VBVLAbuW), root finding in [AIR-281](https://trello.com/c/bjKa4hRj) / [PR #269](https://github.com/vladimino/iptv-watchlist/pull/269)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -115,5 +115,5 @@ The stored format is unchanged, so a code revert needs no data change. After a r
 
 ## Follow-ups
 
-- The owner decides `Accepted` or `Declined` before merge.
+- ADR 0064 and both rendered Mermaid diagrams were explicitly accepted by the owner on 2026-10-31 ([decision](https://trello.com/c/VBVLAbuW#comment-6ae5d948481f3132e371ae82)); successful post-merge CI/CD and safe production verification remain separate from this architecture approval.
 - A per-film recovery writer (AIR-281 alternative 1) would build on this contract and needs its own card and ADR.
