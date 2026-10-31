@@ -22,7 +22,7 @@ for (const id of ['limbo-snapshot-text', 'limbo-causes', 'limbo-subsystems', 'li
 assert.ok(html.indexOf('id="limbo-causes"') < html.indexOf('id="limbo-results"'), 'filters come before results in tab order');
 assert.match(html, /<script src="\/admin-limbo\.js"><\/script>/);
 assert.match(html, /href="\/admin"/);
-assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limbo" id="admin-view-limbo">Лимбо<\/a><\/nav>/, 'the admin sections link to the inventory');
+assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limbo" id="admin-view-limbo">Лимбо<\/a>.*<\/nav>/, 'the admin sections link to the inventory');
 assert.match(html, /<a href="\/admin\/limbo" aria-current="page">Лимбо<\/a>/, 'the inventory is the current section on its own page');
 assert.doesNotMatch(html, /fetch\(|\/api\/|programme\.json/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');

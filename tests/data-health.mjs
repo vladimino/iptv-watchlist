@@ -55,7 +55,7 @@ function checkIssue(item, result) {
   assert(Number.isInteger(item.affected.count) && item.affected.count >= 0, item.id);
   assert(item.affected.sample.length <= result.thresholds.sampleSize, item.id);
   for (const key of ['observedAt', 'lastProgressAt']) assert(item[key] === null || !Number.isNaN(Date.parse(item[key])), key);
-  if (item.threshold) {assert(Object.hasOwn(DATA_HEALTH_THRESHOLDS, item.threshold.code), item.threshold.code); assert.equal(item.threshold.unit, 'ms');}
+  if (item.threshold) {assert(Object.hasOwn(DATA_HEALTH_THRESHOLDS, item.threshold.code), item.threshold.code); assert.equal(item.threshold.unit, item.threshold.code === 'posterBacklogCount' ? 'records' : 'ms');}
   assert.equal(typeof item.provenance.source, 'string');
   assert.equal(typeof item.provenance.rule, 'string');
   if (item.action.eligible === true) assert.equal(item.action.reason, 'eligible');
@@ -462,6 +462,14 @@ assert.deepEqual(one(posters, 'poster/missing_asset/film:film:untrusted').action
 assert.equal(only(posters, 'poster').some(item => item.subject.id === 'film:unknown'), false, 'an absent poster field is not a missing poster');
 const summary = one(posters, 'poster/missing_asset/catalog:published');
 assert.deepEqual([summary.affected, summary.provenance.verifiedMissing, summary.action.eligible], [{count: 7, sample: ['film:l', 'film:m', 'film:n', 'film:o', 'film:p']}, 5, true]);
+assert.deepEqual([summary.severity, summary.threshold], ['info', {code: 'posterBacklogCount', value: 20, unit: 'records'}], 'a small restorable backlog stays informational');
+// The restorable backlog escalates by count, not by age: 20 verified records warn, 19 do not, and unverified ones never do.
+const backlogSummary = values => one(checkResult(evaluate(complete({posters: {observedAt: NOW, programmeRunId: 'gen-2', catalogRecords: 400, ...values}}))), 'poster/missing_asset/catalog:published');
+assert.equal(backlogSummary({missingPoster: 20, verifiedMissing: 20, unverifiedMissing: 0}).severity, 'warning');
+assert.equal(backlogSummary({missingPoster: 19, verifiedMissing: 19, unverifiedMissing: 0}).severity, 'info');
+assert.equal(backlogSummary({missingPoster: 300, verifiedMissing: 0, unverifiedMissing: 300}).severity, 'info');
+assert.equal(backlogSummary({missingPoster: 30, verifiedMissing: 25, unverifiedMissing: 5, observedAt: at(-400 * D)}).severity, 'warning');
+assert.equal(one(checkResult(evaluate(complete({posters: {observedAt: NOW, programmeRunId: 'gen-2', catalogRecords: 40, missingPoster: 3, verifiedMissing: 3, unverifiedMissing: 0}}), {thresholds: {posterBacklogCount: 3}})), 'poster/missing_asset/catalog:published').severity, 'warning', 'the backlog count is a threshold override');
 assert.equal(only(evaluate(complete({posters: {observedAt: NOW, programmeRunId: 'gen-2', missingPoster: 0}})), 'poster').length, 0);
 assert.deepEqual(one(checkResult(evaluate(complete({posters: {observedAt: NOW, programmeRunId: 'gen-2'}}))), 'poster/incomplete/catalog:published').action, {suggested: 'investigate', code: 'supply_evidence', eligible: null, reason: 'evidence_incomplete'});
 assert.equal(one(checkResult(evaluate(complete({posters: {observedAt: NOW, programmeRunId: 'gen-2', missingPoster: 4, verifiedMissing: 0, unverifiedMissing: 4}}))), 'poster/missing_asset/catalog:published').action.reason, 'identity_unverified');
