@@ -73,6 +73,8 @@ A downstream projector that is already authoritative, repeatable and recoverable
 
 **Approval and security boundaries do not change:** production writes, imports, jobs, flags, Access, Scheduled Tasks and authority changes still need the relevant action-specific owner authorization; no document or code deploy authorizes execution. Read-only operations must still be verified safe against runbooks, because some GET paths write. Protect secrets, authorization, idempotency keys and data identity; do not weaken guards merely to optimize throughput. Apply this classification to operational runbooks beyond R2 as they are touched, including D1, prediction/discovery recovery and imports. If an existing runbook or ADR prescribes a stronger safeguard, amend that specific contract through the agreed review path rather than silently skipping it.
 
+The [cross-system safeguard audit](risk-proportional-safeguard-audit.md) records concrete keep/simplify decisions and limits across runbooks. A documentation change does not silently change CLI contracts or accepted ADRs.
+
 ## Newly discovered risks: explicit owner triage, not automatic scope expansion
 
 **A task must not become a gate for risks outside its explicitly approved acceptance boundary.** Newly discovered risks are tracked separately unless they demonstrably invalidate that boundary. Define the smallest safe, independently useful outcome and its acceptance boundary before work begins; do not silently grow Done criteria into a migration-wide or cutover-wide gate. A prerequisite must block only the capability that truly depends on it, not unrelated successors.
