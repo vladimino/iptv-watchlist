@@ -406,7 +406,7 @@ Parameters are validated before any read. Any other method is 405 `method_not_al
 - `copies[]`: `{key, role: generation|live, present, readable, version, records, missingPoster, verifiedMissing}` per copy; `records`, `missingPoster` and `verifiedMissing` are `null` for a copy that is absent or unreadable.
 - `queue`: `{cursor, limit, items, remainingAfterCursor, total}`. `items` are the next `limit` restorable records after `cursor` — `{id, tmdbId, title, original, year}` with titles cut to 200 characters — which are exactly the records a `POST {dryRun: false, limit, cursor}` would process next.
 - `unverified`: `{count, sample}`, up to ten records without a poster that the route will not touch, each with `reason` `tmdb_id_missing` (no numeric TMDB id) or `identity_not_tmdb` (the id is not the record's canonical identity).
-- `health`: the [data health](../domain/data-health.md#rules) catalog poster summary issue of these counts (`id`, `severity`, `reason`, `category`, `action`, `evidence`, `threshold`) or `null` when no poster is missing, and the `posterBacklogCount` in force.
+- `health`: the [data health](../domain/data-health.md#rules-by-subsystem) catalog poster summary issue of these counts (`id`, `severity`, `reason`, `category`, `action`, `evidence`, `threshold`) or `null` when no poster is missing, and the `posterBacklogCount` in force.
 - `limits`: `{batch: 10, route: 20}`; `reads`: the keys read.
 
 ### The page
