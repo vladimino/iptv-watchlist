@@ -204,3 +204,19 @@
 .archive-details li{margin:0 0 6px;overflow-wrap:anywhere}
 .archive-row-facts{color:#c5d0c2}
 @media(max-width:800px){.archive-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.archive-actions button{flex:1 1 100%}}
+.posters-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.posters-action,.posters-unverified{margin-top:22px}
+.posters-action-intro,.posters-source{font-size:14px;line-height:1.5;color:var(--muted);margin:0 0 10px}
+.posters-form{margin:0 0 14px}
+.posters-facts{margin:0 0 10px;font-size:14px}
+.posters-facts div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:6px 0;border-top:1px solid #242b24}
+.posters-facts dt{color:var(--muted)}.posters-facts dd{margin:0;text-align:right;overflow-wrap:anywhere}
+.posters-change{display:block;color:var(--muted);font-size:12px}
+.posters-list{margin:0 0 10px;padding-left:18px;font-size:14px;line-height:1.5}
+.posters-list li{margin:4px 0;overflow-wrap:anywhere}
+.posters-warning{color:#f3dd9a}
+.posters-backlog{border-color:#8a7a45;color:#f3dd9a;margin-top:14px}
+.posters-progress{margin:14px 0 0;padding:10px 12px;border-left:3px solid var(--lime);font-size:14px;line-height:1.5}
+.posters-outcomes span{color:var(--muted)}
+.posters-dynamics h3{margin:12px 0 6px;font-size:15px}
+@media(max-width:800px){.posters-layout{grid-template-columns:minmax(0,1fr)}.posters-form{flex-direction:column;align-items:stretch}}

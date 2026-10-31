@@ -22,8 +22,8 @@ for (const id of ['archive-form', 'archive-file', 'archive-generated-at', 'archi
 assert.ok(html.indexOf('id="archive-file"') < html.indexOf('id="archive-generated-at"') && html.indexOf('id="archive-generated-at"') < html.indexOf('id="archive-submit"'), 'file, time, then submit in tab order');
 assert.match(html, /accept="\.zip,application\/zip"/);
 assert.match(html, /<script src="\/admin-letterboxd\.js"><\/script>/);
-assert.match(html, /<a href="\/admin\/letterboxd" aria-current="page">Архив Letterboxd<\/a><a href="\/admin\/limbo">Лимбо<\/a><\/nav>/);
-for (const file of ['public/admin.html', 'public/admin-limbo.html']) assert.match(fs.readFileSync(file, 'utf8'), /<a href="\/admin\/letterboxd"[^>]*>Архив Letterboxd<\/a><a href="\/admin\/limbo"/, file + ' links to the archive page');
+assert.match(html, /<a href="\/admin\/letterboxd" aria-current="page">Архив Letterboxd<\/a><a href="\/admin\/limbo">Лимбо<\/a><a href="\/admin\/posters">Постеры<\/a><\/nav>/);
+for (const file of ['public/admin.html', 'public/admin-limbo.html', 'public/admin-posters.html']) assert.match(fs.readFileSync(file, 'utf8'), /<a href="\/admin\/letterboxd"[^>]*>Архив Letterboxd<\/a><a href="\/admin\/limbo"/, file + ' links to the archive page');
 assert.doesNotMatch(html, /\/api\/|fetch\(/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
 assert.doesNotMatch(bundle, /localStorage|sessionStorage|indexedDB|caches\.|document\.cookie|Authorization|Bearer|history\.(push|replace)State|\/api\/letterboxd\/baseline|\/api\/sync|\/mcp/);

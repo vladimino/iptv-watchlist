@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Постеры каталога</title>
+  <meta name="description" content="Страница владельца: покрытие постерами каталога и ручная ограниченная дозагрузка из TMDB.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ постеры</span></div>
+    <a class="admin-home" href="/">К программе</a>
+  </header>
+  <main class="admin-shell">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">ВЛАДЕЛЕЦ · РУЧНАЯ ОПЕРАЦИЯ</p>
+        <h1>Постеры каталога</h1>
+        <p class="admin-intro">Сколько записей каталога без постера, сколько из них можно восстановить из TMDB по проверенному id и сколько нельзя. Чтение ничего не меняет; запись идёт только после вашего подтверждения, пакетами не больше 10 записей.</p>
+      </div>
+    </section>
+    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin?view=health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limbo">Лимбо</a><a href="/admin/posters" aria-current="page">Постеры</a></nav>
+    <p id="posters-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="posters-snapshot-text">Каталог ещё не прочитан.</span></p>
+    <p id="posters-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем обе копии каталога…</p>
+    <p id="posters-error" class="admin-state admin-state-error" role="alert" hidden></p>
+    <div id="posters-backlog" class="admin-state admin-state-stale posters-backlog" role="alert" hidden></div>
+    <div class="admin-layout posters-layout">
+      <section aria-labelledby="posters-coverage-title" class="admin-card posters-coverage">
+        <h2 id="posters-coverage-title">Покрытие постерами</h2>
+        <div id="posters-coverage"><p class="muted">Покрытие появится после чтения каталога.</p></div>
+      </section>
+      <section aria-labelledby="posters-dynamics-title" class="admin-card posters-dynamics">
+        <h2 id="posters-dynamics-title">Динамика и последние запуски</h2>
+        <p class="posters-source">Источник: история этого браузера. Сервер не хранит журнал запусков; в другом браузере здесь будет пусто.</p>
+        <div id="posters-dynamics"><p class="muted">Истории пока нет.</p></div>
+        <button type="button" id="posters-forget" class="admin-more">Забыть историю этого браузера</button>
+      </section>
+    </div>
+    <section aria-labelledby="posters-action-title" class="admin-card action-panel posters-action">
+      <h2 id="posters-action-title">Ручная дозагрузка из TMDB</h2>
+      <p class="posters-action-intro">Каждый пакет — один явный вызов существующего маршрута обслуживания. Он берёт блокировку резолвера, проверяет поколение перед каждой записью и пишет только поле постера в обе копии каталога с проверкой версии. Подтверждение ниже защищает от случайного нажатия; доступ по-прежнему решает Cloudflare Access.</p>
+      <form id="posters-form" class="limbo-form posters-form" action="/admin/posters">
+        <label class="limbo-field">Записей в пакете<select id="posters-limit" name="limit"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10" selected>10 (максимум)</option></select></label>
+        <label class="limbo-field">Вызовов не больше<select id="posters-calls" name="calls"><option value="1" selected>1 пакет</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="30">30 (максимум)</option></select></label>
+        <label class="limbo-field">Начать<select id="posters-start" name="start"><option value="continue" selected>с сохранённой позиции</option><option value="first">с начала очереди</option></select></label>
+      </form>
+      <div id="posters-preview" aria-live="polite"><p class="muted">Проверка появится после чтения каталога.</p></div>
+      <label class="action-accept" id="posters-accept-label" hidden><input type="checkbox" id="posters-accept"><span id="posters-accept-text"></span></label>
+      <div class="action-buttons">
+        <button type="button" id="posters-run" data-action-confirm disabled>Запустить</button>
+        <button type="button" id="posters-recheck">Проверить заново</button>
+        <button type="button" id="posters-stop" hidden>Остановить после текущего пакета</button>
+      </div>
+      <p id="posters-refusal" class="admin-state admin-state-error" role="alert" hidden></p>
+      <div id="posters-progress" class="posters-progress" role="status" aria-live="polite" hidden></div>
+      <div id="posters-receipt" class="action-receipt" hidden></div>
+    </section>
+    <section aria-labelledby="posters-unverified-title" class="admin-card posters-unverified">
+      <h2 id="posters-unverified-title">Без проверенного TMDB id</h2>
+      <p class="posters-source">Эти записи страница не восстанавливает: маршрут берёт постер только по TMDB id, который подтверждён как идентичность записи. Исправление идентичности — отдельная работа.</p>
+      <div id="posters-unverified"><p class="muted">Список появится после чтения каталога.</p></div>
+    </section>
+  </main>
+  <script src="/admin-posters.js"></script>
+</body>
+</html>
