@@ -68,7 +68,9 @@ A sequence of owner actions. Each step is approved separately and checked before
 5. One manual `ratings_sync_start({trigger:'manual'})`, then `ratings_sync_step({runId})` while `nextAction` is `continue`. Expect `finished`, or `error` with a cause. The cursor and the queue only move forward. On a problem, set `inline`.
 6. Enable the Ratings Task, then extend the drift monitor ([Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task)).
 
-As of the live read-only check on 2026-10-31 the storage is migrated, `RATINGS_PIPELINE=separate` and the Ratings Task is enabled. The drift monitor's scope was not extended. The list above is the sequence that was followed. It is not an instruction to repeat it, and this page does not change the flag or the task.
+As of the live read-only check on 2026-10-31 the storage is migrated, `RATINGS_PIPELINE=separate` and the Ratings Task is enabled. A later owner-approved registry change the same day set the drift monitor to daily 18:15 Europe/Madrid, DTSTART 2026-10-31, reading the three task entries and read-only `ratings_sync_status` ([Scheduled Tasks](../reference/scheduled-tasks.md#read-only-drift-monitor)). The list above is the sequence that was followed. It is not an instruction to repeat it, and this page does not change the flag or the task.
+
+The expected Ratings Task recurrence is daily at 17:30 Europe/Madrid, flexible, DTSTART 2026-11-01, as recorded in the [Scheduled Tasks contract](../reference/scheduled-tasks.md#ratings-task). A scheduled start is not refused because it follows the previous start ([ADR 0069](../adr/0069-no-scheduled-ratings-start-gap.md)). `busy` and `isolated` still end that invocation. The six-hour pause after a Letterboxd 403 or 429 on the removal queue is unchanged.
 
 ### Isolation
 

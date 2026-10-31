@@ -54,7 +54,7 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
 }
 
 // 3. HTTP under separate with migrated storage: a run, a mismatched run, a GET status that writes nothing even with a
-// stale run in storage, isolation and the scheduled gap over HTTP.
+// stale run in storage, and a second scheduled start immediately after a finished one.
 {
  const {bucket,http,net,clock,R,env}=setup(SEPARATE);
  migrated(bucket);diaryPages(net,{pages:1});
@@ -63,7 +63,8 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
  eq((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-0000000000ff'})).body.reason,'run_mismatch');
  let reply;do{reply=await http(STEP,'POST',{runId:started.body.runId});}while(reply.body.nextAction==='continue');
  assert.equal(reply.body.reason,'finished');
- eq((await http(START,'POST',{trigger:'scheduled'})).body.reason,'too_soon');
+ const again=await http(START,'POST',{trigger:'scheduled'});
+ assert.equal(again.body.reason,'started');assert.equal(again.body.created,true);assert.notEqual(again.body.runId,started.body.runId);
  bucket.set(RUN,{...bucket.value(RUN),state:'running',lease:{step:'dead',expiresAt:new Date(Date.now()-1).toISOString()}});
  const writes=bucket.writes().length,fetches=net.fetches.length;
  for(let i=0;i<3;i++){const status=await http(STATUS,'GET');assert.equal(status.body.run.stale,'interrupted');assert.equal(status.body.pipeline,'running');}
@@ -83,6 +84,10 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
  eq(tools.ratings_sync_status.annotations,{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false});
  eq([tools.ratings_sync_start.annotations.readOnlyHint,tools.ratings_sync_start.annotations.openWorldHint],[false,false]);
  eq([tools.ratings_sync_step.annotations.readOnlyHint,tools.ratings_sync_step.annotations.openWorldHint],[false,true]);
+ assert.match(tools.ratings_sync_step.description,/first Diary page once per run/);
+ assert.match(tools.ratings_sync_step.description,/never requests page 2/);
+ assert.doesNotMatch(tools.ratings_sync_step.description,/3 Diary pages|9 per run/);
+ assert.doesNotMatch(tools.ratings_sync_start.description,/too_soon|nextStartAt/);
  eq([tools.ratings_storage_migrate.annotations.readOnlyHint,tools.ratings_storage_migrate.annotations.destructiveHint],[false,false]);
  for(const tool of Object.values(tools)){assert.equal(tool.inputSchema.additionalProperties,false);assert.doesNotMatch(JSON.stringify(tool.inputSchema.properties),/"url"|"key"|"path"|"prefix"|"bucket"|"limit"|"page"/,tool.name);}
  eq(tools.ratings_storage_migrate.inputSchema.properties.mode.enum,['dry_run','apply']);
@@ -106,4 +111,4 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
  assert.equal(bucket.writes().length,0,'dry_run over MCP writes nothing');
 }
 
-console.log('Ratings API (ADR 0060): HTTP disabled under inline, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and the scheduled gap, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');
+console.log('Ratings API (ADR 0060, ADR 0069): HTTP disabled under inline, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');

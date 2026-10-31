@@ -6,7 +6,7 @@ Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron
 sequenceDiagram
     actor Daily as Daily EPG Task (17:00)
     actor Hourly as Hourly Task (hourly)
-    actor Monitor as Drift monitor (17:45, read-only)
+    actor Monitor as Drift monitor (18:15, read-only)
     actor Owner as Owner
     participant Registry as Task registry
     participant Access as Cloudflare Access
@@ -73,14 +73,16 @@ sequenceDiagram
     end
     Hourly->>MCP: prediction_complete on allowed owned stop
     Note over Monitor,Registry: Read-only monitor, never a producer or a task editor
-    Monitor->>Registry: Read the EPG and hourly task entries
+    Monitor->>Registry: Read the EPG, hourly and Ratings task entries
     Registry-->>Monitor: Enabled state, recurrence, prompt, latest run
     Monitor->>Access: Authorize read-only status
     Access->>MCP: JWT verified
     Monitor->>MCP: epg_status
-    MCP-->>Monitor: stage, runId, updatedAt, ratings outcome
+    MCP-->>Monitor: stage, runId, updatedAt
+    Monitor->>MCP: ratings_sync_status
+    MCP-->>Monitor: pipeline and freshness, no write
     Note over Monitor,Owner: Compare with the Scheduled Task contract on main
-    opt Disabled task, failed run, drift, no live evidence or no EPG today
+    opt Disabled task, failed run, drift, no live evidence, no EPG today, or a ratings anomaly
         Monitor->>Owner: Notification with the observed state
     end
     Note over Cron,D1: The one Worker cron trigger, inert while D1_ENRICHMENT_WRITE is unset (ADR 0056)
@@ -94,18 +96,18 @@ sequenceDiagram
     end
 ```
 
-The drift monitor is a read-only automation in the same registry. It compares the daily and hourly tasks' live entries with the [contract](../reference/scheduled-tasks.md#read-only-drift-monitor), reads `epg_status` through the same Access-protected MCP and only notifies the owner; it cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. The Ratings Task is enabled (live read-only check on 2026-10-31) and is drawn in the next diagram, not in this one: this diagram is the EPG and prediction tasks. With production `RATINGS_PIPELINE=separate`, the daily commit does not read Diary. The Worker default of that flag remains `inline`, and under `inline` the commit still reads Diary page 1. The drift monitor does not read the Ratings Task; extending it is a separate decision.
+The drift monitor is a read-only automation in the same registry. Its expected recurrence, after the owner-approved registry change recorded on 2026-10-31, is daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, enabled. It reads the live entries of the daily EPG task, the hourly task and the Ratings Task, then `epg_status` and read-only `ratings_sync_status` through the same Access-protected MCP, and only notifies the owner. It cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. The Ratings Task's own run is drawn in the next diagram. With production `RATINGS_PIPELINE=separate`, the daily commit does not read Diary. The Worker default of that flag remains `inline`, and under `inline` the commit still reads Diary page 1. This page does not edit the monitor or any task.
 
 A scheduled trigger does not imply successful completion. `already_running`, `busy`, lease ownership, deferred backoff and a previous run's retries that could not yet be written (`prediction_retry_heal_pending`) may prevent new work. The prediction Task, the EPG Task's commit and the discovery chunks can overlap. All three write the prediction queue, and each write is conditional and rebuilds on conflict ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31), so the overlap does not lose a retry or a batch summary. Discovery uses **one chunk per explicit request**; it does not recursively self-fetch through an Access bypass or an internal continuation service. The [MCP security boundary](authentication-and-mcp.md) verifies signed identity and restricts tool arguments.
 
 ## The separate ratings pipeline (production; `inline` remains the Worker default)
 
-[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) moves Letterboxd ratings out of the EPG commit. The Worker default of `RATINGS_PIPELINE` is `inline`: ratings then run inside the commit, and this diagram does not apply. Production on 2026-10-31 is the other mode. A live read-only check that day found the storage migrated, `RATINGS_PIPELINE=separate` and the Ratings Task enabled. In that mode the commit only enqueues removed films, and the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`. The drift monitor does not read `ratings_sync_status`; extending it was not part of that check. `ratings_storage_migrate` stays the one-time owner tool that made the mode possible. This page does not change the flag or the task. Contracts: [ratings reference](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline), [MCP reference](../reference/api/mcp.md), [Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task); operation: [runbook](../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) moves Letterboxd ratings out of the EPG commit. The Worker default of `RATINGS_PIPELINE` is `inline`: ratings then run inside the commit, and this diagram does not apply. Production on 2026-10-31 is the other mode. A live read-only check that day found the storage migrated, `RATINGS_PIPELINE=separate` and the Ratings Task enabled. In that mode the commit only enqueues removed films, and the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`. The drift monitor reads `ratings_sync_status` and does not call `ratings_sync_start` or `ratings_sync_step`. `ratings_storage_migrate` stays the one-time owner tool that made the mode possible. The expected recurrence of the Ratings Task, after the owner-approved registry change on 2026-10-31, is daily at 17:30 Europe/Madrid with flexible timing and DTSTART 2026-11-01. A scheduled start is not refused for following the previous one ([ADR 0069](../adr/0069-no-scheduled-ratings-start-gap.md), Proposed). `busy` and `isolated` still end the invocation. The six-hour pause after a Letterboxd 403 or 429 on the removal queue stays. This page does not change the flag or the task. Contracts: [ratings reference](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline), [MCP reference](../reference/api/mcp.md), [Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task); operation: [runbook](../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
 
 ```mermaid
 sequenceDiagram
     actor Daily as Daily EPG Task
-    actor Ratings as Ratings Task (18:00, enabled)
+    actor Ratings as Ratings Task (17:30, enabled)
     Note over Daily,Ratings: Production mode. The Worker default inline is not drawn here
     participant MCP as Worker MCP
     participant Run as Ratings run record
@@ -115,7 +117,7 @@ sequenceDiagram
     MCP->>R2: Watchlist events, then one queue reference per removal event
     Note over Daily,R2: The commit reads no Diary and runs no lookup
     Ratings->>MCP: ratings_sync_start(scheduled)
-    MCP->>Run: Create run, or answer busy, too_soon or isolated
+    MCP->>Run: Create run, or answer busy or isolated
     loop While nextAction is continue
         Ratings->>MCP: ratings_sync_step(runId)
         MCP->>Run: Begin the step: lease by compare-and-swap

@@ -73,7 +73,7 @@ One record holds the running or the last run, written only by compare-and-swap.
 
 | Field | Meaning |
 | --- | --- |
-| `runId`, `trigger`, `startedAt`, `lastStartAt` | The run and how it started (`scheduled` or `manual`) |
+| `runId`, `trigger`, `startedAt`, `lastStartAt` | The run and how it started (`scheduled` or `manual`). `lastStartAt` is the same instant as `startedAt` on this record and is not a gate between starts |
 | `state` | `running`, `finished`, `error` (the Diary ended `blocked`, `rate_limited` or `failed`; `cause` names it) or `unknown` (closed after an interruption) |
 | `phase` | `diary`, `removal`, then `done` |
 | `lease` | `{step, expiresAt}`: the id of the step that owns the record and its expiry, three minutes after the step began |
@@ -89,11 +89,10 @@ One record holds the running or the last run, written only by compare-and-swap.
 
 - **Start** (`trigger`, optional `clearIsolation`). Answers `started` with a new `runId`, or one of:
   - `busy`: a run is active; its id is not handed out;
-  - `too_soon`: a scheduled start less than six hours after the last start, with `nextStartAt`; a manual start has no gap;
   - `isolated`, with `isolation`;
   - `disabled`, `not_migrated`.
 
-  A stale `running` record is first closed as `unknown`. A start makes no Letterboxd request.
+  Neither `scheduled` nor `manual` is refused for following the previous start ([ADR 0069](../../adr/0069-no-scheduled-ratings-start-gap.md)). A stale `running` record is first closed as `unknown`. A start makes no Letterboxd request.
 - **Step** (`runId`). Takes the lease by compare-and-swap, does one bounded piece of work, writes the record only while its lease holds, then releases it. Answers:
   - `continue` / `more_work`;
   - `wait` / `busy` while another step's lease is live, not before `nextCatchUpAt`;
