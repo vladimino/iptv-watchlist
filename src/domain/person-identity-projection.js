@@ -3,9 +3,10 @@
 // filter and a catalog filter may use them. Both filters call filmsForPerson. A review candidate is
 // never a member: a shared name, an ambiguous credit and a refused join do not add films.
 //
-// The caller passes records it already loaded. This module does not query, and no production route
-// loads it. R2 stays the authority for the site. Nothing here is stored, so an owner `different`
-// is undone by projecting again.
+// The caller passes records it already loaded. This module does not query and does not write.
+// One GET, the person identity route, loads a bounded D1 neighborhood and calls it. The live site
+// still matches the role-specific id. R2 stays the authority. Nothing here is stored, so an owner
+// `different` is undone by projecting again.
 
 import {canonicalPersons, filmVerified, personKey} from './canonical-person.js';
 

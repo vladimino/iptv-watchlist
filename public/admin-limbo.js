@@ -201,17 +201,65 @@ function limboCauseTone(cause) {
   return cause === 'manual_review' ? 'conflict' : cause === 'retry_eligible' || cause === 'stalled' ? 'provisional' : cause === 'unknown' || cause === 'stale_projection' ? 'ambiguous' : cause === 'backoff' || cause === 'pending' ? 'reviewed' : 'plain';
 }
 
-function limboItemHtml(item) {
+function limboSentence(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const head = value.charAt(0).toLocaleUpperCase('ru-RU') + value.slice(1);
+  return /[.!?…]$/.test(head) ? head : head + '.';
+}
+
+// One line under the verdict. It names the specific reason and stays quiet when it would only repeat the badge.
+function limboReasonLine(item) {
+  const reason = LIMBO_REASON_TEXT[item.reason];
+  if (!reason) return '';
+  const cause = LIMBO_CAUSE_LABELS[item.cause] || '';
+  if (reason.toLocaleLowerCase('ru-RU') === cause.toLocaleLowerCase('ru-RU')) return '';
+  return limboSentence(reason);
+}
+
+// Who moves next. A closed sentence, never the formal "разобраться · недопустимо (…)" combination and never a raw code.
+function limboNextLine(item) {
+  if (item.kind === 'observation' && (item.reason === 'identity_ambiguous' || item.reason === 'identity_conflict')) return 'Автоматическое исправление недоступно. Кнопка ниже только объясняет, почему.';
+  if (item.kind === 'observation' && item.reason === 'terminal_without_resolution') return 'Разбор ниже скажет, можно ли вернуть наблюдение в обычную очередь. Эта карточка ничего не записывает.';
+  const lead = {
+    retry_eligible: 'Дальше обычный проход системы. Эта страница его не запускает.',
+    stalled: 'Повтор не назначен. Эта страница ничего не запускает.',
+    backoff: 'Ждать: повтор уже назначен и наступит сам.',
+    pending: 'Ждать: запись в очереди или недавно двигалась.',
+    manual_review: 'Нужен человек. Кнопка ниже только объясняет состояние и ничего не исправляет.',
+    stale_projection: 'Сначала перечитать снимок: данные другого поколения.',
+    external_archive: 'Нужны данные извне. Эта страница их не загружает.',
+    unknown: 'Состояние неизвестно. Это не значит, что всё в порядке.',
+  }[item.cause] || 'Дальше неизвестно. Подробности в технических данных.';
+  return limboRecoveryFilm(item) ? lead.replace(/\.$/, '') + '. Разбор прогноза только объясняет, запуск отсюда не делается.' : lead;
+}
+
+// The clock facts that change a decision: a scheduled retry, and how long the record has stood still. Empty states stay out.
+function limboWhenLine(item) {
+  const parts = [];
+  const progress = item.progress?.status;
+  if (typeof item.age?.ms === 'number' && item.age.ms >= 86400000 && (item.cause === 'stalled' || item.cause === 'manual_review' || item.cause === 'retry_eligible' || item.cause === 'unknown')) parts.push('без прогресса ' + limboDays(item.age.ms));
+  if (item.progress?.retryAt) parts.push('повтор ' + limboDate(item.progress.retryAt));
+  if (item.age?.lastProgressAt && progress && progress !== 'not_applicable') parts.push('последний переход ' + limboDate(item.age.lastProgressAt));
+  else if (item.age?.ms === null && item.cause === 'unknown') parts.push('время последнего перехода неизвестно');
+  return parts.length ? limboSentence(parts.join(', ')) : '';
+}
+
+function limboIdentityText(item) {
+  const identity = item.film?.identity;
+  if (!identity) return 'идентичность не наблюдалась';
+  const base = identity.canonicalIdentity ? 'доверенная идентичность ' + identity.canonicalIdentity : identity.trustedExternalIds.length ? 'доверенные id: ' + identity.trustedExternalIds.join(', ') : identity.status ? 'идентичность: ' + identity.status : 'идентичность не наблюдалась';
+  return base + (identity.conflicting ? ' · конфликт' : '');
+}
+
+function limboTechHtml(item) {
   const film = item.film;
-  const title = film?.title || (item.kind === 'observation' ? item.observation?.title || 'Наблюдение ' + item.subjectId : film?.storedId || item.subjectId);
-  const kindLabel = item.kind === 'observation' ? 'наблюдение' : film && film.inProgramme === false ? 'фильм каталога (вне программы)' : 'фильм';
-  const identity = film?.identity;
-  const identityText = identity ? (identity.canonicalIdentity ? 'доверенная идентичность ' + identity.canonicalIdentity : identity.trustedExternalIds.length ? 'доверенные id: ' + identity.trustedExternalIds.join(', ') : identity.status ? 'идентичность: ' + identity.status : 'идентичность не наблюдалась') + (identity.conflicting ? ' · конфликт' : '') : 'идентичность не наблюдалась';
   const action = item.action || {};
-  const actionText = (LIMBO_ACTION_TEXT[action.suggested] || action.suggested || '—') + (action.code ? ': ' + (LIMBO_ACTION_CODE_TEXT[action.code] || action.code) : '') + ' · ' + (action.eligible === true ? 'допустимо' : action.eligible === false ? 'недопустимо' : 'неизвестно') + (action.reason ? ' (' + (LIMBO_ELIGIBILITY_TEXT[action.reason] || action.reason) + ')' : '');
   const evidence = item.evidence || {};
-  const evidenceText = (LIMBO_EVIDENCE_TEXT[evidence.completeness] || evidence.completeness || '—') + ', источник ' + (evidence.source || '—') + ', прочитано ' + limboDate(evidence.observedAt) + ((evidence.missing || []).length ? ', нет: ' + evidence.missing.join(', ') : '') + ((evidence.anomalies || []).length ? ', аномалии: ' + evidence.anomalies.map(code => LIMBO_ANOMALY_TEXT[code] || code).join(', ') : '');
   const diagnostics = item.diagnostics || {};
+  const kindLabel = item.kind === 'observation' ? 'наблюдение' : film && film.inProgramme === false ? 'фильм каталога (вне программы)' : 'фильм';
+  const actionText = (LIMBO_ACTION_TEXT[action.suggested] || action.suggested || '—') + (action.code ? ': ' + (LIMBO_ACTION_CODE_TEXT[action.code] || action.code) : '') + ' · ' + (action.eligible === true ? 'допустимо' : action.eligible === false ? 'недопустимо' : 'неизвестно') + (action.reason ? ' (' + (LIMBO_ELIGIBILITY_TEXT[action.reason] || action.reason) + ')' : '');
+  const evidenceText = (LIMBO_EVIDENCE_TEXT[evidence.completeness] || evidence.completeness || '—') + ', источник ' + (evidence.source || '—') + ', прочитано ' + limboDate(evidence.observedAt) + ((evidence.missing || []).length ? ', нет: ' + evidence.missing.join(', ') : '') + ((evidence.anomalies || []).length ? ', аномалии: ' + evidence.anomalies.map(code => LIMBO_ANOMALY_TEXT[code] || code).join(', ') : '');
   const diagnosticParts = [];
   if (diagnostics.failureReason) diagnosticParts.push('последняя ошибка: ' + diagnostics.failureReason);
   if (diagnostics.retryScope) diagnosticParts.push('область: ' + diagnostics.retryScope);
@@ -219,21 +267,38 @@ function limboItemHtml(item) {
   if (typeof diagnostics.attempts === 'number') diagnosticParts.push('попыток: ' + diagnostics.attempts);
   if (diagnostics.nextAction) diagnosticParts.push('следующий шаг конвейера: ' + diagnostics.nextAction);
   if (diagnostics.terminalReason) diagnosticParts.push('терминальная причина: ' + diagnostics.terminalReason);
+  if (diagnostics.rule) diagnosticParts.push('правило: ' + diagnostics.rule);
   const rows = [
-    ['причина', LIMBO_REASON_TEXT[item.reason] || item.reason],
+    ['запись', item.id],
+    ['ключ', item.kind === 'observation' ? (item.observation?.key || item.subjectId) : film?.storedId || item.subjectId],
+    ['вид', kindLabel],
+    ['подсистема', (LIMBO_SUBSYSTEM_LABELS[item.subsystem] || item.subsystem) + (item.subsystem ? ' (' + item.subsystem + ')' : '')],
+    ['серьёзность', (LIMBO_SEVERITY_TEXT[item.severity] || item.severity || '') + (item.severity ? ' (' + item.severity + ')' : '')],
+    ['причина', (LIMBO_REASON_TEXT[item.reason] || item.reason || '') + (item.reason ? ' (' + item.reason + ')' : '')],
     ['без прогресса', limboDays(item.age?.ms) + (item.age?.lastProgressAt ? ', последний переход ' + limboDate(item.age.lastProgressAt) : item.age?.ms === null ? ' (время последнего перехода неизвестно)' : '')],
     ['прогресс', (LIMBO_PROGRESS_TEXT[item.progress?.status] || item.progress?.status || '—') + (item.progress?.retryAt ? ', повтор ' + limboDate(item.progress.retryAt) : '')],
     ['ожидаемое действие', actionText],
-    ['порог', item.threshold ? limboDays(item.threshold.value) + ' — ' + (LIMBO_THRESHOLD_TEXT[item.threshold.code] || item.threshold.code) : '—'],
+    ['порог', item.threshold ? limboDays(item.threshold.value) + ' — ' + (LIMBO_THRESHOLD_TEXT[item.threshold.code] || item.threshold.code) : ''],
     ['данные', evidenceText],
-    ['идентичность', identityText],
+    ['идентичность', limboIdentityText(item)],
   ];
   if (diagnosticParts.length) rows.push(['диагностика', diagnosticParts.join(' · ')]);
+  const body = rows.filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '').map(([name, value]) => `<div><dt>${limboEscape(name)}</dt><dd>${limboEscape(value)}</dd></div>`).join('');
+  return `<details class="limbo-tech"><summary>Технические подробности</summary><dl class="limbo-facts">${body}</dl></details>`;
+}
+
+function limboItemHtml(item) {
+  const film = item.film;
+  const title = film?.title || (item.kind === 'observation' ? item.observation?.title || 'Наблюдение без названия' : film?.storedId || 'Фильм без названия');
+  const year = film?.year || item.observation?.year;
+  const kindLabel = item.kind === 'observation' ? 'наблюдение' : film && film.inProgramme === false ? 'фильм каталога (вне программы)' : 'фильм';
+  const meta = [year ? String(year) : null, kindLabel].filter(Boolean).join(' · ');
+  const reason = limboReasonLine(item);
+  const when = limboWhenLine(item);
   const links = [];
   if (item.links?.film) links.push(`<a class="limbo-link" href="${limboEscape(item.links.film)}">Открыть в каталоге данных</a>`);
   else if (item.links?.filmUnavailable === 'not_in_programme') links.push('<span class="muted limbo-unlinked">Фильма нет в опубликованной программе: карточки в каталоге данных для него нет.</span>');
   else if (item.links?.filmUnavailable === 'record_not_observed') links.push('<span class="muted limbo-unlinked">Запись фильма в этом снимке не прочитана: карточку открыть нельзя.</span>');
-  if (item.kind === 'observation') links.push('<span class="muted">Identity Review для наблюдений ещё не доступен.</span>');
   let recovery = '';
   const recoveryFilm = limboRecoveryFilm(item);
   if (recoveryFilm) {
@@ -249,8 +314,7 @@ function limboItemHtml(item) {
     links.push(`<button type="button" class="admin-more limbo-recovery-open" data-obs-recovery="${slot}" aria-expanded="false" aria-controls="obs-recovery-${slot}">Разобрать наблюдение</button>`);
     recovery = `<section class="limbo-recovery" id="obs-recovery-${slot}" data-obs-recovery-slot="${slot}" aria-label="Разбор наблюдения" hidden></section>`;
   }
-  const year = film?.year || item.observation?.year;
-  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span><span class="admin-hit-meta">${limboEscape([kindLabel, film?.storedId, year ? String(year) : null, item.id].filter(Boolean).join(' · '))}</span><span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || item.cause)}${limboBadge('plain', LIMBO_SUBSYSTEM_LABELS[item.subsystem] || item.subsystem)}${limboBadge(item.severity === 'critical' ? 'conflict' : item.severity === 'warning' ? 'provisional' : 'missing', LIMBO_SEVERITY_TEXT[item.severity] || item.severity)}</span><dl class="limbo-facts">${rows.map(([name, value]) => `<div><dt>${limboEscape(name)}</dt><dd>${limboEscape(value)}</dd></div>`).join('')}</dl>${links.length ? `<p class="limbo-links">${links.join(' ')}</p>` : ''}${recovery}</article>`;
+  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span>${meta ? `<span class="admin-hit-meta">${limboEscape(meta)}</span>` : ''}<span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || 'Состояние не распознано')}</span>${reason ? `<p class="limbo-reason">${limboEscape(reason)}</p>` : ''}<p class="limbo-next">${limboEscape(limboNextLine(item))}</p>${when ? `<p class="limbo-when">${limboEscape(when)}</p>` : ''}${links.length ? `<div class="limbo-actions">${links.join('')}</div>` : ''}${recovery}${limboTechHtml(item)}</article>`;
 }
 
 // A film item of the fingerprint or prediction subsystem with a stored id can be explained by the recovery assessment.

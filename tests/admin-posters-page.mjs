@@ -21,7 +21,7 @@ const build = fs.readFileSync('build.mjs', 'utf8');
 const bundle = bundleAdmin([client, postersClient, run, page]);
 
 // Static boundary: no token, no TMDB, no other write route, no flag, no lease handling; one POST target only.
-const ids = ['posters-snapshot-text', 'posters-loading', 'posters-error', 'posters-backlog', 'posters-coverage', 'posters-dynamics', 'posters-forget', 'posters-form', 'posters-limit', 'posters-calls', 'posters-start', 'posters-preview', 'posters-accept-label', 'posters-accept', 'posters-accept-text', 'posters-run', 'posters-recheck', 'posters-stop', 'posters-refusal', 'posters-progress', 'posters-receipt', 'posters-unverified'];
+const ids = ['posters-snapshot-text', 'posters-loading', 'posters-error', 'posters-backlog', 'posters-coverage', 'posters-dynamics', 'posters-forget', 'posters-form', 'posters-limit', 'posters-calls', 'posters-start', 'posters-preview', 'posters-accept-label', 'posters-accept', 'posters-accept-text', 'posters-run', 'posters-recheck', 'posters-stop', 'posters-refusal', 'posters-progress', 'posters-receipt', 'posters-held', 'posters-held-accept-label', 'posters-held-accept', 'posters-held-accept-text', 'posters-held-run', 'posters-unverified'];
 for (const id of ids) assert.match(html, new RegExp(`id="${id}"`), id);
 assert.match(html, /<script src="\/admin-posters\.js"><\/script>/);
 assert.match(html, /<a href="\/admin\/posters" aria-current="page">Постеры<\/a>/);
@@ -75,7 +75,7 @@ vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default
 const env = {BUCKET: bucket, TMDB_API_READ_ACCESS_TOKEN: 'secret-token', TMDB_REQUEST_INTERVAL_MS: 0};
 
 const G1 = '11111111-1111-4111-8111-111111111111';
-const POINTER = 'epg/published-generation.json', LIVE = 'epg/discovered-films.json', COPY = 'epg/generations/' + G1 + '/discovered-films.json', LEASE = 'epg/resolver-lease.json';
+const POINTER = 'epg/published-generation.json', LIVE = 'epg/discovered-films.json', COPY = 'epg/generations/' + G1 + '/discovered-films.json', LEASE = 'epg/resolver-lease.json', NEG = 'epg/catalog-poster-negatives.json';
 const film = (id, tmdbId, extra = {}) => ({id, tmdbId: String(tmdbId), canonicalIdentity: 'tmdb:' + tmdbId, title: 'Фильм ' + id, original: 'Film ' + id, year: 2000 + tmdbId, poster: null, ...extra});
 function seed() {
   records.clear(); etags.clear(); raw.clear(); puts = []; tmdbCalls = []; requests = [];
@@ -133,7 +133,7 @@ vm.runInContext(bundle, ctx);
 const exec = code => vm.runInContext(code, ctx);
 const settle = async () => {await exec('postersLive.pending'); await new Promise(resolve => setTimeout(resolve, 0));};
 const text = selector => nodes.get(selector).innerHTML + nodes.get(selector).textContent;
-const fire = (selector, type) => Promise.all((listeners.get(selector) || []).filter(item => item.type === type).map(item => item.fn({preventDefault() {}})));
+const fire = (selector, type, extra) => Promise.all((listeners.get(selector) || []).filter(item => item.type === type).map(item => item.fn({preventDefault() {}, ...extra})));
 const posts = () => requests.filter(request => request.method === 'POST');
 const accept = async () => {nodes.get('#posters-accept').checked = true; await fire('#posters-accept', 'change');};
 
@@ -143,8 +143,11 @@ assert.deepEqual(requests.map(request => [request.method, request.path, request.
 assert.deepEqual([puts, tmdbCalls], [[], []]);
 const coverage = text('#posters-coverage');
 assert.match(coverage, /data-posters-field="missingPoster"><dt>Без постера<\/dt><dd><b>15<\/b>/);
-assert.match(coverage, /data-posters-field="verifiedMissing"><dt>Можно восстановить \(проверенный TMDB id\)<\/dt><dd><b>14<\/b>/);
-assert.match(coverage, /data-posters-field="unverifiedMissing"><dt>Нельзя восстановить \(нет проверенного TMDB id\)<\/dt><dd><b>1<\/b>/);
+assert.match(coverage, /data-posters-field="actionable"><dt>Можно дозагрузить сейчас<\/dt><dd><b>14<\/b>/);
+assert.match(coverage, /data-posters-field="noPosterHeld"><dt>На TMDB нет постера \(повтор после даты\)<\/dt><dd><b>0<\/b>/);
+assert.match(coverage, /data-posters-field="identityReview"><dt>Нужен разбор идентичности TMDB<\/dt><dd><b>0<\/b>/);
+assert.match(coverage, /data-posters-field="unverifiedMissing"><dt>Без проверенного TMDB id<\/dt><dd><b>1<\/b>/);
+assert.match(coverage, /Очередь решает сервер по запомненным ответам TMDB/);
 assert.match(coverage, /<details class="action-tech"><summary>Технические подробности<\/summary>/, 'raw keys and versions stay in a closed disclosure');
 assert.match(text('#posters-unverified'), /Без идентичности \(2051\)<\/b> · TMDB id есть, но идентичность не подтверждена этим id/);
 assert.equal(nodes.get('#posters-backlog').hidden, true, '14 restorable records are under the backlog threshold');
@@ -186,7 +189,7 @@ await settle();
 assert.deepEqual(posts().map(request => [request.path, request.body, request.credentials, request.headers['Content-Type']]), [['/api/enrichment/catalog/posters', {dryRun: false, limit: 10, expectedProgrammeRunId: G1}, 'same-origin', 'application/json']]);
 assert.deepEqual(requests.map(request => request.method), ['GET', 'POST', 'GET'], 'fresh check, the call, the re-read');
 assert.equal(tmdbCalls.length, 10);
-assert.deepEqual([...new Set(puts)].sort(), [COPY, LEASE, LIVE].sort(), 'only both catalog copies and the lease are written');
+assert.deepEqual([...new Set(puts)].sort(), [COPY, LEASE, LIVE, NEG].sort(), 'both catalog copies, the lease and the negative index');
 assert.equal(records.get(LIVE).a00.poster, 'https://image.tmdb.org/t/p/w342/p99.jpg');
 assert.equal(records.get(COPY).f01.poster, 'https://image.tmdb.org/t/p/w342/p1.jpg');
 assert.equal(records.get(LIVE).f02.poster, null, 'no poster on TMDB stays absent');
@@ -197,10 +200,10 @@ assert.equal(receipt.summary.noPoster, 1);
 const box = text('#posters-receipt');
 assert.match(box, /Выполнено столько вызовов, сколько вы подтвердили/);
 assert.match(box, /<dt>Записано постеров<\/dt><dd>9<\/dd>/);
-assert.match(box, /<b><a class="posters-tmdb" href="https:\/\/www\.themoviedb\.org\/movie\/2" target="_blank" rel="noopener noreferrer">Фильм f02 \(2002\)<\/a><\/b><span>На TMDB постера нет — повтор не поможет<\/span>/);
+assert.match(box, /<b><a class="posters-tmdb" href="https:\/\/www\.themoviedb\.org\/movie\/2" target="_blank" rel="noopener noreferrer">Фильм f02 \(2002\)<\/a><\/b><span>На TMDB постера нет — обычный запуск пропустит её до срока повторной проверки<\/span>/);
 assert.match(box, /<details class="action-tech"><summary>Технические подробности<\/summary>/);
 assert.equal(nodes.get('#posters-receipt').hidden, false);
-assert.match(document.querySelector('#posters-recheck-note').textContent, /без постера 16 → 7, можно восстановить 15 → 6/);
+assert.match(document.querySelector('#posters-recheck-note').textContent, /без постера 16 → 7, можно дозагрузить 15 → 5/);
 assert.match(text('#posters-coverage'), /<b>7<\/b> <small class="posters-change">было 16<\/small>/, 'coverage is re-read after the run');
 const stored = JSON.parse(store.get('iptv.admin.posters.v1'));
 assert.deepEqual([stored.lastSuccess.hydrated, stored.resume, stored.terminal], [9, {programmeRunId: G1, cursor: 'f09'}, {f02: 'no_poster_on_tmdb'}]);
@@ -300,7 +303,7 @@ for (const [label, mutate, sentence, copyLine] of [
   assert.match(coverageBox, /Покрытие неизвестно: данные неполные/, label);
   assert.match(coverageBox, sentence, label);
   assert.match(coverageBox, copyLine, label + ': the per-copy state stays visible');
-  for (const field of ['catalogRecords', 'withPoster', 'missingPoster', 'verifiedMissing', 'unverifiedMissing']) assert.match(coverageBox, new RegExp(`data-posters-field="${field}"><dt>[^<]+</dt><dd><b>неизвестно</b>`), label + ' ' + field);
+  for (const field of ['catalogRecords', 'withPoster', 'missingPoster', 'actionable', 'noPosterHeld', 'identityReview', 'unverifiedMissing']) assert.match(coverageBox, new RegExp(`data-posters-field="${field}"><dt>[^<]+</dt><dd><b>неизвестно</b>`), label + ' ' + field);
   assert.doesNotMatch(coverageBox, /<dd><b>0<\/b>/, label + ': nothing is shown as zero');
   assert.match(text('#posters-unverified'), /Неизвестно: данные неполные/, label);
   assert.equal(nodes.get('#posters-backlog').hidden, true, label);
@@ -353,11 +356,36 @@ assert.equal(tmdbCalls.length, 14, 'one TMDB request per record, none for the li
 assert.deepEqual(requests.map(request => request.method), ['GET', 'POST', 'POST', 'GET'], 'no read between the batches');
 const receiptBox = text('#posters-receipt');
 assert.ok(receiptBox.includes('<b>' + link(11, 'Фильм f11 (2011)') + '</b>'), 'a second-batch record shows its real title, linked');
-assert.ok(receiptBox.includes('<b>' + link(2, 'Фильм f02 (2002)') + '</b><span>На TMDB постера нет — повтор не поможет</span>'), 'no_poster_on_tmdb is linked');
+assert.ok(receiptBox.includes('<b>' + link(2, 'Фильм f02 (2002)') + '</b><span>На TMDB постера нет — обычный запуск пропустит её до срока повторной проверки</span>'), 'no_poster_on_tmdb is linked');
 assert.ok(receiptBox.includes('<b>' + link(12, 'Фильм f12 (2012)') + '</b><span>TMDB ответил за другой фильм — нужен ручной разбор</span>'), 'tmdb_id_mismatch links to the stored id');
 assert.ok(receiptBox.includes(link(13, '&lt;img src=x onerror=alert(1)&gt; (2013)')), 'a title is escaped inside the link');
 assert.doesNotMatch(receiptBox, /<img/);
 assert.doesNotMatch(receiptBox, /<b>f1[1-4]<\/b>/, 'no internal id in place of a title');
 assert.equal((receiptBox.match(/class="posters-tmdb"/g) || []).length, 14);
 
-console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure, the expected-generation fence across a G1 → G2 publish, and unknown-not-zero coverage for a missing live copy, a missing or malformed generation copy and a missing pointer, and TMDB links with real titles in every batch passed');
+// 13. A remembered answer is listed with its TMDB link and rechecked by one confirmed call that is not the sweep.
+seed();
+records.set(NEG, {schemaVersion: 1, entries: {'2': {status: 'no_poster_on_tmdb', checkedAt: '2026-10-01T00:00:00.000Z', nextCheckAt: '2099-01-01T00:00:00.000Z'}}});
+etags.set(NEG, 'neg-1');
+requests = []; puts = []; tmdbCalls = [];
+await fire('#posters-recheck', 'click');
+await settle();
+const held = text('#posters-held');
+assert.match(held, /href="https:\/\/www\.themoviedb\.org\/movie\/2"/);
+assert.match(held, /data-tmdb="2"/);
+assert.doesNotMatch(text('#posters-preview'), /Фильм f02/, 'a remembered answer is not in the ordinary first batch');
+assert.doesNotMatch(text('#posters-unverified'), /<a /, 'an unverified record stays plain text');
+await fire('#posters-held', 'click', {target: {dataset: {tmdb: '2'}}});
+assert.match(nodes.get('#posters-held-accept-text').textContent, /только для «Фильм f02 \(2002\)»/);
+assert.equal(nodes.get('#posters-held-run').disabled, true);
+nodes.get('#posters-held-accept').checked = true;
+await fire('#posters-held-accept', 'change');
+assert.equal(nodes.get('#posters-held-run').disabled, false);
+requests = []; puts = []; tmdbCalls = [];
+await fire('#posters-held-run', 'click');
+await settle();
+assert.deepEqual(posts().map(request => request.body), [{dryRun: false, limit: 1, expectedProgrammeRunId: G1, recheck: ['2']}]);
+assert.equal(posts().every(request => request.body.cursor === undefined), true);
+assert.deepEqual(tmdbCalls, ['2']);
+
+console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure, the expected-generation fence across a G1 → G2 publish, unknown-not-zero coverage for a missing live copy, a missing or malformed generation copy and a missing pointer, TMDB links with real titles in every batch, and one confirmed recheck of a remembered answer passed');
