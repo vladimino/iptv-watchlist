@@ -1,9 +1,9 @@
 # ADR 0059: Watchlist and catalog person filters share one derived reference
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** pending owner decision; not yet accepted  
+**Approval source:** [explicit owner acceptance of ADR 0059 and visual approval of the amended Mermaid on 2026-10-31](https://trello.com/c/1uvzKiGg#comment-6ae589359fddf40d03a6a966), following [positive independent review of PR #265 HEAD 6b0a03f](https://github.com/vladimino/iptv-watchlist/pull/265#pullrequestreview-5721603785). This accepts the code-only derived read-model architecture, not production data writes, D1 read/authority cutover, feature flags, Scheduled Tasks or external calls.  
 **Related work:** [AIR-201](https://trello.com/c/1uvzKiGg), [AIR-44](https://trello.com/c/ojtZjVc9), [AIR-16](https://trello.com/c/LtoEguNS)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -62,9 +62,9 @@ Rollback is reverting the change. There is no stored human, no flag, no binding 
 - **Original decision:** [AIR-201](https://trello.com/c/1uvzKiGg)
 - **Implementation:** `src/domain/person-identity-projection.js`, `tests/person-identity-projection.mjs`
 - **Dated verification:** not recorded. The tests are synthetic. No production read was made for this decision.
-- **Uncertainty:** owner acceptance of this ADR is still open. The grouping's production counts remain those of [ADR 0058](0058-canonical-person-grouping.md).
+- **Uncertainty:** this consumer projection is verified by synthetic tests only, not by a production route/read. The grouping's production counts remain those of [ADR 0058](0058-canonical-person-grouping.md).
 
 ## Follow-ups
 
-- Owner decision on this ADR, and rendered review of the diagram in [the Film/Person lifecycle](../architecture/film-person-lifecycle.md).
+- The owner accepted this ADR and visually approved the [changed Film/Person lifecycle Mermaid](../architecture/film-person-lifecycle.md) on 2026-10-31 ([decision](https://trello.com/c/1uvzKiGg#comment-6ae589359fddf40d03a6a966)); no route cutover was approved.
 - A later card may call the projection from a read path once Film and Person freshness and the read boundary are approved. Storing humans or decisions is a separate card.
