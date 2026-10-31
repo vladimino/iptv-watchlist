@@ -509,9 +509,9 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
 // LETTERBOXD_DIARY_HISTORY off, only the removal lookup runs.
 async function diaryRatingsStage(env,run){
  const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0},ratings={};
- const afterPage=async({page,rows,next,history})=>{
+ const afterPage=async({page,rows,next,history,readAt})=>{
   const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
-  const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next});
+  const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next}).map(item=>({...item,readAt}));
   for(const item of evidence)facts[item.ratingState]++;
   // Only a rating the diary proved counts: it reaches the removal event (as the film's effective rating, which a newer
   // observation may hold) and spares the per-film lookup. A stored rating without diary proof does neither.

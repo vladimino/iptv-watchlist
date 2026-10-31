@@ -356,4 +356,33 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal((await drain(R,env,runId)).at(-1).reason,'finished');
 }
 
-console.log('Ratings run (ADR 0060, ADR 0067): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause and lookup off, Diary-resolved queue entries, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, the scheduled gap and a run without EPG passed');
+// 11. A same-day Diary edit whose new observation id sorts below the stored one still replaces the fact, and a removal
+// event resolved on the later run gets that new rating rather than the hash winner.
+{
+ const {bucket,env,R,net,ctx,clock}=setup({pages:0});
+ const Facts=g(ctx,'LetterboxdFacts');
+ const watched='2026-10-30T00:00:00.000Z',ref='diary:viewing:401';
+ const bare=value=>Facts.observation({factKey:'lb-gone',fact:'rating',value,observedAt:watched,source:'letterboxd_diary',sourceRef:ref});
+ assert.ok((await bare(4.5)).observationId<(await bare(4)).observationId,'4.5 sorts below 4.0 for this film');
+ migrated(bucket);
+ net.diary.set(1,diaryPage([diaryRow('gone',8,'2026-10-30','401')],false));
+ const first=plain(await R.start(env,{trigger:'manual'}));
+ await drain(R,env,first.runId);
+ assert.equal(bucket.value('letterboxd/facts/films/lb-gone.json').rating.value,4);
+ const eventAt=at(clock.now+MIN);
+ await ctx.writeEvent(env,{id:'run-edit-watchlist',type:'watchlist',at:eventAt,total:0,baseline:false,added:[],removed:[{id:'gone',title:'Gone',year:2001}]});
+ await g(ctx,'enqueueRemovalRefs')(env,[film('gone')],{eventKey:eventKeyOf(eventAt,'run-edit-watchlist'),sourceRunId:'run-edit',at:eventAt});
+ assert.equal(bucket.value(QUEUE).films.gone.state,'pending');
+ clock.now+=H;
+ net.diary.set(1,diaryPage([diaryRow('gone',9,'2026-10-30','401')],false));
+ const second=plain(await R.start(env,{trigger:'manual'}));
+ await drain(R,env,second.runId);
+ assert.equal(bucket.value('letterboxd/facts/films/lb-gone.json').rating.value,4.5);
+ assert.equal(bucket.value('letterboxd/facts/films/lb-gone.json').rating.observedAt,watched);
+ assert.equal(bucket.value(QUEUE).films.gone.rating,4.5);
+ assert.equal(bucket.value(eventKeyOf(eventAt,'run-edit-watchlist')).removed[0].rating,4.5);
+ assert.equal(net.memberFetches().length,0,'the later page rates the removal; no member lookup');
+ assert.equal(net.diaryFetches().length,2);
+}
+
+console.log('Ratings run (ADR 0060, ADR 0067): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause and lookup off, Diary-resolved queue entries, a same-day edit replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, the scheduled gap and a run without EPG passed');

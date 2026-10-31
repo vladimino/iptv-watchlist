@@ -329,6 +329,7 @@
     "source": "letterboxd_diary",
     "sourceRef": "diary:viewing:702",
     "observationId": "e7772254b2315a9723d7a06b7bfe03e65a09a7ac5cdc03cf352bb1c0d974bb7c",
+    "ingestedAt": "2026-10-31T08:00:00.000Z",
     "replaced": null
    },
    "ratingHistory": [
@@ -369,6 +370,7 @@
     "source": "letterboxd_diary",
     "sourceRef": "diary:viewing:701",
     "observationId": "167c02097e08e787199ac4e600b8c0fc25ca2dd0cef188b1d4448475ae6b4a14",
+    "ingestedAt": "2026-10-31T08:00:00.000Z",
     "replaced": null
    },
    "ratingHistory": [

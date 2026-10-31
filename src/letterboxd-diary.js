@@ -149,7 +149,8 @@ const LetterboxdDiary=(()=>{
  // bottom; a later row of the same day, an open page edge, a next link or an uncertain viewing count does not hide it
  // and is not a conflict. A day with no visible rating proves a viewing only. An older day on the page does not stand
  // in. `history` is unused: the page is the evidence, and the history merge has already stored every row. The
- // observation time is the watched date, so a newer observation from any source still wins over it.
+ // observation time is the watched date, so a newer observation from any source still wins over it. A later read of a
+ // different rating on that same date is a newer diary observation by its read time, not by moving `observedAt`.
  function ratingEvidence(history,lids,page=null){
   const rows=Array.isArray(page?.rows)?page.rows:[],wanted=lids instanceof Set?lids:null,byLid=new Map();
   for(const row of rows){
@@ -270,7 +271,7 @@ const LetterboxdDiary=(()=>{
      mergeRows(history,rows,groups,observedAt,page,tally);return pageKeys.size?history:null;
     });
     mark('diary_history_merge','exit',{page,entries:Object.keys(merged?.entries||{}).length});
-    if(afterPage){mark('diary_facts_apply','enter',{page});try{await afterPage({page,rows,next:parsed.next,history:merged});}catch(e){mark('diary_facts_apply','error',{page});fail('failed','after_page:'+String(e.message).slice(0,120)+'_page_'+page);}mark('diary_facts_apply','exit',{page});}
+    if(afterPage){mark('diary_facts_apply','enter',{page});try{await afterPage({page,rows,next:parsed.next,history:merged,readAt:startedAt});}catch(e){mark('diary_facts_apply','error',{page});fail('failed','after_page:'+String(e.message).slice(0,120)+'_page_'+page);}mark('diary_facts_apply','exit',{page});}
     if(!outcome){
      for(const row of rows.filter(row=>row.watchedDate)){
       if(!coverage.newestWatchedDate||row.watchedDate>coverage.newestWatchedDate)coverage.newestWatchedDate=row.watchedDate;

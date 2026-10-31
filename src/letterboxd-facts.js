@@ -38,10 +38,22 @@ const LetterboxdFacts=(()=>{
   const observationId=await sha256([factKey,fact,JSON.stringify(value),observedAt,source,sourceRef??''].join('|'));
   return {value,effectiveOn,observedAt,source,sourceRef,observationId};
  }
- // Total order (observedAt, source rank, observation id).
+ // Total order: observedAt, source rank, then the page-read time when both observations are diary ratings of that
+ // same instant, then observation id. `ingestedAt` is not part of the observation id, so a reread of the same value is
+ // still the same observation. A diary rating stored before this rule has no `ingestedAt` and loses to one that has it;
+ // two without it stay on the observation id. Every other source is ordered exactly as before (ADR 0023).
+ function diaryReadOrder(a,b){
+  if(a.source!=='letterboxd_diary'||b.source!=='letterboxd_diary')return 0;
+  const ai=Date.parse(a.ingestedAt||''),bi=Date.parse(b.ingestedAt||'');
+  const aOk=Number.isFinite(ai),bOk=Number.isFinite(bi);
+  if(aOk&&bOk&&ai!==bi)return ai-bi;
+  if(aOk!==bOk)return aOk?1:-1;
+  return 0;
+ }
  function compareObservations(a,b){
   const t=Date.parse(a.observedAt)-Date.parse(b.observedAt);if(t)return t;
   const r=SOURCE_RANK[a.source]-SOURCE_RANK[b.source];if(r)return r;
+  const d=diaryReadOrder(a,b);if(d)return d;
   return a.observationId<b.observationId?-1:a.observationId>b.observationId?1:0;
  }
  const stripReplaced=value=>{if(!value)return null;const {replaced,...rest}=value;return rest;};
@@ -306,11 +318,13 @@ const LetterboxdFacts=(()=>{
   return {...result,conflict:false,accepted};
  }
 
- // AIR-287 (ADR 0054): diary evidence as facts, in one batch per diary page. Each film is linked by its Letterboxd id only
- // (one links compare-and-swap for the batch); watched: true and, when the diary proves one, the rating are observations
- // at the watched date with the diary entries as source reference, so a reread is the same observation and a newer
- // observation from any source (the films-list floor included) always wins. A film whose projection already shows the
- // same watched and rating is not written. One view-index projection for the batch.
+ // AIR-287 (ADR 0054) and ADR 0067: diary evidence as facts, in one batch per diary page. Each film is linked by its
+ // Letterboxd id only (one links compare-and-swap for the batch). watched: true and, when the page shows one, the rating
+ // are observations at the watched date, so a newer observation from any other source (the films-list floor included)
+ // still wins. The rating observation also carries `ingestedAt`, the page-read time (`readAt`, else now): a later read
+ // of a different rating on that same date replaces the earlier diary observation, and a late write of an earlier read
+ // does not. `ingestedAt` is not part of the observation id, so a reread of the same value is the same observation. A
+ // film whose projection already shows the same watched and rating is not written. One view-index projection for the batch.
  async function applyDiaryEvidence(env,evidence){
   const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
   const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{}};
@@ -336,7 +350,11 @@ const LetterboxdFacts=(()=>{
    const factKey=keys.get(item.lid);if(!factKey)continue;
    const base={factKey,observedAt:item.watchedDate+'T00:00:00.000Z',source:'letterboxd_diary',sourceRef:item.sourceRef||null};
    const observations=[{fact:'watched',observation:await observation({...base,fact:'watched',value:true})}];
-   if(item.rating!=null)observations.push({fact:'rating',observation:await observation({...base,fact:'rating',value:item.rating})});
+   if(item.rating!=null){
+    const rating=await observation({...base,fact:'rating',value:item.rating});
+    const ingestedAt=typeof item.readAt==='string'&&ISO.test(item.readAt)?item.readAt:new Date().toISOString();
+    observations.push({fact:'rating',observation:{...rating,ingestedAt}});
+   }
    const floors={...await summaryObservations('films-list',filmsList,item.lid,factKey),...await summaryObservations('watchlist',watchlist,item.lid,factKey)};
    const result=await recordObservations(env,factKey,{letterboxd:item.lid},observations,{floors});
    records.push(result.record);

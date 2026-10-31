@@ -66,7 +66,9 @@ A sequence of owner actions. Each step is approved separately and checked before
    On `partial` or `failed`, repeat `apply`; the commit keeps running ratings meanwhile.
 4. Set `RATINGS_PIPELINE=separate`. The switch writes no storage. Read back `feature_flags` and `pipeline: idle`. Then check that the next EPG commit makes no Diary or lookup request, carries `ratingsPipeline: separate` and grows the queue's references for its removals. On a problem, set `inline` back.
 5. One manual `ratings_sync_start({trigger:'manual'})`, then `ratings_sync_step({runId})` while `nextAction` is `continue`. Expect `finished`, or `error` with a cause. The cursor and the queue only move forward. On a problem, set `inline`.
-6. Enable the Ratings Task, then extend the drift monitor ([Scheduled Tasks](../reference/scheduled-tasks.md#staged-ratings-task-disabled)).
+6. Enable the Ratings Task, then extend the drift monitor ([Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task)).
+
+As of the live read-only check on 2026-10-31 the storage is migrated, `RATINGS_PIPELINE=separate` and the Ratings Task is enabled. The drift monitor's scope was not extended. The list above is the sequence that was followed. It is not an instruction to repeat it, and this page does not change the flag or the task.
 
 ### Isolation
 

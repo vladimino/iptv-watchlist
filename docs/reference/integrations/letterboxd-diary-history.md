@@ -104,9 +104,10 @@ After the page's history commit, the films on that page become facts. `Letterbox
 
 - **Never an older day.** An older day on the page never stands in for the latest one.
 - **Unresolved entries.** An entry without a lid links nothing, and a slug never links ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md)).
-- **Observation.** Both facts are observations with `source: letterboxd_diary`, `observedAt` set to the watched date at `00:00:00.000Z`, and `sourceRef: diary:<entry keys>`.
-  - A reread is the same observation, so nothing is written.
-  - Any newer observation wins: a film page, the owner, a films-list summary floor, or a newer diary date. The rating is never rolled back to an older diary value.
+- **Observation.** Both facts are observations with `source: letterboxd_diary`, `observedAt` set to the watched date at `00:00:00.000Z`, and `sourceRef: diary:<entry keys>`. The rating observation also carries `ingestedAt`, the attempt's start.
+  - A reread of the same value and source reference is the same observation (`ingestedAt` is not part of the observation id), so nothing is written.
+  - A later read of a different rating on that same watched date replaces the earlier diary rating. A late write of an earlier read does not. A diary rating stored without `ingestedAt` loses to one that has it.
+  - Any newer observation from another source wins: a film page, the owner, a films-list summary floor, or a newer diary date. The rating is never rolled back to an older diary value, and it is never dated at the sync time.
   - `ratingHistory` gets `first_observed` or `changed` only when the effective rating changes.
 - **Batch writer.** `LetterboxdFacts.applyDiaryEvidence` writes one batch per page:
   - one links compare-and-swap;

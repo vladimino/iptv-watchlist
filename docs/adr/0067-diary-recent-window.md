@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-31  
 **Approval source:** The owner decided the product rule on [AIR-304](https://trello.com/c/5M7hmLfM) on 2026-10-31: page 1 only, and a rating visible on that page is used. Acceptance of this ADR, and visual approval of the changed Mermaid in `docs/architecture/letterboxd-ingestion.md` and `docs/architecture/scheduling-and-orchestration.md`, are still pre-merge gates. The decision authorizes no production run, flag, Task edit or storage write.  
 **Related work:** [AIR-304](https://trello.com/c/5M7hmLfM); the production run recorded in [the 2026-10-31 evidence](../evidence/letterboxd/air-304-diary-page-2-blocked-2026-10-31.md); [AIR-295](https://trello.com/c/VtFZ6cci) (live cutover, not closed by this record); [AIR-294](https://trello.com/c/IzWiVABa); [AIR-287](https://trello.com/c/kOZlT8UE); [ADR 0049](0049-letterboxd-diary-viewing-history.md); [ADR 0054](0054-diary-first-epg-ratings.md); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md)  
-**Supersedes:** In part: [ADR 0049](0049-letterboxd-diary-viewing-history.md) decision 3 (three pages, the next page while a page is new, backfill overlap) and decision 5 (`complete` / `partial` as the success of a routine read); [ADR 0054](0054-diary-first-epg-ratings.md) decision 2 (a rating only when the day's rows are all known and agree, and the page fence); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md) the Diary-phase page budget (three pages a step, nine a run) and the use of `resumePage` as the next unread page. Every other decision of those records stays.  
+**Supersedes:** In part: [ADR 0049](0049-letterboxd-diary-viewing-history.md) decision 3 (three pages, the next page while a page is new, backfill overlap) and decision 5 (`complete` / `partial` as the success of a routine read); [ADR 0054](0054-diary-first-epg-ratings.md) decision 2 (a rating only when the day's rows are all known and agree, and the page fence); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md) the Diary-phase page budget (three pages a step, nine a run) and the use of `resumePage` as the next unread page; [ADR 0023](0023-letterboxd-user-facts.md) decision 4 only for two `letterboxd_diary` observations at the same `observedAt`. Every other decision of those records stays.  
 **Superseded by:** None
 
 ## Context
@@ -32,6 +32,7 @@ A ratings step that already checkpointed `diaryPagesRead >= 1`, or a diary gate 
 - A day with no visible rating proves a viewing only.
 - An older day on the page does not stand in.
 - The observation time stays the watched date, so a newer observation from any other source, including the owner, still wins.
+- Two diary ratings of that same watched date are ordered by the page-read time (`ingestedAt` on the rating observation), after source rank and before `observationId`. The time is the attempt's start, fixed before the fact write, so a late write of an earlier read does not replace a later read. `ingestedAt` is not part of `observationId`: the same value and source reference stay the same observation. A diary rating stored without `ingestedAt` loses to one that has it; two without it stay on `observationId`. An owner observation, a film-page observation and any later `observedAt` are compared before this and still win on the existing rules.
 - Each row with a viewing id stays its own history entry. Rows without one still collapse to one day entry, and that entry keeps `ratingsAtEntry` in page order. An identity conflict (the same viewing id, a different lid) stays a conflict.
 - `viewingCountExact` stays the lower-bound from day groups. It does not cancel the rating.
 
@@ -56,6 +57,7 @@ Diary page 1 holds up to 50 rows. More than 50 new viewings between successful r
 - **Keep the backfill and stop when page 2 returns 403.** The stored `resumePage` would send the next run to page 2 again. That is the production failure this record closes. Rejected.
 - **Hide a rating that sits on an open page edge, or when two rows of the day disagree, until a later page proves the day.** The owner rejected this on 2026-10-31: a visible rating is used, and the missing count is reported separately. Rejected.
 - **Choose the rating by sorting entry keys, or require a proof of order beyond Diary display order.** The owner rejected an extra tie-break. Rejected.
+- **Date the diary fact at the time of the sync, so a changed rating sorts as newer.** That would beat an owner or film-page observation made after the watched date and before the sync. The watched date stays the observation time. Rejected.
 
 ## Consequences
 

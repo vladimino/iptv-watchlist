@@ -151,9 +151,9 @@ const LetterboxdRatings=(()=>{
   if((cp.diaryPagesRead||0)>=1||!LetterboxdDiary.enabled(env))return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
   let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0;
-  const afterPage=async({page,rows,next,history})=>{
+  const afterPage=async({page,rows,next,history,readAt})=>{
    const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
-   const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next});
+   const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next}).map(item=>({...item,readAt}));
    for(const item of evidence)facts[item.ratingState]++;
    const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
    for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
