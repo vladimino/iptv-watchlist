@@ -1,6 +1,7 @@
 // Browser client of the limbo inventory route, behind the same Cloudflare Access session as the page. One GET per view
 // to /api/admin/limbo with the filter from the URL and the snapshot pin the page holds; one more GET per "show more"
-// under the same pin. It stores nothing and sends no credential. A 409, or a pin that differs from the held one, is a
+// under the same pin; one GET to /api/admin/prediction-recovery per film the owner opens. It stores nothing and sends no
+// credential. A 409, or a pin that differs from the held one, is a
 // stale snapshot the page must say out loud, never a silent refill.
 const LIMBO_PAGE_LIMIT=25;
 function limboParams(state,cursor){
@@ -28,4 +29,19 @@ async function loadLimboMore(state,cursor,options={}){
  if(!result.ok)return {mode:'error',error:result.error,items:[],nextCursor:null};
  if(options.pin&&result.body?.pin&&result.body.pin!==options.pin)return {mode:'stale',error:'stale_pin',items:[],nextCursor:null};
  return {mode:'ready',error:null,items:result.body.items||[],nextCursor:result.body.nextCursor||null};
+}
+// The prediction recovery assessment of one stored film: one GET, with the pin of the previous check of the same film when
+// there is one. A 409 means the state changed since; the fresh assessment is read once more without the pin and marked
+// `changed`, so the owner never reads an old verdict as the current one.
+async function loadPredictionRecovery(filmId,options={}){
+ const common={fetch:options.fetch,signal:options.signal};
+ const result=await adminCall('/prediction-recovery',{film:filmId},{...common,pin:options.pin||null});
+ if(result.error==='aborted')return {mode:'aborted'};
+ if(result.status===409&&options.pin){
+  const fresh=await adminCall('/prediction-recovery',{film:filmId},common);
+  if(fresh.error==='aborted')return {mode:'aborted'};
+  return fresh.ok?{mode:'ready',changed:true,answer:fresh.body}:{mode:'error',error:fresh.error};
+ }
+ if(!result.ok)return {mode:'error',error:result.error};
+ return {mode:'ready',changed:false,answer:result.body};
 }
