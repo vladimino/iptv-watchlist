@@ -1,5 +1,7 @@
 // The pure preview module (src/domain/letterboxd-archive-preview.js): the facts it proposes are the baseline import's plan,
 // the export time follows the importer's rules, and the answer is bounded and says what it does not know.
+import fs from 'node:fs';
+import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {planItem} from '../scripts/letterboxd-baseline-import.mjs';
 import {parseExport} from '../src/letterboxd-export.js';
@@ -29,7 +31,10 @@ const bare = buildPreview({archive, parsed, comparison: null, now: NOW, archiveS
 assert.equal(bare.writes, false);
 assert.equal(bare.status, 'partial');
 assert.deepEqual(bare.completeness, {status: 'partial', missing: ['ratings.csv', 'watchlist.csv', 'diary.csv']});
-assert.deepEqual(bare.freshness.reasons, ['archive_stale']);
+assert.equal(bare.freshness.needsFreshArchive, true);
+assert.equal(bare.freshness.verdict, 'needs_fresh');
+assert.deepEqual(bare.freshness.reasons, ['archive_stale', 'ratings_unconfirmed']);
+assert.equal(bare.freshness.ratingsNewerInR2, undefined);
 assert.equal(bare.matching.status, 'unavailable');
 assert.equal(bare.proposal.status, 'unavailable');
 assert.equal(bare.baseline.status, 'unknown');
@@ -53,6 +58,8 @@ assert.deepEqual(bare.details.invalidRows.rows, [{file: 'watched.csv', record: 3
   assert.equal(answer.proposal.facts.older, 1);
   assert.equal(answer.proposal.facts.tie, 1);
   assert.equal(answer.proposal.byFact.rating.tie, 1);
+  assert.equal(answer.freshness.needsFreshArchive, true);
+  assert.equal(answer.freshness.verdict, 'needs_fresh');
   assert.deepEqual(answer.freshness.reasons, ['ratings_newer_in_r2']);
   assert.equal(answer.details.adds.total, 30);
   assert.equal(answer.details.adds.rows.length, PREVIEW_LIMITS.detailRows);
@@ -60,4 +67,69 @@ assert.deepEqual(bare.details.invalidRows.rows, [{file: 'watched.csv', record: 3
   assert.equal(answer.status, 'complete');
   assert.equal(answer.matching.status, 'complete', 'a missing scan summary is evidence, not a failure');
 }
+
+const DAY = 86400000;
+const recentArchive = {...archive, generatedAt: '2026-10-30T00:00:00.000Z'};
+const oneFilm = [{code: 'c0', name: 'N', year: 2000, inWatched: true, inRatings: true, inWatchlist: false, rating: 4}];
+const present = {watched: {present: true, records: 1, valid: 1, invalid: {}, duplicates: 0, conflicts: 0, missingYear: 0}};
+function oneComparison(overrides = {}) {
+  return {
+    sources: {programme: {evidence: 'observed'}, metadata: {evidence: 'observed'}, ratingsGeneration: {evidence: 'observed'}, links: {evidence: 'observed'}, filmsListSummary: {evidence: 'observed'}, watchlistSummary: {evidence: 'observed'}, ...overrides.sources},
+    omitted: {}, consistency: overrides.consistency || {status: 'stable', changed: []}, receipt: {status: 'absent', committedAt: null}, indexSummary: {}, hypothesis: {verdict: 'supported'},
+    matches: [{code: 'c0', status: 'accepted', method: 'lid_exact', reason: null, candidates: []}],
+    items: [{code: 'c0', lid: 'c0', tmdb: null, facts: {watched: true, rating: 4}, effectiveOn: {}, state: overrides.state || 'compared', reason: overrides.reason || null, outcomes: overrides.outcomes || [{fact: 'watched', outcome: 'unchanged', tie: false, current: null}, {fact: 'rating', outcome: overrides.rating || 'unchanged', tie: false, current: null}]}],
+    recordReads: {limit: 300, needed: 1, done: overrides.done ?? 1},
+  };
+}
+function freshnessOf(comparison, generatedAt = recentArchive.generatedAt) {
+  return buildPreview({archive: {...recentArchive, generatedAt}, parsed: {...parsed, films: oneFilm, files: {watched: present.watched, ratings: present.watched, watchlist: present.watched, diary: present.watched}, invalidRows: []}, comparison, now: NOW, archiveStaleMs: 60 * DAY}).freshness;
+}
+for (const [label, comparison] of [
+  ['unverified record', oneComparison({state: 'unverified', reason: 'record_read_limit', outcomes: [{fact: 'rating', outcome: 'unverified', tie: false, current: null}]})],
+  ['ratings generation unavailable', oneComparison({sources: {ratingsGeneration: {evidence: 'unavailable'}}})],
+  ['scan summary unavailable', oneComparison({sources: {filmsListSummary: {evidence: 'unavailable'}}})],
+  ['drift', oneComparison({consistency: {status: 'drift', changed: ['letterboxd/facts/links.json']}})],
+]) {
+  const freshness = freshnessOf(comparison);
+  assert.equal(freshness.needsFreshArchive, false, label);
+  assert.equal(freshness.verdict, 'inconclusive', label);
+  assert.deepEqual(freshness.reasons, ['ratings_unconfirmed'], label);
+}
+{
+  const provenGap = freshnessOf(oneComparison({state: 'unverified', reason: 'record_unavailable', rating: 'older', outcomes: [{fact: 'rating', outcome: 'older', tie: false, current: {value: 5, observedAt: '2026-10-29T00:00:00.000Z', source: 'letterboxd_films_list'}}]}));
+  assert.equal(provenGap.needsFreshArchive, true);
+  assert.equal(provenGap.verdict, 'needs_fresh');
+  assert.deepEqual(provenGap.reasons, ['ratings_newer_in_r2', 'ratings_unconfirmed']);
+}
+{
+  const absent = freshnessOf(oneComparison({sources: {ratingsGeneration: {evidence: 'object_missing'}}}));
+  assert.equal(absent.needsFreshArchive, false);
+  assert.equal(absent.verdict, 'verified');
+  assert.deepEqual(absent.reasons, []);
+}
+{
+  const unread = buildPreview({archive: recentArchive, parsed, comparison: null, now: NOW, archiveStaleMs: 60 * DAY});
+  assert.equal(unread.freshness.needsFreshArchive, false);
+  assert.equal(unread.freshness.verdict, 'inconclusive');
+  assert.deepEqual(unread.freshness.reasons, ['ratings_unconfirmed']);
+}
+
+const presentation = vm.createContext({});
+vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'), presentation);
+const banner = freshness => presentation.archiveFreshnessHtml({freshness});
+const shown = {
+  inconclusive: banner({needsFreshArchive: false, verdict: 'inconclusive', reasons: ['ratings_unconfirmed'], archiveStaleMs: 60 * DAY, ageMs: DAY, ratingsNewerInR2: 0}),
+  verified: banner({needsFreshArchive: false, verdict: 'verified', reasons: [], archiveStaleMs: 60 * DAY, ageMs: DAY, ratingsNewerInR2: 0}),
+  fresh: banner({needsFreshArchive: true, verdict: 'needs_fresh', reasons: ['ratings_newer_in_r2', 'ratings_unconfirmed'], archiveStaleMs: 60 * DAY, ageMs: DAY, ratingsNewerInR2: 1}),
+};
+assert.match(shown.inconclusive, /Сравнение неполное, свежесть оценок не подтверждена/);
+assert.doesNotMatch(shown.inconclusive, /Нужен свежий архив|Архив достаточно свежий|archive-callout-ok/);
+assert.match(shown.inconclusive, /archive-callout-warn/);
+assert.match(shown.verified, /Архив достаточно свежий/);
+assert.match(shown.verified, /Среди проверенных фильмов ни одна оценка не новее этого архива/);
+assert.doesNotMatch(shown.verified, /ни одна оценка в R2 не новее/);
+assert.match(shown.fresh, /Нужен свежий архив/);
+assert.match(shown.fresh, /оценка в R2 новее этого архива/);
+assert.match(shown.fresh, /Остальные оценки не подтверждены/);
+assert.doesNotMatch(shown.fresh, /Архив достаточно свежий/);
 console.log('letterboxd-archive-preview: ok');

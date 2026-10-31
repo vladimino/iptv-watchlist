@@ -166,7 +166,7 @@ assert.deepEqual(Object.keys(held).sort(), ['c3', 'w1']);
 assert.deepEqual(held.c3.outcomes, {watched: 'older', rating: 'older'});
 assert.deepEqual(held.w1.outcomes, {watchlist: 'older'});
 assert.equal(answer.proposal.byFact.rating.older, 1);
-assert.deepEqual(answer.freshness, {needsFreshArchive: true, reasons: ['ratings_newer_in_r2'], archiveStaleMs: 60 * D, ageMs: NOW - Date.parse(GENERATED), ratingsNewerInR2: 1});
+assert.deepEqual(answer.freshness, {needsFreshArchive: true, verdict: 'needs_fresh', reasons: ['ratings_newer_in_r2', 'ratings_unconfirmed'], archiveStaleMs: 60 * D, ageMs: NOW - Date.parse(GENERATED), ratingsNewerInR2: 1});
 assert.deepEqual(answer.details.conflicts.rows.map(row => [row.code, row.held]), [['l1', 'alias_conflict']]);
 assert.deepEqual(answer.details.unverified.rows.map(row => [row.code, row.held]), [['m1', 'record_converging']]);
 assert.deepEqual(answer.details.identity.rows.map(row => [row.code, row.status, row.reason]).sort(), [['e5', 'candidate', 'identity_unverified'], ['g7', 'conflict', 'stored_title_differs'], ['o9', 'ambiguous', 'multiple_targets'], ['u1', 'unmatched', 'no_stored_title']]);
@@ -249,6 +249,7 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   assert.deepEqual(Object.entries(again.body.proposal.facts).filter(([, n]) => n > 0), [['unchanged', 8]]);
   assert.equal(again.body.details.adds.total, 0);
   assert.equal(again.body.details.updates.total, 0);
+  assert.deepEqual(again.body.freshness, {needsFreshArchive: false, verdict: 'verified', reasons: [], archiveStaleMs: 60 * D, ageMs: NOW - Date.parse(GENERATED), ratingsNewerInR2: 0});
   assert.deepEqual(nonGets(), []);
 }
 
@@ -259,6 +260,7 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   const stale = await send({bytes: zip, name: 'letterboxd-demo-user-2026-07-01-10-00-utc.zip'});
   assert.equal(stale.status, 200);
   assert.ok(stale.body.freshness.needsFreshArchive);
+  assert.equal(stale.body.freshness.verdict, 'needs_fresh');
   assert.deepEqual(stale.body.freshness.reasons, ['archive_stale']);
   const renamed = await send({bytes: zip, name: 'my-export.zip'});
   assert.equal(renamed.status, 422); assert.equal(renamed.body.error, 'generated_at_required');
@@ -320,6 +322,8 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   assert.equal(noLinks.body.proposal.films.unverified, 8);
   assert.ok(noLinks.body.proposal.reasons.includes('source_unavailable:links'));
   assert.equal(noLinks.body.details.adds.total, 0, 'nothing is proposed as new when the link index is unknown');
+  assert.equal(noLinks.body.freshness.needsFreshArchive, false);
+  assert.equal(noLinks.body.freshness.verdict, 'inconclusive');
   await seedWorld();
   failing = new Set(['epg/published-generation.json']);
   const noProgramme = await send({bytes: archive});
@@ -330,6 +334,9 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   const noRecord = await send({bytes: archive});
   assert.deepEqual(noRecord.body.details.unverified.rows.map(row => [row.code, row.held]).sort(), [['c3', 'record_unavailable'], ['m1', 'record_converging']]);
   assert.equal(noRecord.body.freshness.ratingsNewerInR2, 0);
+  assert.equal(noRecord.body.freshness.needsFreshArchive, false);
+  assert.equal(noRecord.body.freshness.verdict, 'inconclusive');
+  assert.deepEqual(noRecord.body.freshness.reasons, ['ratings_unconfirmed']);
   await seedWorld();
   let seen = 0;
   onGet = key => {if (key === Facts.FACTS_KEYS.links && ++seen === 1) Promise.resolve().then(() => put(Facts.FACTS_KEYS.links, JSON.parse(records.get(key).text)));};
@@ -338,6 +345,31 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   assert.deepEqual(drift.body.consistency, {status: 'drift', changed: [Facts.FACTS_KEYS.links]});
   assert.ok(drift.body.proposal.reasons.includes('facts_changed_during_read'));
   assert.equal(drift.body.status, 'partial');
+  assert.equal(drift.body.freshness.needsFreshArchive, true);
+  assert.equal(drift.body.freshness.verdict, 'needs_fresh');
+  assert.deepEqual(drift.body.freshness.reasons, ['ratings_newer_in_r2', 'ratings_unconfirmed']);
+  await seedWorld();
+  failing = new Set(['enrichment/ratings/generations/gen-1.json']);
+  const noRatings = await send({bytes: exportArchive(exportFilms.slice(0, 2))});
+  assert.equal(noRatings.status, 200);
+  assert.equal(noRatings.body.matching.sources.ratingsGeneration.evidence, 'unavailable');
+  assert.equal(noRatings.body.freshness.ratingsNewerInR2, 0);
+  assert.equal(noRatings.body.freshness.needsFreshArchive, false);
+  assert.equal(noRatings.body.freshness.verdict, 'inconclusive');
+  assert.deepEqual(noRatings.body.freshness.reasons, ['ratings_unconfirmed']);
+  await seedWorld();
+  failing = new Set([Facts.FACTS_KEYS.filmsList]);
+  const noFloor = await send({bytes: exportArchive(exportFilms.slice(0, 2))});
+  assert.equal(noFloor.body.freshness.needsFreshArchive, false);
+  assert.equal(noFloor.body.freshness.verdict, 'inconclusive');
+  await seedWorld();
+  let flipped = 0;
+  onGet = key => {if (key === Facts.FACTS_KEYS.links && ++flipped === 1) Promise.resolve().then(() => put(Facts.FACTS_KEYS.links, JSON.parse(records.get(key).text)));};
+  const quietDrift = await send({bytes: exportArchive(exportFilms.slice(0, 2))});
+  assert.equal(quietDrift.body.consistency.status, 'drift');
+  assert.equal(quietDrift.body.freshness.ratingsNewerInR2, 0);
+  assert.equal(quietDrift.body.freshness.needsFreshArchive, false);
+  assert.equal(quietDrift.body.freshness.verdict, 'inconclusive');
 }
 
 // 8. The record read cap: films past it are unverified, never guessed.
@@ -357,6 +389,79 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   assert.equal(capped.body.details.adds.total, 300);
   assert.equal(capped.body.details.adds.rows.length, 25, 'detail lists are bounded');
   assert.equal(reads().filter(key => key.startsWith('letterboxd/facts/films/')).length, 300);
+  assert.equal(capped.body.freshness.needsFreshArchive, false);
+  assert.equal(capped.body.freshness.verdict, 'inconclusive');
+  assert.deepEqual(capped.body.freshness.reasons, ['ratings_unconfirmed']);
+}
+
+// 8b. Redirect hops count toward the same cap. A hop that does not fit is unverified and is not compared from the stub.
+{
+  await seedWorld();
+  const many = Array.from({length: 200}, (_, i) => {
+    const code = 'r' + String(i).padStart(4, '0');
+    return {code, name: 'Redirect ' + i, year: 1990 + (i % 30), watched: true, rating: 3};
+  });
+  const programme = JSON.parse(records.get('epg/generations/' + G1 + '/programme.json').text);
+  programme.films = many.map(film => stored(film.code, film.name, film.year, null));
+  put('epg/generations/' + G1 + '/programme.json', programme);
+  const links = {};
+  for (const film of many) {
+    const key = 'lb-' + film.code;
+    links['letterboxd:' + film.code] = key;
+    put(Facts.recordKey(key), {...Facts.emptyRecord(key, {letterboxd: film.code}), redirectTo: key + 'x'});
+    put(Facts.recordKey(key + 'x'), Facts.emptyRecord(key + 'x', {letterboxd: film.code}));
+  }
+  put(Facts.FACTS_KEYS.links, links);
+  calls = [];
+  const redirected = await send({bytes: exportArchive(many)});
+  assert.equal(redirected.status, 200);
+  const factGets = reads().filter(key => key.startsWith('letterboxd/facts/films/'));
+  assert.equal(factGets.length, 300);
+  assert.deepEqual(redirected.body.proposal.recordReads, {limit: 300, needed: 200, done: 300});
+  assert.equal(redirected.body.details.unverified.total, 50);
+  assert.ok(redirected.body.details.unverified.rows.every(row => row.held === 'record_read_limit'));
+  assert.equal(redirected.body.details.adds.total, 150);
+  assert.equal(redirected.body.proposal.films.unverified, 50);
+  assert.equal(redirected.body.status, 'partial');
+  assert.equal(redirected.body.freshness.verdict, 'inconclusive');
+  assert.equal(redirected.body.freshness.needsFreshArchive, false);
+  for (let i = 150; i < 200; i++) {
+    const code = 'r' + String(i).padStart(4, '0');
+    assert.equal(factGets.includes(Facts.recordKey('lb-' + code)), false, code);
+    assert.equal(factGets.includes(Facts.recordKey('lb-' + code + 'x')), false, code + 'x');
+  }
+  await seedWorld();
+  const mixed = Array.from({length: 300}, (_, i) => {
+    const code = 'q' + String(i).padStart(4, '0');
+    return {code, name: 'Hop ' + i, year: 1990 + (i % 30), watched: true, rating: 4};
+  });
+  const mixedProgramme = JSON.parse(records.get('epg/generations/' + G1 + '/programme.json').text);
+  mixedProgramme.films = mixed.map(film => stored(film.code, film.name, film.year, null));
+  put('epg/generations/' + G1 + '/programme.json', mixedProgramme);
+  const mixedLinks = {};
+  for (const film of mixed) {
+    const key = 'lb-' + film.code;
+    mixedLinks['letterboxd:' + film.code] = key;
+    const record = Facts.emptyRecord(key, {letterboxd: film.code});
+    if (film.code === 'q0299') record.redirectTo = key + 'x';
+    put(Facts.recordKey(key), record);
+  }
+  put(Facts.recordKey('lb-q0299x'), {...Facts.emptyRecord('lb-q0299x', {letterboxd: 'q0299'}), rating: await observe('lb-q0299x', 'rating', 5, '2026-10-29T00:00:00.000Z')});
+  put(Facts.FACTS_KEYS.links, mixedLinks);
+  calls = [];
+  const hopped = await send({bytes: exportArchive(mixed)});
+  assert.equal(hopped.status, 200);
+  const hopGets = reads().filter(key => key.startsWith('letterboxd/facts/films/'));
+  assert.equal(hopGets.length, 300);
+  assert.equal(hopGets.includes(Facts.recordKey('lb-q0299x')), false, 'the hop is not read once the cap is spent');
+  assert.deepEqual(hopped.body.proposal.recordReads, {limit: 300, needed: 300, done: 300});
+  assert.equal(hopped.body.details.unverified.total, 1);
+  assert.deepEqual(hopped.body.details.unverified.rows.map(row => [row.code, row.held]), [['q0299', 'record_read_limit']]);
+  assert.equal(hopped.body.details.adds.total, 299);
+  assert.equal(hopped.body.details.heldNewer.total, 0);
+  assert.equal(hopped.body.status, 'partial');
+  assert.equal(hopped.body.freshness.needsFreshArchive, false);
+  assert.equal(hopped.body.freshness.verdict, 'inconclusive');
 }
 
 // 9. The request boundary: everything outside the contract is refused before any read.

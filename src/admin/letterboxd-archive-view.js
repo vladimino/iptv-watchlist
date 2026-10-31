@@ -128,10 +128,15 @@ function archiveErrorText(error, detail) {
 
 function archiveFreshnessHtml(answer) {
   const freshness = answer.freshness || {};
-  if (!freshness.needsFreshArchive) return `<div class="archive-callout archive-callout-ok" role="status"><b>Архив достаточно свежий</b><span>Экспорт сделан ${archiveEscape(archiveAge(freshness.ageMs))} назад (порог ${archiveEscape(archiveAge(freshness.archiveStaleMs))}), и ни одна оценка в R2 не новее его.</span></div>`;
+  const verdict = freshness.verdict || (freshness.needsFreshArchive ? 'needs_fresh' : 'verified');
+  const age = `Экспорт сделан ${archiveEscape(archiveAge(freshness.ageMs))} назад (порог ${archiveEscape(archiveAge(freshness.archiveStaleMs))}).`;
+  if (verdict === 'inconclusive') return `<div class="archive-callout archive-callout-warn" role="status"><b>Сравнение неполное, свежесть оценок не подтверждена</b><span>${age} Прочитанных оценок недостаточно, чтобы решить, нужен ли новый экспорт.</span></div>`;
+  if (verdict !== 'needs_fresh') return `<div class="archive-callout archive-callout-ok" role="status"><b>Архив достаточно свежий</b><span>${age} Среди проверенных фильмов ни одна оценка не новее этого архива.</span></div>`;
   const reasons = (freshness.reasons || []).map(reason => reason === 'archive_stale'
     ? `<li>Экспорту ${archiveEscape(archiveAge(freshness.ageMs))}: это больше порога ${archiveEscape(archiveAge(freshness.archiveStaleMs))}.</li>`
-    : reason === 'ratings_newer_in_r2' ? `<li>У ${freshness.ratingsNewerInR2} фильм(ов) оценка в R2 новее этого архива: значит, после экспорта оценки менялись.</li>` : `<li>${archiveEscape(reason)}</li>`).join('');
+    : reason === 'ratings_newer_in_r2' ? `<li>У ${freshness.ratingsNewerInR2} проверенных фильм(ов) оценка в R2 новее этого архива: значит, после экспорта оценки менялись.</li>`
+    : reason === 'ratings_unconfirmed' ? '<li>Остальные оценки не подтверждены: часть записей не прочитана или источники были недоступны. Это число не охватывает все оценки в R2.</li>'
+    : `<li>${archiveEscape(reason)}</li>`).join('');
   return `<div class="archive-callout archive-callout-warn" role="alert"><b>Нужен свежий архив</b><ul>${reasons}</ul><span>Скачай новый экспорт в настройках Letterboxd и проверь его здесь.</span></div>`;
 }
 

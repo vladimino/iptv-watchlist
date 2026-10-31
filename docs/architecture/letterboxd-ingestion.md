@@ -109,7 +109,7 @@ sequenceDiagram
         Worker-->>Page: 4xx code, nothing read from R2
     else Archive readable
         Worker->>R2: get: programme, metadata, ratings, links,<br/>scan summaries, this archive's receipt
-        Worker->>R2: get: at most 300 linked fact records
+        Worker->>R2: get: at most 300 fact-record GETs<br/>(a redirect hop counts)
         Worker->>Worker: Match, then per-fact outcome<br/>with the import's merge rules
         Worker->>R2: get again: the same keys' ETags
         Worker-->>Page: Bounded proposal, writes false, no-store
@@ -119,4 +119,4 @@ sequenceDiagram
     Note over Page: «Очистить» or leaving the page drops the answer,<br/>there is no import button
 ```
 
-The preview's baseline is always `unknown`: the import stores per-chunk receipts and no summary, so the answer only says whether **this** archive's receipt exists. «Нужен свежий архив» appears when the export is older than the data health threshold or R2 holds a newer rating for some film.
+The preview's baseline is always `unknown`: the import stores per-chunk receipts and no summary, so the answer only says whether **this** archive's receipt exists. «Нужен свежий архив» appears only when the export is older than the data health threshold or a compared film has a newer rating in R2. When rating evidence is missing and nothing proven requires a new archive, the page says the comparison is incomplete and rating freshness is not confirmed. A positive sentence covers only the films that were checked.

@@ -64,6 +64,20 @@ function row(film, match, extra = {}) {
 }
 function bounded(list, limit) {return {total: list.length, rows: list.slice(0, limit)};}
 
+// needsFreshArchive is only a proven reason: the export is older than the threshold, or a compared rating is newer.
+// Missing rating evidence is ratings_unconfirmed. It never by itself asks for a new archive.
+function previewFreshness({ageMs, archiveStaleMs, ratingsNewer, unchecked}) {
+  const proven = [];
+  if (ageMs > archiveStaleMs) proven.push('archive_stale');
+  if (ratingsNewer > 0) proven.push('ratings_newer_in_r2');
+  const reasons = unchecked ? [...proven, 'ratings_unconfirmed'] : proven;
+  const verdict = proven.length ? 'needs_fresh' : unchecked ? 'inconclusive' : 'verified';
+  const freshness = {needsFreshArchive: verdict === 'needs_fresh', verdict, reasons, archiveStaleMs, ageMs};
+  if (typeof ratingsNewer === 'number') freshness.ratingsNewerInR2 = ratingsNewer;
+  return freshness;
+}
+const RATING_EVIDENCE = ['ratingsGeneration', 'links', 'filmsListSummary', 'watchlistSummary'];
+
 // input: {archive, parsed, comparison, now, archiveStaleMs, limits}
 //  archive: {sha256, bytes, entries, ignoredEntries, nameStandard, generatedAt, generatedAtSource, files: {<name>: {sha256, bytes}}}
 //  parsed: parseExport() of the archive's CSV texts
@@ -83,10 +97,8 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
     export: exportSummary(parsed),
     baseline: {status: 'unknown', reason: 'no_bounded_summary', confirmedAt: null, sha256: null, thisArchive: comparison?.receipt ?? {status: 'not_read', committedAt: null}},
   };
-  const reasons = [];
-  if (ageMs > archiveStaleMs) reasons.push('archive_stale');
   if (!comparison) {
-    answer.freshness = {needsFreshArchive: reasons.length > 0, reasons, archiveStaleMs, ageMs};
+    answer.freshness = previewFreshness({ageMs, archiveStaleMs, ratingsNewer: null, unchecked: true});
     answer.matching = {status: 'unavailable'};
     answer.proposal = {status: 'unavailable'};
     answer.status = 'partial';
@@ -142,8 +154,8 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
     recordReads: comparison.recordReads,
   };
   const ratingsNewer = byFact.rating.older;
-  if (ratingsNewer > 0) reasons.push('ratings_newer_in_r2');
-  answer.freshness = {needsFreshArchive: reasons.length > 0, reasons, archiveStaleMs, ageMs, ratingsNewerInR2: ratingsNewer};
+  const ratingsUnchecked = state.unverified > 0 || comparison.consistency.status !== 'stable' || RATING_EVIDENCE.some(name => comparison.sources[name]?.evidence === 'unavailable');
+  answer.freshness = previewFreshness({ageMs, archiveStaleMs, ratingsNewer, unchecked: ratingsUnchecked});
   answer.consistency = comparison.consistency;
   answer.status = answer.completeness.status === 'complete' && answer.matching.status === 'complete' && answer.proposal.status === 'complete' ? 'complete' : 'partial';
   const limit = limits.detailRows;

@@ -4,8 +4,9 @@
 // parser (LetterboxdExport), matches them with the offline matcher (LetterboxdMatch) against single named R2 objects and
 // computes, with the baseline import's own merge functions, what an import would do to each fact. Nothing is stored: the
 // archive, its rows and the answer exist only in this request and its no-store response. The R2 reads go through a bucket
-// that has nothing but `get`; no key is listed, no record is read beyond PREVIEW_LIMITS.maxRecordReads, no outbound request
-// is made, nothing is logged. There is no apply step here: the import stays the separately approved baseline route.
+// that has nothing but `get`; no key is listed, and fact-record GETs, including a redirect hop, stay within
+// PREVIEW_LIMITS.maxRecordReads. No outbound request is made and nothing is logged. There is no apply step here: the
+// import stays the separately approved baseline route.
 const LBA_PATH='/api/admin/letterboxd-archive/preview';
 const LBA_FORM_OVERHEAD=64*1024,LBA_NAME_MAX=255,LBA_DECLARED_MAX=40;
 const LBA_LID=/^[A-Za-z0-9_-]{1,80}$/,LBA_TMDB=/^[1-9]\d{0,11}$/;
@@ -128,21 +129,41 @@ async function lbaCompare(env,parsed,origin){
   item.factKey=factKey;
   if(LetterboxdFacts.aliasesOf(links_).some(alias=>linkIndex[alias]))toRead.push(item);
  }
+ // One request-wide cap on fact-record GETs. A redirect hop counts. The budget is reserved synchronously before each
+ // GET, six films at a time, and a film whose hop does not fit is unverified: the stub is not compared.
  const limit=LetterboxdArchivePreview.PREVIEW_LIMITS.maxRecordReads,concurrency=LetterboxdArchivePreview.PREVIEW_LIMITS.recordReadConcurrency;
- const reading=toRead.slice(0,limit);
- for(const item of toRead.slice(limit)){item.state='unverified';item.reason='record_read_limit';}
  let recordReads=0;
  const stored=new Map();
- for(let at=0;at<reading.length;at+=concurrency){
-  await Promise.all(reading.slice(at,at+concurrency).map(async item=>{
-   recordReads++;
-   let result=await lbaRead(readEnv,LetterboxdFacts.recordKey(item.factKey));
-   if(result.evidence==='observed'&&result.value?.redirectTo&&!result.value?.migrating){recordReads++;result=await lbaRead(readEnv,LetterboxdFacts.recordKey(result.value.redirectTo));}
-   if(result.evidence==='unavailable'){item.state='unverified';item.reason='record_unavailable';return;}
-   if(result.value?.migrating||result.value?.redirectTo){item.state='unverified';item.reason='record_converging';return;}
+ const pending=toRead.slice();
+ const take=()=>{if(recordReads>=limit)return false;recordReads++;return true;};
+ while(pending.length&&recordReads<limit){
+  const batch=[];
+  while(batch.length<concurrency&&pending.length&&take())batch.push(pending.shift());
+  const first=await Promise.all(batch.map(item=>lbaRead(readEnv,LetterboxdFacts.recordKey(item.factKey))));
+  const hops=[];
+  for(let i=0;i<batch.length;i++){
+   const item=batch[i],result=first[i];
+   if(result.evidence==='unavailable'){item.state='unverified';item.reason='record_unavailable';continue;}
+   if(result.value?.migrating){item.state='unverified';item.reason='record_converging';continue;}
+   if(result.value?.redirectTo){
+    if(!take()){item.state='unverified';item.reason='record_read_limit';continue;}
+    hops.push({item,key:result.value.redirectTo});
+    continue;
+   }
    stored.set(item,result.value);
-  }));
+  }
+  for(let at=0;at<hops.length;at+=concurrency){
+   const slice=hops.slice(at,at+concurrency);
+   const second=await Promise.all(slice.map(hop=>lbaRead(readEnv,LetterboxdFacts.recordKey(hop.key))));
+   slice.forEach((hop,i)=>{
+    const result=second[i];
+    if(result.evidence==='unavailable'){hop.item.state='unverified';hop.item.reason='record_unavailable';return;}
+    if(result.value?.migrating||result.value?.redirectTo){hop.item.state='unverified';hop.item.reason='record_converging';return;}
+    stored.set(hop.item,result.value);
+   });
+  }
  }
+ for(const item of pending){item.state='unverified';item.reason='record_read_limit';}
  const floorsSource={filmsList:lbaSummaryValue(filmsList.value),watchlist:lbaSummaryValue(watchlist.value)};
  for(const item of items){
   if(item.state==='unverified'){item.outcomes=Object.keys(item.facts).map(fact=>({fact,outcome:'unverified',tie:false,current:null}));continue;}
