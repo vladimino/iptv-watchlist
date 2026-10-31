@@ -50,17 +50,18 @@ The prediction queue keeps its single object and format, and every write of it b
    - the completion and every stop record any failure of the run that the submit's write did not land.
 
    A film that is no longer outstanding drops its record on the next rebuild, as before.
-9. **A failed retry write fails closed.** A queued run's failure is saved on the run record with `retryHeal: pending` before the queue write. Only a queue write that confirms all of the run's failures clears the mark: the submit's, the completion's or a stop's.
-   - When every attempt fails (a conflict through 5 attempts, a put that throws, or no queue object), the run still stops, but the mark stays.
-   - The runner lease keeps naming its last run after release or expiry. Before acquiring the lease, the next start writes that run's marked retries.
-   - If that write fails too, the start selects nothing, takes no lease and answers `503 prediction_retry_heal_pending`. A failed film therefore never becomes eligible before its `retryAt` because a write was lost.
-   - A repeated attempt re-reads the queue, and a record that already carries the run's `lastRunId` is left as it is. An unknown outcome is therefore never doubled.
 6. **Bounded conflict.** At most 5 attempts per call, with a short jittered pause between them (about 20 to 170 ms each, at most about 340 ms in total).
    - Exhaustion throws `PredictionQueueConflictError` (`code: prediction_queue_conflict`) and writes nothing of the caller's.
    - The owner reconcile answers `409 {code: prediction_queue_conflict}`.
    - Every other caller keeps its existing error path: the runner stops with `storage_error`; the EPG commit tail records `enrichmentQueueError` and continues; the resolver records `prediction_queue_checkpoint`; the profile publication stands and the next rebuild follows.
 7. **Unknown outcome.** A `put` that throws is not repeated blindly. The error propagates, and the next writer reads whatever was stored.
 8. **Leases unchanged.** Queue correctness does not depend on any lease. A lease holder's `beforeWrite` (the resolver's fence) renews before every attempt, so a writer that lost its lease writes nothing.
+9. **A failed retry write fails closed.** A queued run's failure is saved on the run record with `retryHeal: pending` before the queue write. Only a queue write that confirms all of the run's failures clears the mark: the submit's, the completion's or a stop's.
+   - When every attempt fails (a conflict through 5 attempts, a put that throws, or no queue object), the run still stops, but the mark stays.
+   - The runner lease keeps naming its last run after release or expiry. Before acquiring the lease, the next start writes that run's marked retries.
+   - If that write fails too, the start selects nothing, takes no lease and answers `503 prediction_retry_heal_pending`. A failed film therefore never becomes eligible before its `retryAt` because a write was lost.
+   - That answer is a start outcome, not a stop: no run, stop record or Event is written, and `latest-run.json` keeps naming the marked run.
+   - A repeated attempt re-reads the queue, and a record that already carries the run's `lastRunId` is left as it is. An unknown outcome is therefore never doubled.
 
 **Not decided:**
 
