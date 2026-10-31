@@ -142,5 +142,14 @@ context.mixed={integrations:{aggregate:'attention',attentionCount:2,sources:[
  {id:'letterboxd_ratings',state:'degraded',code:'ratings_pending',pendingSince:'2026-10-31T08:00:00Z',lastSuccessAt:null,lastFailureAt:null}
 ]}};
 assert.equal(vm.runInContext('footerStatusText(mixed)',context).integrationAggregate,'2 требуют внимания · распознавание без подтверждённого выполнения');
+context.unknownBatch={integrations:{aggregate:'attention',attentionCount:1,failedCount:0,sources:[
+ {id:'resolver',state:'unknown',code:'no_data',lastSuccessAt:'2026-10-31T10:26:39Z',lastFailureAt:null,lastBatchAt:null,gateAt:'2026-10-31T11:00:00Z'},
+ {id:'predictions',state:'healthy',code:'ok',lastSuccessAt:'2026-10-31T09:40:00Z'}
+]}};
+const unknownBatch=vm.runInContext('footerStatusText(unknownBatch)',context);
+assert.equal(unknownBatch.integrations.resolver,'нет данных');
+assert.equal(unknownBatch.integrationAggregate,'1 требует внимания');
+assert.doesNotMatch(unknownBatch.integrations.resolver,/нет подтверждённого выполнения|Usage|выполняется/);
+assert.doesNotMatch(unknownBatch.integrationAggregate,/нет подтверждённого выполнения/);
 for(const sample of [unconfirmed.integrationAggregate,waitingGate.integrations.resolver])assert(sample.length<120);
 console.log('Status footer UI: four-line default, structured details, expand/collapse, Events navigation and responsive layout passed');

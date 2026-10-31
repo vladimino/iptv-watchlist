@@ -960,25 +960,29 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  const byTime=(a,b)=>Date.parse(a)-Date.parse(b),priorResolverSuccess=resolverConfirmed.map(item=>item.at).sort(byTime).at(-1)||null,currentResolverSuccess=resolverConfirmed.filter(item=>item.current).map(item=>item.at).sort(byTime).at(-1)||null;
  const resolverProgress=()=>{const elapsed=age(continuation?.at);return integrationEntry('resolver','source',elapsed>INTEGRATION_STALE_MS?'stale':'running',elapsed>INTEGRATION_STALE_MS?'stale':'running',priorResolverSuccess,null);};
  // Exhausted chunk_budget is a schedule gate, not a live writer. Waiting is not attention. The stall code
- // means no newer discovery batch was stored; it never asserts an external usage quota.
+ // means a same-generation batch was stored and none newer than the gate was. A missing status, an unusable
+ // checkpoint or batch time, or a batch from another generation is unknown evidence, not that code, and the
+ // code never asserts an external usage quota.
  const chunkBudgetRecognition=()=>{
   const skew=5*60*1000,skewed=value=>Number.isFinite(value)&&value>now+skew;
-  const checkpoint=integrationTime(continuation?.at),gate=integrationTime(continuation?.nextCatchUpAt),gateMs=gate?Date.parse(gate):NaN;
+  const checkpoint=integrationTime(continuation?.at),checkpointMs=checkpoint?Date.parse(checkpoint):NaN,gate=integrationTime(continuation?.nextCatchUpAt),gateMs=gate?Date.parse(gate):NaN;
   const batchAt=integrationTime(discoveryStatus?.finishedAt),batchMs=batchAt?Date.parse(batchAt):NaN;
+  const pinned=continuation?.programmeRunId,published=reportRunId,sameGeneration=!!(pinned&&published&&pinned===published);
+  const statusGeneration=discoveryStatus?.programmeRunId,batchSameGeneration=!!(statusGeneration&&pinned&&published&&statusGeneration===pinned&&statusGeneration===published);
   const later=(a,b)=>[a,b].filter(Boolean).sort((x,y)=>Date.parse(x)-Date.parse(y)).at(-1)||null;
-  const success=later(priorResolverSuccess,checkpoint&&!skewed(Date.parse(checkpoint))?checkpoint:null);
-  const entry=(state,code,extra={})=>({...integrationEntry('resolver','source',state,code,success,null),lastBatchAt:batchAt&&!skewed(batchMs)?batchAt:null,...extra});
+  const success=later(priorResolverSuccess,checkpoint&&!skewed(checkpointMs)?checkpoint:null);
+  const entry=(state,code,extra={})=>({...integrationEntry('resolver','source',state,code,success,null),lastBatchAt:batchSameGeneration&&batchAt&&!skewed(batchMs)?batchAt:null,...extra});
   if(resolverLease?.expiresAt>now)return resolverProgress();
   if(continuation?.retryAt&&Date.parse(continuation.retryAt)>now)return integrationEntry('resolver','source','degraded','resolver_backoff',success,checkpoint);
-  if(skewed(checkpoint?Date.parse(checkpoint):NaN)||skewed(batchMs))return entry('unknown','no_data');
+  if(skewed(checkpointMs)||skewed(batchMs))return entry('unknown','no_data');
   if(continuation?.remainingChunks>0)return resolverProgress();
-  const pinned=continuation?.programmeRunId,published=reportRunId,sameGeneration=!!(pinned&&published&&pinned===published);
   const epgSettled=sync?.stage==='complete'&&!sync.error,exhausted=continuation?.remainingChunks===0;
   if(!sameGeneration||!epgSettled||!exhausted||!Number.isFinite(gateMs))return entry('waiting','resolver_waiting');
   if(gateMs>now)return entry('waiting','resolver_waiting',{gateAt:gate});
   const graceEnd=resolverProgressGraceEnd(gateMs);
   if(graceEnd==null||now<=graceEnd)return entry('waiting','resolver_waiting',{gateAt:gate});
-  if(Number.isFinite(batchMs)&&batchMs>gateMs)return entry('waiting','resolver_waiting',{gateAt:gate});
+  if(batchSameGeneration&&Number.isFinite(batchMs)&&batchMs>gateMs)return entry('waiting','resolver_waiting',{gateAt:gate});
+  if(!Number.isFinite(checkpointMs)||!batchSameGeneration||!Number.isFinite(batchMs))return entry('unknown','no_data');
   if(!(Number.isInteger(discoveryReady)&&discoveryReady>0))return currentResolverSuccess?integrationEntry('resolver','source',fresh(currentResolverSuccess),freshCode(currentResolverSuccess),currentResolverSuccess,null):entry('waiting','resolver_waiting',{gateAt:gate});
   return entry('degraded','resolver_no_recent_progress',{gateAt:gate});
  };
