@@ -305,4 +305,90 @@ async function observation(factKey, fact, value, observedAt, source) {
   assert.equal(missing.body.refusal, 'not_eligible');
 }
 
+// 5. The same scope requested later returns the original issuance. The expiry does not move.
+{
+  seed();
+  put('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: new Date(NOW - D).toISOString(), films: [film('rateonly', 'Rated Only', 2014, 9001)], people: {directors: [], actors: []}, stats: {}});
+  const bytes = archiveOf([{code: 'rateonly', name: 'Rated Only', year: 2014, rating: 4}]);
+  const seen = await preview(bytes);
+  const issued = await confirm(bytes, seen.body, 0, 'apply-key-clock00001');
+  assert.equal(issued.status, 200, JSON.stringify(issued.body));
+  const later = loadArchiveWorker({now: NOW + 60000, console: {log() {}, warn() {}, error() {}, info() {}, debug() {}}, fetch: async () => {throw new Error('no outbound request');}});
+  const batch = batchOf(seen.body, 0);
+  const form = new FormData();
+  form.append('archive', new File([bytes], NAME, {type: 'application/zip'}));
+  form.append('chunk', '0');
+  form.append('planHash', batch.planHash);
+  form.append('programmeRunId', seen.body.batches.programmeRunId);
+  form.append('scopeFingerprint', batch.scopeFingerprint);
+  form.append('idempotencyKey', 'apply-key-clock00001');
+  form.append('accepted', 'true');
+  const encoded = await encode({method: 'POST', body: form});
+  calls = [];
+  const response = await later.worker.fetch(new Request(ORIGIN + '/api/admin/letterboxd-archive/apply-confirm', {method: 'POST', headers: {'Content-Type': encoded.type, 'Content-Length': String(encoded.body.length), Origin: ORIGIN, 'Cf-Access-Jwt-Assertion': ACCESS, 'X-IPTV-Admin-Action': 'letterboxd_archive_apply'}, body: encoded.body}), env, execution);
+  const again = {status: response.status, body: await response.json()};
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal(again.body.writes, false);
+  assert.equal(again.body.confirmation.confirmedAt, issued.body.confirmation.confirmedAt);
+  assert.equal(again.body.confirmation.expiresAt, issued.body.confirmation.expiresAt);
+  assert.deepEqual(again.body.confirmation, issued.body.confirmation);
+  assert.equal(calls.some(call => call.startsWith('put:')), false, 'a same-scope retry does not store a new confirmation');
+}
+
+// 6. A fact write that dies before the receipt is resumed. A newer fact on a film this intent has not finished is kept.
+{
+  seed();
+  put('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: new Date(NOW - D).toISOString(), films: [film('rateonly', 'Rated Only', 2014, 9001), film('secondnew', 'Second New', 2017, 9004)], people: {directors: [], actors: []}, stats: {}});
+  const bytes = archiveOf([{code: 'rateonly', name: 'Rated Only', year: 2014, rating: 4}, {code: 'secondnew', name: 'Second New', year: 2017, rating: 3}]);
+  const seen = await preview(bytes);
+  const issued = await confirm(bytes, seen.body, 0, 'apply-key-resume0001');
+  assert.equal(issued.status, 200, JSON.stringify(issued.body));
+  const originalPut = bucket.put.bind(bucket);
+  let thrown = false;
+  bucket.put = async (key, value, options) => {
+    const result = await originalPut(key, value, options);
+    if (!thrown && key.startsWith('letterboxd/facts/films/')) {thrown = true; throw new Error('injected after the first fact write');}
+    return result;
+  };
+  let interrupted;
+  try {interrupted = await commit(bytes, issued.body.confirmation);} finally {bucket.put = originalPut;}
+  assert.equal(thrown, true);
+  assert.equal(interrupted.status, 500);
+  assert.equal(interrupted.body.error, 'storage_error');
+  const actionKey = 'admin/actions/letterboxd_archive_apply/v1/apply-key-resume0001.json';
+  const action = read(actionKey);
+  assert.equal(action.state, 'running');
+  assert.equal(action.receipt, null);
+  const sha = seen.body.archive.sha256;
+  const intent = read('letterboxd/imports/' + sha + '/chunks/0.intent.json');
+  assert.equal(intent.itemsHash, action.planHash);
+  assert.equal(read('letterboxd/imports/' + sha + '/chunks/0.receipt.json'), undefined);
+  const wroteFirst = !!read(Facts.recordKey('tmdb-9001'));
+  const wroteSecond = !!read(Facts.recordKey('tmdb-9004'));
+  assert.equal(wroteFirst !== wroteSecond, true, 'exactly one film fact was written before the fault');
+  const pendingLid = wroteFirst ? 'secondnew' : 'rateonly';
+  const pendingKey = wroteFirst ? 'tmdb-9004' : 'tmdb-9001';
+  const pendingTmdb = wroteFirst ? '9004' : '9001';
+  const links = read(Facts.FACTS_KEYS.links);
+  links['letterboxd:' + pendingLid] = pendingKey; links['tmdb:' + pendingTmdb] = pendingKey;
+  put(Facts.FACTS_KEYS.links, links);
+  put(Facts.recordKey(pendingKey), {...Facts.emptyRecord(pendingKey, {letterboxd: pendingLid, tmdb: pendingTmdb}), rating: await observation(pendingKey, 'rating', 5, '2026-10-30T00:00:00.000Z', 'letterboxd_films_list'), watched: await observation(pendingKey, 'watched', true, '2026-10-30T00:00:00.000Z', 'letterboxd_films_list')});
+  const resumed = await commit(bytes, issued.body.confirmation);
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(resumed.body.replayed, false);
+  assert.equal(read(Facts.recordKey(pendingKey)).rating.value, 5, 'a newer observation on the unfinished film is kept');
+  const byId = Object.fromEntries(resumed.body.receipt.outcomes.map(item => [item.id, item.outcome]));
+  assert.equal(byId[pendingLid], 'skipped_changed');
+  assert.equal(resumed.body.receipt.state, 'partial');
+  assert.ok(read(actionKey).receipt, 'the resumed commit stores the action receipt');
+  const saved = read(actionKey);
+  saved.receipt = null; saved.baseline = null; saved.state = 'running'; saved.finishedAt = null;
+  put(actionKey, saved);
+  const recovered = await commit(bytes, issued.body.confirmation);
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+  assert.equal(recovered.body.replayed, true, 'a baseline receipt with no action receipt is replayed, not refused');
+  assert.equal(read(Facts.recordKey(pendingKey)).rating.value, 5);
+  assert.ok(read(actionKey).receipt);
+}
+
 console.log('admin-letterboxd-apply: ok');

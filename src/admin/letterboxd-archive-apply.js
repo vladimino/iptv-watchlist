@@ -63,7 +63,24 @@ async function lbaActionRead(env,prefix,idempotencyKey){
 async function lbaActionWrite(env,prefix,idempotencyKey,record,etag){
  return await env.BUCKET.put(lbaActionKey(prefix,idempotencyKey),JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}});
 }
-function lbaSameIssued(stored,issued){return !!stored&&JSON.stringify(stored)===JSON.stringify(issued);}
+// The scope is the confirmation. The clock fields are not: a retry of the same key returns the stored issuance and its
+// original expiry, so a later clock cannot mint a new TTL or look like a different confirmation.
+const LBA_ISSUED_SCOPE=['schemaVersion','capability','version','subject','pin','scopeKey','scopeFingerprint','ids','idempotencyKey'];
+function lbaSameIssued(stored,issued){
+ return !!stored&&!!issued&&LBA_ISSUED_SCOPE.every(key=>JSON.stringify(stored[key])===JSON.stringify(issued[key]));
+}
+function lbaIssuedRecords(issued){
+ try{const scope=JSON.parse(issued&&issued.scopeKey);return Array.isArray(scope.records)?scope.records:null;}catch{return null;}
+}
+// An intent or receipt whose items hash is this action's plan is this plan. A different hash is another plan and must not
+// be completed or overwritten. A missing object is neither.
+async function lbaOwnBaseline(env,sha,chunk,planHash){
+ const [intent,receipt]=await Promise.all([lbaObject(env,lbaImportObject(sha,chunk,'intent')),lbaObject(env,lbaImportObject(sha,chunk,'receipt'))]);
+ if(intent.value===undefined||receipt.value===undefined)return {error:true,intent:false,receipt:false,foreign:false};
+ const intentHash=intent.value&&typeof intent.value.itemsHash==='string'?intent.value.itemsHash:null;
+ const receiptHash=receipt.value&&typeof receipt.value.itemsHash==='string'?receipt.value.itemsHash:null;
+ return {error:false,intent:intentHash===planHash,receipt:receiptHash===planHash,foreign:(!!intentHash&&intentHash!==planHash)||(!!receiptHash&&receiptHash!==planHash)};
+}
 function lbaImportObject(sha,chunk,kind){return 'letterboxd/imports/'+sha+'/chunks/'+chunk+'.'+kind+'.json';}
 async function lbaObject(env,key){
  try{const object=await env.BUCKET.get(key);return object?{value:await object.json(),etag:object.etag??null}:{value:null,etag:null};}
@@ -173,7 +190,16 @@ async function lbaApplyCommit(request,env,url){
   if(!pin)return lbaRefuse('stale_pin',409);
   if(!plan||plan.planHash!==stored.record.planHash)return lbaRefuse('record_changed',409);
   const now=new Date().toISOString();
-  const fresh={pin,now,records:plan.records,issues:plan.records.map(record=>LetterboxdArchiveApply.applyIssue(record.id))};
+  const own=await lbaOwnBaseline(env,opened.origin.sha256,stored.record.chunk,stored.record.planHash);
+  if(own.error)return json({error:'storage_error'},500);
+  if(own.foreign)return lbaRefuse('idempotency_conflict',409);
+  // A running action whose own intent or receipt is already stored has written some of the versions a fresh read would
+  // hash. Those versions are not a new scope. The issued scope still has to match, and a newer observation is kept by
+  // the baseline merge. An action that has not opened an intent still uses the fresh versions.
+  const resume=stored.record.state==='running'&&(own.intent||own.receipt);
+  const records=resume?lbaIssuedRecords(stored.record.issued):plan.records;
+  if(!records)return lbaRefuse('invalid_request',400);
+  const fresh={pin,now,records,issues:records.map(record=>LetterboxdArchiveApply.applyIssue(record.id))};
   const checked=AdminActions.checkSubmission(LBA_APPLY_REGISTRY,confirmation,fresh,{principal:lbaPrincipal(request,url),issued:stored.record.issued});
   if(!checked.ok)return lbaRefuse(checked.refusal,checked.refusal==='confirmation_expired'||checked.refusal==='invalid_request'?400:409);
   if(stored.record.state!=='running'){

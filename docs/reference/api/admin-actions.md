@@ -151,7 +151,7 @@ The declaration is:
 | Issuance | The confirm route stores the issued confirmation as the action record, created only if absent |
 | Executor lease | None. The preview's one-at-a-time isolate slot is the only concurrency gate, and it answers 429 rather than `lease_held` |
 | Commit with CAS | `commitBaselineChunk`: an intent, then one compare-and-swap per fact, then the view index, then the import receipt |
-| Receipt | `receiptOf` on the action record. A stored action receipt replays and writes nothing. A `running` action without a receipt is sent through `commitBaselineChunk` again, because that function completes an open intent and replays a receipt |
+| Receipt | `receiptOf` on the action record. A stored action receipt replays and writes nothing. A `running` action without a receipt is sent through `commitBaselineChunk` again. If that chunk's baseline intent or receipt already has this plan's `itemsHash`, the check uses the issued scope, so the intent's own fact writes are not `record_changed`; a newer observation is still kept. A different plan hash is `idempotency_conflict` |
 | Retry | No automatic loop inside one request. The owner can send the same confirmation again after `storage_error`. A terminal failed receipt is not stored on that failure, so the resume stays possible |
 
 The action record does not contain the ZIP, CSV text, film names, rating values or a token.

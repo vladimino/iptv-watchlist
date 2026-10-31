@@ -150,11 +150,18 @@ sequenceDiagram
     Worker->>R2: get the stored confirmation
     alt An action receipt is already stored
         Worker-->>Page: replay, writes false
+    else This plan's intent or receipt is already open
+        Worker->>R2: resume that baseline intent
+        Worker->>R2: put the action receipt
+        Worker-->>Page: written, already applied, or skipped because newer
+        Note over Worker,R2: Own fact writes are not a new scope.<br/>A newer unrelated observation is kept
     else The fresh comparison still matches
         Worker->>R2: mark the action running
         Worker->>R2: baseline commit of this chunk:<br/>intent, facts, view index, receipt
         Worker->>R2: put the action receipt beside it
         Worker-->>Page: written, already applied, or skipped because newer
+    else The fresh comparison no longer matches
+        Worker-->>Page: refusal, no fact write
     end
     opt The owner later rolls this chunk back
         Owner->>Page: «Подтвердить откат», then «Откатить»
@@ -162,6 +169,6 @@ sequenceDiagram
         Worker->>R2: baseline rollback from the receipt's origin
         Note over Worker,R2: A later observation stays
     end
-    Note over Worker,R2: The ZIP is not stored. Confirm never starts the commit.<br/>A running commit with no receipt is resumed, not frozen
+    Note over Worker,R2: The ZIP is not stored. Confirm never starts the commit.<br/>A running commit with no receipt resumes its own plan, not a fresh scope
     Note over Page: The preview request above is unchanged and still writes nothing
 ```

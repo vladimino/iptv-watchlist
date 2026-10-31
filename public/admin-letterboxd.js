@@ -139,7 +139,8 @@ function onArchiveCommit(chunk) {
   const pending = postArchiveCommit(current.file, current.declared, archiveLive.issued[chunk], {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
     if (result.mode !== 'ready') return archiveApplyFailed(result);
-    archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true};
+    const receipt = result.answer.receipt || {};
+    archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, counts: receipt.counts || null};
     archiveLive.controller = null;
     archiveShow('ready', archiveLive.answer);
     return result;

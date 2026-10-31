@@ -263,6 +263,27 @@ function archiveChangeLine(changes) {
   const counts = changes || {};
   return ['new', 'replaces', 'unchanged', 'older'].filter(code => counts[code]).map(code => ARCHIVE_OUTCOME_TEXT[code] + ': ' + counts[code]).join(' · ') || 'без фактов';
 }
+const ARCHIVE_COUNT_TEXT = {written: 'записано', already_applied: 'уже было', skipped_changed: 'пропущено', failed: 'ошибки', unknown: 'неизвестно', not_attempted: 'не начато'};
+function archiveCountLine(counts) {
+  return ['written', 'already_applied', 'skipped_changed', 'failed', 'unknown', 'not_attempted'].filter(code => counts && counts[code]).map(code => ARCHIVE_COUNT_TEXT[code] + ': ' + counts[code]).join(' · ');
+}
+function archiveCommitText(number, done) {
+  const counts = done.counts || {};
+  const line = archiveCountLine(counts);
+  const detail = line ? ' ' + line + '.' : '';
+  const wrote = counts.written || 0;
+  const skipped = counts.skipped_changed || 0;
+  const failed = counts.failed || 0;
+  if (done.state === 'succeeded') {
+    const replay = done.replayed ? ' Повтор ничего не меняет.' : '';
+    return wrote ? `Партия ${number} записана полностью.${detail}${replay}` : `Партия ${number} уже была записана.${detail}${replay}`;
+  }
+  if (done.state === 'partial') return `Партия ${number} записана частично.${detail}`;
+  if (done.state === 'failed' && !wrote && !failed && skipped) return `Факты партии ${number} не изменились: более новые записи оставлены.${detail}`;
+  if (done.state === 'failed' || done.state === 'aborted' || done.state === 'refused') return `Партия ${number} не записана.${detail}`;
+  if (done.state === 'unknown') return `Исход партии ${number} неизвестен.${detail} Повтор вслепую не запускается.`;
+  return `Партия ${number}: состояние ${done.state || '—'}.${detail}`;
+}
 function archiveBatchesHtml(answer, session) {
   const batches = answer.batches;
   if (!batches) return '';
@@ -283,8 +304,7 @@ function archiveBatchesHtml(answer, session) {
       const replay = done.replayed ? ' Повтор того же отката ничего не меняет.' : '';
       actions += `<p role="status">Откат партии ${number} выполнен.${archiveEscape(replay)} Состояние: ${archiveEscape(done.state || '—')}. Более поздняя запись, если она была, сохранена.</p>`;
     } else if (done) {
-      const replay = done.replayed ? ' Повтор той же партии ничего не меняет.' : '';
-      actions += `<p role="status">Партия ${number} записана.${archiveEscape(replay)} Состояние: ${archiveEscape(done.state || '—')}.</p>`;
+      actions += `<p role="status">${archiveEscape(archiveCommitText(number, done))}</p>`;
       actions += rollback
         ? `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback="${chunk.chunk}">Откатить партию ${number}</button></div>`
         : `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback-confirm="${chunk.chunk}">Подтвердить откат партии ${number}</button></div>`;

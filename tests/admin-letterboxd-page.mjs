@@ -198,4 +198,32 @@ assert.equal(requests.at(-1).headers['Cf-Access-Jwt-Assertion'], undefined, 'the
 assert.equal(requests.filter(request => request.url.endsWith('/apply')).length, 0, 'confirm does not commit');
 await run('onArchiveCommit(0)');
 assert.equal(requests.filter(request => request.url.endsWith('/apply')).length, 0, 'without an issued confirmation the record control sends nothing');
+
+// 7. A commit answer is shown by its receipt, not as a full write merely because the HTTP status is 200.
+const counts = (extra) => ({written: 0, already_applied: 0, skipped_changed: 0, failed: 0, unknown: 0, not_attempted: 0, ...extra});
+const paintCommit = async (state, extra, replayed = false) => {
+  const previous = ctx.fetch;
+  ctx.fetch = async () => new Response(JSON.stringify({mode: 'apply', writes: state === 'succeeded', replayed, state, receipt: {state, counts: counts(extra)}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+  run('archiveLive.issued[0] = {idempotencyKey:"lb0123456789abcdef"}; archiveLive.committed = {};');
+  await run('onArchiveCommit(0)');
+  ctx.fetch = previous;
+  return result.innerHTML;
+};
+const failedHtml = await paintCommit('failed', {skipped_changed: 2});
+assert.match(failedHtml, /Факты партии 1 не изменились/);
+assert.match(failedHtml, /пропущено: 2/);
+assert.doesNotMatch(failedHtml, /Партия 1 записана/);
+const partialHtml = await paintCommit('partial', {written: 1, skipped_changed: 1, failed: 1});
+assert.match(partialHtml, /Партия 1 записана частично/);
+assert.match(partialHtml, /записано: 1/);
+assert.match(partialHtml, /пропущено: 1/);
+assert.match(partialHtml, /ошибки: 1/);
+assert.doesNotMatch(partialHtml, /записана полностью/);
+const fullHtml = await paintCommit('succeeded', {written: 2});
+assert.match(fullHtml, /Партия 1 записана полностью/);
+assert.match(fullHtml, /записано: 2/);
+const replayHtml = await paintCommit('succeeded', {already_applied: 2}, true);
+assert.match(replayHtml, /уже была записана/);
+assert.match(replayHtml, /Повтор ничего не меняет/);
+assert.doesNotMatch(replayHtml, /записана полностью/);
 console.log('admin-letterboxd-page: ok');
