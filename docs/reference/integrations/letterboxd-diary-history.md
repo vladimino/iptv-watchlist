@@ -81,6 +81,8 @@ With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ra
 - **Never fatal.** The stage never fails the commit. A blocked, rate-limited or failed run ends the ratings attempt as `error` with that cause, and keeps every stored fact.
 - **Gate off.** Nothing is read or written by the stage. The ratings attempt ends `finished` with cause `diary_off`.
 
+**Proposed, not deployed.** [ADR 0059](../../adr/0059-independent-letterboxd-ratings-pipeline.md) (`Proposed`) would move this stage out of the EPG commit into a separate ratings run with its own record `letterboxd/ratings/run.json`. The stage would keep its order, overlap and stop rules and its per-page facts, with these changes: at most three pages per step and nine per run; after each page, `state.json` written by compare-and-swap with the run's `runId` (a per-page checkpoint, instead of once at the end); the summary in the run record instead of `sync.json`. Until that record is accepted and delivered, the behavior above is the contract.
+
 ## Rating facts
 
 After each page's history commit, and before the next page is requested, the films on that page become facts. `LetterboxdDiary.ratingEvidence` reads the stored history, by lid only.
