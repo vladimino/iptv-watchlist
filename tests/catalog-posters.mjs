@@ -228,8 +228,50 @@ seed();records.delete(POINTER);records.delete(COPY);r=await post({},{});assert.e
 r=await post({dryRun:false,limit:5},{});
 assert.deepEqual(Array.from(r.body.writes.map(write=>write.key)),[LIVE]);assert.equal(records.get(LIVE).tmdb_1.poster,POSTER+'/one.jpg');
 
+// 15. The expected-generation fence: a call bound to G1 is refused once G2 is published, before any TMDB request and any write.
+for(const value of ['',5,null,'x'.repeat(201),{id:G1}]){seed();r=await post({dryRun:false,limit:5,expectedProgrammeRunId:value},{});assert.equal(r.status,400,JSON.stringify(value));assert.equal(r.body.error,'Invalid expectedProgrammeRunId');assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);}
+const COPY2='epg/generations/'+G2+'/discovered-films.json';
+const publishG2=()=>{records.set(COPY2,structuredClone(records.get(LIVE)));etags.set(COPY2,'g2-copy');records.set(POINTER,{programmeRunId:G2,phase:'published'});etags.set(POINTER,'p2');};
+// A matching fence changes nothing about the call.
+seed();r=await post({dryRun:false,limit:1,expectedProgrammeRunId:G1},{});
+assert.equal(r.status,200);assert.equal(r.body.programmeRunId,G1);assert.deepEqual(Array.from(r.body.outcomes.map(item=>[item.id,item.outcome])),[['heat','hydrated']]);
+// G1 → G2 between two calls: the second call, still bound to G1, makes no TMDB request, takes no lease and writes nothing.
+publishG2();puts=[];fetches=[];before=snapshot();
+const g2Before=JSON.stringify(records.get(COPY2));
+r=await post({dryRun:false,limit:1,cursor:'heat',expectedProgrammeRunId:G1},{});
+assert.equal(r.status,409);assert.equal(r.body.error,'Programme generation changed');assert.equal(r.body.generationChanged,true);assert.equal(r.body.leaseLost,false);
+assert.equal(r.body.expectedProgrammeRunId,G1);assert.equal(r.body.programmeRunId,G2);assert.equal(r.body.outcomes,undefined);
+assert.deepEqual(fetches,[],'no TMDB request for the rejected call');assert.deepEqual(puts,[],'no write at all, not even the lease');
+assert.equal(snapshot(),before);assert.equal(JSON.stringify(records.get(COPY2)),g2Before,'the G2 copy is untouched');
+// The dry run honours the same fence.
+r=await post({dryRun:true,expectedProgrammeRunId:G1},{});assert.equal(r.status,409);assert.equal(r.body.dryRun,true);assert.equal(r.body.generationChanged,true);assert.deepEqual(puts,[]);
+// No published generation is a mismatch too.
+seed();records.delete(POINTER);puts=[];fetches=[];r=await post({dryRun:false,limit:5,expectedProgrammeRunId:G1},{});
+assert.equal(r.status,409);assert.equal(r.body.programmeRunId,null);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+// G2 published while the lease is taken: the fence is checked again under the lease, before TMDB; only the lease is touched.
+seed();{
+ const originalPutLease=bucket.put;
+ bucket.put=async(key,value,options)=>{const saved=await originalPutLease(key,value,options);if(key===LEASE&&JSON.parse(value).expiresAt>0&&records.get(POINTER).programmeRunId===G1){publishG2();}return saved;};
+ r=await post({dryRun:false,limit:5,expectedProgrammeRunId:G1},{});bucket.put=originalPutLease;
+}
+assert.equal(r.status,409);assert.equal(r.body.generationChanged,true);assert.equal(r.body.programmeRunId,G2);
+assert.deepEqual(fetches,[],'no TMDB request after the generation changed under the lease');
+assert.deepEqual([...new Set(puts)],[LEASE],'only the lease is acquired and released');assert.equal(records.get(LEASE).expiresAt,0,'the lease is released');
+assert.equal(records.get(COPY2).tmdb_1.poster,null);assert.equal(records.get(COPY).tmdb_1.poster,null);assert.equal(records.get(LIVE).tmdb_1.poster,null);
+// The page's sweep carries the fence on every call, the first included, and stops on the refusal with nothing sent to G2.
+{
+ const {runPosterSweep}=await import('../src/admin/posters-run.js');
+ seed();const bodies=[],calls=[];
+ const call=async body=>{bodies.push(structuredClone(body));const mark={fetches:fetches.length,puts:puts.length};const answer=await post(body,{});calls.push({fetches:fetches.slice(mark.fetches),puts:puts.slice(mark.puts)});if(bodies.length===1)publishG2();return {ok:answer.status===200,status:answer.status,body:answer.body};};
+ const receipt=await runPosterSweep({confirmation:{programmeRunId:G1,cursor:null,limit:1,calls:5},call,now:()=>Date.now()});
+ assert.equal(receipt.stop,'generation_changed');assert.equal(receipt.calls.length,2);
+ assert.deepEqual(bodies.map(body=>body.expectedProgrammeRunId),[G1,G1],'every call carries the confirmed generation');
+ assert.equal(calls[0].fetches.length,1);assert.deepEqual(calls[1].fetches,[],'the refused call made no TMDB request');assert.deepEqual(calls[1].puts,[],'the refused call wrote nothing');
+ assert.equal(etags.get(COPY2),'g2-copy','nothing reached the G2 copy');assert.equal(records.get(COPY2).tmdb_1.poster,null);
+}
+
 // 14. Route inventory: the hydration is a POST only; GET is not a route.
 const get=await worker.fetch(new Request('https://iptv.example/api/enrichment/catalog/posters'),{...baseEnv},{waitUntil(){}});
 assert.equal(get.status,404);
 
-console.log('Catalog posters: read-only dry run, no switch (stale bindings inert), origin and input checks, resolver lease, verified ids only, poster-only writes in both copies, bounded retry and rate limit, a cursor that never passes a retryable record and a truthful done, ETag races without overwrite, generation and lease re-checked at every write with partial writes reported');
+console.log('Catalog posters: read-only dry run, no switch (stale bindings inert), origin and input checks, resolver lease, verified ids only, poster-only writes in both copies, bounded retry and rate limit, a cursor that never passes a retryable record and a truthful done, ETag races without overwrite, generation and lease re-checked at every write with partial writes reported, and an expected-generation fence that refuses a G1-bound call on G2 before TMDB and before any write');
