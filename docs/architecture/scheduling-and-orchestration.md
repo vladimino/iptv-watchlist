@@ -100,12 +100,12 @@ A scheduled trigger does not imply successful completion. `already_running`, `bu
 
 ## The separate ratings pipeline (production; `inline` remains the Worker default)
 
-[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) moves Letterboxd ratings out of the EPG commit. The Worker default of `RATINGS_PIPELINE` is `inline`: ratings then run inside the commit, and this diagram does not apply. Production on 2026-10-31 is the other mode. A live read-only check that day found the storage migrated, `RATINGS_PIPELINE=separate` and the Ratings Task enabled. In that mode the commit only enqueues removed films, and the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`. The drift monitor does not read `ratings_sync_status`; extending it was not part of that check. `ratings_storage_migrate` stays the one-time owner tool that made the mode possible. This page does not change the flag or the task. Contracts: [ratings reference](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline), [MCP reference](../reference/api/mcp.md), [Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task); operation: [runbook](../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) moves Letterboxd ratings out of the EPG commit. The Worker default of `RATINGS_PIPELINE` is `inline`: ratings then run inside the commit, and this diagram does not apply. Production on 2026-10-31 is the other mode. A live read-only check that day found the storage migrated, `RATINGS_PIPELINE=separate` and the Ratings Task enabled. In that mode the commit only enqueues removed films, and the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`. The drift monitor does not read `ratings_sync_status`; extending it was not part of that check. `ratings_storage_migrate` stays the one-time owner tool that made the mode possible. The expected recurrence of the Ratings Task, after the owner-approved registry change on 2026-10-31, is daily at 17:30 Europe/Madrid with flexible timing and DTSTART 2026-11-01. A scheduled start is not refused for following the previous one ([ADR 0069](../adr/0069-no-scheduled-ratings-start-gap.md), Proposed). `busy` and `isolated` still end the invocation. The six-hour pause after a Letterboxd 403 or 429 on the removal queue stays. This page does not change the flag or the task. Contracts: [ratings reference](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline), [MCP reference](../reference/api/mcp.md), [Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task); operation: [runbook](../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
 
 ```mermaid
 sequenceDiagram
     actor Daily as Daily EPG Task
-    actor Ratings as Ratings Task (18:00, enabled)
+    actor Ratings as Ratings Task (17:30, enabled)
     Note over Daily,Ratings: Production mode. The Worker default inline is not drawn here
     participant MCP as Worker MCP
     participant Run as Ratings run record
@@ -115,7 +115,7 @@ sequenceDiagram
     MCP->>R2: Watchlist events, then one queue reference per removal event
     Note over Daily,R2: The commit reads no Diary and runs no lookup
     Ratings->>MCP: ratings_sync_start(scheduled)
-    MCP->>Run: Create run, or answer busy, too_soon or isolated
+    MCP->>Run: Create run, or answer busy or isolated
     loop While nextAction is continue
         Ratings->>MCP: ratings_sync_step(runId)
         MCP->>Run: Begin the step: lease by compare-and-swap

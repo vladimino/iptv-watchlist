@@ -8,7 +8,7 @@
 const LetterboxdRatings=(()=>{
  const KEYS={run:'letterboxd/ratings/run.json',migration:'letterboxd/ratings/migration.json'};
  const CONTRACT_VERSION=1,RUN_SCHEMA_VERSION=1;
- const LEASE_MS=3*60000,LEASE_MARGIN_MS=45000,ABANDONED_MS=30*60000,SCHEDULED_GAP_MS=6*3600000;
+ const LEASE_MS=3*60000,LEASE_MARGIN_MS=45000,ABANDONED_MS=30*60000;
  const STEP_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
  const MIGRATION_WRITER={runId:'ratings-storage-migrate',step:'migrate'};
  const DIARY_ERRORS=['failed','blocked','rate_limited'];
@@ -68,14 +68,13 @@ const LetterboxdRatings=(()=>{
    let base=stored,reason='started';
    if(base?.state==='running'){const stale=staleness(base,now);if(!stale)return reply(null,false,'stop','busy');base=closeStale(base,stale,now);}
    if(base?.isolation){if(clearIsolation&&trigger==='manual')base={...base,isolation:null,isolationClearedAt:iso(now)};else reason='isolated';}
-   if(reason==='started'&&trigger==='scheduled'&&base?.lastStartAt&&now-Date.parse(base.lastStartAt)<SCHEDULED_GAP_MS)reason='too_soon';
    const diaryOn=LetterboxdDiary.enabled(env),at=iso(now);
    const next=reason==='started'?{schemaVersion:RUN_SCHEMA_VERSION,runId:crypto.randomUUID(),trigger,state:'running',phase:diaryOn?'diary':'removal',lease:{step:null,expiresAt:null},
     startedAt:at,updatedAt:at,lastStepAt:null,finishedAt:null,closedAt:null,checkpoint:{diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0},pinned,
     outcome:null,cause:null,interruptedPhase:null,diary:null,removal:null,isolation:base?.isolation||null,...(base?.isolationClearedAt?{isolationClearedAt:base.isolationClearedAt}:{}),lastStartAt:at,recent:base?.recent||[]}:base!==stored?base:null;
    if(next&&await put(env,KEYS.run,object,next)===null)continue;
    if(reason==='started')return reply(next.runId,true,'continue','started');
-   return reply(null,false,'stop',reason,reason==='too_soon'?{nextStartAt:iso(Date.parse(base.lastStartAt)+SCHEDULED_GAP_MS)}:reason==='isolated'?{isolation:base.isolation}:{});
+   return reply(null,false,'stop',reason,reason==='isolated'?{isolation:base.isolation}:{});
   }
   throw new Error('Ratings run changed during start');
  }
@@ -304,5 +303,5 @@ const LetterboxdRatings=(()=>{
   const error=validate(action,body);if(error)return {status:400,body:{error}};
   return {status:200,body:await (action==='start'?start(env,body):action==='step'?step(env,body):migrate(env,body))};
  }
- return {KEYS,CONTRACT_VERSION,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,SCHEDULED_GAP_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();

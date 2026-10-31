@@ -70,6 +70,8 @@ A sequence of owner actions. Each step is approved separately and checked before
 
 As of the live read-only check on 2026-10-31 the storage is migrated, `RATINGS_PIPELINE=separate` and the Ratings Task is enabled. The drift monitor's scope was not extended. The list above is the sequence that was followed. It is not an instruction to repeat it, and this page does not change the flag or the task.
 
+The expected Ratings Task recurrence is daily at 17:30 Europe/Madrid, flexible, DTSTART 2026-11-01, as recorded in the [Scheduled Tasks contract](../reference/scheduled-tasks.md#ratings-task). A scheduled start is not refused because it follows the previous start ([ADR 0069](../adr/0069-no-scheduled-ratings-start-gap.md)). `busy` and `isolated` still end that invocation. The six-hour pause after a Letterboxd 403 or 429 on the removal queue is unchanged.
+
 ### Isolation
 
 `isolated` means two consecutive runs were interrupted in the same phase at the same checkpoint: the step dies at the same place, typically a Worker resource limit. Record `isolation` (phase, checkpoint, run ids) and the Workers Observability end reason, and stop. Clearing it is an owner decision: one `ratings_sync_start({trigger:'manual', clearIsolation:true})`, normally after the cause has been fixed. A Scheduled Task never clears it.

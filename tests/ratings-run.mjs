@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPages,diaryPage,diaryRow,migrated,QUEUE,CURSOR,HISTORY,RUN,SEPARATE,H,MIN,eventKeyOf,film,plain,g} from './ratings-harness.mjs';
 
-// ADR 0060 decisions 4, 5, 7 and 8: the ratings run record, its lease and checkpoints, the start and step answers,
-// stale runs, isolation, the scheduled gap, and a status that only reads.
+// ADR 0060 decisions 4, 5, 7 and 8, and ADR 0069: the ratings run record, its lease and checkpoints, the start and
+// step answers, stale runs, isolation, scheduled starts with no minimum interval, and a status that only reads.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
 function setup({pages=12,extra={}}={}){
@@ -334,17 +334,43 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(bucket.value(RUN).checkpoint.diaryPagesRead,0,'the run record is not written after the loss');
 }
 
-// 10. Scheduled starts keep six hours from the last start; a manual start is not gated.
+// 10. Scheduled starts have no minimum interval after a finished run or an error run. A live run is busy.
+// A start that lost the compare-and-swap cannot replace the newer record. A manual start is unchanged.
 {
- const {bucket,env,R,clock}=setup({pages:1});
+ const {bucket,env,R,clock,net}=setup({pages:1});
  migrated(bucket);
- const first=plain(await R.start(env,{trigger:'scheduled'}));await drain(R,env,first.runId);
+ const first=plain(await R.start(env,{trigger:'scheduled'}));
+ assert.equal(first.reason,'started');
+ assert.equal(bucket.value(RUN).lastStartAt,bucket.value(RUN).startedAt);
+ await drain(R,env,first.runId);
+ assert.equal(bucket.value(RUN).state,'finished');
  clock.now+=2*H;
  const soon=plain(await R.start(env,{trigger:'scheduled'}));
- eq(soon,{runId:null,created:false,nextAction:'stop',reason:'too_soon',nextStartAt:at(T0+6*H)});
- const manual=plain(await R.start(env,{trigger:'manual'}));assert.equal(manual.reason,'started');await drain(R,env,manual.runId);
- clock.now=T0+8*H+1;
- assert.equal(plain(await R.start(env,{trigger:'scheduled'})).reason,'started');
+ assert.equal(soon.reason,'started');assert.equal(soon.created,true);assert.notEqual(soon.runId,first.runId);
+ assert.equal('nextStartAt' in soon,false);
+ assert.equal(bucket.value(RUN).lastStartAt,at(T0+2*H));
+ await drain(R,env,soon.runId);
+ const manual=plain(await R.start(env,{trigger:'manual'}));
+ assert.equal(manual.reason,'started');await drain(R,env,manual.runId);
+ clock.now+=MIN;
+ net.diary.set(1,403);
+ const failed=plain(await R.start(env,{trigger:'scheduled'}));
+ assert.equal(failed.reason,'started');
+ assert.equal((await drain(R,env,failed.runId)).at(-1).reason,'error');
+ clock.now+=MIN;
+ const afterError=plain(await R.start(env,{trigger:'scheduled'}));
+ assert.equal(afterError.reason,'started');
+ eq(plain(await R.start(env,{trigger:'scheduled'})),{runId:null,created:false,nextAction:'stop',reason:'busy'});
+ assert.equal(bucket.value(RUN).runId,afterError.runId);assert.equal(bucket.value(RUN).state,'running');
+ await drain(R,env,afterError.runId);
+ let nested=null;
+ bucket.hooks.beforePut=async key=>{if(key===RUN&&!nested){nested=R.start(env,{trigger:'scheduled'});await nested;}};
+ const outer=plain(await R.start(env,{trigger:'scheduled'}));
+ bucket.hooks.beforePut=null;
+ const inner=plain(await nested);
+ assert.equal(inner.reason,'started');assert.equal(outer.reason,'busy');assert.equal(outer.runId,null);
+ assert.equal(bucket.value(RUN).runId,inner.runId,'the stale compare-and-swap does not replace the newer run');
+ assert.ok(bucket.log.some(item=>item.op==='conflict'&&item.key===RUN));
 }
 
 // 11. The run does not need today's EPG: no published generation, no programme, the run still reads and finishes.
@@ -389,4 +415,4 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(net.diaryFetches().length,2);
 }
 
-console.log('Ratings run (ADR 0060, ADR 0067): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause and lookup off, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, the scheduled gap and a run without EPG passed');
+console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause and lookup off, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');
