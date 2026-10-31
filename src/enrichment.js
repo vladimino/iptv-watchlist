@@ -329,8 +329,10 @@ async function enqueueRemovalRefs(env,incoming,ref,now=Date.now()){
 // Letterboxd request. One list page per call; the cursor lives on the queue (`legacyLink`) until that scan is done.
 // An entry the scan does not match keeps `legacy` and `legacyLink.done`, so a later step does not list again. A match
 // drops `legacy` once the scan is done and leaves the new references unresolved for settleRemovalRefs. A rating already
-// on the entry is not replaced, and a film id that differs (another year, an alias) is not a match. The EPG commit
-// does not call this.
+// on the entry is not replaced, and a film id that differs (another year, an alias) is not a match. A cleanup deletes
+// only the scan this call read: the same ids and cursor, and only while those ids are still not candidates. A newer
+// cursor stays. `advanced` is true only when this call's queue write commits, so a late step does not count another
+// scan's page. The EPG commit does not call this.
 const LEGACY_LINK_PAGE=20;
 const removalRefOrder=(a,b)=>String(a.at||'')<String(b.at||'')?-1:String(a.at||'')>String(b.at||'')?1:a.eventKey<b.eventKey?-1:a.eventKey>b.eventKey?1:0;
 const legacyLinkCandidate=entry=>!!entry&&entry.legacy===true&&entry.state==='rated'&&confirmedHalfStar(entry.rating)!=null&&entry.legacyLink?.done!==true;
@@ -353,8 +355,16 @@ async function linkLegacyRemovalRefs(env,{limit=LEGACY_LINK_PAGE,now=Date.now()}
  if(!scan&&!open.length)return summary;
  summary.skipped=false;
  if(scan&&!scan.ids.some(id=>legacyLinkCandidate(stored.films[id]))){
-  const saved=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{if(!q.legacyLink)return null;delete q.legacyLink;return q;});
-  summary.advanced=true;summary.more=legacyLinkCandidates(saved).length>0;summary.done=!summary.more;return summary;
+  let cleared=false;
+  const saved=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
+   cleared=false;
+   const current=q.legacyLink&&Array.isArray(q.legacyLink.ids)?q.legacyLink:null;
+   if(!current||JSON.stringify(current.ids)!==JSON.stringify(scan.ids)||(current.cursor||null)!==(scan.cursor||null))return null;
+   if(current.ids.some(id=>legacyLinkCandidate((q.films||{})[id])))return null;
+   delete q.legacyLink;cleared=true;return q;
+  });
+  summary.advanced=cleared;summary.scanning=!!saved.legacyLink;
+  summary.more=summary.scanning||legacyLinkCandidates(saved).length>0;summary.done=!summary.more;return summary;
  }
  if(typeof env.BUCKET.list!=='function')return summary;
  const scanIds=scan?scan.ids:open.map(([id])=>id).sort(),cursor=scan?.cursor||null,wanted=new Set(scanIds);
@@ -369,13 +379,13 @@ async function linkLegacyRemovalRefs(env,{limit=LEGACY_LINK_PAGE,now=Date.now()}
   for(const film of event.removed){const id=String(film?.id??'');if(!wanted.has(id)||seen.has(id))continue;seen.add(id);matches.push({id,ref});}
  }
  const truncated=page?.truncated===true&&typeof page.cursor==='string'&&page.cursor.length>0&&page.cursor!==cursor;
- let linked=0;
+ let linked=0,committed=false;
  const saved=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
-  linked=0;if(!removalQueueV2(q))return null;
+  linked=0;committed=false;if(!removalQueueV2(q))return null;
   const current=q.legacyLink&&Array.isArray(q.legacyLink.ids)?q.legacyLink:null;
   const starting=!current&&!cursor,same=!!current&&JSON.stringify(current.ids)===JSON.stringify(scanIds)&&(current.cursor||null)===(cursor||null);
   if(!starting&&!same)return null;
-  let changed=starting;
+  let changed=false;
   for(const match of matches)if(attachLegacyRef(q,match.id,match.ref)){linked++;changed=true;}
   if(!truncated){
    for(const id of scanIds){
@@ -386,11 +396,12 @@ async function linkLegacyRemovalRefs(env,{limit=LEGACY_LINK_PAGE,now=Date.now()}
    }
    if(q.legacyLink){delete q.legacyLink;changed=true;}
   }else{q.legacyLink={ids:scanIds,cursor:page.cursor,startedAt:current?.startedAt||at};changed=true;}
-  return changed?q:null;
+  if(!changed)return null;
+  committed=true;return q;
  });
  summary.linked=linked;summary.scanning=!!saved.legacyLink;
  summary.more=summary.scanning||legacyLinkCandidates(saved).length>0;summary.done=!summary.more;
- summary.advanced=linked>0||summary.scanning||scanIds.some(id=>saved.films?.[id]?.legacyLink?.done===true);
+ summary.advanced=committed;
  return summary;
 }
 // Rated version 2 entries with unresolved references: the rating is written to each referenced removal event with the

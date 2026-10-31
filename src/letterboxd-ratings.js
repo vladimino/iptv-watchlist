@@ -187,6 +187,7 @@ const LetterboxdRatings=(()=>{
  // REMOVAL_RATING_LOOKUP off ends the lookups for this run. No legacy candidate means no event list.
  async function removalPhase(env,run,{own,remaining,clock}){
   const legacyLink=await linkLegacyRemovalRefs(env,{limit:LEGACY_LINK_PAGE,now:clock()});
+  // The counter moves only when this step's queue write committed. A lost compare-and-swap does not count another scan's page.
   if(legacyLink.advanced)await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,legacyPagesLinked:(current.checkpoint.legacyPagesLinked||0)+1}}));
   const settled=await settleRemovalRefs(env,{limit:SETTLE_PER_STEP,now:clock(),checkedBefore:run.startedAt});
   const lookup={checked:0,rated:0,notRated:0,failed:0,refused:0,stoppedBy:null,pausedUntil:null};

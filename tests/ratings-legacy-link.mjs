@@ -162,4 +162,42 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
  assert.equal(otherField.bucket.value('letterboxd/ratings/run.json').isolation,null);
 }
 
-console.log('Ratings legacy link: two removals, alias, kept rating, missing event, killed page, no list without a confirmed rating, a checkpointed ratings step, and isolation across a checkpoint without legacyPagesLinked passed');
+// 5. A late cleanup observed obsolete scan A. Before its compare-and-swap lands, B clears A and advances scan B.
+// A's resumed write must not erase B's cursor or count B's page on this run.
+{
+ const {clock:runClock,FakeDate:RunDate,crypto:runCrypto}=makeClock(T0),runNet=makeNetwork(),runBucket=makeBucket();
+ const runCtx=loadContext({net:runNet,clock:runClock,FakeDate:RunDate,crypto:runCrypto});
+ const runEnv=baseEnv(runBucket,{...SEPARATE,LETTERBOXD_DIARY_HISTORY:undefined,REMOVAL_RATING_LOOKUP:'off'});
+ const link=vm.runInContext('linkLegacyRemovalRefs',runCtx);
+ const R=g(runCtx,'LetterboxdRatings');
+ const stale={url:film('stale').url,state:'not_rated',attempts:3,enqueuedAt:at(T0),checkedAt:FIRST,claim:null,refs:[],legacy:true};
+ migrated(runBucket,{films:{stale,[FILM]:entry()}});
+ const queued=runBucket.value(QUEUE);queued.legacyLink={ids:['stale'],cursor:'0',startedAt:FIRST};runBucket.set(QUEUE,queued);
+ runBucket.set(eventKeyOf(SECOND,'b-new'),removal('b-new',SECOND,[filmRow('noise','Noise',2001)]));
+ runBucket.set(eventKeyOf(FIRST,'b-old'),removal('b-old',FIRST,[filmRow('noise-2','Noise',2000)]));
+ const started=plain(await R.start(runEnv,{trigger:'manual'}));
+ let armed=true;
+ runBucket.hooks.beforePut=async(key,value)=>{
+  if(!armed||key!==QUEUE||value.legacyLink)return;
+  armed=false;
+  const dropped=await link(runEnv,{limit:1,now:T0});
+  assert.equal(dropped.advanced,true,'B commits the removal of obsolete scan A');
+  assert.equal(runBucket.value(QUEUE).legacyLink,undefined);
+  const moved=await link(runEnv,{limit:1,now:T0});
+  assert.equal(moved.scanning,true,'B leaves the next scan in progress');
+  assert.deepEqual(runBucket.value(QUEUE).legacyLink.ids,[FILM]);
+ };
+ const stepped=plain(await R.step(runEnv,{runId:started.runId}));
+ assert.equal(armed,false,'A reached the cleanup write');
+ assert.equal(stepped.nextAction,'continue');
+ assert.equal(stepped.summary.removal.lookup.stoppedBy,'legacy_link');
+ assert.equal(runBucket.value('letterboxd/ratings/run.json').checkpoint.legacyPagesLinked,0,'A does not count B\'s page');
+ const cursor=runBucket.value(QUEUE).legacyLink;
+ assert.ok(cursor,'A does not erase B\'s cursor');
+ assert.deepEqual(cursor.ids,[FILM]);
+ assert.notEqual(cursor.cursor||null,'0');
+ assert.equal(runBucket.value(QUEUE).films[FILM].legacy,true);
+ assert.equal(runNet.fetches.length,0);
+}
+
+console.log('Ratings legacy link: two removals, alias, kept rating, missing event, killed page, no list without a confirmed rating, a checkpointed ratings step, isolation across a checkpoint without legacyPagesLinked, and a late cleanup that keeps a newer cursor passed');
