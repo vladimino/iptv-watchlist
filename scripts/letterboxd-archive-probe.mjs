@@ -29,8 +29,6 @@ function storedFilm(n, size) {
 
 // Production sizes from the evidence: programme about 2.2 MB, metadata.json about 1.2 MB, links.json about 25 KB with
 // about 420 imported films, a films-list summary of the whole account and a watchlist summary.
-// Production sizes from the evidence: programme about 2.2 MB, metadata.json about 1.2 MB, links.json about 25 KB with
-// about 420 imported films, a films-list summary of the whole account and a watchlist summary.
 function syntheticObjects() {
   const programmeFilms = Array.from({length: 1500}, (_, n) => storedFilm(n, 1300));
   const metadata = Object.fromEntries(Array.from({length: 1500}, (_, n) => [code(n + 1500), storedFilm(n + 1500, 650)]));
