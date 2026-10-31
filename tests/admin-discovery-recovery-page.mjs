@@ -56,7 +56,7 @@ assert.match(html, /data-obs-recovery-execute>Повторно направит�
 assert.match(html, /data-obs-recovery-cancel>Отменить/);
 assert.doesNotMatch(visible(html), /k{20}/);
 html = V.obsRecoveryPanelHtml({...okAnswer, assessment: {...okAnswer.assessment, execute: {...okAnswer.assessment.execute, available: false, reason: 'writer_active', effect: {when: 'none', at: null}}}, action: {status: 'ineligible'}}, {slot: 'o1'});
-assert.match(html, /Недоступно: резолвер сейчас пишет: вмешиваться нельзя\./);
+assert.match(html, /Недоступно — резолвер сейчас пишет: вмешиваться нельзя\./);
 assert.doesNotMatch(html, /data-obs-recovery-accept/);
 html = V.obsRecoveryPanelHtml({...okAnswer, observation: {...okAnswer.observation, title: '<img src=x onerror=alert(1)>'}}, {slot: 'o1'});
 assert.doesNotMatch(html, /<img/);
@@ -249,7 +249,7 @@ assert.equal(JSON.parse(await (await memory.get('epg/discovery-resolution.json')
 await click(panel, '[data-obs-recovery-recheck]');
 await settle();
 assert.doesNotMatch(panel.innerHTML, /obs-receipt/);
-assert.match(panel.innerHTML, /Недоступно: наблюдение и так в обычной очереди: запись ничего не изменит\./);
+assert.match(panel.innerHTML, /Недоступно — наблюдение и так в обычной очереди: запись ничего не изменит\./);
 
 // Cancel: back to the checkbox, nothing executed.
 const other = slotOf('Громкий берег');
@@ -274,7 +274,7 @@ await put('epg/resolver-lease.json', {id: 'chunk-hop', expiresAt: clock + 60000}
 await click(otherPanel, '[data-obs-recovery-execute]');
 await settle();
 assert.match(otherPanel.innerHTML, /Резолвер сейчас занят\. Ничего не записано/);
-assert.match(otherPanel.innerHTML, /Недоступно: резолвер сейчас пишет/);
+assert.match(otherPanel.innerHTML, /Недоступно — резолвер сейчас пишет/);
 assert.match(otherPanel.innerHTML, /Подтверждение сохранено до 31\.10\.2026, 13:10 Madrid/);
 assert.doesNotMatch(otherPanel.innerHTML, /data-obs-recovery-execute/, 'no execution while the lease is live');
 assert.equal(JSON.parse(await (await memory.get('epg/discovery-resolution.json')).text())[OTHER].terminalReason, 'repeated_uncertain_match');
@@ -302,7 +302,7 @@ const ambigPanel = document.querySelector(`[data-obs-recovery-slot="${ambig}"]`)
 await run('onLimboResult')({preventDefault() {}, target: {closest: match => match === '[data-obs-recovery]' ? openButton(ambig) : null}});
 await settle();
 assert.match(ambigPanel.innerHTML, /Идентичность неоднозначна/);
-assert.match(ambigPanel.innerHTML, /Недоступно: идентичность неоднозначна: нужен разбор идентичности, а не повтор\./);
+assert.match(ambigPanel.innerHTML, /Недоступно — идентичность неоднозначна: нужен разбор идентичности, а не повтор\./);
 assert.doesNotMatch(ambigPanel.innerHTML, /data-obs-recovery-accept/);
 // Close: no request.
 requests = [];

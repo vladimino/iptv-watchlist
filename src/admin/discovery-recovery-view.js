@@ -236,7 +236,7 @@ function obsActionHtml(answer, state) {
   if (!gate.available || action.status !== 'eligible') {
     const expires = state?.confirmation && gate.reason === 'writer_active' ? obsDate(state.confirmation.expiresAt) : null;
     const held = expires ? `<p class="obs-confirmed" role="status">Подтверждение сохранено до ${obsEscape(expires)}. Выполнить его можно, когда резолвер освободится: нажми «Проверить заново».</p>` : '';
-    return `<h4>Повторно направить на проверку</h4><p>Недоступно: ${obsEscape(OBS_GATE_COPY[gate.reason])}.</p>${held}`;
+    return `<h4>Повторно направить на проверку</h4><p>Недоступно — ${obsEscape(OBS_GATE_COPY[gate.reason])}.</p>${held}`;
   }
   const title = answer.observation.title || answer.observation.normalizedTitle || 'без названия';
   const minutes = Math.round((action.confirmTtlMs || 600000) / 60000);
