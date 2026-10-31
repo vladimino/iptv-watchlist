@@ -181,6 +181,50 @@ const LetterboxdDiary=(()=>{
  }
  const outcomeOf=status=>status===403?'blocked':status===429?'rate_limited':'failed';
 
+ // The Diary cursor (`state.json`). Version 1 (no `writer`) is written as before, last writer wins. The merge form
+ // (ADR 0060 decision 6, `schemaVersion: 2` with `writer`) exists only once ratings_storage_migrate has converted it:
+ // its progress part is a join (newest = later, oldest = earlier, reachedEnd = either, resumePage = the larger, null
+ // once reachedEnd; an absent page counts as page 2, the start of the backfill) and its diagnostic part
+ // (lastOutcome, stopReason, counts, writer) is one record, last writer wins by (lastAttemptAt, writer.runId,
+ // writer.step, content). Serialization is canonical, so equal states are equal bytes.
+ const emptyState=()=>({schemaVersion:1,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null});
+ const cursorMigrated=state=>state?.schemaVersion===2&&!!state.writer&&typeof state.writer==='object';
+ const sorted=value=>Array.isArray(value)?value.map(sorted):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,sorted(value[key])])):value;
+ const later=(a,b)=>a==null?b??null:b==null?a:a>b?a:b,earlier=(a,b)=>a==null?b??null:b==null?a:a<b?a:b;
+ const backfillPage=value=>Number.isInteger(value)&&value>=2?value:null;
+ function joinProgress(a,b){
+  const ca=a?.coverage||{},cb=b?.coverage||{},reachedEnd=ca.reachedEnd===true||cb.reachedEnd===true;
+  const pa=backfillPage(a?.resumePage),pb=backfillPage(b?.resumePage);
+  return {coverage:{newestWatchedDate:later(ca.newestWatchedDate??null,cb.newestWatchedDate??null),oldestWatchedDate:earlier(ca.oldestWatchedDate??null,cb.oldestWatchedDate??null),reachedEnd},resumePage:reachedEnd||pa==null&&pb==null?null:Math.max(pa??2,pb??2)};
+ }
+ const diagnosticOrder=state=>[String(state?.lastAttemptAt||''),String(state?.writer?.runId||''),String(state?.writer?.step||''),JSON.stringify(sorted({lastOutcome:state?.lastOutcome??null,stopReason:state?.stopReason??null,counts:state?.counts??null}))];
+ function compareDiagnostics(a,b){const x=diagnosticOrder(a),y=diagnosticOrder(b);for(let i=0;i<x.length;i++){if(x[i]<y[i])return -1;if(x[i]>y[i])return 1;}return 0;}
+ // Commutative, associative and idempotent over merge-form states; `incoming` without lastAttemptAt (a per-page
+ // checkpoint) carries progress only and never wins the diagnostic record.
+ function mergeCursor(stored,incoming){
+  const winner=compareDiagnostics(incoming,stored)>0?incoming:stored;
+  return sorted({schemaVersion:2,...joinProgress(stored,incoming),lastAttemptAt:later(stored?.lastAttemptAt??null,incoming?.lastAttemptAt??null),lastSuccessAt:later(stored?.lastSuccessAt??null,incoming?.lastSuccessAt??null),lastFailureAt:later(stored?.lastFailureAt??null,incoming?.lastFailureAt??null),
+   lastOutcome:winner?.lastOutcome??null,stopReason:winner?.stopReason??null,counts:winner?.counts??null,writer:winner?.writer||stored?.writer||incoming?.writer||null});
+ }
+ // ratings_storage_migrate: the merge form of the current cursor, its progress and diagnostics unchanged.
+ const migrateCursor=(state,writer)=>sorted({...emptyState(),...(state||{}),schemaVersion:2,writer});
+ async function readCursor(env){const object=await env.BUCKET.get(KEYS.state);return {object,state:object?await object.json():null};}
+ const putCursor=(env,object,value)=>env.BUCKET.put(KEYS.state,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ // Every cursor write is conditional on the version read, and the rule follows the version found at the write: a
+ // version 1 cursor gets this run's state as before; a merge-form cursor gets this run's state merged in, with its
+ // writer, so no write of this code turns a migrated cursor back into version 1. `progressOnly` (a per-page checkpoint)
+ // writes nothing on a version 1 cursor.
+ async function commitCursor(env,read,state,writer,{progressOnly=false}={}){
+  let {object,state:current}=read;
+  for(let attempt=0;attempt<5;attempt++){
+   const next=cursorMigrated(current)?mergeCursor(current,{...state,writer}):progressOnly?null:state;
+   if(next==null)return current;
+   if(await putCursor(env,object,next)!==null)return next;
+   ({object,state:current}=await readCursor(env));
+  }
+  throw new Error('Diary state changed during write');
+ }
+
  // One bounded run. Page 1 always. While a page is entirely new, the new entries may continue on the next page, so that
  // page is read too. Once a page holds a known entry, the run switches to the pending backfill, resumed one page
  // before where it stopped (overlap), and reads on from there until the page budget or the last page. Each page is
@@ -188,19 +232,31 @@ const LetterboxdDiary=(()=>{
  // run and are reported, never thrown.
  // AIR-263: `trace(phase, edge, fields)` receives compact phase markers (enter and exit, page, counts and byte sizes the
  // step already holds); a failing trace never changes the run.
- async function syncHistory(env,{now=Date.now(),maxPages=MAX_PAGES,afterPage=null,trace=null}={}){
+ // ADR 0060 options of the ratings run: `writer {runId, step}` names the writer in a merge-form cursor (the inline EPG
+ // stage passes its run and step `inline`); `startPage`/`startMode` continue the run's own checkpoint, a backfill never
+ // below the cursor's resumePage; `beforePage()` returning false ends the step before the next request (stopReason
+ // `step_budget`); `progressWrites` joins the cursor after each page; `onPage({page, next, pagesRead})` runs after that
+ // join and returning false ends the step (stopReason `lease_lost`). Without them the run is the one described above.
+ async function syncHistory(env,{now=Date.now(),maxPages=MAX_PAGES,afterPage=null,trace=null,writer=null,startPage=1,startMode='incremental',beforePage=null,onPage=null,progressWrites=false}={}){
   const mark=(phase,edge,fields={})=>{try{trace?.(phase,edge,fields);}catch{}};
   const startedAt=new Date(now).toISOString(),username=sourceConfig(env).letterboxdUsername;
+  const stamp={runId:String(writer?.runId||'unknown'),step:String(writer?.step||'inline')};
   mark('diary_state_load','enter');
-  const previous=await loadJSON(env,KEYS.state)||{schemaVersion:1,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null};
+  const read=await readCursor(env);
+  const previous=read.state||emptyState();
   const counts={pages:0,rows:0,unresolved:0,undated:0};
   const coverage={newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false,...previous.coverage};
   const tally={seen:new Set(),added:new Set(),updated:new Set(),conflicts:new Set()};
   mark('diary_state_load','exit',{found:previous.lastAttemptAt!=null});
-  let page=1,mode='incremental',outcome=null,stopReason=null,moreAfter=null,firstRows=[];
+  let page=Number.isInteger(startPage)&&startPage>=1?startPage:1,mode=startMode==='backfill'?'backfill':'incremental',outcome=null,stopReason=null,moreAfter=null,firstRows=[],halted=false;
+  if(mode==='backfill'&&Number.isInteger(previous.resumePage)&&previous.resumePage>page)page=previous.resumePage;
+  const backfillDone=mode==='backfill'&&coverage.reachedEnd;
   const fail=(kind,reason)=>{outcome=kind;stopReason=reason;moreAfter=page;};
-  while(true){
+  // The resume point if the run stopped before reading `next`: the rule applied after the loop.
+  const resumeAt=next=>coverage.reachedEnd&&next==null?null:next!=null&&(mode==='backfill'||next>1)?next:previous.resumePage||null;
+  while(!backfillDone){
    if(counts.pages>=maxPages){moreAfter=page;break;}
+   if(beforePage&&!await beforePage({page,mode})){moreAfter=page;stopReason='step_budget';halted=true;break;}
    // Request, body and parse are one bounded step: any failure of it is a reported outcome, not an exception.
    let parsed;
    try{
@@ -236,27 +292,34 @@ const LetterboxdDiary=(()=>{
     if(!coverage.newestWatchedDate||row.watchedDate>coverage.newestWatchedDate)coverage.newestWatchedDate=row.watchedDate;
     if(!coverage.oldestWatchedDate||row.watchedDate<coverage.oldestWatchedDate)coverage.oldestWatchedDate=row.watchedDate;
    }
-   if(!parsed.next){coverage.reachedEnd=true;break;}
-   if(page>=STOP_PAGE){outcome='partial';stopReason='page_limit';break;}
-   const allNew=pageKeys.size>0&&knownBefore.size===0;
-   if(mode==='incremental'&&allNew){page++;continue;}
-   if(mode==='incremental'&&previous.resumePage){mode='backfill';page=Math.max(page+1,previous.resumePage-1);continue;}
-   if(mode==='incremental'&&!coverage.reachedEnd){mode='backfill';page++;continue;}
-   if(mode==='backfill'){page++;continue;}
-   break;
+   let next=null;
+   if(!parsed.next)coverage.reachedEnd=true;
+   else if(page>=STOP_PAGE){outcome='partial';stopReason='page_limit';}
+   else{
+    const allNew=pageKeys.size>0&&knownBefore.size===0;
+    if(mode==='incremental'&&allNew)next=page+1;
+    else if(mode==='incremental'&&previous.resumePage){mode='backfill';next=Math.max(page+1,previous.resumePage-1);}
+    else if(mode==='incremental'&&!coverage.reachedEnd){mode='backfill';next=page+1;}
+    else if(mode==='backfill')next=page+1;
+   }
+   if(progressWrites){mark('diary_state_checkpoint','enter',{page});await commitCursor(env,await readCursor(env),{coverage:{...coverage},resumePage:resumeAt(next)},stamp,{progressOnly:true});mark('diary_state_checkpoint','exit',{page});}
+   if(onPage&&!await onPage({page,next:next==null?null:{page:next,mode},pagesRead:counts.pages})){if(next!=null)moreAfter=next;page=next??page;stopReason='lease_lost';halted=true;break;}
+   if(next==null)break;
+   page=next;
   }
   Object.assign(counts,{added:tally.added.size,updated:tally.updated.size,unchanged:[...tally.seen].filter(key=>!tally.added.has(key)&&!tally.updated.has(key)&&!tally.conflicts.has(key)).length,conflicts:tally.conflicts.size});
   // Pages left unread: resume there next time, unless only an incremental pass ran and an older backfill is pending.
-  const resumePage=coverage.reachedEnd&&moreAfter==null?null:moreAfter!=null&&(mode==='backfill'||page>1)?moreAfter:previous.resumePage||null;
+  const resumePage=resumeAt(moreAfter);
   if(!outcome)outcome=coverage.reachedEnd&&resumePage==null?'complete':'partial';
   if(outcome==='partial'&&!stopReason)stopReason=moreAfter!=null?'page_budget':'overlap';
   const failed=['failed','blocked','rate_limited'].includes(outcome);
   const state={schemaVersion:1,lastAttemptAt:startedAt,lastSuccessAt:failed?previous.lastSuccessAt||null:startedAt,lastFailureAt:failed?startedAt:previous.lastFailureAt||null,
    lastOutcome:outcome,stopReason,counts,coverage,resumePage};
   mark('diary_state_save','enter');
-  await saveJSON(env,KEYS.state,state);
+  const saved=await commitCursor(env,read,state,stamp);
   mark('diary_state_save','exit',{outcome});
-  return {...state,firstPageRows:firstRows};
+  // `next`: where this run would go on (its own checkpoint), or null when it has nothing left to read or failed.
+  return {...state,firstPageRows:firstRows,next:!failed&&moreAfter!=null?{page:moreAfter,mode}:null,halted,merged:cursorMigrated(saved),cursor:{coverage:saved?.coverage||coverage,resumePage:saved?.resumePage??resumePage}};
  }
  // Read side: state, per-film aggregates and, for one film, its entries. Never writes or fetches.
  async function readHistory(env,{filmId=null}={}){
@@ -266,5 +329,6 @@ const LetterboxdDiary=(()=>{
   if(filmId!=null)body.film={filmId,...(films[filmId]||{viewingCount:0,viewingCountExact:true,lastWatchedAt:null,rewatches:0,rewatchesExact:true}),entries:entries.filter(entry=>entry.identity?.value===filmId).sort((a,b)=>a.watchedDate<b.watchedDate?1:a.watchedDate>b.watchedDate?-1:0)};
   return body;
  }
- return {KEYS,MAX_PAGES,enabled,pageUrl,parsePage,keyRows,mergeRows,summarize,ratingEvidence,syncHistory,readHistory,loadHistory:env=>loadJSON(env,KEYS.history)};
+ return {KEYS,MAX_PAGES,enabled,pageUrl,parsePage,keyRows,mergeRows,summarize,ratingEvidence,syncHistory,readHistory,loadHistory:env=>loadJSON(env,KEYS.history),
+  cursorMigrated,joinProgress,mergeCursor,migrateCursor,readCursor,putCursor,emptyState};
 })();

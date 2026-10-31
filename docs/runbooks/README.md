@@ -18,7 +18,7 @@ These pages describe the **currently maintained** operational boundaries; none i
 - [D1 backfill execution and recovery (owner approval required)](d1-backfill.md)
 - [TMDB credits for watchlist Films in D1 (owner approval required)](tmdb-watchlist-credits.md)
 - [TMDB TV identity correction for four retired movie ids: offline plan and production steps (owner approval required)](tmdb-tv-identity-correction.md)
-- [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md)
+- [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md); also [one stuck observation](discovery-ledger.md#one-stuck-observation): the owner page read and the guarded reconsideration
 - [Letterboxd export reconciliation, offline (complete matching needs an approved R2 snapshot), and identity from film pages (network run needs owner approval)](letterboxd-export-reconciliation.md)
 
 Historical, non-authoritative Sites and R2 migration steps are in [archive](../archive/README.md). Contracts, ADRs and dated experiments have separate roles in the [documentation index](../README.md).

@@ -1,7 +1,7 @@
 # AIR-298: prediction queue writer inventory and offline race tests
 
 **Captured:** 2026-10-31, code reading of `main` `dab57b9` and offline tests on the AIR-298 branch. No production read or write, no run, no reconcile.  
-**Card:** [AIR-298](https://trello.com/c/VBVLAbuW). **Decision:** [ADR 0061](../../adr/0061-prediction-queue-conditional-writes.md) (Proposed). **Root finding:** [AIR-281 audit](air-281-targeted-recovery-no-go-2026-10-31.md).
+**Card:** [AIR-298](https://trello.com/c/VBVLAbuW). **Decision:** [ADR 0062](../../adr/0062-prediction-queue-conditional-writes.md) (Proposed). **Root finding:** [AIR-281 audit](air-281-targeted-recovery-no-go-2026-10-31.md).
 
 ## Hypothesis versus observation
 

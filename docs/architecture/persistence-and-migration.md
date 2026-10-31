@@ -37,6 +37,13 @@ The prediction family is portable only when every prediction record links an imm
 
 A fingerprint or prediction bundle stored under a retired Film id, whose survivor holds its own newer payload, is not imported: the importer records it as superseded by the canonical payload and leaves the object in R2 ([ADR-0029](../adr/0029-superseded-redirect-payloads.md)). This is a ledger rule inside the offline import and changes no node or arrow above.
 
+Two R2 families stay R2-only and add no row ([ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md)):
+
+- The discovery observation index under `epg/generations/<run>/discovery-observations/` is a derived projection of the ledger and the decisions and falls under the generation archive family.
+- The guarded owner action records under `admin/actions/` are run records.
+
+Both stay within `worker <--> r2` and change no node or arrow above.
+
 The immutable fingerprint body and generation record ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md) section 2) that the current `fingerprint.json` names are mapped through it and add no row; older generations stay in R2 as unreferenced history. This is also a ledger rule inside the offline import and changes no node or arrow above.
 
 The D1 data came through a one-off path, not a live flow: a fenced read-only snapshot of R2, a local build by the backfill executor, and one load through the D1 Import API ([runbook](../runbooks/d1-backfill.md)). Between reloads, D1 follows R2 only through the enrichment projector once it is turned on: R2 stays the truth, and D1 Films, Persons, credits and metadata trail it by up to an hour. Other domains (candidates, decisions, predictions, ratings) follow R2 only through a reload until their own step. A reload seeds the projector's change keys and replays the D1-only steps ([runbook](../runbooks/d1-backfill.md#reload-with-the-enrichment-projector-air-275-phase-2)). The projector's enrichment objects include the optional owner-approved `identity/tmdb-retirements.json` ([ADR 0057](../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md)): when it exists, the projection applies it and D1 follows the corrected identity like any other R2 change; the snapshot loader, the offline import and the seed read it the same way. This changes no node or arrow above.

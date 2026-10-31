@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
+const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -154,8 +154,9 @@ assert.deepEqual(unmet.report.flags.filter(item=>item.requires).map(item=>item.n
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
  DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
+ RATINGS_PIPELINE:'ratingsPipelineSwitch(env)',
 };
-const samples=[undefined,'',' ','on',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
+const samples=[undefined,'',' ','on','inline','separate',' separate','separate ','Separate','SEPARATE',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);
 for(const [name,expression] of Object.entries(consumer)){
  const compute=vm.runInContext('env=>'+expression,context);

@@ -2,7 +2,8 @@
 // closed on any undeclared code or on an answer that claims an action or a writer, escaping, codes and the pin only inside
 // the closed technical details, Madrid times. The page: the panel opens only from a film item of the prediction or
 // fingerprint subsystem, toggles with aria-expanded, reads through the client with the held pin, and after a change says
-// so and shows the fresh state. The bundle has no write method and no action control.
+// so and shows the fresh state. The prediction panel has no write method and no action control; the bundle's only write
+// is the separate discovery action's POST.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -136,8 +137,10 @@ assert.doesNotMatch(V.recoveryErrorHtml('<b>x</b>'), /<b>/);
 
 // 4. The page over the Worker bundle.
 const page = fs.readFileSync('public/admin-limbo.js', 'utf8');
-const bundle = bundleAdmin([fs.readFileSync('src/admin/client.js', 'utf8'), fs.readFileSync('src/admin/limbo-client.js', 'utf8'), viewSource, page]);
-assert.doesNotMatch(bundle, /method:\s*['"](?:POST|PUT|PATCH|DELETE)|\/api\/enrichment|\/mcp|Authorization|Bearer|localStorage/);
+const bundle = bundleAdmin([fs.readFileSync('src/admin/client.js', 'utf8'), fs.readFileSync('src/admin/limbo-client.js', 'utf8'), viewSource, fs.readFileSync('src/admin/discovery-recovery-view.js', 'utf8'), page]);
+assert.equal([...bundle.matchAll(/method:\s*['"]POST/g)].length, 1, 'the one write is the discovery action');
+assert.doesNotMatch(page.slice(page.indexOf('function limboRecoveryLoad'), page.indexOf('function limboRecoveryObservation')), /DiscoveryRecovery\(|DiscoveryReconsider\(|discoveryActionPost/, 'the prediction panel calls no action');
+assert.doesNotMatch(bundle, /method:\s*['"](?:PUT|PATCH|DELETE)|\/api\/enrichment|\/mcp|Authorization|Bearer|localStorage/);
 assert.doesNotMatch(page, /\bfetch\(/);
 const css = fs.readFileSync('public/admin.css', 'utf8');
 assert.match(css, /\.limbo-recovery\{/);
@@ -160,6 +163,7 @@ const FrozenDate = class extends Date {constructor(...args) {super(...(args.leng
 const workerContext = vm.createContext({Response, Request, Headers, URL, URLSearchParams, AbortSignal, Date: FrozenDate, Intl, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, Uint32Array, DataView, atob, btoa, crypto: webcrypto, console, setTimeout, structuredClone, encodeURIComponent, decodeURIComponent,
   ASSETS: {}, INITIAL_PERSONAL_RATINGS: {}, FILM_TITLE_DICTIONARY: [], PERSON_NAME_DICTIONARY: [],
   fetch: async () => {throw new Error('no outbound request');}});
+vm.runInContext(scoped('src/domain/discovery-observation-index.js', 'DiscoveryIndex'), workerContext);
 for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/ratings-seed.js', 'src/discovery.js', 'src/letterboxd-facts.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
 vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), workerContext);
@@ -169,6 +173,9 @@ vm.runInContext(fs.readFileSync('src/admin/limbo.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/prediction-diagnostics.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/prediction-recovery.js', 'PredictionRecovery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/prediction-recovery.js', 'utf8'), workerContext);
+vm.runInContext(scoped('src/domain/admin-actions.js', 'AdminActions'), workerContext);
+vm.runInContext(scoped('src/domain/discovery-recovery.js', 'DiscoveryRecovery'), workerContext);
+vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), workerContext);
 const G1 = '11111111-1111-4111-8111-111111111111';
 const QUEUE = 'enrichment/prediction-queue.json';

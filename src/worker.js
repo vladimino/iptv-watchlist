@@ -300,7 +300,7 @@ async function writeEvent(env,event){
  for(let attempt=0;attempt<5;attempt++){
   const object=await env.BUCKET.get(key),stored=object?await object.json():null,next=stored?mergeRemovalEvent(stored,event):event;
   const saved=await env.BUCKET.put(key,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
-  if(saved!==null)return;
+  if(saved!==null)return next;
  }
  throw new Error('Watchlist event changed during write');
 }
@@ -324,8 +324,9 @@ async function beginSync(env){
  if(films.size!==total)throw new Error(`Incomplete watchlist: ${films.size}/${total}`);
  const verify=parseWatchlist(await getHTML(sources.watchlist));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
  const cache=await loadJSON(env,'metadata.json')||{};const all=[...films.values()].map(f=>cache[f.id]?{...cache[f.id],...f,aliases:cache[f.id].aliases}:f);const pending=all.filter(f=>!f.metadataAt||f.peopleVersion!==1||f.peopleNamesVersion!==2||!f.synopsisFetchedAt||Date.now()-Date.parse(f.metadataAt)>30*86400000).map(f=>f.id);
- const ratingPending=['letterboxd-diary'];
- const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,ratingPending,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
+ const ratingPending=['letterboxd-diary'],separate=await ratingsSeparate(env);
+ if(separate&&current)await flushRemovalHandover(env,current);
+ const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...(separate?{}:{ratingPending}),cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
 async function metadataSync(env,run){
@@ -456,8 +457,21 @@ async function publishGenerationWithLedger(env,runId,discovery,meta,files){
 // AIR-268: queue and look up the films this run's watchlist diff removed. The hand-over stays in sync.json until the
 // queue holds it, so a request killed after finishSync is replayed by the next step on the completed run (syncStep).
 async function resumeRemovalLookups(env,run){
- const lookup=await lookupRemovalRatings(env,run.removalLookups);if(!lookup)return null;
+ const lookup=await lookupRemovalRatings(env,run.removalLookups,Date.now(),removalHandoverRef(run));if(!lookup)return null;
  if(!lookup.error)delete run.removalLookups;run.removalRatingLookup=lookup;await saveJSON(env,'sync.json',run);return lookup;
+}
+// ADR 0060: the separate pipeline acts once RATINGS_PIPELINE is `separate` and ratings_storage_migrate has migrated the
+// queue and the Diary cursor. The EPG commit then hands the films its watchlist diff removed to the queue as
+// references to the removal event, durably and before it publishes, and does no ratings work: no Diary read, no fact
+// write, no lookup. A hand-over left in sync.json (`removalRefs`, or a version 1 `removalLookups`) is flushed by the
+// next step on the run and by the next sync start before sync.json is replaced.
+const ratingsSeparate=async env=>env?.RATINGS_PIPELINE==='separate'&&await LetterboxdRatings.separateActive(env);
+function removalHandoverRef(run){const event=(run?.events||[]).find(item=>item?.type==='watchlist');return event?.id&&Number.isFinite(Date.parse(event.at))?{eventKey:removalEventKey(event),sourceRunId:run.runId,at:event.at}:null;}
+async function flushRemovalHandover(env,run){
+ if(!run?.removalRefs&&!run?.removalLookups)return false;
+ const items=[...(run.removalRefs?.films?.length?[{films:run.removalRefs.films,ref:run.removalRefs.ref}]:[]),...LetterboxdRatings.syncHandover(run)];
+ for(const item of items)await enqueueRemovalRefs(env,item.films,item.ref);
+ delete run.removalRefs;delete run.removalLookups;return true;
 }
 // AIR-270: the post-commit ratings work carries a durable attempt marker in sync.json. Each phase is saved (and logged)
 // before it starts, so a request killed for memory or time leaves `state: started` with the phase it died in. The next
@@ -515,6 +529,11 @@ async function diaryRatingsStage(env,run){
  return ratings;
 }
 async function completeWithRatings(env,run,report){
+ if(await ratingsSeparate(env)){
+  await flushRemovalHandover(env,run);delete run.ratingPending;run.ratingsPipeline='separate';
+  const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
+  return {...result,ratingsPipeline:'separate'};
+ }
  if(run.ratingPending?.length)run.ratingAttempt={id:crypto.randomUUID(),state:'started',startedAt:new Date().toISOString()};
  if(run.ratingAttempt?.state==='started')await ratingsPhase(env,run,'post_commit',false);
  const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
@@ -558,7 +577,7 @@ async function syncStep(env,pathname,body,step){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';if(run.removalLookups)await resumeRemovalLookups(env,run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';if(run.removalRefs||run.removalLookups){if(run.removalRefs||await ratingsSeparate(env)){if(await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);}else await resumeRemovalLookups(env,run);}if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const discovery=await queueDiscovery(env,'epg_committed',run.runId);step.discovery=discoverySummary(discovery);return json({...result,discovery});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
@@ -577,7 +596,9 @@ async function epgSync(env,run){
  const matched=[...fresh.values()].map(f=>({...f,shows:f.shows.sort((a,b)=>a.start-b.start)}));const currentById=new Map(matched.map(f=>[String(f.id),f]));const films=run.watchlist.map(f=>withAvailability({...f,...currentById.get(String(f.id)),shows:currentById.get(String(f.id))?.shows||[]}));const countShows=matched.reduce((n,f)=>n+f.shows.length,0);
  const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
- if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];if(removalLookupEnabled(env)){const removed=new Set(run.events[0].removed.map(film=>String(film.id)));run.removalLookups=(before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);}await saveJSON(env,'sync.json',run);}
+ const separate=await ratingsSeparate(env);
+ if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};if(separate){const films=removedFilms();if(films.length)run.removalRefs={ref:removalHandoverRef(run),films};}else if(removalLookupEnabled(env))run.removalLookups=removedFilms();await saveJSON(env,'sync.json',run);}
+ if(separate&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report}));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
  await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
@@ -599,9 +620,13 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/admin/limbo')return await adminLimboRoute(request,env,url);
   if(url.pathname==='/api/admin/posters')return await adminPostersRoute(request,env,url);
   if(url.pathname==='/api/admin/prediction-recovery')return await adminPredictionRecoveryRoute(request,env,url);
+  if(url.pathname==='/api/admin/discovery-recovery')return await adminDiscoveryRecoveryRoute(request,env,url);
+  if(url.pathname.startsWith('/api/admin/discovery-recovery/'))return await adminDiscoveryReconsiderRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/'))return await adminReadRoute(request,env,url);
   if(url.pathname.startsWith('/api/letterboxd/baseline/'))return await LetterboxdFacts.handleBaselineRequest(request,env,url.pathname);
   if(url.pathname==='/api/letterboxd/diary'&&request.method==='GET'){const filmId=url.searchParams.get('filmId');if(filmId!=null&&!/^[A-Za-z0-9_-]{1,80}$/.test(filmId))return json({error:'Invalid filmId'},400);return json(await LetterboxdDiary.readHistory(env,{filmId}));}
+  if(url.pathname==='/api/letterboxd/ratings/status'&&request.method==='GET')return json(await LetterboxdRatings.status(env));
+  if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step','/api/letterboxd/ratings/migrate'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});

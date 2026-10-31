@@ -32,7 +32,7 @@ After the step, inspect `discovery.nextAction`: `continue` permits only the next
 
 ## Prediction queue conflicts
 
-Every writer of `enrichment/prediction-queue.json` writes conditionally and rebuilds on conflict ([queue writes](../reference/api/prediction-runner.md#queue-writes), [ADR 0061](../adr/0061-prediction-queue-conditional-writes.md)). A conflict that outlasts 5 attempts is reported, never written over:
+Every writer of `enrichment/prediction-queue.json` writes conditionally and rebuilds on conflict ([queue writes](../reference/api/prediction-runner.md#queue-writes), [ADR 0062](../adr/0062-prediction-queue-conditional-writes.md)). A conflict that outlasts 5 attempts is reported, never written over:
 
 | Where | What it looks like | What to do |
 | --- | --- | --- |

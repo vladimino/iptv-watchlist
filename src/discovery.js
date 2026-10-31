@@ -481,7 +481,65 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  }
  try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint',{beforeWrite:fence});}catch(e){if(e?.name==='LeaseLostError')throw e;error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
  const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,...variantDiagnostic(variantMeter)};
- await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);await saveScorePreview(env,source,preview,fence);return summary;
+ await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);await saveScorePreview(env,source,preview,fence);await saveObservationIndex(env,source,persistedDecisions,fence,{kind:'resolver_chunk',hopId});return summary;
+}
+async function discoveryDigest(text){const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));return Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('');}
+// Index records with the digest of each full decision (the record version the guarded action compares) and the revision
+// of each shard (what the manifest names, so a reader can tell a torn index).
+async function observationIndexShards(built,decisions){
+ const shards=[];
+ for(const records of built.shards){
+  const items=[];
+  for(const record of records)items.push({...record,decisionHash:await discoveryDigest(DiscoveryIndex.canonicalJson(decisions[record.key]))});
+  shards.push({items,revision:await discoveryDigest(DiscoveryIndex.canonicalJson(items))});
+ }
+ return shards;
+}
+// Writes changed shards, then the manifest, each behind the fence. A shard object carries its revision in custom
+// metadata; one whose stored revision already equals the new one is not rewritten (a manifest alone cannot tell, since a
+// writer may have stopped between a shard and its manifest). The manifest names the etags of the resolution map and the
+// generation ledger as they are now, so any later write to either makes the index stale for every reader.
+async function observationShardPut(env,run,index,items,revision,options={}){
+ return await env.BUCKET.put(DiscoveryIndex.observationIndexShardKey(run,index),JSON.stringify(DiscoveryIndex.observationShardDocument(run,index,items,revision)),{httpMetadata:{contentType:'application/json'},customMetadata:{revision},...options});
+}
+async function writeObservationIndex(env,run,shards,fence,fields){
+ for(let index=0;index<shards.length;index++){
+  const stored=await env.BUCKET.head(DiscoveryIndex.observationIndexShardKey(run,index));
+  if(stored?.customMetadata?.revision===shards[index].revision)continue;
+  await fence();await observationShardPut(env,run,index,shards[index].items,shards[index].revision);
+ }
+ const [resolution,ledger]=await Promise.all([env.BUCKET.head('epg/discovery-resolution.json'),env.BUCKET.head(epgGenerationKey(run,'discovery-latest.json'))]);
+ if(!resolution?.etag||!ledger?.etag)return {written:false,reason:'source_unread'};
+ await fence();await saveJSON(env,DiscoveryIndex.observationIndexManifestKey(run),DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),...fields,sources:{resolutionEtag:resolution.etag,ledgerEtag:ledger.etag},shards:shards.map(shard=>({items:shard.items.length,revision:shard.revision}))}));
+ return {written:true,reason:null};
+}
+// The observation index (src/domain/discovery-observation-index.js) of the chunk's generation, from the ledger and the
+// decisions the chunk already holds in memory: the current, unscreened observations that have a decision other than
+// verified or excluded. It is written after the checkpoint and the score preview, so a failure here never costs the
+// chunk its progress: every error but a lost lease is swallowed, and the previous index, whose etags no longer match,
+// is then read as stale. Owner reads use it instead of the ledger and the resolution map.
+async function saveObservationIndex(env,source,decisions,fence,writer){
+ const run=source.programmeRunId||null;
+ try{
+  const pointer=run?await env.BUCKET.get(EPG_GENERATION_KEY):null,generation=pointer?await pointer.json():null;
+  if(!run||generation?.phase!=='published'||generation.programmeRunId!==run)return {written:false,reason:'generation_not_published'};
+  const now=Date.now(),entries=[];let awaitingFirstLookup=0;
+  for(const candidate of source.items){
+   const decision=decisions[candidate.key];
+   if(candidateActivity(candidate,now)!=='current'||screenedNonfilmReason(candidate,decision))continue;
+   if(!decision){awaitingFirstLookup++;continue;}
+   if(decision.status==='verified'||decision.status==='excluded_nonfilm')continue;
+   entries.push({candidate,decision});
+  }
+  const built=DiscoveryIndex.buildObservationIndex({programmeRunId:run,entries});
+  if(built.error)return {written:false,reason:built.error};
+  const shards=await observationIndexShards(built,decisions);
+  return await writeObservationIndex(env,run,shards,fence,{writer,coverage:built.coverage,counts:{...discoveryCounts(source.items,decisions,now),awaitingFirstLookup}});
+ }catch(e){
+  if(e?.name==='LeaseLostError')throw e;
+  try{console.log(JSON.stringify({event:'discovery_observation_index',programmeRunId:diagnosticId(run),written:false,error:diagnosticErrorCode(e)}));}catch{}
+  return {written:false,reason:'error'};
+ }
 }
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
 const DISCOVERY_CHUNK_BUDGET=12;

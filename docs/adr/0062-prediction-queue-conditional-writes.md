@@ -1,4 +1,4 @@
-# ADR 0061: Every prediction queue writer writes conditionally and rebuilds on conflict
+# ADR 0062: Every prediction queue writer writes conditionally and rebuilds on conflict
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-31  
