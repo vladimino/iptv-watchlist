@@ -24,6 +24,6 @@ Errors: `405` for any method but GET, `503` when the Worker has no `DB` binding,
 ## Limits
 
 - Name matching uses SQLite `lower()`, which folds ASCII only; Cyrillic names compare as stored.
-- Cross-source evidence follows [ADR-0009](../../adr/0009-canonical-film-person-identity.md) and the identity rule of [AIR-201](https://trello.com/c/1uvzKiGg): only a shared verified Film with the same role and name is evidence; a name alone is a candidate. Nothing here links, merges or edits a person.
+- Cross-source evidence follows [ADR 0009](../../adr/0009-canonical-film-person-identity.md) and [ADR 0058](../../adr/0058-canonical-person-grouping.md): only a shared verified Film with the same role and name is evidence; a name alone is a candidate. These routes do not compute the [person identity projection](../domain/person-identity-projection.md) and do not link, merge or edit a person.
 - `coCredit` needs a Film that carries credits from both sources. A reload from R2 gives watchlist Films only Letterboxd credits and catalog Films only TMDB credits, so `coCredit` is empty until the [TMDB credits for watchlist Films](../../runbooks/tmdb-watchlist-credits.md) are added to D1.
 - `actual_rating` holds only ratings that came from `actual.json`; the owner's Letterboxd ratings live in the Letterboxd facts in R2 and are not in D1 yet.
