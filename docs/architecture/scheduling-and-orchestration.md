@@ -100,7 +100,7 @@ A scheduled trigger does not imply successful completion. `already_running`, `bu
 
 ## Proposed: a separate ratings pipeline (not implemented)
 
-[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) proposes moving the Letterboxd ratings out of the EPG commit. Nothing below is deployed: today ratings run inside the commit as in the diagram above. In the proposal the commit only enqueues removed films, and four dedicated tools serve the ratings: the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`, the drift monitor reads `ratings_sync_status`, and the owner runs the one-time `ratings_storage_migrate`.
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) accepts the architecture for moving Letterboxd ratings out of the EPG commit. Nothing below is deployed: today ratings run inside the commit as in the diagram above. In the accepted design the commit only enqueues removed films, and four dedicated tools serve the ratings: the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`, the drift monitor reads `ratings_sync_status`, and the owner runs the one-time `ratings_storage_migrate`.
 
 ```mermaid
 sequenceDiagram

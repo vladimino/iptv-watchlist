@@ -1,11 +1,11 @@
 # ADR 0060: Letterboxd ratings run as their own leased, checkpointed pipeline, driven by a separate Scheduled Task through dedicated MCP tools
 
-**Status:** Proposed  
-**Original decision date:** not decided (proposed 2026-10-31)  
+**Status:** Accepted  
+**Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** not documented; the owner decides `Accepted` or `Declined` before merge. The owner's 2026-10-31 direction (a separate daily Ratings Task, no ratings ownership in the EPG Task) is recorded on [AIR-296](https://trello.com/c/6lFnWkr8); it chose the direction, not this record.  
+**Approval source:** The owner explicitly accepted ADR 0060 and visually approved both rendered Mermaid diagrams in `docs/architecture/scheduling-and-orchestration.md` on 2026-10-31 (Europe/Madrid), after a [positive independent review](https://github.com/vladimino/iptv-watchlist/pull/266#pullrequestreview-5721734814) of reviewed HEAD `31d0370dc58522cc89f6593d2793d1aa4dbbc060` and successful PR CI. [Owner decision recorded in PR #266](https://github.com/vladimino/iptv-watchlist/pull/266#issuecomment-6540460858); [AIR-296 owner-gate record](https://trello.com/c/6lFnWkr8#comment-6ae5947f3c4913889317726e). Approval covers the architecture and documentation only; no production migration, R2/D1 write, flag change, Scheduled Task change or manual ratings/EPG run is authorized.  
 **Related work:** [AIR-296](https://trello.com/c/6lFnWkr8) (this decision); [AIR-294](https://trello.com/c/IzWiVABa) (code); [AIR-295](https://trello.com/c/VtFZ6cci) (production cutover); [AIR-263](https://trello.com/c/uNoGwtid) and its [memory profile](../evidence/epg-diary-oom-profile-2026-10-30.md); [AIR-288](https://trello.com/c/bpXgN1nV); [AIR-293 staging record](../evidence/scheduled-tasks-drift-and-ratings-staging-2026-10-30.md); [ADR 0005](0005-external-chatgpt-tasks.md); [ADR 0023](0023-letterboxd-user-facts.md); [ADR 0043](0043-removal-rating-lookup-queue.md); [ADR 0049](0049-letterboxd-diary-viewing-history.md); [ADR 0054](0054-diary-first-epg-ratings.md)  
-**Supersedes:** None while Proposed. On acceptance, in part: [ADR 0054](0054-diary-first-epg-ratings.md) decision 1 (where the diary is read) and decision 6 (where the attempt is recorded); [ADR 0049](0049-letterboxd-diary-viewing-history.md) decisions 2 and 3 (one read and three pages per EPG commit, run state written last); [ADR 0043](0043-removal-rating-lookup-queue.md) decisions 1, 2, 3 and 6 (when films are queued and looked up, the entry identity and retention, how the hand-over is replayed, what the switch gates). Every other decision of those records stays.  
+**Supersedes:** In part: [ADR 0054](0054-diary-first-epg-ratings.md) decision 1 (where the diary is read) and decision 6 (where the attempt is recorded); [ADR 0049](0049-letterboxd-diary-viewing-history.md) decisions 2 and 3 (one read and three pages per EPG commit, run state written last); [ADR 0043](0043-removal-rating-lookup-queue.md) decisions 1, 2, 3 and 6 (when films are queued and looked up, the entry identity and retention, how the hand-over is replayed, what the switch gates). Every other decision of those records stays.  
 **Superseded by:** None
 
 ## Context
@@ -200,7 +200,7 @@ Not decided here: the Ratings Task's final prompt and time, its activation and t
 
 ## Evidence
 
-- **Original decision:** this record, [AIR-296](https://trello.com/c/6lFnWkr8); owner decision pending.
+- **Original decision:** this record, [AIR-296](https://trello.com/c/6lFnWkr8); explicitly Accepted by the owner on 2026-10-31, with both changed Mermaid diagrams visually approved ([recorded decision](https://github.com/vladimino/iptv-watchlist/pull/266#issuecomment-6540460858)).
 - **Implementation:** none; [AIR-294](https://trello.com/c/IzWiVABa).
 - **Dated verification:** the incident and profile in the [AIR-263 report](../evidence/epg-diary-oom-profile-2026-10-30.md) and the [AIR-288 card](https://trello.com/c/bpXgN1nV); the code facts above were read at `main` `bbb9efe`.
 - **Uncertainty:**

@@ -42,7 +42,7 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 
 **Not registered in the deployed Worker, not read by any code, not set in production.** `feature_flags` does not report it. It joins the configuration contract above only with the code that reads it.
 
-- **`RATINGS_PIPELINE`**, proposed by [ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) (`Proposed`):
+- **`RATINGS_PIPELINE`**, specified by [ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) (`Accepted` design, not implemented):
   - **Values:** `inline` and `separate`.
   - **Default:** absent or any other value is `inline`. Exact-string and whitespace rules are fixed with the code.
   - **`inline`:** keeps the current behavior: the routine EPG commit runs the Diary stage and the removal lookups. While the removal queue is still `schemaVersion: 1` and the Diary cursor unmigrated, it writes today's formats with today's rules, only through version-aware conditional writes, so deploying the code changes no stored content. The proposed `ratings_sync_start` and `ratings_sync_step` answer `disabled` and write nothing.

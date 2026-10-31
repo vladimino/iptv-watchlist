@@ -102,7 +102,7 @@ Every string field is drawn from a closed vocabulary: stages and states (`idle`,
 
 ### Proposed ratings tools (not deployed)
 
-[ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md) is `Proposed`. The deployed Worker exposes none of the tools below and runs ratings inside the EPG commit, as described above. If the record is accepted and delivered, the tools would be added to the allowlist under the same [authorization](#authorization), and they would answer `disabled` until `RATINGS_PIPELINE` is `separate`.
+[ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md) is `Accepted` as an architecture; its tools are not deployed. The deployed Worker exposes none of the tools below and runs ratings inside the EPG commit, as described above. When implemented under separately authorized delivery, the tools would be added to the allowlist under the same [authorization](#authorization), and they would answer `disabled` until `RATINGS_PIPELINE` is `separate`.
 
 | Tool | Writes | What it would call |
 | --- | --- | --- |
