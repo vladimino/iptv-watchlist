@@ -1,6 +1,6 @@
 # Film / Person lifecycle and identity
 
-This diagram illustrates **five independent Film state dimensions** in the storage-neutral domain contract, not a monolithic database status machine or a claim that D1 has replaced R2. Sources: [Film/Person reference](../reference/domain/film-person.md), [identity ADR](../adr/0009-canonical-film-person-identity.md), [domain model](../../src/domain/film-person.js), [reader](../../src/domain/film-person-reader.js) and [backfill](../../src/domain/film-person-backfill.js).
+This diagram illustrates **five independent Film state dimensions** in the storage-neutral domain contract, not a monolithic database status machine or a claim that D1 has replaced R2. Sources: [Film/Person reference](../reference/domain/film-person.md), [identity ADR](../adr/0009-canonical-film-person-identity.md), [domain model](../../src/domain/film-person.js), [reader](../../src/domain/film-person-reader.js) and [backfill](../../src/domain/film-person-backfill.js). A second diagram shows the derived Person reference; it is not a route and not a stored map ([ADR 0059](../adr/0059-person-identity-projection.md), [projection](../reference/domain/person-identity-projection.md)).
 
 ```mermaid
 flowchart LR
@@ -31,4 +31,18 @@ Identity is not inferred from title alone: the watchlist keeps its Letterboxd id
 
 Five dimensions have independent transition guards. A new Taste Profile version makes a prediction stale **without** invalidating its film fingerprint. Changes to showtimes do not invalidate either artifact. `displayReady`, `catalogReady` and `predictionReady` are derived views, not sixth lifecycle statuses. The domain's `*.lifecycle.json` sidecars and dry-run backfill are projections/measurements, not authority to overwrite production objects.
 
-**Current/future boundary:** existing Worker read/write paths and authoritative R2 objects continue to serve the site. The canonical domain model, offline D1 repositories and proposed import/cutover are distinct stages; do not depict them as one deployed transactional entity store. See [D1 schema](../reference/data/d1-schema.md) and [staged migration ADR](../adr/0017-staged-d1-migration.md).
+Person records stay role- and source-specific. The derived reference below is how a watchlist filter and a catalog filter name one human. Production routes do not call it; they still match the role-specific id on the stored credit. A shared name is a review, not a member. The arrow from stored rows means the caller loaded them first. The projection does not query and does not write.
+
+```mermaid
+flowchart LR
+  loaded["Records the caller already loaded"]
+  derived["Derived Person reference"]
+  filters["Person filter of this contract"]
+  stored["Stored rows, R2 authoritative"]
+  routes["Live site routes"]
+  loaded --> derived --> filters
+  stored -.->|caller loads; the projection does not query or write| loaded
+  routes -->|read the stored role id| stored
+```
+
+**Current/future boundary:** existing Worker read/write paths and authoritative R2 objects continue to serve the site. The canonical domain model, the derived Person reference, offline D1 repositories and proposed import/cutover are distinct stages; do not depict them as one deployed transactional entity store. See [D1 schema](../reference/data/d1-schema.md) and [staged migration ADR](../adr/0017-staged-d1-migration.md).
