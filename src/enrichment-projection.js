@@ -36,6 +36,43 @@ export function catalogMetadata(record,key,sha){
  return {schemaVersion:1,year:record.year??null,runtime:record.runtime??null,synopsis:record.synopsis??null,poster:record.poster??null,url:record.url??null,genres:Array.isArray(record.genres)?record.genres:[],peopleVersion:record.peopleVersion??null,payload:{},r2Key:key,contentSha256:sha,updatedAt};
 }
 
+// The metadataSync decision clocks that film_metadata does not store. catalogMetadata folds metadataAt, updatedAt and
+// synopsisFetchedAt into one updatedAt, and it drops peopleNamesVersion and peopleLocalizedAt. A missing metadata.json
+// entry is null (no row). An entry that is present is an object, and a missing or empty clock is null, not a default:
+// null metadataAt is an unstamped record, null synopsisFetchedAt still needs the synopsis step, and only the integer 2
+// in peopleNamesVersion means the name attempt finished. The 30-day window stays in the domain code.
+const syncClock=value=>typeof value==='string'&&value.length?value:null;
+export function filmSyncState(record){
+ if(!record||typeof record!=='object'||Array.isArray(record))return null;
+ return {metadataAt:syncClock(record.metadataAt),synopsisFetchedAt:syncClock(record.synopsisFetchedAt),peopleNamesVersion:Number.isInteger(record.peopleNamesVersion)?record.peopleNamesVersion:null,peopleLocalizedAt:syncClock(record.peopleLocalizedAt)};
+}
+// The metadata.json entry for a Film that already has a row. film:<slug> uses the slug; film:tmdb:<n> uses the catalog
+// spelling tmdb_<n>. aliases are the Film's stored letterboxd external ids, so a retained cache still matches after the
+// Film has left the view and the only identity left in D1 is the Film row. A key that matches no Film is not a row:
+// this function does not mint one.
+export function metadataForFilmId(metadata,filmId,aliases=[]){
+ if(!metadata||typeof metadata!=='object'||typeof filmId!=='string'||!filmId.startsWith('film:'))return null;
+ const keys=[];
+ const add=key=>{if(typeof key==='string'&&key.length&&!keys.includes(key))keys.push(key);};
+ add(filmId.slice(5));
+ const bare=filmId.slice(5);
+ if(bare.startsWith('tmdb:'))add('tmdb_'+bare.slice(5));
+ for(const alias of aliases||[])add(String(alias));
+ for(const key of keys){const value=metadata[key];if(value&&typeof value==='object'&&!Array.isArray(value))return value;}
+ for(const [key,value] of Object.entries(metadata)){
+  if(!value||typeof value!=='object'||Array.isArray(value))continue;
+  const id=value.id!=null?String(value.id):key;
+  if(id===filmId||keys.includes(id)||keys.includes(key))return value;
+ }
+ return null;
+}
+const SYNC_KEY_SENTINEL='#sync';
+export function filmSyncChangeKey(sync){
+ if(!sync)return 'absent';
+ const hashed=projectionKey({metadataAt:sync.metadataAt??null,synopsisFetchedAt:sync.synopsisFetchedAt??null,peopleNamesVersion:sync.peopleNamesVersion??null,peopleLocalizedAt:sync.peopleLocalizedAt??null},SYNC_KEY_SENTINEL);
+ return 'sync'+hashed.slice(hashed.indexOf(':'));
+}
+
 // The source records of one Film: its own id as written, its Letterboxd id, and the catalog spelling tmdb_<id> of each
 // trusted, non-conflicting TMDB id, which is how epg/discovered-films.json keys a catalog film. Without that spelling a
 // catalog film got no credits, and a watchlist film with the same verified TMDB id lost the catalog's TMDB credits.
@@ -80,8 +117,9 @@ export function enrichmentInputs({view,store,metadataSha256=null}){
  const films=view.films.map(film=>{
   const {fingerprint,prediction,predictionHistory,availability,...owned}=film;
   const roster=creditRoster(sources(film));
-  const metadata=catalogMetadata(metadataRecord(store.metadata,film),'metadata.json',metadataSha256);
-  return {id:film.id,film:owned,watchlist:listedOnWatchlist(store,film),credits:roster.unmatched.length?undefined:roster.credits,unmatched:roster.unmatched.length,metadata};
+  const record=metadataRecord(store.metadata,film);
+  const metadata=catalogMetadata(record,'metadata.json',metadataSha256);
+  return {id:film.id,film:owned,watchlist:listedOnWatchlist(store,film),credits:roster.unmatched.length?undefined:roster.credits,unmatched:roster.unmatched.length,metadata,sync:filmSyncState(record)};
  });
  return {films,people:view.people.map(person=>({id:person.id,person}))};
 }
