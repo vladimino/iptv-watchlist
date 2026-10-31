@@ -1,6 +1,6 @@
 # TMDB TV identity correction of four watchlist miniseries (AIR-291)
 
-**Captured:** 2026-10-31, 07:10–07:40 UTC, in the agent container (Node 22), runtime code at `main` `dab57b9` ([PR #268](https://github.com/vladimino/iptv-watchlist/pull/268)), Worker version `48828515-cba8-48a4-8a53-f7c7ac5d5e7c` (deployed 07:02 UTC).  
+**Captured:** 2026-10-31, 07:10–08:40 UTC, in the agent container (Node 22), runtime code at `main` `dab57b9` ([PR #268](https://github.com/vladimino/iptv-watchlist/pull/268)), Worker version `48828515-cba8-48a4-8a53-f7c7ac5d5e7c` (deployed 07:02 UTC).  
 **Card:** [AIR-291](https://trello.com/c/OWV3rL9q); decision [ADR 0057](../../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md); procedure [runbook](../../runbooks/tmdb-tv-identity-correction.md).  
 **Authorizations:** the owner approved the read-only preflight ("начинай", 07:07 UTC) and the single R2 write of the body with SHA-256 `c8aa44c2…` ("разрешаю", 07:36 UTC).  
 **Write path:** the owner chose the Cloudflare API write (07:23 UTC). No S3 writer credential was available for the runbook's conditional put. He made it subject to an owner gate that shows exactly what is written. The runbook was amended to carry this alternative ([PR #272](https://github.com/vladimino/iptv-watchlist/pull/272)).  
@@ -73,6 +73,19 @@ The comparison used the plan's `d1Expected` and `d1Before`, by SHA-256 of their 
 | `film:g97G` | `corrected` | unchanged (11, 11) | unchanged | 1 / 0 / 0 / 1 | unchanged |
 
 Across the database there are exactly 4 `tmdb_tv` rows. No Film trusts a retired movie id, and no Film trusts a TV number as a movie id. The `letterboxd` and `letterboxd_slug` rows are unchanged. Since every credit row is unchanged, the `coCredit` pairs derived from them are unchanged too.
+
+## Repeat run (no-op)
+
+The next cron run, at 08:37:30 UTC, applied the same object and changed nothing. This is the repeated-application check.
+
+| Measure | Value |
+| --- | --- |
+| Outcome | `complete`, 10.5 s, 4 queries, lease released |
+| `tmdbRetirements` | `valid: true`, `applied: 4`, `held: []`, `reasons: []` |
+| Changed and written Films / Persons | 0 / 0, 0 / 0 |
+| Released entities, membership removed, errors | 0, 0, 0 |
+
+A read-only readback at 08:40 UTC found all four Films still `corrected`. Their identity hashes equal `d1Expected`. Their credit rows and prediction `content_sha256` equal the pre-write baseline. Watchlist membership and localization are unchanged, and the global counts are unchanged: 4 `tmdb_tv` rows, 0 trusted retired movie ids, 0 TV numbers trusted as movie ids.
 
 ## Limits
 
