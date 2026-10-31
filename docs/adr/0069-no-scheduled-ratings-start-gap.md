@@ -3,7 +3,7 @@
 **Status:** Proposed  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** Owner acceptance of this record is still required, as is visual approval of the changed sequence diagram in `docs/architecture/scheduling-and-orchestration.md`. The removal of the guard is the owner's decision of 2026-10-31 on [AIR-310](https://trello.com/c/yoaqG5b6). Accepting this record permits the ordinary PR delivery only. It does not authorize a ratings run, an EPG run, a flag change, a Task edit, a storage write or clearing an isolation.  
+**Approval source:** Owner acceptance of this record is still required, as is visual approval of the two changed sequence diagrams in `docs/architecture/scheduling-and-orchestration.md`. The removal of the guard is the owner's decision of 2026-10-31 on [AIR-310](https://trello.com/c/yoaqG5b6). Accepting this record permits the ordinary PR delivery only. It does not authorize a ratings run, an EPG run, a flag change, a Task edit, a storage write or clearing an isolation.  
 **Related work:** [AIR-310](https://trello.com/c/yoaqG5b6); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md); [ADR 0043](0043-removal-rating-lookup-queue.md); [ADR 0067](0067-diary-recent-window.md); the live Ratings Task change is a separate owner approval already carried out and is not repeated here  
 **Supersedes:** In part: [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md) decision 7, the `too_soon` answer (a scheduled start less than six hours after the last start, with `nextStartAt`). The 403/429 six-hour queue pause in decision 5, and every other decision of that record, stay.  
 **Superseded by:** None
@@ -40,7 +40,7 @@ Keep `SCHEDULED_GAP_MS`. The owner rejected that on 2026-10-31: the daily task a
 
 - A scheduled start soon after a finished run, and one soon after an error run, is `started`.
 - Two overlapping invocations still receive one `started` and one `busy`.
-- The sequence diagram in `docs/architecture/scheduling-and-orchestration.md` labels the Ratings Task `17:30, enabled` and the start answer `busy` or `isolated`. That rendered diagram needs the owner's visual approval before merge. The state diagram on the same page is unchanged.
+- Two sequence diagrams in `docs/architecture/scheduling-and-orchestration.md` change. The first labels the drift monitor `18:15, read-only` and shows it reading the EPG, hourly and Ratings task entries, then `epg_status` and read-only `ratings_sync_status`, then optionally notifying the owner. The ratings diagram labels the Ratings Task `17:30, enabled` and the start answer `busy` or `isolated`. Both rendered diagrams need the owner's visual approval before merge.
 - A deploy of this code does not start a run, does not change `RATINGS_PIPELINE`, and does not change the live task.
 
 ## Recovery and migration boundary
@@ -52,8 +52,10 @@ Removing the guard is a code change. Restoring it is a later code change; no sto
 - **Original decision:** the owner decision of 2026-10-31 in the body of [AIR-310](https://trello.com/c/yoaqG5b6).
 - **Implementation:** the pull request that delivers this record. The historical text of ADR 0060 decision 7 is left in place; the supersession is the header pointer on that record.
 - **Dated verification:** offline tests in `tests/ratings-run.mjs` and `tests/ratings-api.mjs`. No production ratings start or step is part of this record.
-- **Uncertainty:** whether the owner accepts this record and visually approves the changed sequence diagram. Both are pre-merge gates.
+- **Uncertainty:** whether the owner accepts this record and visually approves the two changed sequence diagrams. Both are pre-merge gates.
 
 ## Follow-ups
 
-None. The live task is already at 17:30 by a separate approval. Extending the drift monitor to the Ratings Task remains the open follow-up of ADR 0060 and is not this decision.
+The Ratings Task is already daily at 17:30 Europe/Madrid by a separate approval. The drift monitor already reads the daily EPG task, the hourly task and the Ratings Task, plus read-only `ratings_sync_status`, on a daily 18:15 Europe/Madrid recurrence with DTSTART 2026-10-31. That registry change is a separate owner approval, recorded in the [re-review of this delivery](https://github.com/vladimino/iptv-watchlist/pull/290#pullrequestreview-5723925956). This record does not edit either task.
+
+The live Ratings Task prompt still names `too_soon`. Replacing that wording is a separate task edit after this code is deployed, and this record does not authorize it.
