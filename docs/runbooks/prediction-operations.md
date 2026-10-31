@@ -41,12 +41,12 @@ Open `/admin/limbo`, find the film among the prediction or fingerprint items and
 | `retry_backoff` | Wait for the shown retry time. Do not reset `retryAt` or restart the runner |
 | `queue_refresh_pending` | Wait for the next refresh (any prediction run, EPG commit or profile update). A manual `POST /api/enrichment/queue/reconcile` is a production write that rebuilds the whole queue outside the prediction writer lease; it needs separate owner approval and is not a per-film fix |
 | `ready_no_runs` | Check the prediction Scheduled Task as in the section above: enabled, last execution, result. Do not start a run from the page |
-| `repeated_failures` | Read `prediction_film_diagnostics` for `retry.validation` and fix the caller's output against the submit contract (step 5 above) |
+| `repeated_failures` | Follow the reason. Model output (`validation_error`, `parse_error`): read `prediction_film_diagnostics` for `retry.validation` and fix the caller's output against the submit contract (step 5 above). Infrastructure (storage, quota, time budget, model availability, lease): check that cause in run diagnostics, Cloudflare logs and the Task history; the model output is not at fault. Unrecognised kind: investigate the classification and the run history first. In every case do not reset `retryAt` or restart the runner |
 | `index_inconsistent` | The view index and the film objects disagree: investigate the index, not the queue |
 | `not_in_catalog` | The film is in neither the published programme nor the catalog: an identity question for the resolver, not a prediction one |
 | `snapshot_partial`, `profile_missing`, `queue_unavailable`, `film_unreadable`, `queue_state_unknown` | Press «Проверить заново» later. Persistent disagreement after the next refresh is a finding for the owner, not a reason to write |
 
-«Состояние изменилось» after a recheck means one of the read objects (queue, profile, index, programme, film objects, lease or latest run) changed since the previous check; the panel shows the fresh verdict.
+«состояние запуска неизвестно» means the lease or the latest run could not be read or is malformed; it is not evidence that no run is active, so do not clear a lease on its basis. «Состояние изменилось» after a recheck means one of the read objects (queue, profile, index, programme, film objects, lease or latest run) changed since the previous check; the panel shows the fresh verdict.
 
 Keep existing Cloudflare Access protections; don't embed auth tokens in links, logs or documentation. Do not trigger extra production sync or prediction runs just to test timestamps. The legacy Sites-specific prompt in [prediction-scheduled-prompt.md](../archive/legacy-sites/prediction-scheduled-prompt.md) is historical and must remain disabled.
 
