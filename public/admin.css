@@ -38,6 +38,15 @@
 .admin-state{margin:16px 0}
 .admin-state-error{padding:12px 14px;border:1px solid #88665b;border-radius:8px;color:#ffcfbd;background:#2a1d19}
 .admin-empty-copy{margin:8px 0 0}
+.admin-name-form{display:grid;gap:12px;margin-top:18px}
+.admin-name-form fieldset{margin:0;padding:12px;border:1px solid var(--line);border-radius:10px;min-width:0}
+.admin-name-form legend{padding:0 6px}
+.admin-name-options{display:grid;gap:8px}
+.admin-name-option{display:flex;gap:8px;align-items:flex-start;min-width:0}
+.admin-name-option span,.admin-name-option small{overflow-wrap:anywhere}
+.admin-name-form input[type="text"],.admin-name-form textarea{width:100%;max-width:100%;box-sizing:border-box}
+.admin-name-form button{justify-self:start}
+.admin-name-status:empty{display:none}
 @media(max-width:800px){.admin-layout{grid-template-columns:minmax(0,1fr)}.admin-card h2{font-size:24px}.admin-card dl div{grid-template-columns:minmax(0,1fr);gap:2px}}
 .admin-snapshot{display:flex;align-items:flex-start;gap:10px;font-size:14px;color:#bdc9b7;background:#1c251a;border:1px solid #35412f;border-radius:8px;padding:11px 15px;margin:27px 0 8px;overflow-wrap:anywhere}
 .admin-snapshot[data-admin-skew=true]{border-color:#6b5a2a;color:#e6d9a6}

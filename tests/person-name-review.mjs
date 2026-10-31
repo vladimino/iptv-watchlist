@@ -11,7 +11,17 @@ assert.doesNotMatch(review,/linkFilms\(|localFilmId\(|localPersonId\(|externalId
 const topLevelNames=source=>new Set([...source.matchAll(/^(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map(match=>match[1]));
 const taken=new Set([...topLevelNames(domain),...topLevelNames(titleReview)]);
 for(const name of topLevelNames(review))assert.equal(taken.has(name),false,`${name} is already defined by film-person.js or film-title-review.js`);
-for(const file of ['build.mjs','src/worker.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/client.js','src/admin/read.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/person-name-review|applyPersonNameReview|personNameState|reconcilePersonName/,file);
+for(const file of ['src/worker.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/client.js','src/admin/person-name-client.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/person-name-review|applyPersonNameReview|personNameState|reconcilePersonName/,file);
+assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/person-name-review\.js/);
+assert.match(fs.readFileSync('build.mjs','utf8'),/src\/admin\/person-name-route\.js/);
+assert.match(fs.readFileSync('build.mjs','utf8'),/src\/admin\/owner-reviews\.js/);
+const buildSource=fs.readFileSync('build.mjs','utf8');
+assert.ok(buildSource.indexOf('src/domain/person-name-review.js')<buildSource.indexOf('src/admin/read.js'));
+assert.ok(buildSource.indexOf('src/admin/read.js')<buildSource.indexOf('src/admin/owner-reviews.js'));
+assert.ok(buildSource.indexOf('src/admin/owner-reviews.js')<buildSource.indexOf('src/admin/person-name-route.js'));
+const reviewKey=(fs.readFileSync('src/admin/owner-reviews.js','utf8').match(/OWNER_REVIEWS_KEY='([^']+)'/)||[])[1];
+assert.equal(reviewKey,'admin/owner-reviews.json');
+assert.equal((fs.readFileSync('src/worker.js','utf8').match(/admin\/owner-reviews\.json/g)||[]).length,2,'programme and watchlist reads pass the overlay; the EPG commit does not');
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,Math,String});
 vm.runInContext(domain+'\n'+review+'\n'+titleReview+'\nglobalThis.api={personView,applyAutomaticLocalization,applyReviewedLocalization,transition,NAME_REVIEW_CONTRACT_VERSION,NAME_REVIEW_MODES,personNameVersion,personNameOptions,personNameCollisions,personNameState,personNameProjection,validatePersonNameReview,applyPersonNameReview,personNameReviewCompletion,reconcilePersonName};',ctx);

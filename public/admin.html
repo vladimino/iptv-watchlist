@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Данные каталога</title>
-  <meta name="description" content="Страница владельца: поиск фильмов и людей и очереди качества по опубликованной программе. Название одного фильма записывается только после подтверждения.">
+  <meta name="description" content="Страница владельца: поиск фильмов и людей и очереди качества по опубликованной программе. Название одного фильма и русское имя человека записываются только после подтверждения.">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/admin.css">
@@ -17,9 +17,9 @@
   <main class="admin-shell">
     <section class="page-heading">
       <div>
-        <p class="eyebrow">ВЛАДЕЛЕЦ · ТОЛЬКО ЧТЕНИЕ</p>
+        <p class="eyebrow">ВЛАДЕЛЕЦ</p>
         <h1>Каталог данных</h1>
-        <p class="admin-intro">Поиск фильмов и людей и очереди качества по опубликованной программе. Название одного фильма записывается только с его карточки, после подтверждения.</p>
+        <p class="admin-intro">Поиск фильмов и людей и очереди качества по опубликованной программе. Название одного фильма и русское имя человека записываются только с их карточки, после подтверждения.</p>
       </div>
     </section>
     <nav class="admin-views" aria-label="Разделы"><a href="/admin" id="admin-view-catalog" data-admin-view="catalog" aria-current="page">Каталог</a><a href="/admin?view=health" id="admin-view-health" data-admin-view="health">Здоровье данных</a><a href="/admin/letterboxd" id="admin-view-letterboxd">Архив Letterboxd</a><a href="/admin/limbo" id="admin-view-limbo">Лимбо</a><a href="/admin/posters" id="admin-view-posters">Постеры</a></nav>
@@ -39,7 +39,7 @@
       <h3 class="admin-health-subtitle">Проблемы по приоритету</h3>
       <p id="admin-health-empty" class="admin-state admin-health-empty" role="status" hidden></p>
       <ol id="admin-health-issues" class="health-groups"></ol>
-      <p class="muted admin-health-note">Страница только читает. Предложенное действие и его готовность описывают состояние записи; выполнение действий здесь не предусмотрено.</p>
+      <p class="muted admin-health-note">ТОЛЬКО ЧТЕНИЕ. Предложенное действие и его готовность описывают состояние записи; выполнение действий здесь не предусмотрено.</p>
     </section>
     <div id="admin-catalog">
     <form class="search-panel" role="search" action="/admin">

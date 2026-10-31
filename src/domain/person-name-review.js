@@ -1,8 +1,8 @@
 // Reviewed preferred RU name for one Person, AIR-126.
 // Pure validation and transition rules for the owner's manual name review. It is loaded beside
 // film-person.js and reuses its guards (applyReviewedLocalization, applyAutomaticLocalization,
-// mergeAliases, stamp). No HTTP and no storage access here, and this file is not in the Worker
-// bundle: a separately approved writer (AIR-54) persists what these functions return.
+// mergeAliases, stamp). No HTTP and no storage access here. The Worker loads it so the owner
+// route can persist what these functions return; the functions themselves still perform no write.
 // A Person id is role-specific (person:actor/<slug>, person:director/<slug>, …). This contract never
 // mints, merges or replaces an id: the same human under another role stays another record, and the
 // owner links such records explicitly through `roles`, which records the link on both sides.

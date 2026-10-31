@@ -95,6 +95,7 @@ for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
 vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), workerContext);
 vm.runInContext(scoped('src/domain/limbo-inventory.js', 'LimboInventory'), workerContext);
+vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/limbo.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-actions.js', 'AdminActions'), workerContext);

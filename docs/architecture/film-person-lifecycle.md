@@ -54,4 +54,21 @@ flowchart LR
   catalog -->|typed tmdb movie identity| finds
 ```
 
+## Owner name confirmation
+
+**Proposed for visual review.** The store is the accepted [ADR 0072](../adr/0072-owner-reviewed-localization-overlay.md). This diagram is not that acceptance and is not visually approved. It is not the identity diagram above. The owner confirms one Russian name on a Person card. One POST writes the `people` map of one R2 object and copies `films`. Programme, watchlist and admin reads overlay that name. A dictionary or automatic name is held and is not applied. The identity GET does not read the object, and a saved role link does not replace a role id.
+
+```mermaid
+flowchart LR
+  form["Person card<br/>Сохранить имя"]
+  post["POST one command"]
+  pure["Name review contract"]
+  object[("admin/owner-reviews.json<br/>people written, films copied")]
+  reads["Programme, watchlist<br/>and admin reads"]
+  held["Dictionary and automatic names<br/>held, not applied"]
+  form --> post --> pure --> object
+  object --> reads
+  held -.->|does not replace an owner name| reads
+```
+
 **Current/future boundary:** existing Worker read/write paths and authoritative R2 objects continue to serve the site. The person identity GET reads D1 and calls the derived reference. Finds reads that GET for a selected actor or director and still takes eligibility from the published catalog. The watchlist grid does not. D1 is not the authority. The canonical domain model, offline D1 repositories and a later general page cutover stay distinct; do not depict them as one deployed transactional entity store. See [D1 schema](../reference/data/d1-schema.md) and [staged migration ADR](../adr/0017-staged-d1-migration.md).
