@@ -56,6 +56,7 @@ assert.equal(posterCoverage(read({health: {issue: {severity: 'warning', reason: 
 // 2. Confirmation: exact scope, accepted, eligible only.
 assert.deepEqual(posterConfirm(preview, {accepted: false, now: NOW}), {ok: false, reason: 'not_accepted'});
 assert.deepEqual(posterConfirm(gated, {accepted: true, now: NOW}), {ok: false, reason: 'not_eligible'});
+assert.deepEqual(posterConfirm({...preview, coverage: {...preview.coverage, programmeRunId: null}}, {accepted: true, now: NOW}), {ok: false, reason: 'not_eligible'}, 'no confirmation without a generation to fence on');
 let confirmed = posterConfirm(preview, {accepted: true, now: NOW});
 assert.equal(confirmed.ok, true);
 assert.deepEqual([confirmed.confirmation.programmeRunId, confirmed.confirmation.limit, confirmed.confirmation.calls, confirmed.confirmation.cursor, confirmed.confirmation.expiresAt, confirmed.confirmation.consumedAt], [G1, 10, 3, null, new Date(NOW + POSTER_CONFIRM_TTL_MS).toISOString(), null]);
@@ -94,13 +95,14 @@ async function sweep(answers, options = {}) {
 
 // One call, the budget: no cursor on the first call, the limit as confirmed and never above ten.
 let {receipt, bodies} = await sweep([ok()], {calls: 1});
-assert.deepEqual(bodies, [{dryRun: false, limit: 10}]);
+assert.deepEqual(bodies, [{dryRun: false, limit: 10, expectedProgrammeRunId: G1}], 'the first call already carries the confirmed generation');
 assert.deepEqual([receipt.stop, receipt.nextCursor, receipt.summary.hydrated, receipt.summary.calls], ['call_budget', 'f0', 1, 1]);
 ({bodies} = await sweep([ok()], {calls: 1, limit: 20}));
-assert.deepEqual(bodies, [{dryRun: false, limit: 10}], 'a tampered limit is capped at ten');
+assert.deepEqual(bodies, [{dryRun: false, limit: 10, expectedProgrammeRunId: G1}], 'a tampered limit is capped at ten');
 // The cursor is carried from answer to answer, and an empty restart cursor is never sent.
 ({receipt, bodies} = await sweep(index => ok({nextCursor: ['f1', 'f3', ''][index], outcomes: [{id: 'f' + index, tmdbId: '1', outcome: 'hydrated'}]}), {calls: 3, cursor: 'f0'}));
 assert.deepEqual(bodies.map(body => body.cursor ?? null), ['f0', 'f1', 'f3']);
+assert.deepEqual(bodies.map(body => body.expectedProgrammeRunId), [G1, G1, G1], 'every call carries the confirmed generation');
 assert.equal(receipt.nextCursor, null);
 // Done ends the run and clears the position.
 ({receipt, bodies} = await sweep([ok(), ok({done: true, nextCursor: null, remainingAfterCursor: 0})]));
@@ -122,6 +124,9 @@ assert.deepEqual([receipt.stop, receipt.retryAt, bodies.length, receipt.summary.
 assert.deepEqual([receipt.stop, bodies.length], ['generation_changed', 2]);
 ({receipt, bodies} = await sweep([ok({programmeRunId: G2}), ok()]));
 assert.deepEqual([receipt.stop, bodies.length], ['generation_changed', 1]);
+// The route's expected-generation fence refuses the call before TMDB and any write: a 409 that is a generation change.
+({receipt, bodies} = await sweep([ok(), {ok: false, status: 409, error: 'Programme generation changed', body: {dryRun: false, enabled: true, error: 'Programme generation changed', generationChanged: true, leaseLost: false, expectedProgrammeRunId: G1, programmeRunId: G2}}, ok()]));
+assert.deepEqual([receipt.stop, bodies.length, receipt.summary.outcomes.length, receipt.nextCursor], ['generation_changed', 2, 1, 'f0']);
 // Resolver busy: nothing written, no further call.
 ({receipt, bodies} = await sweep([{ok: false, status: 409, error: 'Resolver is writing the catalog', body: {dryRun: false, enabled: true, error: 'Resolver is writing the catalog', programmeRunId: G1}}, ok()]));
 assert.deepEqual([receipt.stop, bodies.length, receipt.summary.outcomes.length], ['resolver_busy', 1, 0]);

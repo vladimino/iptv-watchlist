@@ -131,7 +131,7 @@ export function posterScopeKey(programmeRunId, cursor, limit, calls, items) {
 // The owner's confirmation of one exact preview, valid for a short time and for one run.
 export function posterConfirm(preview, {accepted, now}) {
   if (!accepted) return {ok: false, reason: 'not_accepted'};
-  if (!preview || preview.status !== 'eligible' || !preview.scopeKey) return {ok: false, reason: 'not_eligible'};
+  if (!preview || preview.status !== 'eligible' || !preview.scopeKey || !preview.coverage?.programmeRunId) return {ok: false, reason: 'not_eligible'};
   return {ok: true, confirmation: {
     scopeKey: preview.scopeKey, programmeRunId: preview.coverage.programmeRunId, cursor: preview.cursor, limit: preview.limit, calls: preview.calls,
     issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + POSTER_CONFIRM_TTL_MS).toISOString(), consumedAt: null,
@@ -171,6 +171,7 @@ function answerStop(answer, record) {
   if (!answer || answer.error === 'network' || answer.error === 'aborted' || answer.status === 0) return 'unknown_result';
   const body = isObject(answer.body) ? answer.body : null;
   if (answer.status === 409 && body?.leaseLost === true) return 'lease_lost';
+  if (answer.status === 409 && body?.generationChanged === true) return 'generation_changed';
   if (answer.status === 409 && body?.error === 'Resolver is writing the catalog') return 'resolver_busy';
   if (answer.status === 503 && body?.error === 'TMDB is not configured') return 'tmdb_unconfigured';
   if (answer.status === 400) return 'invalid_request';
@@ -190,7 +191,7 @@ export async function runPosterSweep({confirmation, call, now, stopRequested = (
   while (true) {
     if (receipt.calls.length >= confirmation.calls) {receipt.stop = 'call_budget'; break;}
     if (receipt.calls.length > 0 && stopRequested()) {receipt.stop = 'owner_stopped'; break;}
-    const body = {dryRun: false, limit: Math.min(confirmation.limit, POSTER_BATCH_MAX)};
+    const body = {dryRun: false, limit: Math.min(confirmation.limit, POSTER_BATCH_MAX), expectedProgrammeRunId: confirmation.programmeRunId};
     if (cursor) body.cursor = cursor;
     let answer;
     try {answer = await call(body);} catch {answer = null;}

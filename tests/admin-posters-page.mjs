@@ -95,8 +95,11 @@ const fakeFetch = async (input, init = {}) => {
   requests.push({method, path: url.pathname + url.search, credentials: init.credentials, body: init.body ? JSON.parse(init.body) : null, headers: init.headers});
   const headers = new Headers(init.headers || {});
   if (method !== 'GET') headers.set('Origin', 'http://127.0.0.1');
-  return workerContext.worker.fetch(new Request('http://127.0.0.1' + url.pathname + url.search, {method, headers, body: init.body}), env, {waitUntil() {throw new Error('background work');}});
+  const response = await workerContext.worker.fetch(new Request('http://127.0.0.1' + url.pathname + url.search, {method, headers, body: init.body}), env, {waitUntil() {throw new Error('background work');}});
+  if (method === 'POST' && afterPost) {const hook = afterPost; afterPost = null; hook();}
+  return response;
 };
+let afterPost = null;
 
 // DOM stand-in: fixed nodes, plus nodes the page renders inside innerHTML and later looks up by id.
 const listeners = new Map();
@@ -180,7 +183,7 @@ await accept();
 requests = [];
 const receipt = await exec('onPostersRun()');
 await settle();
-assert.deepEqual(posts().map(request => [request.path, request.body, request.credentials, request.headers['Content-Type']]), [['/api/enrichment/catalog/posters', {dryRun: false, limit: 10}, 'same-origin', 'application/json']]);
+assert.deepEqual(posts().map(request => [request.path, request.body, request.credentials, request.headers['Content-Type']]), [['/api/enrichment/catalog/posters', {dryRun: false, limit: 10, expectedProgrammeRunId: G1}, 'same-origin', 'application/json']]);
 assert.deepEqual(requests.map(request => request.method), ['GET', 'POST', 'GET'], 'fresh check, the call, the re-read');
 assert.equal(tmdbCalls.length, 10);
 assert.deepEqual([...new Set(puts)].sort(), [COPY, LEASE, LIVE].sort(), 'only both catalog copies and the lease are written');
@@ -259,4 +262,24 @@ assert.equal(nodes.get('#posters-accept-label').hidden, true);
 assert.match(text('#posters-preview'), /Не удалось прочитать состояние/);
 bucket.get = realGet;
 
-console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history and read failure passed');
+// 10. G1 → G2 published after the first call of a confirmed run: the next call still carries G1, the route refuses it before
+// TMDB and before any write, and the run stops with nothing sent to G2.
+seed();
+await fire('#posters-recheck', 'click');
+await settle();
+nodes.get('#posters-calls').value = '3';
+await fire('#posters-calls', 'change');
+await settle();
+await accept();
+const G2 = '22222222-2222-4222-8222-222222222222', COPY2 = 'epg/generations/' + G2 + '/discovered-films.json';
+afterPost = () => {records.set(COPY2, structuredClone(records.get(LIVE))); etags.set(COPY2, 'g2-copy'); records.set(POINTER, {phase: 'published', programmeRunId: G2, publishedAt: new Date().toISOString()}); etags.set(POINTER, 'p2'); tmdbCalls = []; puts = [];};
+requests = [];
+result = await exec('onPostersRun()');
+await settle();
+assert.equal(result.stop, 'generation_changed');
+assert.deepEqual(posts().map(request => request.body.expectedProgrammeRunId), [G1, G1], 'both calls are bound to the confirmed generation');
+assert.deepEqual([tmdbCalls, puts], [[], []], 'the refused call made no TMDB request and no write');
+assert.equal(etags.get(COPY2), 'g2-copy', 'the G2 copy is untouched');
+assert.match(text('#posters-receipt'), /опубликовано новое поколение программы/);
+
+console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure and the expected-generation fence across a G1 → G2 publish passed');
