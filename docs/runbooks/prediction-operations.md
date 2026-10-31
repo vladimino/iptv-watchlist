@@ -4,6 +4,10 @@
 
 [Prediction-runner API contract](../reference/api/prediction-runner.md). Expected task behavior and hourly discovery catch-up are defined in [Scheduled Tasks](../reference/scheduled-tasks.md); verify actual settings in the live registry.
 
+## Proportionate triage
+
+For a single deferred film, ordinary backoff or an interrupted but recoverable run, prefer the next Scheduled Task and its built-in retry/resume. Do **not** require a complete queue audit, full R2 snapshot, new model batch, manual lease reset or per-item diagnostic inspection just to establish that one retryable failure occurred. Read the queue/runner summary first; use film diagnostics only for persistent, identity-sensitive or unexplained failures, and broad parity only for a demonstrated cross-film inconsistency. Keep owner gates for manual producer calls and hard ownership/lease fences: retrying a non-idempotent model submission blindly can duplicate work or corrupt run state. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
+
 ## Hourly discovery preflight and orphaned checkpoints
 
 The hourly Task's discovery catch-up runs **before** prediction processing, but a blocked discovery continuation must not stop safe prediction work. Read `probe_read`, `epg_status` and `epg_pipeline_status`; verify the currently published `programmeRunId` and the pinned continuation generation. Only a server-authorized existing-generation continuation may be advanced by a separate, owner-authorized writer execution. A healthy paused checkpoint may allow ordinary sequential `epg_sync_step` calls; each call runs no more than one discovery chunk.
