@@ -65,6 +65,12 @@ Each step needs its own explicit owner approval. A code deploy authorizes none o
 3. **R2 write.**
    - Write the plan's `r2Retirements.body` to `identity/tmdb-retirements.json`, once, with a conditional put (`onlyIf` absent, or the expected etag).
    - Read it back.
+   - **Alternative: the Cloudflare API, unconditionally.** Use this when no S3 writer credential is available. The Cloudflare REST API (`PUT /accounts/{account_id}/r2/buckets/iptv/objects/identity%2Ftmdb-retirements.json`) has no conditional put. It is acceptable only because no Worker, Task or script writes this key. It needs its own owner gate:
+     - Before the gate, show the owner the exact body, its SHA-256 and byte length, the four Films with their old and new ids, the target key and the recovery point. The approval names that SHA-256.
+     - Immediately before the put, `GET` the key and require `404`. If it exists, stop.
+     - Put the approved bytes once, with `content-type: application/json`. Do not retry blindly: after any error, `GET` first.
+     - `GET` the key back and require the same SHA-256 and byte length.
+     - Check the body with `tmdbRetirementSet` (`ok: true`, four retirements) before the put and again on the read-back bytes.
 4. **D1.** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owns each Film's identity rows and rewrites them from R2, so one projector run after the R2 write carries the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
    - The run's summary (`GET /api/d1/status`, `lastRun.summary`) carries `tmdbRetirements`. Expect `valid: true`, `applied: 4`, `held: []`.
    - `outcome: failed` with `reason: input_invalid` and `inputKey: identity/tmdb-retirements.json` means the object failed its check: nothing was written. Stop, and roll back R2 or correct the object under a new approval.
@@ -76,7 +82,7 @@ Each step needs its own explicit owner approval. A code deploy authorizes none o
 
 ## Rollback
 
-- **R2.** Remove the four entries from `identity/tmdb-retirements.json` (or delete the object if it holds only them). The projection then reads the records' movie ids again.
+- **R2.** Remove the four entries from `identity/tmdb-retirements.json` (or delete the object if it holds only them). The projection then reads the records' movie ids again. Through the Cloudflare API this is a `DELETE` of the key, under its own owner approval, followed by a `GET` that must answer `404`.
 - **D1.** No hand-written inverse SQL. After the R2 rollback, the next projector run writes the four Films' previous identity back from R2. `d1Readback` against the preflight plan must then show them `pending`.
 - **Whole-database restore.** A D1 Time Travel restore to the bookmark is a separate, separately authorized recovery for the whole database. It also discards every other D1 write made after the bookmark, including the projector's.
 
