@@ -1,9 +1,9 @@
 # ADR 0063: Terminal TMDB poster answers are remembered in one index and stay out of the ordinary queue
 
-**Status:** Proposed  
+**Status:** Accepted 2026-10-31 (architecture only; no production execution authorization)  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** owner decision on [AIR-302](https://trello.com/c/9rqjCMhy), 2026-10-31 (Europe/Madrid). Acceptance of this record, and visual approval of the changed discovery diagram, remain the owner's  
+**Approval source:** explicit owner approval in the AIR-302 / PR #282 conversation on 2026-10-31 (Europe/Madrid): ADR 0063 **Accepted**, and the rendered Mermaid in `docs/architecture/discovery-and-resolution.md` **visually approved**; [AIR-302 owner-decision record](https://trello.com/c/9rqjCMhy#comment-6ae5d030b513156865faa56b)  
 **Related work:** [AIR-302](https://trello.com/c/9rqjCMhy); [AIR-283](https://trello.com/c/s35GwqRz); [ADR 0020](0020-owner-triggered-catalog-poster-hydration.md); [ADR 0048](0048-permanent-catalog-poster-maintenance-route.md)  
 **Supersedes:** [ADR 0020](0020-owner-triggered-catalog-poster-hydration.md) in part: the completion invariant that a cursor followed until `done` settles every verified record without a poster. [ADR 0048](0048-permanent-catalog-poster-maintenance-route.md) in part: terminal `no_poster_on_tmdb` and `tmdb_id_mismatch` answers are retained, and the ordinary queue no longer revisits them  
 **Superseded by:** None
@@ -47,7 +47,7 @@ Reversible by a code revert. The revert does not delete the index; the two catal
 - **Original decision:** owner decision on [AIR-302](https://trello.com/c/9rqjCMhy), 2026-10-31.
 - **Implementation:** `src/discovery.js`, `src/admin/posters.js`, `src/admin/posters-run.js`, `public/admin-posters.js`.
 - **Dated verification:** not recorded. Deterministic tests cover the queue, the 90-day return, an id change, a mismatch, a malformed HTTP 200 that stays retryable, transient errors, the cap, a lost compare-and-swap and an unreadable index. Production behaviour of the index is not established by those tests.
-- **Uncertainty:** the record is Proposed. The owner has not yet accepted this text or the rendered discovery diagram.
+- **Uncertainty:** production behavior of the new negative index remains unverified until an explicitly authorized owner POST; accepting the ADR and deploying code authorize no such execution.
 
 ## Follow-ups
 
