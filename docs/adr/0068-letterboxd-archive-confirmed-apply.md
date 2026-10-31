@@ -1,9 +1,9 @@
 # ADR 0068: A confirmed Letterboxd archive apply re-checks the ZIP on two owner requests and writes through the existing baseline commit
 
-**Status:** Proposed (code and synthetic tests only; it authorizes no production upload, validate, commit, rollback, R2 or D1 write, flag, Access change, service token or Scheduled Task)  
+**Status:** Accepted (architecture decision only; no production upload, validate, commit, rollback, R2 or D1 write, flag, Access change, service token or Scheduled Task is authorized)  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** not documented (the owner handed implementation of [AIR-285](https://trello.com/c/FFMUP4qm) on 2026-10-31; acceptance of this record and of the apply diagram is still an owner gate)  
+**Approval source:** [Owner explicitly accepted ADR 0068 and visually approved the apply Mermaid on 2026-10-31](https://trello.com/c/FFMUP4qm#comment-6ae60b9a1ccfc3a18b8d67a5), after independent PASS review of PR #287 at `6f6b1a146e4f1728a716f7ced16d154920a30405`  
 **Related work:** [AIR-285](https://trello.com/c/FFMUP4qm); [AIR-284](https://trello.com/c/Y9udReUR) / [ADR 0066](0066-ephemeral-letterboxd-archive-preview.md) (the preview this apply follows); [AIR-280](https://trello.com/c/ijIEPgm1) (guarded owner actions); [ADR 0053](0053-permanent-letterboxd-baseline-import-route.md); [ADR 0055](0055-retire-letterboxd-facts-switch.md); [ADR 0023](0023-letterboxd-user-facts.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -56,8 +56,8 @@ Not decided here, and not authorized by this record: a production upload or impo
 - **Original decision:** [AIR-285 handoff](https://trello.com/c/FFMUP4qm), 2026-10-31, which required this ADR to choose the transport and the failure retry.
 - **Implementation:** the AIR-285 pull request (routes, page, synthetic tests).
 - **Dated verification:** not recorded. Synthetic tests cover a rating with no diary row, a kept value, a newer fact, a held identity, replay, a tampered archive, a changed programme, a conflict, a partial chunk, rollback after a later observation, access denied, a missing binding, a malformed ZIP, a same-scope confirm after the clock moves, a commit faulted after the first fact write and then resumed, and a page that distinguishes a full write, a partial write and a write that changed nothing, and a replay of a stored baseline receipt that keeps a partial or failed result. No production upload was made, and no new resource measurement was taken.
-- **Uncertainty:** owner acceptance of this record and of the apply diagram is outstanding. The production edge was not measured again. The preview's workerd probe remains the size evidence.
+- **Uncertainty:** the owner accepted this architecture and visually approved the apply diagram on 2026-10-31, but the production edge was not measured again. The preview's workerd probe remains the size evidence. No production ZIP upload or import has been authorized.
 
 ## Follow-ups
 
-Owner acceptance of this Proposed record and of the apply sequence in [letterboxd ingestion](../architecture/letterboxd-ingestion.md) before merge. A joint visual acceptance of the preview and this apply, after deploy, is a separate gate and is not granted here. A bounded baseline-summary projection, if wanted, stays its own card.
+A joint owner visual acceptance of the preview and this apply, after deploy, is a separate gate and is not granted by the ADR/Mermaid decision. A bounded baseline-summary projection, if wanted, stays its own card.

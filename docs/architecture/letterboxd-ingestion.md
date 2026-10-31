@@ -121,9 +121,9 @@ sequenceDiagram
 
 The preview's baseline is always `unknown`: the import stores per-chunk receipts and no summary, so the answer only says whether **this** archive's receipt exists. «Нужен свежий архив» appears only when the export is older than the data health threshold or a compared film has a newer rating in R2. When `ratings.csv` is missing, or the match or the proposal is not complete, and nothing proven requires a new archive, the page says the comparison is incomplete and rating freshness is not confirmed. A positive sentence covers only the films that were checked. A green freshness sentence is not permission to write.
 
-## Confirmed archive apply (proposed)
+## Confirmed archive apply
 
-**Proposed ([ADR 0068](../adr/0068-letterboxd-archive-confirmed-apply.md)).** This is not the preview path above. After the owner has read the proposal, two further requests can record one chunk of films the preview fully compared, at most 50. Each request uploads the ZIP again. The first stores only the issued confirmation. The second is the only one that calls the baseline commit. Rollback is the same two-step shape and sends no ZIP. The archive is still stored nowhere. A rating row is a watched and rated fact whether or not the diary lists that film. A newer stored fact is kept.
+**Accepted ([ADR 0068](../adr/0068-letterboxd-archive-confirmed-apply.md)).** This is not the preview path above. After the owner has read the proposal, two further requests can record one chunk of films the preview fully compared, at most 50. Each request uploads the ZIP again. The first stores only the issued confirmation. The second is the only one that calls the baseline commit. Rollback is the same two-step shape and sends no ZIP. The archive is still stored nowhere. A rating row is a watched and rated fact whether or not the diary lists that film. A newer stored fact is kept.
 
 ```mermaid
 sequenceDiagram
