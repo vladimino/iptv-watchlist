@@ -10,7 +10,15 @@ const RECOVERY_LATEST_RUN_KEY=ENRICHMENT_KEY+'latest-run.json';
 
 function recoveryReadOnlyEnv(env){
  const versions=new Map();
- const bucket={async get(key){const object=await env.BUCKET.get(key);versions.set(key,object?String(object.etag??'present'):'absent');return object;}};
+ // A key read twice (the generation pointer is read once per staged object) keeps every version it showed, so a change
+ // between those reads yields a pin no later read can match.
+ const record=(key,version)=>{const prior=versions.get(key);versions.set(key,prior==null||prior.split('|').includes(version)?(prior??version):prior+'|'+version);};
+ const bucket={async get(key){
+  let object;
+  try{object=await env.BUCKET.get(key);}catch(error){record(key,'unavailable');throw error;}
+  record(key,object?String(object.etag??'present'):'absent');
+  return object;
+ }};
  return {env:{...env,BUCKET:bucket},versions};
 }
 async function recoveryRead(env,key){
