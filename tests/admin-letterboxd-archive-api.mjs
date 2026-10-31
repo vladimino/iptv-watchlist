@@ -201,14 +201,28 @@ assert.deepEqual(logged, []);
 assert.deepEqual(fetches, []);
 assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the archive name is not echoed');
 
-// 3. Concurrent previews read the same state and give the same answer.
+// 3. One preview at a time per isolate: a second one while the first runs is refused before its body is read; once the
+// first is done the next runs and reads the same state.
 {
   calls = [];
   const [x, y] = await Promise.all([send({bytes: archive}), send({bytes: archive})]);
-  assert.equal(x.status, 200); assert.equal(y.status, 200);
-  assert.deepEqual(x.body, y.body);
+  assert.equal(x.status, 200);
+  assert.deepEqual([y.status, y.body], [429, {error: 'preview_busy'}]);
+  assert.equal(y.headers.get('Cache-Control'), 'no-store');
+  const z = await send({bytes: archive});
+  assert.equal(z.status, 200);
+  assert.deepEqual(x.body, z.body);
   assert.deepEqual({...x.body, reads: null}, {...answer, reads: null});
   assert.deepEqual(nonGets(), []);
+  // A slot left by a request the runtime cancelled is taken over once it is older than the slot time.
+  vm.runInContext('LBA_ACTIVE_AT=Date.now()-1000', context);
+  assert.equal((await send({bytes: archive})).status, 429);
+  vm.runInContext('LBA_ACTIVE_AT=Date.now()-60001', context);
+  assert.equal((await send({bytes: archive})).status, 200);
+  // A failed preview releases the slot too.
+  const bad = await send({bytes: Buffer.from('not a zip at all, definitely not')});
+  assert.equal(bad.status, 422);
+  assert.equal((await send({bytes: archive})).status, 200);
 }
 
 // 4. The same archive after its baseline commit: the receipt is seen and every compared fact is unchanged.

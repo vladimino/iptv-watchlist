@@ -13,7 +13,7 @@ export const ARCHIVE_LIMITS = Object.freeze({
   maxEntryBytes: 4 * MIB,      // one inflated CSV
   maxTotalBytes: 8 * MIB,      // the inflated CSVs together
   maxRatio: 100,               // declared inflated size over compressed size of a read entry
-  maxRows: 20000,              // line breaks in one CSV, a bound on its records
+  maxRows: 10000,              // line breaks in one CSV, a bound on its records and on the parse's memory
   maxMillis: 20000,            // wall budget, checked between inflated chunks
 });
 export const ARCHIVE_FILES = Object.freeze(['watched.csv', 'ratings.csv', 'watchlist.csv', 'diary.csv']);

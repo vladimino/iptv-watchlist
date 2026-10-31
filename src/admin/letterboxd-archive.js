@@ -9,6 +9,11 @@
 const LBA_PATH='/api/admin/letterboxd-archive/preview';
 const LBA_FORM_OVERHEAD=64*1024,LBA_NAME_MAX=255,LBA_DECLARED_MAX=40;
 const LBA_LID=/^[A-Za-z0-9_-]{1,80}$/,LBA_TMDB=/^[1-9]\d{0,11}$/;
+// One preview at a time per isolate: a single worst-case preview needs about half of the isolate's memory (ADR 0061).
+// The slot is a start time, not a flag: a request the runtime cancels never reaches `finally`, so a slot older than
+// LBA_SLOT_MS is taken over.
+const LBA_SLOT_MS=60000;
+let LBA_ACTIVE_AT=0;
 const LBA_METADATA_KEY='metadata.json',LBA_RATINGS_POINTER_KEY='enrichment/ratings/published.json';
 const lbaRatingsGenerationKey=id=>'enrichment/ratings/generations/'+encodeURIComponent(id)+'.json';
 const lbaImportKey=(sha,kind)=>'letterboxd/imports/'+sha+'/chunks/0.'+kind+'.json';
@@ -174,6 +179,8 @@ async function adminLetterboxdArchiveRoute(request,env,url){
  if(length===null||!/^\d{1,12}$/.test(length))return adminError('length_required',411);
  if(Number(length)>maxBody)return adminError('archive_too_large',413);
  const started=Date.now(),signal=request.signal||null;
+ if(LBA_ACTIVE_AT&&started-LBA_ACTIVE_AT<LBA_SLOT_MS)return adminError('preview_busy',429);
+ LBA_ACTIVE_AT=started;
  try{
   let body=await lbaBody(request,maxBody);
   if(!body)return adminError('archive_too_large',413);
@@ -199,7 +206,7 @@ async function adminLetterboxdArchiveRoute(request,env,url){
   catch(error){if(error?.name==='ArchiveError')return lbaUnprocessable('archive_invalid',{code:error.code,file:error.file});throw error;}
   form=null;file=null;
   const texts={};
-  for(const [kind,name] of Object.entries(LetterboxdArchivePreview.PREVIEW_FILES))texts[kind]=archive.files[name]?.text??null;
+  for(const [kind,name] of Object.entries(LetterboxdArchivePreview.PREVIEW_FILES)){texts[kind]=archive.files[name]?.text??null;if(archive.files[name])archive.files[name].text=null;}
   if(texts.watched===null)return lbaUnprocessable('missing_watched');
   let parsed;
   try{parsed=LetterboxdExport.parseExport(texts);}
@@ -219,5 +226,5 @@ async function adminLetterboxdArchiveRoute(request,env,url){
   return json({...preview,reads:comparison.reads});
  }catch{
   return adminError('preview_failed',500);
- }
+ }finally{if(LBA_ACTIVE_AT===started)LBA_ACTIVE_AT=0;}
 }
