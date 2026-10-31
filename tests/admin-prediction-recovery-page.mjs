@@ -26,7 +26,8 @@ for (const code of R.PREDICTION_RECOVERY_CAUSES) {
 }
 for (const code of R.PREDICTION_RECOVERY_ACTION_REASONS) assert.ok(V.RECOVERY_ACTION_REASON_COPY[code], 'reason ' + code);
 for (const code of R.PREDICTION_RECOVERY_PREREQUISITES) assert.ok(V.RECOVERY_PREREQUISITE_COPY[code], 'prerequisite ' + code);
-for (const code of ['runner_lease', 'latest_run', 'queue_activity', 'catalog']) assert.ok(V.RECOVERY_EVIDENCE_COPY[code], 'evidence ' + code);
+for (const code of R.PREDICTION_RECOVERY_EVIDENCE) assert.ok(V.RECOVERY_EVIDENCE_COPY[code], 'evidence ' + code);
+assert.ok(V.recoveryExplainable({assessment: R.assessPredictionRecovery(null)}), 'a malformed input still has an explanation: unknown');
 assert.deepEqual(Object.keys(V.RECOVERY_CAUSE_COPY).sort(), [...R.PREDICTION_RECOVERY_CAUSES].sort(), 'no copy for a cause that does not exist');
 
 const NOW = Date.parse('2026-10-31T09:00:00.000Z'), H = 3600000;

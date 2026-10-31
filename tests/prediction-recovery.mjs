@@ -52,6 +52,7 @@ function invariant(result) {
   assert.deepEqual(result.writer, {exists: false, decision: 'no_go'}, 'no writer exists');
   for (const code of result.missingPrerequisites) assert.ok(R.PREDICTION_RECOVERY_PREREQUISITES.includes(code), code);
   assert.ok(['complete', 'partial', 'missing'].includes(result.evidence.completeness));
+  for (const code of result.evidence.missing) assert.ok(R.PREDICTION_RECOVERY_EVIDENCE.includes(code), code);
 }
 
 // 1. Current prediction, not queued: nothing to do.

@@ -19,6 +19,7 @@ export const PREDICTION_RECOVERY_CAUSES = [
 export const PREDICTION_RECOVERY_NEXT = ['none', 'scheduled_run', 'check_scheduled_tasks', 'retry_at', 'hot_drain', 'run_progress', 'queue_refresh', 'owner_investigation', 'reread'];
 export const PREDICTION_RECOVERY_ACTION_REASONS = ['not_needed', 'ordinary_schedule', 'backoff_respected', 'queue_derived', 'caller_contract', 'other_subsystem', 'evidence_incomplete'];
 export const PREDICTION_RECOVERY_PREREQUISITES = ['taste_profile', 'prediction_queue', 'catalog_membership', 'film_state'];
+export const PREDICTION_RECOVERY_EVIDENCE = ['runner_lease', 'latest_run', 'queue_activity', 'catalog'];
 export const PREDICTION_RECOVERY_REPEATED_ATTEMPTS = 5;
 export const PREDICTION_RECOVERY_QUEUE_IDLE_MS = 24 * 3600000;
 export const PREDICTION_RECOVERY_WRITER = Object.freeze({exists: false, decision: 'no_go'});
@@ -175,7 +176,7 @@ export function assessPredictionRecovery(input) {
     return {
       version: PREDICTION_RECOVERY_VERSION, filmId, status: 'unknown', cause: 'film_unreadable', work: null, nextExpected: {kind: 'reread', at: null},
       targetedAction: {available: false, capability: null, reason: 'evidence_incomplete'}, writer: {...PREDICTION_RECOVERY_WRITER},
-      missingPrerequisites: ['film_state'], evidence: {completeness: 'missing', missing: ['film_state']}, facts,
+      missingPrerequisites: ['film_state'], evidence: {completeness: 'missing', missing: []}, facts,
       runner: {live: runner.live, runId: null, leaseExpiresAt: null, filmSelected: null},
     };
   }
