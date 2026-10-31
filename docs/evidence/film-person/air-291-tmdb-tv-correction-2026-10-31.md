@@ -4,7 +4,7 @@
 **Card:** [AIR-291](https://trello.com/c/OWV3rL9q); decision [ADR 0057](../../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md); procedure [runbook](../../runbooks/tmdb-tv-identity-correction.md).  
 **Authorizations:** the owner approved the read-only preflight ("начинай", 07:07 UTC) and the single R2 write of the body with SHA-256 `c8aa44c2…` ("разрешаю", 07:36 UTC).  
 **Write path:** the owner chose the Cloudflare API write (07:23 UTC). No S3 writer credential was available for the runbook's conditional put. He made it subject to an owner gate that shows exactly what is written. The runbook was amended to carry this alternative ([PR #272](https://github.com/vladimino/iptv-watchlist/pull/272)).  
-**Verdict:** **CORRECTED.** The four Films hold their TMDB TV entry as the trusted `tmdb_tv` identity in the R2 projection and in D1. Their retired movie ids remain as untrusted entries. Nothing else changed.
+**Verdict:** **CORRECTED.** The four Films hold their TMDB TV entry as the trusted `tmdb_tv` identity in the R2 projection and in D1. Their retired movie ids remain as untrusted entries. No change was detected in the verified scope: the four Films' D1 rows and the database-wide external-id checks. Full R2 parity was not captured (see [deviations and evidence limits](#deviations-and-evidence-limits)).
 
 The evidence bodies (the TMDB answers and the Letterboxd pages) stay in the private AIR-286 artifact. Only ids, counts, hashes and timestamps are recorded here.
 
@@ -28,7 +28,7 @@ All reads went through the Cloudflare API: `GET` of R2 objects and `SELECT` on D
   - **Other records.** No other record carried any of the eight numbers. This covered the published and root `discovered-films.json`, `discovery-resolution.json`, `discovery-latest.json` and `titles.json`.
 - **D1.** The four Films had canonical `tmdb:<movieId>`, a trusted movie row and identity `resolved`. There was no `tmdb_tv` row in the database, and no other Film held any of the eight numbers.
 - **Dry-run.** `scripts/tmdb-tv-identity-plan.mjs` ran with the artifact against a local SQLite copy of the planner's D1 rows for these Films. It reported `ready: 4`, `ownerReview: 0`, `refused: 0`, 0 collisions and 0 numeric overlaps, and `d1Readback` reported `pending` for all four.
-- **Not done.** No full fenced R2 snapshot was taken, because no S3 read credential was available. The write only adds a key that did not exist, so its recovery is a `DELETE` of that key.
+- **Procedural deviation.** The card and the runbook require a fenced R2 snapshot before the write. None was taken, because no S3 read credential was available. The targeted Cloudflare API reads above are not an atomic cut of the bucket. See [deviations and evidence limits](#deviations-and-evidence-limits).
 
 ## Recovery points
 
@@ -36,7 +36,7 @@ All reads went through the Cloudflare API: `GET` of R2 objects and `SELECT` on D
 | --- | --- |
 | D1 Time Travel bookmark, preflight (07:2x UTC) | `0000002e-00000000-00005115-0f49a507b1981cab44da5c0e813a8f37` |
 | D1 Time Travel bookmark, immediately before the write (07:36:49 UTC) | `00000031-00000000-00005115-89baab30ad4c1029767209139769a834` |
-| R2 | Key absent before the write; rollback is a `DELETE` of `identity/tmdb-retirements.json` |
+| R2 | No fenced snapshot. The key was absent before the write (`GET` → `404`), and the write touched no other key. |
 
 ## Write
 
@@ -87,7 +87,20 @@ The next cron run, at 08:37:30 UTC, applied the same object and changed nothing.
 
 A read-only readback at 08:40 UTC found all four Films still `corrected`. Their identity hashes equal `d1Expected`. Their credit rows and prediction `content_sha256` equal the pre-write baseline. Watchlist membership and localization are unchanged, and the global counts are unchanged: 4 `tmdb_tv` rows, 0 trusted retired movie ids, 0 TV numbers trusted as movie ids.
 
-## Limits
+## Deviations and evidence limits
 
-- The records in R2 still carry the movie id as `tmdbId`. That is by design (ADR 0057): the object takes it out of the trusted identity. The admin Film record and the model's TMDB URI still show the movie id.
-- The four records are due for a metadata refresh after 2026-11-01 22:08 UTC. If the refreshed Letterboxd page no longer shows the confirmed divergence, the Film is held (`link_changed` or `attributes_changed`) and D1 keeps the corrected rows until review.
+- **Procedural deviation at preflight: no fenced R2 snapshot.**
+  - **Scope.** The whole bucket. The write added one key that did not exist and touched no other key, so the four Films' R2 records were only read.
+  - **Impact.** There is no atomic pre-write cut to compare full R2 parity against or to restore from. The D1 Time Travel bookmarks cover D1 only.
+  - **Remedy.** It cannot be remedied after the fact.
+  - **Waiver.** The owner's choice of the Cloudflare API write path did not explicitly waive the snapshot.
+  - **Owner disposition:** not yet recorded.
+- **Post-apply planner dry-run not run.** The runbook's readback includes a second planner dry-run that should report four Films unchanged and repeat the preservation and collision comparison. It was not run. The evidence above is different: two complete projector runs (the second a no-op) and a D1 hash readback against the plan. **Owner disposition:** not yet recorded (accept, or authorize a separate read-only planner check).
+- **R2 records keep the movie id.** The records in R2 still carry the movie id as `tmdbId`. That is by design (ADR 0057): the object takes it out of the trusted identity. The admin Film record and the model's TMDB URI still show the movie id.
+
+## Future operational caveats
+
+These are expected observations, not acceptance gates for AIR-291.
+
+- **Metadata refresh.** The four records are due for a metadata refresh after 2026-11-01 22:08 UTC. If the refreshed Letterboxd page no longer shows the confirmed divergence, the Film is held (`link_changed` or `attributes_changed`) and D1 keeps the corrected rows until review.
+- **Rollback.** No rollback is pending. A future rollback needs its own owner approval. It first verifies that the object's current SHA-256 and version are still `c8aa44c2…` and `7e5e6f1c…`, then deletes the key. The next projector run reconciles D1.
