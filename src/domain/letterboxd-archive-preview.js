@@ -48,6 +48,37 @@ export function proposedFacts(film) {
 const zero = names => Object.fromEntries(names.map(name => [name, 0]));
 const sameValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+// How a baseline outcome changes the value the owner sees. `replaces` stays the commit's outcome: a same stored value
+// is still a new observation (source and time), and only a different value, or a replace with nothing to compare, is a
+// changed value. `unchanged` is the identical observation, not "the value happened to match".
+export function factValueKind(entry, proposed) {
+  if (!entry) return 'other';
+  if (entry.outcome === 'new') return 'new';
+  if (entry.outcome === 'older') return 'older';
+  if (entry.outcome === 'unchanged') return 'unchanged';
+  if (entry.outcome === 'unverified') return 'unverified';
+  if (entry.outcome === 'replaces') return entry.current && sameValue(entry.current.value, proposed) ? 'same' : 'changed';
+  return 'other';
+}
+const VALUE_KEYS = {new: 'newValues', changed: 'changedValues', same: 'sameValueUpdates', unchanged: 'unchanged', older: 'older', unverified: 'unverified'};
+function emptyValues() {
+  return {newValues: 0, changedValues: 0, sameValueUpdates: 0, unchanged: 0, older: 0, unverified: 0};
+}
+// Fact counts, not film counts. Compared films and unread films are separate: a batch is only the compared films.
+export function summarizeFactValues(items) {
+  const totals = emptyValues();
+  const byFact = Object.fromEntries(FACTS.map(fact => [fact, emptyValues()]));
+  for (const item of items || []) {
+    for (const entry of item.outcomes || []) {
+      const key = VALUE_KEYS[factValueKind(entry, item.facts?.[entry.fact])];
+      if (!key) continue;
+      totals[key]++;
+      if (byFact[entry.fact]) byFact[entry.fact][key]++;
+    }
+  }
+  return {...totals, byFact};
+}
+
 function exportSummary(parsed) {
   const files = {};
   for (const [kind, name] of Object.entries(PREVIEW_FILES)) {
@@ -120,7 +151,7 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
   };
   const facts = zero(PREVIEW_OUTCOMES), byFact = Object.fromEntries(FACTS.map(fact => [fact, zero(PREVIEW_OUTCOMES)]));
   const state = {compared: 0, unverified: 0, alias_conflict: 0, invalid_identity: 0};
-  const adds = [], updates = [], heldNewer = [], unverified = [], conflicts = [];
+  const adds = [], updates = [], sameValue = [], heldNewer = [], unverified = [], conflicts = [];
   const matchByCode = new Map(comparison.matches.map(match => [match.code, match]));
   for (const item of comparison.items) {
     state[item.state] = (state[item.state] || 0) + 1;
@@ -133,13 +164,16 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
       outcomes[entry.fact] = entry.outcome;
       if (entry.current) current[entry.fact] = entry.current;
     }
-    const detail = row(film, match, {facts: item.facts, outcomes, current});
+    const valueKind = {};
+    for (const entry of item.outcomes) valueKind[entry.fact] = factValueKind(entry, item.facts[entry.fact]);
+    const detail = row(film, match, {facts: item.facts, outcomes, current, valueKind});
     if (item.state === 'alias_conflict' || item.state === 'invalid_identity') conflicts.push({...detail, held: item.state});
     else if (item.state === 'unverified') unverified.push({...detail, held: item.reason || 'record_not_read'});
     else {
-      if (item.outcomes.some(entry => entry.outcome === 'new')) adds.push(detail);
-      if (item.outcomes.some(entry => entry.outcome === 'replaces' && (!entry.current || !sameValue(entry.current.value, item.facts[entry.fact])))) updates.push(detail);
-      if (item.outcomes.some(entry => entry.outcome === 'older')) heldNewer.push(detail);
+      if (item.outcomes.some(entry => valueKind[entry.fact] === 'new')) adds.push(detail);
+      if (item.outcomes.some(entry => valueKind[entry.fact] === 'changed')) updates.push(detail);
+      if (item.outcomes.some(entry => valueKind[entry.fact] === 'same')) sameValue.push(detail);
+      if (item.outcomes.some(entry => valueKind[entry.fact] === 'older')) heldNewer.push(detail);
     }
   }
   const identity = comparison.matches.filter(match => match.status !== 'accepted').map(match => row(films.get(match.code), match, {candidates: match.candidates.length}));
@@ -151,6 +185,7 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
     reasons: proposalReasons,
     films: {accepted: byStatus.accepted, compared: state.compared, unverified: state.unverified, aliasConflict: state.alias_conflict, invalidIdentity: state.invalid_identity, heldForIdentity: identity.length},
     facts, byFact,
+    values: summarizeFactValues(comparison.items.filter(item => item.state === 'compared')),
     recordReads: comparison.recordReads,
   };
   const ratingsNewer = byFact.rating.older;
@@ -161,7 +196,7 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
   const limit = limits.detailRows;
   answer.details = {
     limit,
-    adds: bounded(adds, limit), updates: bounded(updates, limit), heldNewer: bounded(heldNewer, limit),
+    adds: bounded(adds, limit), updates: bounded(updates, limit), sameValue: bounded(sameValue, limit), heldNewer: bounded(heldNewer, limit),
     unverified: bounded(unverified, limit), conflicts: bounded(conflicts, limit), identity: bounded(identity, limit),
     invalidRows: bounded(parsed.invalidRows, limit),
   };
