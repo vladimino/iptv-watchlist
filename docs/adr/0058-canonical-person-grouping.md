@@ -78,5 +78,5 @@ The contract is pure and loaded by nothing at runtime, so this ADR changes no da
 
 ## Follow-ups
 
-- Storing canonical humans and owner decisions, and a reader for AIR-201 — separate gated cards.
+- The consumer reference over this grouping, without a Worker read or stored humans, is [ADR 0059](0059-person-identity-projection.md). Storing humans and owner decisions remains a separate card.
 - TMDB credits for watchlist Films added after AIR-286.

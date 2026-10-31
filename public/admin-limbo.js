@@ -102,8 +102,14 @@ const LIMBO_ERROR_TEXT = {
   method_not_allowed: 'Страница делает только GET-запросы.',
 };
 const LIMBO_DEBOUNCE_MS = 200;
+const LIMBO_RECOVERY_SUBSYSTEMS = ['prediction', 'fingerprint'];
+const LIMBO_RECOVERY_FILM_ID = /^[A-Za-z0-9_-]{1,80}$/;
 
 const limboLive = {pin: null, snapshot: null, counts: null, seq: 0, controller: null, timer: null, pending: null, stale: false, next: null, state: null};
+// One entry per rendered «Разобрать прогноз» panel: the stored film id it reads, whether it is open, the pin of its last
+// answer and a sequence number so that an older answer never replaces a newer one.
+const limboRecovery = new Map();
+let limboRecoveryNext = 0;
 
 function limboEscape(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
@@ -225,7 +231,56 @@ function limboItemHtml(item) {
   else if (item.links?.filmUnavailable === 'not_in_programme') links.push('<span class="muted limbo-unlinked">Фильма нет в опубликованной программе: карточки в каталоге данных для него нет.</span>');
   else if (item.links?.filmUnavailable === 'record_not_observed') links.push('<span class="muted limbo-unlinked">Запись фильма в этом снимке не прочитана: карточку открыть нельзя.</span>');
   if (item.kind === 'observation') links.push('<span class="muted">Identity Review для наблюдений ещё не доступен.</span>');
-  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span><span class="admin-hit-meta">${limboEscape([kindLabel, film?.storedId, film?.year ? String(film.year) : null, item.id].filter(Boolean).join(' · '))}</span><span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || item.cause)}${limboBadge('plain', LIMBO_SUBSYSTEM_LABELS[item.subsystem] || item.subsystem)}${limboBadge(item.severity === 'critical' ? 'conflict' : item.severity === 'warning' ? 'provisional' : 'missing', LIMBO_SEVERITY_TEXT[item.severity] || item.severity)}</span><dl class="limbo-facts">${rows.map(([name, value]) => `<div><dt>${limboEscape(name)}</dt><dd>${limboEscape(value)}</dd></div>`).join('')}</dl>${links.length ? `<p class="limbo-links">${links.join(' ')}</p>` : ''}</article>`;
+  let recovery = '';
+  const recoveryFilm = limboRecoveryFilm(item);
+  if (recoveryFilm) {
+    const slot = String(++limboRecoveryNext);
+    limboRecovery.set(slot, {filmId: recoveryFilm, open: false, pin: null, seq: 0});
+    links.push(`<button type="button" class="admin-more limbo-recovery-open" data-limbo-recovery="${slot}" aria-expanded="false" aria-controls="limbo-recovery-${slot}">Разобрать прогноз</button>`);
+    recovery = `<section class="limbo-recovery" id="limbo-recovery-${slot}" data-limbo-recovery-slot="${slot}" aria-label="Разбор прогноза" hidden></section>`;
+  }
+  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span><span class="admin-hit-meta">${limboEscape([kindLabel, film?.storedId, film?.year ? String(film.year) : null, item.id].filter(Boolean).join(' · '))}</span><span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || item.cause)}${limboBadge('plain', LIMBO_SUBSYSTEM_LABELS[item.subsystem] || item.subsystem)}${limboBadge(item.severity === 'critical' ? 'conflict' : item.severity === 'warning' ? 'provisional' : 'missing', LIMBO_SEVERITY_TEXT[item.severity] || item.severity)}</span><dl class="limbo-facts">${rows.map(([name, value]) => `<div><dt>${limboEscape(name)}</dt><dd>${limboEscape(value)}</dd></div>`).join('')}</dl>${links.length ? `<p class="limbo-links">${links.join(' ')}</p>` : ''}${recovery}</article>`;
+}
+
+// A film item of the fingerprint or prediction subsystem with a stored id can be explained by the recovery assessment.
+function limboRecoveryFilm(item) {
+  if (item.kind !== 'film' || !LIMBO_RECOVERY_SUBSYSTEMS.includes(item.subsystem)) return null;
+  const storedId = item.film?.storedId;
+  return typeof storedId === 'string' && LIMBO_RECOVERY_FILM_ID.test(storedId) ? storedId : null;
+}
+
+function limboRecoveryLoad(slot) {
+  const entry = limboRecovery.get(slot);
+  const panel = document.querySelector(`[data-limbo-recovery-slot="${slot}"]`);
+  if (!entry || !panel) return Promise.resolve(null);
+  const seq = ++entry.seq;
+  panel.innerHTML = '<p class="admin-state" role="status" aria-busy="true">Читаем состояние прогноза…</p>';
+  const pending = loadPredictionRecovery(entry.filmId, {pin: entry.pin}).then(result => {
+    if (seq !== entry.seq || result.mode === 'aborted') return result;
+    if (result.mode === 'error') {
+      panel.innerHTML = recoveryErrorHtml(result.error);
+      return result;
+    }
+    entry.pin = result.answer && typeof result.answer.pin === 'string' ? result.answer.pin : null;
+    panel.innerHTML = recoveryPanelHtml(result.answer, {changed: result.changed});
+    return result;
+  });
+  limboLive.pending = pending;
+  return pending;
+}
+
+function onLimboRecoveryToggle(slot) {
+  const entry = limboRecovery.get(slot);
+  const panel = document.querySelector(`[data-limbo-recovery-slot="${slot}"]`);
+  const button = document.querySelector(`[data-limbo-recovery="${slot}"]`);
+  if (!entry || !panel) return Promise.resolve(null);
+  entry.open = !entry.open;
+  panel.hidden = !entry.open;
+  if (button) {
+    button.setAttribute('aria-expanded', entry.open ? 'true' : 'false');
+    button.textContent = entry.open ? 'Скрыть разбор' : 'Разобрать прогноз';
+  }
+  return entry.open ? limboRecoveryLoad(slot) : Promise.resolve(null);
 }
 
 function limboContextHtml(view) {
@@ -263,6 +318,7 @@ function limboShow(view, state) {
   }
   total.textContent = view.total ? String(view.total) : '';
   empty.hidden = view.items.length > 0;
+  limboRecovery.clear();
   results.innerHTML = view.items.map(limboItemHtml).join('') + (view.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : '');
   document.querySelector('#limbo-context-body').innerHTML = limboContextHtml(view);
 }
@@ -378,7 +434,18 @@ function onLimboReset() {
 }
 
 function onLimboResult(event) {
-  const more = event.target.closest ? event.target.closest('[data-limbo-more]') : null;
+  const closest = selector => event.target.closest ? event.target.closest(selector) : null;
+  const open = closest('[data-limbo-recovery]');
+  if (open) {
+    event.preventDefault();
+    return onLimboRecoveryToggle(open.getAttribute('data-limbo-recovery'));
+  }
+  if (closest('[data-limbo-recovery-recheck]')) {
+    const panel = closest('[data-limbo-recovery-slot]');
+    event.preventDefault();
+    return panel ? limboRecoveryLoad(panel.getAttribute('data-limbo-recovery-slot')) : null;
+  }
+  const more = closest('[data-limbo-more]');
   if (!more) return;
   event.preventDefault();
   onLimboMore();
