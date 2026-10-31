@@ -37,6 +37,21 @@ In bounded mode no discovery chunk and no status read touches the archive. `POST
 
   Do not follow `current.json` for history.
 
+## One stuck observation: will a retry help?
+
+There is no per-observation retry, and there is no owner page that shows one observation: the limbo inventory reports observations as unavailable until a bounded projection exists. Do not improvise a targeted retry.
+
+1. **Read the series, read-only.** In `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`), read `continuation`, `continuationHealth` and `lastBatch`. The [recovery assessment](../reference/domain/discovery-recovery.md#series-states) names the series state they add up to. `continuing`, `waiting` and `recovering` mean the next scheduled step takes the queue; `interrupted` and `stopped` mean nothing moves until the next EPG commit.
+2. **Judge the observation by the rules, not by hope.**
+   - An actionable observation is already queued.
+   - A future `retryAt` is policy.
+   - A terminal or `ambiguous` decision needs identity review.
+   - A candidate outside the EPG window cannot be resolved until it airs again.
+   
+   The [verdict table](../reference/domain/discovery-recovery.md#verdicts) gives the answer for each case.
+3. **Do not use a forced `POST /api/enrichment/discovery/resolve` as a targeted retry.** It runs a whole chunk over other observations, with TMDB calls. Running it is a separate owner-approved operation, decided at the series level.
+4. **Never edit `epg/discovery-resolution.json` or the resolver lease by hand.** A running chunk rewrites the whole decision map from its own copy, so a manual edit is lost or overwrites the chunk's decisions.
+
 ## Rollback
 
 - **R1 (operational):** set `DISCOVERY_LEDGER_MODE=frozen`. Nothing is rebuilt or deleted, and the active ledger grows again from the next commit. Removing the value has the same effect while an archive exists.

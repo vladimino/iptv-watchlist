@@ -95,6 +95,16 @@ An executor takes a lease with a fencing number, then handles the confirmed reco
 
 A receipt carries `idempotencyKey`, capability and version, subject, pin, `scopeFingerprint` (not the full key) — echoed only when the confirmation passes `validateConfirmation`, otherwise `null` — per-record `outcomes` with an error **code** from the closed vocabulary `provider_error`, `timeout`, `rate_limited`, `conflict`, `fence_lost`, `validation_error`, `storage_error`, `aborted`, `internal_error` (anything else, including any exception message, becomes `internal_error`; `actionErrorCode` does the classification), `counts`, `retry` (`retryable` ids, `maxAttempts`), `compensation`, `atomic: false` and `audit` (`actor: "owner"`, `confirmedAt`). It never contains a token, an exception message, an e-mail or another identity; an unknown refusal is reported as `invalid_request`. A repeated submission with the same key returns the stored receipt with `replay: true` and writes nothing.
 
+## Discovery observations: no capability
+
+No capability exists for a discovery observation (`healthActionCode: discovery_retry`, subject kind `observation`), and none may be registered on top of the existing resolver. Three facts stand in the way:
+
+- the candidate is readable only by parsing the whole discovery ledger, so no bounded preview exists;
+- the resolution decisions are one object without record versions that every chunk rewrites whole, so a single-record CAS needs a new fenced writer;
+- `POST /api/enrichment/discovery/resolve` runs a chunk over the global pending order and cannot target a key.
+
+What the owner can know about one observation is given by the pure [recovery assessment](../domain/discovery-recovery.md): whether a retry would help and what happens next. It always answers `execute.available: false`, `reason: no_targeted_writer`. A future reconsideration capability needs a bounded observation projection first, then its own ADR, card and owner gate; see the [dated analysis](../../evidence/discovery-targeted-recovery-no-go-2026-10-31.md).
+
 ## Transport shape
 
 `fixtureActionRequest` shows the shape a future owner route must keep, without being one: `GET /preview` only previews; `POST /execute` only executes; any other method is 405, an unknown path 404, a non-owner principal 403 before anything else. A refused submission answers 409 for a concurrency or freshness refusal (`stale_pin`, `record_changed`, `eligibility_changed`, `idempotency_conflict`, `lease_held`, `in_progress`) and 400 otherwise. A production route built on this contract also keeps the Worker's same-origin check for non-GET requests and is subject to its own card, tests, ADR classification and owner approval.
