@@ -1,6 +1,6 @@
 # Letterboxd ingestion and last-good ratings
 
-This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0043-removal-rating-lookup-queue.md), [diary history ADR](../adr/0049-letterboxd-diary-viewing-history.md), [Diary-first ratings ADR](../adr/0054-diary-first-epg-ratings.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
+This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0043-removal-rating-lookup-queue.md), [diary history ADR](../adr/0049-letterboxd-diary-viewing-history.md), [Diary-first ratings ADR](../adr/0054-diary-first-epg-ratings.md), [archive preview ADR](../adr/0066-ephemeral-letterboxd-archive-preview.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
 
 ```mermaid
 sequenceDiagram
@@ -86,3 +86,37 @@ flowchart TD
 ```
 
 A fact record also carries `ratingHistory`, the append-only list of the film's rating changes, written in the same compare-and-swap as the rating; the projection does not read it ([ADR 0038](../adr/0038-durable-rating-and-prediction-lineage.md), [user facts contract](../reference/integrations/letterboxd-user-facts.md)). Unresolved export rows (no accepted identity) never reach the merge; they stay in the importer's private report until a separate identity verification. The dashed path is display-only: the offline builder writes their normalized names and years to a private list, and Finds hide a catalog film whose original title and year match it uniquely, on every request and without a switch ([ADR-0041](../adr/0041-retire-finds-title-exclusion-switch.md)). Finds read that list without writing anything, and the match never becomes a fact, a rating or an identity link ([catalog API](../reference/api/catalog.md#display-only-title-exclusion), [runbook](../runbooks/finds-display-exclusion.md)).
+
+## Owner archive preview (no write)
+
+**Accepted ([ADR 0066](../adr/0066-ephemeral-letterboxd-archive-preview.md)).** The owner checks an account export from `/admin/letterboxd` before any import. The archive travels in one same-origin POST under the existing Access session, lives only in that request and is never stored; the Worker reads single named R2 objects through a get-only wrapper and answers with a bounded proposal. There is no apply step on this path: the import stays the separately approved [baseline route](../runbooks/letterboxd-baseline-import.md). Contract: [admin API](../reference/api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Owner
+    participant Page as /admin/letterboxd<br/>(tab memory only)
+    participant Access as Cloudflare Access
+    participant Worker as Worker preview route
+    participant R2 as Authoritative R2
+    Owner->>Page: Choose the export ZIP, click «Проверить архив»
+    Page->>Page: Local checks: .zip name, at most 10 MiB, export time
+    Page->>Access: POST multipart, same origin, session cookie
+    Access->>Worker: Owner request
+    Worker->>Worker: Origin, type, length, one preview per isolate
+    Worker->>Worker: Read ZIP in memory within limits,<br/>parse the four CSV files, SHA-256
+    alt Refused (too large, bomb, bad CSV, export time)
+        Worker-->>Page: 4xx code, nothing read from R2
+    else Archive readable
+        Worker->>R2: get: programme, metadata, ratings, links,<br/>scan summaries, this archive's receipt
+        Worker->>R2: get: at most 300 fact-record GETs<br/>(a redirect hop counts)
+        Worker->>Worker: Match, then per-fact outcome<br/>with the import's merge rules
+        Worker->>R2: get again: the same keys' ETags
+        Worker-->>Page: Bounded proposal, writes false, no-store
+    end
+    Page-->>Owner: Freshness, totals, conflicts, adds, updates, held
+    Note over Worker,R2: No put, delete or list, no log,<br/>no outbound fetch, nothing kept after the response
+    Note over Page: «Очистить» or leaving the page drops the answer,<br/>there is no import button
+```
+
+The preview's baseline is always `unknown`: the import stores per-chunk receipts and no summary, so the answer only says whether **this** archive's receipt exists. «Нужен свежий архив» appears only when the export is older than the data health threshold or a compared film has a newer rating in R2. When `ratings.csv` is missing, or the match or the proposal is not complete, and nothing proven requires a new archive, the page says the comparison is incomplete and rating freshness is not confirmed. A positive sentence covers only the films that were checked.

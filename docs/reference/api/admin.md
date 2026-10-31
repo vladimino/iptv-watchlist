@@ -414,7 +414,7 @@ Parameters are validated before any read. Any other method is 405 `method_not_al
 
 ### The page
 
-`/admin/posters` is the fourth section of the admin navigation. It shows the coverage (records, with a poster, without one, actionable now, no poster on TMDB until a date, a TMDB identity to review, and without a verified id) with the per-copy figures in a closed «Технические подробности»; a warning when the verified-missing backlog reaches `posterBacklogCount`, which does not mean every one of those records can be filled; the remembered answers, each with its TMDB link, date and a separate recheck; the records without a verified TMDB id; when the read is incomplete, «Покрытие неизвестно: данные неполные» with each problem and each copy's state in plain Russian, every figure as «неизвестно», no preview batch and no confirmation; and the browser's own history: the last successful restoration, recent coverage readings and runs. The server keeps no run journal. That history lives only in this browser's `localStorage` (`iptv.admin.posters.v1`), is labelled as such, and can be forgotten. It does not decide the queue: the index does, and old browser verdicts are not imported.
+`/admin/posters` is the last section of the admin navigation. It shows the coverage (records, with a poster, without one, actionable now, no poster on TMDB until a date, a TMDB identity to review, and without a verified id) with the per-copy figures in a closed «Технические подробности»; a warning when the verified-missing backlog reaches `posterBacklogCount`, which does not mean every one of those records can be filled; the remembered answers, each with its TMDB link, date and a separate recheck; the records without a verified TMDB id; when the read is incomplete, «Покрытие неизвестно: данные неполные» with each problem and each copy's state in plain Russian, every figure as «неизвестно», no preview batch and no confirmation; and the browser's own history: the last successful restoration, recent coverage readings and runs. The server keeps no run journal. That history lives only in this browser's `localStorage` (`iptv.admin.posters.v1`), is labelled as such, and can be forgotten. It does not decide the queue: the index does, and old browser verdicts are not imported.
 
 A manual run follows the guarded-action principles of [admin actions](admin-actions.md#the-poster-page):
 
@@ -425,13 +425,100 @@ A manual run follows the guarded-action principles of [admin actions](admin-acti
 5. **Receipt.** Every record is named by the `title` and `year` the route returns with its outcome, in every batch, falling back to the preview's title and then to the record id. The stop reason in plain Russian, the totals (written, already present, no poster on TMDB, TMDB answered for another film, retryable), a partial-write warning when one copy was written without the other, the latest outcome of every record, and per call the HTTP status, cursors and writes per copy in «Технические подробности». A negative outcome with `negativeSaved: false` says the verdict was not stored. The page then re-reads the coverage and shows before → after for the missing count and the actionable count. `done` means the actionable queue was walked; remembered refusals are not in it.
 6. **Recheck.** The remembered-answer list offers one id at a time, and only from the sample of at most ten per group. An id outside that sample is not offered; there is no paging or search. Its confirmation is separate from the sweep: one `POST` with `{dryRun: false, limit: 1, expectedProgrammeRunId, recheck: ["<tmdbId>"]}` and no cursor, after a fresh read still contains that id in the sample. It does not move the sweep's saved position. An unreadable index stops the sweep the same way as any other answer the page cannot treat as a batch (`503` `Poster negatives unreadable`).
 
+## Letterboxd archive preview: `POST /api/admin/letterboxd-archive/preview`
+
+The read behind `/admin/letterboxd`: the owner sends the Letterboxd account export ZIP and gets back what it contains and what an import of it would do to the stored facts now. It **writes nothing**: the archive, its rows and the answer exist only in the request and its `no-store` response; nothing is put to R2, D1, KV or a cache, nothing is logged, `waitUntil` is not used and no outbound request is made, not even to a URL in the archive ([ADR 0066](../../adr/0066-ephemeral-letterboxd-archive-preview.md)). Applying an archive is the separately approved [baseline import](../../runbooks/letterboxd-baseline-import.md); this route has no apply mode. Source: [`src/admin/letterboxd-archive.js`](../../../src/admin/letterboxd-archive.js) (handler), [`src/domain/letterboxd-archive-zip.js`](../../../src/domain/letterboxd-archive-zip.js) (ZIP reader, `LetterboxdArchiveZip`), [`src/domain/letterboxd-archive-preview.js`](../../../src/domain/letterboxd-archive-preview.js) (answer, `LetterboxdArchivePreview`), the bundled offline [parser and matcher](../integrations/letterboxd-export.md), [`src/admin/letterboxd-archive-client.js`](../../../src/admin/letterboxd-archive-client.js), [`src/admin/letterboxd-archive-view.js`](../../../src/admin/letterboxd-archive-view.js) and [`public/admin-letterboxd.js`](../../../public/admin-letterboxd.js) (the page). Tests: [`tests/letterboxd-archive-zip.mjs`](../../../tests/letterboxd-archive-zip.mjs), [`tests/letterboxd-archive-preview.mjs`](../../../tests/letterboxd-archive-preview.mjs), [`tests/admin-letterboxd-archive-api.mjs`](../../../tests/admin-letterboxd-archive-api.mjs), [`tests/admin-letterboxd-page.mjs`](../../../tests/admin-letterboxd-page.mjs); the real-runtime probe is [`scripts/letterboxd-archive-probe.mjs`](../../../scripts/letterboxd-archive-probe.mjs).
+
+### Request
+
+`multipart/form-data` with exactly the field `archive` (the ZIP file) and, only for a renamed archive, `generatedAt` (the export time in UTC, `YYYY-MM-DDTHH:MMZ` with optional seconds and milliseconds). The export time comes from the Letterboxd file name `letterboxd-<user>-YYYY-MM-DD-HH-MM-utc.zip`; a standard name with `generatedAt` is refused, so the two never disagree. The checks run in this order, and a refused request reads nothing from R2: path, method, `Origin` equal to the Worker origin, content type, `Content-Length` present and within 10 MiB plus 64 KiB of form overhead, the per-isolate slot, the body read with the same cap, the form fields, the file name (at most 255 characters) and size, the export time, the ZIP, the CSV files.
+
+### Archive limits
+
+| Limit | Value |
+| --- | --- |
+| Compressed archive | 10 MiB |
+| Central directory entries | 2,000 |
+| Entry name | 255 bytes; no absolute or drive path, empty, `.` or `..` segment, backslash or control character |
+| One inflated CSV | 4 MiB |
+| The inflated CSVs together | 8 MiB |
+| Declared inflated size over compressed size | 100 |
+| Lines per CSV | 10,000 |
+| Wall time of the read | 20 s, checked between inflated chunks |
+
+Only `watched.csv`, `ratings.csv`, `watchlist.csv` and `diary.csv` at the top level are inflated, each checked for size, CRC-32 and strict UTF-8; every other entry is only checked for a safe name, method and flags. `watched.csv` is required; a missing other file makes the answer `partial`.
+
+### Errors
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 404 | `not_found` | another path under `/api/admin/letterboxd-archive/` |
+| 405 | `method_not_allowed` | not a POST |
+| 403 | `origin_not_allowed` | `Origin` missing or not the Worker's own |
+| 415 | `unsupported_media_type` | not `multipart/form-data` with a boundary |
+| 411 | `length_required` | no numeric `Content-Length` |
+| 413 | `archive_too_large` | the declared or read body, or the file, is above the cap |
+| 429 | `preview_busy` | another preview runs on this isolate (below) |
+| 400 | `invalid_form` | unreadable form, a missing, repeated or extra field, or an unusable file name |
+| 422 | `generated_at_required`, `generated_at_conflict`, `generated_at_invalid`, `generated_at_future`, `generated_at_too_old` | a renamed archive without a time; a standard name with one; not the UTC form; later than now; before 2011 |
+| 422 | `archive_invalid` with `code` and `file` | the ZIP reader refused: `not_zip`, `archive_too_large`, `zip64_unsupported`, `multi_disk_unsupported`, `too_many_entries`, `central_directory_invalid`, `entry_name_invalid`, `duplicate_entry`, `encrypted_entry`, `unsupported_method`, `local_header_invalid`, `entry_truncated`, `entry_overlap`, `entry_too_large`, `total_too_large`, `ratio_exceeded`, `entry_size_mismatch`, `inflate_failed`, `checksum_failed`, `invalid_utf8`, `too_many_rows`, `time_budget`, `aborted` |
+| 422 | `csv_invalid` with `file` and `record` | a CSV file the parser cannot read |
+| 422 | `missing_watched` | the archive has no `watched.csv` |
+| 500 | `preview_failed` | anything else; no detail is returned |
+
+**One preview per isolate.** A worst-case preview needs about half of the isolate's 128 MB, so the handler holds one slot per isolate and answers 429 to a second concurrent request on the same isolate. The slot is the start time of the running preview and is taken over after 60 s, because a request the runtime cancels never reaches its `finally`.
+
+### What is read
+
+Through a bucket wrapper that exposes only `get`; no key is listed:
+
+| Read | Use |
+| --- | --- |
+| The admin snapshot (five reads above) | The published programme for the matcher; failure leaves matching `partial` |
+| `metadata.json` | Catalog metadata for the matcher |
+| `enrichment/ratings/published.json`, then its generation when `projected: true` | The ratings the matcher uses as evidence |
+| `letterboxd/facts/links.json` | The link index: which films already have a fact record and under which key |
+| `letterboxd/facts/scans/films-list.json`, `letterboxd/facts/scans/watchlist.json` | The scan summaries, the floor of every observation ([ADR 0024](../../adr/0024-letterboxd-scan-summary.md)) |
+| `letterboxd/imports/<sha256>/chunks/0.intent.json`, `0.receipt.json` | Whether **this** archive was already imported (`committed`, `opened`, `absent`) |
+| `letterboxd/facts/films/<key>.json` | Only for accepted films whose alias is in the link index. At most 300 fact-record GETs, six at a time; one redirect hop counts toward that cap. A film whose hop does not fit is `unverified` with `record_read_limit` and is not compared from the stub. A record that is migrating, a second redirect or a failed read makes the film `unverified` |
+| The pointer, `metadata.json`, the ratings pointer, the link index and both summaries again | ETag fence: any change makes `consistency.status` `drift` and the proposal `partial` |
+
+Not read: the generation catalog copy (several megabytes; it only adds `title_year` candidates) and `enrichment/view-index.json` (a projection of the records). `matching.omitted` names both. The keys actually read are listed in `reads`.
+
+### Answer, 200
+
+```text
+{
+  schemaVersion: 1, mode: "preview", writes: false, evaluatedAt, status: complete|partial,
+  archive: {sha256, bytes, entries, ignoredEntries, nameStandard, generatedAt, generatedAtSource: archive_name|owner_declared, ageMs, files: {<name>: {sha256, bytes}}},
+  completeness: {status, missing: [file, ...]},
+  export: {files: {watched|ratings|watchlist|diary: {name, present, records, valid, invalid, duplicates, conflicts, missingYear, auxiliary}}, sets: {<set>: count}, films, crossFileMismatches, invalidRows, invalidByReason},
+  baseline: {status: "unknown", reason: "no_bounded_summary", confirmedAt: null, sha256: null, thisArchive: {status: committed|opened|absent|unavailable, committedAt}},
+  freshness: {needsFreshArchive, verdict: needs_fresh|inconclusive|verified, reasons: [archive_stale, ratings_newer_in_r2, ratings_unconfirmed], archiveStaleMs, ageMs, ratingsNewerInR2},
+  matching: {status, sources: {<source>: {evidence, key, ...}}, omitted, index, byStatus, acceptedByMethod: {lid_exact, tmdb_verified, title_year}, reasons, lidHypothesis},
+  proposal: {status, reasons, films: {accepted, compared, unverified, aliasConflict, invalidIdentity, heldForIdentity}, facts: {new, replaces, unchanged, older, tie, unverified}, byFact: {watched|rating|watchlist: {...}}, recordReads: {limit, needed, done}},
+  consistency: {status: stable|drift, changed: [key, ...]},
+  details: {limit: 25, adds, updates, heldNewer, unverified, conflicts, identity, invalidRows},   // each {total, rows ≤ 25}
+  reads: [key, ...]
+}
+```
+
+- **Outcomes** are the baseline commit's, computed on a copy of each record with the same observation ids and summary floors: `new` (no value yet), `replaces` (the export's observation is greater), `unchanged`, `older` (a stored or scanned observation is newer and wins), `tie` (counted beside the outcome when the observation equals the stored one), `unverified` (the record was not read).
+- **Held** films are not proposed: `heldNewer` (R2 is newer for some fact), `unverified` (`record_read_limit`, `record_unavailable`, `record_converging`, `links_unavailable`), `conflicts` (`alias_conflict`: the Letterboxd and TMDB aliases point to two records; `invalid_identity`), and `identity` (every film the matcher did not accept, with its status, method, reason and number of candidates). Only `accepted` films are compared, as in the import.
+- **Rows** carry the film's export code, name, year, match status and method, the proposed facts, the outcome per fact and the current value where one exists. They are capped at 25 per list; `total` is the full count. They are personal data and appear only in this response.
+- `baseline` is always `unknown`: the import stores receipts per archive and no summary, so the latest confirmed baseline cannot be found without listing the bucket. `freshness.needsFreshArchive` is true only when `verdict` is `needs_fresh`. That is a proven reason: `archive_stale` when the export is older than the data health `archiveStaleMs` (60 days), or `ratings_newer_in_r2` when at least one compared film has a newer rating in R2 (`ratingsNewerInR2` is that count, and it is omitted when R2 was not read). `ratings_unconfirmed` is added when `ratings.csv` is missing, or when matching or the proposal is not complete: an unavailable programme or metadata, an unavailable ratings generation, link index or scan summary, an unread linked record, or ETag drift. With no proven reason that verdict is `inconclusive`. `verified` means the ratings file was present, the match and the proposal were complete, and the checked films showed no newer rating; it does not certify ratings outside that comparison. A missing object (`object_missing`) is evidence of absence and does not by itself make freshness inconclusive. `needsFreshArchive` is never set from an unknown.
+
+### The page
+
+`/admin/letterboxd` («Архив Letterboxd») sits between data health and limbo in the admin navigation. Opening it sends nothing. The form takes the ZIP and, for a renamed archive, the export time; the page checks the name, the size and the time locally, then sends one `POST` with `credentials: 'same-origin'` and `cache: 'no-store'` and accepts only an answer with `mode: "preview"` and `writes: false`. States: idle, loading (with «Отменить», also on Escape, which aborts the request), error (focused, the code's Russian text), result (focused): the freshness banner («Нужен свежий архив» only for a proven reason, «Сравнение неполное, свежесть оценок не подтверждена» when rating evidence is missing, or «Архив достаточно свежий» scoped to the films that were checked), the totals, the archive's files and SHA-256, the baseline as «неизвестно» with the reason, the matching by method and status, the proposal by fact and outcome, and the detail lists in closed `<details>`. Times are shown in Europe/Madrid. «Очистить» drops the answer and returns focus to the file field; leaving the page drops it too. There is no import, commit or validate control, and nothing is put in `localStorage` or the URL.
+
 ## Limits
 
 - The catalogue is the pinned generation's programme: watchlist films and the people on them. Catalog-only films (`epg/discovered-films.json`), unresolved observations and the resolution ledger are not searched; identity codes that need the ledger (`ambiguous`, `rejected`) are not produced here.
 - The catalogue routes do not read fingerprint and prediction state; see `queue_unavailable` above. Only the [prediction recovery read](#prediction-recovery-get-apiadminprediction-recovery) reads them, for one film per request.
 - Pages run over an in-memory projection of the whole programme object; a cold request costs five R2 reads and one parse of the programme, a warm one five reads and no parse of the programme.
-- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; the catalogue routes have no `POST`. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
+- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; the catalogue routes have no `POST`. `POST /api/admin/letterboxd-archive/preview` is the [archive preview](#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview): it accepts a body and writes nothing. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
 - Two admin pages can cause a write, each only after the owner's confirmation. `/admin/posters` calls the existing `POST /api/enrichment/catalog/posters`; `/admin/limbo` calls the two `POST /api/admin/discovery-recovery/*` routes of one observation.
 - On `/admin/posters`: `no_poster_on_tmdb` and `tmdb_id_mismatch` are stored in `epg/catalog-poster-negatives.json` by the maintenance route ([ADR 0063](../../adr/0063-catalog-poster-negative-index.md)). They stay inside `verifiedMissing`, which is what the poster summary warns on, and they leave the ordinary queue. The browser history does not decide that queue. A code revert leaves the index in place; older code then shows those records as actionable again.
 
-Rollback is a revert of the routes and the pages: the read routes wrote no R2 object. Decisions reconsidered by confirmed actions stay reconsidered, and their action records stay ([runbook](../../runbooks/discovery-ledger.md#one-stuck-observation)). Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback).
+Rollback is a revert of the routes and the pages: the read routes and the archive preview wrote no R2 object. Decisions reconsidered by confirmed actions stay reconsidered, and their action records stay ([runbook](../../runbooks/discovery-ledger.md#one-stuck-observation)). Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback).

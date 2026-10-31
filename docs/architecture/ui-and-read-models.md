@@ -39,6 +39,8 @@ The currently published programme generation determines which shows are availabl
 - `/admin/posters` calls the existing owner-only maintenance route `POST /api/enrichment/catalog/posters` for one bounded run, or for one explicit recheck of a remembered answer. That route's lease, generation and compare-and-swap guards are the [poster hydration path](discovery-and-resolution.md); the same call records a terminal TMDB refusal in the remembered-answer index under those guards.
 - `/admin/limbo` sends the guarded `discovery_reconsider` action: two same-origin POSTs, a server-issued confirmation and then the execution, which may change one decision of one observation under the resolver lease ([discovery recovery](discovery-and-resolution.md)).
 
+The Letterboxd archive page `/admin/letterboxd` sends the owner's export ZIP in one `POST /api/admin/letterboxd-archive/preview`. The Worker reads it in memory, compares it with single named R2 objects through a get-only wrapper and answers with a bounded proposal. The archive is stored nowhere, the answer lives only in the tab, and nothing is applied ([archive preview path](letterboxd-ingestion.md#owner-archive-preview-no-write), [ADR 0066](../adr/0066-ephemeral-letterboxd-archive-preview.md)).
+
 Contracts: [admin read model](../reference/domain/admin-read-contract.md), [route](../reference/api/admin.md), [data health model](../reference/domain/data-health.md).
 
 **Important side-effect boundary:** do not assume all HTTP GET requests are pure reads. Some existing view/event handlers can initialize or recover persisted state; consult the [deployment runbook](../runbooks/deployment.md) and [GET side-effect tests](../../tests/get-side-effects.mjs) before operational probing.
