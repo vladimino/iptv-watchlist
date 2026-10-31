@@ -1,9 +1,9 @@
 # ADR 0061: Owner reads of one discovery observation use a generation-scoped index, and one guarded action lifts its terminal fence
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** owner scope change on PR #267 ([comment](https://github.com/vladimino/iptv-watchlist/pull/267#issuecomment-6540170794)); acceptance of this record is pending  
+**Approval source:** [owner decision, 2026-10-31](https://trello.com/c/YpCzctKo#comment-6ae5a355ccd25f22a299c880), after independent PASS review of PR #267 HEAD `76104aaa1ca963bcb03e06b57adfdad98c8018e8`; the changed discovery Mermaid was visually approved at the same gate. Earlier [owner scope approval](https://github.com/vladimino/iptv-watchlist/pull/267#issuecomment-6540170794)  
 **Related work:** [AIR-282](https://trello.com/c/YpCzctKo); [PR #267](https://github.com/vladimino/iptv-watchlist/pull/267); [ADR 0006](0006-one-chunk-discovery.md); [ADR 0007](0007-persistent-discovery-evidence.md); [ADR 0034](0034-bounded-discovery-ledger.md)  
 **Supersedes:** None. It replaces the NO-GO conclusion of the [dated analysis](../evidence/discovery-targeted-recovery-no-go-2026-10-31.md), which was evidence, not a decision record  
 **Superseded by:** None
