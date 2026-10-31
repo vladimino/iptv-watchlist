@@ -191,6 +191,8 @@
 .posters-change{display:block;color:var(--muted);font-size:12px}
 .posters-list{margin:0 0 10px;padding-left:18px;font-size:14px;line-height:1.5}
 .posters-list li{margin:4px 0;overflow-wrap:anywhere}
+.posters-held-row{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline}.posters-held-row>b{min-width:0}
+.posters-held-pick{font:inherit;font-size:13px}
 .posters-warning{color:#f3dd9a}
 .posters-backlog{border-color:#8a7a45;color:#f3dd9a;margin-top:14px}
 .posters-tmdb{color:var(--lime);text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere}

@@ -1,6 +1,7 @@
 // GET /api/admin/posters: the owner's poster coverage read. It counts both catalog copies with the same rule as the maintenance
-// route's dry run, returns the next bounded batch after a cursor, the records without a verified TMDB identity, and the data
-// health verdict of the catalog summary. It reads three objects, never the lease, never calls TMDB and never writes.
+// route's dry run, returns the next bounded batch of the actionable queue after a cursor, a sample of remembered terminal
+// answers, the records without a verified TMDB identity, and the data health verdict of the catalog summary. It reads the
+// pointer, both catalog copies and the negative index, never the lease, never calls TMDB and never writes.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -33,7 +34,7 @@ vm.runInContext(fs.readFileSync('src/admin/posters.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), context);
 
 const G1 = '11111111-1111-4111-8111-111111111111';
-const POINTER = 'epg/published-generation.json', LIVE = 'epg/discovered-films.json', COPY = 'epg/generations/' + G1 + '/discovered-films.json', LEASE = 'epg/resolver-lease.json';
+const POINTER = 'epg/published-generation.json', LIVE = 'epg/discovered-films.json', COPY = 'epg/generations/' + G1 + '/discovered-films.json', LEASE = 'epg/resolver-lease.json', NEG = 'epg/catalog-poster-negatives.json';
 const POSTER = 'https://image.tmdb.org/t/p/w342/kept.jpg';
 const film = (id, tmdbId, extra = {}) => ({id, tmdbId: String(tmdbId), canonicalIdentity: 'tmdb:' + tmdbId, title: 'Фильм ' + id, original: 'Film ' + id, year: 2001, poster: null, ...extra});
 function seed(catalog, copy = catalog) {
@@ -57,14 +58,16 @@ const post = async body => {
   return {status: response.status, body: await response.json()};
 };
 
-// 1. The counts agree with the maintenance route's dry run, over both copies, and nothing but three objects is read.
+// 1. The counts agree with the maintenance route's dry run, over both copies, and nothing but the four objects is read.
 seed(base);
 let r = await get();
 assert.equal(r.status, 200);
-assert.deepEqual([...new Set(reads)].sort(), [LIVE, COPY, POINTER].sort(), 'pointer and both catalog copies only: no lease, no ledger');
+assert.deepEqual([...new Set(reads)].sort(), [LIVE, COPY, NEG, POINTER].sort(), 'pointer, both catalog copies and the negative index: no lease, no ledger');
 assert.deepEqual(fetches, [], 'no TMDB request');
 const dry = await post({});
-for (const field of ['programmeRunId', 'catalogRecords', 'missingPoster', 'verifiedMissing', 'unverifiedMissing']) assert.equal(r.body[field], dry.body[field], field);
+for (const field of ['programmeRunId', 'catalogRecords', 'missingPoster', 'verifiedMissing', 'unverifiedMissing', 'actionable', 'noPosterHeld', 'identityReview']) assert.equal(r.body[field], dry.body[field], field);
+assert.deepEqual([r.body.actionable, r.body.noPosterHeld, r.body.identityReview], [4, 0, 0], 'an absent index is an empty one');
+assert.deepEqual(r.body.held, {noPoster: {count: 0, sample: []}, identityReview: {count: 0, sample: []}});
 assert.deepEqual([r.body.catalogRecords, r.body.withPoster, r.body.missingPoster, r.body.verifiedMissing, r.body.unverifiedMissing], [7, 1, 6, 4, 2]);
 assert.deepEqual(r.body.queue.items.map(item => item.id), Array.from(dry.body.ids), 'the batch is the head of the route queue');
 assert.deepEqual(r.body.queue.items[0], {id: 'a1', tmdbId: '1', title: 'Фильм a1', original: 'Film a1', year: 2001});
@@ -117,8 +120,9 @@ assert.deepEqual([r.body.missingPoster, r.body.health.issue], [0, null], 'a full
 const unknown = (body, problems, label) => {
   assert.equal(r.status, 200, label);
   assert.deepEqual(body.evidence, {complete: false, problems}, label);
-  assert.deepEqual([body.catalogRecords, body.withPoster, body.missingPoster, body.verifiedMissing, body.unverifiedMissing], [null, null, null, null, null], label + ': no count is reported as zero');
+  assert.deepEqual([body.catalogRecords, body.withPoster, body.missingPoster, body.verifiedMissing, body.unverifiedMissing, body.actionable, body.noPosterHeld, body.identityReview], [null, null, null, null, null, null, null, null], label + ': no count is reported as zero');
   assert.deepEqual([body.queue.items, body.queue.remainingAfterCursor, body.queue.total], [[], null, null], label + ': no batch is offered');
+  assert.deepEqual(body.held, {noPoster: {count: null, sample: []}, identityReview: {count: null, sample: []}}, label);
   assert.deepEqual(body.unverified, {count: null, sample: []}, label);
   assert.deepEqual([body.health.issue.category, body.health.issue.reason, body.health.issue.action.code], ['incomplete', 'progress_unknown', 'supply_evidence'], label);
   assert.deepEqual(fetches, [], label + ': no TMDB request');
@@ -131,7 +135,7 @@ r = await get();
 unknown(r.body, ['generation_not_published'], 'unpublished');
 assert.equal(r.body.programmeRunId, null);
 assert.deepEqual(r.body.copies.map(copy => [copy.role, copy.present, copy.readable, copy.records, copy.missingPoster]), [['live', true, true, 7, 6]]);
-assert.deepEqual([...new Set(reads)].sort(), [LIVE, POINTER].sort());
+assert.deepEqual([...new Set(reads)].sort(), [LIVE, NEG, POINTER].sort());
 assert.equal(keysBefore(), before);
 // 6b. No pointer at all.
 seed(base, null); records.delete(POINTER); before = keysBefore();
@@ -178,4 +182,35 @@ seed({a1: film('a1', 1, {title: 'x'.repeat(500), year: '2001', original: {html: 
 r = await get();
 assert.deepEqual([r.body.queue.items[0].title.length, r.body.queue.items[0].year, r.body.queue.items[0].original], [200, null, null]);
 
-console.log('Admin posters API: dry-run parity over both copies, cursor and limit, validation before reads, backlog threshold, unverified sample, unknown-not-zero for an unpublished or missing pointer and a missing or malformed copy, and failing reads passed');
+// 9. Remembered answers leave the actionable batch and stay visible. The health backlog still counts every verified record without a poster.
+seed(base);
+records.set(NEG, {schemaVersion: 1, entries: {
+  '1': {status: 'no_poster_on_tmdb', checkedAt: '2026-10-01T00:00:00.000Z', nextCheckAt: '2099-01-01T00:00:00.000Z'},
+  '5': {status: 'tmdb_id_mismatch', checkedAt: '2026-10-02T00:00:00.000Z'},
+}});
+etags.set(NEG, 'neg-1');
+r = await get();
+assert.deepEqual(r.body.queue.items.map(item => item.id), ['a3', 'a7']);
+assert.deepEqual([r.body.queue.total, r.body.actionable, r.body.noPosterHeld, r.body.identityReview, r.body.verifiedMissing], [2, 2, 1, 1, 4]);
+assert.deepEqual(r.body.held.noPoster, {count: 1, sample: [{id: 'a1', tmdbId: '1', title: 'Фильм a1', original: 'Film a1', year: 2001, checkedAt: '2026-10-01T00:00:00.000Z', nextCheckAt: '2099-01-01T00:00:00.000Z'}]});
+assert.deepEqual(r.body.held.identityReview.sample.map(item => [item.id, item.tmdbId, item.checkedAt, item.nextCheckAt]), [['a5', '5', '2026-10-02T00:00:00.000Z', null]]);
+assert.equal(r.body.health.issue.reason, 'posters_missing', 'held records still count toward the poster summary');
+const heldMany = {};
+for (let index = 0; index < 25; index++) heldMany['m' + String(index).padStart(2, '0')] = film('m' + String(index).padStart(2, '0'), 100 + index);
+const heldEntries = {};
+for (let index = 0; index < 25; index++) heldEntries[String(100 + index)] = {status: 'no_poster_on_tmdb', checkedAt: '2026-10-01T00:00:00.000Z', nextCheckAt: '2099-01-01T00:00:00.000Z'};
+seed(heldMany);
+records.set(NEG, {schemaVersion: 1, entries: heldEntries}); etags.set(NEG, 'neg-many');
+r = await get();
+assert.deepEqual([r.body.actionable, r.body.noPosterHeld, r.body.queue.total, r.body.held.noPoster.sample.length, r.body.health.issue.severity], [0, 25, 0, 10, 'warning']);
+// An unreadable index makes the queue unknown, not empty and not ready.
+seed(base);
+records.set(NEG, {schemaVersion: 1, entries: {nope: 1}}); etags.set(NEG, 'bad');
+before = keysBefore(); fetches = [];
+r = await get();
+unknown(r.body, ['negatives_unreadable'], 'negatives unreadable');
+assert.equal(r.body.programmeRunId, G1);
+assert.deepEqual(fetches, []);
+assert.equal(keysBefore(), before, 'an unreadable index is not repaired');
+
+console.log('Admin posters API: dry-run parity over both copies, cursor and limit, validation before reads, backlog threshold, unverified sample, unknown-not-zero for an unpublished or missing pointer and a missing or malformed copy, remembered answers held out of the batch, an unreadable index that is not an empty queue, and failing reads passed');
