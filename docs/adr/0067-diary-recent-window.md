@@ -1,9 +1,9 @@
 # ADR 0067: The routine Diary read is the first page only, and a rating visible on that page is the rating
 
-**Status:** Proposed  
+**Status:** Accepted (owner decision 2026-10-31)  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** The owner decided the product rule on [AIR-304](https://trello.com/c/5M7hmLfM) on 2026-10-31: page 1 only, and a rating visible on that page is used. Acceptance of this ADR, and visual approval of the changed Mermaid in `docs/architecture/letterboxd-ingestion.md` and `docs/architecture/scheduling-and-orchestration.md`, are still pre-merge gates. The decision authorizes no production run, flag, Task edit or storage write.  
+**Approval source:** Owner explicitly Accepted ADR 0067 and visually approved the rendered Mermaid in `docs/architecture/letterboxd-ingestion.md` and both diagrams in `docs/architecture/scheduling-and-orchestration.md` on 2026-10-31 (Europe/Madrid), after the independent PASS review of PR #285 reviewed HEAD `94c8a63922387cb1a882f659b202544c972dce38` and successful CI. [Owner-gate record](https://trello.com/c/5M7hmLfM#comment-6ae5f8b4edcdfed02b9d1aea); [PASS review](https://github.com/vladimino/iptv-watchlist/pull/285#pullrequestreview-5723132080). This approval permits only routine PR delivery, not additional production runs or changes to data, flags, Tasks or migrations.  
 **Related work:** [AIR-304](https://trello.com/c/5M7hmLfM); the production run recorded in [the 2026-10-31 evidence](../evidence/letterboxd/air-304-diary-page-2-blocked-2026-10-31.md); [AIR-295](https://trello.com/c/VtFZ6cci) (live cutover, not closed by this record); [AIR-294](https://trello.com/c/IzWiVABa); [AIR-287](https://trello.com/c/kOZlT8UE); [ADR 0049](0049-letterboxd-diary-viewing-history.md); [ADR 0054](0054-diary-first-epg-ratings.md); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md)  
 **Supersedes:** In part: [ADR 0049](0049-letterboxd-diary-viewing-history.md) decision 3 (three pages, the next page while a page is new, backfill overlap) and decision 5 (`complete` / `partial` as the success of a routine read); [ADR 0054](0054-diary-first-epg-ratings.md) decision 2 (a rating only when the day's rows are all known and agree, and the page fence); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md) the Diary-phase page budget (three pages a step, nine a run) and the use of `resumePage` as the next unread page; [ADR 0023](0023-letterboxd-user-facts.md) decision 4 only for two `letterboxd_diary` observations at the same `observedAt`; [ADR 0038](0038-durable-rating-and-prediction-lineage.md) decision 1 only for the claim that the observation id alone makes a history write idempotent. Every other decision of those records stays.  
 **Superseded by:** None
@@ -76,7 +76,7 @@ This record is the code and its documents. It does not authorize a live ratings 
 
 ## Evidence
 
-- **Original decision:** [AIR-304](https://trello.com/c/5M7hmLfM), owner rule of 2026-10-31 in the card description. Acceptance of this ADR is not yet recorded.
+- **Original decision:** [AIR-304](https://trello.com/c/5M7hmLfM), owner rule of 2026-10-31 in the card description. Owner Accepted this ADR on 2026-10-31; see the owner-gate record above.
 - **Production failure that motivated it:** [page 2 blocked on 2026-10-31](../evidence/letterboxd/air-304-diary-page-2-blocked-2026-10-31.md), run `66d57611-c2de-4245-8618-1fa71dee167c`. No diary rows are in that report.
 - **Implementation:** the pull request that adds this record. Not yet merged.
 - **Uncertainty:** this record does not retest whether a later diary page would answer after a delay. The reader does not ask.
