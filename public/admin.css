@@ -187,6 +187,10 @@
 .archive-file input[type=file]{padding:6px}
 .archive-file input:focus-visible,.archive-time input:focus-visible,.archive-details summary:focus-visible,.archive-results:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
 .archive-hint{margin:0 0 8px;font-size:13px;overflow-wrap:anywhere}
+.archive-batch{display:flex;flex-direction:column;gap:8px;margin:0 0 12px;padding:12px 14px;border:1px solid #3a4038;border-radius:8px}
+.archive-batch h3{margin:0;font-size:16px}
+.archive-batch p{margin:0}
+.archive-apply-note{margin:0 0 12px}
 .archive-actions{display:flex;flex-wrap:wrap;gap:10px}
 .archive-actions .admin-more,.archive-actions .admin-refresh{width:auto;margin:0}
 .archive-actions [hidden]{display:none}

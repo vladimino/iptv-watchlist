@@ -65,7 +65,7 @@
 .footer-details-body h3{margin:0 0 9px;color:var(--text);font-size:13px;font-weight:650}
 .status-section-help{margin:-2px 0 9px;color:var(--muted);font-size:11px;line-height:1.45}
 .footer-details-body dl{margin:0;min-width:0}
-.footer-details-body dl>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:4px 0;border-bottom:1px solid #242b24;min-width:0}
+.footer-details-body dl>div{display:grid;grid-template-columns:minmax(6.5rem,1fr) minmax(0,1.15fr);gap:12px;padding:4px 0;border-bottom:1px solid #242b24;min-width:0}
 .footer-details-body dt{min-width:0;overflow-wrap:anywhere}
 .footer-details-body dd{margin:0;color:#dce8d2;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .status-events-link{display:inline-block;margin-top:11px;color:var(--lime);text-underline-offset:3px}#status-integration-list>div{grid-template-columns:minmax(0,1fr);gap:2px}#status-integration-list [hidden]{display:none}#status-integration-list dd{text-align:left}#status-integration-list dd.is-failed{color:#f0c2b4}#status-integration-list dd.is-attention{color:#f3dd9a}
