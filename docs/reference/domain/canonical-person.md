@@ -98,6 +98,6 @@ Pairs with evidence that do not join become **candidates**, never links:
 
 ## Not in this contract
 
-- No stored human, owner decision or D1 table of either. The [person identity projection](person-identity-projection.md) is the consumer reference over this grouping. One GET loads a bounded neighborhood and calls that projection ([ADR 0062](../../adr/0062-d1-person-identity-read.md)). Persisting humans or decisions, and pointing a page at the reference, stays separate work.
+- No stored human, owner decision or D1 table of either. The [person identity projection](person-identity-projection.md) is the consumer reference over this grouping. One GET loads a bounded neighborhood and calls that projection ([ADR 0062](../../adr/0062-d1-person-identity-read.md)). The Finds actor and director filter reads that GET and does not store a human ([ADR 0065](../../adr/0065-finds-person-filter-d1-read.md)). Persisting humans or decisions stays separate work.
 - No fetching of credits. Films without TMDB credits in D1 give no coCredit evidence until a separately approved credits step adds them; this includes the watchlist Films added after AIR-286.
 - No owner decision UI: [AIR-54](https://trello.com/c/yKtj1ahy) and AIR-126 cover owner input.
