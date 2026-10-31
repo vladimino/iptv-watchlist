@@ -187,13 +187,54 @@ Parameters are validated before any read. No filter is required: the whole inven
 
 ### The page
 
-`/admin/limbo` holds the filter in the URL (`kind`, `subsystem`, `cause`, `age`), the pin and cursors in memory. Cause and subsystem chips carry the whole-inventory counts; a form sets kind and age; Escape and "Сбросить фильтры" clear the filter. Each item shows why it is waiting (reason, cause, progress, retry time), since when (days without progress and the last transition), the expected action and whether it is eligible, the threshold, the evidence source and read time, the identity provenance and the last diagnostic, and links to the film in `/admin` only when the film is in the published programme; a film known only from the queue says that the catalogue has no card for it. The side panel shows the snapshot, the pipeline context, the unread subsystems and the thresholds, and states that observations are unavailable. Empty, error and stale snapshot are distinct states as on `/admin`. The page is the third section of the admin navigation (Каталог, Здоровье данных, Лимбо). The page has no action button: retries and refreshes are guarded actions of another card.
+`/admin/limbo` holds the filter in the URL (`kind`, `subsystem`, `cause`, `age`), the pin and cursors in memory. Cause and subsystem chips carry the whole-inventory counts; a form sets kind and age; Escape and "Сбросить фильтры" clear the filter. Each item shows why it is waiting (reason, cause, progress, retry time), since when (days without progress and the last transition), the expected action and whether it is eligible, the threshold, the evidence source and read time, the identity provenance and the last diagnostic, and links to the film in `/admin` only when the film is in the published programme; a film known only from the queue says that the catalogue has no card for it. The side panel shows the snapshot, the pipeline context, the unread subsystems and the thresholds, and states that observations are unavailable. Empty, error and stale snapshot are distinct states as on `/admin`. The page is the third section of the admin navigation (Каталог, Здоровье данных, Лимбо, Постеры). The page has no action button: retries and refreshes are guarded actions of another card.
+
+## Poster coverage
+
+`GET /api/admin/posters` is the read behind the owner page `/admin/posters`: how many catalog records lack a poster, how many of them can be restored from TMDB by a verified id, which ones cannot, and the next bounded batch of the restoration queue. It is read-only and behind the same Access application. The only write the page can cause is an owner-confirmed call of the existing maintenance route `POST /api/enrichment/catalog/posters` ([catalog reference](catalog.md#poster-hydration), [ADR 0048](../../adr/0048-permanent-catalog-poster-maintenance-route.md)); this route never calls it. Source: [`src/admin/posters.js`](../../../src/admin/posters.js) (handler), [`src/admin/posters-client.js`](../../../src/admin/posters-client.js), [`src/admin/posters-run.js`](../../../src/admin/posters-run.js) and [`public/admin-posters.js`](../../../public/admin-posters.js) (the page). Tests: [`tests/admin-posters-api.mjs`](../../../tests/admin-posters-api.mjs), [`tests/admin-posters-run.mjs`](../../../tests/admin-posters-run.mjs), [`tests/admin-posters-page.mjs`](../../../tests/admin-posters-page.mjs); the [GET side-effect test](../../../tests/get-side-effects.mjs) pins its read set.
+
+### What is read
+
+Exactly three objects, in order: `epg/published-generation.json`, the live catalog `epg/discovered-films.json`, and the published generation's copy `epg/generations/<programmeRunId>/discovered-films.json` (only when the pointer is `published`). These are the objects the maintenance route counts, with the same rule (`catalogPosterMissing`): a record counts once, as missing when either copy lacks an `https://` poster, and as restorable (`verifiedMissing`) when its numeric `tmdbId` is also its `canonicalIdentity`. No snapshot pin, no programme, no `BUCKET.list`, no resolver lease, no ledger, no TMDB request and no write. A missing or malformed copy counts as empty and is reported per copy; a failing read is 503 `storage_unavailable`.
+
+### Parameters
+
+| Parameter | Rule |
+| --- | --- |
+| `limit` | Size of the batch shown, digits `1`–`10`, default `10`; otherwise 400 `invalid_limit`. Ten is the page's batch cap, below the route's own limit of 20 |
+| `cursor` | The position in the queue, as the maintenance route uses it: records whose id sorts after it (`localeCompare`, `en`). Empty or absent is the start; longer than 200 characters is 400 `invalid_cursor` |
+
+Parameters are validated before any read. Any other method is 405 `method_not_allowed`.
+
+### Answer
+
+`{schemaVersion, observedAt, programmeRunId, catalogRecords, withPoster, missingPoster, verifiedMissing, unverifiedMissing, publishedAt, copies, queue, unverified, health, limits, reads}`.
+
+- The counts are the maintenance route's dry-run counts of the same objects.
+- `copies[]`: `{key, role: generation|live, present, readable, version, records, missingPoster, verifiedMissing}` per copy.
+- `queue`: `{cursor, limit, items, remainingAfterCursor, total}`. `items` are the next `limit` restorable records after `cursor` — `{id, tmdbId, title, original, year}` with titles cut to 200 characters — which are exactly the records a `POST {dryRun: false, limit, cursor}` would process next.
+- `unverified`: `{count, sample}`, up to ten records without a poster that the route will not touch, each with `reason` `tmdb_id_missing` (no numeric TMDB id) or `identity_not_tmdb` (the id is not the record's canonical identity).
+- `health`: the [data health](../domain/data-health.md#rules) catalog poster summary issue of these counts (`id`, `severity`, `reason`, `category`, `action`, `evidence`, `threshold`) or `null` when no poster is missing, and the `posterBacklogCount` in force.
+- `limits`: `{batch: 10, route: 20}`; `reads`: the keys read.
+
+### The page
+
+`/admin/posters` is the fourth section of the admin navigation. It shows the coverage (records, with a poster, without one, restorable, not restorable) with the per-copy figures in a closed «Технические подробности»; a warning when the restorable backlog reaches `posterBacklogCount`; the records without a verified TMDB id; and the browser's own history: the last successful restoration, recent coverage readings and runs. The server keeps no run journal, so that history lives only in this browser's `localStorage` (`iptv.admin.posters.v1`), is labelled as such, and can be forgotten; it is never an input to the route.
+
+A manual run follows the guarded-action principles of [admin actions](admin-actions.md#the-poster-page):
+
+1. **Preview.** The owner picks the batch size (1–10, default 10), the call budget (1–30, default 1) and the start (the position saved by the last run for the same generation, or the start of the queue). The preview is one GET: the first batch by title and TMDB id, how many records follow, and the most this run can touch. It writes nothing and calls no TMDB.
+2. **Confirmation.** A checkbox restates the exact scope (calls, batch size, maximum records, start, generation). It is valid for ten minutes and one run, and is dropped by any change of the options or a re-check. It guards against an accidental click; authorization is still Cloudflare Access.
+3. **Fresh check.** Immediately before the first call the page re-reads the queue with the confirmed cursor and limit. A different generation, a different first batch, nothing left to restore or a rate-limit gate refuses the run with nothing sent.
+4. **Bounded execution.** One `POST /api/enrichment/catalog/posters` with `{dryRun: false, limit}` and the route's `nextCursor` per call, never in parallel and never above ten records. The run stops at the first of: `done`; the confirmed call budget; five consecutive calls with no new poster and an unchanged cursor; `retryAt` (TMDB rate limit, kept as a gate for the next preview); a generation change, reported by the route or seen in its answer; the resolver lease held by discovery (409); a lost lease (409, with the copies already written); TMDB not configured (503); a rejected request (400); an answer the page cannot read or an outcome code it has no sentence for. "Остановить после текущего пакета" stops between calls; a call in flight always completes and is recorded.
+5. **Receipt.** The stop reason in plain Russian, the totals (written, already present, no poster on TMDB, TMDB answered for another film, retryable), a partial-write warning when one copy was written without the other, the latest outcome of every record, and per call the HTTP status, cursors and writes per copy in «Технические подробности». The page then re-reads the coverage and shows before → after.
 
 ## Limits
 
 - The catalogue is the pinned generation's programme: watchlist films and the people on them. Catalog-only films (`epg/discovered-films.json`), unresolved observations and the resolution ledger are not searched; identity codes that need the ledger (`ambiguous`, `rejected`) are not produced here.
 - Fingerprint and prediction state is not read; see `queue_unavailable` above.
 - Pages run over an in-memory projection of the whole programme object; a cold request costs five R2 reads and one parse of the programme, a warm one five reads and no parse of the programme.
-- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; this API has no `POST`. The health read suggests actions as the model states them and offers no way to run one.
+- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; this API has no `POST`. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
+- `/admin/posters` is the one admin page that calls a write route, and only the existing `POST /api/enrichment/catalog/posters`, after the owner's confirmation. Outcomes `no_poster_on_tmdb` and `tmdb_id_mismatch` are not stored by that route, so those records stay in `verifiedMissing`; only the browser history remembers them.
 
-Rollback is a revert of the route and the page: no R2 object was written by them.
+Rollback is a revert of the routes and the pages: the read routes wrote no R2 object. Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback).
