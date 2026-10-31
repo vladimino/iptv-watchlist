@@ -1,9 +1,9 @@
 # ADR 0071: A rated legacy removal entry is linked to existing events of the same film id
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** Pending owner decision. Independent review does not accept this record.  
+**Approval source:** The owner explicitly accepted ADR 0071 and visually approved both changed Ratings Mermaid diagrams on 2026-10-31 (Europe/Madrid) after independent [PASS review of PR #293 HEAD `14eade38f18fd8aa7390fa672ddff03d1408a6bf`](https://github.com/vladimino/iptv-watchlist/pull/293#pullrequestreview-5724769767) and successful PR CI. [Owner decision recorded in AIR-303](https://trello.com/c/mCvySjUN#comment-6ae64e789a0dcc24f6fa8b43). Approval covers the documented architecture and visuals only; no separate production Ratings/EPG run, flags, Tasks, R2/D1 writes, migration, repair or backfill authorized.  
 **Related work:** [AIR-303](https://trello.com/c/mCvySjUN); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md); [ADR 0043](0043-removal-rating-lookup-queue.md); [evidence](../evidence/letterboxd/air-303-legacy-removal-events-2026-10-31.md)  
 **Supersedes:** In part: [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md) decision 3, the sentence that a version 1 entry migrated as `legacy: true` with `refs: []` promises nothing for an event. That promise stays for an entry that is not `rated` with a confirmed half-star. The migration shape, reopen-on-new-reference rule, retention of unresolved references, and every other decision of that record stay.  
 **Superseded by:** None
@@ -14,7 +14,7 @@
 - **Diary resolution does not add a reference.** `resolveRemovalByDiary` marks the queue entry `rated` with `lastResult: diary` and leaves `legacy` and `refs` as they are. The fact is stored. The historical watchlist events are not.
 - **Production shape on 2026-10-31, as recorded on AIR-303 from read-only checks.** One legacy queue entry (`entries: 1`, `legacy: 1`, `refs: 0`, hand-over films `0`, `ratings_storage_migrate` `dry_run` `writes: 0`). The same film was removed twice, and both removal events stayed in «Остальные удаления» after a Diary rating. The manual EPG run `d035ce87-3fbc-4edd-aeac-ecf5a84d8aed` reached `programme` complete; inline ratings were interrupted in `post_commit` with `ratingAttempt: unknown` and `removalRatingLookup.checked: 0`. This record does not repeat those reads and does not include a diary row or a rating value. Counts and the run id are in the evidence note.
 - **A full scan on every EPG commit or every ordinary ratings step is the wrong repair.** `enrichRecentRemovalRatings` already lists up to 100 events on the inline path. Putting that on the EPG commit, or on every removal step after the repair, walks `events/items/` for no further work. `addRemovalRef` must not be reused for this repair: a new reference on a finished entry reopens it to `pending` and would start another Letterboxd lookup.
-- **Number.** Accepted [ADR 0070](0070-metadatasync-freshness-clocks.md) is on `main`: the enrichment projector writes metadata-sync freshness clocks at schema v5 ([AIR-311](https://trello.com/c/81P7wg4u), merged [PR #291](https://github.com/vladimino/iptv-watchlist/pull/291)). That acceptance belongs to that record. This record is Proposed ADR 0071. No other open branch held 0071.
+- **Number.** Accepted [ADR 0070](0070-metadatasync-freshness-clocks.md) is on `main`: the enrichment projector writes metadata-sync freshness clocks at schema v5 ([AIR-311](https://trello.com/c/81P7wg4u), merged [PR #291](https://github.com/vladimino/iptv-watchlist/pull/291)). That acceptance belongs to that record. This record is Accepted ADR 0071. No other open branch held 0071.
 
 ## Decision
 
@@ -42,7 +42,7 @@ What this record does **not** decide: a production ratings run, a flag change, a
 
 - The first removal steps after this code is deployed, and only if an owner-approved ratings run is later started while a rated legacy entry remains, walk `events/items/` twenty keys at a time. The observed volume is one legacy entry and two removal events for that film. The cost is the length of the event prefix, once, not a list on later steps.
 - A second removal of the same film after the scan uses the existing v2 enqueue. It is not another full scan.
-- Two diagrams in `docs/architecture/scheduling-and-orchestration.md` change: the ratings sequence diagram gains one optional list page, and the ratings state diagram's removal loop names that page. The drift sequence diagram does not change. Both changed diagrams need the owner's visual approval before merge. This record stays Proposed until the owner accepts or declines it. `main` already has six scheduling diagrams, including the metadata-sync clocks split from Accepted ADR 0070: Daily EPG and hourly discovery, hourly prediction, the drift monitor, Worker cron, the ratings sequence, and the ratings state. This record changes only the ratings sequence diagram and the ratings state diagram.
+- Two diagrams in `docs/architecture/scheduling-and-orchestration.md` change: the ratings sequence diagram gains one optional list page, and the ratings state diagram's removal loop names that page. The drift sequence diagram does not change. Both changed diagrams were explicitly visually approved by the owner on 2026-10-31 (Europe/Madrid), [recorded in AIR-303](https://trello.com/c/mCvySjUN#comment-6ae64e789a0dcc24f6fa8b43). `main` already has six scheduling diagrams, including the metadata-sync clocks split from Accepted ADR 0070: Daily EPG and hourly discovery, hourly prediction, the drift monitor, Worker cron, the ratings sequence, and the ratings state. This record changes only the ratings sequence diagram and the ratings state diagram.
 
 ## Recovery and migration boundary
 
