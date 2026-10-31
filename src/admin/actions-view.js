@@ -1,95 +1,103 @@
-// Reusable guarded-action panel: preview, explicit confirmation of the exact scope, receipt. It renders what an
-// adapter returns and calls the adapter's two functions; it never decides eligibility and never executes on its own.
-// Rendering a preview writes nothing; only the confirm button, enabled after the owner ticks the scope checkbox on an
-// eligible preview, calls `adapter.execute`.
-const ACTION_PREVIEW_TEXT = {
-  eligible: 'Можно подтвердить', ineligible: 'Нельзя выполнить', stale: 'Снимок устарел', unsupported: 'Действие не поддерживается', unknown: 'Недостаточно данных', empty: 'Нечего делать',
-};
-const ACTION_RUN_TEXT = {
-  approved: 'подтверждено', running: 'выполняется', succeeded: 'выполнено', partial: 'выполнено частично', failed: 'не выполнено', aborted: 'прервано', unknown: 'исход неизвестен', refused: 'отказано',
-};
-const ACTION_OUTCOME_TEXT = {written: 'записано', already_applied: 'уже применено', skipped_changed: 'пропущено: запись изменилась', failed: 'ошибка', unknown: 'неизвестно, записалось ли', not_attempted: 'не выполнялось'};
-const ACTION_REFUSAL_TEXT = {
-  access_denied: 'Нет доступа владельца.', unsupported_capability: 'Такого действия нет в реестре.', invalid_request: 'Некорректный запрос.',
-  confirmation_missing: 'Нет явного подтверждения.', confirmation_expired: 'Подтверждение истекло. Постройте превью заново.', confirmation_mismatch: 'Подтверждение относится к другому объёму.',
-  stale_pin: 'Опубликованный снимок изменился после превью.', record_changed: 'Запись изменилась после превью.', eligibility_changed: 'Готовность записей изменилась после превью.',
-  not_eligible: 'Превью не допускает подтверждения.', budget_exceeded: 'Объём больше бюджета действия.', idempotency_conflict: 'Этот ключ уже использован для другого объёма.',
-  in_progress: 'Такое же действие уже выполняется.', lease_held: 'Другое действие держит lease.',
-};
+// Reusable guarded-action panel. It renders the plain-language model of src/admin/actions-presentation.js in a fixed
+// order (what is wrong, what will change, who is included and why, who is skipped and why, risks, the exact
+// confirmation, the result) and calls the adapter's functions; it never decides eligibility and never executes on its
+// own. Rendering a preview writes nothing. The confirm button works only for an eligible preview that the presentation
+// layer could fully explain, and only after the owner ticks the scope checkbox. Every text is HTML-escaped; raw codes,
+// ids, versions and fingerprints are shown only inside the closed "Технические подробности" disclosure.
 
 function actionEscape(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
 }
 
-function actionPreviewHtml(preview) {
-  const status = preview.status;
-  const affected = (preview.affected || []).map(item => `<li><span>${actionEscape(item.id)}</span> <small>версия ${actionEscape(item.version)}</small></li>`).join('');
-  const excluded = (preview.excluded || []).map(item => `<li><span>${actionEscape(item.id)}</span> <small>${actionEscape(item.status)} · ${actionEscape(item.reason)}</small></li>`).join('');
-  const budget = preview.budget ? `записей ${preview.budget.records} из ${preview.budget.maxRecords}, записей в хранилище ${preview.budget.writes}, внешних вызовов ${preview.budget.externalCalls}` : '—';
-  return `<p class="action-status action-status-${actionEscape(status)}"><b>${actionEscape(ACTION_PREVIEW_TEXT[status] || status)}</b>${preview.reason && preview.reason !== 'eligible' ? ' · ' + actionEscape(preview.reason) : ''}</p>
-    <dl class="action-facts">
-      <div><dt>Действие</dt><dd>${actionEscape(preview.capability)} v${actionEscape(preview.version)}</dd></div>
-      <div><dt>Снимок</dt><dd>${actionEscape(String(preview.pin || '').slice(0, 40))}${preview.currentPin ? ' · сейчас ' + actionEscape(String(preview.currentPin).slice(0, 40)) : ''}</dd></div>
-      <div><dt>Бюджет</dt><dd>${actionEscape(budget)}</dd></div>
-      <div><dt>Атомарность</dt><dd>${preview.atomic === false ? 'нет: при сбое возможен частичный результат, он будет виден в квитанции' : '—'}</dd></div>
-      <div><dt>Откат</dt><dd>${actionEscape(preview.compensation?.guidance || '—')}</dd></div>
-      <div><dt>Объём</dt><dd>${preview.scopeFingerprint ? 'отпечаток ' + actionEscape(preview.scopeFingerprint) : '—'}</dd></div>
-    </dl>
-    <h4>Будут затронуты</h4>${affected ? `<ul class="action-list">${affected}</ul>` : '<p class="muted">Ничего.</p>'}
-    ${excluded ? `<h4>Исключены</h4><ul class="action-list action-list-excluded">${excluded}</ul>` : ''}`;
+function actionTechnicalHtml(rows) {
+  if (!rows?.length) return '';
+  const items = rows.map(([label, value]) => `<div><dt>${actionEscape(label)}</dt><dd>${actionEscape(value)}</dd></div>`).join('');
+  return `<details class="action-tech"><summary>Технические подробности</summary><p class="muted">Для диагностики. Внутренние коды и идентификаторы — как их записала система.</p><dl class="action-facts">${items}</dl></details>`;
 }
 
-function actionReceiptHtml(receipt) {
-  const outcomes = (receipt.outcomes || []).map(entry => `<li><span>${actionEscape(entry.id)}</span> <small>${actionEscape(ACTION_OUTCOME_TEXT[entry.outcome] || entry.outcome)}${entry.error ? ' · ' + actionEscape(entry.error) : ''}</small></li>`).join('');
-  const refusal = receipt.refusal ? `<p class="action-refusal">${actionEscape(ACTION_REFUSAL_TEXT[receipt.refusal] || receipt.refusal)}</p>` : '';
-  const retry = receipt.state === 'refused' ? 'Ничего не выполнялось. Постройте превью заново.'
-    : receipt.state === 'unknown' ? 'Исход части записей неизвестен: сначала перечитайте записи, вслепую не повторяйте.'
-    : receipt.retry?.retryable?.length ? `Можно повторить: ${receipt.retry.retryable.map(actionEscape).join(', ')}` : 'Повтор не нужен.';
-  return `<p class="action-status action-status-run-${actionEscape(receipt.state)}"><b>Квитанция: ${actionEscape(ACTION_RUN_TEXT[receipt.state] || receipt.state)}</b>${receipt.replay ? ' · повтор того же ключа, ничего не записано заново' : ''}</p>${refusal}
-    ${outcomes ? `<ul class="action-list">${outcomes}</ul>` : ''}
-    <p class="muted action-retry">${retry}</p>
-    <p class="muted">Ключ ${actionEscape(receipt.idempotencyKey || '—')} · объём ${actionEscape(receipt.scopeFingerprint || '—')} · исполнитель: ${actionEscape(receipt.audit?.actor || '—')}</p>`;
+function actionStatusHtml(tone, headline, detail, next) {
+  return `<div class="action-status action-tone-${actionEscape(tone)}"><p><b>${actionEscape(headline)}</b>${detail ? ' ' + actionEscape(detail) : ''}</p>${next ? `<p class="action-next">${actionEscape(next)}</p>` : ''}</div>`;
 }
 
-// Mounts the panel into `root`. `adapter`: {preview(request) -> Promise<preview>, execute(confirmation) -> Promise<receipt>,
-// confirm(preview, accepted) -> confirmation|{error}}. Returns {refresh(request)} for the host page.
+function actionPreviewHtml(model) {
+  const head = `<h2 class="action-title">${actionEscape(model.title)}</h2>`;
+  if (!model.explainable) return `${head}<p class="action-unexplainable" role="alert">${actionEscape(model.message)}</p>${actionTechnicalHtml(model.technical)}`;
+  const included = model.included.length
+    ? `<ul class="action-items">${model.included.map(item => `<li><b>${actionEscape(item.name)}</b><span>${actionEscape(item.text)}</span></li>`).join('')}</ul>`
+    : '<p class="muted">Никого: изменять сейчас нечего.</p>';
+  const excluded = model.excluded.length
+    ? `<ul class="action-items action-items-excluded">${model.excluded.map(item => `<li><b>${actionEscape(item.name)}</b><span>${actionEscape(item.text)}</span><span class="action-next">Что делать: ${actionEscape(item.next)}</span></li>`).join('')}</ul>`
+    : '<p class="muted">Никого не пропускаем.</p>';
+  const change = model.change;
+  return `${head}${actionStatusHtml(model.status.tone, model.status.headline, model.status.detail, model.status.next)}
+    <section class="action-section"><h3>Что не так</h3><p>${actionEscape(model.problem)}</p></section>
+    <section class="action-section"><h3>Что мы собираемся изменить</h3><p>${actionEscape(change.summary)}</p><p>Что может измениться: ${actionEscape(change.fields)}. ${actionEscape(change.untouched)}</p><p>${actionEscape(change.effect)}</p>${change.simulation ? `<p class="action-simulation">${actionEscape(change.simulation)}</p>` : ''}</section>
+    <section class="action-section"><h3>Кого это затронет (и почему)</h3>${included}</section>
+    <section class="action-section"><h3>Кого пропустим (и почему)</h3>${excluded}</section>
+    <section class="action-section"><h3>Что может пойти не так / как поступить</h3><ul class="action-risks">${model.risks.map(risk => `<li>${actionEscape(risk)}</li>`).join('')}</ul></section>
+    ${actionTechnicalHtml(model.technical)}`;
+}
+
+function actionReceiptHtml(model) {
+  const head = '<h3 class="action-result-title" tabindex="-1" data-action-result-title>Что получилось</h3>';
+  if (!model.explainable) return `${head}${actionStatusHtml(model.tone, model.headline, '', '')}<p class="action-unexplainable" role="alert">${actionEscape(model.message)}</p>${actionTechnicalHtml(model.technical)}`;
+  const lines = model.lines.map(line => `<li class="action-outcome-${actionEscape(line.outcome)}"><b>${actionEscape(line.name)}</b><span>${actionEscape(line.text)}</span>${line.next ? `<span class="action-next">Что делать: ${actionEscape(line.next)}</span>` : ''}</li>`).join('');
+  return `${head}${actionStatusHtml(model.tone, model.headline, model.summary, model.next)}${model.replay ? `<p class="muted">${actionEscape(model.replay)}</p>` : ''}
+    ${lines ? `<ul class="action-items">${lines}</ul>` : ''}${actionTechnicalHtml(model.technical)}`;
+}
+
+// Mounts the panel into `root`. `adapter`: {descriptors, context() -> {titles, issues}, request?() -> request, preview(request) -> Promise<preview>,
+// confirm(preview, accepted) -> confirmation|{error}, execute(confirmation) -> Promise<receipt>}. Returns
+// {refresh(request), confirm(), state} for the host page.
 function mountActionPanel(root, adapter) {
   root.innerHTML = `<div class="action-panel">
     <div class="action-preview" data-action-preview aria-live="polite"></div>
-    <label class="action-accept"><input type="checkbox" data-action-accept disabled> <span>Я подтверждаю именно этот объём и понимаю, что результат может быть частичным</span></label>
-    <div class="action-buttons"><button type="button" data-action-confirm disabled>Подтвердить и выполнить</button><button type="button" data-action-repreview>Построить превью заново</button></div>
-    <div class="action-receipt" data-action-receipt aria-live="polite" role="status"></div>
+    <section class="action-section action-confirm" aria-labelledby="action-confirm-title"><h3 id="action-confirm-title">Подтверждение</h3>
+      <label class="action-accept"><input type="checkbox" data-action-accept disabled> <span data-action-accept-text>Подтверждение станет доступно, когда проверка покажет, что изменять.</span></label>
+      <div class="action-buttons"><button type="button" data-action-confirm disabled>Смоделировать изменение</button><button type="button" data-action-repreview>Проверить заново</button></div>
+    </section>
+    <div class="action-receipt" data-action-receipt aria-live="polite"></div>
   </div>`;
-  const previewNode = root.querySelector('[data-action-preview]'), accept = root.querySelector('[data-action-accept]');
+  const previewNode = root.querySelector('[data-action-preview]'), accept = root.querySelector('[data-action-accept]'), acceptText = root.querySelector('[data-action-accept-text]');
   const confirmButton = root.querySelector('[data-action-confirm]'), repreview = root.querySelector('[data-action-repreview]'), receiptNode = root.querySelector('[data-action-receipt]');
-  const state = {request: null, preview: null, busy: false};
+  const state = {request: null, preview: null, model: null, busy: false};
   const sync = () => {
-    const eligible = state.preview?.status === 'eligible';
-    accept.disabled = !eligible || state.busy;
-    if (!eligible) accept.checked = false;
-    confirmButton.disabled = !eligible || !accept.checked || state.busy;
+    // Only an eligible preview that was fully explained can be confirmed; anything else keeps both controls off.
+    const ready = state.preview?.status === 'eligible' && state.model?.explainable === true && Boolean(state.model.confirm);
+    accept.disabled = !ready || state.busy;
+    if (!ready) accept.checked = false;
+    confirmButton.disabled = !ready || !accept.checked || state.busy;
+    acceptText.textContent = ready ? state.model.confirm.label : 'Подтверждать нечего: выполнение недоступно. Причина указана выше.';
+    confirmButton.textContent = ready ? state.model.confirm.cta : 'Смоделировать изменение';
+  };
+  const showReceipt = receipt => {
+    receiptNode.innerHTML = actionReceiptHtml(presentReceipt(receipt, adapter.descriptors, adapter.context()));
+    receiptNode.querySelector?.('[data-action-result-title]')?.focus?.();
   };
   async function refresh(request) {
     state.request = request ?? state.request;
     state.preview = null;
+    state.model = null;
     accept.checked = false;
-    previewNode.innerHTML = '<p class="muted">Строим превью…</p>';
+    previewNode.innerHTML = '<p class="muted">Проверяем данные…</p>';
+    receiptNode.innerHTML = '';
     sync();
     state.preview = await adapter.preview(state.request);
-    previewNode.innerHTML = actionPreviewHtml(state.preview);
+    state.model = presentPreview(state.preview, adapter.descriptors, adapter.context());
+    previewNode.innerHTML = actionPreviewHtml(state.model);
     sync();
     return state.preview;
   }
   async function confirm() {
     if (confirmButton.disabled) return null;
     const confirmation = adapter.confirm(state.preview, accept.checked);
-    if (confirmation.error) {receiptNode.innerHTML = actionReceiptHtml({state: 'refused', refusal: confirmation.error, outcomes: []}); return null;}
+    if (confirmation.error) {showReceipt({state: 'refused', refusal: confirmation.error, outcomes: []}); return null;}
     state.busy = true;
     sync();
     receiptNode.innerHTML = '<p class="muted">Выполняется…</p>';
     try {
       const receipt = await adapter.execute(confirmation);
-      receiptNode.innerHTML = actionReceiptHtml(receipt);
+      showReceipt(receipt);
       return receipt;
     } finally {
       state.busy = false;
@@ -99,6 +107,7 @@ function mountActionPanel(root, adapter) {
   }
   accept.addEventListener('change', sync);
   confirmButton.addEventListener('click', () => {confirm();});
-  repreview.addEventListener('click', () => {refresh();});
+  // A fresh check asks the adapter for a request over the current data, so a stale preview can recover.
+  repreview.addEventListener('click', () => {refresh(adapter.request ? adapter.request() : undefined);});
   return {refresh, confirm, state};
 }

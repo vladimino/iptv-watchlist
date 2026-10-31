@@ -13,6 +13,30 @@ export const FIXTURE_CAPABILITY = defineCapability({
   confirmTtlMs: 10 * 60000,
 });
 
+// The display descriptor of the synthetic capability: the human contract src/admin/actions-presentation.js renders.
+// It must agree with FIXTURE_CAPABILITY (id, version, action code, subject kind, compensation) or the panel refuses to
+// explain, and therefore to confirm, anything.
+export const FIXTURE_DESCRIPTOR = Object.freeze({
+  capability: 'fixture_metadata_refresh', version: 1, healthActionCode: 'metadata_refresh', subjectKind: 'film', compensation: 'restore_before_image',
+  simulation: true,
+  title: 'Проверка перед обновлением метаданных',
+  noun: {one: 'тестовый фильм', few: 'тестовых фильма', many: 'тестовых фильмов', ofOne: 'тестового фильма', ofMany: 'тестовых фильмов'},
+  subjectLabel: 'тестовый фильм «{name}»',
+  problem: 'У некоторых фильмов метаданные — описание, год, жанры, длительность — отсутствуют, заполнены не полностью или давно не обновлялись. Из-за этого на сайте видны неполные или старые сведения.',
+  change: 'Для каждого фильма из списка ниже заново получим карточку метаданных и сохраним её вместо прежней.',
+  fields: ['описание', 'год выпуска', 'жанры', 'длительность'],
+  untouched: 'Название, оценки, прогнозы и расписание эфира не меняются.',
+  effect: 'После изменения у фильма будет полная и свежая карточка метаданных.',
+  simulationNote: 'В тренажёре изменение только моделируется: меняется копия данных в памяти этой вкладки. Реальные фильмы и сайт не затрагиваются.',
+  externalCalls: null,
+  risks: [
+    'Обновление отдельного фильма может завершиться ошибкой — тогда этот фильм не изменится, а остальные продолжат обновляться.',
+    'Сохранение может прерваться так, что неизвестно, применилось ли изменение. Такой фильм нельзя повторять вслепую — сначала проверьте его карточку.',
+  ],
+  cta: 'Смоделировать изменение',
+  confirm: 'Подтверждаю: смоделировать обновление метаданных для {count} — {names}. Понимаю, что часть фильмов может не обновиться; результат будет показан по каждому.',
+});
+
 let fixtureVersionCounter = 0;
 function fixtureNextVersion(id) {
   fixtureVersionCounter += 1;

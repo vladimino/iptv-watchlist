@@ -2,7 +2,7 @@
 
 This page is the contract every Data Health recovery action must follow before it may write: a versioned capability, a read-only eligibility decision, a dry-run preview, the owner's explicit confirmation of one exact scope with an expiry, checks against a fresh read at submission, bounded execution with CAS per record, an honest receipt, and retry and compensation rules. It is implemented as a pure library and a fixture exemplar. **No production action exists**: the Worker has no action route, does not bundle the library, and no capability is wired to R2, D1, a Scheduled Task, Access, a flag or an external service.
 
-Source: [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (the contract, pure), [`src/admin/actions-fixture.js`](../../../src/admin/actions-fixture.js) (in-memory store, executor, GET/POST transport shape), [`src/admin/actions-view.js`](../../../src/admin/actions-view.js) (the reusable panel), [`public/admin-actions.html`](../../../public/admin-actions.html) and [`public/admin-actions.js`](../../../public/admin-actions.js) (the demonstration page at `/admin/actions`). Tests: [`tests/admin-actions.mjs`](../../../tests/admin-actions.mjs), [`tests/admin-actions-view.mjs`](../../../tests/admin-actions-view.mjs). Eligibility comes from the [data health model](../domain/data-health.md); the pin is the one of the [admin read API](admin.md).
+Source: [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (the contract, pure), [`src/admin/actions-fixture.js`](../../../src/admin/actions-fixture.js) (in-memory store, executor, GET/POST transport shape), [`src/admin/actions-presentation.js`](../../../src/admin/actions-presentation.js) (the machine-to-human presentation layer), [`src/admin/actions-view.js`](../../../src/admin/actions-view.js) (the reusable panel), [`public/admin-actions.html`](../../../public/admin-actions.html) and [`public/admin-actions.js`](../../../public/admin-actions.js) (the demonstration page at `/admin/actions`). Tests: [`tests/admin-actions.mjs`](../../../tests/admin-actions.mjs), [`tests/admin-actions-presentation.mjs`](../../../tests/admin-actions-presentation.mjs), [`tests/admin-actions-view.mjs`](../../../tests/admin-actions-view.mjs). Eligibility comes from the [data health model](../domain/data-health.md); the pin is the one of the [admin read API](admin.md).
 
 ## Boundaries
 
@@ -99,8 +99,63 @@ A receipt carries `idempotencyKey`, capability and version, subject, pin, `scope
 
 `fixtureActionRequest` shows the shape a future owner route must keep, without being one: `GET /preview` only previews; `POST /execute` only executes; any other method is 405, an unknown path 404, a non-owner principal 403 before anything else. A refused submission answers 409 for a concurrency or freshness refusal (`stale_pin`, `record_changed`, `eligibility_changed`, `idempotency_conflict`, `lease_held`, `in_progress`) and 400 otherwise. A production route built on this contract also keeps the Worker's same-origin check for non-GET requests and is subject to its own card, tests, ADR classification and owner approval.
 
+## Presentation layer (machine to human)
+
+The owner decides on meaning, not on internal codes. [`src/admin/actions-presentation.js`](../../../src/admin/actions-presentation.js) turns a preview or a receipt into plain Russian. It is pure: no DOM, storage, network, clock, randomness or language model, and no input reaches an external service. It never decides eligibility, authority or risk; it can only withhold an explanation, and an unexplained preview can never be confirmed. The safety logic stays in the domain contract, which contains no display text and does not depend on this layer.
+
+### Display descriptor
+
+Each capability version has one display descriptor, plain data registered with `createDescriptorRegistry` (a malformed or duplicate descriptor throws). The fixture's is `FIXTURE_DESCRIPTOR` in `src/admin/actions-fixture.js`.
+
+| Field | Meaning |
+| --- | --- |
+| `capability`, `version` | the capability it explains |
+| `healthActionCode`, `subjectKind`, `compensation` | must agree with the capability and with the typed evidence, or nothing is explained |
+| `title` | the panel heading, e.g. «Проверка перед обновлением метаданных» |
+| `noun` | Russian count forms: `one`, `few`, `many`, and `ofOne`, `ofMany` after «из» |
+| `subjectLabel` | how a subject is named, with `{name}` for its trusted display title |
+| `problem` | «Что не так» |
+| `change`, `fields`, `untouched`, `effect` | «Что мы собираемся изменить»: the change, the fields that may change, what does not change, the expected effect |
+| `simulation`, `simulationNote` | a simulation says so in the change section, the headline and the result |
+| `externalCalls` | the sentence describing external calls; required when the capability's budget declares any, `null` otherwise |
+| `risks` | at least one risk of the capability itself and what to do about it; an empty list is rejected |
+| `cta` | the action button; the panel adds the count, e.g. «Смоделировать изменение (2 тестовых фильма)». A live capability names its real change here |
+| `confirm` | the scope acknowledgement; must contain both `{count}` and `{names}`, so it lists the whole scope (the domain scope key is enforced independently) |
+
+### Inputs and the explanation
+
+`presentPreview(preview, descriptors, context)` and `presentReceipt(receipt, descriptors, context)` take the trusted read the preview was judged on: `context = {titles, issues}`, where `titles` maps a stable subject id to its display title (trusted presentation metadata, never derived from the id) and `issues` are the data health issues. Every sentence comes from the descriptor, from typed fields (status, reasons, outcomes, error codes, compensation kind, `atomic`, budget, confirmation lifetime) and from the closed copy tables:
+
+| Table | Covers |
+| --- | --- |
+| `ACTION_PREVIEW_STATE_COPY`, `ACTION_PREVIEW_REASON_COPY` | every preview state and every reason `previewAction` emits, with a next step |
+| `ACTION_ISSUE_REASON_COPY` | every data health issue reason: why an included record needs the action |
+| `ACTION_EXCLUSION_COPY` | every data health eligibility reason and every exclusion `previewAction` adds (`no_issue`, `not_eligible`, `record_not_read`, `subject_kind_differs`, `version_unknown`), each with a reason and a safe next step |
+| `ACTION_RUN_STATE_COPY`, `ACTION_OUTCOME_COPY`, `ACTION_ERROR_COPY` | every run state, record outcome and error code |
+| `ACTION_REFUSAL_COPY` | every refusal, with how to fix it |
+| `ACTION_COMPENSATION_COPY` | every compensation kind, never promising an automatic rollback |
+
+The explanation follows a fixed order: «Что не так» → «Что мы собираемся изменить» → «Кого это затронет (и почему)» → «Кого пропустим (и почему)», each skipped record with a next step → «Что может пойти не так / как поступить» (non-atomic execution in plain words, concurrent changes, the capability's risks, external calls, undo, the confirmation lifetime) → the exact acknowledgement → «Что получилось» («Удалось для N из M», each record's outcome and next step; an unknown outcome says not to retry without checking; a refusal says why nothing ran and how to fix it).
+
+### Fail closed
+
+The whole preview is unexplainable, shown as «Невозможно достоверно объяснить действие; выполнение недоступно», with no acknowledgement and no button, when any of these holds:
+
+- there is no descriptor for the capability version, or its compensation, subject kind or external calls disagree with the preview;
+- a state, reason or exclusion code has no declared copy;
+- an included record has no trusted title, no typed issue of this capability's action code and subject kind, an issue reason without copy, or evidence that is not `complete`;
+- the preview is `eligible` and an excluded record has no trusted title: a confirmable scope names every subject it mentions.
+
+A receipt with an undeclared state, refusal, outcome or error code is shown as «Невозможно достоверно объяснить результат…» and asks for a manual check before any retry. Only in a preview that cannot be confirmed anyway is an excluded record without a trusted title called «запись без проверенного названия»; no name is invented and the id is not shown in its place.
+
+A receipt of an unfinished run (`approved`, `running`) is never shown as final: it has no «N из M» summary and no «nothing more to do», lists only the results already known, and asks to refresh the status or check later without starting the action again.
+
+### What the primary view never shows
+
+Stable ids, record versions, the pin, the scope key and fingerprint, the idempotency key, budget fields and limits, raw states, reasons, refusals and error codes, `atomic`, and CAS, lease or fence terms appear only inside a closed `<details>` «Технические подробности», kept in full for support. Every text, including display titles, is HTML-escaped. The stable ids stay in the action scope; display titles are presentation only.
+
 ## The panel and the demonstration page
 
-`mountActionPanel(root, adapter)` renders a preview (status, capability, snapshot, budget, atomicity, compensation, scope fingerprint, affected and excluded records), a checkbox "Я подтверждаю именно этот объём…", **Подтвердить и выполнить** (enabled only for an eligible preview with the box ticked) and **Построить превью заново**, and the receipt (state, refusal text, per-record outcomes, what may be retried, key, scope fingerprint). It calls only `adapter.preview`, `adapter.confirm` and `adapter.execute`, and decides nothing itself.
+`mountActionPanel(root, adapter)` renders the presentation of a preview in the order above, the exact contextual acknowledgement (a checkbox whose label names the count and the subjects), the action button with its count and **Проверить заново**, and the result under «Что получилось», which receives focus when it appears. The adapter supplies `descriptors`, `context()`, an optional `request()` for a fresh check over current data, `preview`, `confirm` and `execute`. The panel enables the checkbox, and after it the button, only for an `eligible` preview that the presentation layer fully explained; it decides nothing else.
 
-`/admin/actions` is the panel on synthetic data, all in the tab's memory: scenarios with two eligible films, a failure in the middle (partial), a timeout (unknown), a snapshot that changes after the preview (refused, stale pin) and nothing eligible. The page makes no request, stores nothing and is not linked from the owner catalogue page.
+`/admin/actions` is the panel as a simulator on fictional data, all in the tab's memory, under the permanent banner «Тренажёр на вымышленных данных. Реальные фильмы не меняются». Its selector, «Демонстрационные ситуации», is a test harness, not an owner workflow; each situation says what it imitates and what will be seen: two films can be updated, a failure on one film (partial), an unknown result (timeout), data that change after the check (refused, then recovered by a fresh check), and nothing to change. Films carry fictional titles («Север», «Тихая гавань», «Пустой лист», «Двойник»). The page makes no request, stores nothing, calls no model and is not linked from the owner catalogue page.

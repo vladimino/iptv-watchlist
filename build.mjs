@@ -4,8 +4,8 @@ import {scoped} from './scripts/bundle-scope.mjs';
 const assets={};
 for(const [path,file,type] of [['/','index.html','text/html'],['/styles.css','styles.css','text/css'],['/app.js','app.js','text/javascript'],['/admin','admin.html','text/html'],['/admin.css','admin.css','text/css']]) assets[path]={body:fs.readFileSync('public/'+file,'utf8'),type};
 assets['/admin/actions']={body:fs.readFileSync('public/admin-actions.html','utf8'),type:'text/html'};
-// The guarded action demonstration: the pure contract, the in-memory fixture executor, the panel and the page script. The Worker never runs them.
-assets['/admin-actions.js']={body:bundleAdmin([fs.readFileSync('src/domain/admin-actions.js','utf8'),fs.readFileSync('src/admin/actions-fixture.js','utf8'),fs.readFileSync('src/admin/actions-view.js','utf8'),fs.readFileSync('public/admin-actions.js','utf8')]),type:'text/javascript'};
+// The guarded action demonstration: the pure contract, the in-memory fixture executor, the presentation layer, the panel and the page script. The Worker never runs them.
+assets['/admin-actions.js']={body:bundleAdmin([fs.readFileSync('src/domain/admin-actions.js','utf8'),fs.readFileSync('src/admin/actions-fixture.js','utf8'),fs.readFileSync('src/admin/actions-presentation.js','utf8'),fs.readFileSync('src/admin/actions-view.js','utf8'),fs.readFileSync('public/admin-actions.js','utf8')]),type:'text/javascript'};
 assets['/admin.js']={body:bundleAdmin([fs.readFileSync('src/admin/client.js','utf8'),fs.readFileSync('src/admin/health-view.js','utf8'),fs.readFileSync('public/admin.js','utf8')]),type:'text/javascript'};
 assets['/admin/limbo']={body:fs.readFileSync('public/admin-limbo.html','utf8'),type:'text/html'};
 assets['/admin-limbo.js']={body:bundleAdmin([fs.readFileSync('src/admin/client.js','utf8'),fs.readFileSync('src/admin/limbo-client.js','utf8'),fs.readFileSync('public/admin-limbo.js','utf8')]),type:'text/javascript'};

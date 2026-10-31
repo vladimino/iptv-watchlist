@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Ручные операции — демонстрация</title>
-  <meta name="description" content="Демонстрация контракта безопасных ручных операций на синтетических данных: превью, подтверждение объёма, квитанция. Страница ничего не пишет и не делает запросов.">
+  <title>Ручные операции — тренажёр</title>
+  <meta name="description" content="Тренажёр безопасных ручных операций на вымышленных данных: объяснение, подтверждение списка, итог по каждому фильму. Страница ничего не пишет и не делает запросов.">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/admin.css">
@@ -15,16 +15,20 @@
     <a class="admin-home" href="/admin">К данным</a>
   </header>
   <main class="admin-shell">
+    <p id="action-demo-banner" class="demo-note action-banner" role="note"><span class="info-icon" aria-hidden="true">i</span><span><b>Тренажёр на вымышленных данных. Реальные фильмы не меняются.</b> Данные, проверка и результат живут только в этой вкладке; страница не делает запросов к сайту.</span></p>
     <section class="page-heading">
       <div>
-        <p class="eyebrow">ДЕМОНСТРАЦИЯ · СИНТЕТИЧЕСКИЕ ДАННЫЕ</p>
-        <h1>Ручные операции</h1>
-        <p class="admin-intro">Как будет выглядеть любое действие восстановления: превью затрагиваемых записей, явное подтверждение именно этого объёма, квитанция с честным результатом.</p>
+        <p class="eyebrow">ТРЕНАЖЁР · ВЫМЫШЛЕННЫЕ ДАННЫЕ</p>
+        <h1>Ручные операции с данными</h1>
+        <p class="admin-intro">Так будет устроено любое исправление данных: сначала объяснение — что не так, что изменится, кого это затронет и чем грозит, — затем ваше подтверждение именно этого списка, затем итог по каждому фильму.</p>
       </div>
     </section>
-    <p id="action-demo-note" class="demo-note"><span class="info-icon" aria-hidden="true">i</span><span>Это демонстрация. Хранилище, исполнитель и квитанции живут только в этой вкладке; страница не делает запросов и ничего не меняет в данных сайта.</span></p>
-    <label class="action-scenario"><span>Сценарий</span><select id="action-scenario"></select></label>
-    <p id="action-receipt-reset" class="muted" aria-live="polite"></p>
+    <section class="action-harness" aria-labelledby="action-harness-title">
+      <h2 id="action-harness-title">Демонстрационные ситуации</h2>
+      <p class="muted">Учебные примеры, а не режимы работы. Выберите ситуацию — панель ниже покажет, как она выглядит.</p>
+      <label class="action-scenario"><span>Ситуация</span><select id="action-scenario"></select></label>
+      <p id="action-scenario-note" class="action-scenario-note" aria-live="polite"></p>
+    </section>
     <section id="action-root" class="admin-card" aria-label="Действие"></section>
   </main>
   <script src="/admin-actions.js"></script>
