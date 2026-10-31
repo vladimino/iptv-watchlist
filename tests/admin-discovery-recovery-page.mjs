@@ -194,6 +194,13 @@ const slotOf = title => items.find(item => item.inner.includes(`<span class="adm
 const target = slotOf('Тихий берег');
 assert.match(results.innerHTML, new RegExp(`data-obs-recovery="${target}" aria-expanded="false" aria-controls="obs-recovery-${target}">Разобрать наблюдение</button>`));
 assert.match(results.innerHTML, new RegExp(`<section class="limbo-recovery" id="obs-recovery-${target}" data-obs-recovery-slot="${target}" aria-label="Разбор наблюдения" hidden>`));
+const cardFace = html => html.replace(/<details class="limbo-tech">[\s\S]*?<\/details>/g, '');
+const face = cardFace(results.innerHTML).replace(/data-limbo-item="[^"]*"/g, '');
+assert.match(face, /Автоматическое исправление недоступно\. Кнопка ниже только объясняет, почему/);
+assert.match(face, /Разбор ниже скажет, можно ли вернуть наблюдение в обычную очередь/);
+assert.match(face, /class="limbo-actions"/);
+assert.doesNotMatch(face, /\|2001|observation:|недопустимо|не применимо|Identity Review|admin-status-plain|неизвестно/);
+assert.match(results.innerHTML, /<details class="limbo-tech">[\s\S]*тихий берег\|2001/);
 assert.match(nodes.get('#limbo-context-body').innerHTML, /Наблюдения: частичное покрытие — в индексе 3 нерешённых наблюдений с решением резолвера/);
 
 // Open: one GET for this key; the panel explains it and offers the checkbox; «Подтвердить» is disabled.
@@ -302,7 +309,9 @@ const ambigPanel = document.querySelector(`[data-obs-recovery-slot="${ambig}"]`)
 await run('onLimboResult')({preventDefault() {}, target: {closest: match => match === '[data-obs-recovery]' ? openButton(ambig) : null}});
 await settle();
 assert.match(ambigPanel.innerHTML, /Идентичность неоднозначна/);
+assert.match(ambigPanel.innerHTML, /Автоматическое исправление этой проблемы пока недоступно/);
 assert.match(ambigPanel.innerHTML, /Недоступно — идентичность неоднозначна: нужен разбор идентичности, а не повтор\./);
+assert.doesNotMatch(panel.innerHTML, /Автоматическое исправление этой проблемы пока недоступно/);
 assert.doesNotMatch(ambigPanel.innerHTML, /data-obs-recovery-accept/);
 // Close: no request.
 requests = [];

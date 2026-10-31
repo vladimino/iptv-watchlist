@@ -9,3 +9,15 @@ export function scoped(file,name,names){
  if(!exported.length)throw new Error(file+' hands over nothing');
  return 'const '+name+'=(()=>{\n'+source.replace(/^export\s+/gm,'')+'\nreturn {'+exported.join(',')+'};\n})();';
 }
+// The person identity projection imports the canonical Person module. Both are pure. One scope
+// strips the import and the exports so the Worker bundle can call them without a second copy of either name.
+export function scopePersonIdentity(files=['src/domain/canonical-person.js','src/domain/person-identity-projection.js']){
+ let body='';
+ for(const file of files){
+  let source=fs.readFileSync(file,'utf8');
+  source=source.replace(/^\s*import\s+\{[^}]+\}\s+from\s+['"][^'"]+['"];?\r?\n/gm,'');
+  if(/^\s*import\s/m.test(source))throw new Error(file+' cannot be bundled: it imports');
+  body+=source.replace(/^export\s+/gm,'')+'\n';
+ }
+ return 'const PersonIdentity=(()=>{\n'+body+'return {projectPersonIdentity,resolvePersonReference,filmsForPerson,personSurfaces,personFold};\n})();\n';
+}

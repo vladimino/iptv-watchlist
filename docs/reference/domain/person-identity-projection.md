@@ -1,8 +1,8 @@
 # Person identity projection
 
-**Role:** consumer reference for one human across the watchlist and the catalog. Decision: [ADR 0059](../../adr/0059-person-identity-projection.md) (Accepted). Implemented by `src/domain/person-identity-projection.js`, over the grouping in [the canonical Person contract](canonical-person.md). Verified against the source on **2026-10-31**.
+**Role:** consumer reference for one human across the watchlist and the catalog. Decision: [ADR 0059](../../adr/0059-person-identity-projection.md) (Accepted). The one route that calls it is [ADR 0062](../../adr/0062-d1-person-identity-read.md) (Proposed). Implemented by `src/domain/person-identity-projection.js`, over the grouping in [the canonical Person contract](canonical-person.md). Verified against the source on **2026-10-31**.
 
-The projection is a read model. It does not query, write, or load inside the Worker. Programme, watchlist and catalog routes still match the role-specific id on the stored credit. Calling this module from a route is a separate approval.
+The projection is a read model. It does not query and does not write. The caller passes records it already loaded. Programme, watchlist and catalog routes still match the role-specific id on the stored credit. `GET /api/d1/persons/<role>/<key>/identity` loads one bounded D1 neighborhood and calls this module ([D1 catalog](../api/d1-catalog.md#person-identity)). That route does not replace those filters.
 
 ## Call
 

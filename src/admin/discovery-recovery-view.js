@@ -283,6 +283,7 @@ export function obsRecoveryPanelHtml(answer, state = {}) {
   return `${changed}${receipt}${error}${stale}<p class="recovery-headline"><span class="admin-status admin-status-${obsTone(assessment.verdict)}">${obsEscape(copy.title)}</span></p>`
     + `<h4>Что с наблюдением</h4><p>${obsEscape(copy.what + reason)}</p>`
     + `<h4>Что будет дальше</h4><p>${obsEscape(obsNextText(assessment.next))}</p>`
+    + (assessment.review?.reason === 'identity_ambiguous' && !assessment.execute?.available ? '<p>Автоматическое исправление этой проблемы пока недоступно.</p>' : '')
     + `<h4>Данные</h4>${obsFactsHtml(answer)}`
     + obsActionHtml(answer, state)
     + (snapshot ? `<p class="muted recovery-snapshot">${obsEscape(snapshot)}.</p>` : '')
