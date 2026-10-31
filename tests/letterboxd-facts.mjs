@@ -46,11 +46,12 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  F.applyObservation(record,'watched',await obs('watched',true,0));
  assert.equal(F.applyObservation(record,'rating',await obs('rating',null,2,'letterboxd_films_list','scan2')).outcome,'replaces');
  assert.equal(record.rating.value,null);assert.equal(record.watched.value,true);
- // Same watched date, two diary reads. 4.5's observation id sorts below 4.0's, so the hash tie would keep 4.0. The later
- // read replaces it; a late write of the earlier read does not. An owner observation after midnight of that day, and an
- // owner observation at that same midnight, both stay ahead of a later diary read.
+ // A viewing dated 20 Oct is ingested as 4.0 that day and as 4.5 on 25 Oct. The watched date does not move. 4.5's
+ // observation id sorts below 4.0's. The 25 Oct read replaces it; the same value on 26 Oct is the same observation; a
+ // late write of the 20 Oct read does not. An owner observation on 22 Oct, and an owner observation at the watched
+ // midnight, both stay ahead of a later diary read.
  {
-  const b=bucket(),env={BUCKET:b},watched='2026-10-30',t1='2026-10-31T08:00:00.000Z',t2='2026-10-31T18:00:00.000Z';
+  const b=bucket(),env={BUCKET:b},watched='2026-10-20',t1='2026-10-20T18:00:00.000Z',t2='2026-10-25T18:00:00.000Z',t3='2026-10-26T18:00:00.000Z';
   const item=(lid,rating,readAt,ref='diary:viewing:401')=>({lid,watchedDate:watched,rating,sourceRef:ref,readAt});
   const bare=async(lid,value,ref='diary:viewing:401')=>F.observation({factKey:'lb-'+lid,fact:'rating',value,observedAt:watched+'T00:00:00.000Z',source:'letterboxd_diary',sourceRef:ref});
   assert.ok((await bare('Edit',4.5)).observationId<(await bare('Edit',4)).observationId,'4.5 sorts below 4.0');
@@ -60,11 +61,15 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
   assert.equal(stored('Edit').rating.value,4.5);assert.equal(stored('Edit').rating.ingestedAt,t2);
   assert.equal(stored('Edit').rating.observedAt,watched+'T00:00:00.000Z');
   assert.equal(stored('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1);
+  b.records.set(F.FACTS_KEYS.viewIndex,{Edit:{watched:true,actualRating:1}});
+  assert.equal((await F.applyDiaryEvidence(env,[item('Edit',4.5,t3)])).unchanged,1);
+  assert.equal(stored('Edit').rating.value,4.5);assert.equal(stored('Edit').rating.ingestedAt,t2);
+  assert.equal(stored('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1);
   assert.equal((await F.applyDiaryEvidence(env,[item('Edit',4,t1)])).older,1);assert.equal(stored('Edit').rating.value,4.5);
-  const owner=await F.observation({factKey:'lb-Edit',fact:'rating',value:5,observedAt:'2026-10-30T15:00:00.000Z',source:'owner',sourceRef:'edit'});
+  const owner=await F.observation({factKey:'lb-Edit',fact:'rating',value:5,observedAt:'2026-10-22T12:00:00.000Z',source:'owner',sourceRef:'edit'});
   await F.recordObservations(env,'lb-Edit',{letterboxd:'Edit'},[{fact:'rating',observation:owner}]);
   b.records.set(F.FACTS_KEYS.viewIndex,{Edit:{watched:true,actualRating:5}});
-  assert.equal((await F.applyDiaryEvidence(env,[item('Edit',4.5,'2026-10-31T20:00:00.000Z')])).older,1);
+  assert.equal((await F.applyDiaryEvidence(env,[item('Edit',4.5,t3)])).older,1);
   assert.equal(stored('Edit').rating.value,5);assert.equal(stored('Edit').rating.source,'owner');
   assert.equal((await F.applyDiaryEvidence(env,[item('Tie',4,t1)])).written,1);
   const ownerSame=await F.observation({factKey:'lb-Tie',fact:'rating',value:2,observedAt:watched+'T00:00:00.000Z',source:'owner'});

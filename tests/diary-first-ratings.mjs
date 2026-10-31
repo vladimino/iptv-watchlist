@@ -189,44 +189,54 @@ assert.equal(Object.keys(records.get('letterboxd/diary/history.json').entries).l
 assert.ok(ops<=250,'R2 operations for 50 new films: '+ops);
 fs.writeFileSync(process.env.DIARY_WORST_CASE_OUT||'/dev/null',JSON.stringify({films:50,r2Operations:ops,ms:elapsed}));
 
-// 11. Two runs. The same viewing edited from 4.0 to 4.5, and a newly inserted first row of that day, both replace the
-// stored rating even though the new observation id sorts below the old one. An owner rating later that watched day
-// stays. A late write of the first read does not put 4.0 back.
+// 11. A rating revised days later. The Diary row keeps the watched date and the viewing id. Ingest 4.0 for a viewing
+// dated 20 Oct; on 25 Oct page 1 shows that same row as 4.5. The stored rating becomes 4.5 even though that observation
+// id sorts below 4.0. The same page on 26 Oct writes nothing. An owner observation dated 22 Oct still wins. A late
+// write of the 20 Oct read does not put 4.0 back.
 {
- const Facts=vm.runInContext('LetterboxdFacts',ctx),dayWatched='2026-10-30';
- let now=Date.parse('2026-10-31T08:00:00.000Z');
+ const Facts=vm.runInContext('LetterboxdFacts',ctx),dayWatched='2026-10-20',ref='diary:viewing:401';
+ const oct20=Date.parse('2026-10-20T18:00:00.000Z'),oct25=Date.parse('2026-10-25T18:00:00.000Z'),oct26=Date.parse('2026-10-26T18:00:00.000Z');
+ let now=oct20;
  const NativeDate=ctx.Date;
  class Clock extends NativeDate{constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}static parse(value){return NativeDate.parse(value);}static UTC(...args){return NativeDate.UTC(...args);}}
  ctx.Date=Clock;
- const bare=(lid,value,ref)=>Facts.observation({factKey:'lb-'+lid,fact:'rating',value,observedAt:dayWatched+'T00:00:00.000Z',source:'letterboxd_diary',sourceRef:ref});
- assert.ok((await bare('Edit',4.5,'diary:viewing:401')).observationId<(await bare('Edit',4,'diary:viewing:401')).observationId,'edited 4.5 sorts below 4.0');
- assert.ok((await bare('row',4.5,'diary:viewing:501')).observationId<(await bare('row',4,'diary:viewing:402')).observationId,'the inserted first row sorts below the old row');
+ const bare=value=>Facts.observation({factKey:'lb-Edit',fact:'rating',value,observedAt:dayWatched+'T00:00:00.000Z',source:'letterboxd_diary',sourceRef:ref});
+ assert.ok((await bare(4.5)).observationId<(await bare(4)).observationId,'4.5 sorts below 4.0; the hash must not be what saves it');
  records.clear();etags.clear();requests.length=0;
- publish([{lid:'Edit',date:dayWatched,stars:8,viewing:'401'},{lid:'row',date:dayWatched,stars:8,viewing:'402'},{lid:'Own',date:dayWatched,stars:8,viewing:'403'}]);
- await commit('same-day-1');
- assert.equal(record('Edit').rating.value,4);assert.equal(record('row').rating.value,4);assert.equal(record('Own').rating.value,4);
+ const page=stars=>[{lid:'Edit',date:dayWatched,stars,viewing:'401'},{lid:'Own',date:dayWatched,stars,viewing:'403'}];
+ publish(page(8));
+ await commit('revise-oct-20');
+ assert.equal(record('Edit').rating.value,4);
+ assert.equal(record('Edit').rating.observedAt,dayWatched+'T00:00:00.000Z');
+ assert.equal(record('Edit').rating.ingestedAt,new Date(oct20).toISOString());
+ assert.equal(record('Edit').rating.sourceRef,ref);
  const own=record('Own');
- own.rating={value:5,observedAt:'2026-10-30T15:00:00.000Z',source:'owner',sourceRef:'edit',observationId:'owner-own',replaced:own.rating};
+ own.rating={value:5,observedAt:'2026-10-22T12:00:00.000Z',source:'owner',sourceRef:'edit',observationId:'owner-own',replaced:own.rating};
  records.set('letterboxd/facts/films/lb-Own.json',own);
  records.set('enrichment/view-index.json',{...view(),Own:{...view().Own,actualRating:5}});
- now+=3600000;
- publish([{lid:'Edit',date:dayWatched,stars:9,viewing:'401'},{lid:'row',date:dayWatched,stars:9,viewing:'501'},{lid:'row',date:dayWatched,stars:8,viewing:'402'},{lid:'Own',date:dayWatched,stars:9,viewing:'403'}]);
+ now=oct25;
+ publish(page(9));
  requests.length=0;
- await commit('same-day-2');
+ await commit('revise-oct-25');
  assert.deepEqual(requests,[url(1)]);
- assert.equal(record('Edit').rating.value,4.5);assert.equal(record('Edit').rating.observedAt,dayWatched+'T00:00:00.000Z');
- assert.equal(record('Edit').rating.sourceRef,'diary:viewing:401');
+ assert.equal(record('Edit').rating.value,4.5);
+ assert.equal(record('Edit').rating.observedAt,dayWatched+'T00:00:00.000Z');
+ assert.equal(record('Edit').rating.ingestedAt,new Date(oct25).toISOString());
+ assert.equal(record('Edit').rating.sourceRef,ref);
  assert.equal(record('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1);
- assert.equal(record('row').rating.value,4.5);assert.equal(record('row').rating.sourceRef,'diary:viewing:501');
- const rowEntries=Object.values(records.get('letterboxd/diary/history.json').entries).filter(entry=>entry.identity?.value==='row'&&entry.watchedDate===dayWatched);
- assert.equal(rowEntries.length,2,'both viewing ids stay');
  assert.equal(record('Own').rating.value,5);assert.equal(record('Own').rating.source,'owner');
  const readAt=record('Edit').rating.ingestedAt;
- const earlier=new Date(Date.parse(readAt)-3600000).toISOString();
- await Facts.applyDiaryEvidence(env,[{lid:'Edit',watchedDate:dayWatched,rating:4,sourceRef:'diary:viewing:401',readAt:earlier}]);
+ await Facts.applyDiaryEvidence(env,[{lid:'Edit',watchedDate:dayWatched,rating:4,sourceRef:ref,readAt:new Date(oct20).toISOString()}]);
  assert.equal(record('Edit').rating.value,4.5);assert.equal(record('Edit').rating.ingestedAt,readAt);
- await commit('same-day-2b');
- assert.equal(record('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1,'a replay of the edited page adds no second change');
+ const factWrites=()=>writes.filter(key=>key==='letterboxd/facts/films/lb-Edit.json').length;
+ const before=factWrites();
+ now=oct26;
+ publish(page(9));
+ await commit('revise-oct-26');
+ assert.equal(factWrites(),before,'the identical later read writes no fact');
+ assert.equal(record('Edit').rating.value,4.5);
+ assert.equal(record('Edit').rating.ingestedAt,readAt);
+ assert.equal(record('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1);
 }
 
-console.log('Diary-first ratings (AIR-304): page order, first visible rating, one page of 50 as facts, no films list, replay without writes, newer observation wins either way, re-rating once, same-day edit and an inserted first row replace the stored rating, owner precedence holds, unrated newer day and watched-only prove no rating, older day does not override, page 1 blocked then retried, failed facts write re-reads page 1, facts gate, edge rating kept with an inexact count, both viewing ids kept, stored rating never taken as diary proof, bounded R2 operations for 50 new films passed');
+console.log('Diary-first ratings (AIR-304): page order, first visible rating, one page of 50 as facts, no films list, replay without writes, newer observation wins either way, re-rating once, a rating revised days later on the same viewing replaces the stored one and a repeat is idempotent, owner precedence holds, unrated newer day and watched-only prove no rating, older day does not override, page 1 blocked then retried, failed facts write re-reads page 1, facts gate, edge rating kept with an inexact count, both viewing ids kept, stored rating never taken as diary proof, bounded R2 operations for 50 new films passed');
