@@ -31,7 +31,7 @@ A deploy does not activate anything. Each step below that changes production nee
 
 ## Proposed separate ratings run (design, not live)
 
-[ADR 0059](../adr/0059-independent-letterboxd-ratings-pipeline.md) is `Proposed`; none of the following exists in production. If it is accepted and delivered, observation would move from `sync.json` to `ratings_sync_status`:
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) is `Proposed`; none of the following exists in production. If it is accepted and delivered, observation would move from `sync.json` to `ratings_sync_status`:
 
 - **Run record:** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`) and `outcome`/`cause`. A run with `lease.live: false` is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response.
 - **`isolated`:** two runs interrupted at the same phase and checkpoint. Record it and stop; only an owner-approved manual start with `clearIsolation` lifts it.

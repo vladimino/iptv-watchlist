@@ -1,4 +1,4 @@
-# ADR 0059: Letterboxd ratings run as their own leased, checkpointed pipeline, driven by a separate Scheduled Task through dedicated MCP tools
+# ADR 0060: Letterboxd ratings run as their own leased, checkpointed pipeline, driven by a separate Scheduled Task through dedicated MCP tools
 
 **Status:** Proposed  
 **Original decision date:** not decided (proposed 2026-10-31)  

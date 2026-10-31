@@ -102,7 +102,7 @@ Every string field is drawn from a closed vocabulary: stages and states (`idle`,
 
 ### Proposed ratings tools (not deployed)
 
-[ADR 0059](../../adr/0059-independent-letterboxd-ratings-pipeline.md) is `Proposed`. The deployed Worker exposes none of the tools below and runs ratings inside the EPG commit, as described above. If the record is accepted and delivered, the tools would be added to the allowlist under the same [authorization](#authorization), and they would answer `disabled` until `RATINGS_PIPELINE` is `separate`.
+[ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md) is `Proposed`. The deployed Worker exposes none of the tools below and runs ratings inside the EPG commit, as described above. If the record is accepted and delivered, the tools would be added to the allowlist under the same [authorization](#authorization), and they would answer `disabled` until `RATINGS_PIPELINE` is `separate`.
 
 | Tool | Writes | What it would call |
 | --- | --- | --- |
@@ -110,7 +110,7 @@ Every string field is drawn from a closed vocabulary: stages and states (`idle`,
 | `ratings_sync_start` | yes | `POST /api/letterboxd/ratings/start` with `{trigger, clearIsolation?}`. Answers `started`, `busy`, `too_soon`, `isolated` or `disabled`; closes a stale `running` record as `unknown` before deciding. `clearIsolation` only with `trigger: manual` |
 | `ratings_sync_step` | yes, open world | `POST /api/letterboxd/ratings/step` with `{runId}`: one step of at most three Diary pages, each checkpointed, or five removal lookups. `nextAction` `continue`, `wait` (`busy`, until `nextCatchUpAt`) or `stop` (`finished`, `error`, `unknown`, `run_mismatch`, `not_running`, `lease_lost`) |
 
-The caller would start once, step sequentially while `nextAction` is `continue`, honor `wait`, and never retry a `stop` or an invocation that ended without a response; the next start closes such a run `unknown`. The EPG, hourly and discovery contracts above would stop carrying ratings: `epg_sync_step` would neither read the Diary nor run lookups, and `ratingsPending` would no longer be set. The states, lease and races are in [the record](../../adr/0059-independent-letterboxd-ratings-pipeline.md#5-state-machine).
+The caller would start once, step sequentially while `nextAction` is `continue`, honor `wait`, and never retry a `stop` or an invocation that ended without a response; the next start closes such a run `unknown`. The EPG, hourly and discovery contracts above would stop carrying ratings: `epg_sync_step` would neither read the Diary nor run lookups, and `ratingsPending` would no longer be set. The states, lease and races are in [the record](../../adr/0060-independent-letterboxd-ratings-pipeline.md#5-state-machine).
 
 ## Authorization
 
