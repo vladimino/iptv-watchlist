@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {scopePersonIdentity} from '../scripts/bundle-scope.mjs';
 
 const source=fs.readFileSync('src/catalog-d1.js','utf8');
 assert.doesNotMatch(source,/\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i,'the D1 catalog views never write');
@@ -42,7 +43,7 @@ INSERT INTO import_receipt VALUES('k','s','film','film:tmdb:1','${T}');
 
 const ctx=vm.createContext({Response,URL,JSON,Promise,Number,String,Math});
 // The status view also reports the enrichment projector (ADR 0056); its read-only status function comes from its own module.
-vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+fs.readFileSync('src/d1-enrichment.js','utf8')+'\n'+source+'\nglobalThis.route=catalogD1Route;',ctx);
+vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+fs.readFileSync('src/d1-enrichment.js','utf8')+'\n'+scopePersonIdentity(['src/domain/canonical-person.js','src/domain/person-identity-projection.js'])+'\n'+source+'\nglobalThis.route=catalogD1Route;',ctx);
 const get=async(p,env={DB},method='GET')=>{const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p,{method}),env,new URL('https://iptv.test/api/d1/'+p));return {status:res.status,body:await res.json()};};
 
 // status
@@ -82,6 +83,90 @@ assert.deepEqual(r.body.crossRole.map(x=>[x.human,x.ids.sort()]),[['letterboxd:m
 assert.deepEqual(r.body.coCredit,[{letterboxd:'person:director/michael-mann',tmdb:'person:tmdb_director/1032',role:'director',name:'Майкл Манн',films:1}]);
 assert.deepEqual(r.body.nameOnly.map(x=>[x.name,x.letterboxd,x.tmdb]),[['Al Pacino',['person:actor/al-pacino'],['person:tmdb_actor/555']]],'a name with Film evidence leaves the name-only queue');
 assert.deepEqual(r.body.sameName.map(x=>[x.name,x.source,x.ids.sort(),x.count]),[['John Smith','letterboxd',['person:actor/john-smith','person:actor/john-smith-1'],2]]);
+// person identity: the existing person route stays a filmography; this route is the derived reference
+const peopleBefore=sqlite('select count(*) from person');
+r=await get('persons/director/michael-mann/identity');
+assert.equal(r.status,200);
+assert.equal(r.body.authoritative,false);
+assert.equal(r.body.bounded,false);
+assert.equal(r.body.reference.state,'trusted');
+assert.equal(r.body.reference.crossSource,'verified');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/michael-mann','person:director/michael-mann','person:tmdb_actor/1032','person:tmdb_director/1032']);
+assert.deepEqual(r.body.films.director,{state:'trusted',crossSource:'verified',humanId:r.body.reference.humanId,watchlist:['film:tmdb:2'],catalog:['film:tmdb:1','film:tmdb:3']});
+assert.deepEqual(r.body.films.actor.watchlist,[]);
+assert.deepEqual(r.body.films.actor.catalog,[]);
+assert.ok(r.body.reference.links.some(link=>link.basis==='co_credit'));
+assert.ok(r.body.reference.links.some(link=>link.basis==='same_key'));
+assert.deepEqual(r.body.limitations,['owner_decisions_not_stored','role_links_not_stored']);
+const actorMann=await get('persons/actor/michael-mann/identity');
+assert.equal(actorMann.body.reference.humanId,r.body.reference.humanId);
+assert.deepEqual(actorMann.body.films.director.catalog,r.body.films.director.catalog);
+assert.deepEqual(actorMann.body.films.director.watchlist,r.body.films.director.watchlist);
+r=await get('persons/actor/al-pacino/identity');
+assert.equal(r.body.reference.state,'ambiguous');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/al-pacino']);
+assert.equal(r.body.reference.reviews.some(review=>review.reason==='name_only'),true);
+assert.deepEqual(r.body.films.actor,{state:'ambiguous',crossSource:r.body.films.actor.crossSource,humanId:r.body.reference.humanId,watchlist:[],catalog:['film:tmdb:1']});
+assert.deepEqual(r.body.films.director.watchlist,[]);
+assert.deepEqual(r.body.films.director.catalog,[]);
+r=await get('persons/actor/john-smith/identity');
+assert.equal(r.body.reference.state,'ambiguous');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/john-smith']);
+assert.equal(r.body.reference.reviews.some(review=>review.reason==='same_name'),true);
+assert.deepEqual(r.body.films.actor.watchlist,[],'a shared name adds no film');
+assert.deepEqual(r.body.films.actor.catalog,[]);
+assert.equal(sqlite('select count(*) from person'),peopleBefore,'an identity read writes nothing');
+assert.equal((await get('persons/director/michael-mann')).body.name,'Michael Mann','the filmography route is unchanged');
+// A retired movie id does not verify a film. A trusted TV id does, and it joins only the shared role.
+sqlite(`
+INSERT INTO film VALUES('film:tmdb:9',1,'tmdb:9','Retired','${T}'),('film:tv:1',1,'tmdb_tv:9687','The Odyssey','${T}'),('film:tmdb:8',1,'tmdb:8','Collision','${T}');
+INSERT INTO film_external_id VALUES('film:tmdb:9','tmdb','17266',0,0,NULL),('film:tv:1','tmdb','17266',0,0,NULL),('film:tv:1','tmdb_tv','9687',1,0,NULL),('film:tmdb:8','tmdb','8',1,0,NULL),('film:tmdb:8','tmdb','80',1,0,NULL);
+INSERT INTO person VALUES('person:actor/odyssey','actor/odyssey',1,'${T}'),('person:tmdb_actor/968','tmdb_actor/968',1,'${T}'),('person:actor/ann','actor/ann',1,'${T}'),('person:tmdb_actor/11','tmdb_actor/11',1,'${T}'),('person:tmdb_actor/12','tmdb_actor/12',1,'${T}'),('person:actor/clash','actor/clash',1,'${T}'),('person:tmdb_actor/70','tmdb_actor/70',1,'${T}');
+INSERT INTO person_alias VALUES('person:actor/odyssey','name','Odysseus',NULL),('person:tmdb_actor/968','name','Odysseus',NULL),('person:actor/ann','name','Ann',NULL),('person:tmdb_actor/11','name','Ann',NULL),('person:tmdb_actor/12','name','Ann',NULL),('person:actor/clash','name','Clash',NULL),('person:tmdb_actor/70','name','Clash',NULL);
+INSERT INTO film_person_credit VALUES('film:tmdb:9','person:actor/odyssey','actor',0),('film:tmdb:9','person:tmdb_actor/968','actor',1),('film:tv:1','person:actor/odyssey','actor',0),('film:tv:1','person:tmdb_actor/968','actor',1),('film:tmdb:1','person:actor/ann','actor',1),('film:tmdb:1','person:tmdb_actor/11','actor',2),('film:tmdb:1','person:tmdb_actor/12','actor',3),('film:tmdb:8','person:actor/clash','actor',0),('film:tmdb:8','person:tmdb_actor/70','actor',1);
+INSERT INTO watchlist_film VALUES('film:tv:1','${T}');
+`);
+for(let n=0;n<200;n++)sqlite(`INSERT INTO person VALUES('person:actor/decoy-${n}','actor/decoy-${n}',1,'${T}');INSERT INTO person_alias VALUES('person:actor/decoy-${n}','name','Decoy ${n}',NULL);`);
+r=await get('persons/actor/odyssey/identity');
+assert.equal(r.body.reference.state,'trusted');
+assert.equal(r.body.reference.crossSource,'verified');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/odyssey','person:tmdb_actor/968']);
+assert.deepEqual(r.body.films.actor.watchlist,['film:tv:1']);
+assert.deepEqual(r.body.films.actor.catalog,['film:tmdb:9'],'the retired movie stays a credit and does not have to be the verifying id');
+r=await get('persons/actor/ann/identity');
+assert.equal(r.body.reference.state,'ambiguous');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/ann']);
+assert.equal(r.body.reference.reviews.some(review=>review.reason==='ambiguous_co_credit'),true);
+assert.deepEqual(r.body.films.actor.catalog,['film:tmdb:1']);
+assert.equal(r.body.films.actor.catalog.includes('film:tmdb:9'),false);
+r=await get('persons/actor/clash/identity');
+assert.equal(r.body.reference.crossSource,'none','two trusted ids leave the film unverified');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/clash']);
+assert.deepEqual(r.body.films.actor.catalog,['film:tmdb:8']);
+sqlite(`
+INSERT INTO film VALUES('film:tmdb:7',1,NULL,'Newer','${T}');
+INSERT INTO watchlist_film VALUES('film:tmdb:7','${T}');
+INSERT INTO person VALUES('person:director/newer','director/newer',1,'${T}');
+INSERT INTO person_alias VALUES('person:director/newer','name','Newer Director',NULL);
+INSERT INTO film_person_credit VALUES('film:tmdb:7','person:director/newer','director',0);
+`);
+r=await get('persons/director/newer/identity');
+assert.equal(r.body.reference.state,'unresolved','a watchlist film with no TMDB credit stays one record');
+assert.deepEqual(r.body.reference.memberIds,['person:director/newer']);
+assert.equal(r.body.reference.crossSource,'none');
+assert.equal(r.body.reference.links.length,0);
+assert.deepEqual(r.body.films.director.watchlist,['film:tmdb:7']);
+assert.deepEqual(r.body.films.director.catalog,[]);
+assert.deepEqual(r.body.films.actor.watchlist,[]);
+const started=Date.now();
+for(let n=0;n<20;n++)await get('persons/actor/al-pacino/identity');
+const elapsed=Date.now()-started;
+assert.ok(elapsed<5000,`20 identity reads took ${elapsed}ms`);
+assert.equal((await get('persons/actor/decoy-0/identity')).body.reference.memberIds.includes('person:actor/al-pacino'),false);
+assert.equal((await get('persons/actor/nobody/identity')).status,404);
+assert.equal((await get('persons/writer/ann/identity')).status,404);
+assert.equal((await get('persons/actor/al-pacino/identity',{DB},'POST')).status,405);
+assert.equal((await get('persons/actor/al-pacino/identity',{})).status,503);
 // guards
 assert.equal((await get('status',{DB},'POST')).status,405);
 assert.equal((await get('status',{})).status,503);

@@ -1,6 +1,7 @@
-// Read-only relational views over the D1 catalog (AIR-275 phase 1). Persons are entities here: one row per Letterboxd role
-// slug, with their names, external ids and filmography, plus review queues for people stored twice. Nothing here writes,
-// and nothing reads R2; R2 stays authoritative for every existing page until a later phase moves it.
+// Read-only relational views over the D1 catalog. Persons are entities here: one row per Letterboxd role
+// slug, with their names, external ids and filmography, plus review queues for people stored twice.
+// The person identity route loads one person's neighborhood and calls the pure projection. Nothing here writes,
+// and nothing reads R2; R2 stays authoritative for every existing page.
 const D1_LIMIT_DEFAULT=50,D1_LIMIT_MAX=100;
 const d1Limit=value=>{const n=Number(value);return Number.isInteger(n)&&n>=1?Math.min(n,D1_LIMIT_MAX):D1_LIMIT_DEFAULT;};
 const d1Rows=async(db,sql,params=[])=>(await db.prepare(sql).bind(...params).all()).results||[];
@@ -75,6 +76,122 @@ async function d1PersonReview(db,{limit}){
  const list=value=>value?String(value).split(','):[];
  return {totals,crossRole:crossRole.map(row=>({human:row.human,name:row.name,ids:row.ids.split(' ')})),coCredit,nameOnly:nameOnly.map(row=>({name:row.name,letterboxd:list(row.letterboxd),tmdb:list(row.tmdb)})),sameName:sameName.map(row=>({name:row.name,source:row.src,ids:list(row.ids),count:row.humans}))};
 }
+const IDENTITY_PERSON_CAP=400,IDENTITY_FILM_CAP=800,IDENTITY_ROUNDS=6,IDENTITY_NAMESAKES=40;
+const d1Json=text=>{if(text==null)return null;try{return JSON.parse(text);}catch{return null;}};
+async function d1Chunk(db,sql,ids){
+ if(!ids.length)return [];
+ const out=[],marks=sql.split('/*ids*/').length-1;
+ for(let i=0;i<ids.length;i+=80){
+  const chunk=ids.slice(i,i+80),place=chunk.map(()=>'?').join(',');
+  out.push(...await d1Rows(db,sql.replaceAll('/*ids*/',place),Array(marks).fill(chunk).flat()));
+ }
+ return out;
+}
+async function d1HumanIds(db,ids){
+ const keys=[...new Set(ids.map(id=>personSource(id)+':'+personSlug(id)))];
+ const rows=await d1Chunk(db,`select id from person where ${HUMAN_KEY_SQL('id')} in (/*ids*/) order by id`,keys);
+ return rows.map(row=>row.id);
+}
+async function d1Namesakes(db,ids){
+ const own=await d1Chunk(db,`select value name from person_alias where kind='name' and person_id in (/*ids*/) union select value from person_dimension where dimension='localization' and status in ('reviewed','provisional') and value is not null and person_id in (/*ids*/)`,ids);
+ const folded=new Set(own.map(row=>PersonIdentity.personFold(row.name)).filter(Boolean));
+ if(!folded.size)return {ids:[],truncated:false};
+ const needles=[...new Set(own.flatMap(row=>{const value=String(row.name??'');return [value,value.toLocaleLowerCase('ru')];}).filter(Boolean))];
+ const rows=await d1Chunk(db,`select id,name from (select person_id id,value name from person_alias where kind='name' union select person_id,value from person_dimension where dimension='localization' and status in ('reviewed','provisional') and value is not null) where lower(name) in (/*ids*/) order by id,name`,needles);
+ const seen=new Set(ids),found=[];
+ for(const row of rows){
+  if(!folded.has(PersonIdentity.personFold(row.name))||seen.has(row.id))continue;
+  seen.add(row.id);found.push(row.id);
+  if(found.length>=IDENTITY_NAMESAKES)return {ids:found,truncated:true};
+ }
+ return {ids:found,truncated:false};
+}
+async function d1IdentityPersons(db,ids){
+ const aliases=await d1Chunk(db,`select person_id id,kind,value from person_alias where person_id in (/*ids*/) order by person_id,kind,value`,ids);
+ const locals=await d1Chunk(db,`select person_id id,status,source,value,provenance_json from person_dimension where dimension='localization' and person_id in (/*ids*/) order by person_id`,ids);
+ const conflicts=await d1Chunk(db,`select entity_id id,value,source,reason from localization_conflict where entity_kind='person' and entity_id in (/*ids*/) order by entity_id,value`,ids);
+ const byAlias=new Map(),byLocal=new Map(),byConflict=new Map();
+ for(const row of aliases){if(!byAlias.has(row.id))byAlias.set(row.id,[]);byAlias.get(row.id).push(row);}
+ for(const row of locals)if(!byLocal.has(row.id))byLocal.set(row.id,row);
+ for(const row of conflicts){if(!byConflict.has(row.id))byConflict.set(row.id,[]);byConflict.get(row.id).push(row);}
+ return ids.slice().sort().map(id=>{
+  const names=(byAlias.get(id)||[]).filter(row=>row.kind==='name');
+  const local=byLocal.get(id);
+  const localization=local&&(local.status==='reviewed'||local.status==='provisional')&&local.value?{status:local.status,value:local.value,source:local.source??null,provenance:d1Json(local.provenance_json)}:null;
+  return {id,original:names[0]?.value??null,aliases:names.slice(1).map(row=>({kind:'name',value:row.value})),localization,localizationConflicts:(byConflict.get(id)||[]).map(row=>({value:row.value,source:row.source??null,reason:row.reason})),roleLinks:[]};
+ });
+}
+async function d1IdentityFilms(db,ids){
+ const films=await d1Chunk(db,`select f.id,f.canonical_identity canonicalIdentity,(select status from film_dimension d where d.film_id=f.id and d.dimension='identity') identityStatus,(select 1 from watchlist_film w where w.film_id=f.id) inWatchlist from film f where f.id in (/*ids*/) order by f.id`,ids);
+ const external=await d1Chunk(db,`select film_id filmId,scheme,value,trusted,conflicting from film_external_id where scheme in ('tmdb','tmdb_tv') and film_id in (/*ids*/) order by film_id,scheme,value`,ids);
+ const byFilm=new Map();
+ for(const row of external){if(!byFilm.has(row.filmId))byFilm.set(row.filmId,[]);byFilm.get(row.filmId).push({scheme:row.scheme,value:String(row.value),trusted:row.trusted===1,conflicting:row.conflicting===1});}
+ return films.map(row=>({id:row.id,surface:row.inWatchlist===1?'watchlist':'catalog',canonicalIdentity:row.canonicalIdentity??null,identity:row.identityStatus?{status:row.identityStatus}:null,externalIds:byFilm.get(row.id)||[]}));
+}
+function d1IdentityBody(recordId,projection,limitations,bounded){
+ const selector={recordId};
+ const resolved=PersonIdentity.resolvePersonReference(projection,selector);
+ const reference={state:resolved.status,crossSource:resolved.crossSource,humanId:resolved.humanId,formerIds:resolved.formerIds,memberIds:resolved.memberIds,links:resolved.links,reviews:resolved.reviews,externalIds:resolved.externalIds,reversal:resolved.reversal};
+ const films={};
+ for(const role of ['actor','director']){
+  const surfaces=PersonIdentity.personSurfaces(projection,selector,role);
+  films[role]={state:surfaces.status,crossSource:surfaces.crossSource,humanId:surfaces.humanId,watchlist:surfaces.watchlist,catalog:surfaces.catalog};
+ }
+ return {source:'d1',authoritative:false,recordId,reference,films,limitations,bounded};
+}
+async function d1IdentityProjection(db,personIds){
+ const persons=await d1IdentityPersons(db,personIds);
+ const loaded=new Set(persons.map(person=>person.id));
+ const credits=(await d1Chunk(db,`select film_id filmId,person_id personId,role from film_person_credit where role in ('actor','director') and person_id in (/*ids*/) order by film_id,role,person_id`,personIds)).filter(credit=>loaded.has(credit.personId));
+ const filmIds=[...new Set(credits.map(credit=>credit.filmId))].sort();
+ const films=filmIds.length?await d1IdentityFilms(db,filmIds):[];
+ return PersonIdentity.projectPersonIdentity({persons,credits,films,decisions:[]});
+}
+// One person, not the catalog. Same-key records stay together. People credited on those films are witnesses,
+// so a second person of the same name keeps a coCredit from looking unique. A witness joins the core only when
+// the projection says they are the same human, and the next round then loads that human's other films.
+// Namesakes are loaded with no extra films. Owner decisions and role links are not stored in D1.
+// A neighborhood past the cap answers from the same-key records only, so a partial witness list cannot add a film.
+async function d1PersonIdentity(db,id){
+ if(!await d1First(db,`select id from person where id=?`,[id]))return null;
+ const seed=new Set(await d1HumanIds(db,[id]));
+ seed.add(id);
+ const limitations=['owner_decisions_not_stored','role_links_not_stored'];
+ let core=new Set(seed),truncated=false;
+ for(let round=0;round<IDENTITY_ROUNDS;round++){
+  const coreIds=[...core].sort();
+  const coreCredits=await d1Chunk(db,`select film_id filmId,person_id personId,role from film_person_credit where role in ('actor','director') and person_id in (/*ids*/) order by film_id,role,person_id`,coreIds);
+  const filmIds=[...new Set(coreCredits.map(credit=>credit.filmId))].sort();
+  const witnessCredits=filmIds.length?await d1Chunk(db,`select film_id filmId,person_id personId,role from film_person_credit where role in ('actor','director') and film_id in (/*ids*/) order by film_id,role,person_id`,filmIds):[];
+  const namesakes=await d1Namesakes(db,coreIds);
+  if(namesakes.truncated)truncated=true;
+  const witnessIds=witnessCredits.map(credit=>credit.personId).filter(personId=>!core.has(personId));
+  const personIds=[...new Set([...coreIds,...witnessIds,...namesakes.ids])].sort();
+  if(personIds.length>IDENTITY_PERSON_CAP||filmIds.length>IDENTITY_FILM_CAP)break;
+  const persons=await d1IdentityPersons(db,personIds);
+  const loaded=new Set(persons.map(person=>person.id));
+  const seen=new Set(),credits=[];
+  for(const credit of [...coreCredits,...witnessCredits]){
+   if(!loaded.has(credit.personId))continue;
+   const key=credit.filmId+'\n'+credit.role+'\n'+credit.personId;
+   if(seen.has(key))continue;
+   seen.add(key);credits.push({filmId:credit.filmId,personId:credit.personId,role:credit.role});
+  }
+  const films=filmIds.length?await d1IdentityFilms(db,filmIds):[];
+  const projection=PersonIdentity.projectPersonIdentity({persons,credits,films,decisions:[]});
+  const members=PersonIdentity.resolvePersonReference(projection,{recordId:id}).memberIds;
+  const missing=members.filter(personId=>!core.has(personId));
+  if(!missing.length){
+   if(truncated)limitations.push('namesakes_truncated');
+   return d1IdentityBody(id,projection,limitations,false);
+  }
+  const grown=await d1HumanIds(db,missing);
+  if(core.size+grown.length>IDENTITY_PERSON_CAP)break;
+  for(const personId of grown)core.add(personId);
+ }
+ limitations.push('neighborhood_bounded');
+ return d1IdentityBody(id,await d1IdentityProjection(db,[...seed].sort()),limitations,true);
+}
 async function catalogD1Route(request,env,url){
  if(request.method!=='GET')return json({error:'Method not allowed'},405);
  if(!env.DB)return json({error:'D1 is not bound to this Worker'},503);
@@ -82,7 +199,9 @@ async function catalogD1Route(request,env,url){
  if(path==='status')return json(await d1Status(env.DB,env));
  if(path==='persons')return json(await d1Persons(env.DB,{q:params.get('q'),role:params.get('role'),source:params.get('source'),cursor:params.get('cursor'),limit:params.get('limit')}));
  if(path==='persons/review')return json(await d1PersonReview(env.DB,{limit:params.get('limit')}));
- let match=path.match(/^persons\/((?:tmdb_)?(?:actor|director)\/[^/]{1,200})$/);
+ let match=path.match(/^persons\/((?:tmdb_)?(?:actor|director)\/[^/]{1,200})\/identity$/);
+ if(match){let key;try{key=decodeURIComponent(match[1]);}catch{return json({error:'Person not found'},404);}const body=await d1PersonIdentity(env.DB,'person:'+key);return body?json(body):json({error:'Person not found'},404);}
+ match=path.match(/^persons\/((?:tmdb_)?(?:actor|director)\/[^/]{1,200})$/);
  if(match){const person=await d1Person(env.DB,'person:'+decodeURIComponent(match[1]));return person?json(person):json({error:'Person not found'},404);}
  match=path.match(/^films\/([^/]{1,200})$/);
  if(match){const film=await d1Film(env.DB,'film:'+decodeURIComponent(match[1]));return film?json(film):json({error:'Film not found'},404);}

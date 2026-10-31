@@ -34,7 +34,12 @@ const plain=value=>JSON.parse(JSON.stringify(value));
 const NOW=Date.now(),OLD='2020-01-01T00:00:00.000Z',T='2026-10-30T00:00:00.000Z';
 
 // Movie-only consumers read the records' tmdbId, which keeps the movie number Letterboxd shows; none of them learns tmdb_tv.
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js','src/letterboxd-facts.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/tmdb_tv|TMDB_TV_SCHEME/,file);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/worker.js','src/letterboxd-facts.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/tmdb_tv|TMDB_TV_SCHEME/,file);
+// The person identity read selects the tmdb and tmdb_tv rows the projector already stored and passes them to the pure
+// projection. It does not parse a page, apply the retirements object, or import the TV identity module.
+const catalogD1=fs.readFileSync('src/catalog-d1.js','utf8');
+assert.match(catalogD1,/scheme in \('tmdb','tmdb_tv'\)/);
+assert.doesNotMatch(catalogD1,/TMDB_TV_SCHEME|tmdb-retirements|tmdb-tv-identity/);
 assert.doesNotMatch(fs.readFileSync('src/d1-enrichment.js','utf8'),/\bBUCKET\.(put|delete|list)\b/,'the projector never writes or lists R2');
 
 // 1. parseFilm keeps the typed link beside the unchanged attribute number; a record written before carries no field.

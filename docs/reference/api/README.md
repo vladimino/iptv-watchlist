@@ -10,7 +10,7 @@ Current interface contracts, not a grant of production writer access:
 - [Read-only prediction queue diagnostics](prediction-diagnostics.md)
 - [Read-only per-film prediction, rating and Diary viewing history](film-history.md)
 - [Read-only prediction quality: prospective metrics and calibration](prediction-quality.md)
-- [Read-only D1 catalog views: persons, filmographies, duplicate review](d1-catalog.md)
+- [Read-only D1 catalog views: persons, filmographies, duplicate review, and one derived Person identity read](d1-catalog.md)
 - [Owner admin API: pinned programme snapshot, Film/Person search, quality queues, data health, limbo, recovery reads and the guarded reconsideration of one discovery observation](admin.md)
 - [Guarded owner actions: preview, explicit confirmation, idempotent CAS execution, receipt; contract, fixture exemplar and the one production capability `discovery_reconsider`](admin-actions.md)
 

@@ -6,7 +6,9 @@ import {CANONICAL_PERSON_VERSION,PERSON_CANDIDATE_REASONS,PERSON_ISSUES,PERSON_L
 // Offline contract: pure, outside the Worker bundle and every runtime writer (AIR-44).
 const source=fs.readFileSync('src/domain/canonical-person.js','utf8');
 assert.doesNotMatch(source,/\b(fetch|import|require|BUCKET|wrangler|prepare|Date\.now|new Date|Math\.random)\b/);
-for(const file of ['build.mjs','src/worker.js','src/catalog-d1.js','src/d1-enrichment.js','src/canonical-repository.js','src/enrichment-projection.js','public/app.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/canonical-person/,`${file} must not load the AIR-44 contract`);
+assert.match(fs.readFileSync('build.mjs','utf8'),/scopePersonIdentity\(\['src\/domain\/canonical-person\.js','src\/domain\/person-identity-projection\.js'\]\)/);
+assert.doesNotMatch(fs.readFileSync('src/catalog-d1.js','utf8'),/canonical-person/);
+for(const file of ['src/worker.js','src/d1-enrichment.js','src/canonical-repository.js','src/enrichment-projection.js','public/app.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/canonical-person/,`${file} must not load the AIR-44 contract`);
 
 const plain=value=>JSON.parse(JSON.stringify(value));
 const freeze=value=>{if(value&&typeof value==='object'){Object.freeze(value);for(const item of Object.values(value))freeze(item);}return value;};
