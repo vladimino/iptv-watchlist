@@ -262,6 +262,8 @@ assert.deepEqual(identityCalls.map(call=>call.url),['/api/d1/persons/director/no
 reply('/api/d1/persons/director/nolan/identity',http(200,personBody('director/nolan','director',['film:tmdb:1','film:tmdb:2'])));
 await flush();
 assert.deepEqual(showFinds(),[],'one confirmed role is not enough while the other is still loading');
+assert.match(nodes['#finds-cards'].innerHTML,/Проверяем фильмы этого человека/);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,/нет подходящих|не подтверждена|Не удалось проверить/);
 reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1','film:tmdb:4'])));
 await flush();
 assert.deepEqual(showFinds(),['tmdb_1'],'actor AND director');
@@ -286,31 +288,44 @@ assert.ok(vm.runInContext('findsCompare(a,b,now,findsScope(),findsContext())<0',
 ui.input=moodRanked[1];
 assert.match(vm.runInContext('findsCard(input,now,findsScope(),findsContext())',ui),/Совпадает с фильтрами: Том Харди · Мрачный · Напряжённый/);
 
-// Fail closed: name-only, ambiguous, conflicting, bounded, unknown, a broken body, 404 and 503.
-async function expectClosed(label,response){
- reset();arm();identityCalls.length=0;set(`state.actors='actor/hardy'`);
+// A rejected identity and a failed request both add no film, and they say different things.
+const REFUSED=/Связь этого человека с каталогом не подтверждена/;
+const FAILED=/Не удалось проверить фильмы этого человека/;
+const NONE=/В «Находках» нет подходящих фильмов этого человека/;
+const ABSENCE=/Подтверждённых фильмов этого человека/;
+async function expectPersonLine(label,response,pattern){
+ reset();arm();identityCalls.length=0;set(`state.actors='actor/hardy';resultsView={visible:0,valid:true};`);
  showFinds();
  reply('/api/d1/persons/actor/hardy/identity',response);
  await flush();
  assert.deepEqual(showFinds(),[],label);
- assert.match(nodes['#finds-cards'].innerHTML,/Подтверждённых фильмов этого человека/,label);
+ assert.equal(nodes['#finds'].hidden,false,label);
+ assert.match(nodes['#finds-cards'].innerHTML,pattern,label);
+ assert.doesNotMatch(nodes['#finds-cards'].innerHTML,ABSENCE,label);
+ assert.equal(nodes['#empty'].hidden,true,'the shared empty state stays hidden while Finds explains the person');
+ assert.equal((nodes['#finds-cards'].innerHTML.match(/class="finds-card"/g)||[]).length,0,label);
 }
 const verified=personBody('actor/hardy','actor',['film:tmdb:1']);
-await expectClosed('name only',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'ambiguous',cross:'none',links:[{basis:'same_name',roles:['actor'],personIds:[],films:[],names:['Том']}]})));
-await expectClosed('ambiguous',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'ambiguous',cross:'ambiguous',links:[]})));
-await expectClosed('conflicting',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'conflicting',cross:'refused',links:[]})));
-await expectClosed('bounded',http(200,{...verified,bounded:true,limitations:[...verified.limitations,'neighborhood_bounded']}));
-await expectClosed('unknown state',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'unresolved',cross:'none',links:[]})));
-await expectClosed('co_credit for the other role',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{links:[{basis:'co_credit',roles:['director'],personIds:[],films:['film:tmdb:1'],names:['Имя']}]})));
-await expectClosed('broken body',http(200,{source:'d1',authoritative:false}));
-await expectClosed('404',http(404,{error:'Person not found'}));
-await expectClosed('503',http(503,{error:'no db'}));
-reset();arm();set(`state.actors='actor/hardy'`);
+await expectPersonLine('name only',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'ambiguous',cross:'none',links:[{basis:'same_name',roles:['actor'],personIds:[],films:[],names:['Том']}]})),REFUSED);
+await expectPersonLine('ambiguous',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'ambiguous',cross:'ambiguous',links:[]})),REFUSED);
+await expectPersonLine('conflicting',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'conflicting',cross:'refused',links:[]})),REFUSED);
+await expectPersonLine('bounded',http(200,{...verified,bounded:true,limitations:[...verified.limitations,'neighborhood_bounded']}),REFUSED);
+await expectPersonLine('unknown state',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'unresolved',cross:'none',links:[]})),REFUSED);
+await expectPersonLine('co_credit for the other role',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{links:[{basis:'co_credit',roles:['director'],personIds:[],films:['film:tmdb:1'],names:['Имя']}]})),REFUSED);
+await expectPersonLine('broken body',http(200,{source:'d1',authoritative:false}),REFUSED);
+await expectPersonLine('404',http(404,{error:'Person not found'}),FAILED);
+await expectPersonLine('503',http(503,{error:'no db'}),FAILED);
+await expectPersonLine('unreadable body',{ok:true,status:200,json:async()=>{throw new Error('bad json');}},FAILED);
+reset();arm();set(`state.actors='actor/hardy';resultsView={visible:0,valid:true};`);
 ui.fetch=async()=>{fetches++;throw new Error('offline');};
 showFinds();
 await flush();
 assert.deepEqual(showFinds(),[],'a network error matches nothing');
-assert.match(nodes['#finds-cards'].innerHTML,/Подтверждённых фильмов этого человека/);
+assert.match(nodes['#finds-cards'].innerHTML,FAILED);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,ABSENCE);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,NONE);
+assert.equal(nodes['#finds'].hidden,false);
+assert.equal(nodes['#empty'].hidden,true);
 ui.fetch=async(url,init)=>{
  fetches++;
  const path=String(url);
@@ -344,11 +359,17 @@ async function withActor(rows,catalogIds){
  return showFinds();
 }
 assert.deepEqual(await withActor(personFilms(3),['film:tmdb:999']),[],'no catalog row for the D1 id');
+assert.match(nodes['#finds-cards'].innerHTML,NONE,'a verified identity with no eligible film stays visible');
+assert.equal(nodes['#finds'].hidden,false);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,FAILED);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,REFUSED);
 assert.equal((await withActor(personFilms(3),['film:tmdb:100'])).length,1);
 assert.equal((await withActor(personFilms(5),personFilms(5).map(item=>'film:tmdb:'+item.tmdbId))).length,5);
 assert.equal((await withActor(personFilms(8),personFilms(8).map(item=>'film:tmdb:'+item.tmdbId))).length,5,'more than five still shows five');
 const weakPerson=film('tmdb_100',{rating:3.2});
 assert.deepEqual(await withActor([weakPerson],['film:tmdb:100']),[],'a weak prediction stays ineligible');
+assert.match(nodes['#finds-cards'].innerHTML,NONE);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,FAILED);
 
 // Async: reset, Back/Forward, a rapid switch and a generation change never show the previous answer.
 reset();arm();identityCalls.length=0;
@@ -394,11 +415,15 @@ showFinds();
 reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1'])));
 await flush();
 assert.deepEqual(showFinds(),['tmdb_1']);
+set(`findsSource={...findsSource,error:true}`);
+assert.deepEqual(showFinds(),['tmdb_1'],'a failed catalog refresh on this generation keeps the finds');
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,FAILED);
 const beforeGeneration=identityCalls.length;
 set(`report={...report,runId:'G2'}`);
 assert.deepEqual(showFinds(),[],'a new programme generation hides the old catalog and the old person answer');
 assert.equal(nodes['#finds'].hidden,true);
-set(`findsSource={...findsSource,programmeRunId:'G2'}`);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,/нет подходящих|не подтверждена|Не удалось проверить/,'a generation mismatch does not explain an empty person');
+set(`findsSource={...findsSource,programmeRunId:'G2',error:false}`);
 showFinds();
 assert.equal(identityCalls.length,beforeGeneration+1,'the new generation asks again');
 reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:5'])));
@@ -410,12 +435,55 @@ reset();arm();const beforeInvalid=identityCalls.length;
 set(`state.directors='lb_director/1'`);
 assert.deepEqual(showFinds(),[]);
 assert.equal(identityCalls.length,beforeInvalid,'an id that is not a person route is not fetched');
-assert.match(nodes['#finds-cards'].innerHTML,/Подтверждённых фильмов этого человека/);
+assert.match(nodes['#finds-cards'].innerHTML,REFUSED);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,ABSENCE);
+assert.equal(nodes['#finds'].hidden,false);
 set(`state.directors='director/nolan';state.startedOnly=true`);
 showFinds();
 assert.deepEqual(showFinds(),[],'«Начатые» still leaves no find');
+assert.equal(nodes['#finds'].hidden,true);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,/нет подходящих|не подтверждена|Не удалось проверить/);
 set(`state.startedOnly=false;state.viewing='rewatch'`);
 assert.deepEqual(showFinds(),[],'«Пересмотр» still leaves no find');
+assert.equal(nodes['#finds'].hidden,true);
+
+// Actor AND director: an error is not an unverified identity, and two verified answers with no shared film stay visible.
+reset();arm();set(`state.actors='actor/hardy';state.directors='director/nolan';resultsView={visible:0,valid:true};`);
+showFinds();
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1'])));
+reply('/api/d1/persons/director/nolan/identity',http(503,{error:'no db'}));
+await flush();
+assert.deepEqual(showFinds(),[]);
+assert.match(nodes['#finds-cards'].innerHTML,FAILED);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,NONE);
+assert.equal(nodes['#empty'].hidden,true);
+reset();arm();set(`state.actors='actor/hardy';state.directors='director/nolan';resultsView={visible:0,valid:true};`);
+showFinds();
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1'])));
+reply('/api/d1/persons/director/nolan/identity',http(200,{source:'d1',authoritative:false}));
+await flush();
+assert.deepEqual(showFinds(),[]);
+assert.match(nodes['#finds-cards'].innerHTML,REFUSED);
+assert.doesNotMatch(nodes['#finds-cards'].innerHTML,FAILED);
+reset();arm();set(`state.actors='actor/hardy';state.directors='director/nolan';resultsView={visible:2,valid:true};`);
+showFinds();
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1'])));
+reply('/api/d1/persons/director/nolan/identity',http(200,personBody('director/nolan','director',['film:tmdb:2'])));
+await flush();
+assert.deepEqual(showFinds(),[]);
+assert.match(nodes['#finds-cards'].innerHTML,NONE,'two verified people with no shared film keep the section');
+assert.equal(nodes['#empty'].hidden,true,'a visible watchlist does not add the shared empty state');
+set(`state.genres=new Set(['Комедия'])`);
+assert.deepEqual(showFinds(),[]);
+assert.match(nodes['#finds-cards'].innerHTML,NONE,'another hard filter that removes the person match stays explained');
+set(`state.actors='';state.directors='';state.genres=new Set();`);
+assert.ok(showFinds().length>0,'clearing the person restores the catalog finds');
+set(`state.mechanics=new Set(['puzzle'])`);
+assert.deepEqual(showFinds(),[]);
+assert.equal(nodes['#finds'].hidden,true,'without a person an empty section stays hidden');
+set(`resultsView={visible:0,valid:true};`);
+showFinds();
+assert.equal(nodes['#empty'].hidden,false,'the shared empty state returns when Finds has nothing to explain');
 
 // HTML in a person name is escaped inside the match line.
 reset();arm();set(`state.actors='actor/<b>'`);

@@ -790,22 +790,24 @@ function findsBindPerson(d1Ids,films){
 function findsPersonView(){
  const selected=[];
  for(const field of ['directors','actors']){const id=state[field];if(id)selected.push({field,id,route:findsPersonRoute(field,id)});}
- if(!selected.length)return {active:false,ready:true,pending:false,closed:false,people:[],ids:new Set()};
+ if(!selected.length)return {active:false,ready:true,pending:false,closed:false,reason:null,people:[],ids:new Set()};
  const generation=report?.runId??null;
- let pending=false,closed=false;
+ let pending=false,refused=false,failed=false;
  const people=[];
  for(const item of selected){
-  if(!item.route){closed=true;continue;}
+  if(!item.route){refused=true;continue;}
   const cached=findsPeople.cache.get(generation+'\n'+item.route.path);
   if(!cached||cached.status==='loading'){pending=true;continue;}
-  if(cached.status!=='ready'){closed=true;continue;}
+  if(cached.status==='error'){failed=true;continue;}
+  if(cached.status!=='ready'){refused=true;continue;}
   people.push({label:findsPersonLabel(item.field,item.id),catalogIds:findsBindPerson(cached.ids,findsSource.films)});
  }
- if(closed)return {active:true,ready:false,pending:false,closed:true,people:[],ids:new Set()};
- if(pending||people.length!==selected.length)return {active:true,ready:false,pending:true,closed:false,people:[],ids:new Set()};
+ if(failed)return {active:true,ready:false,pending:false,closed:true,reason:'error',people:[],ids:new Set()};
+ if(refused)return {active:true,ready:false,pending:false,closed:true,reason:'refused',people:[],ids:new Set()};
+ if(pending||people.length!==selected.length)return {active:true,ready:false,pending:true,closed:false,reason:'checking',people:[],ids:new Set()};
  let ids=null;
  for(const item of people){const next=item.catalogIds;ids=ids?new Set([...ids].filter(id=>next.has(id))):new Set(next);}
- return {active:true,ready:true,pending:false,closed:false,people,ids};
+ return {active:true,ready:true,pending:false,closed:false,reason:'ready',people,ids};
 }
 function syncFindsPeople(){
  const generation=report?.runId??null;
@@ -822,14 +824,17 @@ function syncFindsPeople(){
  }
 }
 async function loadFindsPerson(route,cacheKey,generation){
- let ids=null;
+ let entry={status:'error'};
  try{
   const response=await fetch(route.path);
-  if(response.ok)ids=findsPersonAccepted(await response.json(),route);
- }catch{ids=null;}
+  if(response.ok){
+   const ids=findsPersonAccepted(await response.json(),route);
+   entry=ids?{status:'ready',ids}:{status:'refused'};
+  }
+ }catch{entry={status:'error'};}
  findsPeople.inflight.delete(cacheKey);
  if(findsPeople.generation!==generation)return;
- findsPeople.cache.set(cacheKey,ids?{status:'ready',ids}:{status:'closed'});
+ findsPeople.cache.set(cacheKey,entry);
  renderFinds();
 }
 // The owner's «Смотрел» mark (ADR-0032): POST /api/catalog/watched with the card's TMDB id only. A marked film leaves Finds at once,
@@ -1030,10 +1035,10 @@ function findsCaption(count,scope,contextual=false){
 // With a channel, period or other filter the finds follow, the watchlist grid and the finds are two sections of one query: the grid
 // gets its own heading, an empty section is not shown, and the shared empty state appears only when both sections are empty.
 let resultsView={visible:0,valid:true};
-function syncResultSections(findsCount){
+function syncResultSections(findsCount,findsExplained){
  const scoped=!!findsScope()||findsContextActive(findsContext());
  const heading=$('#watchlist-title');if(heading)heading.hidden=!(scoped&&resultsView.valid&&resultsView.visible>0);
- const empty=$('#empty');if(empty)empty.hidden=resultsView.visible>0||!resultsView.valid||scoped&&findsCount>0;
+ const empty=$('#empty');if(empty)empty.hidden=resultsView.visible>0||!resultsView.valid||scoped&&findsCount>0||!!findsExplained;
 }
 function renderFinds(now=nowMs()){
  const node=$('#finds');if(!node){syncResultSections(0);return [];}
@@ -1041,8 +1046,9 @@ function renderFinds(now=nowMs()){
  const scope=findsScope(),context=findsContext();
  const list=findsFresh()?buildFinds(findsSource.films,now,scope,context):[];
  const person=context.people,blocked=!context.valid||context.startedOnly||context.viewing==='rewatch';
- const pending=!!(person?.active&&person.pending&&findsFresh()&&!blocked),closed=!!(person?.active&&person.closed&&findsFresh()&&!blocked);
- const status=pending?'<p class="finds-person-status" role="status">Проверяем фильмы этого человека…</p>':closed?'<p class="finds-person-status" role="alert">Подтверждённых фильмов этого человека в «Находках» нет. Список watchlist не изменён.</p>':'';
+ const shown=!!(person?.active&&findsFresh()&&!blocked);
+ const pending=shown&&person.pending;
+ const status=!shown?'':person.reason==='checking'?'<p class="finds-person-status" role="status">Проверяем фильмы этого человека…</p>':person.reason==='error'?'<p class="finds-person-status" role="alert">Не удалось проверить фильмы этого человека. Список watchlist не изменён.</p>':person.reason==='refused'?'<p class="finds-person-status" role="status">Связь этого человека с каталогом не подтверждена. Список watchlist не изменён.</p>':person.ready&&list.length===0?'<p class="finds-person-status" role="status">В «Находках» нет подходящих фильмов этого человека. Список watchlist не изменён.</p>':'';
  // A re-render replaces the buttons; keyboard focus on a mark or undo button is put back on its replacement.
  const active=document.activeElement,refocus=active?.dataset?.findsWatched?`[data-finds-watched="${active.dataset.findsWatched}"]`:active?.dataset?.findsUndo?`[data-finds-undo="${active.dataset.findsUndo}"]`:null;
  const notice=$('#finds-notice');if(notice){const html=findsNoticeHTML();if(notice.innerHTML!==html)notice.innerHTML=html;notice.hidden=!findsNotice;}
@@ -1051,7 +1057,7 @@ function renderFinds(now=nowMs()){
  const title=$('#finds-title');if(title)title.textContent=findsTitle(scope);
  const cards=$('#finds-cards');if(cards)cards.innerHTML=status+list.map(film=>findsCard(film,now,scope,context)).join('');
  const caption=$('#finds-caption');if(caption)caption.textContent=findsCaption(list.length,scope,findsContextActive(context));
- syncResultSections(list.length);
+ syncResultSections(list.length,!!status);
  if(refocus&&document.activeElement!==active)document.querySelector(refocus)?.focus();
  return list;
 }
