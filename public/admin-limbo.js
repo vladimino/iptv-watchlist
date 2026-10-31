@@ -110,6 +110,9 @@ const limboLive = {pin: null, snapshot: null, counts: null, seq: 0, controller: 
 // answer and a sequence number so that an older answer never replaces a newer one.
 const limboRecovery = new Map();
 let limboRecoveryNext = 0;
+// One entry per rendered «Разобрать наблюдение» panel: the observation key, its last answer and pin, and the owner's
+// progress through the guarded action (the checkbox, the server-issued confirmation, the receipt).
+const obsRecovery = new Map();
 
 function limboEscape(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
@@ -200,7 +203,7 @@ function limboCauseTone(cause) {
 
 function limboItemHtml(item) {
   const film = item.film;
-  const title = film?.title || (item.kind === 'observation' ? 'Наблюдение ' + item.subjectId : film?.storedId || item.subjectId);
+  const title = film?.title || (item.kind === 'observation' ? item.observation?.title || 'Наблюдение ' + item.subjectId : film?.storedId || item.subjectId);
   const kindLabel = item.kind === 'observation' ? 'наблюдение' : film && film.inProgramme === false ? 'фильм каталога (вне программы)' : 'фильм';
   const identity = film?.identity;
   const identityText = identity ? (identity.canonicalIdentity ? 'доверенная идентичность ' + identity.canonicalIdentity : identity.trustedExternalIds.length ? 'доверенные id: ' + identity.trustedExternalIds.join(', ') : identity.status ? 'идентичность: ' + identity.status : 'идентичность не наблюдалась') + (identity.conflicting ? ' · конфликт' : '') : 'идентичность не наблюдалась';
@@ -239,7 +242,15 @@ function limboItemHtml(item) {
     links.push(`<button type="button" class="admin-more limbo-recovery-open" data-limbo-recovery="${slot}" aria-expanded="false" aria-controls="limbo-recovery-${slot}">Разобрать прогноз</button>`);
     recovery = `<section class="limbo-recovery" id="limbo-recovery-${slot}" data-limbo-recovery-slot="${slot}" aria-label="Разбор прогноза" hidden></section>`;
   }
-  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span><span class="admin-hit-meta">${limboEscape([kindLabel, film?.storedId, film?.year ? String(film.year) : null, item.id].filter(Boolean).join(' · '))}</span><span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || item.cause)}${limboBadge('plain', LIMBO_SUBSYSTEM_LABELS[item.subsystem] || item.subsystem)}${limboBadge(item.severity === 'critical' ? 'conflict' : item.severity === 'warning' ? 'provisional' : 'missing', LIMBO_SEVERITY_TEXT[item.severity] || item.severity)}</span><dl class="limbo-facts">${rows.map(([name, value]) => `<div><dt>${limboEscape(name)}</dt><dd>${limboEscape(value)}</dd></div>`).join('')}</dl>${links.length ? `<p class="limbo-links">${links.join(' ')}</p>` : ''}${recovery}</article>`;
+  const observationKey = limboRecoveryObservation(item);
+  if (observationKey) {
+    const slot = 'o' + String(++limboRecoveryNext);
+    obsRecovery.set(slot, {key: observationKey, open: false, pin: null, seq: 0, answer: null, changed: false, accepted: false, confirmation: null, receipt: null, durable: null, index: null, busy: false, error: null});
+    links.push(`<button type="button" class="admin-more limbo-recovery-open" data-obs-recovery="${slot}" aria-expanded="false" aria-controls="obs-recovery-${slot}">Разобрать наблюдение</button>`);
+    recovery = `<section class="limbo-recovery" id="obs-recovery-${slot}" data-obs-recovery-slot="${slot}" aria-label="Разбор наблюдения" hidden></section>`;
+  }
+  const year = film?.year || item.observation?.year;
+  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span><span class="admin-hit-meta">${limboEscape([kindLabel, film?.storedId, year ? String(year) : null, item.id].filter(Boolean).join(' · '))}</span><span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || item.cause)}${limboBadge('plain', LIMBO_SUBSYSTEM_LABELS[item.subsystem] || item.subsystem)}${limboBadge(item.severity === 'critical' ? 'conflict' : item.severity === 'warning' ? 'provisional' : 'missing', LIMBO_SEVERITY_TEXT[item.severity] || item.severity)}</span><dl class="limbo-facts">${rows.map(([name, value]) => `<div><dt>${limboEscape(name)}</dt><dd>${limboEscape(value)}</dd></div>`).join('')}</dl>${links.length ? `<p class="limbo-links">${links.join(' ')}</p>` : ''}${recovery}</article>`;
 }
 
 // A film item of the fingerprint or prediction subsystem with a stored id can be explained by the recovery assessment.
@@ -283,11 +294,177 @@ function onLimboRecoveryToggle(slot) {
   return entry.open ? limboRecoveryLoad(slot) : Promise.resolve(null);
 }
 
+// An observation item can be explained by the discovery recovery assessment when it carries a well-formed key.
+function limboRecoveryObservation(item) {
+  if (item.kind !== 'observation') return null;
+  const key = item.observation?.key ?? item.subjectId;
+  return typeof key === 'string' && key.length >= 1 && key.length <= 200 && !/[\u0000-\u001f\u007f]/.test(key) ? key : null;
+}
+
+function obsPanel(slot) {
+  return document.querySelector(`[data-obs-recovery-slot="${slot}"]`);
+}
+
+function obsRender(slot, focus) {
+  const entry = obsRecovery.get(slot);
+  const panel = obsPanel(slot);
+  if (!entry || !panel) return;
+  panel.innerHTML = entry.answer ? obsRecoveryPanelHtml(entry.answer, {...entry, slot}) : obsRecoveryErrorHtml(entry.error || 'network');
+  const target = focus ? panel.querySelector(focus) : null;
+  if (target && typeof target.focus === 'function') target.focus();
+}
+
+// Reads the observation again. `keep` preserves the receipt and the last error so the owner reads the outcome beside the
+// fresh state; 'confirmation' clears them but keeps an unexpired server-issued confirmation, so a refusal for a busy
+// resolver can be retried once it is free; anything else starts the action over from the checkbox.
+function obsRecoveryLoad(slot, keep = false) {
+  const entry = obsRecovery.get(slot);
+  const panel = obsPanel(slot);
+  if (!entry || !panel) return Promise.resolve(null);
+  const seq = ++entry.seq;
+  if (keep !== true) {
+    const held = keep === 'confirmation' && entry.confirmation && Date.parse(entry.confirmation.expiresAt) > Date.now() ? entry.confirmation : null;
+    Object.assign(entry, {accepted: false, confirmation: held, receipt: null, durable: null, index: null, error: null});
+  }
+  panel.setAttribute('aria-busy', 'true');
+  if (!entry.answer) panel.innerHTML = '<p class="admin-state" role="status" aria-busy="true">Читаем состояние наблюдения…</p>';
+  const pending = loadDiscoveryRecovery(entry.key, {pin: entry.pin}).then(result => {
+    if (seq !== entry.seq || result.mode === 'aborted') return result;
+    panel.removeAttribute('aria-busy');
+    if (result.mode === 'error') {
+      entry.answer = null;
+      entry.pin = null;
+      panel.innerHTML = obsRecoveryErrorHtml(result.error);
+      return result;
+    }
+    entry.answer = result.answer;
+    entry.changed = result.changed;
+    entry.pin = result.answer && typeof result.answer.pin === 'string' ? result.answer.pin : null;
+    obsRender(slot);
+    return result;
+  });
+  limboLive.pending = pending;
+  return pending;
+}
+
+function onObsRecoveryToggle(slot) {
+  const entry = obsRecovery.get(slot);
+  const panel = obsPanel(slot);
+  const button = document.querySelector(`[data-obs-recovery="${slot}"]`);
+  if (!entry || !panel) return Promise.resolve(null);
+  entry.open = !entry.open;
+  panel.hidden = !entry.open;
+  if (button) {
+    button.setAttribute('aria-expanded', entry.open ? 'true' : 'false');
+    button.textContent = entry.open ? 'Скрыть разбор' : 'Разобрать наблюдение';
+  }
+  return entry.open ? obsRecoveryLoad(slot) : Promise.resolve(null);
+}
+
+// The checkbox only enables «Подтвердить»; the panel is not redrawn, so focus stays on the checkbox.
+function onObsRecoveryAccept(slot, checked) {
+  const entry = obsRecovery.get(slot);
+  const panel = obsPanel(slot);
+  if (!entry || !panel) return;
+  entry.accepted = checked === true;
+  const confirm = panel.querySelector('[data-obs-recovery-confirm]');
+  if (confirm) confirm.disabled = !entry.accepted || entry.busy;
+}
+
+function onObsRecoveryConfirm(slot) {
+  const entry = obsRecovery.get(slot);
+  if (!entry || !entry.accepted || entry.busy || !entry.pin) return Promise.resolve(null);
+  entry.busy = true;
+  entry.error = null;
+  obsRender(slot);
+  const pending = confirmDiscoveryReconsider(entry.key, entry.pin).then(result => {
+    entry.busy = false;
+    if (result.ok && result.body && result.body.confirmation) {
+      entry.confirmation = result.body.confirmation;
+      obsRender(slot, '[data-obs-recovery-execute]');
+      return result;
+    }
+    entry.error = result.error;
+    entry.accepted = false;
+    if (result.error === 'stale_pin' || result.error === 'not_eligible') return obsRecoveryLoad(slot, true).then(() => result);
+    obsRender(slot, '[role="alert"]');
+    return result;
+  });
+  limboLive.pending = pending;
+  return pending;
+}
+
+// The execution is sent once. Whatever comes back — a receipt, a refusal or no answer — the observation is read again,
+// and the outcome stays on screen beside it.
+function onObsRecoveryExecute(slot) {
+  const entry = obsRecovery.get(slot);
+  if (!entry || !entry.confirmation || entry.busy) return Promise.resolve(null);
+  entry.busy = true;
+  entry.error = null;
+  obsRender(slot);
+  const pending = executeDiscoveryReconsider(entry.confirmation).then(result => {
+    entry.busy = false;
+    const body = result.body || {};
+    if (body.receipt) {
+      entry.receipt = body.receipt;
+      entry.durable = typeof body.durable === 'boolean' ? body.durable : null;
+      entry.index = body.index ?? null;
+      entry.confirmation = null;
+    } else {
+      entry.error = result.error;
+      if (result.error !== 'lease_held' && result.error !== 'lease_unknown') entry.confirmation = null;
+    }
+    entry.accepted = false;
+    return obsRecoveryLoad(slot, true).then(() => {
+      const panel = obsPanel(slot);
+      const target = panel ? panel.querySelector('.obs-receipt, [role="alert"]') : null;
+      if (target) {
+        target.setAttribute('tabindex', '-1');
+        target.focus();
+      }
+      return result;
+    });
+  });
+  limboLive.pending = pending;
+  return pending;
+}
+
+function onObsRecoveryCancel(slot) {
+  const entry = obsRecovery.get(slot);
+  if (!entry || entry.busy) return;
+  Object.assign(entry, {accepted: false, confirmation: null, error: null});
+  obsRender(slot, '[data-obs-recovery-accept]');
+}
+
+const LIMBO_OBSERVATION_UNAVAILABLE = {
+  index_missing: 'индекса наблюдений для опубликованного поколения ещё нет: его записывает первый обычный чанк резолвера в этом поколении',
+  index_other_generation: 'индекс наблюдений записан для другого поколения программы',
+  index_malformed: 'индекс наблюдений не распознан',
+  index_torn: 'индекс наблюдений записан не до конца',
+  index_unavailable: 'нет опубликованного поколения или индекс не прочитан',
+};
+
+// Unresolved observations come only from the generation's bounded index: unavailable means unknown, never none, and the
+// index itself never covers observations that have not had a first lookup.
+function limboObservationText(observations, observed) {
+  if (observations.available === false) return `<p class="limbo-unavailable">Нерешённые наблюдения EPG недоступны: ${limboEscape(LIMBO_OBSERVATION_UNAVAILABLE[observations.reason] || 'индекс наблюдений не прочитан')}. Их отсутствие в списке ничего не говорит об их состоянии.</p>`;
+  const omitted = observations.omitted || {};
+  const cut = (omitted.cap || 0) + (omitted.oversized || 0) + (omitted.malformed || 0);
+  const parts = [`Наблюдения: частичное покрытие — в индексе ${observations.indexed ?? '—'} нерешённых наблюдений с решением резолвера, прочитано ${observed ?? '—'}`];
+  if (cut) parts.push(`не вошло в индекс по его пределам: ${cut}`);
+  if (typeof observations.awaitingFirstLookup === 'number') parts.push(`ждут первой проверки и в индекс не входят: ${observations.awaitingFirstLookup}`);
+  parts.push('индекс записан ' + limboDate(observations.writtenAt));
+  let text = '<p>' + limboEscape(parts.join(' · ')) + '.</p>';
+  if (observations.state === 'stale') text += '<p class="limbo-unavailable">Индекс наблюдений устарел: карта решений или реестр наблюдений изменились после его записи. Показано состояние на момент записи; его обновит следующий обычный чанк.</p>';
+  return text;
+}
+
 function limboContextHtml(view) {
   const parts = [];
   const coverage = view.coverage || {};
   parts.push(`<p>Фильмы: ${coverage.films === 'complete' ? 'полное покрытие' : 'частичное покрытие'} — прочитано записей: ${coverage.filmsObserved ?? '—'}. Запись вне списка не считается здоровой: о ней просто ничего не известно.</p>`);
-  if (coverage.observations && coverage.observations.available === false) parts.push('<p class="limbo-unavailable">Нерешённые наблюдения EPG недоступны этим чтением: для них нужен отдельный ограниченный индекс поколения, который записывается при публикации программы. Их отсутствие в списке ничего не говорит об их состоянии.</p>');
+  const observations = coverage.observations;
+  if (observations) parts.push(limboObservationText(observations, coverage.observationsObserved));
   if (view.context && view.context.length) {
     parts.push('<h3>Состояние конвейера</h3><ul>' + view.context.map(issue => `<li>${limboEscape(LIMBO_SUBSYSTEM_LABELS[issue.subsystem] || issue.subsystem)} · ${limboEscape(LIMBO_SEVERITY_TEXT[issue.severity] || issue.severity)} · ${limboEscape(LIMBO_REASON_TEXT[issue.reason] || issue.reason)}${issue.affected && issue.affected.count ? ' · затронуто: ' + issue.affected.count : ''}${issue.progress && issue.progress.retryAt ? ' · повтор ' + limboEscape(limboDate(issue.progress.retryAt)) : ''}</li>`).join('') + '</ul>');
   } else parts.push('<p class="muted">Поколение и очередь прогнозов без замечаний в прочитанном снимке.</p>');
@@ -319,6 +496,7 @@ function limboShow(view, state) {
   total.textContent = view.total ? String(view.total) : '';
   empty.hidden = view.items.length > 0;
   limboRecovery.clear();
+  obsRecovery.clear();
   results.innerHTML = view.items.map(limboItemHtml).join('') + (view.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : '');
   document.querySelector('#limbo-context-body').innerHTML = limboContextHtml(view);
 }
@@ -440,6 +618,32 @@ function onLimboResult(event) {
     event.preventDefault();
     return onLimboRecoveryToggle(open.getAttribute('data-limbo-recovery'));
   }
+  const obsOpen = closest('[data-obs-recovery]');
+  if (obsOpen) {
+    event.preventDefault();
+    return onObsRecoveryToggle(obsOpen.getAttribute('data-obs-recovery'));
+  }
+  const obsSlot = closest('[data-obs-recovery-slot]');
+  if (obsSlot) {
+    const slot = obsSlot.getAttribute('data-obs-recovery-slot');
+    if (closest('[data-obs-recovery-recheck]')) {
+      event.preventDefault();
+      return obsRecoveryLoad(slot, 'confirmation');
+    }
+    if (closest('[data-obs-recovery-confirm]')) {
+      event.preventDefault();
+      return onObsRecoveryConfirm(slot);
+    }
+    if (closest('[data-obs-recovery-execute]')) {
+      event.preventDefault();
+      return onObsRecoveryExecute(slot);
+    }
+    if (closest('[data-obs-recovery-cancel]')) {
+      event.preventDefault();
+      return onObsRecoveryCancel(slot);
+    }
+    return;
+  }
   if (closest('[data-limbo-recovery-recheck]')) {
     const panel = closest('[data-limbo-recovery-slot]');
     event.preventDefault();
@@ -449,6 +653,12 @@ function onLimboResult(event) {
   if (!more) return;
   event.preventDefault();
   onLimboMore();
+}
+
+function onLimboResultChange(event) {
+  const accept = event.target.closest ? event.target.closest('[data-obs-recovery-accept]') : null;
+  const panel = accept && accept.closest ? accept.closest('[data-obs-recovery-slot]') : null;
+  if (panel) onObsRecoveryAccept(panel.getAttribute('data-obs-recovery-slot'), accept.checked);
 }
 
 function onLimboKey(event) {
@@ -471,6 +681,7 @@ function startLimbo() {
   document.querySelector('#limbo-causes').addEventListener('click', onLimboChip);
   document.querySelector('#limbo-subsystems').addEventListener('click', onLimboChip);
   document.querySelector('#limbo-results').addEventListener('click', onLimboResult);
+  document.querySelector('#limbo-results').addEventListener('change', onLimboResultChange);
   document.querySelector('#limbo-refresh').addEventListener('click', onLimboRefresh);
   window.addEventListener('keydown', onLimboKey);
   window.addEventListener('popstate', onLimboHistory);

@@ -19,6 +19,9 @@ flowchart TD
     owner["Owner-approved maintenance call<br/>through Cloudflare Access"]
     hydrate["Poster hydration:<br/>verified records without poster,<br/>bounded batch under resolver lease"]
     posterdetail["TMDB movie detail<br/>by the record's verified id"]
+    obsindex[("Observation index per published generation:<br/>manifest and 16 shards in R2")]
+    ownerread["Owner page /admin/limbo:<br/>read-only explanation of one observation"]
+    reconsider["discovery_reconsider:<br/>confirmed terminal no_more_evidence only;<br/>resolver lease, CAS, receipt"]
     epg --> ledger --> eligible
     eligible -->|no| unresolved
     eligible -->|yes| search --> scorer
@@ -35,6 +38,11 @@ flowchart TD
     catalogue -.->|read records with poster null| hydrate
     hydrate --> posterdetail
     posterdetail -->|poster field only; generation and lease re-checked before each copy write| catalogue
+    ledger -.->|each chunk after its checkpoint, fenced| obsindex
+    obsindex -->|bounded read; ledger and decisions by etag only| ownerread
+    ownerread -->|explicit owner confirmation of one key| reconsider
+    reconsider -->|lifts terminal fence of one decision; no TMDB, no chunk| ledger
+    reconsider -.->|refreshes its record| obsindex
 ```
 
 Before an observation reaches the ledger, and again before each resolver chunk, the [non-film screen](../reference/domain/nonfilm-screening.md) removes high-confidence series episodes and TV shows by title, or by XMLTV `episode-num` during the EPG scan. A reliable watchlist/catalog match or a verified decision outranks that screen. A stored `excluded_nonfilm` decision that the current rule no longer reproduces makes the observation eligible again in the normal cycle; it is not cleaned up or backfilled.
@@ -44,6 +52,14 @@ The scorer combines duplicate rows by **TMDB ID** before calculating uniqueness;
 The scored gate is the only resolver: the former `SCORED_RESOLUTION` rollout variable is retired from code ([ADR 0036](../adr/0036-scored-resolution-only.md)), and rolling the resolver back is a code revert, not a setting. `CANDIDATE_DISCOVERY` is an **independent optional runtime flag** (`on` only) for bounded title/year variants. The dated [AIR-68 cutover](https://trello.com/c/qbLDc6Ql) enabled scored resolution but did not approve optional variants. A historical rollout result does not establish today's flag setting. Each explicit discovery step processes a bounded chunk; no recursive public self-fetch or unbounded TMDB work is implied. See [one-chunk ADR](../adr/0006-one-chunk-discovery.md).
 
 The catalogue upsert above is the only writer that creates or re-identifies catalogue records. The owner-triggered [poster hydration](../reference/api/catalog.md#poster-hydration) ([ADR 0020](../adr/0020-owner-triggered-catalog-poster-hydration.md), [ADR 0048](../adr/0048-permanent-catalog-poster-maintenance-route.md)) is a second writer outside this flow, a permanent owner-only maintenance route with no switch of its own: it fills only the `poster` field of already verified records from TMDB detail by the same id, under the same resolver lease, and never creates a record, a decision or an identity. Its two catalogue writes are separate compare-and-swaps, not one atomic step; a stop between them is reported and completed by the next call. It runs only on an owner-approved call, never on a schedule.
+
+**Owner recovery of one observation** ([ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md)):
+
+- **Index.** After its checkpoint, each resolver chunk writes a bounded index of the current unresolved observations that already have a decision. It is fenced by the resolver lease and written only for the published generation. The manifest names the etags of the decisions and the ledger it was built from, so any later write to either makes the index stale.
+- **Owner read.** The owner page explains one observation from that index alone, never from the ledger or the decision body. A missing, torn or foreign index is unavailable, not empty.
+- **Guarded action.** The one write, `discovery_reconsider`, is offered only for a confirmed terminal `no_more_evidence` on a fresh index with no live lease, protected wait, throttle or ambiguity. It changes one decision: it clears the terminal reason and the retry time and keeps the attempts and the evidence key. It writes under the resolver lease, by compare-and-swap on the decision map's etag and the decision's digest, with a stored before-image and receipt. It calls no TMDB and starts no chunk: the next ordinary chunk takes the observation through the `eligible` gate above, and an uncertain result on the same evidence makes it terminal again.
+
+Contracts: [admin API](../reference/api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery), [observation index](../reference/domain/discovery-observation-index.md), [recovery assessment](../reference/domain/discovery-recovery.md).
 
 R2 remains authoritative. The separately planned D1 candidate tables are not active production authority.
 
