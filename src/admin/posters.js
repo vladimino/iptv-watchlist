@@ -19,9 +19,22 @@ function adminPostersUnverifiedReason(film){
  if(tmdbId==null||tmdbId===''||!/^\d+$/.test(String(tmdbId)))return 'tmdb_id_missing';
  return 'identity_not_tmdb';
 }
+// One object as {key, present, version, films}: `films` is the parsed JSON object, or null when the object is absent or its
+// body is not a JSON object. A failing storage call throws; a body that does not parse is only this object's problem.
+async function adminPostersRead(bucket,key){
+ const object=await bucket.get(key);
+ if(!object)return {key,present:false,version:null,films:null};
+ const etag=typeof object.etag==='string'&&object.etag?object.etag:null;
+ let body=null,text=null;
+ if(typeof object.text==='function'){text=await object.text();try{body=JSON.parse(text);}catch{body=null;}}
+ else{try{body=await object.json();}catch{body=null;}}
+ const version=etag||(text!==null?await adminDigest(text):null);
+ return {key,present:true,version,films:body&&typeof body==='object'&&!Array.isArray(body)?body:null};
+}
 function adminPostersCopy(source,role){
+ if(!source.films)return {key:source.key,role,present:source.present,readable:false,version:source.version,records:null,missingPoster:null,verifiedMissing:null};
  const counts=catalogPosterMissing([source]);
- return {key:source.key,role,present:source.present,readable:source.films!==null,version:source.version,records:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length};
+ return {key:source.key,role,present:source.present,readable:true,version:source.version,records:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length};
 }
 async function adminPostersRoute(request,env,url){
  if(request.method!=='GET')return adminError('method_not_allowed',405);
@@ -31,35 +44,47 @@ async function adminPostersRoute(request,env,url){
  let cursor=null;
  if(params.has('cursor')){const raw=params.get('cursor');if(raw.length>ADMIN_POSTERS_CURSOR_MAX)return adminError('invalid_cursor',400);cursor=raw||null;}
  const bucket=env.BUCKET,reads=[];
- const read=async key=>{reads.push(key);const object=await adminReadObject(bucket,key,null);return {key,version:object.version,films:object.present&&object.body&&typeof object.body==='object'&&!Array.isArray(object.body)?object.body:null,present:object.present};};
- let pointer,live,copy=null,programmeRunId=null;
+ const read=async key=>{reads.push(key);return await adminPostersRead(bucket,key);};
+ let pointerObject,pointer,live,copy=null,programmeRunId=null;
  try{
-  reads.push(EPG_GENERATION_KEY);
-  const object=await adminReadObject(bucket,EPG_GENERATION_KEY,null);
-  pointer=object.present&&object.body&&typeof object.body==='object'?object.body:null;
+  pointerObject=await read(EPG_GENERATION_KEY);
+  pointer=pointerObject.films;
   programmeRunId=pointer?.phase==='published'&&typeof pointer.programmeRunId==='string'&&pointer.programmeRunId?pointer.programmeRunId:null;
   live=await read(ADMIN_POSTERS_LIVE_KEY);
   if(programmeRunId)copy=await read(epgGenerationKey(programmeRunId,'discovered-films.json'));
  }catch{return adminError('storage_unavailable',503);}
- const sources=[live,...(copy?[copy]:[])];
- const counts=catalogPosterMissing(sources);
- const queue=counts.verified.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0),batch=queue.slice(0,limit);
+ // The counts are only as good as their inputs: a missing or unreadable copy, or a pointer that names no published
+ // generation, makes every count unknown. Nothing is counted as zero for it, and no batch is offered.
+ const problems=[];
+ if(!pointerObject.present)problems.push('pointer_missing');
+ else if(!pointer)problems.push('pointer_unreadable');
+ else if(!programmeRunId)problems.push('generation_not_published');
+ if(copy&&!copy.present)problems.push('generation_copy_missing');
+ else if(copy&&!copy.films)problems.push('generation_copy_unreadable');
+ if(!live.present)problems.push('live_copy_missing');
+ else if(!live.films)problems.push('live_copy_unreadable');
+ const complete=problems.length===0;
+ const counts=complete?catalogPosterMissing([live,copy]):null;
+ const queue=complete?counts.verified.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0):null,batch=complete?queue.slice(0,limit):[];
  const nowMs=Date.now(),now=new Date(nowMs).toISOString();
- const summary={programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length};
+ const summary=complete
+  ?{programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length}
+  :{programmeRunId,catalogRecords:null,missingPoster:null,verifiedMissing:null,unverifiedMissing:null};
  const health=DataHealth.evaluateDataHealth({
   now,
   published:programmeRunId?{programmeRunId,phase:'published',publishedAt:typeof pointer.publishedAt==='string'?pointer.publishedAt:null,observedAt:now}:null,
-  posters:live.present||copy?.present?{...summary,sample:counts.verified.slice(0,ADMIN_POSTERS_LIMIT_MAX).map(row=>row.id),observedAt:now}:null,
+  posters:complete?{...summary,sample:counts.verified.slice(0,ADMIN_POSTERS_LIMIT_MAX).map(row=>row.id),observedAt:now}:{programmeRunId,observedAt:now},
  });
  if(health.error)return adminError('health_unavailable',503);
  const issue=health.issues.find(item=>item.subsystem==='poster'&&item.subject.kind==='catalog')||null;
  return json({
   schemaVersion:1,observedAt:now,
-  ...summary,withPoster:counts.all.length-counts.missing.length,
+  ...summary,withPoster:complete?counts.all.length-counts.missing.length:null,
   publishedAt:typeof pointer?.publishedAt==='string'?pointer.publishedAt:null,
+  evidence:{complete,problems},
   copies:[...(copy?[adminPostersCopy(copy,'generation')]:[]),adminPostersCopy(live,'live')],
-  queue:{cursor,limit,items:batch.map(adminPostersRecord),remainingAfterCursor:queue.length,total:counts.verified.length},
-  unverified:{count:counts.unverified.length,sample:counts.unverified.slice(0,ADMIN_POSTERS_UNVERIFIED_SAMPLE).map(row=>({id:row.id,title:adminPostersText(row.film.title),year:adminPostersYear(row.film.year),reason:adminPostersUnverifiedReason(row.film)}))},
+  queue:{cursor,limit,items:batch.map(adminPostersRecord),remainingAfterCursor:complete?queue.length:null,total:complete?counts.verified.length:null},
+  unverified:complete?{count:counts.unverified.length,sample:counts.unverified.slice(0,ADMIN_POSTERS_UNVERIFIED_SAMPLE).map(row=>({id:row.id,title:adminPostersText(row.film.title),year:adminPostersYear(row.film.year),reason:adminPostersUnverifiedReason(row.film)}))}:{count:null,sample:[]},
   health:{issue:issue?{id:issue.id,severity:issue.severity,reason:issue.reason,category:issue.category,action:issue.action,evidence:issue.evidence,threshold:issue.threshold??null}:null,posterBacklogCount:health.thresholds.posterBacklogCount},
   limits:{batch:ADMIN_POSTERS_LIMIT_MAX,route:CATALOG_POSTER_LIMIT},
   reads,

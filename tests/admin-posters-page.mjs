@@ -40,12 +40,12 @@ assert.match(build, /fs\.readFileSync\('src\/admin\/posters\.js','utf8'\)/, 'the
 assert.match(css, /@media\(max-width:800px\)\{\.posters-layout\{grid-template-columns:minmax\(0,1fr\)\}/);
 
 // Worker over an R2 stand-in, with a TMDB stand-in.
-const records = new Map(), etags = new Map();
+const records = new Map(), etags = new Map(), raw = new Map();
 let revision = 0, puts = [], tmdbCalls = [], requests = [], tmdb = {};
 const bucket = {
   async get(key) {
-    if (!records.has(key)) return null;
-    const text = JSON.stringify(records.get(key));
+    if (!records.has(key) && !raw.has(key)) return null;
+    const text = raw.has(key) ? raw.get(key) : JSON.stringify(records.get(key));
     return {etag: etags.get(key), uploaded: new Date(), json: async () => JSON.parse(text), text: async () => text};
   },
   async put(key, value, options = {}) {
@@ -78,7 +78,7 @@ const G1 = '11111111-1111-4111-8111-111111111111';
 const POINTER = 'epg/published-generation.json', LIVE = 'epg/discovered-films.json', COPY = 'epg/generations/' + G1 + '/discovered-films.json', LEASE = 'epg/resolver-lease.json';
 const film = (id, tmdbId, extra = {}) => ({id, tmdbId: String(tmdbId), canonicalIdentity: 'tmdb:' + tmdbId, title: 'Фильм ' + id, original: 'Film ' + id, year: 2000 + tmdbId, poster: null, ...extra});
 function seed() {
-  records.clear(); etags.clear(); puts = []; tmdbCalls = []; requests = [];
+  records.clear(); etags.clear(); raw.clear(); puts = []; tmdbCalls = []; requests = [];
   const catalog = {};
   for (let index = 1; index <= 14; index++) catalog['f' + String(index).padStart(2, '0')] = film('f' + String(index).padStart(2, '0'), index);
   catalog.kept = film('kept', 50, {poster: 'https://image.tmdb.org/t/p/w342/kept.jpg'});
@@ -282,4 +282,52 @@ assert.deepEqual([tmdbCalls, puts], [[], []], 'the refused call made no TMDB req
 assert.equal(etags.get(COPY2), 'g2-copy', 'the G2 copy is untouched');
 assert.match(text('#posters-receipt'), /опубликовано новое поколение программы/);
 
-console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure and the expected-generation fence across a G1 → G2 publish passed');
+// 11. Unknown is never zero: a missing live copy, a missing or malformed generation copy, or a missing pointer makes the
+// coverage unknown on the page, keeps the per-copy diagnostics visible, offers nothing to confirm and sends no POST.
+for (const [label, mutate, sentence, copyLine] of [
+  ['live copy missing', () => records.delete(LIVE), /Нет рабочей копии каталога/, /живой каталог: объекта нет/],
+  ['generation copy missing', () => records.delete(COPY), /Нет копии каталога опубликованного поколения/, /копия поколения: объекта нет/],
+  ['generation copy malformed', () => {records.delete(COPY); raw.set(COPY, '{"f01": {"id": "f01"'); etags.set(COPY, 'bad');}, /Копия каталога опубликованного поколения не читается/, /копия поколения: объект есть, но не читается как каталог/],
+  ['pointer missing', () => records.delete(POINTER), /Нет указателя опубликованного поколения программы/, /живой каталог: записей 16/],
+]) {
+  seed(); mutate();
+  const before = JSON.stringify([[...records.entries()].sort(), [...raw.entries()].sort()]);
+  requests = [];
+  await fire('#posters-recheck', 'click');
+  await settle();
+  assert.ok(requests.length >= 1 && requests.every(request => request.method === 'GET'), label + ': reads only');
+  const coverageBox = text('#posters-coverage');
+  assert.match(coverageBox, /Покрытие неизвестно: данные неполные/, label);
+  assert.match(coverageBox, sentence, label);
+  assert.match(coverageBox, copyLine, label + ': the per-copy state stays visible');
+  for (const field of ['catalogRecords', 'withPoster', 'missingPoster', 'verifiedMissing', 'unverifiedMissing']) assert.match(coverageBox, new RegExp(`data-posters-field="${field}"><dt>[^<]+</dt><dd><b>неизвестно</b>`), label + ' ' + field);
+  assert.doesNotMatch(coverageBox, /<dd><b>0<\/b>/, label + ': nothing is shown as zero');
+  assert.match(text('#posters-unverified'), /Неизвестно: данные неполные/, label);
+  assert.equal(nodes.get('#posters-backlog').hidden, true, label);
+  assert.match(text('#posters-preview'), /Данные неполные: покрытие неизвестно, запуск недоступен/, label);
+  assert.equal(nodes.get('#posters-accept-label').hidden, true, label + ': nothing to confirm');
+  assert.equal(nodes.get('#posters-run').disabled, true, label);
+  nodes.get('#posters-accept').checked = true; await fire('#posters-accept', 'change');
+  assert.equal(nodes.get('#posters-run').disabled, true, label + ': ticking a hidden checkbox confirms nothing');
+  assert.equal(await exec('onPostersRun()'), null, label);
+  assert.deepEqual([posts(), puts, tmdbCalls], [[], [], []], label + ': no POST, no write, no TMDB');
+  assert.equal(JSON.stringify([[...records.entries()].sort(), [...raw.entries()].sort()]), before, label + ': the read creates or fixes nothing');
+  const observations = JSON.parse(store.get('iptv.admin.posters.v1') || '{"observations":[]}').observations;
+  assert.ok(observations.every(item => Number.isInteger(item.missingPoster)), label + ': an unknown reading is not stored as a count');
+}
+// A copy that disappears between the confirmation and the first call: the fresh check refuses, nothing is sent.
+seed();
+await fire('#posters-recheck', 'click');
+await settle();
+await accept();
+assert.equal(nodes.get('#posters-run').disabled, false);
+records.delete(COPY);
+requests = [];
+assert.equal(await exec('onPostersRun()'), null);
+assert.deepEqual(requests.map(request => request.method), ['GET']);
+assert.match(nodes.get('#posters-refusal').textContent, /данные оказались неполными/);
+assert.deepEqual([puts, tmdbCalls], [[], []]);
+assert.match(text('#posters-coverage'), /Нет копии каталога опубликованного поколения/);
+assert.equal(nodes.get('#posters-accept-label').hidden, true);
+
+console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure, the expected-generation fence across a G1 → G2 publish, and unknown-not-zero coverage for a missing live copy, a missing or malformed generation copy and a missing pointer passed');

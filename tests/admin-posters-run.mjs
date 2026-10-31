@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {
-  POSTER_BATCH_MAX, POSTER_CALLS_MAX, POSTER_NO_PROGRESS_MAX, POSTER_CONFIRM_TTL_MS, POSTER_CALL_CHOICES, POSTER_OUTCOME_COPY, POSTER_STOP_COPY, POSTER_PREVIEW_COPY, POSTER_REFUSAL_COPY, POSTER_TERMINAL,
+  POSTER_EVIDENCE_COPY, posterEvidenceText, POSTER_BATCH_MAX, POSTER_CALLS_MAX, POSTER_NO_PROGRESS_MAX, POSTER_CONFIRM_TTL_MS, POSTER_CALL_CHOICES, POSTER_OUTCOME_COPY, POSTER_STOP_COPY, POSTER_PREVIEW_COPY, POSTER_REFUSAL_COPY, POSTER_TERMINAL,
   posterCoverage, posterPreview, posterConfirm, posterBeginRun, runPosterSweep, posterReceiptSummary, posterOutcomeText, posterStopText,
   posterHistoryRead, posterHistoryObserve, posterHistoryRecord, posterResumeCursor,
 } from '../src/admin/posters-run.js';
@@ -15,8 +15,13 @@ const item = (id, tmdbId = id.replace(/\D/g, '') || '1') => ({id, tmdbId, title:
 const read = (fields = {}) => ({
   schemaVersion: 1, observedAt: new Date(NOW).toISOString(), programmeRunId: G1, catalogRecords: 40, withPoster: 30, missingPoster: 10, verifiedMissing: 8, unverifiedMissing: 2,
   queue: {cursor: null, limit: 10, items: Array.from({length: 8}, (_, index) => item('f' + index, String(index + 1))), remainingAfterCursor: 8, total: 8},
+  evidence: {complete: true, problems: []},
   unverified: {count: 2, sample: []}, health: {issue: {severity: 'info', reason: 'posters_missing'}, posterBacklogCount: 20}, ...fields,
 });
+// What the route returns when an object behind the counts is missing or unreadable: no counts, no batch, the problems named.
+const partial = (problems, fields = {}) => read({catalogRecords: null, withPoster: null, missingPoster: null, verifiedMissing: null, unverifiedMissing: null,
+  queue: {cursor: null, limit: 10, items: [], remainingAfterCursor: null, total: null}, unverified: {count: null, sample: []},
+  health: {issue: {severity: 'info', category: 'incomplete', reason: 'progress_unknown'}, posterBacklogCount: 20}, evidence: {complete: false, problems}, ...fields});
 
 assert.equal(POSTER_BATCH_MAX, 10); assert.equal(POSTER_CALLS_MAX, 30); assert.equal(POSTER_NO_PROGRESS_MAX, 5); assert.equal(POSTER_CONFIRM_TTL_MS, 600000);
 assert.equal(Math.max(...POSTER_CALL_CHOICES), POSTER_CALLS_MAX);
@@ -50,7 +55,30 @@ assert.deepEqual([gated.status, gated.scopeKey, gated.retryAt], ['rate_limited',
 assert.equal(posterPreview(read(), {limit: 10, calls: 1, retryAt: NOW - 1, now: NOW}).status, 'eligible', 'a passed retryAt no longer gates');
 for (const broken of [null, {}, read({missingPoster: -1}), read({queue: null}), read({verifiedMissing: '8'})]) assert.equal(posterPreview(broken, {limit: 10, calls: 1, now: NOW}).status, 'unknown');
 assert.equal(posterPreview(read({queue: {cursor: null, limit: 10, items: [{id: 'x', tmdbId: 'abc'}, item('f1', '2')], remainingAfterCursor: 2, total: 2}}), {limit: 10, calls: 1, now: NOW}).items.length, 1, 'an item without a numeric TMDB id is never in scope');
-for (const status of ['eligible', 'nothing', 'unverified_only', 'end_of_queue', 'rate_limited', 'unknown']) assert.ok(POSTER_PREVIEW_COPY[status], status);
+for (const status of ['eligible', 'nothing', 'unverified_only', 'end_of_queue', 'rate_limited', 'incomplete', 'unknown']) assert.ok(POSTER_PREVIEW_COPY[status], status);
+// Unknown is never zero: an incomplete read is its own status, with no counts, no batch and nothing to confirm.
+for (const [problems, label] of [[['live_copy_missing'], 'live copy missing'], [['generation_copy_missing'], 'generation copy missing'], [['generation_copy_unreadable'], 'generation copy malformed'], [['pointer_missing'], 'pointer missing'], [['generation_not_published'], 'not published']]) {
+  const body = partial(problems, problems[0].startsWith('pointer') || problems[0] === 'generation_not_published' ? {programmeRunId: null} : {});
+  const coverage = posterCoverage(body);
+  assert.deepEqual([coverage.complete, coverage.problems, coverage.missingPoster, coverage.verifiedMissing, coverage.withPoster, coverage.backlog], [false, problems, null, null, null, false], label);
+  const incomplete = posterPreview(body, {limit: 10, calls: 3, now: NOW});
+  assert.deepEqual([incomplete.status, incomplete.items, incomplete.scopeKey, incomplete.planned], ['incomplete', [], null, 0], label);
+  assert.deepEqual(posterConfirm(incomplete, {accepted: true, now: NOW}), {ok: false, reason: 'not_eligible'}, label + ': cannot be confirmed');
+  for (const code of problems) assert.ok(POSTER_EVIDENCE_COPY[code], code);
+}
+// Counts and items in an answer that does not claim completeness are ignored rather than trusted.
+for (const fields of [{evidence: undefined}, {evidence: {complete: false, problems: ['live_copy_missing']}}, {evidence: {complete: true, problems: ['live_copy_missing']}}, {programmeRunId: null}]) {
+  const body = read(fields);
+  assert.equal(posterPreview(body, {limit: 10, calls: 1, now: NOW}).status, 'incomplete', JSON.stringify(fields));
+  assert.equal(posterCoverage(body).missingPoster, null, JSON.stringify(fields));
+}
+assert.deepEqual(posterCoverage(read({evidence: undefined})).problems, ['evidence_missing']);
+assert.deepEqual(posterCoverage(read({programmeRunId: null})).problems, ['generation_not_published']);
+assert.match(posterEvidenceText('made_up'), /Неизвестная проблема/);
+const routeSource = fs.readFileSync('src/admin/posters.js', 'utf8');
+const routeProblems = [...routeSource.matchAll(/problems\.push\('([a-z_]+)'\)/g)].map(match => match[1]);
+assert.ok(routeProblems.length >= 7);
+for (const code of routeProblems) assert.ok(Object.hasOwn(POSTER_EVIDENCE_COPY, code), 'no sentence for evidence problem ' + code);
 assert.equal(posterCoverage(read({health: {issue: {severity: 'warning', reason: 'posters_missing'}, posterBacklogCount: 20}})).backlog, true);
 
 // 2. Confirmation: exact scope, accepted, eligible only.
@@ -60,7 +88,7 @@ assert.deepEqual(posterConfirm({...preview, coverage: {...preview.coverage, prog
 let confirmed = posterConfirm(preview, {accepted: true, now: NOW});
 assert.equal(confirmed.ok, true);
 assert.deepEqual([confirmed.confirmation.programmeRunId, confirmed.confirmation.limit, confirmed.confirmation.calls, confirmed.confirmation.cursor, confirmed.confirmation.expiresAt, confirmed.confirmation.consumedAt], [G1, 10, 3, null, new Date(NOW + POSTER_CONFIRM_TTL_MS).toISOString(), null]);
-for (const reason of ['not_accepted', 'not_eligible', 'confirmation_expired', 'confirmation_used', 'stale_generation', 'scope_changed', 'read_failed']) assert.ok(POSTER_REFUSAL_COPY[reason], reason);
+for (const reason of ['not_accepted', 'not_eligible', 'confirmation_expired', 'confirmation_used', 'stale_generation', 'scope_changed', 'read_failed', 'evidence_incomplete']) assert.ok(POSTER_REFUSAL_COPY[reason], reason);
 
 // 3. The fresh check before the first call.
 let begin = posterBeginRun(confirmed.confirmation, read(), {now: NOW + 1000});
@@ -75,6 +103,8 @@ const retargeted = read(); retargeted.queue.items[0] = {...retargeted.queue.item
 assert.equal(posterBeginRun(confirmed.confirmation, retargeted, {now: NOW + 1000}).reason, 'scope_changed', 'the same record with another TMDB id');
 assert.equal(posterBeginRun(confirmed.confirmation, read({missingPoster: 0, verifiedMissing: 0, unverifiedMissing: 0}), {now: NOW + 1000}).reason, 'not_eligible');
 assert.equal(posterBeginRun(confirmed.confirmation, null, {now: NOW + 1000}).reason, 'read_failed');
+for (const problems of [['live_copy_missing'], ['generation_copy_missing'], ['generation_copy_unreadable']]) assert.equal(posterBeginRun(confirmed.confirmation, partial(problems), {now: NOW + 1000}).reason, 'evidence_incomplete', problems[0] + ' between confirmation and the first call refuses with nothing sent');
+assert.equal(posterBeginRun(confirmed.confirmation, partial(['pointer_missing'], {programmeRunId: null}), {now: NOW + 1000}).reason, 'evidence_incomplete');
 assert.equal(posterBeginRun(confirmed.confirmation, read(), {now: NOW + 1000, retryAt: NOW + 60000}).reason, 'not_eligible', 'a rate-limit gate set meanwhile refuses');
 assert.equal(posterBeginRun(null, read(), {now: NOW}).reason, 'not_eligible');
 
@@ -170,6 +200,7 @@ assert.equal(history.observations.length, 1, 'an unchanged reading updates the l
 history = posterHistoryObserve(history, {...posterCoverage(read({missingPoster: 9, verifiedMissing: 7})), observedAt: new Date(NOW + 2000).toISOString()});
 assert.equal(history.observations.length, 2);
 for (let index = 0; index < 30; index++) history = posterHistoryObserve(history, {...posterCoverage(read({verifiedMissing: index})), observedAt: new Date(NOW + index * 1000).toISOString()});
+assert.equal(posterHistoryObserve(history, posterCoverage(partial(['live_copy_missing']))), history, 'an incomplete read is never recorded as a coverage reading');
 assert.equal(history.observations.length, 20);
 ({receipt} = await sweep([ok({outcomes: [{id: 'f0', tmdbId: '1', outcome: 'hydrated'}, {id: 'f1', tmdbId: '2', outcome: 'no_poster_on_tmdb'}], hydrated: 1, nextCursor: 'f1'})], {calls: 1}));
 history = posterHistoryRecord(history, receipt);
@@ -192,4 +223,4 @@ assert.deepEqual(posterHistoryRead(JSON.stringify({...history, terminal: {x: 'hy
 for (let index = 0; index < 15; index++) history = posterHistoryRecord(history, receipt);
 assert.equal(history.receipts.length, 10);
 
-console.log('Admin posters run: copy tables against the route, preview, exact-scope confirmation, fresh check, batch cap, call budget, no-progress stop, rate limit, generation change, resolver busy, lease loss with partial writes, unknown results, owner stop and bounded history passed');
+console.log('Admin posters run: copy tables against the route, preview, exact-scope confirmation, fresh check, batch cap, call budget, no-progress stop, rate limit, generation change, resolver busy, lease loss with partial writes, unknown results, owner stop, incomplete evidence that is never zero nor confirmable, and bounded history passed');

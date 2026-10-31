@@ -183,10 +183,10 @@ The queue object has several writers: the prediction runner's routes under the 9
 
 | Principle | On the poster page |
 | --- | --- |
-| Read-only preview | `GET /api/admin/posters` with the chosen cursor and batch size: counts, the first batch by title and TMDB id, the most the run can touch. No TMDB request, no write, no lease |
+| Read-only preview | `GET /api/admin/posters` with the chosen cursor and batch size: counts, the first batch by title and TMDB id, the most the run can touch. No TMDB request, no write, no lease. A missing or unreadable catalog copy or an untrusted generation pointer is incomplete evidence: the counts are unknown, never zero, and the preview cannot be confirmed |
 | Eligibility from data health | the catalog poster summary (`poster_hydration`); a record is in scope only with a numeric `tmdbId` that is its `canonicalIdentity`, the route's own rule |
 | Exact scope, expiry | a checkbox naming calls, batch size, maximum records, start and generation; the scope key is the generation, cursor, limit, call budget and the first batch's `id=tmdbId` pairs; ten minutes, one run, dropped by any option change |
-| Fresh check | a new GET with the confirmed cursor and limit immediately before the first call; another generation, another first batch, nothing to do or a rate-limit gate refuses with nothing sent |
+| Fresh check | a new GET with the confirmed cursor and limit immediately before the first call; incomplete evidence, another generation, another first batch, nothing to do or a rate-limit gate refuses with nothing sent |
 | Bounded execution | at most 30 sequential calls of at most 10 records; stop on `done`, the budget, five idle calls, `retryAt`, a generation change, a busy or lost lease, TMDB not configured, a rejected request, an unreadable answer or an unknown outcome code |
 | Per-record CAS | done by the route: the expected-generation fence the page sends on every call (`expectedProgrammeRunId`, refused before TMDB and before any write), the resolver lease, the generation check before every write and a compare-and-swap per catalog copy |
 | Honest receipt | every call and the latest outcome of every record; partial writes between the two copies are named; raw codes, keys, cursors and HTTP statuses only in «Технические подробности»; a code without a sentence is shown as unknown, never guessed |

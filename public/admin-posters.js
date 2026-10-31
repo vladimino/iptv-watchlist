@@ -70,9 +70,15 @@ function postersSnapshotText(read) {
   return `Поколение ${String(read.programmeRunId || '—').slice(0, 8)} · прочитано ${postersDate(read.observedAt)} · ${copies}. Данные — из R2 сейчас; запись постеров на этой странице только по подтверждению.`;
 }
 
+function postersCopyState(copy) {
+  if (!copy.present) return 'объекта нет';
+  if (copy.readable === false) return 'объект есть, но не читается как каталог';
+  return `записей ${copy.records}, без постера ${copy.missingPoster}, восстановимых ${copy.verifiedMissing}`;
+}
+
 function postersCoverageHtml(read, before) {
   const coverage = posterCoverage(read);
-  const change = (field) => before && before[field] !== coverage[field] ? ` <small class="posters-change">было ${before[field]}</small>` : '';
+  const change = (field) => before && before.complete && coverage.complete && before[field] !== coverage[field] ? ` <small class="posters-change">было ${before[field]}</small>` : '';
   const rows = [
     ['Записей в каталоге', coverage.catalogRecords, 'catalogRecords'],
     ['С постером', coverage.withPoster, 'withPoster'],
@@ -82,8 +88,9 @@ function postersCoverageHtml(read, before) {
   ];
   const known = Object.keys(postersLive.history.terminal || {}).length;
   const note = known ? `<p class="posters-source">Из восстановимых этот браузер уже знает ${known} с окончательным отказом (на TMDB постера нет или TMDB ответил за другой фильм). Сервер такие исходы не хранит, поэтому они остаются в счёте «можно восстановить».</p>` : '';
-  return `<dl class="posters-facts">${rows.map(([label, value, field]) => `<div data-posters-field="${field}"><dt>${postersEscape(label)}</dt><dd><b>${value}</b>${change(field)}</dd></div>`).join('')}</dl>${note}
-    <details class="action-tech"><summary>Технические подробности</summary><dl class="action-facts">${(read.copies || []).map(copy => `<div><dt>${postersEscape(copy.key)}</dt><dd>${copy.present && copy.readable !== false ? `записей ${copy.records}, без постера ${copy.missingPoster}, восстановимых ${copy.verifiedMissing}, версия ${postersEscape(copy.version || '—')}` : copy.present ? 'объект есть, но не читается как каталог' : 'объекта нет'}</dd></div>`).join('')}<div><dt>Проверка здоровья</dt><dd>${postersEscape(read.health?.issue ? `${read.health.issue.id} · ${read.health.issue.severity} · ${read.health.issue.action?.code}/${read.health.issue.action?.reason}` : 'проблем нет')}</dd></div><div><dt>Прочитано</dt><dd>${postersEscape((read.reads || []).join(', '))}</dd></div></dl></details>`;
+  const incomplete = coverage.complete ? '' : `<div class="action-status action-tone-blocked" id="posters-incomplete"><p><b>Покрытие неизвестно: данные неполные.</b> Числа ниже не считаются нулём, запуск недоступен, пока данные не будут полными. Страница эти объекты не создаёт и не чинит.</p><ul class="posters-list">${coverage.problems.map(code => `<li>${postersEscape(posterEvidenceText(code))}</li>`).join('')}</ul><ul class="posters-list">${(read.copies || []).map(copy => `<li>${postersEscape(POSTERS_COPY_ROLE[copy.role] || copy.role)}: ${postersEscape(postersCopyState(copy))}</li>`).join('')}</ul></div>`;
+  return `${incomplete}<dl class="posters-facts">${rows.map(([label, value, field]) => `<div data-posters-field="${field}"><dt>${postersEscape(label)}</dt><dd><b>${value === null ? 'неизвестно' : value}</b>${change(field)}</dd></div>`).join('')}</dl>${note}
+    <details class="action-tech"><summary>Технические подробности</summary><dl class="action-facts">${(read.copies || []).map(copy => `<div><dt>${postersEscape(copy.key)}</dt><dd>${postersEscape(postersCopyState(copy))}${copy.version ? `, версия ${postersEscape(copy.version)}` : ''}</dd></div>`).join('')}${coverage.complete ? '' : `<div><dt>Полнота</dt><dd>${postersEscape(coverage.problems.join(', '))}</dd></div>`}<div><dt>Проверка здоровья</dt><dd>${postersEscape(read.health?.issue ? `${read.health.issue.id} · ${read.health.issue.severity} · ${read.health.issue.action?.code}/${read.health.issue.action?.reason}` : 'проблем нет')}</dd></div><div><dt>Прочитано</dt><dd>${postersEscape((read.reads || []).join(', '))}</dd></div></dl></details>`;
 }
 
 function postersBacklogText(read) {
@@ -104,7 +111,8 @@ function postersDynamicsHtml(history) {
 }
 
 function postersUnverifiedHtml(read) {
-  const unverified = read.unverified || {count: 0, sample: []};
+  const unverified = read.unverified || {count: null, sample: []};
+  if (!posterCoverage(read)?.complete || !Number.isInteger(unverified.count)) return '<p>Неизвестно: данные неполные.</p>';
   if (!unverified.count) return '<p>Таких записей нет.</p>';
   const more = unverified.count > unverified.sample.length ? `<p class="muted">Показаны первые ${unverified.sample.length} из ${unverified.count}.</p>` : '';
   return `<ul class="posters-list">${unverified.sample.map(item => `<li><b>${postersEscape(postersTitle(item))}</b> · ${postersEscape(posterUnverifiedText(item.reason))} <small class="muted">${postersEscape(item.id)}</small></li>`).join('')}</ul>${more}`;
@@ -120,6 +128,7 @@ function postersPreviewHtml(preview) {
   if (preview.status === 'rate_limited') lines.push(`<p class="action-next">Следующая попытка — не раньше ${postersDate(preview.retryAt)}.</p>`);
   if (preview.status === 'end_of_queue') lines.push('<p class="action-next">Выберите «с начала очереди», чтобы пройти её заново.</p>');
   if (preview.status === 'unverified_only') lines.push('<p class="action-next">Нужна проверка идентичности этих записей — это другая работа.</p>');
+  if (preview.status === 'incomplete') lines.push(`<ul class="posters-list">${preview.coverage.problems.map(code => `<li>${postersEscape(posterEvidenceText(code))}</li>`).join('')}</ul><p class="action-next">Ничего не отправлено. Подтвердить запуск можно только по полным данным; восстановление недостающих объектов — отдельная работа.</p>`);
   lines.push('</div>');
   if (preview.status === 'eligible') {
     const terminal = postersLive.history.terminal || {};
@@ -277,7 +286,7 @@ async function onPostersRun() {
   const note = document.querySelector('#posters-recheck-note');
   if (note) {
     const coverage = after ? posterCoverage(after) : null;
-    note.textContent = coverage ? `Покрытие перечитано: без постера ${before.missingPoster} → ${coverage.missingPoster}, можно восстановить ${before.verifiedMissing} → ${coverage.verifiedMissing}.` : 'Перечитать покрытие не удалось; результат выше — по ответам маршрута.';
+    note.textContent = coverage && !coverage.complete ? 'Покрытие после запуска неизвестно: данные неполные.' : coverage ? `Покрытие перечитано: без постера ${before.missingPoster} → ${coverage.missingPoster}, можно восстановить ${before.verifiedMissing} → ${coverage.verifiedMissing}.` : 'Перечитать покрытие не удалось; результат выше — по ответам маршрута.';
   }
   return receipt;
 }

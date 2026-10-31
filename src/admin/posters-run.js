@@ -57,8 +57,22 @@ export const POSTER_PREVIEW_COPY = Object.freeze({
   unverified_only: {tone: 'blocked', headline: 'Восстанавливать нечего: у оставшихся записей нет проверенного TMDB id'},
   end_of_queue: {tone: 'neutral', headline: 'После этой позиции очередь пуста'},
   rate_limited: {tone: 'warning', headline: 'TMDB ограничил частоту запросов — запуск пока недоступен'},
+  incomplete: {tone: 'blocked', headline: 'Данные неполные: покрытие неизвестно, запуск недоступен'},
   unknown: {tone: 'warning', headline: 'Не удалось прочитать состояние — запуск недоступен'},
 });
+
+// Why the coverage is unknown (GET /api/admin/posters evidence.problems). A code without a sentence is shown as unknown.
+export const POSTER_EVIDENCE_COPY = Object.freeze({
+  pointer_missing: 'Нет указателя опубликованного поколения программы.',
+  pointer_unreadable: 'Указатель опубликованного поколения не читается.',
+  generation_not_published: 'Поколение программы сейчас не опубликовано.',
+  generation_copy_missing: 'Нет копии каталога опубликованного поколения.',
+  generation_copy_unreadable: 'Копия каталога опубликованного поколения не читается.',
+  live_copy_missing: 'Нет рабочей копии каталога.',
+  live_copy_unreadable: 'Рабочая копия каталога не читается.',
+  evidence_missing: 'Сервер не сообщил, полны ли данные.',
+});
+export function posterEvidenceText(code) {return POSTER_EVIDENCE_COPY[code] || 'Неизвестная проблема с данными.';}
 
 export const POSTER_REFUSAL_COPY = Object.freeze({
   not_accepted: 'Отметьте, что подтверждаете именно этот объём.',
@@ -68,6 +82,7 @@ export const POSTER_REFUSAL_COPY = Object.freeze({
   stale_generation: 'После подтверждения опубликовано новое поколение. Ничего не отправлено; проверьте заново.',
   scope_changed: 'После подтверждения очередь изменилась: первый пакет уже не тот, что вы видели. Ничего не отправлено; проверьте заново.',
   read_failed: 'Не удалось перечитать состояние перед запуском. Ничего не отправлено.',
+  evidence_incomplete: 'Перед запуском данные оказались неполными: покрытие неизвестно. Ничего не отправлено.',
 });
 
 const UNVERIFIED_COPY = Object.freeze({
@@ -87,18 +102,24 @@ function retryMs(value) {
   return null;
 }
 
-// The coverage figures of a GET /api/admin/posters body, or null when the body is not one.
+// The coverage figures of a GET /api/admin/posters body, or null when the body is not one. `complete` is true only when the
+// server says every object behind the counts was read; otherwise the counts are null and `problems` says why.
 export function posterCoverage(read) {
-  if (!isObject(read)) return null;
+  if (!isObject(read) || !isObject(read.queue) || !Array.isArray(read.queue.items)) return null;
   const fields = ['catalogRecords', 'missingPoster', 'verifiedMissing', 'unverifiedMissing'];
-  if (fields.some(name => count(read[name]) === null) || !isObject(read.queue) || !Array.isArray(read.queue.items)) return null;
+  const evidence = isObject(read.evidence) ? read.evidence : null;
+  const problems = evidence && Array.isArray(evidence.problems) ? evidence.problems.filter(code => typeof code === 'string').slice(0, 20) : ['evidence_missing'];
+  const programmeRunId = typeof read.programmeRunId === 'string' && read.programmeRunId ? read.programmeRunId : null;
+  const complete = evidence?.complete === true && problems.length === 0 && programmeRunId !== null;
+  if (complete && fields.some(name => count(read[name]) === null)) return null;
+  const value = name => complete ? read[name] : null;
   return {
-    programmeRunId: typeof read.programmeRunId === 'string' && read.programmeRunId ? read.programmeRunId : null,
+    programmeRunId, complete, problems: complete ? [] : problems.length ? problems : ['generation_not_published'],
     observedAt: typeof read.observedAt === 'string' ? read.observedAt : null,
-    catalogRecords: read.catalogRecords, missingPoster: read.missingPoster,
-    verifiedMissing: read.verifiedMissing, unverifiedMissing: read.unverifiedMissing,
-    withPoster: read.catalogRecords - read.missingPoster,
-    backlog: read.health?.issue?.severity === 'warning' && read.health.issue.reason === 'posters_missing',
+    catalogRecords: value('catalogRecords'), missingPoster: value('missingPoster'),
+    verifiedMissing: value('verifiedMissing'), unverifiedMissing: value('unverifiedMissing'),
+    withPoster: complete ? read.catalogRecords - read.missingPoster : null,
+    backlog: complete && read.health?.issue?.severity === 'warning' && read.health.issue.reason === 'posters_missing',
     backlogThreshold: count(read.health?.posterBacklogCount),
   };
 }
@@ -111,6 +132,7 @@ export function posterPreview(read, {limit, calls, retryAt = null, now}) {
   const batch = normalizeChoice(limit, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], POSTER_BATCH_MAX);
   const budget = normalizeChoice(calls, POSTER_CALL_CHOICES, 1);
   if (!coverage) return {status: 'unknown', limit: batch, calls: budget, items: [], coverage: null, scopeKey: null};
+  if (!coverage.complete) return {status: 'incomplete', limit: batch, calls: budget, cursor: cursorOf(read.queue.cursor), items: [], coverage, remaining: null, maxRecords: batch * budget, planned: 0, retryAt: null, scopeKey: null};
   const cursor = cursorOf(read.queue.cursor);
   const items = read.queue.items.filter(item => isObject(item) && typeof item.id === 'string' && /^\d+$/.test(String(item.tmdbId))).slice(0, batch)
     .map(item => ({id: item.id, tmdbId: String(item.tmdbId), title: typeof item.title === 'string' ? item.title : null, year: Number.isInteger(item.year) ? item.year : null}));
@@ -146,6 +168,7 @@ export function posterBeginRun(confirmation, freshRead, {now, retryAt = null}) {
   if (!(Date.parse(confirmation.expiresAt) > now)) return {ok: false, reason: 'confirmation_expired'};
   const preview = posterPreview(freshRead, {limit: confirmation.limit, calls: confirmation.calls, retryAt, now});
   if (preview.status === 'unknown') return {ok: false, reason: 'read_failed', preview};
+  if (preview.status === 'incomplete') return {ok: false, reason: 'evidence_incomplete', preview};
   if ((preview.coverage.programmeRunId || null) !== (confirmation.programmeRunId || null)) return {ok: false, reason: 'stale_generation', preview};
   if (preview.status !== 'eligible') return {ok: false, reason: 'not_eligible', preview};
   if (preview.scopeKey !== confirmation.scopeKey) return {ok: false, reason: 'scope_changed', preview};
@@ -255,7 +278,7 @@ export function posterHistoryRead(raw) {
 }
 
 export function posterHistoryObserve(history, coverage) {
-  if (!coverage || !coverage.observedAt) return history;
+  if (!coverage || !coverage.complete || !coverage.observedAt) return history;
   const entry = {at: coverage.observedAt, programmeRunId: coverage.programmeRunId, catalogRecords: coverage.catalogRecords, missingPoster: coverage.missingPoster, verifiedMissing: coverage.verifiedMissing, unverifiedMissing: coverage.unverifiedMissing};
   const last = history.observations[history.observations.length - 1];
   const same = last && last.programmeRunId === entry.programmeRunId && last.missingPoster === entry.missingPoster && last.verifiedMissing === entry.verifiedMissing && last.unverifiedMissing === entry.unverifiedMissing;
