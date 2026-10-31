@@ -1,12 +1,12 @@
 # Letterboxd Diary viewing history — contract
 
-[AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0049](../../adr/0049-letterboxd-diary-viewing-history.md). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). Gate: `LETTERBOXD_DIARY_HISTORY`, off by default ([feature flags](../feature-flags.md)).
+[AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0049](../../adr/0049-letterboxd-diary-viewing-history.md). The routine read is the first page only ([ADR 0064](../../adr/0064-diary-recent-window.md)). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). Gate: `LETTERBOXD_DIARY_HISTORY`, off by default ([feature flags](../feature-flags.md)).
 
 The owner's public Letterboxd Diary is read into a viewing history. A row with a viewing id is its own entry; rows without one become one entry per film and day that counts its viewings, a lower bound unless one page held the whole day. Without a viewing id the per-viewing granularity is lost: two viewings of a film on one day keep only their count, their ratings in page order and how many rows were marked re-watch, not which viewing was which. The history is kept apart from the current rating. Under [ADR 0054](../../adr/0054-diary-first-epg-ratings.md) the EPG commit turns what it proves into watched and rating facts ([below](#rating-facts)). Absence from the diary means nothing.
 
 ## Source
 
-- **Pages read.** `https://letterboxd.com/<user>/diary/` and `…/diary/page/<n>/`, from the Worker, with the production headers. One request per page, no retry, no redirect followed, no challenge handling.
+- **Pages read.** Exactly one request per run: `https://letterboxd.com/<user>/diary/`, from the Worker, with the production headers. No `/diary/page/<n>/`, no retry, no redirect followed, no challenge handling. A stored `resumePage`, an HTML next link, a page of entirely new rows and a previous error do not select another URL.
 - **Row parsing.** A row is a `tr.diary-entry-row`:
   - **lid:** from the poster's `data-postered-identifier` JSON;
   - **film slug:** from a same-origin `/<user>/film/<slug>/` link;
@@ -18,7 +18,7 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
   - a re-watch marker (`data-rewatch`, or a `td-rewatch` cell with `icon-rewatch` / `icon-status-off`).
 
   Otherwise the re-watch value is `unknown`.
-- **Not known:** whether page 2 answers the Worker.
+- **Page 2.** On 2026-10-31 a separate ratings run received HTTP 403 on page 2 after a useful page 1 ([evidence](../../evidence/letterboxd/air-304-diary-page-2-blocked-2026-10-31.md)). The routine reader does not request that page.
 
 ## Records — `letterboxd/diary/history.json`
 
@@ -52,58 +52,57 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
 | Field | Meaning |
 | --- | --- |
 | `lastAttemptAt`, `lastSuccessAt`, `lastFailureAt` | A failed, blocked or rate-limited run moves only `lastFailureAt` |
-| `lastOutcome` | `complete` (the last page has been reached at some point and nothing is pending), `partial` (pages remain), `blocked` (403 or challenge), `rate_limited` (429), `failed` (other HTTP, a fetch or body-read error, or a page without diary rows). A page without rows is never read as an empty diary: no empty-diary layout is known, so it fails and keeps the coverage and the resume point |
-| `stopReason` | `http_<status>_page_<n>`, `challenge_page_<n>`, `fetch:<message>`, `read:<message>_page_<n>`, `unrecognized_page_<n>`, `page_budget`, `overlap`, `page_limit` |
-| `counts` | `pages`, `rows`, `added`, `unchanged`, `updated`, `conflicts`, `unresolved`, `undated` of the run |
-| `coverage` | `newestWatchedDate`, `oldestWatchedDate`, `reachedEnd` |
-| `resumePage` | The first page not yet read by the backfill, or `null` |
+| `lastOutcome` | `recent_window` (page 1 was read; the daily window, not a complete diary), `partial` (the page was not read), `blocked` (403 or challenge), `rate_limited` (429), `failed` (other HTTP, a fetch or body-read error, a facts-write error, or a page without diary rows). A page without rows is never read as an empty diary: no empty-diary layout is known, so it fails and keeps the coverage. A stored `complete` from an older reader is left as stored and does not plan a read |
+| `stopReason` | `recent_window_only`, `step_budget` (the lease was too short to start the request), `lease_lost`, `http_<status>_page_1`, `challenge_page_1`, `fetch:<message>`, `read:<message>_page_1`, `unrecognized_page_1`, `after_page:<message>_page_1`. A stored cursor may still say `page_budget`, `overlap` or `page_limit`; those do not select a URL |
+| `counts` | `pages`, `rows`, `added`, `unchanged`, `updated`, `conflicts`, `unresolved`, `undated` of the run, and `overflowSuspected`: true only when the page linked a next page, held at least 50 keyed rows, and every one of those keys was new. It is not a count of missed rows |
+| `coverage` | `newestWatchedDate`, `oldestWatchedDate`, `reachedEnd` (this reader never sets it), `window` (`recent` after a write of this reader) |
+| `resumePage` | Kept as stored, including a page number written by the older reader. This reader never advances it and never fetches it. `null` when none is stored |
 
-**Run order, at most three pages:**
-1. Page 1 is always read.
-2. While a page is entirely new, the next page is read too, because the new entries continue there.
-3. Once a page holds a known entry, a pending backfill resumes at `resumePage − 1`, one page of overlap, and reads on.
-4. A history without `reachedEnd` and without a resume point starts its backfill at page 2.
+**Run order, one page:**
+1. Read `https://letterboxd.com/<user>/diary/`, unless `beforePage` returns false: then `partial` / `step_budget`, and `next` asks the caller to try this same page again.
+2. Commit the history, then the facts, then the cursor. `onPage` returning false after that read ends `lease_lost` and does not request another page.
+3. A page that was read is `recent_window` / `recent_window_only`. `lastSuccessAt` moves only then. `historicalCoverage` is `incomplete` when `coverage.window` is `recent`, and `unknown` when a cursor has no `window`.
 
 **Crash and failure behavior:**
-- Each page is committed before the next request, and the state is written last. A killed run only repeats reads.
-- A failure stops the run at once. It keeps the history and `lastSuccessAt`, and records where to resume.
+- The page is committed before the state write. A killed run repeats that same page and adds nothing already stored.
+- A failure stops the run at once. It keeps the history and `lastSuccessAt`. It does not request page 2.
 
 **Conditional writes and the merge form.** Every `state.json` write is a compare-and-swap on the version read, retried on a conflict.
 - **Version 1** (no `writer`): the run's state replaces the stored one, last writer wins, as before the merge form existed.
 - **Merge form** (`schemaVersion: 2` with `writer {runId, step}`): only `ratings_storage_migrate` creates it, progress and diagnostics unchanged. From then on every writer, the inline EPG stage included (`step: inline`), merges its state into the stored one:
-  - **Progress is a join.** `newestWatchedDate` the later, `oldestWatchedDate` the earlier, `reachedEnd` either, `resumePage` the larger (an absent page counts as page 2, the start of the backfill) and `null` once `reachedEnd`. No late or repeated write moves it back.
+  - **Progress is a join.** `newestWatchedDate` the later, `oldestWatchedDate` the earlier, `reachedEnd` either, `resumePage` the larger (an absent page counts as page 2) and `null` once `reachedEnd`. `coverage.window: recent` is kept once either side has it, and omitted when both sides lack it. No late or repeated write moves `reachedEnd` or `resumePage` back. Neither one is a fetch plan ([ADR 0064](../../adr/0064-diary-recent-window.md)).
   - **Diagnostics are one record.** `lastOutcome`, `stopReason`, `counts` and `writer` come from the write ordered last by (`lastAttemptAt`, `writer.runId`, `writer.step`, content); `lastAttemptAt`, `lastSuccessAt` and `lastFailureAt` are each the later. Diagnostics never plan a read.
   - **Canonical bytes.** The merge is commutative, associative and idempotent, and keys are sorted, so equal states are equal bytes.
   - **Per-page joins.** The separate run joins progress after each page; such a join carries no `lastAttemptAt` and never wins the diagnostics. On a version 1 cursor it writes nothing.
 - **No write turns a merge-form cursor back into version 1.** A cursor found at version 1 after the migration recorded it is reported `migration: regressed` by `ratings_sync_status`.
 
-**Coverage limit.** A backdated entry is found when it lands on page 1, or on a page a later backfill reaches. A periodic full rescan is not part of this contract.
+**Coverage limit.** A backdated entry is found when it lands on page 1. Page 1 holds at most 50 rows, so more than 50 new viewings between successful runs can miss this window. Those rows belong to a separate archive import, which this path does not start. `overflowSuspected` is the only automatic signal, and only in the case in the table above. A periodic full rescan is not part of this contract, and `reachedEnd` is not a claim that one happened.
 
 ## In the EPG commit
 
 With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ratings attempt](letterboxd-ratings.md#ratings-attempt)) right after the commit. The removal lookup follows it, and the public films list is not requested ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md)).
 
 - **Summary.** It is stored in `sync.json` as `diaryHistory` and returned by the sync status. It holds `outcome`, `stopReason`, `counts`, `resumePage`, `coverage` and `at`, plus `facts`:
-  - `rated`, `unrated`, `ambiguous`, `partial`: the evidence states;
+  - `rated`, `unrated`, and `ambiguous` / `partial` (both stay 0: this reader does not produce those states);
   - `films`, `written`, `unchanged`, `older`, `skipped`, `conflicts`: the write outcomes;
   - `enabled`: always `true`; the former `LETTERBOXD_FACTS` switch is retired ([ADR 0055](../../adr/0055-retire-letterboxd-facts-switch.md)) and kept in the summary for its readers.
 - **Never fatal.** The stage never fails the commit. A blocked, rate-limited or failed run ends the ratings attempt as `error` with that cause, and keeps every stored fact.
 - **Gate off.** Nothing is read or written by the stage. The ratings attempt ends `finished` with cause `diary_off`.
 
-**Separate ratings pipeline.** With `RATINGS_PIPELINE=separate` and the storage migrated, the commit runs no Diary stage; the [separate ratings run](letterboxd-ratings.md#separate-ratings-pipeline) reads the Diary instead, with the same order, overlap and stop rules and per-page facts, at most three pages per step and nine per run, continued from its own checkpoint. After each page it joins its progress into the cursor (below), so a killed step loses at most the page in flight. Its summary is in the run record, not in `sync.json`.
+**Separate ratings pipeline.** With `RATINGS_PIPELINE=separate` and the storage migrated, the commit runs no Diary stage; the [separate ratings run](letterboxd-ratings.md#separate-ratings-pipeline) reads Diary page 1 once. A step that already checkpointed that page does not fetch again. `more` retries the same page only when it was not read. After the page it joins its progress into the cursor, so a killed step loses at most the page in flight. A `recent_window` is a finished diary phase, not an error. Its summary is in the run record, not in `sync.json`, and includes `historicalCoverage: incomplete`.
 
 ## Rating facts
 
-After each page's history commit, and before the next page is requested, the films on that page become facts. `LetterboxdDiary.ratingEvidence` reads the stored history, by lid only.
+After the page's history commit, the films on that page become facts. `LetterboxdDiary.ratingEvidence` reads the page rows in display order, by lid only. The stored history is not the evidence.
 
 | Evidence | Condition | Fact |
 | --- | --- | --- |
-| `rated` | The film's latest watched date has every row known and rated with one value: viewing-id entries, and day entries whose count is proved by one page | `watched: true` and `rating` |
-| `unrated` | The latest date's rows have no rating | `watched: true` only |
-| `ambiguous` | The latest date's rows disagree | `watched: true` only |
-| `partial` | The latest date's day count is a lower bound, or the date is not inside the page just read: the film has no row of that date on it, or the date touches an open page edge (the top of a page after the first, the bottom of a page with a next one). Viewing-id rows are fenced the same way | `watched: true` only |
+| `rated` | The film's latest watched date on the page has a row with a rating. The value is the first such row, top to bottom. A later row of that day, a next link, an open edge or an inexact viewing count does not hide it | `watched: true` and `rating` |
+| `unrated` | That date's rows on the page show no rating | `watched: true` only |
 
-- **Never an older entry.** An older entry never stands in for the latest one.
+`ambiguous` and `partial` are not produced. The summary counters stay and stay 0. A same-day disagreement is not a conflict and not a reason to skip the rating. Both viewing-id rows stay in the history. `viewingCountExact: false` is reported on its own and does not cancel the rating.
+
+- **Never an older day.** An older day on the page never stands in for the latest one.
 - **Unresolved entries.** An entry without a lid links nothing, and a slug never links ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md)).
 - **Observation.** Both facts are observations with `source: letterboxd_diary`, `observedAt` set to the watched date at `00:00:00.000Z`, and `sourceRef: diary:<entry keys>`.
   - A reread is the same observation, so nothing is written.
@@ -113,7 +112,7 @@ After each page's history commit, and before the next page is requested, the fil
   - one links compare-and-swap;
   - one record compare-and-swap per film whose view index does not already show the same watched and rating;
   - one view-index projection.
-- **Failure.** A failed write stops the run at that page (`stopReason: after_page:<message>_page_<n>`), so the next run reads the page again.
+- **Failure.** A failed write stops the run (`stopReason: after_page:<message>_page_1`), so the next run reads page 1 again.
 - **Removal events.** They get the proved ratings first, as the film's effective rating. The removal lookup then runs only for removed films without one. A stored rating without diary proof does not spare the lookup.
 
 ## Read API

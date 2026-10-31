@@ -77,7 +77,7 @@ Entries without a lid (`identity: null`) are never attributed; `snapshot.sources
 - `notes` name known gaps of this film's history: `prediction_lineage_unknown` (a record has no `fingerprintPromptVersion` or `runId`; records written before those fields existed), `prediction_without_time`, `rating_history_starts_after_current_value` (a current rating with no recorded history: it was set before the history writer existed), `first_observed_is_not_a_rating_date`. Diary notes:
   - `diary_absence_is_not_unwatched`: always present when the Diary is considered; a film without Diary entries may still have been watched, and a film without `ratingHistory` may still have been rated.
   - `diary_history_missing`, `diary_history_unreadable`: no readable Diary history is stored.
-  - `diary_coverage_partial`: a history exists, but the run state does not show a complete read (`lastOutcome: complete`, `coverage.reachedEnd` and no `resumePage`); older entries may be missing.
+  - `diary_coverage_partial`: a history exists, and the run state does not show a complete read. A recent window (`lastOutcome: recent_window`, `coverage.window: recent`) is this case on purpose: page 1 was read and older entries may be missing. The note is omitted only for a stored older cursor with `lastOutcome: complete`, `coverage.reachedEnd` and no `resumePage`.
   - `diary_unlinked`, `diary_identity_disagreement`: the Diary is not linked (see [Diary link](#diary-link)).
   - `diary_viewings_lower_bound`: an entry's `viewings` is not certain, so it is a lower bound.
   - `diary_rewatch_unknown`: an entry, or a row of a day entry, has no re-watch marker.

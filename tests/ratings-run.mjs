@@ -30,74 +30,79 @@ async function drain(R,env,runId,limit=20){const replies=[];for(let i=0;i<limit;
  assert.equal(bucket.writes().length,0,'nothing written');assert.equal(net.fetches.length,0,'nothing requested');
 }
 
-// 2. A full run: three Diary pages per step, nine per run, a checkpoint after each page, then the removal phase.
-// The next run goes on from the cursor: page 1 overlaps, the backfill resumes one page before where it stopped.
+// 2. A run reads Diary page 1 once, even when it links a next page and the cursor still says resumePage 2, then the
+// removal phase. The run finishes as a recent window: lastSuccessAt moves, reachedEnd is not claimed, and page 2 is
+// never requested. The next run reads page 1 again and does not resume a backfill.
 {
  const {bucket,env,R,net}=setup();
- migrated(bucket);
+ migrated(bucket,{cursor:{resumePage:2}});
  const started=plain(await R.start(env,{trigger:'manual'}));
  assert.equal(started.reason,'started');assert.equal(started.nextAction,'continue');assert.equal(started.created,true);
  const replies=await drain(R,env,started.runId);
- eq(replies.map(reply=>[reply.nextAction,reply.reason,reply.step?.diaryPages??null]),[['continue','more_work',3],['continue','more_work',3],['continue','more_work',3],['stop','finished',0]]);
- eq(net.diaryFetches().map(url=>Number(url.match(/page\/(\d+)/)?.[1]||1)),[1,2,3,4,5,6,7,8,9]);
+ eq(replies.map(reply=>[reply.nextAction,reply.reason,reply.step?.diaryPages??null]),[['continue','more_work',1],['stop','finished',0]]);
+ eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
  const run=bucket.value(RUN);
- assert.equal(run.state,'finished');assert.equal(run.phase,'done');assert.equal(run.checkpoint.diaryPagesRead,9);assert.equal(run.checkpoint.diaryNextPage,10);
+ assert.equal(run.state,'finished');assert.equal(run.phase,'done');assert.equal(run.checkpoint.diaryPagesRead,1);assert.equal(run.checkpoint.diaryNextPage,null);
+ assert.equal(run.diary.outcome,'recent_window');assert.equal(run.diary.stopReason,'recent_window_only');assert.equal(run.diary.historicalCoverage,'incomplete');
  assert.equal(run.lease.step,null,'the lease is released');
  assert.equal(run.recent[0].runId,started.runId);
- assert.equal(Object.keys(bucket.value(HISTORY).entries).length,450);
+ assert.equal(Object.keys(bucket.value(HISTORY).entries).length,50,'one page, not the pages behind it');
  const cursor=bucket.value(CURSOR);
- assert.equal(cursor.schemaVersion,2);assert.equal(cursor.writer.runId,started.runId);assert.equal(cursor.resumePage,10);
- assert.ok([...bucket.records.keys()].some(key=>key.startsWith('letterboxd/facts/')),'the rating facts of the pages read are written');
+ assert.equal(cursor.schemaVersion,2);assert.equal(cursor.writer.runId,started.runId);
+ assert.equal(cursor.resumePage,2,'the stored resume page is kept and is not a fetch plan');
+ assert.equal(cursor.coverage.window,'recent');assert.equal(cursor.coverage.reachedEnd,false);
+ assert.equal(cursor.lastOutcome,'recent_window');assert.ok(cursor.lastSuccessAt);
+ assert.equal(cursor.counts.overflowSuspected,true,'a full page of new rows with a next link is the overflow fact');
+ assert.ok([...bucket.records.keys()].some(key=>key.startsWith('letterboxd/facts/')),'the rating facts of the page are written');
  assert.equal(net.watchlistFetches().length,0,'the ratings run never reads the watchlist');
  assert.ok(!bucket.log.some(item=>item.key==='watchlist.json'||item.key==='sync.json'||item.key==='programme.json'),'nor the sync or EPG objects');
- // Run 2: page 1 is known, the backfill resumes at page 9 (overlap) and reaches the end.
  net.fetches.length=0;
  const second=plain(await R.start(env,{trigger:'manual'}));
  const more=await drain(R,env,second.runId);
- eq(net.diaryFetches().map(url=>Number(url.match(/page\/(\d+)/)?.[1]||1)),[1,9,10,11,12]);
+ eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
  assert.equal(more.at(-1).reason,'finished');
- eq(bucket.value(CURSOR).coverage.reachedEnd,true);assert.equal(bucket.value(CURSOR).resumePage,null);
- assert.equal(bucket.value(RUN).diary.outcome,'complete');
+ assert.equal(bucket.value(CURSOR).coverage.reachedEnd,false);assert.equal(bucket.value(CURSOR).resumePage,2);
+ assert.equal(bucket.value(RUN).diary.outcome,'recent_window');
  assert.equal(bucket.value(RUN).recent.length,2);
+ assert.equal(plain(await R.status(env)).diary.historicalCoverage,'incomplete');
 }
 
-// 3. Page boundaries: a step whose lease runs short stops before the next request (`step_budget`) and the next step
-// reads that page; a step that never starts a page reads nothing twice.
+// 3. A step whose lease is already too short reads nothing (`step_budget`) and the next step reads page 1, still not page 2.
 {
  const {bucket,env,R,net,clock}=setup();
  migrated(bucket);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
- let pagesSeen=0;
- const step=plain(await R.step(env,{runId},{now:clock.now,clock:()=>clock.now+(net.diaryFetches().length>pagesSeen?R.LEASE_MS-R.LEASE_MARGIN_MS+1:0)}));
- assert.equal(step.step.diaryPages,1);assert.equal(step.nextAction,'continue');
- assert.equal(bucket.value(RUN).checkpoint.diaryNextPage,2);
- assert.equal(bucket.value(CURSOR).stopReason,'step_budget');
- pagesSeen=Infinity;
- await R.step(env,{runId});
- eq(net.diaryFetches().map(url=>Number(url.match(/page\/(\d+)/)?.[1]||1)),[1,2,3,4]);
+ const step=plain(await R.step(env,{runId},{now:clock.now,clock:()=>clock.now+R.LEASE_MS-1000}));
+ assert.equal(step.step.diaryPages,0);assert.equal(step.nextAction,'continue');assert.equal(step.phase,'diary');
+ assert.equal(bucket.value(CURSOR).stopReason,'step_budget');assert.equal(net.diaryFetches().length,0);
+ const next=plain(await R.step(env,{runId}));
+ assert.equal(next.step.diaryPages,1);
+ eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
 }
 
-// 4. Diary failures end the Diary phase and the run is an error; the removal phase still runs. 403 is blocked, 429 rate
-// limited, anything else failed; a partial run (the run budget) is not an error.
+// 4. Diary failures of page 1 end the Diary phase and the run is an error; the removal phase still runs, and no later
+// page is requested. 403 is blocked, 429 rate limited, anything else failed. A successful page is a recent window, not an error.
 for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degraded'],[429,'rate_limited','ratings_rate_limit','degraded'],[500,'failed','ratings_failed','failed']]){
  const {bucket,env,R,net}=setup({pages:3});
  migrated(bucket);
- net.diary.set(2,status);
+ net.diary.set(1,status);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
  const replies=await drain(R,env,runId);
  assert.equal(replies.at(-1).reason,'error',outcome);
  const run=bucket.value(RUN);
- assert.equal(run.diary.outcome,outcome);assert.equal(run.cause,outcome);assert.equal(run.diary.pagesRead,1);
- assert.equal(bucket.value(CURSOR).resumePage,2,'the failed page is where the next run resumes');
+ assert.equal(run.diary.outcome,outcome);assert.equal(run.cause,outcome);assert.equal(run.diary.pagesRead,0);
+ eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
+ assert.equal(bucket.value(CURSOR).lastSuccessAt,null);
  eq(R.health(run,T0),{lastSuccessAt:null,lastFailureAt:run.finishedAt,state,code});
 }
 {
- const {bucket,env,R}=setup({pages:12});
+ const {bucket,env,R,net}=setup({pages:12});
  migrated(bucket);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
  await drain(R,env,runId);
- assert.equal(bucket.value(RUN).diary.outcome,'partial');assert.equal(bucket.value(RUN).state,'finished');
+ assert.equal(bucket.value(RUN).diary.outcome,'recent_window');assert.equal(bucket.value(RUN).state,'finished');
  assert.equal(R.health(bucket.value(RUN),T0).code,'ok');
+ assert.equal(net.diaryFetches().length,1);
 }
 
 // 5. The removal phase: settle first, then at most five lookups with claim tokens; a rating reaches every unresolved
@@ -231,7 +236,7 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
 
 // 7. Concurrency and lost responses.
 {
- const {bucket,env,R,clock}=setup();
+ const {bucket,env,R,clock,net}=setup();
  migrated(bucket);
  // Two starts racing: one starts, the other answers busy and never sees the running id.
  let nested=null;
@@ -249,9 +254,12 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  bucket.hooks.beforeGet=null;
  assert.equal(waited.nextAction,'wait');assert.equal(waited.reason,'busy');assert.equal(waited.nextCatchUpAt,at(clock.now+R.LEASE_MS));
  assert.equal(first.nextAction,'continue');
- // A lost response: the caller repeats the step and the run goes on from its checkpoint, not from page 1.
+ // A lost response: the caller repeats the step. The diary page was already read, so the repeat is the removal phase
+ // and does not fetch page 1 again.
+ const fetches=net.diaryFetches().length;
  const repeat=plain(await R.step(env,{runId}));
- assert.equal(repeat.nextAction,'continue');assert.equal(bucket.value(RUN).checkpoint.diaryPagesRead,6);
+ assert.equal(repeat.nextAction,'stop');assert.equal(bucket.value(RUN).checkpoint.diaryPagesRead,1);
+ assert.equal(net.diaryFetches().length,fetches);
  // Another runId is a mismatch and writes nothing.
  const writes=bucket.writes().length;
  eq(plain(await R.step(env,{runId:'00000000-0000-4000-8000-999999999999'})).reason,'run_mismatch');
@@ -348,4 +356,4 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal((await drain(R,env,runId)).at(-1).reason,'finished');
 }
 
-console.log('Ratings run (ADR 0060): disabled and not_migrated write nothing, 3 pages per step and 9 per run with checkpoints and overlap resume, page boundaries, Diary blocked/rate-limited/failed/partial, five lookups with a 403 pause and lookup off, Diary-resolved queue entries, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, the scheduled gap and a run without EPG passed');
+console.log('Ratings run (ADR 0060, ADR 0064): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause and lookup off, Diary-resolved queue entries, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, the scheduled gap and a run without EPG passed');

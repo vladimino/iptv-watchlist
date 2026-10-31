@@ -9,7 +9,7 @@ const LetterboxdRatings=(()=>{
  const KEYS={run:'letterboxd/ratings/run.json',migration:'letterboxd/ratings/migration.json'};
  const CONTRACT_VERSION=1,RUN_SCHEMA_VERSION=1;
  const LEASE_MS=3*60000,LEASE_MARGIN_MS=45000,ABANDONED_MS=30*60000,SCHEDULED_GAP_MS=6*3600000;
- const STEP_PAGES=3,RUN_PAGES=9,STEP_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
+ const STEP_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
  const MIGRATION_WRITER={runId:'ratings-storage-migrate',step:'migrate'};
  const DIARY_ERRORS=['failed','blocked','rate_limited'];
  const iso=ms=>new Date(ms).toISOString();
@@ -142,13 +142,13 @@ const LetterboxdRatings=(()=>{
   return out;
  }
 
- // The Diary phase of one step: at most three pages, nine per run, with the order, overlap and stop rules of
- // LetterboxdDiary.syncHistory. After each page: the history merge, that page's facts and the diary resolution of queued
- // films, the cursor join, then the run checkpoint. The run continues its own checkpoint, never another run's.
+ // The Diary phase: the first page once per run (ADR 0064). A run that already read it, or a gate that is off, does
+ // not fetch. After the page: its history merge, its facts and the diary resolution of queued films, the cursor join,
+ // then the run checkpoint. `more` is only a retry of that same page when the lease stopped the step before the request.
  async function diaryPhase(env,run,{stepId,own,remaining,clock}){
-  const cp=run.checkpoint,budget=Math.min(STEP_PAGES,RUN_PAGES-(cp.diaryPagesRead||0));
+  const cp=run.checkpoint;
   const prior=run.diary||null;
-  if(budget<=0||!LetterboxdDiary.enabled(env))return {pages:0,more:false,next:null,summary:prior};
+  if((cp.diaryPagesRead||0)>=1||!LetterboxdDiary.enabled(env))return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
   let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0;
   const afterPage=async({page,rows,next,history})=>{
@@ -165,10 +165,10 @@ const LetterboxdRatings=(()=>{
    try{await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,diaryPagesRead:pagesRead,diaryNextPage:next?.page??null,diaryMode:next?.mode??current.checkpoint.diaryMode}}));return true;}
    catch(e){if(e instanceof LeaseLost){leaseLost=true;return false;}throw e;}
   };
-  const diary=await LetterboxdDiary.syncHistory(env,{now:clock(),maxPages:budget,afterPage,beforePage:async()=>remaining()>LEASE_MARGIN_MS,onPage,startPage:cp.diaryNextPage||1,startMode:cp.diaryMode||'incremental',writer:{runId:run.runId,step:stepId},progressWrites:true});
+  const diary=await LetterboxdDiary.syncHistory(env,{now:clock(),afterPage,beforePage:async()=>remaining()>LEASE_MARGIN_MS,onPage,writer:{runId:run.runId,step:stepId},progressWrites:true});
   if(leaseLost)throw new LeaseLost();
-  const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next&&pagesRead<RUN_PAGES;
-  const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts}),
+  const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next;
+  const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,historicalCoverage:'incomplete',counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts,overflowSuspected:diary.counts.overflowSuspected?1:0}),
    facts:addCounts(prior?.facts,facts),removalResolved:(prior?.removalResolved||0)+resolved,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
   return {pages:stepPages,more,next:diary.next,summary};
  }
@@ -271,7 +271,7 @@ const LetterboxdRatings=(()=>{
   const queue=state.queue,entries=Object.values(queue?.films||{}),cursor=state.cursor;
   return {contractVersion:CONTRACT_VERSION,switch:ratingsPipelineSwitch(env),pipeline:pipelineOf(env,state.migration,run),migration:state.migration,...(state.regressed.length?{regressedObjects:state.regressed}:{}),
    run:presentRun(run,now),
-   diary:{enabled:LetterboxdDiary.enabled(env),migrated:state.cursorV2,lastOutcome:cursor?.lastOutcome??null,stopReason:cursor?.stopReason??null,coverage:cursor?.coverage||null,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null,lastSuccessAt:cursor?.lastSuccessAt??null},
+   diary:{enabled:LetterboxdDiary.enabled(env),migrated:state.cursorV2,lastOutcome:cursor?.lastOutcome??null,stopReason:cursor?.stopReason??null,coverage:cursor?.coverage||null,historicalCoverage:cursor?.coverage?.window==='recent'?'incomplete':'unknown',overflowSuspected:cursor?.counts?.overflowSuspected===true,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null,lastSuccessAt:cursor?.lastSuccessAt??null},
    removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:removalLookupEnabled(env),entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
     refIssues:Object.fromEntries(REMOVAL_REF_ISSUES.map(issue=>[issue,entries.reduce((n,entry)=>n+(entry.refs||[]).filter(ref=>ref.resolved!==true&&ref.issue===issue).length,0)])),
     legacy:entries.filter(entry=>entry.legacy===true).length,expired:entries.filter(entry=>entry.state==='expired').length,droppedRefs:queue?.droppedRefs||0,pausedUntil:queue?.pausedUntil&&Date.parse(queue.pausedUntil)>now?queue.pausedUntil:null},
@@ -304,5 +304,5 @@ const LetterboxdRatings=(()=>{
   const error=validate(action,body);if(error)return {status:400,body:{error}};
   return {status:200,body:await (action==='start'?start(env,body):action==='step'?step(env,body):migrate(env,body))};
  }
- return {KEYS,CONTRACT_VERSION,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,SCHEDULED_GAP_MS,STEP_PAGES,RUN_PAGES,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,SCHEDULED_GAP_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();

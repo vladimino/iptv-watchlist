@@ -1,5 +1,5 @@
 {
- "about": "Inline EPG sync of the code before the separate ratings pipeline (ADR 0060): R2 objects after the run, step replies and requests. Synthetic fixture data only.",
+ "about": "Inline EPG sync with the Diary recent window (ADR 0064): one Diary page, R2 objects after the run, step replies and requests. Synthetic fixture data only. Not a byte copy of the multi-page reader.",
  "snapshot": {
   "enrichment/films/film3/actual.json": {
    "rating": 3.5,
@@ -274,13 +274,14 @@
    "lastAttemptAt": "2026-10-31T08:00:00.000Z",
    "lastSuccessAt": "2026-10-31T08:00:00.000Z",
    "lastFailureAt": null,
-   "lastOutcome": "complete",
-   "stopReason": null,
+   "lastOutcome": "recent_window",
+   "stopReason": "recent_window_only",
    "counts": {
     "pages": 1,
     "rows": 2,
     "unresolved": 0,
     "undated": 0,
+    "overflowSuspected": false,
     "added": 2,
     "updated": 0,
     "unchanged": 0,
@@ -289,7 +290,8 @@
    "coverage": {
     "newestWatchedDate": "2026-10-29",
     "oldestWatchedDate": "2026-10-20",
-    "reachedEnd": true
+    "reachedEnd": false,
+    "window": "recent"
    },
    "resumePage": null
   },
@@ -565,13 +567,14 @@
     "finishedAt": "2026-10-31T08:00:00.000Z"
    },
    "diaryHistory": {
-    "outcome": "complete",
-    "stopReason": null,
+    "outcome": "recent_window",
+    "stopReason": "recent_window_only",
     "counts": {
      "pages": 1,
      "rows": 2,
      "unresolved": 0,
      "undated": 0,
+     "overflowSuspected": false,
      "added": 2,
      "updated": 0,
      "unchanged": 0,
@@ -581,7 +584,8 @@
     "coverage": {
      "newestWatchedDate": "2026-10-29",
      "oldestWatchedDate": "2026-10-20",
-     "reachedEnd": true
+     "reachedEnd": false,
+     "window": "recent"
     },
     "facts": {
      "films": 2,
@@ -688,13 +692,14 @@
     "channels": 1,
     "futureFullChannels": 0,
     "diaryHistory": {
-     "outcome": "complete",
-     "stopReason": null,
+     "outcome": "recent_window",
+     "stopReason": "recent_window_only",
      "counts": {
       "pages": 1,
       "rows": 2,
       "unresolved": 0,
       "undated": 0,
+      "overflowSuspected": false,
       "added": 2,
       "updated": 0,
       "unchanged": 0,
@@ -704,7 +709,8 @@
      "coverage": {
       "newestWatchedDate": "2026-10-29",
       "oldestWatchedDate": "2026-10-20",
-      "reachedEnd": true
+      "reachedEnd": false,
+      "window": "recent"
      },
      "facts": {
       "films": 2,

@@ -119,8 +119,8 @@ sequenceDiagram
         Ratings->>MCP: ratings_sync_step(runId)
         MCP->>Run: Begin the step: lease by compare-and-swap
         alt Diary phase
-            MCP->>LB: At most 3 Diary pages
-            MCP->>R2: Per page: history, facts, then cursor merge, progress forward only
+            MCP->>LB: Diary page 1 only
+            MCP->>R2: That page: history, facts, then cursor merge, progress forward only
             MCP->>R2: Queued films the Diary rated: every referenced removal event
         else Removal phase
             MCP->>LB: At most 5 member pages, attempt claimed first
@@ -135,10 +135,10 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Diary: ratings_sync_start
-    Diary --> Diary: step, up to 3 pages
-    Diary --> Removal: diary ended or run budget used
+    Diary --> Diary: the same page again, when it was not read
+    Diary --> Removal: page 1 read, or the diary gate is off
     Removal --> Removal: step, up to 5 lookups
-    Removal --> Finished: queue done or paused, diary complete or partial
+    Removal --> Finished: queue done or paused, diary recent window
     Removal --> Error: queue done or paused, diary blocked, rate-limited or failed
     Diary --> Unknown: step lease expired or idle 30 min
     Removal --> Unknown: step lease expired or idle 30 min
@@ -149,7 +149,7 @@ stateDiagram-v2
     Isolated --> [*]: owner-approved manual start with clearIsolation
 ```
 
-The run record `letterboxd/ratings/run.json` admits one running run and one active step at a time, and the lease owns only that object. R2 has no multi-key transaction, so a step that outlived its lease cannot be fenced out of other objects; instead every shared object changes by a monotone merge. The Diary cursor's progress in `letterboxd/diary/state.json` is a join that only moves forward (its last-attempt diagnostics are a deterministic last-writer-wins record that never plans a read), removal-queue entries move one way and accept an outcome only under the step's own claim, and the history, facts and removal events take idempotent merges, so a late write can add real progress and never move anything back. The cursor and the queue are authoritative; the run record's checkpoint is a per-run counter. Each removal event keeps its own reference in the queue, and an unresolved one is never pruned. The diagram shows `RATINGS_PIPELINE=separate` after the storage migration; a removal step first writes the ratings of rated entries to their removal events (at most 100 references per step), then runs the lookups. Deploying the code changes nothing: under `inline` with unmigrated objects the commit's path and stored bytes are those of the earlier code. The migration's witness `letterboxd/ratings/migration.json` records each converted object, so the status reports one found back at version 1 as `regressed`. The queue and the cursor are migrated only by the owner-approved `ratings_storage_migrate` tool, run under `inline` before the switch, and `separate` takes effect only once that migration is complete. A stale run is closed by the next start or step, never by the status read. Ownership, contracts, races, migration and rollback are in the ADR; activation is a separate owner decision.
+The run record `letterboxd/ratings/run.json` admits one running run and one active step at a time, and the lease owns only that object. R2 has no multi-key transaction, so a step that outlived its lease cannot be fenced out of other objects; instead every shared object changes by a monotone merge. The Diary cursor's progress in `letterboxd/diary/state.json` is a join that only moves forward (its last-attempt diagnostics are a deterministic last-writer-wins record that never plans a read), removal-queue entries move one way and accept an outcome only under the step's own claim, and the history, facts and removal events take idempotent merges, so a late write can add real progress and never move anything back. The cursor and the queue are authoritative; the run record's checkpoint is a per-run counter. Each removal event keeps its own reference in the queue, and an unresolved one is never pruned. The diagram shows `RATINGS_PIPELINE=separate` after the storage migration; a removal step first writes the ratings of rated entries to their removal events (at most 100 references per step), then runs the lookups. Under `inline` the commit reads Diary page 1 only ([ADR 0064](../adr/0064-diary-recent-window.md)). That is not a byte copy of the earlier multi-page reader. The queue and the cursor migration rules are unchanged. The migration's witness `letterboxd/ratings/migration.json` records each converted object, so the status reports one found back at version 1 as `regressed`. The queue and the cursor are migrated only by the owner-approved `ratings_storage_migrate` tool, run under `inline` before the switch, and `separate` takes effect only once that migration is complete. A stale run is closed by the next start or step, never by the status read. Ownership, contracts, races, migration and rollback are in the ADR; activation is a separate owner decision.
 
 ## Timing and authority
 
