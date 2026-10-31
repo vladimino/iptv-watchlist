@@ -6,7 +6,7 @@
 **Approval source:** explicit owner acceptance of ADR-0048 and visual approval of the rendered Mermaid diagram in the AIR-228 PR #238 conversation on 2026-10-29; separate approval is required to remove the production binding  
 **Related work:** [AIR-228](https://trello.com/c/jhRjobcA); [AIR-15](https://trello.com/c/Yz6SGd3R) (route and one-time run); [AIR-283](https://trello.com/c/s35GwqRz) (planned admin client); [ADR-0020](0020-owner-triggered-catalog-poster-hydration.md); [ADR-0039](0039-allowlisted-feature-flag-readout.md)  
 **Supersedes:** [ADR-0020](0020-owner-triggered-catalog-poster-hydration.md) in part: the `CATALOG_POSTER_HYDRATION` gate and the one-time framing of the operation. The route, the read-only dry run, the verified-identity rule, the resolver lease, the generation and compare-and-swap checks, the batch limit, the outcomes and receipts, and the owner approval of every production execution call stay  
-**Superseded by:** None
+**Superseded by:** [ADR 0062](0062-catalog-poster-negative-index.md) (Proposed) in part: terminal `no_poster_on_tmdb` and `tmdb_id_mismatch` answers are retained, and the ordinary queue no longer revisits them. The route, the dry run, the identity rule, the lease, generation and compare-and-swap checks, the batch limit and the per-call owner approval stay
 
 ## Context
 

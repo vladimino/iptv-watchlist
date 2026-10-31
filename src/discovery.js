@@ -252,6 +252,10 @@ async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
 // discovery writer stores), and writes under the resolver lease with a separate compare-and-swap on each catalog copy. A dry run
 // reads and counts only. Identity, aliases, shows, decisions, the generation pointer and every other key stay untouched.
 const CATALOG_POSTER_LIMIT=20,CATALOG_POSTER_DEFAULT_LIMIT=10,CATALOG_POSTER_ID_SAMPLE=50;
+// One compact index of terminal TMDB answers, keyed by the verified numeric TMDB id, not by a catalog id or a generation.
+// A missing object is an empty index. Remembered answers are no_poster_on_tmdb (skipped until nextCheckAt, 90 days after
+// checkedAt) and tmdb_id_mismatch (never returned to the ordinary queue). Transient failures are not stored.
+const CATALOG_POSTER_NEGATIVES_KEY='epg/catalog-poster-negatives.json',CATALOG_POSTER_NEGATIVES_MAX=2000,CATALOG_POSTER_NEGATIVE_TTL_MS=90*24*60*60*1000,CATALOG_POSTER_TMDB_ID=/^[1-9]\d{0,11}$/;
 function catalogPosterPresent(value){return typeof value==='string'&&value.startsWith('https://');}
 function catalogPosterVerified(film){return !!film&&typeof film==='object'&&film.tmdbId!=null&&film.tmdbId!==''&&/^\d+$/.test(String(film.tmdbId))&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId);}
 function catalogPosterFromDetail(movie){const path=movie?.poster_path;return typeof path==='string'&&/^\/[A-Za-z0-9._-]+$/.test(path)?'https://image.tmdb.org/t/p/w342'+path:null;}
@@ -271,7 +275,7 @@ async function catalogPosterDetail(env,tmdbId){
  return {error:String(lastError?.message||lastError||'TMDB request failed')};
 }
 // Outcomes that end a record's turn in a sweep. Every other outcome is retryable, and the cursor never moves past it.
-const CATALOG_POSTER_TERMINAL=new Set(['hydrated','already_present','no_poster_on_tmdb','tmdb_id_mismatch']);
+const CATALOG_POSTER_TERMINAL=new Set(['hydrated','already_present','no_poster_on_tmdb','tmdb_id_mismatch','not_eligible']);
 // The two catalog copies are separate R2 objects: each write is its own compare-and-swap, and nothing makes them atomic together.
 // The guard runs immediately before every write attempt, including after a lost compare-and-swap: the published generation must
 // still be the one the call started from, and the resolver lease must still be ours (renewed). A failed guard stops all writes.
@@ -316,12 +320,92 @@ function catalogPosterOutcome(id,writes){
  if(states.every(state=>state==='written'||state==='present'))return {outcome:writtenTo.length?'hydrated':'already_present',writtenTo};
  return {outcome:states.find(state=>state&&state!=='written'&&state!=='present')||'not_written',writtenTo};
 }
+// A present object that is not this schema is unreadable: the queue must not proceed as if no answer were remembered.
+function catalogPosterNegativesParse(body){
+ if(!body||typeof body!=='object'||Array.isArray(body)||body.schemaVersion!==1||!body.entries||typeof body.entries!=='object'||Array.isArray(body.entries))return null;
+ const ids=Object.keys(body.entries);
+ if(ids.length>CATALOG_POSTER_NEGATIVES_MAX)return null;
+ const entries={};
+ for(const id of ids){
+  if(!CATALOG_POSTER_TMDB_ID.test(id))return null;
+  const entry=body.entries[id];
+  if(!entry||typeof entry!=='object'||Array.isArray(entry)||typeof entry.checkedAt!=='string'||!Number.isFinite(Date.parse(entry.checkedAt)))return null;
+  if(entry.status==='tmdb_id_mismatch'){entries[id]={status:'tmdb_id_mismatch',checkedAt:entry.checkedAt};continue;}
+  if(entry.status!=='no_poster_on_tmdb'||typeof entry.nextCheckAt!=='string'||!Number.isFinite(Date.parse(entry.nextCheckAt)))return null;
+  entries[id]={status:'no_poster_on_tmdb',checkedAt:entry.checkedAt,nextCheckAt:entry.nextCheckAt};
+ }
+ return entries;
+}
+async function catalogPosterNegativesRead(env){
+ const object=await env.BUCKET.get(CATALOG_POSTER_NEGATIVES_KEY);
+ if(!object)return {ok:true,etag:null,entries:{}};
+ let body=null;
+ try{body=await object.json();}catch{return {ok:false,etag:object.etag||null};}
+ const entries=catalogPosterNegativesParse(body);
+ return entries?{ok:true,etag:object.etag||null,entries}:{ok:false,etag:object.etag||null};
+}
+// `actionable` is requested. `no_poster_held` waits for nextCheckAt. `identity_review` is never requested again by an ordinary call.
+function catalogPosterVerdict(film,entries,nowMs){
+ const entry=entries[String(film?.tmdbId)];
+ if(!entry)return 'actionable';
+ if(entry.status==='tmdb_id_mismatch')return 'identity_review';
+ return Date.parse(entry.nextCheckAt)<=nowMs?'actionable':'no_poster_held';
+}
+function catalogPosterPartition(verified,entries,nowMs){
+ const actionable=[],held=[],review=[];
+ for(const row of verified){
+  const verdict=catalogPosterVerdict(row.film,entries,nowMs);
+  if(verdict==='actionable')actionable.push(row);
+  else if(verdict==='identity_review')review.push(row);
+  else held.push(row);
+ }
+ return {actionable,held,review};
+}
+function catalogPosterNegativesStale(entries,stillMissing){return Object.keys(entries).some(id=>!stillMissing.has(id));}
+// Merges this call's terminal answers into the index and drops ids that are no longer a verified record without a poster.
+// A lost compare-and-swap retries once from a fresh read. Anything not actually stored comes back in `unsaved`.
+async function catalogPosterNegativesSave(env,current,additions,stillMissing,guard){
+ let etag=current.etag,base=current.entries;
+ for(let attempt=0;attempt<2;attempt++){
+  if(attempt>0){
+   const again=await catalogPosterNegativesRead(env);
+   if(!again.ok)return {durable:false,unsaved:[...additions.keys()],reason:'unreadable',written:false};
+   etag=again.etag;base=again.entries;
+  }
+  const entries={},unsaved=[];
+  for(const [id,entry] of Object.entries(base))if(stillMissing.has(id))entries[id]=entry;
+  const nowMs=Date.now(),checkedAt=new Date(nowMs).toISOString(),nextCheckAt=new Date(nowMs+CATALOG_POSTER_NEGATIVE_TTL_MS).toISOString();
+  let count=Object.keys(entries).length;
+  for(const [id,status] of additions){
+   if(!entries[id]&&count>=CATALOG_POSTER_NEGATIVES_MAX){unsaved.push(id);continue;}
+   if(!entries[id])count++;
+   entries[id]=status==='no_poster_on_tmdb'?{status,checkedAt,nextCheckAt}:{status,checkedAt};
+  }
+  const ordered={};for(const id of Object.keys(entries).sort())ordered[id]=entries[id];
+  const same=Object.keys(ordered).length===Object.keys(base).length&&Object.keys(ordered).every(id=>base[id]&&base[id].status===ordered[id].status&&base[id].checkedAt===ordered[id].checkedAt&&base[id].nextCheckAt===ordered[id].nextCheckAt);
+  if(same)return {durable:true,unsaved,reason:unsaved.length?'index_full':null,written:false};
+  const stop=await guard();
+  if(stop)return {durable:false,unsaved:[...additions.keys()],reason:stop,written:false};
+  if(typeof env.beforePosterNegativeWrite==='function'){const hook=env.beforePosterNegativeWrite;env.beforePosterNegativeWrite=null;await hook(env);}
+  const options={httpMetadata:{contentType:'application/json'},onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}};
+  const saved=await env.BUCKET.put(CATALOG_POSTER_NEGATIVES_KEY,JSON.stringify({schemaVersion:1,entries:ordered}),options);
+  if(saved!==null)return {durable:true,unsaved,reason:unsaved.length?'index_full':null,written:true};
+ }
+ return {durable:false,unsaved:[...additions.keys()],reason:'cas_conflict',written:false};
+}
 async function catalogPosterHydration(env,body={}){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>CATALOG_POSTER_LIMIT))return json({error:'Invalid limit'},400);
  if(body.cursor!==undefined&&body.cursor!==null&&(typeof body.cursor!=='string'||body.cursor.length>200))return json({error:'Invalid cursor'},400);
  if(body.expectedProgrammeRunId!==undefined&&(typeof body.expectedProgrammeRunId!=='string'||!body.expectedProgrammeRunId||body.expectedProgrammeRunId.length>200))return json({error:'Invalid expectedProgrammeRunId'},400);
  const dryRun=body.dryRun!==false,limit=body.limit??CATALOG_POSTER_DEFAULT_LIMIT,cursor=body.cursor||null,expected=body.expectedProgrammeRunId??null;
+ // An explicit recheck names verified TMDB ids and is the only way past a remembered answer. It is one call, not a sweep.
+ let recheckIds=null;
+ if(body.recheck!==undefined){
+  if(dryRun||body.cursor!==undefined||!Array.isArray(body.recheck)||body.recheck.length<1||body.recheck.length>limit)return json({error:'Invalid recheck'},400);
+  recheckIds=[];
+  for(const id of body.recheck){if(typeof id!=='string'||!CATALOG_POSTER_TMDB_ID.test(id)||recheckIds.includes(id))return json({error:'Invalid recheck'},400);recheckIds.push(id);}
+ }
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  const programmeRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
  // The caller's scope fence: a call bound to one published generation is refused, before any catalog read, lease, TMDB
@@ -331,8 +415,11 @@ async function catalogPosterHydration(env,body={}){
  const sources=[await catalogPosterObject(env,'epg/discovered-films.json')];
  if(programmeRunId)sources.push(await catalogPosterObject(env,epgGenerationKey(programmeRunId,'discovered-films.json')));
  const counts=catalogPosterMissing(sources);
- const summary={programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length};
- if(dryRun)return json({dryRun:true,enabled:true,...summary,ids:counts.verified.slice(0,CATALOG_POSTER_ID_SAMPLE).map(row=>row.id)});
+ const negatives=await catalogPosterNegativesRead(env);
+ if(!negatives.ok)return json({dryRun,enabled:true,error:'Poster negatives unreadable',negativesReadable:false},503);
+ const part=catalogPosterPartition(counts.verified,negatives.entries,Date.now());
+ const summary={programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length,actionable:part.actionable.length,noPosterHeld:part.held.length,identityReview:part.review.length};
+ if(dryRun)return json({dryRun:true,enabled:true,...summary,ids:part.actionable.slice(0,CATALOG_POSTER_ID_SAMPLE).map(row=>row.id)});
  if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({error:'TMDB is not configured'},503);
  const lease=await acquireDiscoveryLease(env);
  if(!lease)return json({dryRun:false,enabled:true,error:'Resolver is writing the catalog',...summary},409);
@@ -342,7 +429,21 @@ async function catalogPosterHydration(env,body={}){
    const current=latest?.phase==='published'&&latest.programmeRunId?latest.programmeRunId:null;
    if(current!==expected)return fenced(current);
   }
-  const queue=counts.verified.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0),batch=queue.slice(0,limit),outcomes=[],found=[];
+  // The ordinary queue is the actionable part only. A recheck names ids and ignores both the cursor and remembered answers.
+  // Slots keep the owner's order: a named id that is not a verified record without a poster is not_eligible and is not sent to TMDB.
+  let queue,batch,recheckSlots=null;const outcomes=[];
+  if(recheckIds){
+   const verifiedByTmdb=new Map(counts.verified.map(row=>[String(row.film.tmdbId),row]));
+   batch=[];recheckSlots=[];
+   for(const id of recheckIds){
+    const row=verifiedByTmdb.get(id);
+    if(row){batch.push(row);recheckSlots.push(row.id);continue;}
+    const known=counts.all.find(item=>String(item.film?.tmdbId)===id);
+    recheckSlots.push({id:known?known.id:'tmdb:'+id,tmdbId:id,...(known?catalogPosterDisplay(known.film):{title:null,year:null}),outcome:'not_eligible'});
+   }
+   queue=batch;
+  }else{queue=part.actionable.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0);batch=queue.slice(0,limit);}
+  const found=[];
   let retryAt=null;
   for(const row of batch){
    const tmdbId=String(row.film.tmdbId),shown=catalogPosterDisplay(row.film);
@@ -354,6 +455,11 @@ async function catalogPosterHydration(env,body={}){
    const poster=catalogPosterFromDetail(detail.movie);
    if(!poster){outcomes.push({id:row.id,tmdbId,...shown,outcome:'no_poster_on_tmdb'});continue;}
    found.push({id:row.id,tmdbId,poster});outcomes.push({id:row.id,tmdbId,...shown,outcome:'pending',poster});
+  }
+  if(recheckSlots){
+   const byId=new Map(outcomes.map(item=>[item.id,item]));
+   outcomes.length=0;
+   for(const slot of recheckSlots)outcomes.push(typeof slot==='string'?byId.get(slot):slot);
   }
   // Generation copy first, then the live catalog. A stop before either write leaves both unwritten; a stop between them leaves
   // the generation copy written and the live catalog not, which the response reports per copy and per record.
@@ -368,18 +474,35 @@ async function catalogPosterHydration(env,body={}){
    }
   }
   for(const item of outcomes)if(item.outcome==='pending'){const result=catalogPosterOutcome(item.id,writes);item.outcome=result.outcome;if(result.writtenTo.length)item.writtenTo=result.writtenTo;if(result.outcome!=='hydrated'&&!result.writtenTo.length)delete item.poster;}
-  // Completion invariant: the cursor moves only past records whose outcome is terminal, so following `nextCursor` from no
-  // cursor visits every verified record without a poster until each one is hydrated or terminally settled. `done` is true only
-  // when this batch reached the end of that queue and every outcome in it is terminal.
+  // Remember only answers this call actually got from TMDB. A failed write is reported on the outcome and is not treated as stored.
+  const additions=new Map();
+  for(const item of outcomes){
+   if(item.outcome!=='no_poster_on_tmdb'&&item.outcome!=='tmdb_id_mismatch')continue;
+   const id=String(item.tmdbId);
+   if(CATALOG_POSTER_TMDB_ID.test(id))additions.set(id,item.outcome);
+  }
+  const stillMissing=new Set(counts.verified.map(row=>String(row.film.tmdbId)));
+  for(const item of outcomes)if(item.outcome==='hydrated'||item.outcome==='already_present')stillMissing.delete(String(item.tmdbId));
+  const negativeResult=additions.size||catalogPosterNegativesStale(negatives.entries,stillMissing)
+   ?await catalogPosterNegativesSave(env,negatives,additions,stillMissing,()=>catalogPosterGuard(env,programmeRunId,lease))
+   :{durable:true,unsaved:[],reason:null,written:false};
+  for(const item of outcomes)if(item.outcome==='no_poster_on_tmdb'||item.outcome==='tmdb_id_mismatch')item.negativeSaved=CATALOG_POSTER_TMDB_ID.test(String(item.tmdbId))&&negativeResult.durable&&!negativeResult.unsaved.includes(String(item.tmdbId));
+  // Completion invariant: the cursor walks the actionable queue, which already excludes remembered answers. Following
+  // `nextCursor` from no cursor until `done` settles that queue, not every verified record without a poster. `done` is true
+  // only when this batch reached the end of that queue and every outcome in it is terminal. A recheck is not a sweep: its
+  // cursor stays null. An empty actionable queue is `done` and still reports the remembered counts above.
+  const recheckMode=!!recheckIds;
   const firstOpen=outcomes.findIndex(item=>!CATALOG_POSTER_TERMINAL.has(item.outcome));
   const settled=firstOpen<0?batch.length:firstOpen;
-  const done=batch.length===queue.length&&firstOpen<0;
+  const done=recheckMode?firstOpen<0:batch.length===queue.length&&firstOpen<0;
   // `null` is reserved for completion; a sweep that has to restart from the first record gets the empty cursor instead.
-  const nextCursor=done?null:settled>0?batch[settled-1].id:(cursor||'');
-  const generationChanged=writes.some(write=>write.reason==='generation_changed'),leaseLost=writes.some(write=>write.reason==='lease_lost');
-  const payload={dryRun:false,enabled:true,...summary,requested:limit,processed:outcomes.filter(item=>item.outcome!=='not_attempted').length,hydrated:outcomes.filter(item=>item.outcome==='hydrated').length,outcomes,
+  const nextCursor=recheckMode?null:done?null:settled>0?batch[settled-1].id:(cursor||'');
+  const generationChanged=writes.some(write=>write.reason==='generation_changed')||negativeResult.reason==='generation_changed',leaseLost=writes.some(write=>write.reason==='lease_lost')||negativeResult.reason==='lease_lost';
+  const negativeOutcomes=outcomes.filter(item=>item.outcome==='no_poster_on_tmdb'||item.outcome==='tmdb_id_mismatch');
+  const payload={dryRun:false,enabled:true,...summary,recheck:recheckMode,requested:limit,processed:outcomes.filter(item=>item.outcome!=='not_attempted'&&item.outcome!=='not_eligible').length,hydrated:outcomes.filter(item=>item.outcome==='hydrated').length,outcomes,
+   negatives:{persisted:negativeResult.durable&&negativeOutcomes.every(item=>item.negativeSaved===true),reason:negativeResult.reason,written:negativeResult.written},
    writes:writes.map(write=>({key:write.key,written:write.written,reason:write.reason,records:Object.values(write.status).filter(state=>state==='written').length})),
-   retryable:outcomes.filter(item=>!CATALOG_POSTER_TERMINAL.has(item.outcome)).map(item=>item.id),generationChanged,leaseLost,retryAt,done,nextCursor,remainingAfterCursor:Math.max(0,queue.length-settled)};
+   retryable:outcomes.filter(item=>!CATALOG_POSTER_TERMINAL.has(item.outcome)).map(item=>item.id),generationChanged,leaseLost,retryAt,done,nextCursor,remainingAfterCursor:recheckMode?0:Math.max(0,queue.length-settled)};
   if(leaseLost)return json({...payload,error:'Resolver lease lost; see writes for the copies already written'},409);
   return json(payload);
  }finally{await releaseDiscoveryLease(env,lease);}

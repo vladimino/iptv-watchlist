@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   POSTER_EVIDENCE_COPY, posterEvidenceText, POSTER_BATCH_MAX, POSTER_CALLS_MAX, POSTER_NO_PROGRESS_MAX, POSTER_CONFIRM_TTL_MS, POSTER_CALL_CHOICES, POSTER_OUTCOME_COPY, POSTER_STOP_COPY, POSTER_PREVIEW_COPY, POSTER_REFUSAL_COPY, POSTER_TERMINAL,
-  posterTmdbUrl, posterCoverage, posterPreview, posterConfirm, posterBeginRun, runPosterSweep, posterReceiptSummary, posterOutcomeText, posterStopText,
+  posterTmdbUrl, posterCoverage, posterPreview, posterConfirm, posterRecheckPreview, posterBeginRun, runPosterSweep, runPosterRecheck, posterReceiptSummary, posterOutcomeText, posterStopText,
   posterHistoryRead, posterHistoryObserve, posterHistoryRecord, posterResumeCursor,
 } from '../src/admin/posters-run.js';
 
@@ -55,7 +55,8 @@ assert.deepEqual([gated.status, gated.scopeKey, gated.retryAt], ['rate_limited',
 assert.equal(posterPreview(read(), {limit: 10, calls: 1, retryAt: NOW - 1, now: NOW}).status, 'eligible', 'a passed retryAt no longer gates');
 for (const broken of [null, {}, read({missingPoster: -1}), read({queue: null}), read({verifiedMissing: '8'})]) assert.equal(posterPreview(broken, {limit: 10, calls: 1, now: NOW}).status, 'unknown');
 assert.equal(posterPreview(read({queue: {cursor: null, limit: 10, items: [{id: 'x', tmdbId: 'abc'}, item('f1', '2')], remainingAfterCursor: 2, total: 2}}), {limit: 10, calls: 1, now: NOW}).items.length, 1, 'an item without a numeric TMDB id is never in scope');
-for (const status of ['eligible', 'nothing', 'unverified_only', 'end_of_queue', 'rate_limited', 'incomplete', 'unknown']) assert.ok(POSTER_PREVIEW_COPY[status], status);
+for (const status of ['eligible', 'nothing', 'unverified_only', 'held_only', 'end_of_queue', 'rate_limited', 'incomplete', 'unknown']) assert.ok(POSTER_PREVIEW_COPY[status], status);
+assert.equal(posterPreview(read({actionable: 0, noPosterHeld: 3, identityReview: 1, verifiedMissing: 4, missingPoster: 4, queue: {cursor: null, limit: 10, items: [], remainingAfterCursor: 0, total: 0}}), {limit: 10, calls: 1, now: NOW}).status, 'held_only');
 // Unknown is never zero: an incomplete read is its own status, with no counts, no batch and nothing to confirm.
 for (const [problems, label] of [[['live_copy_missing'], 'live copy missing'], [['generation_copy_missing'], 'generation copy missing'], [['generation_copy_unreadable'], 'generation copy malformed'], [['pointer_missing'], 'pointer missing'], [['generation_not_published'], 'not published']]) {
   const body = partial(problems, problems[0].startsWith('pointer') || problems[0] === 'generation_not_published' ? {programmeRunId: null} : {});
@@ -175,6 +176,7 @@ assert.deepEqual(receipt.summary.outcomes.map(item => [item.id, item.title === n
 // TMDB not configured, an invalid request, a network failure, a thrown call, an unexpected body, an unknown outcome code.
 for (const [answer, stop] of [
   [{ok: false, status: 503, error: 'TMDB is not configured', body: {error: 'TMDB is not configured'}}, 'tmdb_unconfigured'],
+  [{ok: false, status: 503, error: 'Poster negatives unreadable', body: {error: 'Poster negatives unreadable', negativesReadable: false}}, 'negatives_unreadable'],
   [{ok: false, status: 400, error: 'Invalid limit', body: {error: 'Invalid limit'}}, 'invalid_request'],
   [{ok: false, status: 0, error: 'network', body: null}, 'unknown_result'],
   [new Error('boom'), 'unknown_result'],
@@ -230,4 +232,34 @@ assert.deepEqual(posterHistoryRead(JSON.stringify({...history, terminal: {x: 'hy
 for (let index = 0; index < 15; index++) history = posterHistoryRecord(history, receipt);
 assert.equal(history.receipts.length, 10);
 
-console.log('Admin posters run: copy tables against the route, preview, exact-scope confirmation, fresh check, batch cap, call budget, no-progress stop, rate limit, generation change, resolver busy, lease loss with partial writes, unknown results, owner stop, incomplete evidence that is never zero nor confirmable, and bounded history passed');
+// 6. One confirmed recheck of a remembered answer: a single call, no cursor, and the sweep's saved position stays.
+const heldItem = {...item('f2', '2'), checkedAt: '2026-10-01T00:00:00.000Z', nextCheckAt: '2027-01-01T00:00:00.000Z'};
+const recheckRead = read({
+  actionable: 0, noPosterHeld: 1, identityReview: 0, verifiedMissing: 1, missingPoster: 1,
+  queue: {cursor: null, limit: 10, items: [], remainingAfterCursor: 0, total: 0},
+  held: {noPoster: {count: 1, sample: [heldItem]}, identityReview: {count: 0, sample: []}},
+});
+const recheckPreview = posterRecheckPreview(recheckRead, ['2']);
+assert.equal(recheckPreview.status, 'recheck');
+assert.equal(posterRecheckPreview(recheckRead, ['9']).status, 'not_eligible', 'an id outside the sample is not a recheck');
+const recheckConfirmed = posterConfirm(recheckPreview, {accepted: true, now: NOW});
+assert.equal(recheckConfirmed.ok, true);
+assert.deepEqual([recheckConfirmed.confirmation.mode, recheckConfirmed.confirmation.recheckIds], ['recheck', ['2']]);
+const recheckBegun = posterBeginRun(recheckConfirmed.confirmation, recheckRead, {now: NOW + 1000});
+assert.equal(recheckBegun.ok, true);
+const recheckBodies = [];
+const recheckReceipt = await runPosterRecheck({
+  confirmation: recheckBegun.confirmation,
+  now: () => NOW,
+  call: async body => {
+    recheckBodies.push(body);
+    return {ok: true, status: 200, body: {dryRun: false, programmeRunId: G1, outcomes: [{id: 'f2', tmdbId: '2', outcome: 'no_poster_on_tmdb', negativeSaved: false}], writes: [], done: true, nextCursor: null, remainingAfterCursor: 0, generationChanged: false, leaseLost: false, retryAt: null}};
+  },
+});
+assert.deepEqual(recheckBodies, [{dryRun: false, limit: 1, expectedProgrammeRunId: G1, recheck: ['2']}]);
+assert.equal(Object.hasOwn(recheckBodies[0], 'cursor'), false);
+assert.deepEqual([recheckReceipt.mode, recheckReceipt.stop, recheckReceipt.done, recheckReceipt.calls[0].outcomes[0].negativeSaved], ['recheck', 'done', true, false]);
+const kept = posterHistoryRecord({version: 1, receipts: [], observations: [], lastSuccess: null, resume: {programmeRunId: G1, cursor: 'f09'}, retryAt: null, terminal: {}}, recheckReceipt);
+assert.deepEqual(kept.resume, {programmeRunId: G1, cursor: 'f09'}, 'a recheck does not move the sweep position');
+
+console.log('Admin posters run: copy tables against the route, preview, exact-scope confirmation, fresh check, batch cap, call budget, no-progress stop, rate limit, generation change, resolver busy, lease loss with partial writes, unknown results, owner stop, incomplete evidence that is never zero nor confirmable, a held-only queue, one confirmed recheck that keeps the sweep position, and bounded history passed');

@@ -6,7 +6,7 @@
 **Approval source:** owner explicitly approved the rendered architecture diagram and ADR decision on 2026-10-26, in the AIR-15 delivery conversation  
 **Related work:** [AIR-15](https://trello.com/c/Yz6SGd3R), [AIR-102](https://trello.com/c/8wKyN4c7), [PR #122](https://github.com/vladimino/iptv-watchlist/pull/122)  
 **Supersedes:** None  
-**Superseded by:** [ADR-0048](0048-permanent-catalog-poster-maintenance-route.md) (Accepted 2026-10-29) in part: the `CATALOG_POSTER_HYDRATION` gate and the one-time framing of the operation; the route, the dry run, the identity rule, the lease, generation and compare-and-swap checks, the batch limit and the per-call owner approval stay
+**Superseded by:** [ADR-0048](0048-permanent-catalog-poster-maintenance-route.md) (Accepted 2026-10-29) in part: the `CATALOG_POSTER_HYDRATION` gate and the one-time framing of the operation; the route, the dry run, the identity rule, the lease, generation and compare-and-swap checks, the batch limit and the per-call owner approval stay. [ADR 0062](0062-catalog-poster-negative-index.md) (Proposed) in part: the completion invariant that a cursor followed until `done` settles every verified record without a poster
 
 ## Context
 

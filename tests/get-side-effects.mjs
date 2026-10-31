@@ -24,7 +24,7 @@ const ADMIN_RECOVERY_ROUTE='/api/admin/prediction-recovery?film=w1',ADMIN_RECOVE
 const DISCOVERY_RECOVERY_ROUTES=['/api/admin/discovery-recovery?key=hot%20film%7C2020','/api/admin/discovery-recovery/receipt?idempotencyKey=idem-000000000000001'],DISCOVERY_RECOVERY_KEYS=['epg/discovery-status.json','epg/generations/run-1/discovery-observations/manifest.json','epg/published-generation.json','epg/resolver-continuation.json','epg/resolver-lease.json'];
 const ADMIN_HEALTH_ROUTE='/api/admin/health',ADMIN_HEALTH_KEYS=['enrichment/prediction-queue.json','enrichment/profile/current.json','enrichment/view-index.json','epg/generations/run-1/discovered-films.json','epg/resolver-continuation.json'];
 // The poster coverage read adds both catalog copies the maintenance route works on, and nothing else: no lease, no TMDB.
-const ADMIN_POSTERS_ROUTES=['/api/admin/posters','/api/admin/posters?limit=3&cursor=a'],ADMIN_POSTERS_KEYS=['epg/discovered-films.json','epg/generations/run-1/discovered-films.json','epg/published-generation.json'];
+const ADMIN_POSTERS_ROUTES=['/api/admin/posters','/api/admin/posters?limit=3&cursor=a'],ADMIN_POSTERS_KEYS=['epg/catalog-poster-negatives.json','epg/discovered-films.json','epg/generations/run-1/discovered-films.json','epg/published-generation.json'];
 for(const path of ['/','/api/migration-export/manifest',...ADMIN_GET_ROUTES,ADMIN_HEALTH_ROUTE,...ADMIN_LIMBO_ROUTES,...ADMIN_POSTERS_ROUTES,ADMIN_RECOVERY_ROUTE,...DISCOVERY_RECOVERY_ROUTES])routes.add(path);
 assert(routes.size>=20,'route extraction found '+routes.size+' GET routes');
 for(const path of WRITING_GET_ROUTES)assert(routes.has(path),path);

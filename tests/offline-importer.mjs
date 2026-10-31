@@ -216,6 +216,8 @@ assert.equal(classifyObject('admin/actions/discovery_reconsider/v1/'+'a'.repeat(
 assert.equal(r2OnlyFamily('admin/actions/discovery_reconsider/v1/'+'a'.repeat(64)+'.json').family,'run_record');
 assert.equal(classifyObject('epg/generations/run-old/discovery-observations/shard-03.json'),'r2_only');
 assert.equal(classifyObject('enrichment/removal-rating-lookups.json'),'r2_only','the removal rating lookup queue is runtime coordination (ADR 0043)');
+assert.equal(classifyObject('epg/catalog-poster-negatives.json'),'r2_only','the poster negative index is runtime coordination and is not imported');
+assert.equal(r2OnlyFamily('epg/catalog-poster-negatives.json').family,'runtime_coordination');
 assert.equal(classifyObject('letterboxd/display-exclusion.json'),'r2_only','the owner-approved Finds display-only exclusion list is user state (owner decision of 28 October 2026)');
 assert.equal(classifyObject('mystery/zz.json'),'unmapped');
 assert.equal(classifyObject('epg/raw/guide.xml'),'excluded');

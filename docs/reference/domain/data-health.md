@@ -162,7 +162,7 @@ A record of another generation than the published one cannot be acted on: its ac
 | `skewToleranceMs` | 5 min | a timestamp this far ahead of `now` is treated as now |
 | `repeatedFailureAttempts` | 5 | attempts that escalate a waiting retry to warning |
 | `sampleSize` | 5 | ids kept on an aggregate issue |
-| `posterBacklogCount` | 20 records | restorable catalog records without a poster (two full batches of `/admin/posters`) that escalate the poster summary to warning |
+| `posterBacklogCount` | 20 records | verified catalog records without a poster (two full batches of `/admin/posters`), including ones the ordinary poster queue skips after a remembered TMDB refusal, that escalate the poster summary to warning |
 
 ## Clock skew and generations
 

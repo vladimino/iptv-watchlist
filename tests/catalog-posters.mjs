@@ -32,7 +32,7 @@ const baseEnv={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTE
 const post=async(body,env={},headers={})=>{const response=await worker.fetch(new Request('https://iptv.example/api/enrichment/catalog/posters',{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)}),{...baseEnv,...env},{waitUntil(){}});return {status:response.status,body:await response.json()};};
 
 const G1='11111111-1111-4111-8111-111111111111',G2='22222222-2222-4222-8222-222222222222',hour=3600000,now=Date.now();
-const LIVE='epg/discovered-films.json',COPY='epg/generations/'+G1+'/discovered-films.json',LEASE='epg/resolver-lease.json',POINTER='epg/published-generation.json';
+const LIVE='epg/discovered-films.json',COPY='epg/generations/'+G1+'/discovered-films.json',LEASE='epg/resolver-lease.json',POINTER='epg/published-generation.json',NEG='epg/catalog-poster-negatives.json';
 const film=(id,tmdbId,extra={})=>({id,tmdbId:String(tmdbId),canonicalIdentity:'tmdb:'+tmdbId,title:'Film '+id,original:'Original '+id,year:2001,runtime:100,genres:['Драма'],poster:null,url:'https://www.themoviedb.org/movie/'+tmdbId,aliases:['Alias '+id],directors:[{id:'tmdb_director/1',name:'D',original:'D'}],actors:[],shows:[{channelId:'c1',channel:'One',start:now-hour,end:now+hour}],showsProgrammeRunId:G1,discoveredAt:'2026-10-01T00:00:00.000Z',...extra});
 const POSTER='https://image.tmdb.org/t/p/w342';
 function seed(){
@@ -52,6 +52,7 @@ function seed(){
  tmdb={1:{id:1,poster_path:'/one.jpg'},3:{id:3,poster_path:null},4:()=>new Response('boom',{status:500}),5:{id:5,poster_path:'/five.jpg'},6:{id:66,poster_path:'/other.jpg'},7:{id:7,poster_path:'/heat.jpg'}};
 }
 const snapshot=()=>JSON.stringify([...records.entries()].filter(([key])=>key!==LEASE).sort());
+const stableSnapshot=()=>snapshot().replace(/"checkedAt":"[^"]+"/g,'"checkedAt":"t"').replace(/"nextCheckAt":"[^"]+"/g,'"nextCheckAt":"t"');
 const without=(record,key)=>{const copy={...record};delete copy[key];return copy;};
 const outcomeOf=(response,id)=>response.body.outcomes.find(item=>item.id===id);
 
@@ -71,7 +72,7 @@ seed();records.get(COPY).tmdb_2.poster=null;r=await post({});assert.equal(r.body
  for(const value of [undefined,'off','on','ON',' on',true,1]){
   seed();puts=[];fetches=[];r=await post({dryRun:false,limit:5},value===undefined?{}:{CATALOG_POSTER_HYDRATION:value});
   assert.equal(r.status,200,String(value));assert.notEqual(r.body.error,'Catalog poster hydration is off');assert.equal(r.body.hydrated,2,String(value));
-  const {at:_at,...body}=r.body;runs.push(JSON.stringify([body,fetches.length,snapshot()]));
+  const {at:_at,...body}=r.body;runs.push(JSON.stringify([body,fetches.length,stableSnapshot()]));
  }
  assert.equal(new Set(runs).size,1,'the binding changes nothing');
 }
@@ -114,7 +115,7 @@ for(const [key,before] of [[LIVE,original.live],[COPY,original.copy]]){
   if(!['tmdb_1','heat'].includes(id))assert.deepEqual(after[id],before[id],key+' '+id+' is untouched');
  }
 }
-assert.deepEqual([...new Set(puts)].sort(),[COPY,LEASE,LIVE].sort(),'only the two catalog copies and the lease are written');
+assert.deepEqual([...new Set(puts)].sort(),[COPY,LEASE,LIVE,NEG].sort(),'the two catalog copies, the lease and the negative index');
 assert.deepEqual(records.get(POINTER),{programmeRunId:G1,phase:'published'});
 assert.deepEqual(records.get('epg/discovery-resolution.json'),{'film|2001':{status:'verified',filmId:'tmdb_1',tmdbId:'1'}});
 assert.equal(records.get(LEASE).expiresAt,0,'the lease is released');
@@ -216,8 +217,10 @@ r=await post({dryRun:false,limit:20,cursor:r.body.nextCursor},{});
 assert.equal(outcomeOf(r,'tmdb_4').outcome,'hydrated','the retry hydrates the failed record');assert.equal(records.get(LIVE).tmdb_4.poster,POSTER+'/four.jpg');
 assert.equal(r.body.done,true);assert.equal(r.body.nextCursor,null);assert.deepEqual(Array.from(r.body.retryable),[]);
 // A fresh sweep after completion only meets terminal records, and reports done again.
-r=await post({dryRun:false,limit:20},{});
-assert.equal(r.body.hydrated,0);assert.equal(r.body.done,true);assert.deepEqual(Array.from(r.body.outcomes.map(item=>item.outcome)),['no_poster_on_tmdb']);
+fetches=[];r=await post({dryRun:false,limit:20},{});
+assert.equal(r.body.hydrated,0);assert.equal(r.body.done,true);assert.deepEqual(r.body.outcomes,[]);
+assert.equal(fetches.some(url=>url.includes('/movie/3?')),false,'a remembered no_poster is not requested again');
+assert.equal(r.body.noPosterHeld,1);assert.equal(r.body.missingPoster>0,true,'done does not mean every record has a poster');
 // A record that keeps failing never lets the sweep report done, however often it is called.
 seed();tmdb[4]=()=>new Response('down',{status:503});tmdb[6]={id:6,poster_path:'/six.jpg'};
 let cursorChain=null;for(let call=0;call<3;call++){r=await post({dryRun:false,limit:20,...(cursorChain===null?{}:{cursor:cursorChain})},{});assert.equal(r.body.done,false);assert.equal(r.body.nextCursor,'tmdb_3');cursorChain=r.body.nextCursor;}
@@ -279,6 +282,118 @@ assert.equal(fetches.every(url=>url.startsWith('https://api.themoviedb.org/3/mov
 seed();tmdb[3]=()=>new Response('slow down',{status:429,headers:{'Retry-After':'120'}});
 r=await post({dryRun:false,limit:5},{});
 assert.deepEqual(Array.from(r.body.outcomes.filter(item=>item.outcome!=='hydrated').map(item=>[item.outcome,item.title])),[['rate_limited','Film tmdb_3'],['not_attempted','Film tmdb_4'],['not_attempted','Film tmdb_6']]);
+
+// 17. Remembered terminal answers. The ordinary queue and the dry-run id sample skip them; a direct call cannot put them back.
+const dayMs=24*60*60*1000;
+seed();r=await post({dryRun:false,limit:5},{});
+assert.equal(outcomeOf(r,'tmdb_3').negativeSaved,true);assert.equal(outcomeOf(r,'tmdb_6').negativeSaved,true);
+assert.equal(Object.hasOwn(outcomeOf(r,'tmdb_4'),'negativeSaved'),false,'a transient failure is not a remembered answer');
+assert.equal(r.body.negatives.persisted,true);assert.equal(r.body.recheck,false);
+assert.deepEqual(Object.keys(records.get(NEG).entries).sort(),['3','6']);
+assert.equal(records.get(NEG).entries['3'].status,'no_poster_on_tmdb');assert.equal(records.get(NEG).entries['6'].status,'tmdb_id_mismatch');
+assert.equal(records.get(NEG).entries['4'],undefined);
+assert.equal(Date.parse(records.get(NEG).entries['3'].nextCheckAt)-Date.parse(records.get(NEG).entries['3'].checkedAt),90*dayMs);
+r=await post({},{});
+assert.deepEqual(Array.from(r.body.ids),['tmdb_4'],'the dry-run sample is the actionable queue');
+assert.deepEqual([r.body.verifiedMissing,r.body.actionable,r.body.noPosterHeld,r.body.identityReview],[3,1,1,1]);
+puts=[];fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.equal(fetches.some(url=>url.includes('/movie/3?')||url.includes('/movie/6?')),false,'the same generation does not ask TMDB again');
+assert.equal(fetches.some(url=>url.includes('/movie/4?')),true,'a transient failure is still requested');
+assert.equal(r.body.outcomes.some(item=>item.id==='tmdb_3'||item.id==='tmdb_6'),false);
+assert.equal(records.get(NEG).entries['4'],undefined,'tmdb_failed is not stored on the retry either');
+publishG2();puts=[];fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.equal(r.body.programmeRunId,G2);assert.equal(fetches.some(url=>url.includes('/movie/3?')||url.includes('/movie/6?')),false,'the next generation shares the index');
+// An expired no_poster is actionable again, and a fresh save is another 90 days from its own checkedAt.
+seed();await post({dryRun:false,limit:5},{});
+records.get(NEG).entries['3'].nextCheckAt=new Date(Date.parse(records.get(NEG).entries['3'].checkedAt)-1000).toISOString();
+fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.equal(fetches.filter(url=>url.includes('/movie/3?')).length,1);assert.equal(outcomeOf(r,'tmdb_3').outcome,'no_poster_on_tmdb');
+assert.equal(Date.parse(records.get(NEG).entries['3'].nextCheckAt)-Date.parse(records.get(NEG).entries['3'].checkedAt),90*dayMs);
+// A changed verified id is a different key: the old verdict neither blocks the new id nor survives.
+seed();await post({dryRun:false,limit:5},{});
+for(const key of [LIVE,COPY]){const row=records.get(key).tmdb_3;row.tmdbId='30';row.canonicalIdentity='tmdb:30';}
+tmdb[30]={id:30,poster_path:null};fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.equal(fetches.some(url=>url.includes('/movie/3?')),false);assert.equal(fetches.some(url=>url.includes('/movie/30?')),true);
+assert.equal(records.get(NEG).entries['3'],undefined);assert.equal(records.get(NEG).entries['30'].status,'no_poster_on_tmdb');
+// A poster that appears in the catalog is no longer a problem, so the remembered answer is dropped.
+seed();await post({dryRun:false,limit:5},{});
+for(const key of [LIVE,COPY])records.get(key).tmdb_3.poster=POSTER+'/late.jpg';
+fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.equal(fetches.some(url=>url.includes('/movie/3?')),false);assert.equal(records.get(NEG).entries['3'],undefined);
+// A mismatch is not requested by an ordinary call. Only an explicit recheck asks again, and it is one call with no cursor.
+seed();await post({dryRun:false,limit:5},{});
+fetches=[];r=await post({dryRun:false,limit:5},{});assert.equal(fetches.some(url=>url.includes('/movie/6?')),false);
+fetches=[];r=await post({dryRun:false,recheck:['6']},{});
+assert.equal(r.status,200);assert.equal(r.body.recheck,true);assert.equal(r.body.nextCursor,null);assert.equal(r.body.remainingAfterCursor,0);assert.equal(r.body.done,true);
+assert.deepEqual(fetches.map(url=>url.match(/movie\/(\d+)/)[1]),['6']);
+assert.equal(outcomeOf(r,'tmdb_6').outcome,'tmdb_id_mismatch');assert.equal(outcomeOf(r,'tmdb_6').negativeSaved,true);
+assert.equal(records.get(NEG).entries['6'].status,'tmdb_id_mismatch');assert.equal(records.get(NEG).entries['6'].nextCheckAt,undefined);
+// A rate limit, a skipped tail and a plain TMDB failure never become entries.
+seed();tmdb[3]=()=>new Response('slow down',{status:429,headers:{'Retry-After':'30'}});
+r=await post({dryRun:false,limit:5},{});
+assert.equal(records.has(NEG),false);assert.deepEqual(Array.from(r.body.outcomes.map(item=>item.outcome)).filter(code=>code==='rate_limited'||code==='not_attempted'),['rate_limited','not_attempted','not_attempted']);
+// A thousand remembered answers are not a thousand TMDB calls, and they do not block a new record.
+{
+ seed();
+ const catalog={},entries={},checkedAt=new Date().toISOString(),nextCheckAt=new Date(Date.now()+10*dayMs).toISOString();
+ for(let index=1;index<=1000;index++){const id='h'+String(index).padStart(4,'0');catalog[id]=film(id,index);entries[String(index)]={status:'no_poster_on_tmdb',checkedAt,nextCheckAt};}
+ catalog.na=film('na',1001);catalog.nb=film('nb',1002);
+ tmdb[1001]={id:1001,poster_path:'/na.jpg'};tmdb[1002]={id:1002,poster_path:'/nb.jpg'};
+ for(const key of [LIVE,COPY]){records.set(key,structuredClone(catalog));etags.set(key,'held-'+key);}
+ records.set(NEG,{schemaVersion:1,entries});etags.set(NEG,'held');
+ fetches=[];r=await post({dryRun:false,limit:2},{});
+ assert.deepEqual(Array.from(r.body.outcomes.map(item=>item.id)),['na','nb']);
+ assert.deepEqual(fetches.map(url=>url.match(/movie\/(\d+)/)[1]),['1001','1002']);
+ assert.equal(r.body.noPosterHeld,1000);assert.equal(r.body.actionable,2);
+}
+// The cap keeps the stored answers and reports the one that did not fit, which the next call asks for again.
+{
+ seed();
+ const catalog={},entries={},checkedAt=new Date().toISOString(),nextCheckAt=new Date(Date.now()+10*dayMs).toISOString();
+ for(let index=1;index<=2000;index++){const id='c'+String(index).padStart(4,'0');catalog[id]=film(id,index);entries[String(index)]={status:'no_poster_on_tmdb',checkedAt,nextCheckAt};}
+ catalog.extra=film('extra',2001);tmdb[2001]={id:2001,poster_path:null};
+ for(const key of [LIVE,COPY]){records.set(key,structuredClone(catalog));etags.set(key,'cap-'+key);}
+ records.set(NEG,{schemaVersion:1,entries});etags.set(NEG,'full');
+ r=await post({dryRun:false,limit:1},{});
+ assert.equal(outcomeOf(r,'extra').outcome,'no_poster_on_tmdb');assert.equal(outcomeOf(r,'extra').negativeSaved,false);
+ assert.equal(r.body.negatives.persisted,false);assert.equal(r.body.negatives.reason,'index_full');assert.equal(r.body.negatives.written,false);
+ assert.equal(records.get(NEG).entries['2001'],undefined);assert.equal(Object.keys(records.get(NEG).entries).length,2000);
+ fetches=[];r=await post({dryRun:false,limit:1},{});
+ assert.equal(fetches.some(url=>url.includes('/movie/2001?')),true,'an unsaved answer is requested again');
+}
+// A lost compare-and-swap on an existing index does not pretend the answer was stored, and does not change the stored one.
+seed();await post({dryRun:false,limit:5},{});
+records.get(NEG).entries['3'].checkedAt='2020-01-01T00:00:00.000Z';
+records.get(NEG).entries['3'].nextCheckAt='2020-04-01T00:00:00.000Z';
+const indexBefore=JSON.stringify(records.get(NEG));
+let flips=0;const bump=workerEnv=>{flips++;etags.set(NEG,'bump-'+flips);workerEnv.beforePosterNegativeWrite=bump;};
+r=await post({dryRun:false,recheck:['3']},{beforePosterNegativeWrite:bump});
+assert.equal(flips,2);assert.equal(outcomeOf(r,'tmdb_3').outcome,'no_poster_on_tmdb');assert.equal(outcomeOf(r,'tmdb_3').negativeSaved,false);
+assert.equal(r.body.negatives.persisted,false);assert.equal(r.body.negatives.reason,'cas_conflict');assert.equal(r.body.done,true);
+assert.equal(JSON.stringify(records.get(NEG)),indexBefore);
+// An unreadable index is not an empty one: nothing is fetched or written, and the answer is not done.
+seed();records.set(NEG,{schemaVersion:1,entries:{nope:1}});etags.set(NEG,'bad');
+for(const body of [{}, {dryRun:false,limit:5}]){
+ puts=[];fetches=[];r=await post(body,{});
+ assert.equal(r.status,503,JSON.stringify(body));assert.equal(r.body.error,'Poster negatives unreadable');assert.equal(r.body.negativesReadable,false);
+ assert.equal(r.body.done,undefined);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+}
+// A recheck is rejected before any read when it is empty, not a numeric id, duplicated, combined with a cursor, or not an execution.
+{
+ let gets=0;const originalGet=bucket.get;bucket.get=async key=>{gets++;return originalGet(key);};
+ for(const body of [{dryRun:false,recheck:[]},{dryRun:false,recheck:['0']},{dryRun:false,recheck:['1','1']},{dryRun:false,recheck:['1'],cursor:'heat'},{recheck:['1']}]){
+  seed();gets=0;puts=[];fetches=[];r=await post(body,{});
+  assert.equal(r.status,400,JSON.stringify(body));assert.equal(r.body.error,'Invalid recheck');
+  assert.equal(gets,0,JSON.stringify(body));assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+ }
+ bucket.get=originalGet;
+}
+// Names that are not verified records without a poster are not sent to TMDB, and they do not create the index.
+seed();puts=[];fetches=[];r=await post({dryRun:false,recheck:['2','999']},{});
+assert.equal(r.status,200);assert.deepEqual(fetches,[]);assert.equal(records.has(NEG),false);
+assert.equal(r.body.done,true);assert.equal(r.body.recheck,true);assert.equal(r.body.processed,0);assert.equal(r.body.negatives.persisted,true);
+assert.deepEqual(Array.from(r.body.outcomes.map(item=>[item.id,item.outcome])),[['tmdb_2','not_eligible'],['tmdb:999','not_eligible']]);
+assert.deepEqual(puts.filter(key=>key!==LEASE),[]);
 
 // 14. Route inventory: the hydration is a POST only; GET is not a route.
 const get=await worker.fetch(new Request('https://iptv.example/api/enrichment/catalog/posters'),{...baseEnv},{waitUntil(){}});
