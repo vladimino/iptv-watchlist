@@ -10,7 +10,7 @@
 - `film`.
 
 Nothing was written. The rows were mapped in memory to the contract's input and passed to `canonicalPersons` with no owner decisions (none are stored).  
-**Card:** [AIR-44](https://trello.com/c/ojtZjVc9); decision [ADR 0058](../../adr/0058-canonical-person-grouping.md) (Proposed).  
+**Card:** [AIR-44](https://trello.com/c/ojtZjVc9); decision [ADR 0058](../../adr/0058-canonical-person-grouping.md) (Accepted 2026-10-31, pure read-model scope only).  
 **Verdict:** the contract reproduces the existing coCredit review queue and joins 70 further humans through name folding. It finds no ambiguous or conflicting evidence. This is a read model only; nothing is persisted.
 
 Aggregates only. Person ids, names and Film ids stay private.

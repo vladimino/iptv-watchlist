@@ -1,9 +1,9 @@
 # ADR 0058: A canonical Person groups role records by source key, verified coCredit or owner decision
 
-**Status:** Proposed  
-**Original decision date:** 2026-10-30  
-**Recorded at:** 2026-10-30  
-**Approval source:** not yet approved; proposed in the AIR-44 pull request  
+**Status:** Accepted  
+**Original decision date:** 2026-10-31  
+**Recorded at:** 2026-10-31  
+**Approval source:** [explicit owner acceptance of ADR 0058 on AIR-44, 2026-10-31](https://trello.com/c/ojtZjVc9#comment-6ae531f26e757ef6c51f6fff), following [positive independent review of PR #263 HEAD 6c88ea7](https://github.com/vladimino/iptv-watchlist/pull/263#pullrequestreview-5719948598)  
 **Related work:** [AIR-44](https://trello.com/c/ojtZjVc9), [AIR-286](https://trello.com/c/EswNQuv8), [AIR-126](https://trello.com/c/fTMyNpi5), [AIR-275](https://trello.com/c/4x7hH0gI)  
 **Supersedes:** None  
 **Superseded by:** None
