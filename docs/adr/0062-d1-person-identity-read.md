@@ -6,7 +6,7 @@
 **Approval source:** [Explicit owner acceptance of ADR 0062 and visual approval of the changed Person-reference Mermaid on 2026-10-31](https://trello.com/c/4x7hH0gI#comment-6ae5c8cf2efa126534d6b174), after [independent re-review of PR #281 HEAD `6bfb8df`](https://github.com/vladimino/iptv-watchlist/pull/281#pullrequestreview-5722418932) found no blocking findings. This approves the one opt-in read-only D1 Person identity route only; it does not authorize D1/R2 writes, data migrations, feature flags, Scheduled Tasks, live page/read authority cutover, or any other production operation.
 **Related work:** [AIR-275](https://trello.com/c/4x7hH0gI), [AIR-201](https://trello.com/c/1uvzKiGg), [AIR-44](https://trello.com/c/ojtZjVc9), [ADR 0051](0051-d1-domain-r2-blobs.md), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0058](0058-canonical-person-grouping.md), [ADR 0059](0059-person-identity-projection.md)
 **Supersedes:** [ADR 0059](0059-person-identity-projection.md) in part. That record left "loading this function from a Worker route or a D1 query" undecided. This record decides one route. The watchlist grid stays on the stored role id. The rest of 0059 stands.
-**Superseded by:** [ADR 0064](0064-finds-person-filter-d1-read.md) in part. The Finds actor and director filter reads this GET. The route, its bounds and the watchlist grid stay as decided here.
+**Superseded by:** [ADR 0065](0065-finds-person-filter-d1-read.md) in part. The Finds actor and director filter reads this GET. The route, its bounds and the watchlist grid stay as decided here.
 
 ## Context
 
@@ -57,4 +57,4 @@ Rollback is reverting the route. R2 and D1 are untouched. This record authorizes
 
 - **Implementation:** `src/catalog-d1.js`, `scripts/bundle-scope.mjs`, `tests/catalog-d1.mjs`
 - **Contract:** [D1 catalog views](../reference/api/d1-catalog.md), [person identity projection](../reference/domain/person-identity-projection.md)
-- **Diagram:** [Film/Person lifecycle](../architecture/film-person-lifecycle.md). The owner explicitly [approved the changed Person-reference Mermaid on 2026-10-31](https://trello.com/c/4x7hH0gI#comment-6ae5c8cf2efa126534d6b174); the diagram keeps R2 authoritative and the watchlist grid on stored role ids. The Finds person filter is the later reader in [ADR 0064](0064-finds-person-filter-d1-read.md).
+- **Diagram:** [Film/Person lifecycle](../architecture/film-person-lifecycle.md). The owner explicitly [approved the changed Person-reference Mermaid on 2026-10-31](https://trello.com/c/4x7hH0gI#comment-6ae5c8cf2efa126534d6b174); the diagram keeps R2 authoritative and the watchlist grid on stored role ids. The Finds person filter is the later reader in [ADR 0065](0065-finds-person-filter-d1-read.md).
