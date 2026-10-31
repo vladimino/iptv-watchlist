@@ -145,4 +145,36 @@ const kinds=record=>JSON.parse(JSON.stringify((record.ratingHistory||[]).map(ent
  assert.equal(F.overlay({...source,ratingHistory:undefined},{...target,ratingHistory:undefined}).ratingHistory,undefined);
 }
 
-console.log('Rating history: first observation, change, confirmation, repeat, older, null, scan floor, absence, concurrent CAS, crash replay, export pre-existing, rollback and re-apply, convergence union with overlaps, re-application and repeated merges passed');
+// A diary rating can return to a value already in the list. The observation id is unchanged (ingestedAt is not part of
+// it). 4.0 → 4.5 → 4.0 → 4.5 on one watched date is four history events. An identical reread and a late earlier read
+// add none. A contended retry of the return appends once. The convergence union keeps both applications of one id.
+{
+ const b=bucket(),env={BUCKET:b},watched='2026-10-20',ref='diary:viewing:401';
+ const item=(rating,readAt)=>({lid:'cycle',watchedDate:watched,rating,sourceRef:ref,readAt});
+ const key='letterboxd/facts/films/lb-cycle.json',stored=()=>b.records.get(key);
+ const reads=['2026-10-20T18:00:00.000Z','2026-10-25T18:00:00.000Z','2026-10-27T18:00:00.000Z','2026-10-28T18:00:00.000Z'];
+ for(const [rating,readAt] of [[4,reads[0]],[4.5,reads[1]],[4,reads[2]],[4.5,reads[3]]])await F.applyDiaryEvidence(env,[item(rating,readAt)]);
+ assert.equal(stored().rating.value,4.5);assert.equal(stored().rating.ingestedAt,reads[3]);
+ assert.deepEqual(stored().ratingHistory.map(entry=>[entry.kind,entry.value]),[['first_observed',4],['changed',4.5],['changed',4],['changed',4.5]]);
+ const id4=stored().ratingHistory[0].observationId,id45=stored().ratingHistory[1].observationId;
+ assert.equal(stored().ratingHistory[2].observationId,id4);assert.equal(stored().ratingHistory[3].observationId,id45);
+ assert.equal(stored().ratingHistory[2].previous.observationId,id45);assert.equal(stored().ratingHistory[3].previous.observationId,id4);
+ b.records.set(F.FACTS_KEYS.viewIndex,{cycle:{watched:true,actualRating:1}});
+ assert.equal((await F.applyDiaryEvidence(env,[item(4.5,'2026-10-29T18:00:00.000Z')])).unchanged,1);
+ assert.equal(stored().ratingHistory.length,4,'an identical reread adds no event');assert.equal(stored().rating.ingestedAt,reads[3]);
+ assert.equal((await F.applyDiaryEvidence(env,[item(4,reads[0])])).older,1);
+ assert.equal(stored().rating.value,4.5);assert.equal(stored().ratingHistory.length,4,'a late earlier read adds no event');
+ const full=structuredClone(stored());
+ const partial={...F.emptyRecord(full.factKey,full.links),rating:{value:4.5,observedAt:watched+'T00:00:00.000Z',source:'letterboxd_diary',observationId:id45},ratingHistory:full.ratingHistory.slice(0,2)};
+ const merged=F.overlay(full,partial);
+ assert.equal(merged.ratingHistory.filter(entry=>entry.observationId===id4&&entry.kind!=='rolled_back').length,2,'both applications of 4.0 survive the union');
+ assert.equal(merged.ratingHistory.filter(entry=>entry.observationId===id45&&entry.kind!=='rolled_back').length,2,'both applications of 4.5 survive the union');
+ assert.deepEqual(F.mergeRatingHistories(merged.ratingHistory,merged.ratingHistory).map(entry=>entry.kind+':'+entry.observationId),merged.ratingHistory.map(entry=>entry.kind+':'+entry.observationId));
+ b.contendOnce(key,current=>({...current,links:{...current.links}}));
+ await F.applyDiaryEvidence(env,[item(4,'2026-10-30T18:00:00.000Z')]);
+ assert.equal(stored().rating.value,4);
+ assert.equal(stored().ratingHistory.filter(entry=>entry.kind==='changed'&&entry.value===4).length,2,'the contended return appends once');
+ assert.equal(stored().ratingHistory.length,5);
+}
+
+console.log('Rating history: first observation, change, confirmation, repeat, older, null, scan floor, absence, concurrent CAS, crash replay, export pre-existing, rollback and re-apply, convergence union with overlaps, re-application and repeated merges, a diary return to a previous value passed');

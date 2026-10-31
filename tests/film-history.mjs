@@ -214,6 +214,8 @@ const full=await history('filmId=alien');
  // A complete Diary coverage drops the partial-coverage note; an unreadable Diary history makes the answer partial.
  set('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'complete',coverage:{newestWatchedDate:'2026-09-25',oldestWatchedDate:'2010-01-01',reachedEnd:true},resumePage:null});
  assert.equal((await history('filmId=dia')).data.notes.includes('diary_coverage_partial'),false);
+ set('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'recent_window',stopReason:'recent_window_only',coverage:{newestWatchedDate:'2026-09-25',oldestWatchedDate:'2010-01-01',reachedEnd:false,window:'recent'},resumePage:4});
+ assert.equal((await history('filmId=dia')).data.notes.includes('diary_coverage_partial'),true,'a recent window stays incomplete coverage even with a stored resume page');
  set('letterboxd/diary/history.json','{broken');
  const broken=await history('filmId=dia');
  assert.equal(broken.data.partial,true);assert.equal(broken.data.snapshot.sources.diary.status,'unreadable');assert.ok(broken.data.notes.includes('diary_history_unreadable'));

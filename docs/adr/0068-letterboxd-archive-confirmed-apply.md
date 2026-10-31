@@ -1,4 +1,4 @@
-# ADR 0067: A confirmed Letterboxd archive apply re-checks the ZIP on two owner requests and writes through the existing baseline commit
+# ADR 0068: A confirmed Letterboxd archive apply re-checks the ZIP on two owner requests and writes through the existing baseline commit
 
 **Status:** Proposed (code and synthetic tests only; it authorizes no production upload, validate, commit, rollback, R2 or D1 write, flag, Access change, service token or Scheduled Task)  
 **Original decision date:** 2026-10-31  

@@ -1,4 +1,4 @@
-// Owner-confirmed apply of one previewed Letterboxd archive chunk (ADR 0067), behind the same Cloudflare Access
+// Owner-confirmed apply of one previewed Letterboxd archive chunk (ADR 0068), behind the same Cloudflare Access
 // application as the preview. The browser sends the ZIP again on confirm and again on commit. This module stores the
 // issued confirmation and, after a second request, the receipt. It never stores the archive, its rows, film names or
 // rating values. Fact writes go through LetterboxdFacts.commitBaselineChunk only after checkSubmission. Preview does

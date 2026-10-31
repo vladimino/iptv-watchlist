@@ -94,18 +94,19 @@ sequenceDiagram
     end
 ```
 
-The drift monitor is a third, read-only automation in the same registry. It compares the two producers' live entries with the [contract](../reference/scheduled-tasks.md#read-only-drift-monitor), reads `epg_status` through the same Access-protected MCP and only notifies the owner; it cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. A staged Ratings Task also exists in the registry but is disabled and is not drawn: ratings still run inside the EPG commit that the daily task's `epg_sync_step` triggers.
+The drift monitor is a read-only automation in the same registry. It compares the daily and hourly tasks' live entries with the [contract](../reference/scheduled-tasks.md#read-only-drift-monitor), reads `epg_status` through the same Access-protected MCP and only notifies the owner; it cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. The Ratings Task is enabled (live read-only check on 2026-10-31) and is drawn in the next diagram, not in this one: this diagram is the EPG and prediction tasks. With production `RATINGS_PIPELINE=separate`, the daily commit does not read Diary. The Worker default of that flag remains `inline`, and under `inline` the commit still reads Diary page 1. The drift monitor does not read the Ratings Task; extending it is a separate decision.
 
 A scheduled trigger does not imply successful completion. `already_running`, `busy`, lease ownership, deferred backoff and a previous run's retries that could not yet be written (`prediction_retry_heal_pending`) may prevent new work. The prediction Task, the EPG Task's commit and the discovery chunks can overlap. All three write the prediction queue, and each write is conditional and rebuilds on conflict ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31), so the overlap does not lose a retry or a batch summary. Discovery uses **one chunk per explicit request**; it does not recursively self-fetch through an Access bypass or an internal continuation service. The [MCP security boundary](authentication-and-mcp.md) verifies signed identity and restricts tool arguments.
 
-## The separate ratings pipeline (deployed, inactive by default)
+## The separate ratings pipeline (production; `inline` remains the Worker default)
 
-[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) moves Letterboxd ratings out of the EPG commit. The code and its four tools are in the Worker, but nothing below acts until the owner migrates the storage and sets `RATINGS_PIPELINE=separate`: with the default `inline`, ratings run inside the commit as in the diagram above, and no Ratings Task is enabled. Once active, the commit only enqueues removed films, and four dedicated tools serve the ratings: the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`, the drift monitor reads `ratings_sync_status`, and the owner runs the one-time `ratings_storage_migrate`. Contracts: [ratings reference](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline), [MCP reference](../reference/api/mcp.md); operation: [runbook](../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md) moves Letterboxd ratings out of the EPG commit. The Worker default of `RATINGS_PIPELINE` is `inline`: ratings then run inside the commit, and this diagram does not apply. Production on 2026-10-31 is the other mode. A live read-only check that day found the storage migrated, `RATINGS_PIPELINE=separate` and the Ratings Task enabled. In that mode the commit only enqueues removed films, and the Ratings Task drives its own run with `ratings_sync_start` and `ratings_sync_step`. The drift monitor does not read `ratings_sync_status`; extending it was not part of that check. `ratings_storage_migrate` stays the one-time owner tool that made the mode possible. This page does not change the flag or the task. Contracts: [ratings reference](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline), [MCP reference](../reference/api/mcp.md), [Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task); operation: [runbook](../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
 
 ```mermaid
 sequenceDiagram
     actor Daily as Daily EPG Task
-    actor Ratings as Ratings Task (proposed)
+    actor Ratings as Ratings Task (18:00, enabled)
+    Note over Daily,Ratings: Production mode. The Worker default inline is not drawn here
     participant MCP as Worker MCP
     participant Run as Ratings run record
     participant LB as Letterboxd
@@ -119,8 +120,8 @@ sequenceDiagram
         Ratings->>MCP: ratings_sync_step(runId)
         MCP->>Run: Begin the step: lease by compare-and-swap
         alt Diary phase
-            MCP->>LB: At most 3 Diary pages
-            MCP->>R2: Per page: history, facts, then cursor merge, progress forward only
+            MCP->>LB: Diary page 1 only
+            MCP->>R2: That page: history, facts, then cursor merge, progress forward only
             MCP->>R2: Queued films the Diary rated: every referenced removal event
         else Removal phase
             MCP->>LB: At most 5 member pages, attempt claimed first
@@ -135,10 +136,10 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Diary: ratings_sync_start
-    Diary --> Diary: step, up to 3 pages
-    Diary --> Removal: diary ended or run budget used
+    Diary --> Diary: the same page again, when it was not read
+    Diary --> Removal: page 1 read, or the diary gate is off
     Removal --> Removal: step, up to 5 lookups
-    Removal --> Finished: queue done or paused, diary complete or partial
+    Removal --> Finished: queue done or paused, diary recent window
     Removal --> Error: queue done or paused, diary blocked, rate-limited or failed
     Diary --> Unknown: step lease expired or idle 30 min
     Removal --> Unknown: step lease expired or idle 30 min
@@ -149,7 +150,7 @@ stateDiagram-v2
     Isolated --> [*]: owner-approved manual start with clearIsolation
 ```
 
-The run record `letterboxd/ratings/run.json` admits one running run and one active step at a time, and the lease owns only that object. R2 has no multi-key transaction, so a step that outlived its lease cannot be fenced out of other objects; instead every shared object changes by a monotone merge. The Diary cursor's progress in `letterboxd/diary/state.json` is a join that only moves forward (its last-attempt diagnostics are a deterministic last-writer-wins record that never plans a read), removal-queue entries move one way and accept an outcome only under the step's own claim, and the history, facts and removal events take idempotent merges, so a late write can add real progress and never move anything back. The cursor and the queue are authoritative; the run record's checkpoint is a per-run counter. Each removal event keeps its own reference in the queue, and an unresolved one is never pruned. The diagram shows `RATINGS_PIPELINE=separate` after the storage migration; a removal step first writes the ratings of rated entries to their removal events (at most 100 references per step), then runs the lookups. Deploying the code changes nothing: under `inline` with unmigrated objects the commit's path and stored bytes are those of the earlier code. The migration's witness `letterboxd/ratings/migration.json` records each converted object, so the status reports one found back at version 1 as `regressed`. The queue and the cursor are migrated only by the owner-approved `ratings_storage_migrate` tool, run under `inline` before the switch, and `separate` takes effect only once that migration is complete. A stale run is closed by the next start or step, never by the status read. Ownership, contracts, races, migration and rollback are in the ADR; activation is a separate owner decision.
+The run record `letterboxd/ratings/run.json` admits one running run and one active step at a time, and the lease owns only that object. R2 has no multi-key transaction, so a step that outlived its lease cannot be fenced out of other objects; instead every shared object changes by a monotone merge. The Diary cursor's progress in `letterboxd/diary/state.json` is a join that only moves forward (its last-attempt diagnostics are a deterministic last-writer-wins record that never plans a read), removal-queue entries move one way and accept an outcome only under the step's own claim, and the history, facts and removal events take idempotent merges, so a late write can add real progress and never move anything back. The cursor and the queue are authoritative; the run record's checkpoint is a per-run counter. Each removal event keeps its own reference in the queue, and an unresolved one is never pruned. The diagram shows `RATINGS_PIPELINE=separate` after the storage migration; a removal step first writes the ratings of rated entries to their removal events (at most 100 references per step), then runs the lookups. Under `inline` the commit reads Diary page 1 only ([ADR 0067](../adr/0067-diary-recent-window.md)). That is not a byte copy of the earlier multi-page reader. The queue and the cursor migration rules are unchanged. The migration's witness `letterboxd/ratings/migration.json` records each converted object, so the status reports one found back at version 1 as `regressed`. The queue and the cursor are migrated only by the owner-approved `ratings_storage_migrate` tool, run under `inline` before the switch, and `separate` takes effect only once that migration is complete. A stale run is closed by the next start or step, never by the status read. Ownership, contracts, races, migration and rollback are in the ADR. The diagram is the production mode as of the 2026-10-31 live read (`RATINGS_PIPELINE=separate`, Ratings Task enabled). The Worker default remains `inline`. Neither this diagram nor a deploy changes the flag or the task.
 
 ## Timing and authority
 

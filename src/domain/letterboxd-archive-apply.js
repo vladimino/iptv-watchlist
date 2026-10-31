@@ -1,4 +1,4 @@
-// Planning for a confirmed Letterboxd archive apply (ADR 0067). Pure: no storage, network or clock. The Worker hashes
+// Planning for a confirmed Letterboxd archive apply (ADR 0068). Pure: no storage, network or clock. The Worker hashes
 // the texts this module builds and asks the guarded-action library whether one chunk may be confirmed. Nothing here
 // writes, and a chunk contains only films the preview fully compared.
 export const APPLY_BATCH_SIZE = 50;

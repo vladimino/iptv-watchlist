@@ -1,5 +1,5 @@
 {
- "about": "Inline EPG sync of the code before the separate ratings pipeline (ADR 0060): R2 objects after the run, step replies and requests. Synthetic fixture data only.",
+ "about": "Inline EPG sync with the Diary recent window (ADR 0067): one Diary page, R2 objects after the run, step replies and requests. Synthetic fixture data only. Not a byte copy of the multi-page reader.",
  "snapshot": {
   "enrichment/films/film3/actual.json": {
    "rating": 3.5,
@@ -274,13 +274,14 @@
    "lastAttemptAt": "2026-10-31T08:00:00.000Z",
    "lastSuccessAt": "2026-10-31T08:00:00.000Z",
    "lastFailureAt": null,
-   "lastOutcome": "complete",
-   "stopReason": null,
+   "lastOutcome": "recent_window",
+   "stopReason": "recent_window_only",
    "counts": {
     "pages": 1,
     "rows": 2,
     "unresolved": 0,
     "undated": 0,
+    "overflowSuspected": false,
     "added": 2,
     "updated": 0,
     "unchanged": 0,
@@ -289,7 +290,8 @@
    "coverage": {
     "newestWatchedDate": "2026-10-29",
     "oldestWatchedDate": "2026-10-20",
-    "reachedEnd": true
+    "reachedEnd": false,
+    "window": "recent"
    },
    "resumePage": null
   },
@@ -327,6 +329,7 @@
     "source": "letterboxd_diary",
     "sourceRef": "diary:viewing:702",
     "observationId": "e7772254b2315a9723d7a06b7bfe03e65a09a7ac5cdc03cf352bb1c0d974bb7c",
+    "ingestedAt": "2026-10-31T08:00:00.000Z",
     "replaced": null
    },
    "ratingHistory": [
@@ -367,6 +370,7 @@
     "source": "letterboxd_diary",
     "sourceRef": "diary:viewing:701",
     "observationId": "167c02097e08e787199ac4e600b8c0fc25ca2dd0cef188b1d4448475ae6b4a14",
+    "ingestedAt": "2026-10-31T08:00:00.000Z",
     "replaced": null
    },
    "ratingHistory": [
@@ -565,13 +569,14 @@
     "finishedAt": "2026-10-31T08:00:00.000Z"
    },
    "diaryHistory": {
-    "outcome": "complete",
-    "stopReason": null,
+    "outcome": "recent_window",
+    "stopReason": "recent_window_only",
     "counts": {
      "pages": 1,
      "rows": 2,
      "unresolved": 0,
      "undated": 0,
+     "overflowSuspected": false,
      "added": 2,
      "updated": 0,
      "unchanged": 0,
@@ -581,7 +586,8 @@
     "coverage": {
      "newestWatchedDate": "2026-10-29",
      "oldestWatchedDate": "2026-10-20",
-     "reachedEnd": true
+     "reachedEnd": false,
+     "window": "recent"
     },
     "facts": {
      "films": 2,
@@ -688,13 +694,14 @@
     "channels": 1,
     "futureFullChannels": 0,
     "diaryHistory": {
-     "outcome": "complete",
-     "stopReason": null,
+     "outcome": "recent_window",
+     "stopReason": "recent_window_only",
      "counts": {
       "pages": 1,
       "rows": 2,
       "unresolved": 0,
       "undated": 0,
+      "overflowSuspected": false,
       "added": 2,
       "updated": 0,
       "unchanged": 0,
@@ -704,7 +711,8 @@
      "coverage": {
       "newestWatchedDate": "2026-10-29",
       "oldestWatchedDate": "2026-10-20",
-      "reachedEnd": true
+      "reachedEnd": false,
+      "window": "recent"
      },
      "facts": {
       "films": 2,

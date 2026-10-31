@@ -1,6 +1,6 @@
 # Letterboxd Diary viewing history — activation, observation, rollback
 
-Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decisions: [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), [ADR 0054](../adr/0054-diary-first-epg-ratings.md) (Diary-first ratings). Card: [AIR-51](https://trello.com/c/33d4hKJ3).
+Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decisions: [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), [ADR 0054](../adr/0054-diary-first-epg-ratings.md) (Diary-first ratings), [ADR 0067](../adr/0067-diary-recent-window.md) (page 1 only). Card: [AIR-51](https://trello.com/c/33d4hKJ3).
 
 A deploy does not activate anything. Each step below that changes production needs its own owner approval.
 
@@ -19,15 +19,15 @@ A deploy does not activate anything. Each step below that changes production nee
 
 - **`sync.json` `diaryHistory`** (in the sync status):
   - `outcome` and `stopReason`;
-  - `counts`: pages at most 3, rows, added, unchanged, updated, conflicts, unresolved, undated;
-  - `resumePage`.
-- **Facts (ADR 0054):** `diaryHistory.facts` shows `rated`, `unrated`, `ambiguous` and `partial`, and the write outcomes `written`, `unchanged`, `older` and `skipped`. `ratingAttempt` ends `finished` with `source: letterboxd_diary`. No request to `/<user>/films/` appears; if one does, stop and report it.
+  - `counts`: `pages` is 0 or 1, plus rows, added, unchanged, updated, conflicts, unresolved, undated, and `overflowSuspected` when the page was full, new, and linked onward;
+  - `resumePage`, kept as stored and not a request.
+- **Facts (ADR 0054, ADR 0067):** `diaryHistory.facts` shows `rated` and `unrated`. `ambiguous` and `partial` stay 0. The write outcomes are `written`, `unchanged`, `older` and `skipped`. A successful page ends `ratingAttempt` `finished` with `source: letterboxd_diary` and `diaryHistory.outcome` `recent_window`. No request to `/<user>/films/` or to `/diary/page/2/` appears; if one does, stop and report it.
 - **Removed films:** `removalDiaryResolved` lists those rated by the diary. `removalRatingLookup` shows at most five member-page requests, only for the rest.
 - **`ratingAttempt.phase`** passes through `diary`. A `ratingAttempt` that ends `unknown` with `interruptedPhase: diary` means the request died in the stage.
 - **`GET /api/letterboxd/diary`:** `state`, entry counts and, for a film, its viewings.
-- **Workers Observability:** `epg_ratings_phase` with `phase: diary`. The diary requests show as at most three subrequests to `letterboxd.com/<user>/diary/…`.
-- **Expected first run:** page 1 and, if it is entirely new, pages 2–3. `partial` with a `resumePage` until the backfill reaches the last page. Later commits continue the backfill.
-- **`blocked`** means the challenge answered at that page. Record it and stop; never retry or work around it. The history keeps what was read.
+- **Workers Observability:** `epg_ratings_phase` with `phase: diary`. The diary request is one subrequest to `letterboxd.com/<user>/diary/`.
+- **Expected run:** page 1 only, `recent_window` / `recent_window_only`, `lastSuccessAt` moved, `coverage.window: recent`, `historicalCoverage: incomplete`, `reachedEnd` left false. A stored `resumePage` does not cause another request. More than 50 new viewings since the previous success can miss this page; that is not a failed run, and this task does not start an archive import.
+- **`blocked`** means the challenge or HTTP 403 answered on page 1. Record it and stop; never retry or work around it, and never request page 2. The history keeps what was already stored, and `lastSuccessAt` stays.
 
 ## Separate ratings pipeline
 
@@ -39,7 +39,7 @@ A deploy does not activate anything. Each step below that changes production nee
 
 - **`switch`, `pipeline`, `migration`.** Before the cutover: `inline`, `inline`, `none`. `separate_pending_migration` means the switch is set but the migration is not complete, so the commit still runs ratings. `migration: regressed` (with `regressedObjects`) is a defect: stop and report it.
 - **`run`.** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`), `outcome`/`cause`, `lease.live` and `stale`. A run with `stale` set is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response.
-- **`removal`.** Queue version, entries, pending, unresolved references, legacy, expired, `droppedRefs`, `pausedUntil`, and `refIssues`: unresolved references by issue. A growing `event_missing` count means removal events that were never written; record it, nothing retries them by hand. **`diary`**: cursor coverage, resume page, last outcome.
+- **`removal`.** Queue version, entries, pending, unresolved references, legacy, expired, `droppedRefs`, `pausedUntil`, and `refIssues`: unresolved references by issue. A growing `event_missing` count means removal events that were never written; record it, nothing retries them by hand. **`diary`**: cursor coverage, `historicalCoverage` (`incomplete` when `coverage.window` is `recent`, otherwise `unknown`), `overflowSuspected`, resume page (not a request), last outcome and `lastSuccessAt`. A finished recent window is `recent_window`, not a complete diary.
 - **`freshness`.** The last finished and the last successful run.
 
 ### Cutover (owner)
@@ -66,7 +66,9 @@ A sequence of owner actions. Each step is approved separately and checked before
    On `partial` or `failed`, repeat `apply`; the commit keeps running ratings meanwhile.
 4. Set `RATINGS_PIPELINE=separate`. The switch writes no storage. Read back `feature_flags` and `pipeline: idle`. Then check that the next EPG commit makes no Diary or lookup request, carries `ratingsPipeline: separate` and grows the queue's references for its removals. On a problem, set `inline` back.
 5. One manual `ratings_sync_start({trigger:'manual'})`, then `ratings_sync_step({runId})` while `nextAction` is `continue`. Expect `finished`, or `error` with a cause. The cursor and the queue only move forward. On a problem, set `inline`.
-6. Enable the Ratings Task, then extend the drift monitor ([Scheduled Tasks](../reference/scheduled-tasks.md#staged-ratings-task-disabled)).
+6. Enable the Ratings Task, then extend the drift monitor ([Scheduled Tasks](../reference/scheduled-tasks.md#ratings-task)).
+
+As of the live read-only check on 2026-10-31 the storage is migrated, `RATINGS_PIPELINE=separate` and the Ratings Task is enabled. The drift monitor's scope was not extended. The list above is the sequence that was followed. It is not an instruction to repeat it, and this page does not change the flag or the task.
 
 ### Isolation
 

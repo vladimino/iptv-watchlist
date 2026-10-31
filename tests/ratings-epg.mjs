@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
 
-// ADR 0060 decisions 2, 3 and 10 at the EPG commit. Under `inline` (and `separate` before the migration) the routine
-// sync writes exactly what the code before the separate pipeline wrote: the golden snapshot was produced by that code
-// (`node tests/ratings-epg.mjs --golden <checkout>`). Under active `separate` the commit only enqueues removal references,
-// durably and before it publishes, and requests nothing from Letterboxd for ratings.
+// ADR 0060 decisions 2, 3 and 10 at the EPG commit, with the Diary read of ADR 0067. Under `inline` (and `separate`
+// before the migration) the routine sync writes the current page-1 Diary reader. The golden snapshot is this code
+// (`node tests/ratings-epg.mjs --golden .`). It is not a byte copy of the multi-page reader. Under active `separate`
+// the commit only enqueues removal references, durably and before it publishes, and requests nothing from Letterboxd
+// for ratings.
 const GOLDEN='tests/fixtures/ratings-inline-parity.json';
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
@@ -37,7 +38,7 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
 if(process.argv[2]==='--golden'){
  const {snapshot,replies,net}=await lifecycle({root:process.argv[3]});
  fs.mkdirSync('tests/fixtures',{recursive:true});
- fs.writeFileSync(GOLDEN,JSON.stringify({about:'Inline EPG sync of the code before the separate ratings pipeline (ADR 0060): R2 objects after the run, step replies and requests. Synthetic fixture data only.',snapshot,replies,fetches:net.fetches},null,1)+'\n');
+ fs.writeFileSync(GOLDEN,JSON.stringify({about:'Inline EPG sync with the Diary recent window (ADR 0067): one Diary page, R2 objects after the run, step replies and requests. Synthetic fixture data only. Not a byte copy of the multi-page reader.',snapshot,replies,fetches:net.fetches},null,1)+'\n');
  console.log('golden written');process.exit(0);
 }
 const golden=JSON.parse(fs.readFileSync(GOLDEN,'utf8'));
@@ -53,6 +54,10 @@ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'}
 }
 assert.ok(golden.snapshot[QUEUE]&&golden.snapshot[CURSOR],'the golden run exercised the queue and the Diary cursor');
 assert.equal(golden.snapshot[QUEUE].schemaVersion,1);
+assert.equal(golden.fetches.filter(url=>url.includes('/diary/')).length,1,'the inline commit fetches Diary page 1 only');
+assert.equal(golden.snapshot[CURSOR].lastOutcome,'recent_window');
+assert.equal(golden.snapshot[CURSOR].coverage.window,'recent');
+assert.equal(golden.snapshot[CURSOR].coverage.reachedEnd,false);
 
 // 2. Active `separate`: the commit enqueues one reference per removed film to the run's removal event, before it
 // publishes, requests nothing for ratings, leaves no ratings marker and no hand-over in sync.json.
@@ -114,4 +119,4 @@ assert.equal(golden.snapshot[QUEUE].schemaVersion,1);
  eq([footer.state,footer.code],['healthy','ok']);
 }
 
-console.log('Ratings at the EPG commit (ADR 0060): inline, explicit inline, malformed and unmigrated separate reproduce the golden run of the earlier code byte for byte; active separate enqueues references before the publish without Diary or member requests, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');
+console.log('Ratings at the EPG commit (ADR 0060, ADR 0067): inline, explicit inline, malformed and unmigrated separate reproduce the page-1 golden byte for byte; active separate enqueues references before the publish without Diary or member requests, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');

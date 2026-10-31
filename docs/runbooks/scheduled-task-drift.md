@@ -21,7 +21,7 @@ Re-read the live evidence before acting; a notification is the monitor's observa
 | `epg_status.stage` is not `complete` for today after the run window | EPG not published today. Distinguish no task run, an interrupted commit (`stage` still `epg`) and a Worker failure before suggesting anything. |
 | `stage` is `complete`, but `ratingAttempt` ended `error` or `unknown`, or `ratingError` is set | A ratings or Diary problem on a published programme, not an EPG failure. A Worker memory-limit kill in the ratings stage and a published `complete` can coexist. See [Diary history](letterboxd-diary-history.md). |
 | An enabled task shows `next_run_time: null` or a lagging `last_run_time` | Not by itself a missed run. Use `run_details.last_run` and the Worker's `updatedAt`. |
-| The staged Ratings Task is disabled | Expected. The monitor does not watch it. |
+| The Ratings Task is enabled or disabled | Not an alert from this monitor: it does not read that task. Enabled is the expected state as of the 2026-10-31 live read. |
 | The prompt or recurrence differs from the contract | Drift. Report the exact difference; the registry may be right and the contract stale, or the reverse. Either way an owner decision is needed. |
 
 ## What the operator may and may not do
@@ -35,4 +35,4 @@ Report to the owner the task identity, observed fields, `runId`, `stage`, `updat
 
 The monitor runs on the same automation platform as the tasks it watches. It can be late, fail or be disabled without notice, so a quiet day does not prove health. If its expected run is missing, the owner can inspect its registry entry directly; restarting or reconfiguring it is a task change and needs approval. Reverting this documentation does not change any live schedule.
 
-When the staged Ratings Task is activated, the monitor's scope changes too: a third producer task and a ratings freshness check separate from EPG publication. That needs its own owner decision and an update of the [contract](../reference/scheduled-tasks.md#staged-ratings-task-disabled) and this page.
+The Ratings Task is enabled (live read-only check on 2026-10-31). This monitor's scope is still the daily EPG task and the hourly task. Extending it to the Ratings Task, including a ratings freshness check separate from EPG publication, needs its own owner decision and an update of the [contract](../reference/scheduled-tasks.md#ratings-task) and this page. A documentation change does not do that.

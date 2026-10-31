@@ -132,7 +132,7 @@ Not covered: `discovery_retry` (a due retry is already taken by the next chunk),
 
 ## Letterboxd archive apply: `letterboxd_archive_apply@1`
 
-Records one chunk of a previewed Letterboxd archive through the existing baseline commit ([ADR 0067](../../adr/0067-letterboxd-archive-confirmed-apply.md), [admin API](admin.md#letterboxd-archive-apply)). The archive preview remains the dry run and writes nothing.
+Records one chunk of a previewed Letterboxd archive through the existing baseline commit ([ADR 0068](../../adr/0068-letterboxd-archive-confirmed-apply.md), [admin API](admin.md#letterboxd-archive-apply)). The archive preview remains the dry run and writes nothing.
 
 The declaration is:
 

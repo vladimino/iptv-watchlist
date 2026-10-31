@@ -518,7 +518,7 @@ After a confirmable chunk, the result (not the form) offers «Подтверди
 
 ## Letterboxd archive apply
 
-Four POST routes behind the same Access application as the preview ([ADR 0067](../../adr/0067-letterboxd-archive-confirmed-apply.md)). Source: [`src/admin/letterboxd-archive-apply.js`](../../../src/admin/letterboxd-archive-apply.js), [`src/domain/letterboxd-archive-apply.js`](../../../src/domain/letterboxd-archive-apply.js). Tests: [`tests/admin-letterboxd-apply.mjs`](../../../tests/admin-letterboxd-apply.mjs). They do not consult `LETTERBOXD_FACTS` or `LETTERBOXD_BASELINE_IMPORT`. Fact writes go through `commitBaselineChunk` and `rollbackBaselineChunk` only. The ZIP is never stored.
+Four POST routes behind the same Access application as the preview ([ADR 0068](../../adr/0068-letterboxd-archive-confirmed-apply.md)). Source: [`src/admin/letterboxd-archive-apply.js`](../../../src/admin/letterboxd-archive-apply.js), [`src/domain/letterboxd-archive-apply.js`](../../../src/domain/letterboxd-archive-apply.js). Tests: [`tests/admin-letterboxd-apply.mjs`](../../../tests/admin-letterboxd-apply.mjs). They do not consult `LETTERBOXD_FACTS` or `LETTERBOXD_BASELINE_IMPORT`. Fact writes go through `commitBaselineChunk` and `rollbackBaselineChunk` only. The ZIP is never stored.
 
 ### Principal, before the body
 
