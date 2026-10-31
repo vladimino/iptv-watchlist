@@ -35,13 +35,14 @@ A deploy does not activate anything. Each step below that changes production nee
 
 - **Run record:** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`) and `outcome`/`cause`. A run with `lease.live: false` is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response.
 - **`isolated`:** two runs interrupted at the same phase and checkpoint. Record it and stop; only an owner-approved manual start with `clearIsolation` lifts it.
-- **Cutover** is a sequence of owner actions:
-  1. Read-only export of `enrichment/removal-rating-lookups.json` and `letterboxd/diary/state.json`.
-  2. Set `RATINGS_PIPELINE=separate`. This is the storage migration: the first write converts the queue to `schemaVersion: 2` and the cursor to the join.
-  3. Read back `removal.schemaVersion`, `unresolved` and `legacy`, and check that the cursor's coverage and `resumePage` are unchanged.
-  4. Enable the Ratings Task.
-  5. Extend the drift monitor.
-- **Rollback:** disable the task, then set `RATINGS_PIPELINE=inline`. The commit keeps the migrated queue and cursor rules, so nothing is lost. Once migrated, a code revert is not a rollback; it needs a separate owner decision on the queue.
+- **Cutover** is a sequence of owner actions. Each step is approved separately and checked before the next one:
+  1. Read-only export of `enrichment/removal-rating-lookups.json` and `letterboxd/diary/state.json`, with sizes and hashes recorded.
+  2. `ratings_storage_migrate` `dry_run`. It writes nothing; its counts must match the export.
+  3. `ratings_storage_migrate` `apply`, still under `inline`. Read back `migration: complete`, `removal.schemaVersion: 2`, `unresolved` and `legacy` as predicted, and cursor progress (coverage, `resumePage`) equal to the export. On `partial` or `failed`, repeat `apply`; the commit keeps running ratings meanwhile.
+  4. Set `RATINGS_PIPELINE=separate`; the switch writes no storage. Read back `pipeline: idle`, and check that the next EPG commit makes no Diary or lookup request. On a problem, set `inline` back.
+  5. One manual `ratings_sync_start` and its steps. Expect `finished` or `error` with a cause; the cursor and queue only move forward. On a problem, set `inline`.
+  6. Enable the Ratings Task, then extend the drift monitor.
+- **Rollback:** disable the task, then set `RATINGS_PIPELINE=inline`. The commit keeps the migrated queue and cursor rules, so nothing is lost. Once migrated (step 3), a code revert is not a rollback; it needs a separate owner decision on the queue.
 
 ## Rollback
 
