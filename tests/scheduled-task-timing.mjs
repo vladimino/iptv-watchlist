@@ -101,6 +101,7 @@ assert.equal(decide(backoff,'2026-10-28T08:20:00Z').run,true);
 // The stored discoveryContract can still say "wait"; the next ordinary step evaluates continuationDecision
 // and starts a new bounded series. The external Scheduled Task has an additional read-only safety preflight.
 const exhausted={...budget,programmeRunId:'programme-1'};
+assert.equal(decide(exhausted,'2026-10-28T06:00:00.000Z').run,true,'the exact gate instant is eligible');
 const exhaustedDue=decide(exhausted,'2026-10-28T06:22:00Z');
 assert.equal(exhaustedDue.run,true,'past-due exhausted budget must not deadlock catch-up');
 assert.equal(exhaustedDue.budget,12,'the Worker replenishes a bounded series, not an unlimited loop');
@@ -117,7 +118,6 @@ assert.equal(settledWithOtherLease.status,'settled');
 assert.equal(settledWithOtherLease.lease,null,'settled health does not itself prove absence of another live lease');
 assert.match(contract,/Due exhausted `chunk_budget` \(AIR-299\)/,'the maintained contract must document the new scheduled-task exception');
 assert.match(contract,/epg_status\.stage=complete/,'do not lose the hourly global EPG stage gate');
-
 
 // Downstream: the footer, the queue status and a wait over HTTP all carry the nominal :20 trigger.
 records.set('enrichment/profile/current.json',{version:7,updatedAt:'2026-10-12T18:00:00Z',profileHash:'profile-7',profile:{}});
