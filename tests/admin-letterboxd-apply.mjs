@@ -178,7 +178,11 @@ async function observation(factKey, fact, value, observedAt, source) {
   assert.equal(second.status, 200, JSON.stringify(second.body));
   const repeated = await commit(bytes, second.body.confirmation);
   assert.equal(repeated.status, 200, JSON.stringify(repeated.body));
-  assert.equal(repeated.body.receipt.outcomes.every(item => item.outcome === 'already_applied'), true);
+  const repeatedById = Object.fromEntries(repeated.body.receipt.outcomes.map(item => [item.id, item.outcome]));
+  assert.equal(repeatedById.rateonly, 'already_applied');
+  assert.equal(repeatedById.keep, 'skipped_changed');
+  assert.equal(repeatedById.newer, 'skipped_changed');
+  assert.equal(repeated.body.receipt.state, 'partial', 'replaying a mixed baseline receipt stays partial');
   assert.equal(read(Facts.recordKey('tmdb-9001')).rating.value, 4);
 
   const later = await Facts.recordObservations(env, 'tmdb-9001', {letterboxd: 'rateonly', tmdb: '9001'}, [{fact: 'rating', observation: await observation('tmdb-9001', 'rating', 5, '2026-10-30T00:00:00.000Z', 'owner')}]);
@@ -387,8 +391,112 @@ async function observation(factKey, fact, value, observedAt, source) {
   const recovered = await commit(bytes, issued.body.confirmation);
   assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
   assert.equal(recovered.body.replayed, true, 'a baseline receipt with no action receipt is replayed, not refused');
+  assert.equal(recovered.body.receipt.state, 'partial');
+  assert.equal(recovered.body.receipt.counts.skipped_changed, 1);
+  assert.equal(recovered.body.receipt.counts.already_applied, 1);
+  assert.equal(recovered.body.receipt.counts.written, 0);
+  assert.equal(recovered.body.receipt.counts.failed, 0);
+  const recoveredById = Object.fromEntries(recovered.body.receipt.outcomes.map(item => [item.id, item.outcome]));
+  assert.equal(recoveredById[pendingLid], 'skipped_changed');
+  assert.equal(recoveredById[wroteFirst ? 'rateonly' : 'secondnew'], 'already_applied');
   assert.equal(read(Facts.recordKey(pendingKey)).rating.value, 5);
   assert.ok(read(actionKey).receipt);
+}
+
+// 7. A baseline receipt stored before the action receipt keeps partial and failed outcomes on the retry.
+{
+  async function dropActionReceipt(bytes, confirmation, key) {
+    const originalPut = bucket.put.bind(bucket);
+    let thrown = false;
+    const actionKey = 'admin/actions/letterboxd_archive_apply/v1/' + key + '.json';
+    bucket.put = async (name, value, options) => {
+      const text = typeof value === 'string' ? value : new TextDecoder().decode(value);
+      if (!thrown && name === actionKey && text.includes('"receipt":{')) {thrown = true; throw new Error('injected before the action receipt');}
+      return originalPut(name, value, options);
+    };
+    let interrupted;
+    try {interrupted = await commit(bytes, confirmation);} finally {bucket.put = originalPut;}
+    return {thrown, interrupted, actionKey};
+  }
+  seed();
+  put('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: new Date(NOW - D).toISOString(), films: [film('rateonly', 'Rated Only', 2014, 9001), film('newer', 'Newer Film', 2016, 9003)], people: {directors: [], actors: []}, stats: {}});
+  const newerKey = 'tmdb-9003';
+  const links = read(Facts.FACTS_KEYS.links);
+  links['letterboxd:newer'] = newerKey; links['tmdb:9003'] = newerKey;
+  put(Facts.FACTS_KEYS.links, links);
+  put(Facts.recordKey(newerKey), {...Facts.emptyRecord(newerKey, {letterboxd: 'newer', tmdb: '9003'}), watched: await observation(newerKey, 'watched', true, '2026-10-25T00:00:00.000Z', 'letterboxd_films_list'), rating: await observation(newerKey, 'rating', 5, '2026-10-25T00:00:00.000Z', 'letterboxd_films_list')});
+  const mixedBytes = archiveOf([{code: 'rateonly', name: 'Rated Only', year: 2014, rating: 4}, {code: 'newer', name: 'Newer Film', year: 2016, watched: true, rating: 2}]);
+  const mixedSeen = await preview(mixedBytes);
+  const mixedIssued = await confirm(mixedBytes, mixedSeen.body, 0, 'apply-key-replaymix01');
+  assert.equal(mixedIssued.status, 200, JSON.stringify(mixedIssued.body));
+  const mixedDrop = await dropActionReceipt(mixedBytes, mixedIssued.body.confirmation, 'apply-key-replaymix01');
+  assert.equal(mixedDrop.thrown, true);
+  assert.equal(mixedDrop.interrupted.status, 500);
+  assert.equal(mixedDrop.interrupted.body.error, 'storage_error');
+  assert.equal(read(mixedDrop.actionKey).state, 'running');
+  assert.equal(read(mixedDrop.actionKey).receipt, null);
+  assert.ok(read('letterboxd/imports/' + mixedSeen.body.archive.sha256 + '/chunks/0.receipt.json'));
+  const mixed = await commit(mixedBytes, mixedIssued.body.confirmation);
+  assert.equal(mixed.status, 200, JSON.stringify(mixed.body));
+  assert.equal(mixed.body.replayed, true);
+  assert.equal(mixed.body.writes, false);
+  assert.equal(mixed.body.receipt.state, 'partial');
+  assert.equal(mixed.body.receipt.counts.already_applied, 1);
+  assert.equal(mixed.body.receipt.counts.skipped_changed, 1);
+  assert.equal(mixed.body.receipt.counts.written, 0);
+  const mixedById = Object.fromEntries(mixed.body.receipt.outcomes.map(item => [item.id, item.outcome]));
+  assert.equal(mixedById.rateonly, 'already_applied');
+  assert.equal(mixedById.newer, 'skipped_changed');
+  assert.equal(read(Facts.recordKey(newerKey)).rating.value, 5);
+
+  seed();
+  put('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: new Date(NOW - D).toISOString(), films: [film('keep', 'Kept Film', 2015, 9002), film('newer', 'Newer Film', 2016, 9003)], people: {directors: [], actors: []}, stats: {}});
+  const skippedLinks = read(Facts.FACTS_KEYS.links);
+  for (const [lid, tmdb, key] of [['keep', '9002', 'tmdb-9002'], ['newer', '9003', 'tmdb-9003']]) {
+    skippedLinks['letterboxd:' + lid] = key; skippedLinks['tmdb:' + tmdb] = key;
+    put(Facts.recordKey(key), {...Facts.emptyRecord(key, {letterboxd: lid, tmdb}), watched: await observation(key, 'watched', true, '2026-10-25T00:00:00.000Z', 'letterboxd_films_list'), rating: await observation(key, 'rating', 5, '2026-10-25T00:00:00.000Z', 'letterboxd_films_list')});
+  }
+  put(Facts.FACTS_KEYS.links, skippedLinks);
+  const skippedBytes = archiveOf([{code: 'keep', name: 'Kept Film', year: 2015, watched: true, rating: 3}, {code: 'newer', name: 'Newer Film', year: 2016, watched: true, rating: 2}]);
+  const skippedSeen = await preview(skippedBytes);
+  const skippedIssued = await confirm(skippedBytes, skippedSeen.body, 0, 'apply-key-replayskip1');
+  assert.equal(skippedIssued.status, 200, JSON.stringify(skippedIssued.body));
+  const skippedDrop = await dropActionReceipt(skippedBytes, skippedIssued.body.confirmation, 'apply-key-replayskip1');
+  assert.equal(skippedDrop.thrown, true);
+  assert.equal(skippedDrop.interrupted.status, 500);
+  assert.equal(read(skippedDrop.actionKey).receipt, null);
+  const skipped = await commit(skippedBytes, skippedIssued.body.confirmation);
+  assert.equal(skipped.status, 200, JSON.stringify(skipped.body));
+  assert.equal(skipped.body.replayed, true);
+  assert.equal(skipped.body.receipt.state, 'failed');
+  assert.equal(skipped.body.receipt.counts.skipped_changed, 2);
+  assert.equal(skipped.body.receipt.counts.written, 0);
+  assert.equal(skipped.body.receipt.counts.already_applied, 0);
+  assert.equal(skipped.body.receipt.counts.failed, 0);
+  assert.equal(read(Facts.recordKey('tmdb-9002')).rating.value, 5);
+  assert.equal(read(Facts.recordKey('tmdb-9003')).rating.value, 5);
+
+  seed();
+  put('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: new Date(NOW - D).toISOString(), films: [film('rateonly', 'Rated Only', 2014, 9001)], people: {directors: [], actors: []}, stats: {}});
+  const conflictBytes = archiveOf([{code: 'rateonly', name: 'Rated Only', year: 2014, rating: 4}]);
+  const conflictSeen = await preview(conflictBytes);
+  const conflictIssued = await confirm(conflictBytes, conflictSeen.body, 0, 'apply-key-replayconf1');
+  assert.equal(conflictIssued.status, 200, JSON.stringify(conflictIssued.body));
+  const conflictActionKey = 'admin/actions/letterboxd_archive_apply/v1/apply-key-replayconf1.json';
+  const conflictAction = read(conflictActionKey);
+  conflictAction.state = 'running';
+  conflictAction.startedAt = new Date(NOW).toISOString();
+  put(conflictActionKey, conflictAction);
+  put('letterboxd/imports/' + conflictSeen.body.archive.sha256 + '/chunks/0.receipt.json', {schemaVersion: 1, itemsHash: conflictAction.planHash, archiveSha256: conflictSeen.body.archive.sha256, chunk: 0, entries: [{lid: 'rateonly', conflict: true}], origin: {archiveSha256: conflictSeen.body.archive.sha256, generatedAt: GENERATED, generatedAtSource: 'archive_name'}});
+  const conflict = await commit(conflictBytes, conflictIssued.body.confirmation);
+  assert.equal(conflict.status, 200, JSON.stringify(conflict.body));
+  assert.equal(conflict.body.replayed, true);
+  assert.equal(conflict.body.writes, false);
+  assert.equal(conflict.body.receipt.state, 'failed');
+  assert.equal(conflict.body.receipt.counts.failed, 1);
+  assert.equal(conflict.body.receipt.outcomes[0].outcome, 'failed');
+  assert.equal(conflict.body.receipt.outcomes[0].error, 'conflict');
+  assert.equal(read(Facts.recordKey('tmdb-9001')), undefined, 'a replayed conflict writes no fact');
 }
 
 console.log('admin-letterboxd-apply: ok');

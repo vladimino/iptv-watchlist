@@ -112,16 +112,18 @@ async function lbaAttachBatches(answer,comparison,now){
  answer.batches={size:LetterboxdArchiveApply.APPLY_BATCH_SIZE,programmeRunId:pin,confirmable:chunks.some(chunk=>chunk.confirmable),reason,chunks};
 }
 
+// A replay of a stored baseline receipt is not a new success. A conflict stays failed and a newer fact stays skipped.
+// Only a film this import actually wrote is already applied. Anything else is unchanged, which is also already applied.
+function lbaFilmOutcome(entry,replay){
+ if(entry.conflict)return {id:entry.lid,outcome:'failed',error:'conflict'};
+ const outcomes=entry.outcomes||[];
+ if(outcomes.some(item=>item.outcome==='new'||item.outcome==='replaces'))return {id:entry.lid,outcome:replay?'already_applied':'written'};
+ if(outcomes.some(item=>item.outcome==='older'))return {id:entry.lid,outcome:'skipped_changed'};
+ return {id:entry.lid,outcome:'already_applied'};
+}
 function lbaCommitOutcomes(result,ids){
  const replay=result.replay===true;
- const byLid=new Map((result.entries||[]).map(entry=>{
-  if(replay)return [entry.lid,{id:entry.lid,outcome:'already_applied'}];
-  if(entry.conflict)return [entry.lid,{id:entry.lid,outcome:'failed',error:'conflict'}];
-  const outcomes=entry.outcomes||[];
-  if(outcomes.some(item=>item.outcome==='new'||item.outcome==='replaces'))return [entry.lid,{id:entry.lid,outcome:'written'}];
-  if(outcomes.some(item=>item.outcome==='older'))return [entry.lid,{id:entry.lid,outcome:'skipped_changed'}];
-  return [entry.lid,{id:entry.lid,outcome:'already_applied'}];
- }));
+ const byLid=new Map((result.entries||[]).map(entry=>[entry.lid,lbaFilmOutcome(entry,replay)]));
  return ids.map(id=>byLid.get(id)||{id,outcome:'unknown'});
 }
 function lbaBaselineView(result){
@@ -219,7 +221,9 @@ async function lbaApplyCommit(request,env,url){
   const receipt=AdminActions.receiptOf({confirmation,capability:LBA_APPLY_CAP,startedAt:stored.record.startedAt,finishedAt:new Date().toISOString(),outcomes});
   const baseline=lbaBaselineView(result);
   const saved={...stored.record,state:receipt.state,finishedAt:receipt.finishedAt,receipt,baseline};
-  const durable=await lbaActionWrite(env,LBA_APPLY_PREFIX,submitted.idempotencyKey,saved,stored.etag);
+  let durable;
+  try{durable=await lbaActionWrite(env,LBA_APPLY_PREFIX,submitted.idempotencyKey,saved,stored.etag);}
+  catch{return json({error:'storage_error'},500);}
   return json({mode:'apply',writes:result.replay!==true,replayed:result.replay===true,receipt,baseline,state:receipt.state,durable:durable!==null});
  }catch{return lbaRefuse('invalid_request',500);}
  finally{lbaFreeSlot(started);}
