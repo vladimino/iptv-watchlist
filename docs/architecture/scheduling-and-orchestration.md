@@ -109,20 +109,24 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Cron as Worker cron trigger (37 * * * *)
-    participant Projector as D1 enrichment projector
+    participant Cron as Worker cron
+    participant Worker as Enrichment projector
     participant R2 as Authoritative R2
-    participant D1 as D1 iptv
-    Note over Cron,D1: The one Worker cron trigger, inert while D1_ENRICHMENT_WRITE is unset (ADR 0056)
-    Cron->>Projector: Scheduled event, hourly
+    participant D1 as D1 database
+    Cron->>Worker: Scheduled event at minute 37
     opt D1_ENRICHMENT_WRITE is dry or on
-        Projector->>R2: Read the enrichment objects of the published generation
-        Projector->>D1: Read change keys
+        Worker->>R2: Read published enrichment records
+        Worker->>D1: Read projection change keys
     end
-    opt D1_ENRICHMENT_WRITE is on and the inputs are complete
-        Projector->>D1: Changed Films and Persons with their keys, one batch each; sync clocks only when schema version is 5
+    opt Flag on and source inputs complete
+        Worker->>D1: Atomically write changed Films and Persons with keys
+        opt Schema v5 and film_sync_state present
+            Worker->>D1: Write metadata sync clocks with checkpoint
+        end
     end
 ```
+
+The cron expression is `37 * * * *`. When `D1_ENRICHMENT_WRITE` is unset, the trigger performs no R2 reads or D1 writes. With `dry`, it reads the source and change keys but never writes. With `on`, the projector writes changed Films and Persons in existing fenced batches. At schema v5, `film_sync_state` uses that same writer: sync clocks for an already-changing Film share its batch, while a clock-only change uses its own fenced batch. The migration is not applied by a code deploy.
 
 The drift monitor is a read-only automation in the same registry. Its expected recurrence, after the owner-approved registry change recorded on 2026-10-31, is daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, enabled. It reads the live entries of the daily EPG task, the hourly task and the Ratings Task, then `epg_status` and read-only `ratings_sync_status` through the same Access-protected MCP, and only notifies the owner. It cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. The Ratings Task's own run is drawn in the next diagram. With production `RATINGS_PIPELINE=separate`, the daily commit does not read Diary. The Worker default of that flag remains `inline`, and under `inline` the commit still reads Diary page 1. This page does not edit the monitor or any task.
 
