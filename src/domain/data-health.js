@@ -45,7 +45,7 @@ export const DATA_HEALTH_FILM_FIELDS = Object.freeze({
 const HOUR = 3600000;
 const DAY = 86400000;
 
-// Every threshold is a positive integer of milliseconds, except the two counts at the end.
+// Every threshold is a positive integer of milliseconds, except the three counts at the end.
 export const DATA_HEALTH_THRESHOLDS = Object.freeze({
   programmeStaleMs: 36 * HOUR,          // the daily programme update missed one cycle and half of the next
   metadataFreshMs: 30 * DAY,            // the metadata freshness window of the Film lifecycle
@@ -60,6 +60,7 @@ export const DATA_HEALTH_THRESHOLDS = Object.freeze({
   skewToleranceMs: 5 * 60000,           // timestamps this far in the future are treated as now
   repeatedFailureAttempts: 5,           // this many recorded attempts escalate a waiting retry
   sampleSize: 5,                        // ids kept on an aggregate issue
+  posterBacklogCount: 20,               // verified catalog records without a poster that escalate the summary: two full batches
 });
 
 const SEVERITY_RANK = Object.fromEntries(DATA_HEALTH_SEVERITIES.map((value, index) => [value, index]));
@@ -659,8 +660,11 @@ function posterSummaryIssues(context) {
     })];
   }
   if (missing === 0) return [];
+  // The count of restorable records escalates, never the time since the last run: a quiet catalog is not a problem.
+  const backlog = verified !== null && verified >= thresholds.posterBacklogCount;
   return [issue({
-    subsystem: 'poster', category: 'missing_asset', severity: 'info', reason: 'posters_missing',
+    subsystem: 'poster', category: 'missing_asset', severity: backlog ? 'warning' : 'info', reason: 'posters_missing',
+    threshold: {code: 'posterBacklogCount', value: thresholds.posterBacklogCount, unit: 'records'},
     subject: {kind: 'catalog', id: 'published'}, evidence: filmEvidence(posters, observed, 'posters', {anomalies: generationChanged ? ['projection_generation_differs'] : []}),
     observedAt: iso(observed.ms), provenance: {source: 'posters', programmeRunId: posters.programmeRunId ?? null, rule: 'posters.summary', verifiedMissing: verified, unverifiedMissing: Number.isInteger(posters.unverifiedMissing) ? posters.unverifiedMissing : null},
     affected: {count: missing, sample: sample(Array.isArray(posters.sample) ? posters.sample : [], thresholds)},

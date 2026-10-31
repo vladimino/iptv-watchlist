@@ -318,9 +318,14 @@ async function catalogPosterHydration(env,body={}){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>CATALOG_POSTER_LIMIT))return json({error:'Invalid limit'},400);
  if(body.cursor!==undefined&&body.cursor!==null&&(typeof body.cursor!=='string'||body.cursor.length>200))return json({error:'Invalid cursor'},400);
- const dryRun=body.dryRun!==false,limit=body.limit??CATALOG_POSTER_DEFAULT_LIMIT,cursor=body.cursor||null;
+ if(body.expectedProgrammeRunId!==undefined&&(typeof body.expectedProgrammeRunId!=='string'||!body.expectedProgrammeRunId||body.expectedProgrammeRunId.length>200))return json({error:'Invalid expectedProgrammeRunId'},400);
+ const dryRun=body.dryRun!==false,limit=body.limit??CATALOG_POSTER_DEFAULT_LIMIT,cursor=body.cursor||null,expected=body.expectedProgrammeRunId??null;
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  const programmeRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
+ // The caller's scope fence: a call bound to one published generation is refused, before any catalog read, lease, TMDB
+ // request or write, once another generation (or none) is published.
+ const fenced=current=>json({dryRun,enabled:true,error:'Programme generation changed',generationChanged:true,leaseLost:false,expectedProgrammeRunId:expected,programmeRunId:current},409);
+ if(expected&&programmeRunId!==expected)return fenced(programmeRunId);
  const sources=[await catalogPosterObject(env,'epg/discovered-films.json')];
  if(programmeRunId)sources.push(await catalogPosterObject(env,epgGenerationKey(programmeRunId,'discovered-films.json')));
  const counts=catalogPosterMissing(sources);
@@ -330,6 +335,11 @@ async function catalogPosterHydration(env,body={}){
  const lease=await acquireDiscoveryLease(env);
  if(!lease)return json({dryRun:false,enabled:true,error:'Resolver is writing the catalog',...summary},409);
  try{
+  if(expected){
+   const again=await env.BUCKET.get(EPG_GENERATION_KEY),latest=again?await again.json():null;
+   const current=latest?.phase==='published'&&latest.programmeRunId?latest.programmeRunId:null;
+   if(current!==expected)return fenced(current);
+  }
   const queue=counts.verified.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0),batch=queue.slice(0,limit),outcomes=[],found=[];
   let retryAt=null;
   for(const row of batch){
