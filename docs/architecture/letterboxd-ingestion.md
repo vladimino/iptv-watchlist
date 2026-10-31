@@ -89,7 +89,7 @@ A fact record also carries `ratingHistory`, the append-only list of the film's r
 
 ## Owner archive preview (no write)
 
-**Proposed ([ADR 0066](../adr/0066-ephemeral-letterboxd-archive-preview.md)).** The owner checks an account export from `/admin/letterboxd` before any import. The archive travels in one same-origin POST under the existing Access session, lives only in that request and is never stored; the Worker reads single named R2 objects through a get-only wrapper and answers with a bounded proposal. There is no apply step on this path: the import stays the separately approved [baseline route](../runbooks/letterboxd-baseline-import.md). Contract: [admin API](../reference/api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview).
+**Accepted ([ADR 0066](../adr/0066-ephemeral-letterboxd-archive-preview.md)).** The owner checks an account export from `/admin/letterboxd` before any import. The archive travels in one same-origin POST under the existing Access session, lives only in that request and is never stored; the Worker reads single named R2 objects through a get-only wrapper and answers with a bounded proposal. There is no apply step on this path: the import stays the separately approved [baseline route](../runbooks/letterboxd-baseline-import.md). Contract: [admin API](../reference/api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview).
 
 ```mermaid
 sequenceDiagram

@@ -1,9 +1,9 @@
 # ADR 0066: The owner's Letterboxd archive is previewed by an ephemeral, read-only Worker request, never stored
 
-**Status:** Proposed  
-**Original decision date:** 2026-10-31 (topology chosen by the owner; this record and its diagram await owner acceptance)  
+**Status:** Accepted  
+**Original decision date:** 2026-10-31 (server-side topology chosen and this ADR subsequently accepted by the owner after independent review on the same day)  
 **Recorded at:** 2026-10-31  
-**Approval source:** [Owner's topology choice on AIR-284](https://trello.com/c/Y9udReUR#comment-6ae5940b46cb2cd2f175c28f): server-side ephemeral processing in the Worker behind the existing owner-only Cloudflare Access; client-local parsing rejected. Acceptance of this record and visual approval of the changed Mermaid diagram are pending.  
+**Approval source:** [Explicit owner acceptance on AIR-284](https://trello.com/c/Y9udReUR#comment-6ae5edcb7436dfb7be7c6292), recorded from the owner's 2026-10-31 chat decision after [independent PASS review](https://github.com/vladimino/iptv-watchlist/pull/273#pullrequestreview-5722869014) on PR #273 at HEAD `aa9bd294c81deb44c07ff6fd216a28a59872ffb1`. The owner accepted ADR 0066 and visually approved the updated Mermaid in `docs/architecture/letterboxd-ingestion.md`. The [earlier topology choice](https://trello.com/c/Y9udReUR#comment-6ae5940b46cb2cd2f175c28f) selected server-side ephemeral processing behind Cloudflare Access, not client-local parsing. No production archive upload, import or writer authorization was given.  
 **Related work:** [AIR-284](https://trello.com/c/Y9udReUR) (this preview); [AIR-285](https://trello.com/c/FFMUP4qm) (the later, separately approved apply step); [AIR-277](https://trello.com/c/H8OhqtXa), [AIR-278](https://trello.com/c/OES5oHbm) (data health); [ADR 0004](0004-mcp-access-boundary.md); [ADR 0023](0023-letterboxd-user-facts.md); [ADR 0024](0024-letterboxd-scan-summary.md); [ADR 0053](0053-permanent-letterboxd-baseline-import-route.md); [feasibility evidence](../evidence/letterboxd/air-284-archive-preview-feasibility-2026-10-31.md)  
 **Supersedes:** None  
 **Superseded by:** None
