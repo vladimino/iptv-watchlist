@@ -34,7 +34,8 @@ async function releaseFilm(db,id){
 }
 // metadata_at, synopsis_fetched_at and people_localized_at are the strings metadata.json stored, or null when that clock
 // is missing. people_names_version is the integer metadata.json stored, or null. people_version stays on film_metadata.
-// A null sync deletes the row: the metadata.json entry is gone. The Film row stays.
+// A null sync deletes the row because the metadata.json entry is gone. Leaving the view does not. The Film row stays,
+// and the foreign key is that existing id: this function does not insert a Film.
 const FILM_SYNC_UPSERT='INSERT INTO film_sync_state (film_id,metadata_at,synopsis_fetched_at,people_names_version,people_localized_at) VALUES (?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET metadata_at=excluded.metadata_at,synopsis_fetched_at=excluded.synopsis_fetched_at,people_names_version=excluded.people_names_version,people_localized_at=excluded.people_localized_at';
 async function projectFilmSyncState(db,input){
  const filmId=requiredFilm(input?.filmId);

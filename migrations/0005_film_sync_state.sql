@@ -1,8 +1,10 @@
 -- Schema v5: the metadataSync freshness clocks that film_metadata does not store (ADR 0070).
 -- Additive. Changes nothing of 0001-0004. Not applied to production by this file.
 -- metadata.json stays authoritative. metadataSync does not read this table.
--- A missing row means metadata.json has no entry for the Film. A row with a NULL clock means the entry
--- exists and that clock is absent. people_version stays on film_metadata. The 30-day window is not stored.
+-- For a Film row that exists, a missing sync row means metadata.json has no entry for that Film.
+-- A row with a NULL clock means the entry exists and that clock is absent. A metadata.json key with no
+-- Film row is not stored and does not create a Film. Leaving the view does not delete the sync row.
+-- people_version stays on film_metadata. The 30-day window is not stored.
 -- Applying this migration to iptv is a separate owner approval. R2 bucket iptv stays authoritative.
 
 CREATE TABLE film_sync_state (

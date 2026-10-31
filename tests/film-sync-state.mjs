@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {filmChangeKey,filmSyncChangeKey,filmSyncState} from '../src/enrichment-projection.js';
+import {filmChangeKey,filmSyncChangeKey,filmSyncState,metadataForFilmId} from '../src/enrichment-projection.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
@@ -42,6 +42,11 @@ assert.notEqual(filmSyncChangeKey(filmSyncState({metadataAt:edge})),filmSyncChan
 assert.equal(filmSyncChangeKey(null),'absent');
 assert.notEqual(filmSyncChangeKey(filmSyncState({})),'absent','an unstamped entry is not a missing entry');
 assert.equal(filmSyncChangeKey(filmSyncState({metadataAt:edge})),filmSyncChangeKey(filmSyncState({metadataAt:edge})));
+assert.equal(metadataForFilmId({heat:{id:'heat',metadataAt:edge}},'film:heat').metadataAt,edge);
+assert.equal(metadataForFilmId({tmdb_100:{id:'tmdb_100',metadataAt:edge}},'film:tmdb:100').metadataAt,edge);
+assert.equal(metadataForFilmId({heat:{id:'heat',metadataAt:edge}},'film:tmdb:949',['heat']).id,'heat');
+assert.equal(metadataForFilmId({heat:{id:'heat'}},'film:orphan'),null);
+assert.equal(metadataForFilmId(null,'film:heat'),null);
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-film-sync-'));
 let databases=0;
@@ -235,19 +240,52 @@ const env={DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'};
  assert.equal(syncRow(db,'film:heat').s,'2026-11-02T00:00:00.000Z');
 }
 
-// 8. A Film that leaves the view loses the sync row with its membership and keeps its Film row.
+// 8. A watchlist Film removed from the watchlist and the programme keeps its sync row while metadata.json keeps the entry.
+// A clock changed while it is off the view is still written. Re-adding the Film finds that row. The row goes only when
+// the entry goes. A metadata.json key with no Film row creates neither a Film nor a sync row.
 {
- const films=[film('heat','Heat','949'),film('plain','Plain','1')];
- bucket.put('watchlist.json',JSON.stringify({updatedAt:T,films}));
- bucket.put('epg/generations/run-1/programme.json',JSON.stringify({updatedAt:T,films:films.map(item=>({...item,shows:[]}))}));
  const metadata=JSON.parse(body(bucket,'metadata.json'));
+ metadata.orphan={id:'orphan',metadataAt:T,synopsisFetchedAt:T,peopleNamesVersion:2,peopleLocalizedAt:T};
+ bucket.put('metadata.json',JSON.stringify(metadata));
+ const ignored=await run(env);
+ assert.equal(ignored.outcome,'complete',JSON.stringify(ignored));
+ assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:orphan'"),0);
+ assert.equal(syncRow(db,'film:orphan'),null);
+ const kept=syncRow(db,'film:collateral');
+ const films=[film('heat','Heat','949'),film('plain','Plain','1')];
+ const putLists=list=>{
+  bucket.put('watchlist.json',JSON.stringify({updatedAt:T,films:list}));
+  bucket.put('epg/generations/run-1/programme.json',JSON.stringify({updatedAt:T,films:list.map(item=>({...item,shows:[]}))}));
+ };
+ putLists(films);
+ const released=await run(env);
+ assert.equal(released.outcome,'complete',JSON.stringify(released));
+ assert.equal(one(db,"SELECT COUNT(*) FROM watchlist_film WHERE film_id='film:collateral'"),0);
+ assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:collateral'"),1);
+ assert.deepEqual(syncRow(db,'film:collateral'),kept);
+ assert.notEqual(one(db,"SELECT change_key FROM projection_state WHERE projection='metadata_sync' AND id='film:collateral'"),'absent');
+ metadata.collateral={...metadata.collateral,synopsisFetchedAt:'2026-11-04T00:00:00.000Z'};
+ bucket.put('metadata.json',JSON.stringify(metadata));
+ const offView=await run(env);
+ assert.equal(offView.outcome,'complete',JSON.stringify(offView));
+ assert.equal(offView.writtenFilms,0);
+ assert.equal(syncRow(db,'film:collateral').s,'2026-11-04T00:00:00.000Z');
+ assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:orphan'"),0);
+ putLists([...films,film('collateral','Collateral','1538')]);
+ const returned=await run(env);
+ assert.equal(returned.outcome,'complete',JSON.stringify(returned));
+ assert.equal(one(db,"SELECT COUNT(*) FROM watchlist_film WHERE film_id='film:collateral'"),1);
+ assert.equal(syncRow(db,'film:collateral').s,'2026-11-04T00:00:00.000Z');
  delete metadata.collateral;
  bucket.put('metadata.json',JSON.stringify(metadata));
- const summary=await run(env);
- assert.equal(summary.outcome,'complete',JSON.stringify(summary));
+ putLists(films);
+ const dropped=await run(env);
+ assert.equal(dropped.outcome,'complete',JSON.stringify(dropped));
  assert.equal(syncRow(db,'film:collateral'),null);
+ assert.equal(one(db,"SELECT change_key FROM projection_state WHERE projection='metadata_sync' AND id='film:collateral'"),'absent');
  assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:collateral'"),1);
  assert.equal(one(db,"SELECT COUNT(*) FROM watchlist_film WHERE film_id='film:collateral'"),0);
+ assert.equal(syncRow(db,'film:orphan'),null);
 }
 
 // 9. The query budget stops a sync-only run before it writes, and the next run finishes it. R2 is already the new value throughout.

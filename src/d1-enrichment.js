@@ -177,19 +177,42 @@ async function d1EnrichmentDiff(env,db,now,summary){
  plan.sync=[];
  if(plan.syncReady){
   const storedSync=new Map((await db.all("SELECT id,change_key FROM projection_state WHERE projection=? AND kind='film'",[METADATA_SYNC_PROJECTION])).map(row=>[row.id,row.change_key]));
+  const viewed=new Set();
   for(const entry of inputs.films){
    if(held.has(entry.id))continue;
+   viewed.add(entry.id);
    const key=EnrichmentProjection.filmSyncChangeKey(entry.sync);
    const previous=storedSync.get(entry.id);
    if(entry.sync){if(previous!==key)plan.sync.push({id:entry.id,sync:entry.sync,key});}
    else if(previous&&previous!=='absent')plan.sync.push({id:entry.id,sync:null,key:'absent'});
   }
-  for(const entity of plan.absent){
-   if(entity.kind!=='film')continue;
-   const previous=storedSync.get(entity.id);
-   entity.clearSync=!!(previous&&previous!=='absent');
+  // Leaving the view releases membership only. metadata.json keeps the cache, and beginSync reads it if the Film returns,
+  // so the sync row follows that entry. The foreign key is an existing film.id: a metadata.json key with no Film row
+  // does not mint a Film and does not get a row. A held Film is left untouched.
+  const known=new Set((await db.all('SELECT id FROM film')).map(row=>row.id));
+  const aliases=new Map();
+  for(const row of await db.all("SELECT film_id,value FROM film_external_id WHERE scheme='letterboxd'")){
+   if(!aliases.has(row.film_id))aliases.set(row.film_id,[]);
+   aliases.get(row.film_id).push(row.value);
   }
-  summary.changedSync=plan.sync.length;
+  const leaving=new Map(plan.absent.filter(item=>item.kind==='film').map(item=>[item.id,item]));
+  for(const id of new Set([...known,...leaving.keys()])){
+   if(viewed.has(id)||held.has(id))continue;
+   const sync=EnrichmentProjection.filmSyncState(EnrichmentProjection.metadataForFilmId(store.metadata,id,aliases.get(id)));
+   const previous=storedSync.get(id);
+   const key=EnrichmentProjection.filmSyncChangeKey(sync);
+   const release=leaving.get(id)||null;
+   if(sync){
+    if(!known.has(id)||previous===key)continue;
+    const item={id,sync,key};
+    if(release)release.syncUpdate=item;
+    else plan.sync.push(item);
+   }else if(previous&&previous!=='absent'){
+    if(release)release.clearSync=true;
+    else plan.sync.push({id,sync:null,key:'absent'});
+   }
+  }
+  summary.changedSync=plan.sync.length+plan.absent.filter(item=>item.syncUpdate||item.clearSync).length;
  }
  return plan;
 }
@@ -272,11 +295,12 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
     const entity=task.item;
     await fenced(async()=>{
      if(entity.kind==='film')await repository.releaseFilm(entity.id);
-     if(entity.clearSync)await writeSync({id:entity.id,sync:null,key:'absent'});
+     if(entity.syncUpdate)await writeSync(entity.syncUpdate);
+     else if(entity.clearSync)await writeSync({id:entity.id,sync:null,key:'absent'});
      await state(entity.kind,entity.id,'absent');
     });
     result.released++;
-    if(entity.clearSync)result.syncWrites++;
+    if(entity.syncUpdate||entity.clearSync)result.syncWrites++;
    }
   }catch(error){
    if(task.kind==='people')for(const entry of task.items)failed('person',entry.id,error);

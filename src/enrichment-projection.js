@@ -46,6 +46,26 @@ export function filmSyncState(record){
  if(!record||typeof record!=='object'||Array.isArray(record))return null;
  return {metadataAt:syncClock(record.metadataAt),synopsisFetchedAt:syncClock(record.synopsisFetchedAt),peopleNamesVersion:Number.isInteger(record.peopleNamesVersion)?record.peopleNamesVersion:null,peopleLocalizedAt:syncClock(record.peopleLocalizedAt)};
 }
+// The metadata.json entry for a Film that already has a row. film:<slug> uses the slug; film:tmdb:<n> uses the catalog
+// spelling tmdb_<n>. aliases are the Film's stored letterboxd external ids, so a retained cache still matches after the
+// Film has left the view and the only identity left in D1 is the Film row. A key that matches no Film is not a row:
+// this function does not mint one.
+export function metadataForFilmId(metadata,filmId,aliases=[]){
+ if(!metadata||typeof metadata!=='object'||typeof filmId!=='string'||!filmId.startsWith('film:'))return null;
+ const keys=[];
+ const add=key=>{if(typeof key==='string'&&key.length&&!keys.includes(key))keys.push(key);};
+ add(filmId.slice(5));
+ const bare=filmId.slice(5);
+ if(bare.startsWith('tmdb:'))add('tmdb_'+bare.slice(5));
+ for(const alias of aliases||[])add(String(alias));
+ for(const key of keys){const value=metadata[key];if(value&&typeof value==='object'&&!Array.isArray(value))return value;}
+ for(const [key,value] of Object.entries(metadata)){
+  if(!value||typeof value!=='object'||Array.isArray(value))continue;
+  const id=value.id!=null?String(value.id):key;
+  if(id===filmId||keys.includes(id)||keys.includes(key))return value;
+ }
+ return null;
+}
 const SYNC_KEY_SENTINEL='#sync';
 export function filmSyncChangeKey(sync){
  if(!sync)return 'absent';
