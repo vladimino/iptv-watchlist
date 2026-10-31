@@ -1,9 +1,9 @@
 # ADR 0065: Finds reads one Person identity from D1
 
-**Status:** Proposed
+**Status:** Accepted
 **Original decision date:** 2026-10-31
 **Recorded at:** 2026-10-31
-**Approval source:** Pending the owner's decision. Independent review does not accept this record.
+**Approval source:** [Explicit owner acceptance of ADR 0065 and visual approval of the amended Person-reference Mermaid on 2026-10-31](https://trello.com/c/LtoEguNS#comment-6ae5db4865ea258914e007e4), after [independent PASS review of PR #284 code HEAD `27cd9e5`](https://github.com/vladimino/iptv-watchlist/pull/284#pullrequestreview-5722655713). Scope: the read-only Finds person-filter client of the existing D1 GET only. This does not authorize D1/R2 writes, migrations, feature flags, Access, Scheduled Tasks, general site read cutover or domain authority flip.
 **Related work:** [AIR-16](https://trello.com/c/LtoEguNS), [AIR-275](https://trello.com/c/4x7hH0gI), [ADR 0009](0009-canonical-film-person-identity.md), [ADR 0051](0051-d1-domain-r2-blobs.md), [ADR 0057](0057-tmdb-tv-identity-and-retired-movie-ids.md), [ADR 0059](0059-person-identity-projection.md), [ADR 0062](0062-d1-person-identity-read.md)
 **Supersedes:** [ADR 0062](0062-d1-person-identity-read.md) in part. That record left the live page on the stored role id. This record lets the Finds actor and director filter read the identity GET. The route, its bounds and the watchlist grid are unchanged.
 **Superseded by:** None
@@ -50,4 +50,4 @@ Rollback is reverting the page reader. No row, flag, binding or schedule changes
 
 - **Implementation:** `public/app.js`, `tests/contextual-finds.mjs`
 - **Contract:** [Catalog](../reference/api/catalog.md#filter-context), [D1 catalog views](../reference/api/d1-catalog.md#person-identity), [person identity projection](../reference/domain/person-identity-projection.md)
-- **Diagram:** [Film/Person lifecycle](../architecture/film-person-lifecycle.md). The changed Person-reference figure needs the owner's visual approval.
+- **Diagram:** [Film/Person lifecycle](../architecture/film-person-lifecycle.md). The owner [visually approved the changed Person-reference figure on 2026-10-31](https://trello.com/c/LtoEguNS#comment-6ae5db4865ea258914e007e4) after independent review.
