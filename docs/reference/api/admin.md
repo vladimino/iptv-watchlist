@@ -1,6 +1,6 @@
 # Owner admin API
 
-`GET /api/admin/*` answers the owner's `/admin` page from one **published snapshot** of the programme: the generation pointer, that generation's programme object and the two localization dictionaries. It searches Film and Person projections, lists quality queues and returns one record, always from the same version tuple, which every answer names as an opaque `pin`. The routes only read; they never list the bucket, never fall back to the root `programme.json`, never write, never read a lease, the resolution ledger, the discovery snapshot or an enrichment object, and never call TMDB, Letterboxd, a model or MCP. The [GET side-effect test](../../../tests/get-side-effects.mjs) covers them like every other read. The later sections add bounded reads with their own read sets, and the one guarded write under `/api/admin/`, the [discovery observation reconsideration](#discovery-observation-recovery-get-apiadmindiscovery-recovery).
+`GET /api/admin/*` answers the owner's `/admin` page from one **published snapshot** of the programme: the generation pointer, that generation's programme object, the two localization dictionaries and the owner-review overlay. It searches Film and Person projections, lists quality queues and returns one record, always from the same version tuple, which every answer names as an opaque `pin`. Those routes never list the bucket, never fall back to the root `programme.json`, never write, never read a lease, the resolution ledger, the discovery snapshot or an enrichment object, and never call TMDB, Letterboxd, a model or MCP. The [GET side-effect test](../../../tests/get-side-effects.mjs) covers them like every other read. The later sections add bounded reads with their own read sets, and the guarded writes under `/api/admin/`: the [film title review](#film-title-review-post-apiadminfilmsstoredidtitle-review) and the [discovery observation reconsideration](#discovery-observation-recovery-get-apiadmindiscovery-recovery).
 
 Access is the existing owner-only Cloudflare Access application in front of the Worker hostname ([ADR 0004](../../adr/0004-mcp-access-boundary.md)). The routes add no second login, no admin middleware, no token in the page and no bypass; the browser session is the only credential, and the page sends `credentials: 'same-origin'`.
 
@@ -16,6 +16,7 @@ Exactly these objects, in this order, on every request. There is no `BUCKET.list
 | 2 | `epg/generations/<programmeRunId>/programme.json` | Must exist and carry `runId` equal to the pointer's run. Otherwise 503 `programme_unavailable`; the root `programme.json` is **not** read instead |
 | 3 | `epg/published-generation.json` again | If the etag or the run differs from step 1, the programme body is discarded and the read starts over once. A second move is 503 `programme_unavailable` without a client pin and 409 `stale_pin` with one |
 | 4 | `titles.json`, `people.json` | The provisional title cache and the cached person names. A missing dictionary is an empty map and a `null` version, not an error |
+| 5 | `admin/owner-reviews.json` | The owner-review overlay ([ADR 0072](../../adr/0072-owner-reviewed-localization-overlay.md)). A missing object is an empty document and a `null` version, not an error. The body is not written by this read |
 
 Each object's version is its R2 etag; when the object exists and the etag is empty, the version is the SHA-256 of the loaded bytes. A missing etag is never "unchanged". `updatedAt` is not a match key.
 
@@ -23,14 +24,14 @@ A failure of R2 itself (an exception from the binding) is 503 `storage_unavailab
 
 ### Warm isolate
 
-The handler keeps one immutable in-memory projection keyed by the full version tuple. A later request still performs the five reads above and compares every version; a held body is reused only when its version is unchanged, and the records are rebuilt when any version differs. The pointer is always parsed because it decides the run. An R2 `get` opens a live response stream, so a body the handler does not read is cancelled before the earlier parse is reused; no stream is left open for garbage collection, and the test's R2 stand-in opens real streams to prove it. The cache is not an R2 object and nothing writes it at EPG publish.
+The handler keeps one immutable in-memory projection keyed by the full version tuple, including the overlay etag. A later request still performs the six reads above and compares every version; a held body is reused only when its version is unchanged, and the records are rebuilt when any version differs. The pointer is always parsed because it decides the run. An R2 `get` opens a live response stream, so a body the handler does not read is cancelled before the earlier parse is reused; no stream is left open for garbage collection, and the test's R2 stand-in opens real streams to prove it. The cache is not an R2 object and nothing writes it at EPG publish. A successful film-title put drops the cache so the next read cannot serve the previous title.
 
 ## The projection
 
 Film records come from the programme films of the pinned generation, Person records from the people embedded in them and in the programme's `people` catalogue, both through the pure `filmView` / `personView` of the [Film/Person contract](../domain/film-person.md):
 
 - **Identity** from the stored Letterboxd id and the TMDB id on the film (`resolved` with `canonicalIdentity: tmdb:<id>` when both are present, `unresolved` otherwise). The resolution ledger is not read, so no record is `ambiguous` or `rejected` from this route; those codes stay in the queue list for the contract's sake and count zero.
-- **Localization** from the reviewed dictionaries baked into the Worker (`data/film-titles.json`, `data/person-names.json`), the film's own `titleRu`/`titleStatus`, the `titles.json` provisional cache and the `people.json` name cache. `localizationConflicts` come from `titleConflicts` / `nameConflicts` on the record.
+- **Localization** from the reviewed dictionaries baked into the Worker (`data/film-titles.json`, `data/person-names.json`), the film's own `titleRu`/`titleStatus`, the `titles.json` provisional cache and the `people.json` name cache. A film entry in the overlay whose localization is `reviewed` with `authority: owner` replaces that localization, the title aliases, `titleReviews` and `localizationConflicts`. `localizationConflicts` otherwise come from `titleConflicts` / `nameConflicts` on the record. The film detail answer adds `item.titleReview`, the read model from the [title review contract](../domain/film-title-review.md). Search rows do not.
 - **Metadata** from the fields the programme film carries (`metadataAt`, `synopsis`, `peopleVersion`); freshness is judged against the programme's `updatedAt`, not the wall clock, so a page is stable for the life of its pin.
 - **Not on the record:** `fingerprint` and `prediction`. That state lives under `enrichment/`, which this read does not load. The two queues `fingerprint-not-current` and `prediction-not-current` answer 400 `queue_unavailable`, and the overview lists them under `unavailableQueues` so the page can say so instead of counting every film.
 - Each record also carries `storedId` (the programme id), `preferred` (the localized value or `null`) and `year`. Shows, synopsis and credits are not returned.
@@ -39,7 +40,7 @@ Records are sorted by `storedId` (films) and `roleId` (people) with `en` compari
 
 ## Routes
 
-All routes are `GET`; any other method is 405 `method_not_allowed`. Unknown paths under `/api/admin/` are 404 `not_found`.
+The routes in this table are `GET`; any other method is 405 `method_not_allowed`. Unknown paths under `/api/admin/` are 404 `not_found`. The [film title review](#film-title-review-post-apiadminfilmsstoredidtitle-review) is a separate POST.
 
 | Route | Answer |
 | --- | --- |
@@ -67,7 +68,7 @@ Parameters are validated before the snapshot is read, so a bad `limit`, `q`, `qu
 
 ## Pin and cursor
 
-`pin` is an opaque string. It encodes the version tuple `programmeRunId`, `generationEtag`, `programmeEtag`, `titlesVersion`, `peopleVersion`; the client sends it back verbatim and never assembles one. A pin matches only when all five parts equal the tuple just read. A change of `titles.json` alone or `people.json` alone is a stale pin, as is a new generation or a rewritten programme object of the same run.
+`pin` is an opaque string. It is version `2` and encodes `programmeRunId`, `generationEtag`, `programmeEtag`, `titlesVersion`, `peopleVersion`, `reviewsVersion`; the client sends it back verbatim and never assembles one. A pin matches only when all six version parts equal the tuple just read. A change of `titles.json` alone, `people.json` alone, or `admin/owner-reviews.json` alone is a stale pin, as is a new generation or a rewritten programme object of the same run. A pin from version `1` (no overlay part) does not parse and is 400 `invalid_pin`.
 
 `nextCursor` is `null` on the last page. It is the pin the page was served under followed by the library cursor, which binds the operation, the folded query or queue, the limit, the digest of the paged records and the last item. It is not an R2 list cursor. With the old pin a cursor of an older tuple is 409 `stale_pin`; without a pin, or with a pin that already matches the new tuple, it is 400 `stale_cursor`. Neither answer carries `items`; the client starts again from the first page.
 
@@ -95,7 +96,7 @@ One request answers the owner's "Здоровье данных" view: it builds 
 
 | Read | Key | Becomes |
 | --- | --- | --- |
-| the admin snapshot (the five reads above, cached by version) | pointer, generation programme, `titles.json`, `people.json` | `published` (`publishedAt` from the pointer, else the programme clock) and the Film records with `programmeRunId`, `observedAt`, and `poster` when the programme film carries that field |
+| the admin snapshot (the six reads above, cached by version) | pointer, generation programme, `titles.json`, `people.json`, `admin/owner-reviews.json` | `published` (`publishedAt` from the pointer, else the programme clock) and the Film records with `programmeRunId`, `observedAt`, and `poster` when the programme film carries that field |
 | `enrichment/view-index.json` with `enrichment/profile/current.json` | the per-film fingerprint and prediction facets | `fingerprint` and `prediction` envelopes (`current`, `stale` or `missing`; `updatedAt` from the prediction's `generatedAt`) judged by the same freshness rule as every other reader. Without the index or the profile no envelope is derived and the route reports both subsystems as `unknown` with `derived: "view_index"` |
 | `enrichment/prediction-queue.json` | the queue | `predictionQueue`, with its film ids re-keyed to the record ids (`film:<storedId>`) so membership and retries meet the same identifiers as the records |
 | `epg/resolver-continuation.json` | the raw continuation record | `discovery` (`stage`, `reason`, `at`, `retryAt`, `nextCatchUpAt`, `remainingChunks`, `programmeRunId`). The lease is not read; a stale `running` record is reported as old, not as orphaned |
@@ -103,7 +104,7 @@ One request answers the owner's "Здоровье данных" view: it builds 
 
 Not read, and therefore **not supplied** to the model, which reports them as unknown rather than healthy: the unresolved observations (they live in the resolution ledger; the limbo inventory is their bounded view) and the Letterboxd baseline (the import leaves per-chunk receipts under `letterboxd/imports/<sha256>/` and no summary object; finding the latest one would list the bucket). `coverage` is `films: complete` (the whole programme) and `observations: partial`, so `identity` can at most be `clear_in_scope`.
 
-A cold request is ten R2 reads (five of the admin snapshot, five health objects), one parse of each changed object and no other work; every read settles before the answer, so a failed read never leaves another half-open. `now` is the Worker clock at the request.
+A cold request is eleven R2 reads (six of the admin snapshot, five health objects), one parse of each changed object and no other work; every read settles before the answer, so a failed read never leaves another half-open. `now` is the Worker clock at the request.
 
 Answer, 200:
 
@@ -135,7 +136,7 @@ Errors are the ones of the table above plus 503 `health_unavailable` when the ev
 
 `/admin` is the owner's page over this API, in two views switched by `?view=`: the catalogue (default) and [data health](#the-health-view). The catalogue view: a search field, the queue buttons with their counts, one result list per kind with a "Показать ещё" button while a `nextCursor` exists, and the detail card of the record in the URL. The search and the queue live in the URL (`/admin?q=&queue=&kind=&id=`), so a link reproduces a view; the pin, the cursors and the queue counts live in memory and are dropped by a refresh. Each keystroke is debounced and the previous requests are aborted; an answer that arrives after a newer request is discarded.
 
-The page distinguishes three states the owner must not confuse: **empty** (200 with no items: "Ничего не найдено"), **error** (a 4xx/5xx or a network failure: the message of the code above, no results shown) and **stale snapshot** (a 409, or two answers with different pins: the results on screen stay, a banner says the published snapshot changed and a button reloads without the pin). The snapshot line names the generation, the programme and dictionary clocks and any skew. Fingerprint and prediction appear as "вне снимка программы" on a film card.
+The page distinguishes three states the owner must not confuse: **empty** (200 with no items: "Ничего не найдено"), **error** (a 4xx/5xx or a network failure: the message of the code above, no results shown) and **stale snapshot** (a 409, or two answers with different pins: the results on screen stay, a banner says the published snapshot changed and a button reloads without the pin). The snapshot line names the generation, the programme and dictionary clocks and any skew. Fingerprint and prediction appear as "вне снимка программы" on a film card. The film card also holds the [title review form](#film-title-review-post-apiadminfilmsstoredidtitle-review): a choice or a typed title, an optional basis, a confirmation checkbox and the button «Записать название», which stays disabled until the checkbox is checked. A 409 `version_conflict` tells the owner to reload and is not shown as success. A network failure keeps the same `requestId` for the retry.
 
 ## Limbo inventory
 
@@ -143,7 +144,7 @@ The page distinguishes three states the owner must not confuse: **empty** (200 w
 
 ### What is read
 
-The five reads of the [snapshot above](#what-is-read), in the same order and with the same failures, then two more objects and the published generation's [observation index](../domain/discovery-observation-index.md). No `BUCKET.list`, no per-film object under `enrichment/films/`, no body of the resolution map or of the discovery ledger, no lease or continuation.
+The six reads of the [snapshot above](#what-is-read), in the same order and with the same failures, then two more objects and the published generation's [observation index](../domain/discovery-observation-index.md). No `BUCKET.list`, no per-film object under `enrichment/films/`, no body of the resolution map or of the discovery ledger, no lease or continuation.
 
 | Step | Key | Use |
 | --- | --- | --- |
@@ -474,7 +475,7 @@ Through a bucket wrapper that exposes only `get`; no key is listed:
 
 | Read | Use |
 | --- | --- |
-| The admin snapshot (five reads above) | The published programme for the matcher; failure leaves matching `partial` |
+| The admin snapshot (six reads above) | The published programme for the matcher; failure leaves matching `partial` |
 | `metadata.json` | Catalog metadata for the matcher |
 | `enrichment/ratings/published.json`, then its generation when `projected: true` | The ratings the matcher uses as evidence |
 | `letterboxd/facts/links.json` | The link index: which films already have a fact record and under which key |
@@ -556,12 +557,36 @@ Confirm reads `letterboxd/imports/<sha256>/chunks/<n>.receipt.json`. A missing o
 
 Apply records live at `admin/actions/letterboxd_archive_apply/v1/<key>.json`. Rollback records live at `admin/actions/letterboxd_archive_rollback/v1/<key>.json`. Neither object is the import receipt. The import receipt under `letterboxd/imports/` is unchanged, including the view before-image the rollback already uses.
 
+## Film title review: `POST /api/admin/films/<storedId>/title-review`
+
+One confirmed preferred Russian title for one Film already in the published programme. `<storedId>` is the programme id, not the record id `film:<storedId>`. The transition is [`applyTitleReview`](../domain/film-title-review.md). The route persists a changed result and does nothing else. Source: [`src/admin/film-title-route.js`](../../../src/admin/film-title-route.js), [`src/admin/owner-reviews.js`](../../../src/admin/owner-reviews.js), [`src/admin/film-title-client.js`](../../../src/admin/film-title-client.js). Tests: [`tests/admin-film-title-api.mjs`](../../../tests/admin-film-title-api.mjs).
+
+The request is JSON, at most 8192 bytes, `Content-Type: application/json`. The command is `{filmId, requestId, mode, value, expectedVersion, basis?}`. `filmId` is the record id. `mode` is `alias` or `manual`. Identity fields are refused.
+
+The caller is the owner session already admitted by Cloudflare Access. The route also requires `Origin` equal to the page origin, `X-IPTV-Admin-Action: film_title_review`, and a non-empty `Cf-Access-Jwt-Assertion` of at most 8192 characters. It checks that the assertion is present. It does not verify the JWT. A mismatched `Origin` is rejected by the Worker before this route, as for every other POST. A missing principal is 403 `forbidden`, and nothing is written.
+
+The write is one conditional put of `admin/owner-reviews.json`. The screen compare-and-set is `expectedVersion`. The storage compare-and-set is the object etag (`onlyIf.etagMatches`, or `etagDoesNotMatch: '*'` when the object is absent). The film slice replaces `films[<storedId>]`. The `people` map is copied unchanged. There is no unconditional put. A lost etag reloads the snapshot once. If the domain token then mismatches, the answer is 409 `version_conflict`. A second lost put is the same 409. After a put the route reads the object back. The stored audit entry must contain the `requestId` and the new domain token. Otherwise the answer is 503 `storage_unavailable` with reason `readback_failed`, and it is not success. The admin snapshot cache is dropped after the put.
+
+A replay of the same `requestId` and the same payload is 200 `{ok: true, changed: false, idempotent: true, version, readback: true, titleReview}` and does not put, including when `expectedVersion` is stale or absent. A different payload under that `requestId` is 409 `request_id_reused`. An already reviewed title of the same text is 200 with `changed: false` and does not put; selecting the dictionary title unchanged does not mint owner authority.
+
+Success is 200 `{ok: true, changed: true, idempotent: false, version, readback: true, titleReview}`.
+
+| Status | `reason` | When |
+| --- | --- | --- |
+| 400 | `invalid_command`, `invalid_mode`, `invalid_title`, `invalid_basis`, `missing_request_id`, `identity_change_forbidden`, `unknown_alias`, `rejected_identity` | the command shape, from the domain contract |
+| 403 | `forbidden` | origin, action header or access assertion missing or wrong |
+| 404 | `missing_film`, `film_mismatch` | no such stored id, or `filmId` is not that film |
+| 409 | `version_conflict`, `request_id_reused`, `illegal_transition` | stale screen, reused request id, or a transition the domain refuses |
+| 503 | `storage_unavailable` | the binding threw, the overlay body is unreadable (`overlay_invalid`), or readback failed (`readback_failed`) |
+
+The route does not write `programme.json`, `titles.json`, `people.json`, `epg/published-generation.json`, a generation object, or D1. GET does not enter it. Deploying the Worker does not create the object. Programme and watchlist reads load the same key and stamp a reviewed owner title before the dictionary and before `titles.json`. The next EPG publication leaves the object where it is.
+
 ## Limits
 
 - The catalogue is the pinned generation's programme: watchlist films and the people on them. Catalog-only films (`epg/discovered-films.json`), unresolved observations and the resolution ledger are not searched; identity codes that need the ledger (`ambiguous`, `rejected`) are not produced here.
 - The catalogue routes do not read fingerprint and prediction state; see `queue_unavailable` above. Only the [prediction recovery read](#prediction-recovery-get-apiadminprediction-recovery) reads them, for one film per request.
-- Pages run over an in-memory projection of the whole programme object; a cold request costs five R2 reads and one parse of the programme, a warm one five reads and no parse of the programme.
-- The catalogue route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; the catalogue routes have no `POST`. `POST /api/admin/letterboxd-archive/preview` is the [archive preview](#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview): it accepts a body and writes nothing. The [archive apply](#letterboxd-archive-apply) is four other POSTs and writes only after a separate confirmation. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
+- Pages run over an in-memory projection of the whole programme object; a cold request costs six R2 reads and one parse of the programme, a warm one six reads and no parse of the programme.
+- The catalogue GET routes edit nothing. `POST /api/admin/films/<storedId>/title-review` is the [film title review](#film-title-review-post-apiadminfilmsstoredidtitle-review): one confirmed title, one conditional put of the overlay. `POST /api/admin/letterboxd-archive/preview` is the [archive preview](#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview): it accepts a body and writes nothing. The [archive apply](#letterboxd-archive-apply) is four other POSTs and writes only after a separate confirmation. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
 - Three admin pages can cause a write, each only after the owner's confirmation. `/admin/posters` calls the existing `POST /api/enrichment/catalog/posters`; `/admin/limbo` calls the two `POST /api/admin/discovery-recovery/*` routes of one observation; `/admin/letterboxd` calls the archive apply routes for one compared chunk.
 - On `/admin/posters`: `no_poster_on_tmdb` and `tmdb_id_mismatch` are stored in `epg/catalog-poster-negatives.json` by the maintenance route ([ADR 0063](../../adr/0063-catalog-poster-negative-index.md)). They stay inside `verifiedMissing`, which is what the poster summary warns on, and they leave the ordinary queue. The browser history does not decide that queue. A code revert leaves the index in place; older code then shows those records as actionable again.
 

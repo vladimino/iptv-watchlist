@@ -4,14 +4,18 @@ import assert from 'node:assert/strict';
 import {filmQueue,searchFilms} from '../src/domain/admin-query.js';
 
 const domain=fs.readFileSync('src/domain/film-person.js','utf8'),review=fs.readFileSync('src/domain/film-title-review.js','utf8');
-// Offline contract: pure, dependency-free, outside the Worker bundle and outside every runtime writer.
+// Offline contract: pure and dependency-free. The Worker bundle loads it; these functions do not write.
 assert.doesNotMatch(review,/\b(fetch|import|export|require|BUCKET|wrangler|R2|D1)\b/);
 assert.doesNotMatch(review,/linkFilms\(|localFilmId\(|externalIds\(|mergeExternal\(|identityState\(/,'a title review never mints or links identity');
 // Both files share one script scope, so a top-level name defined twice would silently replace the lifecycle contract's function.
 const topLevelNames=source=>new Set([...source.matchAll(/^(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map(match=>match[1]));
 const lifecycleNames=topLevelNames(domain);
 for(const name of topLevelNames(review))assert.equal(lifecycleNames.has(name),false,`${name} is already defined by film-person.js`);
-for(const file of ['build.mjs','src/worker.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/client.js','src/admin/read.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-title-review|applyTitleReview|titleReviewState/,file);
+for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/client.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-title-review|applyTitleReview|titleReviewState/,file);
+assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/film-title-review\.js/);
+assert.match(fs.readFileSync('src/admin/film-title-route.js','utf8'),/applyTitleReview/);
+assert.match(fs.readFileSync('src/admin/read.js','utf8'),/titleReviewState/);
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/film-title-review|applyTitleReview|titleReviewState/);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,Math});
 vm.runInContext(domain+'\n'+review+'\nglobalThis.api={filmView,preferredTitle,applyAutomaticLocalization,applyReviewedLocalization,linkFilms,transition,TITLE_REVIEW_CONTRACT_VERSION,TITLE_REVIEW_MODES,titleReviewVersion,titleReviewOptions,titleReviewState,titleReviewProjection,validateTitleReview,applyTitleReview};',ctx);

@@ -46,6 +46,8 @@ Both stay within `worker <--> r2` and change no node or arrow above.
 
 The catalog poster negative index `epg/catalog-poster-negatives.json` ([ADR 0063](../adr/0063-catalog-poster-negative-index.md)) is the same kind of object: one R2 JSON the poster maintenance route reads and writes under its existing lease, classified with the other runtime coordination keys and not imported. It changes no node or arrow above.
 
+Owner-reviewed localization is one more R2 JSON on that same Worker-to-R2 boundary: `admin/owner-reviews.json` ([ADR 0072](../adr/0072-owner-reviewed-localization-overlay.md), Proposed). The Film title route and, later, the Person name route conditionally replace one map inside it. Programme, watchlist and admin reads apply it in memory. EPG publication, metadata sync and the enrichment projector do not write it, and D1 does not become the authority for it. This changes no node or arrow above.
+
 The immutable fingerprint body and generation record ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md) section 2) that the current `fingerprint.json` names are mapped through it and add no row; older generations stay in R2 as unreferenced history. This is also a ledger rule inside the offline import and changes no node or arrow above.
 
 The dashed projector arrow writes Films and Persons when `D1_ENRICHMENT_WRITE=on`. Sync clocks (`film_sync_state`) ride that same arrow only after migration `0005` sets schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)). Until that migration, the arrow is the schema v4 projector. The cron and the flag do not change, and `metadataSync` does not read the rows. This does not add a node.

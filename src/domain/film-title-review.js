@@ -1,8 +1,8 @@
 // Reviewed preferred title for one Film, AIR-125.
 // Pure validation and transition rules for the owner's manual title review. It is loaded
 // beside film-person.js and reuses its guards (applyReviewedLocalization, mergeAliases,
-// preferredTitle, stamp). No HTTP and no storage access here, and this file is not in the Worker bundle:
-// a separately approved writer (AIR-53) persists what these functions return.
+// preferredTitle, stamp). No HTTP and no storage access here. The Worker bundle loads it
+// so the admin title route can call it; that route persists what these functions return.
 const TITLE_REVIEW_CONTRACT_VERSION=1;
 const TITLE_REVIEW_MODES=Object.freeze(['alias','manual']);
 const TITLE_REVIEW_AUTHORITY='owner';

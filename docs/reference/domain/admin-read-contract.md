@@ -220,6 +220,7 @@ Read order for one snapshot:
 2. GET `epg/generations/<programmeRunId>/programme.json`. Require `body.runId` to equal that `programmeRunId`. Keep the object etag. If the object is missing, or `runId` differs, stop. Do not read root `programme.json` instead.
 3. GET the pointer again. If its etag or `programmeRunId` differs from step 1, discard the programme body. One full retry is allowed. A second mismatch returns 503 `programme_unavailable` when the client sent no pin, and 409 `stale_pin` when it did. Do not pair the first programme body with the second pointer.
 4. GET root `titles.json` and `people.json` and keep each etag. A missing dictionary is an empty map and an empty version, not a 503. These keys stay outside the generation.
+5. GET `admin/owner-reviews.json` and keep its etag. A missing object is an empty document and an empty version, not a 503. This read does not write it.
 
 Each version is the raw R2 etag. If the object exists and the etag is empty, hash the loaded bytes and use that hash. A missing etag is not "unchanged". `updatedAt` is not the match key: the dictionaries have no document clock today, and two different bodies can share a timestamp.
 
@@ -229,7 +230,7 @@ Page size follows one rule. The library requires an integer `limit` from 1 to 25
 
 Performance:
 
-- A cold snapshot is the pointer, the generation programme object, the pointer again, and the two dictionaries. No `BUCKET.list`. No per-result R2 get. No TMDB and no model call.
+- A cold snapshot is the pointer, the generation programme object, the pointer again, the two dictionaries and `admin/owner-reviews.json`. No `BUCKET.list`. No per-result R2 get. No TMDB and no model call.
 - A warm isolate adds only the version checks for a tuple it already holds.
 - The response body for a page stays a projection, not the raw programme object.
 
@@ -242,6 +243,7 @@ pin: {
   programmeEtag,
   titlesVersion,
   peopleVersion,
+  reviewsVersion,
   programmeUpdatedAt,
   titlesUpdatedAt,
   peopleUpdatedAt,
@@ -250,7 +252,7 @@ pin: {
 }
 ```
 
-`titlesVersion` and `peopleVersion` are the etag, the content hash, or null when that dictionary object is absent. `*UpdatedAt` is the JSON clock when the body has one, otherwise the R2 `uploaded` time, otherwise null. A pin matches only when `programmeRunId`, `generationEtag`, `programmeEtag`, `titlesVersion`, and `peopleVersion` all match the tuple just read. The timestamp fields are not a match key.
+`titlesVersion`, `peopleVersion` and `reviewsVersion` are the etag, the content hash, or null when that object is absent. `*UpdatedAt` is the JSON clock when the body has one, otherwise the R2 `uploaded` time, otherwise null. A pin matches only when `programmeRunId`, `generationEtag`, `programmeEtag`, `titlesVersion`, `peopleVersion` and `reviewsVersion` all match the tuple just read. The timestamp fields are not a match key. The HTTP pin is version `2`; a version `1` pin does not parse.
 
 `skew` is diagnostic. A true value still returns the page, and a cursor minted for that pin stays valid while the versions match. `skewReasons` may contain:
 
@@ -264,7 +266,7 @@ pin: {
 
 Newer and older are not guessed when a clock is missing. That case is `timestamp_missing` only.
 
-`stale_pin` means the request cannot be continued safely. The client sent a pin whose versions are not the tuple just read, including a change of only `titles.json` or only `people.json`. The handler returns 409 `{ error: 'stale_pin' }` and no `items`. It does not fill the page from the new tuple under the old pin. The client starts again without a pin.
+`stale_pin` means the request cannot be continued safely. The client sent a pin whose versions are not the tuple just read, including a change of only `titles.json`, only `people.json`, or only `admin/owner-reviews.json`. The handler returns 409 `{ error: 'stale_pin' }` and no `items`. It does not fill the page from the new tuple under the old pin. The client starts again without a pin.
 
 Errors:
 
@@ -276,7 +278,7 @@ Errors:
 | 400 | `unknown_queue` | `queue` is not in the table above |
 | 400 | `stale_cursor` | The request pin matches the loaded tuple, but the cursor was not minted for that pin, query, queue, and limit |
 | 404 | `not_found` | Id is absent from the programme object in the matched pin |
-| 409 | `stale_pin` | The supplied pin differs in `programmeRunId` or in any of `generationEtag`, `programmeEtag`, `titlesVersion`, `peopleVersion` |
+| 409 | `stale_pin` | The supplied pin differs in `programmeRunId` or in any of `generationEtag`, `programmeEtag`, `titlesVersion`, `peopleVersion`, `reviewsVersion` |
 | 503 | `programme_unavailable` | The pointer is missing, not `published`, or the generation programme object is missing or has a different `runId`. No sync is started, and root `programme.json` is not used as a substitute |
 
 A 5xx from R2 is a failure of this read. The handler does not retry into a writer. The page shows the error state and does not fall back to the fixture.
@@ -303,13 +305,13 @@ Where the implementation fixes a point this section left open: the pin is one op
 | Risk | What would go wrong | Check before enablement |
 | --- | --- | --- |
 | Writing GET | An admin poll repairs events or seeds a rating | The route is not one of the four writing GETs. A test fails if the handler calls `recoverStopEvents` or `enrichmentView` |
-| Bucket scan | Opening `/admin` lists the bucket or `enrichment/films/` | The handler reads only `epg/published-generation.json`, `epg/generations/<runId>/programme.json`, `titles.json`, and `people.json`. Assert no `list` and no fallback to root `programme.json` |
+| Bucket scan | Opening `/admin` lists the bucket or `enrichment/films/` | The handler reads only `epg/published-generation.json`, `epg/generations/<runId>/programme.json`, `titles.json`, `people.json` and `admin/owner-reviews.json`. Assert no `list` and no fallback to root `programme.json` |
 | Resolver interference | A search reads the lease, continuation, or resolution ledger and is mistaken for AIR-69 activity | Those keys are absent from the handler. AIR-69 is closed or explicitly still excluded |
 | `skew` treated as a failed read | A dictionary clock hides a valid page, or a page claims the clocks match | `skew: true` still returns `items`. A newer titles clock expects 200 and `titles_newer`. A missing clock expects `timestamp_missing` |
 | Stale continuation | Page 2 keeps generation A after only `titles.json`, only `people.json`, or the generation changes | 409 `stale_pin` and no `items` for each of those three changes. A dictionary that is only older stays 200 |
 | `programmeRunId` used as the whole pin | The same run id with a new titles etag returns the next page | The match key includes `titlesVersion` and `peopleVersion`. The titles-only case expects 409 |
 | Anonymous admin | A new route is excluded from Access | No Access bypass. The route stays on the existing Worker hostname. No token in the client |
-| Page reaching another API | The page script calls a writer or another route | Bundle test: the page bundle names only `/api/admin`, sends GET with the browser session and carries no token |
+| Page reaching another API | The page script calls a writer or another route | Bundle test: the page bundle names only `/api/admin`, sends the catalogue GETs and the one confirmed film-title POST with the browser session, and carries no token |
 | D1 mistaken for production | Admin reads an empty or stale SQLite | The route does not open D1. The contract says R2 programme snapshot |
 | Schema edit | An alias index is added to frozen `0001` | No migration in the admin PRs |
 | Publish-path change | A new index object is written from EPG commit | Not part of the read route; a separate card |
