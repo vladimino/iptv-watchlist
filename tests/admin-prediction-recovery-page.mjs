@@ -80,6 +80,9 @@ assert.match(V.recoveryPanelHtml(answer(cases[0])), /около 31\.10\.2026, 10
 assert.equal(V.recoveryDate('2026-07-01T10:00:00.000Z'), '01.07.2026, 12:00 Madrid', 'summer time is UTC+2');
 assert.equal(V.recoveryDate('not a date'), null);
 assert.match(V.recoveryPanelHtml(answer(cases[5])), /фильм взят в работу/);
+assert.match(V.recoveryPanelHtml(answer(cases[0])), /<dt>нужная работа<\/dt><dd>только прогноз; отпечаток переиспользуется<\/dd>/);
+assert.match(V.recoveryPanelHtml(answer(cases[7])), /<dt>нужная работа<\/dt><dd>нет<\/dd>/, 'a current prediction needs nothing');
+assert.match(V.recoveryPanelHtml(answer(cases[8])), /<dt>нужная работа<\/dt><dd>не определена<\/dd>/, 'no prediction and no recorded plan is not "nothing"');
 assert.match(V.recoveryPanelHtml(answer(cases[8])), /<li>фильм в опубликованной программе или в каталоге/);
 assert.match(V.recoveryPanelHtml(answer(cases[12])), /Не удалось прочитать: состояние текущего запуска, последний запуск, время последней проверки очереди\./);
 assert.match(V.recoveryPanelHtml(answer(cases[0]), {changed: true}), /role="status">Состояние изменилось с прошлой проверки/);
@@ -233,6 +236,8 @@ assert.equal(requests.length, 2, 'the pinned read, then a fresh one');
 assert.match(requests[0].path, /film=stuck&pin=R1\./);
 assert.doesNotMatch(requests[1].path, /pin=/);
 assert.match(panel.innerHTML, /Состояние изменилось с прошлой проверки/);
+assert.equal(panel.hidden, false, 'a recheck keeps the panel open');
+assert.equal(button.getAttribute('aria-expanded'), 'true');
 assert.match(panel.innerHTML, /Прошлая попытка не удалась, следующая уже назначена/);
 assert.match(panel.innerHTML, /не раньше 31\.10\.2026, 13:00 Madrid/);
 // An unchanged recheck keeps the pin and says nothing changed.

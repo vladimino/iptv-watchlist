@@ -200,7 +200,7 @@ export function recoveryPanelHtml(answer, options = {}) {
   const factRows = [
     ['прогноз', recoveryPredictionText(facts.prediction)],
     ['отпечаток', recoveryFingerprintText(facts.fingerprint)],
-    ['нужная работа', assessment.work ? RECOVERY_WORK_COPY[assessment.work] || 'другая' : 'нет'],
+    ['нужная работа', assessment.work ? RECOVERY_WORK_COPY[assessment.work] || 'другая' : facts.prediction.current === true ? 'нет' : 'не определена'],
     ['очередь', RECOVERY_LANE_COPY[facts.queue.lane] || 'неизвестно'],
     ['неудачные попытки', recoveryRetryText(facts.retry)],
     ['индекс просмотра', RECOVERY_INDEX_COPY[facts.index] || 'неизвестно'],
