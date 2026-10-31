@@ -84,6 +84,10 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
  eq(tools.ratings_sync_status.annotations,{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false});
  eq([tools.ratings_sync_start.annotations.readOnlyHint,tools.ratings_sync_start.annotations.openWorldHint],[false,false]);
  eq([tools.ratings_sync_step.annotations.readOnlyHint,tools.ratings_sync_step.annotations.openWorldHint],[false,true]);
+ assert.match(tools.ratings_sync_step.description,/first Diary page once per run/);
+ assert.match(tools.ratings_sync_step.description,/never requests page 2/);
+ assert.doesNotMatch(tools.ratings_sync_step.description,/3 Diary pages|9 per run/);
+ assert.doesNotMatch(tools.ratings_sync_start.description,/too_soon|nextStartAt/);
  eq([tools.ratings_storage_migrate.annotations.readOnlyHint,tools.ratings_storage_migrate.annotations.destructiveHint],[false,false]);
  for(const tool of Object.values(tools)){assert.equal(tool.inputSchema.additionalProperties,false);assert.doesNotMatch(JSON.stringify(tool.inputSchema.properties),/"url"|"key"|"path"|"prefix"|"bucket"|"limit"|"page"/,tool.name);}
  eq(tools.ratings_storage_migrate.inputSchema.properties.mode.enum,['dry_run','apply']);

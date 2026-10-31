@@ -5,8 +5,8 @@
 // computes, with the baseline import's own merge functions, what an import would do to each fact. Nothing is stored: the
 // archive, its rows and the answer exist only in this request and its no-store response. The R2 reads go through a bucket
 // that has nothing but `get`; no key is listed, and fact-record GETs, including a redirect hop, stay within
-// PREVIEW_LIMITS.maxRecordReads. No outbound request is made and nothing is logged. There is no apply step here: the
-// import stays the separately approved baseline route.
+// PREVIEW_LIMITS.maxRecordReads. No outbound request is made and nothing is logged. This route does not write. A later
+// confirmed apply lives in src/admin/letterboxd-archive-apply.js and is not started by a successful preview.
 const LBA_PATH='/api/admin/letterboxd-archive/preview';
 const LBA_FORM_OVERHEAD=64*1024,LBA_NAME_MAX=255,LBA_DECLARED_MAX=40;
 const LBA_LID=/^[A-Za-z0-9_-]{1,80}$/,LBA_TMDB=/^[1-9]\d{0,11}$/;
@@ -15,6 +15,13 @@ const LBA_LID=/^[A-Za-z0-9_-]{1,80}$/,LBA_TMDB=/^[1-9]\d{0,11}$/;
 // LBA_SLOT_MS is taken over.
 const LBA_SLOT_MS=60000;
 let LBA_ACTIVE_AT=0;
+// Preview and apply share one slot: each holds the archive in memory, so they must not overlap on one isolate.
+function lbaTrySlot(now){
+ if(LBA_ACTIVE_AT&&now-LBA_ACTIVE_AT<LBA_SLOT_MS)return false;
+ LBA_ACTIVE_AT=now;
+ return true;
+}
+function lbaFreeSlot(token){if(LBA_ACTIVE_AT===token)LBA_ACTIVE_AT=0;}
 const LBA_METADATA_KEY='metadata.json',LBA_RATINGS_POINTER_KEY='enrichment/ratings/published.json';
 const lbaRatingsGenerationKey=id=>'enrichment/ratings/generations/'+encodeURIComponent(id)+'.json';
 const lbaImportKey=(sha,kind)=>'letterboxd/imports/'+sha+'/chunks/0.'+kind+'.json';
@@ -189,7 +196,59 @@ async function lbaCompare(env,parsed,origin){
  };
 }
 
+// One uploaded archive, parsed in this request. `allowed` is null on the preview (only the file and an optional export
+// time) or a map of extra field name to its maximum length. A refusal reads no R2 object. The bytes are dropped before
+// the function returns: only the parsed films and the archive's own checksums leave this function.
+async function lbaIngest(request, allowed, now, signal){
+ const limits=LetterboxdArchiveZip.ARCHIVE_LIMITS,maxBody=limits.maxArchiveBytes+LBA_FORM_OVERHEAD;
+ const contentType=request.headers.get('Content-Type')||'';
+ const length=request.headers.get('Content-Length');
+ if(length===null||!/^\d{1,12}$/.test(length))return {response:adminError('length_required',411)};
+ if(Number(length)>maxBody)return {response:adminError('archive_too_large',413)};
+ let body=await lbaBody(request,maxBody);
+ if(!body)return {response:adminError('archive_too_large',413)};
+ let form;
+ try{form=await new Response(body,{headers:{'Content-Type':contentType}}).formData();}catch{return {response:adminError('invalid_form',400)};}
+ body=null;
+ let file=null,declared=null,fields=0;
+ const extra={};
+ for(const [name,value] of form){
+  fields++;
+  if(name==='archive'&&!file&&value&&typeof value==='object'&&typeof value.arrayBuffer==='function')file=value;
+  else if(name==='generatedAt'&&declared===null&&typeof value==='string'&&value.length<=LBA_DECLARED_MAX)declared=value;
+  else if(allowed&&Object.prototype.hasOwnProperty.call(allowed,name)&&extra[name]===undefined&&typeof value==='string'&&value.length<=allowed[name])extra[name]=value;
+  else return {response:adminError('invalid_form',400)};
+ }
+ if(!file||(!allowed&&fields>2))return {response:adminError('invalid_form',400)};
+ const fileName=typeof file.name==='string'?file.name:'';
+ if(!fileName||fileName.length>LBA_NAME_MAX)return {response:adminError('invalid_form',400)};
+ if(file.size>limits.maxArchiveBytes)return {response:adminError('archive_too_large',413)};
+ const named=LetterboxdArchiveZip.archiveGeneratedAt(fileName);
+ const time=LetterboxdArchivePreview.resolveGeneratedAt({named,declared,now});
+ if(time.error)return {response:lbaUnprocessable(time.error)};
+ let archive;
+ try{archive=await LetterboxdArchiveZip.readLetterboxdArchive(new Uint8Array(await file.arrayBuffer()),{signal,now});}
+ catch(error){if(error?.name==='ArchiveError')return {response:lbaUnprocessable('archive_invalid',{code:error.code,file:error.file})};throw error;}
+ form=null;file=null;
+ const texts={};
+ for(const [kind,name] of Object.entries(LetterboxdArchivePreview.PREVIEW_FILES)){texts[kind]=archive.files[name]?.text??null;if(archive.files[name])archive.files[name].text=null;}
+ if(texts.watched===null)return {response:lbaUnprocessable('missing_watched')};
+ let parsed;
+ try{parsed=LetterboxdExport.parseExport(texts);}
+ catch(error){
+  if(error?.name==='CsvError'){const file_=Object.values(LetterboxdArchivePreview.PREVIEW_FILES).find(name=>String(error.message).startsWith(name+' '))||Object.values(LetterboxdArchivePreview.PREVIEW_FILES).find(name=>String(error.message).startsWith(name+':'))||null;return {response:lbaUnprocessable('csv_invalid',{file:file_,record:Number.isInteger(error.record)?error.record:null})};}
+  throw error;
+ }
+ const files={};
+ for(const [name,entry] of Object.entries(archive.files))files[name]={sha256:entry.sha256,bytes:entry.bytes};
+ for(const kind of Object.keys(texts))texts[kind]=null;
+ const origin={sha256:archive.sha256,generatedAt:time.generatedAt,generatedAtSource:time.source};
+ const presented={sha256:archive.sha256,bytes:archive.bytes,entries:archive.entries,ignoredEntries:archive.ignoredEntries,nameStandard:named!==null,generatedAt:time.generatedAt,generatedAtSource:time.source,files};
+ return {origin,parsed,presented,extra};
+}
+
 async function adminLetterboxdArchiveRoute(request,env,url){
+ if(url.pathname==='/api/admin/letterboxd-archive/apply-confirm'||url.pathname==='/api/admin/letterboxd-archive/apply'||url.pathname==='/api/admin/letterboxd-archive/rollback-confirm'||url.pathname==='/api/admin/letterboxd-archive/rollback')return lbaApplyRoute(request,env,url);
  if(url.pathname!==LBA_PATH)return adminError('not_found',404);
  if(request.method!=='POST')return adminError('method_not_allowed',405);
  if(request.headers.get('Origin')!==url.origin)return adminError('origin_not_allowed',403);
@@ -200,52 +259,17 @@ async function adminLetterboxdArchiveRoute(request,env,url){
  if(length===null||!/^\d{1,12}$/.test(length))return adminError('length_required',411);
  if(Number(length)>maxBody)return adminError('archive_too_large',413);
  const started=Date.now(),signal=request.signal||null;
- if(LBA_ACTIVE_AT&&started-LBA_ACTIVE_AT<LBA_SLOT_MS)return adminError('preview_busy',429);
- LBA_ACTIVE_AT=started;
+ if(!lbaTrySlot(started))return adminError('preview_busy',429);
  try{
-  let body=await lbaBody(request,maxBody);
-  if(!body)return adminError('archive_too_large',413);
-  let form;
-  try{form=await new Response(body,{headers:{'Content-Type':contentType}}).formData();}catch{return adminError('invalid_form',400);}
-  body=null;
-  let file=null,declared=null,fields=0;
-  for(const [name,value] of form){
-   fields++;
-   if(name==='archive'&&!file&&value&&typeof value==='object'&&typeof value.arrayBuffer==='function')file=value;
-   else if(name==='generatedAt'&&declared===null&&typeof value==='string'&&value.length<=LBA_DECLARED_MAX)declared=value;
-   else return adminError('invalid_form',400);
-  }
-  if(!file||fields>2)return adminError('invalid_form',400);
-  const fileName=typeof file.name==='string'?file.name:'';
-  if(!fileName||fileName.length>LBA_NAME_MAX)return adminError('invalid_form',400);
-  if(file.size>limits.maxArchiveBytes)return adminError('archive_too_large',413);
-  const named=LetterboxdArchiveZip.archiveGeneratedAt(fileName);
-  const time=LetterboxdArchivePreview.resolveGeneratedAt({named,declared,now:started});
-  if(time.error)return lbaUnprocessable(time.error);
-  let archive;
-  try{archive=await LetterboxdArchiveZip.readLetterboxdArchive(new Uint8Array(await file.arrayBuffer()),{signal,now:started});}
-  catch(error){if(error?.name==='ArchiveError')return lbaUnprocessable('archive_invalid',{code:error.code,file:error.file});throw error;}
-  form=null;file=null;
-  const texts={};
-  for(const [kind,name] of Object.entries(LetterboxdArchivePreview.PREVIEW_FILES)){texts[kind]=archive.files[name]?.text??null;if(archive.files[name])archive.files[name].text=null;}
-  if(texts.watched===null)return lbaUnprocessable('missing_watched');
-  let parsed;
-  try{parsed=LetterboxdExport.parseExport(texts);}
-  catch(error){
-   if(error?.name==='CsvError'){const file_=Object.values(LetterboxdArchivePreview.PREVIEW_FILES).find(name=>String(error.message).startsWith(name+' '))||Object.values(LetterboxdArchivePreview.PREVIEW_FILES).find(name=>String(error.message).startsWith(name+':'))||null;return lbaUnprocessable('csv_invalid',{file:file_,record:Number.isInteger(error.record)?error.record:null});}
-   throw error;
-  }
-  const origin={sha256:archive.sha256,generatedAt:time.generatedAt,generatedAtSource:time.source};
-  const files={};
-  for(const [name,entry] of Object.entries(archive.files))files[name]={sha256:entry.sha256,bytes:entry.bytes};
-  for(const kind of Object.keys(texts))texts[kind]=null;
-  const comparison=await lbaCompare(env,parsed,origin);
+  const opened=await lbaIngest(request,null,started,signal);
+  if(opened.response)return opened.response;
+  const comparison=await lbaCompare(env,opened.parsed,opened.origin);
   const preview=LetterboxdArchivePreview.buildPreview({
-   archive:{sha256:archive.sha256,bytes:archive.bytes,entries:archive.entries,ignoredEntries:archive.ignoredEntries,nameStandard:named!==null,generatedAt:time.generatedAt,generatedAtSource:time.source,files},
-   parsed,comparison,now:started,archiveStaleMs:DataHealth.DATA_HEALTH_THRESHOLDS.archiveStaleMs,
+   archive:opened.presented,parsed:opened.parsed,comparison,now:started,archiveStaleMs:DataHealth.DATA_HEALTH_THRESHOLDS.archiveStaleMs,
   });
+  await lbaAttachBatches(preview,comparison,started);
   return json({...preview,reads:comparison.reads});
  }catch{
   return adminError('preview_failed',500);
- }finally{if(LBA_ACTIVE_AT===started)LBA_ACTIVE_AT=0;}
+ }finally{lbaFreeSlot(started);}
 }

@@ -13,7 +13,7 @@
 - **ADR 0060 decision 7 refused a scheduled start** that followed `lastStartAt` by less than six hours. The answer was `too_soon` with `nextStartAt`. A manual start was not gated. The constant was `SCHEDULED_GAP_MS` in `src/letterboxd-ratings.js`.
 - **The owner removed that requirement on 2026-10-31.** There is no six-hour minimum between `ratings_sync_start` calls with `trigger: scheduled`. The guard is a redundant safeguard: a live run is already `busy`, the run record is already compare-and-swap, two interrupted runs at the same checkpoint already isolate the pipeline, and a Letterboxd 403 or 429 already pauses the removal queue.
 - **The Ratings Task recurrence is already 17:30.** By a separate owner approval the live task is daily at 17:30 Europe/Madrid, flexible, DTSTART 2026-11-01, and its prompt asks for one Diary page. The coordinator's read-back is recorded on the AIR-310 card. This record documents that expected recurrence. It does not edit the task.
-- **ADR 0068** is the open Letterboxd archive-apply record and is not this decision. This record is 0069.
+- **Number.** ADR 0068 is the confirmed Letterboxd archive apply. This record, 0069, is the scheduled ratings start gap.
 
 ## Decision
 
