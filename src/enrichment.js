@@ -643,7 +643,7 @@ async function flushStopEvent(env,record,key){
 async function recordRunStop(env,id,reason,fallback={}){
  let run=await checkedRun(env,id)||{runId:id,mode:'queued',trigger:fallback.trigger==='scheduled'?'scheduled':'manual',createdAt:new Date().toISOString(),selectedIds:[],results:{},failures:{}};
  if(run.recoveredByRunId){const pending=await loadJSON(env,STOP_EVENT_PREFIX+id+'.json');if(pending&&!pending.delivered)await saveJSON(env,STOP_EVENT_PREFIX+id+'.json',{...pending,delivered:true,superseded:true});return {status:'superseded',runId:id,continuedByRunId:run.recoveredByRunId,mustComplete:false};}
- const key=STOP_EVENT_PREFIX+id+'.json',existing=await loadJSON(env,key);let record=existing;
+ const settled=await settleRunRetries(env,run,'stop_retries'),key=STOP_EVENT_PREFIX+id+'.json',existing=await loadJSON(env,key);let record=existing;
  if(!record){let queue=null;try{queue=await loadJSON(env,predictionQueueKey);}catch{}const summary=runSummary(run),at=run.event?.at||run.completedAt||new Date().toISOString();
  const snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={remaining:queue?(queue.priorityCount||0)+(queue.coldRemaining||0):null,id:run.event?.id||'enrichment-'+id,type:'enrichment',runId:id,at,queueSchemaVersion:6,stage:'partial',title:'Прогнозы приостановлены',reason:systemicReason(reason),stopReason:systemicReason(reason),trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,checked:summary.checked,processed:summary.processed,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),hotRemaining:queue?.priorityCount??fallback.hotRemaining??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??fallback.coldRemaining??run.coldRemaining??null,delta,snapshot};
  record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key);
@@ -651,7 +651,7 @@ async function recordRunStop(env,id,reason,fallback={}){
  run.status='partial';run.reason=record.event.reason;run.stopReason=record.event.reason;run.completedAt=record.event.at;run.event=record.event;run.counts={created:record.event.added,recalculated:record.event.updated,failed:record.event.failed,pending:(record.event.hotRemaining||0)+(record.event.coldRemaining||0)};
  if(fallback.callerFault&&!run.callerFault)run.callerFault=fallback.callerFault;
  await saveJSON(env,runKey(id),run);await diagnosticCheckpoint(env,run);const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');if(!latest||latest.runId===id||fallback.start)await saveJSON(env,ENRICHMENT_KEY+'latest-run.json',run);
- const written=await flushStopEvent(env,record,key);await runnerLease(env,id,'release');return {...record.event,status:'partial',mustComplete:true,eventPending:!written,counts:run.counts};
+ const written=await flushStopEvent(env,record,key);await runnerLease(env,id,'release');return {...record.event,status:'partial',mustComplete:true,eventPending:!written,counts:run.counts,...(settled?{}:{retryHeal:'pending'})};
 }
 async function recoverStopEvents(env){
  for(const prefix of [STOP_EVENT_PREFIX,START_EVENT_PREFIX]){let cursor;do{const page=await env.BUCKET.list({prefix,limit:100,...(cursor?{cursor}:{})});for(const item of page.objects){const record=await loadJSON(env,item.key);if(record&&!record.delivered){if(prefix===STOP_EVENT_PREFIX)await recordRunStop(env,record.event.runId,record.event.reason);else await flushStopEvent(env,record,item.key);}}cursor=page.truncated?page.cursor:null;}while(cursor);}
@@ -780,6 +780,20 @@ function recordRunRetries(queue,run){
   if(merged!==queue.retries[id]){queue.retries[id]=merged;added=true;}
  }
  return added;
+}
+// A queued run's failure reaches the run record before the queue, marked `retryHeal: 'pending'` until a queue write confirms
+// the run's retries. A failed confirmation (conflict exhaustion, a put that throws, no queue) keeps the mark: the runner
+// lease keeps naming the run after release, so the next start confirms them before it selects anything, or starts nothing.
+async function settleRunRetries(env,run,trigger){
+ if(run?.retryHeal!=='pending')return true;
+ try{if(run.mode==='queued'&&!await mutatePredictionQueue(env,queue=>recordRunRetries(queue,run)?queue:null,trigger))return false;}catch{return false;}
+ delete run.retryHeal;return true;
+}
+async function settlePreviousRun(env){
+ const lease=await loadJSON(env,RUNNER_LEASE_KEY);if(!lease?.runId||lease.expiresAt>Date.now())return null;
+ const run=await checkedRun(env,lease.runId);if(run?.retryHeal!=='pending')return null;
+ if(await settleRunRetries(env,run,'start_retries')){await saveJSON(env,runKey(run.runId),run);return null;}
+ return json({status:'blocked',reason:'retry_heal_pending',code:'prediction_retry_heal_pending',pendingRunId:run.runId,...scheduledRunFields()},503);
 }
 // `beforeWrite` lets a lease-holding caller renew its lease immediately before each queue write; `amend` changes the rebuilt
 // queue inside the same conditional write (run bookkeeping), so a conflict re-applies it to the fresh rebuild.
@@ -988,6 +1002,7 @@ async function diagnosedStart(env,body,requestId){
  const runId=crypto.randomUUID(),at=new Date().toISOString(),shell={runId,createdAt:at,diagnosticStartedAt:at,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
  await diagnosticCheckpoint(env,shell,{startResult:'error'});
  const response=await observedPrediction(env,{...body,diagnosticRunId:runId},async()=>{
+  const unsettled=await settlePreviousRun(env);if(unsettled)return unsettled;
   const lease=await runnerLease(env,runId,'acquire');if(lease.status!=='owned')return json(lease);
   shell.leaseAcquiredAt=lease.heartbeatAt;shell.lastHeartbeatAt=lease.heartbeatAt;const previous=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;shell.startResult=previous&&['running','interrupted'].includes(previous.status)?'recovered_stale_lease':'running';await diagnosticCheckpoint(env,shell,{state:'running',startResult:shell.startResult});
   try{const result=await predictionWriter(env,()=>enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');throw error;}
@@ -1087,7 +1102,7 @@ async function enrichmentSubmit(env,body){
    if(['created','recalculated'].includes(run.results[id]))run.firstSubmitAt||=new Date().toISOString();run.formatFailureStreak=0;
   }catch(e){const at=new Date().toISOString(),retryable=failureStage==='parse_error',previous=await loadJSON(env,predictionQueueKey),attempts=(previous?.retries?.[id]?.attempts||0)+1,retryAt=Date.now()+Math.min(6*3600000,3600000*2**(attempts-1));
    const validation=validationStage?{stage:validationStage,reportedBy,issues}:null;
-   run.failures[id]={kind:failureStage,scope:retryable?'item':'run',retryable:true,failedAt:at,retryAt,attempts,...(validation?{validation}:{})};run.results[id]='failed';results.push({filmId:id,status:retryable?'retryable_failure':'failed',error:failureStage,failureScope:retryable?'item':'run',retryable:true,retryAt,...(validation?{validation}:{})});
+   run.failures[id]={kind:failureStage,scope:retryable?'item':'run',retryable:true,failedAt:at,retryAt,attempts,...(validation?{validation}:{})};run.results[id]='failed';if(run.mode==='queued')run.retryHeal='pending';results.push({filmId:id,status:retryable?'retryable_failure':'failed',error:failureStage,failureScope:retryable?'item':'run',retryable:true,retryAt,...(validation?{validation}:{})});
    if(retryable){run.formatFailureStreak=(run.formatFailureStreak||0)+1;if(run.formatFailureStreak>=5)run.systemicStopReason='format_error_storm';}else run.systemicStopReason=failureStage;
    if(validationStage){const stages=[...(run.itemValidation?.stages||[]),{stage:validationStage,reportedBy}].slice(-8);run.itemValidation={consecutive:run.formatFailureStreak||0,stages};}
   }
@@ -1110,7 +1125,7 @@ async function enrichmentComplete(env,body){
  if(fault.value&&!FAULT_REASONS.includes(faultReason))return json({error:'Fault requires an external stop reason'},400);
  const attributed=externalAttribution(faultReason,fault.value);if(attributed)run.callerFault=attributed;
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
- if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){if(run.mode==='queued'){try{await mutatePredictionQueue(env,queue=>recordRunRetries(queue,run)?queue:null,'stop_retries');}catch{}}return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
+ if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&!body.reason)return json({error:'Profile changed; start a new run'},409);
  if(!body.reason&&await runContractChanged(run))return contractChangedResponse();
  if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'completion_check');if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
@@ -1122,7 +1137,7 @@ async function enrichmentComplete(env,body){
  if(run.mode==='queued'){
   // Retries, the batch summary and the counter go into the rebuild's own conditional write; the counter moves once per run.
   const amend=queue=>{recordRunRetries(queue,run);if(queue.lastBatch?.runId!==run.runId)queue.metrics.hotProcessedTotal+=summary.hotProcessed;queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining:queue.pending.length,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,reason:run.reason,perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;return queue;};
-  const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete',{amend});remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
+  const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete',{amend});if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
   // A normal completion is "drained" only when the refreshed queue has no outstanding film; otherwise work remains that
   // this run could not take (deferred by retry or waiting behind hot). Run completion and a drained queue stay separate.
   if(queue&&!run.reason&&!pending)run.stopReason=queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty';

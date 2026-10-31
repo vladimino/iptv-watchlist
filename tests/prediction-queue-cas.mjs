@@ -187,6 +187,62 @@ assert.deepEqual(large,small,'gets and puts are independent of the queue size');
 assert.equal(large.put,1);assert.equal(contended.put,3,'own attempt, the competing write, own retry');
 assert(contended.get<=2*large.get+2,'a conflict at most doubles the reads');
 
+// 12. A retry the queue could not take is never lost. The run keeps it marked, its stop writes it again, and the next
+// start confirms it before selecting anything or starts nothing; the lease keeps naming the unsettled run meanwhile.
+const runRecord=id=>records.get('enrichment/runs/'+id+'.json'),LEASE='enrichment/runner-lease.json';
+const interfere=(times=Infinity)=>park(()=>times-->0,async()=>{await mutate(q=>({...q,noise:(q.noise||0)+1}),'test');},true);
+const begin=()=>api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});
+async function deferredAcrossNextRun(stopped,id){
+ const next=await begin();assert.equal(next.data.status,'running',JSON.stringify(next.data));
+ assert.equal(queue().retries[id]?.lastRunId,stopped,'the next start finds the retry in the queue');assert.equal(queue().retries[id].attempts,1);
+ assert(queue().retries[id].retryAt>Date.now()+50*60000);assert.equal(runRecord(stopped).retryHeal,undefined,'the mark is cleared once settled');
+ assert(!runRecord(next.data.runId).selectedIds.includes(id),'the start does not select the deferred film');
+ const items=(await api('next',{runId:next.data.runId,batchSize:5})).data.items;assert(items.length>0);assert(!items.some(item=>item.filmId===id),'nor does next');
+}
+// Five conflicts at the submit route, and its stop's own write conflicting too: the next start fails closed until the
+// queue takes the retry.
+reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
+interfere();
+const exhausted=await fail(run.runId,target);
+assert.equal(exhausted.status,502);assert.equal(exhausted.data.error,'storage_error');assert.equal(exhausted.data.retryHeal,'pending');
+assert.equal(queue().retries?.[target],undefined);assert.equal(runRecord(run.runId).status,'partial');assert.equal(runRecord(run.runId).retryHeal,'pending');
+assert.equal(runRecord(run.runId).failures[target].kind,'parse_error','the run record holds the failure');
+assert.equal(records.get(LEASE).runId,run.runId);assert.equal(records.get(LEASE).expiresAt,0,'the stopped run released its lease');
+const gated=await begin();
+assert.equal(gated.status,503);assert.equal(gated.data.status,'blocked');assert.equal(gated.data.code,'prediction_retry_heal_pending');assert.equal(gated.data.pendingRunId,run.runId);
+assert.equal(records.get(LEASE).runId,run.runId,'a start that cannot settle takes no lease and selects nothing');
+assert.equal(runRecord(run.runId).retryHeal,'pending');
+hook=null;await deferredAcrossNextRun(run.runId,target);
+// Five conflicts at the submit route only: the stop's write lands, and the next run defers the film.
+reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
+interfere(5);
+const healedAtStop=await fail(run.runId,target);hook=null;
+assert.equal(healedAtStop.status,502);assert.equal(healedAtStop.data.retryHeal,undefined);
+assert.equal(queue().retries[target]?.lastRunId,run.runId,'the stop writes the retry');
+await deferredAcrossNextRun(run.runId,target);
+// An explicit systemic stop whose retry write fails: the stop is recorded, the retry stays marked, the next start waits.
+reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
+delete records.get(QUEUE).retries[target];etags.set(QUEUE,'s'+(++revision));
+interfere();
+const quota=await api('complete',{runId:run.runId,reason:'quota'});
+assert.equal(quota.data.status,'partial');assert.equal(quota.data.stopReason,'quota');assert.equal(quota.data.retryHeal,'pending');
+assert.equal(runRecord(run.runId).retryHeal,'pending');assert.equal(queue().retries?.[target],undefined);
+assert.equal((await begin()).status,503,'the next start fails closed while the queue cannot take the retry');
+hook=null;await deferredAcrossNextRun(run.runId,target);
+// An unknown outcome of the stop's retry write is not repeated blindly: the next write re-reads and finds it in place.
+reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
+delete records.get(QUEUE).retries[target];etags.set(QUEUE,'s'+(++revision));
+ambiguousKey=QUEUE;puts=ops.queuePuts;
+const unknown=await api('complete',{runId:run.runId,reason:'storage_error'});
+assert.equal(unknown.data.status,'partial');assert.equal(ops.queuePuts-puts,1,'the write with an unknown outcome is made once');
+await deferredAcrossNextRun(run.runId,target);
+// A crashed runner (no stop at all) leaves its mark on the run; the start that recovers its lease settles it first.
+reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
+interfere();await fail(run.runId,target);hook=null;
+seed('enrichment/runs/'+run.runId+'.json',{...runRecord(run.runId),status:'running',retryHeal:'pending'});
+seed(LEASE,{...records.get(LEASE),expiresAt:Date.now()-1});
+await deferredAcrossNextRun(run.runId,target);
+
 // 11. No writer is left that puts the queue without a condition.
 const source=fs.readFileSync('src/enrichment.js','utf8')+fs.readFileSync('src/discovery.js','utf8')+fs.readFileSync('src/worker.js','utf8');
 assert(!/saveJSON\(env,predictionQueueKey/.test(source),'no unconditional queue write');
