@@ -308,6 +308,8 @@ async function catalogPosterApply(env,key,found,guard){
  }
  return {key,written:false,reason:'catalog_changed',status};
 }
+// Display fields of an outcome, from the catalog record this call already read: bounded text and an integer year, never markup.
+function catalogPosterDisplay(film){return {title:typeof film?.title==='string'&&film.title?film.title.slice(0,200):null,year:Number.isInteger(film?.year)?film.year:null};}
 function catalogPosterOutcome(id,writes){
  const states=writes.map(write=>write.status[id]),writtenTo=writes.filter(write=>write.status[id]==='written').map(write=>write.key);
  if(states.includes('changed'))return {outcome:'skipped_changed',writtenTo};
@@ -343,15 +345,15 @@ async function catalogPosterHydration(env,body={}){
   const queue=counts.verified.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0),batch=queue.slice(0,limit),outcomes=[],found=[];
   let retryAt=null;
   for(const row of batch){
-   const tmdbId=String(row.film.tmdbId);
-   if(retryAt){outcomes.push({id:row.id,tmdbId,outcome:'not_attempted'});continue;}
+   const tmdbId=String(row.film.tmdbId),shown=catalogPosterDisplay(row.film);
+   if(retryAt){outcomes.push({id:row.id,tmdbId,...shown,outcome:'not_attempted'});continue;}
    const detail=await catalogPosterDetail(env,tmdbId);
-   if(detail.retryAt){retryAt=detail.retryAt;outcomes.push({id:row.id,tmdbId,outcome:'rate_limited'});continue;}
-   if(detail.error){outcomes.push({id:row.id,tmdbId,outcome:'tmdb_failed',error:detail.error});continue;}
-   if(String(detail.movie?.id)!==tmdbId){outcomes.push({id:row.id,tmdbId,outcome:'tmdb_id_mismatch'});continue;}
+   if(detail.retryAt){retryAt=detail.retryAt;outcomes.push({id:row.id,tmdbId,...shown,outcome:'rate_limited'});continue;}
+   if(detail.error){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_failed',error:detail.error});continue;}
+   if(String(detail.movie?.id)!==tmdbId){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_id_mismatch'});continue;}
    const poster=catalogPosterFromDetail(detail.movie);
-   if(!poster){outcomes.push({id:row.id,tmdbId,outcome:'no_poster_on_tmdb'});continue;}
-   found.push({id:row.id,tmdbId,poster});outcomes.push({id:row.id,tmdbId,outcome:'pending',poster});
+   if(!poster){outcomes.push({id:row.id,tmdbId,...shown,outcome:'no_poster_on_tmdb'});continue;}
+   found.push({id:row.id,tmdbId,poster});outcomes.push({id:row.id,tmdbId,...shown,outcome:'pending',poster});
   }
   // Generation copy first, then the live catalog. A stop before either write leaves both unwritten; a stop between them leaves
   // the generation copy written and the live catalog not, which the response reports per copy and per record.
