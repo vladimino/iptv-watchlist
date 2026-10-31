@@ -137,11 +137,11 @@ assert.equal(records.get('epg/resolver-continuation.json').nextCatchUpAt,'2026-1
 const app=fs.readFileSync('public/app.js','utf8'),ui=vm.createContext({Date,Intl,URL,Set,Map});
 vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
 ui.input={...footer,lastRun:null};
-assert.equal(vm.runInContext('footerStatusText(input)',ui).nextLine,'Следующий запуск: около 07:20');
+assert.equal(vm.runInContext('footerStatusText(input)',ui).nextLine,'Следующий запуск по расписанию: около 07:20');
 state.now=at('2026-07-01T05:33:00Z');footer=await get('/api/enrichment/footer/status');
 assert.equal(footer.predictions.nextScheduledRun,'2026-07-01T06:20:00.000Z');
 ui.input={...footer,lastRun:null};
-assert.equal(vm.runInContext('footerStatusText(input)',ui).nextLine,'Следующий запуск: около 08:20');
+assert.equal(vm.runInContext('footerStatusText(input)',ui).nextLine,'Следующий запуск по расписанию: около 08:20');
 
 // Without a usable time zone database the schedule is unknown: the footer shows no time, the
 // discovery wait keeps its gate and claims no trigger.
@@ -152,7 +152,7 @@ blind.records.set('enrichment/prediction-queue.json',records.get('enrichment/pre
 const blindFooter=await (await blind.context.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),blind.env)).json();
 assert.equal(blindFooter.predictions.nextScheduledRun,null);
 ui.input={...blindFooter,lastRun:null};
-assert.equal(vm.runInContext('footerStatusText(input)',ui).nextLine,'Следующий запуск: —');
+assert.equal(vm.runInContext('footerStatusText(input)',ui).nextLine,'Следующий запуск по расписанию: —');
 const blindWait=JSON.parse(JSON.stringify(blind.run("discoveryContract({stage:'paused',reason:'chunk_budget',remainingChunks:0})")));
 assert.equal(blindWait.nextAction,'wait');assert.equal(blindWait.nextCatchUpAt,'2026-10-28T06:00:00.000Z');assert.equal(blindWait.nextScheduledRunAt,null);
 
