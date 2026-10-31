@@ -114,7 +114,7 @@ sequenceDiagram
     end
     Page-->>Owner: Freshness, totals, conflicts, adds, updates, held
     Note over Worker,R2: No put, delete or list, no log,<br/>no outbound fetch, nothing kept after the response
-    Note over Page: «Очистить» or leaving the page drops the answer;<br/>no import button
+    Note over Page: «Очистить» or leaving the page drops the answer,<br/>there is no import button
 ```
 
 The preview's baseline is always `unknown`: the import stores per-chunk receipts and no summary, so the answer only says whether **this** archive's receipt exists. «Нужен свежий архив» appears when the export is older than the data health threshold or R2 holds a newer rating for some film.
