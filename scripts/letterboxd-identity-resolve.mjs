@@ -20,10 +20,11 @@ const HEADERS={'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Ac
 const STOP={429:'rate_limited',403:'forbidden'};
 export class ResolveError extends Error{constructor(message,exitCode=1){super(message);this.name='ResolveError';this.exitCode=exitCode;}}
 
-// The film page parser the Worker's metadata cache uses; src/sources.js is a Worker script, so it is evaluated in a sandbox.
+// The film page parser the Worker's metadata cache uses; src/sources.js is a Worker script, so it is evaluated in a sandbox
+// beside the typed TMDB link reader it calls, as the bundle loads them.
 export function loadPageTools(){
  const context=vm.createContext({});
- vm.runInContext(readFileSync(path.join(ROOT,'src/sources.js'),'utf8')+'\nglobalThis.pageTools={parseFilm,attr,extractYear};',context);
+ vm.runInContext(['src/domain/tmdb-tv-identity.js','src/sources.js'].map(file=>readFileSync(path.join(ROOT,file),'utf8')).join('\n')+'\nglobalThis.pageTools={parseFilm,attr,extractYear};',context);
  return context.pageTools;
 }
 

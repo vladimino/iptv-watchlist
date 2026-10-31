@@ -1,6 +1,7 @@
 // AIR-290: a TMDB TV entry is a typed `tmdb_tv` identity of a Film, and a confirmed retired TMDB movie id leaves the Film's
 // trusted identity without being deleted. Pure functions over Film views; loaded beside film-person.js (transition,
-// letterboxdSlugFromUrl). This file is not in the Worker bundle: the runtime integration is a separate delivery.
+// letterboxdSlugFromUrl). AIR-297: the Worker bundle loads it at top level, so parseFilm keeps the typed link and the lifecycle
+// reader applies the owner-approved retirements object; every name here is unique across the bundle.
 // TMDB movie and TV ids are separate namespaces that reuse the same numbers. A `tmdb` value and a `tmdb_tv` value are
 // never compared with each other, and an equal number in the two schemes is not evidence that two records are one Film.
 const TMDB_MOVIE_SCHEME='tmdb';
@@ -52,11 +53,11 @@ function tmdbRetirement(entry){
  return {ok:true,retirement:{filmId:entry.filmId,lid,movieId,tvId,evidence:{...evidence},confirmation:{...confirmation}}};
 }
 
-const idsOf=(film,scheme)=>(film?.externalIds||[]).filter(item=>item.scheme===scheme);
-const lidOf=film=>idsOf(film,'letterboxd').find(item=>item.trusted&&!item.conflicting)?.value??null;
+const tmdbIdsOf=(film,scheme)=>(film?.externalIds||[]).filter(item=>item.scheme===scheme);
+const tmdbLidOf=film=>tmdbIdsOf(film,'letterboxd').find(item=>item.trusted&&!item.conflicting)?.value??null;
 // Key order does not decide equality: provenance read back from storage may list its keys in another order.
-const stableJson=value=>JSON.stringify(value,(key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a<b?-1:a>b?1:0)):item);
-const sameJson=(a,b)=>stableJson(a)===stableJson(b);
+const tmdbStableJson=value=>JSON.stringify(value,(key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a<b?-1:a>b?1:0)):item);
+const tmdbSameJson=(a,b)=>tmdbStableJson(a)===tmdbStableJson(b);
 // The three pieces a retirement writes. They depend on the retirement and the replaced provenance only, never on the time of
 // the run, so a correction made by any writer reads back as exactly this.
 function retiredProvenance(retirement,previous){return {status:TMDB_RETIRED_STATUS,reason:TMDB_RETIREMENT_REASON,replacement:{scheme:TMDB_TV_SCHEME,value:retirement.tvId},evidence:retirement.evidence,confirmation:retirement.confirmation,previous:previous??null};}
@@ -65,12 +66,12 @@ function retiredIdentityProvenance(prior,retirement){return {...(prior||{}),tmdb
 // The Film already carries exactly this retirement: the retired movie entry and the TV entry with their full provenance,
 // the canonical identity and the identity dimension. Anything less is not a completed correction.
 function carriesRetirement(film,retirement){
- const movie=idsOf(film,TMDB_MOVIE_SCHEME),tv=idsOf(film,TMDB_TV_SCHEME);
+ const movie=tmdbIdsOf(film,TMDB_MOVIE_SCHEME),tv=tmdbIdsOf(film,TMDB_TV_SCHEME);
  if(movie.length!==1||tv.length!==1)return false;
  const [old]=movie,[typed]=tv;
  if(old.value!==retirement.movieId||old.trusted||old.conflicting||!old.provenance||!Object.hasOwn(old.provenance,'previous'))return false;
- if(!sameJson(old.provenance,retiredProvenance(retirement,old.provenance.previous)))return false;
- if(typed.value!==retirement.tvId||!typed.trusted||typed.conflicting||!sameJson(typed.provenance,tmdbTvProvenance(retirement)))return false;
+ if(!tmdbSameJson(old.provenance,retiredProvenance(retirement,old.provenance.previous)))return false;
+ if(typed.value!==retirement.tvId||!typed.trusted||typed.conflicting||!tmdbSameJson(typed.provenance,tmdbTvProvenance(retirement)))return false;
  if(film.canonicalIdentity!==TMDB_TV_SCHEME+':'+retirement.tvId)return false;
  const identity=film.identity;
  return identity?.status==='resolved'&&identity.sourceVersion===TMDB_TV_SCHEME+':'+retirement.tvId&&identity.provenance?.tmdbTvId===retirement.tvId&&identity.provenance?.retiredTmdbId===retirement.movieId;
@@ -83,9 +84,9 @@ function carriesRetirement(film,retirement){
 // is refused too: nothing is repaired.
 function applyTmdbRetirement(film,retirement,at){
  if(!film||film.id!==retirement.filmId)return {ok:false,reason:'film_mismatch',film:film??null};
- if(lidOf(film)!==retirement.lid)return {ok:false,reason:'lid_mismatch',film};
+ if(tmdbLidOf(film)!==retirement.lid)return {ok:false,reason:'lid_mismatch',film};
  if(film.identity?.status!=='resolved')return {ok:false,reason:'identity_not_resolved',film};
- const movie=idsOf(film,TMDB_MOVIE_SCHEME),tv=idsOf(film,TMDB_TV_SCHEME);
+ const movie=tmdbIdsOf(film,TMDB_MOVIE_SCHEME),tv=tmdbIdsOf(film,TMDB_TV_SCHEME);
  if(movie.some(item=>item.conflicting))return {ok:false,reason:'conflicting_tmdb',film};
  if(movie.length!==1||movie[0].value!==retirement.movieId)return {ok:false,reason:'movie_id_mismatch',film};
  if(tv.some(item=>item.value!==retirement.tvId))return {ok:false,reason:'tv_id_mismatch',film};
@@ -113,4 +114,80 @@ function tmdbTvCollisions(films){
  const collisions=[...owners].filter(([,ids])=>ids.size>1).map(([value,ids])=>({scheme:TMDB_TV_SCHEME,value,films:[...ids].sort()}));
  const numericOverlaps=[...owners].filter(([value])=>movieOwners.has(value)).map(([value,ids])=>({value,tvFilms:[...ids].sort(),movieFilms:[...movieOwners.get(value)].sort()}));
  return {collisions,numericOverlaps};
+}
+
+// AIR-297: the lifecycle projection applies the owner-approved retirements object. The object is optional: while it is
+// absent the reader does not call any of this and the projection is what it was. Nothing here creates or edits it.
+const TMDB_RETIREMENTS_KEY='identity/tmdb-retirements.json';
+const TMDB_RETIREMENTS_SCHEMA_VERSION=1;
+// The object is checked as a whole before any entry is used. One invalid entry, or two entries naming the same Film, lid,
+// movie id or TV id, fails the object: none of its retirements applies, and nothing is taken from the valid rest.
+function tmdbRetirementSet(body){
+ if(!body||typeof body!=='object'||Array.isArray(body))return {ok:false,reasons:['body'],retirements:[]};
+ const reasons=[];
+ if(body.schemaVersion!==TMDB_RETIREMENTS_SCHEMA_VERSION)reasons.push('schema_version');
+ if(!Array.isArray(body.retirements))reasons.push('retirements');
+ const retirements=[],seen={filmId:new Set(),lid:new Set(),movieId:new Set(),tvId:new Set()};
+ for(const [index,entry] of (Array.isArray(body.retirements)?body.retirements:[]).entries()){
+  const checked=tmdbRetirement(entry);
+  if(!checked.ok){reasons.push(...checked.reasons.map(reason=>'entry_'+index+':'+reason));continue;}
+  for(const field of Object.keys(seen)){if(seen[field].has(checked.retirement[field]))reasons.push('entry_'+index+':duplicate_'+field);seen[field].add(checked.retirement[field]);}
+  retirements.push(checked.retirement);
+ }
+ return reasons.length?{ok:false,reasons,retirements:[]}:{ok:true,reasons:[],retirements};
+}
+// Whether what one stored record last saw on the Film's Letterboxd page (parseFilm's typed `tmdbLink`) still supports the
+// retirement: exactly one link, `tv/<tvId>`, and exactly one attribute pair, `movie`/<movieId>, the divergence the owner
+// confirmed. Anything else the page now shows is a change for review: no link, several links, another link
+// (`link_changed`), or attributes that are missing, several, of another type or another id, including Letterboxd switching
+// them to the TV entry (`attributes_changed`). A record written before AIR-297 has no such field and says nothing.
+function tmdbLinkChange(record,retirement){
+ const seen=record?.tmdbLink;
+ if(seen===undefined||seen===null)return null;
+ const links=Array.isArray(seen?.links)?seen.links:null,link=links?.length===1?links[0]:null;
+ if(!link||typeof link!=='object'||link.type!=='tv'||String(link.id)!==retirement.tvId)return 'link_changed';
+ const types=seen.attributes?.types,ids=seen.attributes?.ids;
+ if(!Array.isArray(types)||!Array.isArray(ids)||types.length!==1||ids.length!==1)return 'attributes_changed';
+ return types[0]==='movie'&&String(ids[0])===retirement.movieId?null:'attributes_changed';
+}
+// Applies a retirements object to the Films the records build, before catalog records are linked: the retired movie id is
+// no longer trusted, so no catalog record links through it. `recordsOf(film)` returns the Film's own stored records.
+// A retirement is held, and its Film stays as the records build it, when the Film is missing, when a record's observation of
+// the page no longer supports it (tmdbLinkChange), or when applyTmdbRetirement refuses. The time of
+// the correction is the identity's own, so a corrected Film is the same on every run. An invalid object applies nothing.
+function applyTmdbRetirements(films,body,recordsOf=()=>[]){
+ const set=tmdbRetirementSet(body),corrected=new Map();
+ const report={valid:set.ok,reasons:set.reasons,retirements:set.retirements.length,applied:[],held:[],numericOverlaps:[]};
+ if(!set.ok)return {films,corrected,report};
+ const byId=new Map((films||[]).map(film=>[film.id,film]));
+ for(const retirement of set.retirements){
+  const film=byId.get(retirement.filmId),hold=reason=>report.held.push({filmId:retirement.filmId,reason});
+  if(!film){hold('film_missing');continue;}
+  const changed=(recordsOf(film)||[]).map(record=>tmdbLinkChange(record,retirement)).filter(Boolean);
+  if(changed.length){hold(changed.includes('link_changed')?'link_changed':'attributes_changed');continue;}
+  const applied=applyTmdbRetirement(film,retirement,film.identity?.updatedAt??null);
+  if(!applied.ok){hold(applied.reason);continue;}
+  corrected.set(film.id,{before:film,film:applied.film,retirement});
+ }
+ return {films:(films||[]).map(film=>corrected.get(film.id)?.film||film),corrected,report};
+}
+// Checks the corrections against the whole projection once catalog records are linked. A trusted `tmdb_tv` on a second
+// Film, or a second Film still trusting the retired movie id, is owner review: the correction is undone (`restore` lists
+// the Films as the records build them) and every Film involved is held, so a writer leaves all of them as they are.
+function settleTmdbRetirements(films,applied){
+ const report={...applied.report,applied:[],held:[...applied.report.held],numericOverlaps:[]};
+ if(!report.valid)return {restore:[],report};
+ const {collisions,numericOverlaps}=tmdbTvCollisions(films),restore=[],hold=(filmId,reason)=>{if(!report.held.some(item=>item.filmId===filmId))report.held.push({filmId,reason});};
+ for(const [filmId,item] of applied.corrected){
+  const clash=collisions.find(collision=>collision.films.includes(filmId));
+  const others=(films||[]).filter(film=>film.id!==filmId&&tmdbIdsOf(film,TMDB_MOVIE_SCHEME).some(entry=>entry.value===item.retirement.movieId&&entry.trusted&&!entry.conflicting));
+  if(!clash&&!others.length){report.applied.push(filmId);continue;}
+  restore.push(item.before);
+  const reason=clash?'tmdb_tv_collision':'retired_movie_on_other_film';
+  hold(filmId,reason);
+  for(const id of [...(clash?.films||[]),...others.map(film=>film.id)])hold(id,reason);
+ }
+ report.applied.sort();
+ report.numericOverlaps=numericOverlaps.filter(overlap=>overlap.tvFilms.some(id=>report.applied.includes(id)));
+ return {restore,report};
 }

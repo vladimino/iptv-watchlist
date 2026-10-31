@@ -160,6 +160,23 @@ Stable ids, record versions, the pin, the scope key and fingerprint, the idempot
 
 `/admin/actions` is the panel as a simulator on fictional data, all in the tab's memory, under the permanent banner «Тренажёр на вымышленных данных. Реальные фильмы не меняются». Its selector, «Демонстрационные ситуации», is a test harness, not an owner workflow; each situation says what it imitates and what will be seen: two films can be updated, a failure on one film (partial), an unknown result (timeout), data that change after the check (refused, then recovered by a fresh check), and nothing to change. Films carry fictional titles («Север», «Тихая гавань», «Пустой лист», «Двойник»). The page makes no request, stores nothing, calls no model and is not linked from the owner catalogue page.
 
+## Prediction recovery
+
+There is **no capability for the prediction of one film**, and none is to be declared on top of the current queue. The data health model can mark a film `prediction_retry` eligible (a due or overdue retry, or a stalled film the queue does not list); that statement is not executable, and the [prediction recovery read](admin.md#prediction-recovery-get-apiadminprediction-recovery) explains the film instead, with `targetedAction.available: false` and `writer: {exists: false, decision: "no_go"}`. Every case it can report is handled by an existing mechanism or belongs to another subsystem:
+
+| Film state | Effect a per-film queue write would have |
+| --- | --- |
+| Queued and ready now | None. `queueReadyIds` already returns it; only a run processes it |
+| Ready, but no run for more than 24 hours | None. The cause is the external Scheduled Task, not the film |
+| Future `retryAt` | It would bypass the backoff policy (1 h doubling to at most 6 h), which is a safety rule, not a delay to remove |
+| Repeated failures | None. A contract rejection (`validation_error`, `parse_error`) repeats on the same input and is fixed in the caller's output; an infrastructure failure (storage, quota, time budget, model availability, lease) is fixed where it occurs; an unrecognised kind needs investigation first |
+| Not current and not queued | Overwritten: the queue is a derived projection rebuilt in full by every refresh (prediction start, next, submit and complete, EPG commit, profile update, resolver checkpoint, manual reconcile), and the next refresh adds the film on its own |
+| Cold film behind hot work | It would break the hot-first priority rule |
+| In flight or run active | It would race the live run |
+| Index inconsistent, outside the programme and catalog | The cause is the view index or the identity subsystem |
+
+The queue object has several writers: the prediction runner's routes under the 90-second prediction mutation lease, and refreshes from the EPG commit, the profile update, the resolver checkpoint and `POST /api/enrichment/queue/reconcile`, which do not take that lease. Each refresh is a blind whole-object put, without an etag condition, and carries forward the `retries` it read. A per-film edit of that object therefore cannot carry CAS semantics, and a retry override stored inside it would be dropped or overwritten by the next refresh. The same race can also lose a just-written retry record (its `retryAt` and `attempts`): a refresh rebuilds membership, not a lost retry, so such a film becomes eligible before its backoff ends. That pre-existing risk belongs to queue reliability, not to this read. A future targeted prediction writer needs a durable design of its own (for example a separate per-film override object that `refreshPredictionQueue` honours under the writer lease, with an etag condition, an idempotent receipt and a restorable before-image), on top of conditional writes by every queue writer, an accepted ADR, the Mermaid changes it implies and the owner's approval before it is implemented. Until then the panel offers no control.
+
 ## The poster page
 
 `/admin/posters` ([admin reference](admin.md#poster-coverage)) restores catalog posters through `POST /api/enrichment/catalog/posters`, the permanent maintenance route of [ADR 0048](../../adr/0048-permanent-catalog-poster-maintenance-route.md), which predates this contract and keeps its own guards. It is not a registered capability and the Worker gains no action route; the page applies the principles above on the client, in [`src/admin/posters-run.js`](../../../src/admin/posters-run.js):

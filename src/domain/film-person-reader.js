@@ -58,6 +58,12 @@ function loadedSources(store,id,record){
  const metadata=store.metadata?.[id]||null,programme=recordById(store.programme?.films,id),watchlist=recordById(store.watchlist?.films,id);
  return {metadata,programme,watchlist,record:record||catalogRecord(store,id)};
 }
+function tmdbRetirementRecords(store,film){
+ const lid=(film?.externalIds||[]).find(item=>item.scheme==='letterboxd'&&item.trusted&&!item.conflicting)?.value;
+ if(!lid)return [];
+ const loaded=loadedSources(store,String(lid));
+ return [loaded.programme,loaded.watchlist,loaded.metadata].filter(Boolean);
+}
 function knownShows(record){return record&&Object.hasOwn(record,'shows')?record.shows:undefined;}
 function observedShows(programme,body){const programmeShows=knownShows(programme);return programmeShows!==undefined?programmeShows:knownShows(body);}
 function observedProgrammeRun(programme,body){if(programme&&Object.hasOwn(programme,'showsProgrammeRunId'))return programme.showsProgrammeRunId||null;if(body&&Object.hasOwn(body,'showsProgrammeRunId'))return body.showsProgrammeRunId||null;return null;}
@@ -226,6 +232,9 @@ function readLifecycle(store,now,options={}){
  const resolution=store.discoveryResolution||{};
  const films=new Map();
  for(const record of store.programme?.films||store.watchlist?.films||[]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
+ // AIR-297 (ADR 0057): the owner-approved TMDB retirements, only when the object exists. Absent, the view is what it was.
+ const retirements=store.tmdbRetirements==null?null:applyTmdbRetirements([...films.values()],store.tmdbRetirements,film=>tmdbRetirementRecords(context,film));
+ if(retirements)for(const film of retirements.films)films.set(storedFilmId(film),film);
  for(const record of listOf(store.discoveredFilms)){
   if(films.has(String(record.id)))continue;
   const facts=filmFacts(record,context,resolution,now),incoming=projectFilm({...facts,letterboxdId:null,localId:null});
@@ -236,6 +245,9 @@ function readLifecycle(store,now,options={}){
   if(!linked.ok){films.set(storedFilmId(incoming),incoming);continue;}
   films.delete(storedFilmId(same));films.set(storedFilmId(linked.survivor),linked.survivor);
  }
+ const settled=retirements?settleTmdbRetirements([...films.values()],retirements):null;
+ for(const film of settled?.restore||[])films.set(storedFilmId(film),film);
+ const retirementReport=settled?{tmdbRetirements:settled.report}:{};
  const candidates=[],conflicts=[];
  const items=new Map((store.discoveryLatest?.items||[]).map(item=>[item.key,item]));
  const storedIds=new Set([...films.values()].map(storedFilmId)),viewIds=new Set([...films.values()].map(film=>film.id));
@@ -257,7 +269,7 @@ function readLifecycle(store,now,options={}){
  const filmList=[...films.values()].sort((a,b)=>storedFilmId(a).localeCompare(storedFilmId(b),'en'));
  const aliasConflicts=markSlugCollisions(filmList);
  const sortedPeople=()=>[...people.values()].sort((a,b)=>a.roleId.localeCompare(b.roleId,'en'));
- if(options.entitiesOnly)return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:sortedPeople(),candidates,conflicts};
+ if(options.entitiesOnly)return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:sortedPeople(),candidates,conflicts,...retirementReport};
  const legacyIds=legacyEnrichmentIds(store),lifecycleIds=filmList.map(storedFilmId),idParity=shadowParity(legacyIds,lifecycleIds);
  const shared=new Set(idParity.legacy),mismatches=semanticMismatches(context,filmList.filter(film=>shared.has(storedFilmId(film))),now);
  const sidecars={};
@@ -277,5 +289,5 @@ function readLifecycle(store,now,options={}){
   if(film)sidecars['enrichment/films/'+encodeURIComponent(String(id))+'/fingerprint'+LIFECYCLE_SIDECAR]={id:film.id,storedId:storedFilmId(film),fingerprint:film.fingerprint};
  }
  for(const key of Object.keys(sidecars))if(FORBIDDEN_LIFECYCLE_KEYS.includes(key)||key.includes('discovery-latest')||key.includes('predictions'))throw new Error('lifecycle sidecar overwrites '+key);
- return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:sortedPeople(),candidates,conflicts,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
+ return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:sortedPeople(),candidates,conflicts,...retirementReport,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
 }

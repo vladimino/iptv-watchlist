@@ -14,7 +14,7 @@ const client = fs.readFileSync('src/admin/client.js', 'utf8');
 const limboClient = fs.readFileSync('src/admin/limbo-client.js', 'utf8');
 const css = fs.readFileSync('public/admin.css', 'utf8');
 const shell = fs.readFileSync('public/admin.html', 'utf8');
-const bundle = bundleAdmin([client, limboClient, page]);
+const bundle = bundleAdmin([client, limboClient, fs.readFileSync('src/admin/prediction-recovery-view.js', 'utf8'), page]);
 
 // Static boundary: GET only through the client, no token, no other API, no action button.
 assert.match(html, /ТОЛЬКО ЧТЕНИЕ/);

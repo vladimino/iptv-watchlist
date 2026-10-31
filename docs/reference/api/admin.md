@@ -187,7 +187,67 @@ Parameters are validated before any read. No filter is required: the whole inven
 
 ### The page
 
-`/admin/limbo` holds the filter in the URL (`kind`, `subsystem`, `cause`, `age`), the pin and cursors in memory. Cause and subsystem chips carry the whole-inventory counts; a form sets kind and age; Escape and "Сбросить фильтры" clear the filter. Each item shows why it is waiting (reason, cause, progress, retry time), since when (days without progress and the last transition), the expected action and whether it is eligible, the threshold, the evidence source and read time, the identity provenance and the last diagnostic, and links to the film in `/admin` only when the film is in the published programme; a film known only from the queue says that the catalogue has no card for it. The side panel shows the snapshot, the pipeline context, the unread subsystems and the thresholds, and states that observations are unavailable. Empty, error and stale snapshot are distinct states as on `/admin`. The page is the third section of the admin navigation (Каталог, Здоровье данных, Лимбо, Постеры). The page has no action button: retries and refreshes are guarded actions of another card.
+`/admin/limbo` holds the filter in the URL (`kind`, `subsystem`, `cause`, `age`), the pin and cursors in memory. Cause and subsystem chips carry the whole-inventory counts; a form sets kind and age; Escape and "Сбросить фильтры" clear the filter. Each item shows why it is waiting (reason, cause, progress, retry time), since when (days without progress and the last transition), the expected action and whether it is eligible, the threshold, the evidence source and read time, the identity provenance and the last diagnostic, and links to the film in `/admin` only when the film is in the published programme; a film known only from the queue says that the catalogue has no card for it. The side panel shows the snapshot, the pipeline context, the unread subsystems and the thresholds, and states that observations are unavailable. Empty, error and stale snapshot are distinct states as on `/admin`. The page is the third section of the admin navigation (Каталог, Здоровье данных, Лимбо, Постеры). A film item of the prediction or fingerprint subsystem carries «Разобрать прогноз», which opens the [prediction recovery panel](#the-prediction-recovery-panel) for that film. The page has no action button: no targeted prediction write exists ([why](admin-actions.md#prediction-recovery)), and retries and refreshes belong to the guarded action contract.
+
+## Prediction recovery: `GET /api/admin/prediction-recovery`
+
+`GET /api/admin/prediction-recovery?film=<storedId>[&pin=<pin>]` explains why one stored film has or lacks a current prediction and what will happen to it, from the objects the system already keeps. It is read-only, behind the same Access application, and has no `POST`, no action and no capability: it never requeues, resets a retry, refreshes the queue, takes or clears a lease, starts a run or calls a model. Source: [`src/admin/prediction-recovery.js`](../../../src/admin/prediction-recovery.js) (handler), [`src/domain/prediction-recovery.js`](../../../src/domain/prediction-recovery.js) (pure assessment, bundled as `PredictionRecovery`), [`src/admin/prediction-recovery-view.js`](../../../src/admin/prediction-recovery-view.js) (the panel), `loadPredictionRecovery` in [`src/admin/limbo-client.js`](../../../src/admin/limbo-client.js). Tests: [`tests/prediction-recovery.mjs`](../../../tests/prediction-recovery.mjs), [`tests/admin-prediction-recovery-api.mjs`](../../../tests/admin-prediction-recovery-api.mjs), [`tests/admin-prediction-recovery-page.mjs`](../../../tests/admin-prediction-recovery-page.mjs); the [GET side-effect test](../../../tests/get-side-effects.mjs) pins its read set.
+
+### What is read
+
+The handler gives the loader a bucket wrapper that has only `get`, so no code path of the route can put, list or delete. It reads what `prediction_film_diagnostics` reads ([prediction diagnostics](prediction-diagnostics.md)) plus two runner objects, each a single object:
+
+| Key | Use |
+| --- | --- |
+| `enrichment/prediction-queue.json` | lane (`hot`, `cold`, none), `retries[film]` (`attempts`, `retryAt`, classification, validation summary), `programmeRunId`, `refreshedAt`, `lastCheckAt`, `lastBatch.finishedAt` |
+| `enrichment/profile/current.json` | the profile version and hash a prediction is judged against; the profile text is never returned |
+| `enrichment/view-index.json` | whether the index agrees with the film's own objects |
+| `epg/published-generation.json`, the generation's `programme.json` and `discovered-films.json` | programme and catalog membership of the film; the generation copy of the catalog falls back to the root `epg/discovered-films.json` as every reader does |
+| `enrichment/films/<id>/fingerprint.json`, `enrichment/films/<id>/predictions.json` | fingerprint and prediction presence, freshness and profile compatibility under the rule in force |
+| `enrichment/runner-lease.json`, `enrichment/latest-run.json` | whether a run is live (lease not expired) and whether that run selected the film and has no result for it yet |
+
+A read that throws is `unavailable` for that source, a missing object is `not_recorded`; neither is treated as empty or healthy.
+
+### Parameters and pin
+
+| Parameter | Rule |
+| --- | --- |
+| `film` | Required. Letters, digits, `_` or `-`, at most 80; otherwise 400 `invalid_film`, before any read |
+| `pin` | Optional. `R1.` + 32 lowercase hex digits; otherwise 400 `invalid_pin`. A pin that is not the version set just read is 409 `stale_pin` |
+
+The pin is a digest of every key read with its R2 etag (`absent` when missing, `unavailable` when the read threw). Any change to one of those objects, including a lease heartbeat that rewrites the lease with the same content, makes the pin stale. A key read twice in one request (the generation pointer) keeps every version it showed, so a pointer that moves between those reads yields a pin no later read can match. The page uses the pin only to say "the state changed since your last check"; it confirms nothing and authorizes nothing.
+
+### Answer
+
+`{pin, evaluatedAt, atomic: false, assessment, snapshot, sources}`. `atomic: false` because the objects are read one by one. `snapshot` carries `consistent` and `reasons` (the diagnostic's disagreement codes), the queue's `status`, `refreshedAt`, `programmeRunId` and `lastActivityAt` (the later of `lastCheckAt` and `lastBatch.finishedAt`), the profile `status` and `version`, the programme and published generation run ids, `runnerLease` and `latestRun` read statuses and `nominalNextRunAt` (the nominal hourly trigger, an estimate). `sources` lists the keys read.
+
+`assessment` is `{version, filmId, status, cause, work, nextExpected: {kind, at}, targetedAction: {available: false, capability: null, reason}, writer: {exists: false, decision: "no_go"}, missingPrerequisites, evidence: {completeness, missing}, facts, runner}`. `facts` holds the fingerprint (presence, current, usable, reason, migration), the prediction (presence, current, `profileCompatible`, cause, reason, required work), the queue lane and eligibility, the retry (classification, scope, attempts, `failedAt`, `retryAt`, `lastRunId`, validation stage and issue count) and the index agreement. `runner` is `{live, runId, leaseExpiresAt, filmSelected}`, with `null` where the lease or run could not be read.
+
+**Verdicts.** `status` is `no_action`, `wait`, `investigate`, `blocked` or `unknown`. `cause` is decided in this order; the first that applies wins:
+
+| Order | Cause | Status | `nextExpected.kind` | `targetedAction.reason` |
+| --- | --- | --- | --- | --- |
+| 1 | `film_unreadable` — the film objects could not be read | `unknown` | `reread` | `evidence_incomplete` |
+| 2 | `queue_unavailable` — queue missing or unreadable, or the lane is unknown | `unknown` | `reread` | `evidence_incomplete` |
+| 3 | `profile_missing` — the taste profile is missing or unreadable | `blocked` | `reread` | `evidence_incomplete` |
+| 4 | `snapshot_partial` — any disagreement reason other than the queue-wide `index_ahead_of_queue` | `blocked` | `reread` | `evidence_incomplete` |
+| 5 | `in_flight` — a live lease, the latest run is that lease's run, it selected the film and has no result for it | `wait` | `run_progress` | `ordinary_schedule` |
+| 6 | the prediction is current: `index_inconsistent` (`investigate`), `index_ahead_of_queue` when still queued (`wait`, `queue_refresh`), otherwise `prediction_current` (`no_action`, `none`, `not_needed`) | | | |
+| 7 | `index_inconsistent` — index and film objects disagree | `investigate` | `owner_investigation` | `other_subsystem` |
+| 8 | `not_in_catalog` — read programme and catalog, the film is in neither | `investigate` | `owner_investigation` | `other_subsystem` |
+| 9 | `queue_refresh_pending` — not current and not queued | `wait` | `queue_refresh` | `queue_derived` |
+| 10 | `retry_backoff` — a future `retryAt`; `repeated_failures` from 5 attempts | `wait` / `investigate` | `retry_at` / `owner_investigation` | `backoff_respected` / by failure kind (below) |
+| 11 | ready now: `repeated_failures` from 5 attempts, `run_active` under a live lease, `ready_no_runs` when the queue's last activity is older than 24 hours (`investigate`, `check_scheduled_tasks`), otherwise `queued_ready` (`wait`, `scheduled_run` at `nominalNextRunAt`) | | | |
+| 12 | `waiting_behind_hot` — cold film while hot work remains | `wait` | `hot_drain` | `ordinary_schedule` |
+| 13 | `queue_state_unknown` — anything else | `unknown` | `reread` | `evidence_incomplete` |
+
+The 5 attempts and 24 hours are the data health thresholds `repeatedFailureAttempts` and `queueStalledMs`. The reason of `repeated_failures` follows the retry's classification: `caller_contract` for `validation_error`, `parse_error` and `format_error_storm` (the model output breaks the contract); `system_failure` for `storage_error`, `quota`, `time_budget`, `model_unavailable`, `api_error`, `lease_lost`, `lease_expired` and `external_termination` (the infrastructure around the run); `failure_unclassified` for everything else, including the classifier's catch-all `model_error` and a missing classification. Unknown programme or catalog membership is never read as absence. An unreadable lease or latest run leaves the verdict to the queue and marks `evidence.completeness: partial` with `runner_lease` or `latest_run` in `evidence.missing`. The same holds for a recorded lease without a readable `expiresAt` (`runner.live: null`, never "no run"), a live lease without a `runId` (the film's in-flight state is `null`; the verdict can still be `run_active`) and a latest run of the lease's run without a `runId`, a `selectedIds` list or a `results` object; an unknown last activity adds `queue_activity` and is not taken as proof of an idle schedule. `missingPrerequisites` names `taste_profile`, `prediction_queue`, `catalog_membership` or `film_state` when one of them is what blocks a prediction.
+
+**Errors.** 400 `invalid_film`, 400 `invalid_pin`, 405 `method_not_allowed`, 409 `stale_pin`, 503 `storage_unavailable` (the loader itself failed; individual unreadable objects are reported in the answer instead).
+
+### The prediction recovery panel
+
+«Разобрать прогноз» on a limbo film item of the prediction or fingerprint subsystem toggles a panel under the item (`aria-expanded`, `aria-controls`) and issues one GET for that film. The panel shows, in Russian: the status and the cause, what is happening with the prediction, what will happen next (times in Europe/Madrid, the scheduled run labelled as an estimate), why there is no "retry" button for this case, the missing prerequisites, the facts (prediction, fingerprint, required work, lane, failed attempts, index agreement, run) and the snapshot line. Codes, ids, the pin and the source keys appear only inside the closed «Технические подробности». For `repeated_failures` the «why» text follows the reason: the model's output, the infrastructure, or an unrecognised kind; an infrastructure failure never tells the owner to fix the model output. An unknown run state reads «состояние запуска неизвестно». A status, cause, reason, next step, prerequisite or evidence code without declared copy, or an answer that claims an available action or an existing writer, renders «Невозможно достоверно объяснить состояние прогноза» instead of a partial explanation. «Проверить заново» repeats the GET with the held pin; a 409 is followed by one unpinned read and the panel says the state changed. The only control is that recheck.
 
 ## Poster coverage
 
@@ -232,7 +292,7 @@ A manual run follows the guarded-action principles of [admin actions](admin-acti
 ## Limits
 
 - The catalogue is the pinned generation's programme: watchlist films and the people on them. Catalog-only films (`epg/discovered-films.json`), unresolved observations and the resolution ledger are not searched; identity codes that need the ledger (`ambiguous`, `rejected`) are not produced here.
-- Fingerprint and prediction state is not read; see `queue_unavailable` above.
+- The catalogue routes do not read fingerprint and prediction state; see `queue_unavailable` above. Only the [prediction recovery read](#prediction-recovery-get-apiadminprediction-recovery) reads them, for one film per request.
 - Pages run over an in-memory projection of the whole programme object; a cold request costs five R2 reads and one parse of the programme, a warm one five reads and no parse of the programme.
 - The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; this API has no `POST`. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
 - `/admin/posters` is the one admin page that calls a write route, and only the existing `POST /api/enrichment/catalog/posters`, after the owner's confirmation. Outcomes `no_poster_on_tmdb` and `tmdb_id_mismatch` are not stored by that route, so those records stay in `verifiedMissing`; only the browser history remembers them.

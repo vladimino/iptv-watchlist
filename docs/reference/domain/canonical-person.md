@@ -1,8 +1,8 @@
 # Canonical Person — identities, aliases and roles
 
-**Role:** active technical reference for the pure canonical Person contract of [AIR-44](https://trello.com/c/ojtZjVc9), `src/domain/canonical-person.js`. Decision: [ADR 0058](../../adr/0058-canonical-person-grouping.md) (Proposed). Verified against the source on **2026-10-30**.
+**Role:** active technical reference for the pure canonical Person contract, `src/domain/canonical-person.js`. Decision: [ADR 0058](../../adr/0058-canonical-person-grouping.md) (Accepted). Verified against the source on **2026-10-30**.
 
-This is a **read model**, not a writer. Nothing calls it at runtime: the Worker bundle, the D1 projector and the D1 catalog views do not load it. It reads records the caller already loaded and returns a grouping. It writes nothing, merges nothing in storage, mints no stored id and redirects nothing. Wiring it into a runtime path, a D1 table or a page is separate, gated work.
+This is a **read model**, not a writer. The Worker bundle, the D1 projector, the D1 catalog views and the site filters do not load it. The [person identity projection](person-identity-projection.md) calls it with records the caller already loaded. It writes nothing, merges nothing in storage, mints no stored id and redirects nothing. A D1 table, a Worker route or a page that reads humans is separate, gated work.
 
 ## Why
 
@@ -11,7 +11,7 @@ A Person record is role-specific and source-specific ([Film/Person contract](fil
 - `person:tmdb_actor/<id>` and `person:tmdb_director/<id>` are TMDB records;
 - `person:role/<text>` holds credit text only.
 
-One human is therefore stored once per role and once per source. Watchlist Films carry Letterboxd credits, and catalog Films carry TMDB credits. Since [AIR-286](https://trello.com/c/EswNQuv8), watchlist Films carry both. The contract groups records into **canonical humans** and says on what evidence. A consumer such as AIR-201 can then read one human instead of up to four records.
+One human is therefore stored once per role and once per source. Watchlist Films carry Letterboxd credits, and catalog Films carry TMDB credits; a watchlist Film can carry both. The contract groups records into **canonical humans** and says on what evidence. The [person identity projection](person-identity-projection.md) reads one human instead of up to four records.
 
 ## Input
 
@@ -98,6 +98,6 @@ Pairs with evidence that do not join become **candidates**, never links:
 
 ## Not in this contract
 
-- No storage, route, page or D1 table. Persisting humans, redirects or decisions, and reading them in the Worker, is separate gated work.
+- No storage, route, page or D1 table. The [person identity projection](person-identity-projection.md) is the consumer reference over this grouping; persisting humans or decisions, and reading either from a Worker route, is separate gated work.
 - No fetching of credits. Films without TMDB credits in D1 give no coCredit evidence until a separately approved credits step adds them; this includes the watchlist Films added after AIR-286.
 - No owner decision UI: [AIR-54](https://trello.com/c/yKtj1ahy) and AIR-126 cover owner input.
