@@ -200,7 +200,100 @@ const REMOVAL_LOOKUP_KEY=ENRICHMENT_KEY+'removal-rating-lookups.json';
 const REMOVAL_LOOKUP_BATCH=5,REMOVAL_LOOKUP_MAX_ATTEMPTS=3,REMOVAL_LOOKUP_CAP=100,REMOVAL_LOOKUP_KEEP_MS=14*86400000;
 const REMOVAL_LOOKUP_RETRY_MS={claimed:3600000,failed:3600000,blocked:6*3600000,rate_limited:6*3600000,not_rated:24*3600000};
 const removalLookupEnabled=env=>env?.REMOVAL_RATING_LOOKUP==='on';
+// ADR 0060: the ratings pipeline switch. `separate` takes effect only once ratings_storage_migrate has migrated the queue
+// and the Diary cursor (LetterboxdRatings.pipelineState); until then the code behaves as `inline`.
+const ratingsPipelineSwitch=env=>env?.RATINGS_PIPELINE==='separate'?'separate':'inline';
 const removalLookupFilm=film=>{const id=String(film?.id??''),url=String(film?.url||'');return /^[a-zA-Z0-9_-]{1,80}$/.test(id)&&/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/.test(url)?{id,url}:null;};
+// Queue schema version 2 (ADR 0060 decision 3): `films[id]` stays the unit of lookup; `refs` lists every removal event
+// that removed the film, `{eventKey, sourceRunId, at, resolved}`. Every mutation below is applied inside the
+// read-apply-compare-and-swap retry of mergeStoredJSON and branches on the `schemaVersion` of the content read in that
+// retry, so a writer that read version 1 before a migration follows version 2 once it lands on a migrated queue.
+const REMOVAL_LOOKUP_REFS_MAX=20;
+const REMOVAL_EVENT_KEY=/^events\/items\/\d{13}-[A-Za-z0-9_-]{1,160}\.json$/;
+const removalQueueV2=queue=>queue?.schemaVersion===2;
+function removalRef(ref){
+ const eventKey=String(ref?.eventKey||'');if(!REMOVAL_EVENT_KEY.test(eventKey))return null;
+ return {eventKey,sourceRunId:typeof ref.sourceRunId==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(ref.sourceRunId)?ref.sourceRunId:null,at:typeof ref.at==='string'&&Number.isFinite(Date.parse(ref.at))?ref.at:null,resolved:false};
+}
+const removalEntryResolved=entry=>(entry?.refs||[]).every(ref=>ref.resolved===true);
+const removalUnresolvedRefs=entry=>(entry?.refs||[]).filter(ref=>ref.resolved!==true).length;
+// Adds an absent (film, eventKey) pair. A replay of the same event adds nothing; a new reference on a finished entry
+// reopens it (pending, no attempts, fresh enqueuedAt, no claim). Past 20 references the oldest resolved one is dropped,
+// or the oldest unresolved one when none is resolved, and counted in `droppedRefs`. Without a reference (no event to
+// name) an absent film becomes a `legacy` entry that promises nothing for an event.
+function addRemovalRef(queue,film,ref,at){
+ const entry=queue.films[film.id];
+ if(!entry){queue.films[film.id]={url:film.url,state:'pending',attempts:0,enqueuedAt:at,nextAttemptAt:at,lastAttemptAt:null,lastResult:null,claim:null,refs:ref?[ref]:[],...(ref?{}:{legacy:true})};return true;}
+ if(!ref)return false;
+ const refs=Array.isArray(entry.refs)?entry.refs:[];
+ if(refs.some(item=>item.eventKey===ref.eventKey))return false;
+ const next=[...refs,ref];
+ if(next.length>REMOVAL_LOOKUP_REFS_MAX){
+  const order=(a,b)=>String(a.at||'')<String(b.at||'')?-1:String(a.at||'')>String(b.at||'')?1:a.eventKey<b.eventKey?-1:a.eventKey>b.eventKey?1:0;
+  const resolved=next.filter(item=>item.resolved===true).sort(order),victim=(resolved.length?resolved:[...next].sort(order))[0];
+  next.splice(next.indexOf(victim),1);queue.droppedRefs=(queue.droppedRefs||0)+1;
+ }
+ const updated={...entry,url:entry.url||film.url,refs:next};delete updated.legacy;
+ if(entry.state!=='pending')Object.assign(updated,{state:'pending',attempts:0,enqueuedAt:at,nextAttemptAt:at,claim:null});
+ queue.films[film.id]=updated;return true;
+}
+// One enqueue, by the version of the queue read in this retry: version 1 queues an absent film id (ADR 0043), version 2
+// adds the (film, event) reference.
+function applyRemovalEnqueue(queue,films,ref,at){
+ let changed=false;
+ if(!removalQueueV2(queue)){for(const {id,url} of films)if(!queue.films[id]){queue.films[id]={url,state:'pending',attempts:0,enqueuedAt:at,nextAttemptAt:at,lastAttemptAt:null,lastResult:null};changed=true;}return changed;}
+ const reference=removalRef(ref);
+ for(const film of films)if(addRemovalRef(queue,film,reference?{...reference}:null,at))changed=true;
+ return changed;
+}
+// The version 1 to version 2 conversion of ratings_storage_migrate. Version 1 entries carry no event key: they become
+// `refs: []` with `legacy: true`. A hand-over still in sync.json gets its references from its saved watchlist event.
+function migrateRemovalQueue(queue,handover,at){
+ const next={schemaVersion:2,films:{},droppedRefs:0,migratedAt:at};
+ if(queue?.pausedUntil){next.pausedUntil=queue.pausedUntil;next.pausedBy=queue.pausedBy||null;}
+ for(const [id,entry] of Object.entries(queue?.films||{}))next.films[id]={...entry,claim:null,refs:[],legacy:true};
+ if(handover)for(const item of handover)applyRemovalEnqueue(next,item.films,item.ref,at);
+ return next;
+}
+// The claim before a request. Version 2 also stores a random claim token: only the outcome carrying it is accepted.
+function claimRemovalEntry(queue,id,now,at,token){
+ const entry=queue.films[id];if(!entry||entry.state!=='pending'||Date.parse(entry.nextAttemptAt)>now)return false;
+ if(removalQueueV2(queue)&&!(entry.attempts<REMOVAL_LOOKUP_MAX_ATTEMPTS))return false;
+ queue.films[id]={...entry,attempts:entry.attempts+1,lastAttemptAt:at,nextAttemptAt:new Date(now+REMOVAL_LOOKUP_RETRY_MS.claimed).toISOString(),lastResult:'claimed',...(removalQueueV2(queue)?{claim:{token,at}}:{})};
+ return true;
+}
+const removalClaimHeld=(queue,id,at,token)=>{const entry=queue?.films?.[id];if(!entry||entry.lastResult!=='claimed')return false;return removalQueueV2(queue)?entry.claim?.token===token:entry.lastAttemptAt===at;};
+// The outcome of a claimed request. Version 2 accepts it only while the claim token is the caller's and the entry is
+// still pending; a reopened entry has no claim, so a late outcome of the earlier lookup is refused (its attempt counted).
+function applyRemovalOutcome(queue,id,result,error,at,now,token){
+ const entry=queue.films[id];if(!entry)return false;
+ if(removalQueueV2(queue)&&(entry.state!=='pending'||entry.claim?.token!==token))return false;
+ const next=removalLookupOutcome(entry,result,error,at);if(removalQueueV2(queue))next.claim=null;
+ queue.films[id]=next;
+ if(next.lastResult==='blocked'||next.lastResult==='rate_limited'){queue.pausedUntil=new Date(now+REMOVAL_LOOKUP_RETRY_MS[next.lastResult]).toISOString();queue.pausedBy=next.lastResult;}
+ return true;
+}
+// A rating the diary proved resolves the film's entry on the spot (version 2 only): `rated`, `lastResult: diary`.
+function resolveRemovalByDiary(queue,id,rating,at){
+ const entry=queue.films[id];if(!removalQueueV2(queue)||!entry||entry.state==='rated'||confirmedHalfStar(rating)==null)return false;
+ queue.films[id]={...entry,state:'rated',rating,lastResult:'diary',checkedAt:at,nextAttemptAt:null,claim:null,lastError:null};
+ return true;
+}
+// Version 2 retention: an entry with an unresolved reference is never deleted, by age or by the cap. A pending entry
+// still expires after 14 days (no more requests). Only entries whose references are all resolved (legacy entries
+// included) follow the version 1 rules below.
+function pruneRemovalLookupsV2(queue,now){
+ let changed=false;const old=entry=>!(now-Date.parse(entry.enqueuedAt)<=REMOVAL_LOOKUP_KEEP_MS);
+ for(const [id,entry] of Object.entries(queue.films)){
+  if(entry.state==='pending'){if(old(entry)){queue.films[id]={...entry,state:'expired',nextAttemptAt:null,claim:null};changed=true;}continue;}
+  if(!removalEntryResolved(entry))continue;
+  if(entry.state!=='expired'&&old(entry)||entry.state==='expired'&&now-Date.parse(entry.enqueuedAt)>2*REMOVAL_LOOKUP_KEEP_MS){delete queue.films[id];changed=true;}
+ }
+ const finished=Object.keys(queue.films).filter(id=>queue.films[id].state!=='pending'&&removalEntryResolved(queue.films[id]));
+ if(finished.length>REMOVAL_LOOKUP_CAP){for(const id of finished.sort((a,b)=>Date.parse(queue.films[a].enqueuedAt)-Date.parse(queue.films[b].enqueuedAt)).slice(0,finished.length-REMOVAL_LOOKUP_CAP))delete queue.films[id];changed=true;}
+ return changed;
+}
+const pruneRemovalQueue=(queue,now)=>removalQueueV2(queue)?pruneRemovalLookupsV2(queue,now):pruneRemovalLookups(queue,now);
 // A film still pending is never dropped: past 14 days it becomes `expired` (visible, no more requests); the cap and the
 // 14-day retention apply to finished entries only.
 function pruneRemovalLookups(queue,now){
@@ -220,26 +313,76 @@ function removalLookupOutcome(entry,result,error,at){
  if(result.status==='not_rated')return {...entry,state:last?'not_rated':'pending',lastResult:'not_rated',checkedAt:at,nextAttemptAt:last?null:later('not_rated'),lastError:null};
  return {...entry,state:result.status==='identity_conflict'?'conflict':'not_found',lastResult:result.status,checkedAt:at,nextAttemptAt:null,lastError:null};
 }
-async function lookupRemovalRatings(env,incoming=[],now=Date.now()){
+const removalDue=(queue,now,limit)=>Object.entries(queue.films).filter(([,entry])=>entry.state==='pending'&&entry.attempts<REMOVAL_LOOKUP_MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)
+ .sort(([,a],[,b])=>Date.parse(a.enqueuedAt)-Date.parse(b.enqueuedAt)).slice(0,limit).map(([id])=>id);
+const REMOVAL_QUEUE_EMPTY={schemaVersion:1,films:{}};
+// The durable enqueue of the EPG commit under the separate pipeline (ADR 0060 decision 3): references only, no request,
+// whatever REMOVAL_RATING_LOOKUP holds. Idempotent: a replay of the same event adds nothing.
+async function enqueueRemovalRefs(env,incoming,ref,now=Date.now()){
+ const at=new Date(now).toISOString(),films=(Array.isArray(incoming)?incoming:[]).map(removalLookupFilm).filter(Boolean);
+ let schemaVersion=null;
+ await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{schemaVersion=q.schemaVersion;return applyRemovalEnqueue(q,films,ref,at)?q:null;});
+ return {films:films.length,schemaVersion,at};
+}
+// Rated version 2 entries with unresolved references: the rating is written to each referenced removal event with the
+// writeEvent compare-and-swap and merge, and the reference is marked resolved only once the stored event lists the film
+// as removed with a confirmed rating. A kill between the two repeats the idempotent event write. Every attempt stamps
+// the reference's `checkedAt`; one that cannot be resolved keeps `issue`: `event_missing` (the event is not stored,
+// e.g. a commit that never wrote it), `film_not_in_event` or `event_unrated`. Work is taken least recently checked
+// first, so references that never resolve cannot starve later ones; `checkedBefore` skips references already checked
+// since that time (one ratings run visits each reference once).
+const REMOVAL_REF_ISSUES=['event_missing','film_not_in_event','event_unrated'];
+async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBefore=null}={}){
+ const at=new Date(now).toISOString(),summary={written:0,resolved:0,waiting:0,mismatched:0,left:0};
+ const object=await env.BUCKET.get(REMOVAL_LOOKUP_KEY),queue=object?await object.json():null;
+ if(!removalQueueV2(queue))return summary;
+ const work=[];
+ for(const [id,entry] of Object.entries(queue.films)){
+  if(ids&&!ids.includes(id)||entry.state!=='rated'||confirmedHalfStar(entry.rating)==null)continue;
+  for(const ref of entry.refs||[])if(ref.resolved!==true&&!(checkedBefore&&ref.checkedAt&&ref.checkedAt>=checkedBefore))work.push({id,eventKey:ref.eventKey,checkedAt:ref.checkedAt||'',rating:entry.rating,observedAt:entry.checkedAt||null});
+ }
+ work.sort((a,b)=>a.checkedAt<b.checkedAt?-1:a.checkedAt>b.checkedAt?1:a.id<b.id?-1:a.id>b.id?1:a.eventKey<b.eventKey?-1:a.eventKey>b.eventKey?1:0);
+ summary.left=Math.max(0,work.length-limit);
+ for(const item of work.slice(0,limit)){
+  let event=await loadJSON(env,item.eventKey),issue=null;
+  if(event){
+   const next=withRemovalRatings(event,{[item.id]:item.rating},item.observedAt);
+   if(next){event=await writeEvent(env,next);summary.written++;}
+   const film=(event?.type==='watchlist'&&Array.isArray(event.removed)?event.removed:[]).find(value=>String(value?.id)===item.id);
+   issue=!film?'film_not_in_event':removalRating(film)?null:'event_unrated';
+  }else issue='event_missing';
+  await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
+   const ref=removalQueueV2(q)?(q.films[item.id]?.refs||[]).find(value=>value.eventKey===item.eventKey):null;
+   if(!ref||ref.resolved===true)return null;
+   ref.checkedAt=at;if(issue)ref.issue=issue;else{ref.resolved=true;delete ref.issue;}
+   return q;
+  });
+  if(!issue)summary.resolved++;else if(issue==='event_missing')summary.waiting++;else summary.mismatched++;
+ }
+ return summary;
+}
+// `ref` names the removal event of this hand-over; a version 1 queue ignores it, a version 2 queue stores it.
+async function lookupRemovalRatings(env,incoming=[],now=Date.now(),ref=null){
  if(!removalLookupEnabled(env))return null;
  const at=new Date(now).toISOString(),summary={checked:0,rated:0,notRated:0,failed:0,stoppedBy:null,pending:0,expired:0,queued:0};
  try{
   const films=(Array.isArray(incoming)?incoming:[]).map(removalLookupFilm).filter(Boolean);
-  let queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,{schemaVersion:1,films:{}},q=>{
-   let changed=false;
-   for(const {id,url} of films)if(!q.films[id]){q.films[id]={url,state:'pending',attempts:0,enqueuedAt:at,nextAttemptAt:at,lastAttemptAt:null,lastResult:null};changed=true;}
-   return pruneRemovalLookups(q,now)||changed?q:null;
+  let queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
+   const changed=applyRemovalEnqueue(q,films,ref,at);
+   return pruneRemovalQueue(q,now)||changed?q:null;
   });
   // A 403 or 429 is about the source, not the film: the whole queue waits until the backoff ends.
   if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>now){summary.stoppedBy=queue.pausedBy||'blocked';summary.pausedUntil=queue.pausedUntil;}
-  const due=summary.stoppedBy?[]:Object.entries(queue.films).filter(([,entry])=>entry.state==='pending'&&entry.attempts<REMOVAL_LOOKUP_MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)
-   .sort(([,a],[,b])=>Date.parse(a.enqueuedAt)-Date.parse(b.enqueuedAt)).slice(0,REMOVAL_LOOKUP_BATCH).map(([id])=>id);
+  const due=summary.stoppedBy?[]:removalDue(queue,now,REMOVAL_LOOKUP_BATCH);
   for(const id of due){
    // Claim first: a request killed mid-lookup leaves a counted attempt and a later retry time, never a free retry.
-   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,{schemaVersion:1,films:{}},q=>{const entry=q.films[id];if(!entry||entry.state!=='pending'||Date.parse(entry.nextAttemptAt)>now)return null;q.films[id]={...entry,attempts:entry.attempts+1,lastAttemptAt:at,nextAttemptAt:new Date(now+REMOVAL_LOOKUP_RETRY_MS.claimed).toISOString(),lastResult:'claimed'};return q;});
-   const claimed=queue.films[id];if(claimed?.lastAttemptAt!==at||claimed.lastResult!=='claimed')continue;
+   let token=null;
+   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{if(removalQueueV2(q)&&!token)token=crypto.randomUUID();return claimRemovalEntry(q,id,now,at,token)?q:null;});
+   if(!removalClaimHeld(queue,id,at,token))continue;
+   const claimed=queue.films[id];
    let result=null,error=null;try{result=await refreshPersonalRating(env,{id,url:claimed.url});}catch(e){error=String(e.message);}
-   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,{schemaVersion:1,films:{}},q=>{const entry=q.films[id];if(!entry)return null;const next=removalLookupOutcome(entry,result,error,at);q.films[id]=next;if(next.lastResult==='blocked'||next.lastResult==='rate_limited'){q.pausedUntil=new Date(now+REMOVAL_LOOKUP_RETRY_MS[next.lastResult]).toISOString();q.pausedBy=next.lastResult;}return q;});
+   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>applyRemovalOutcome(q,id,result,error,at,now,token)?q:null);
+   if(removalQueueV2(queue)&&queue.films[id]?.state==='rated')await settleRemovalRefs(env,{ids:[id]});
    const entry=queue.films[id];summary.checked++;
    if(entry?.state==='rated')summary.rated++;else if(entry?.lastResult==='not_rated')summary.notRated++;else if(error)summary.failed++;
    if(entry?.lastResult==='blocked'||entry?.lastResult==='rate_limited'){summary.stoppedBy=entry.lastResult;summary.pausedUntil=queue.pausedUntil;break;}
@@ -691,7 +834,7 @@ function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
 function resolverMatches(programmeRunId,reportRunId){if(!programmeRunId||!reportRunId)return true;return programmeRunId===reportRunId;}
-function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest}){
+function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
@@ -715,6 +858,8 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  const ratingsSource=(()=>{
   const entry=(state,code,success,failure,extra={})=>({...integrationEntry('letterboxd_ratings','source',state,code,success,failure),...extra,manualRefreshEnabled:!!enabled,retiredRefresh});
   const pendingSince=integrationTime(sync?.updatedAt);
+  // Under the separate pipeline (ADR 0060) the ratings run record decides, not the EPG commit's sync.json fields.
+  if(ratingsRun)return ratingsRun.state==='ok'?entry(fresh(ratingsRun.lastSuccessAt),freshCode(ratingsRun.lastSuccessAt),ratingsRun.lastSuccessAt,ratingsRun.lastFailureAt,{pipeline:'separate'}):entry(ratingsRun.state,ratingsRun.code,ratingsRun.lastSuccessAt,ratingsRun.lastFailureAt,{pipeline:'separate'});
   if(ratingPending&&(!latestRating||latestRating.ok&&(!pendingSince||Date.parse(latestRating.at)<=Date.parse(pendingSince))))return entry('degraded','ratings_pending',ratingSuccess,ratingFailureAt,{pendingSince});
   if(!latestRating)return entry('unknown','no_data',null,null);
   if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
@@ -754,6 +899,7 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
 }
 async function footerStatus(env){
  const pinned=await pinEpg(env);
+ const ratingsRun=ratingsPipelineSwitch(env)==='separate'&&await LetterboxdRatings.separateActive(env)?LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now()):null;
  const [profile,index,report,catalog,storedQueue,run,lease,source,decisions,sync,ratings,discoveryStatus,continuation,watchlistIngest]=await Promise.all([
   loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,predictionQueueKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json')
  ]);
@@ -765,7 +911,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun})};
 }
 function queueReadyIds(queue,now=Date.now()){const ids=queue.priorityCount?queue.hotPending:queue.coldPending;return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>now));}
 // The ids a batch takes, in queue order: migration work (ADR-0035 section 6) fills at most FINGERPRINT_MIGRATION_SHARE of the
