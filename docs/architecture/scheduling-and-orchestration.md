@@ -2,21 +2,18 @@
 
 Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron. The Worker's one cron trigger runs only the D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md)), shown last in the diagram: it reads R2, writes only D1, and stays inert while `D1_ENRICHMENT_WRITE` is unset. The Worker exposes owner-only MCP tools that perform work only when invoked. Expected task behavior: [Scheduled Task contract](../reference/scheduled-tasks.md). Sources: [scheduling ADR](../adr/0005-external-chatgpt-tasks.md), [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP contract](../reference/api/mcp.md) and [prediction operations](../runbooks/prediction-operations.md).
 
+The sequences below are **independent scheduled or externally driven flows**, not a single sequential execution. They are split for legibility; each uses the same existing Worker, Access, R2 and D1 boundaries. No scheduling or authority changes are introduced by this presentation.
+
+### Daily EPG and hourly discovery continuation
+
 ```mermaid
 sequenceDiagram
     actor Daily as Daily EPG Task (17:00)
     actor Hourly as Hourly Task (hourly)
-    actor Monitor as Drift monitor (18:15, read-only)
-    actor Owner as Owner
-    participant Registry as Task registry
     participant Access as Cloudflare Access
     participant MCP as Worker MCP
     participant EPG as EPG and discovery
-    participant Runner as Prediction runner
     participant R2 as Authoritative R2
-    participant Cron as Worker cron trigger (37 * * * *)
-    participant Projector as D1 enrichment projector
-    participant D1 as D1 iptv
     Note over Daily,R2: External ChatGPT tasks, never Worker Cron
     Daily->>Access: Authorize daily EPG workflow
     Access->>MCP: JWT verified
@@ -55,6 +52,16 @@ sequenceDiagram
             MCP-->>Hourly: continue / wait / stop
         end
     end
+```
+
+### Hourly prediction pipeline
+
+```mermaid
+sequenceDiagram
+    actor Hourly as Hourly Task (hourly)
+    participant MCP as Worker MCP
+    participant Runner as Prediction runner
+    participant R2 as Authoritative R2
     Hourly->>MCP: Runner, schema, profile, queue preflight
     Hourly->>MCP: prediction_start(scheduled) once
     MCP->>Runner: Acquire owned run / check lease
@@ -72,6 +79,17 @@ sequenceDiagram
         end
     end
     Hourly->>MCP: prediction_complete on allowed owned stop
+```
+
+### Read-only Scheduled Task drift monitor
+
+```mermaid
+sequenceDiagram
+    actor Monitor as Drift monitor (18:15, read-only)
+    actor Owner as Owner
+    participant Registry as Task registry
+    participant Access as Cloudflare Access
+    participant MCP as Worker MCP
     Note over Monitor,Registry: Read-only monitor, never a producer or a task editor
     Monitor->>Registry: Read the EPG, hourly and Ratings task entries
     Registry-->>Monitor: Enabled state, recurrence, prompt, latest run
@@ -85,6 +103,16 @@ sequenceDiagram
     opt Disabled task, failed run, drift, no live evidence, no EPG today, or a ratings anomaly
         Monitor->>Owner: Notification with the observed state
     end
+```
+
+### Worker cron: R2-to-D1 enrichment projection
+
+```mermaid
+sequenceDiagram
+    participant Cron as Worker cron trigger (37 * * * *)
+    participant Projector as D1 enrichment projector
+    participant R2 as Authoritative R2
+    participant D1 as D1 iptv
     Note over Cron,D1: The one Worker cron trigger, inert while D1_ENRICHMENT_WRITE is unset (ADR 0056)
     Cron->>Projector: Scheduled event, hourly
     opt D1_ENRICHMENT_WRITE is dry or on
