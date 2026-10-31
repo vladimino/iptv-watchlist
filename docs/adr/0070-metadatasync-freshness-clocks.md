@@ -4,7 +4,7 @@
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
 **Approval source:** pending owner decision  
-**Related work:** [AIR-311](https://trello.com/c/81P7wg4u), [ADR 0056](0056-d1-enrichment-write-through.md)  
+**Related work:** [AIR-311](https://trello.com/c/81P7wg4u), [PR #291](https://github.com/vladimino/iptv-watchlist/pull/291), [ADR 0056](0056-d1-enrichment-write-through.md)  
 **Supersedes:** None  
 **Superseded by:** None
 
@@ -51,7 +51,7 @@ Code rollback is a Worker revert. It does not remove `film_sync_state` or restor
 ## Evidence
 
 - **Original decision:** [AIR-311](https://trello.com/c/81P7wg4u)
-- **Implementation:** the pull request that adds this record
+- **Implementation:** [PR #291](https://github.com/vladimino/iptv-watchlist/pull/291)
 - **Dated verification:** `not recorded` (no production migration and no production projector run of these rows)
 - **Uncertainty:** production schema v4 and `D1_ENRICHMENT_WRITE=on` are taken from the persistence page and the 2026-10-30 projector evidence. This delivery does not re-read the live database.
 
