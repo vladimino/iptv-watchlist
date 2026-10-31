@@ -1,6 +1,6 @@
-# Guarded owner actions (contract and fixture exemplar)
+# Guarded owner actions
 
-This page is the contract every Data Health recovery action must follow before it may write: a versioned capability, a read-only eligibility decision, a dry-run preview, the owner's explicit confirmation of one exact scope with an expiry, checks against a fresh read at submission, bounded execution with CAS per record, an honest receipt, and retry and compensation rules. It is implemented as a pure library and a fixture exemplar. **No production action exists**: the Worker has no action route, does not bundle the library, and no capability is wired to R2, D1, a Scheduled Task, Access, a flag or an external service. The one live owner workflow, poster restoration on `/admin/posters`, follows the same principles over the existing maintenance route without this library; see [the poster page](#the-poster-page).
+This page is the contract every Data Health recovery action must follow before it may write: a versioned capability, a read-only eligibility decision, a dry-run preview, the owner's explicit confirmation of one exact scope with an expiry, checks against a fresh read at submission, bounded execution with CAS per record, an honest receipt, and retry and compensation rules. It is implemented as a pure library, a fixture exemplar and **one production capability**, [`discovery_reconsider@1`](#discovery-reconsideration-discovery_reconsider1). The Worker bundles the library as `AdminActions` for that capability's adapter only, and it is the only capability registered there. No capability is wired to D1, a Scheduled Task, Access, a flag or an external service. The other live owner workflow, poster restoration on `/admin/posters`, follows the same principles over the existing maintenance route without this library; see [the poster page](#the-poster-page).
 
 Source: [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (the contract, pure), [`src/admin/actions-fixture.js`](../../../src/admin/actions-fixture.js) (in-memory store, executor, GET/POST transport shape), [`src/admin/actions-presentation.js`](../../../src/admin/actions-presentation.js) (the machine-to-human presentation layer), [`src/admin/actions-view.js`](../../../src/admin/actions-view.js) (the reusable panel), [`public/admin-actions.html`](../../../public/admin-actions.html) and [`public/admin-actions.js`](../../../public/admin-actions.js) (the demonstration page at `/admin/actions`). Tests: [`tests/admin-actions.mjs`](../../../tests/admin-actions.mjs), [`tests/admin-actions-presentation.mjs`](../../../tests/admin-actions-presentation.mjs), [`tests/admin-actions-view.mjs`](../../../tests/admin-actions-view.mjs). Eligibility comes from the [data health model](../domain/data-health.md); the pin is the one of the [admin read API](admin.md).
 
@@ -95,19 +95,40 @@ An executor takes a lease with a fencing number, then handles the confirmed reco
 
 A receipt carries `idempotencyKey`, capability and version, subject, pin, `scopeFingerprint` (not the full key) — echoed only when the confirmation passes `validateConfirmation`, otherwise `null` — per-record `outcomes` with an error **code** from the closed vocabulary `provider_error`, `timeout`, `rate_limited`, `conflict`, `fence_lost`, `validation_error`, `storage_error`, `aborted`, `internal_error` (anything else, including any exception message, becomes `internal_error`; `actionErrorCode` does the classification), `counts`, `retry` (`retryable` ids, `maxAttempts`), `compensation`, `atomic: false` and `audit` (`actor: "owner"`, `confirmedAt`). It never contains a token, an exception message, an e-mail or another identity; an unknown refusal is reported as `invalid_request`. A repeated submission with the same key returns the stored receipt with `replay: true` and writes nothing.
 
-## Discovery observations: no capability
+## Discovery reconsideration: `discovery_reconsider@1`
 
-No capability exists for a discovery observation (`healthActionCode: discovery_retry`, subject kind `observation`), and none may be registered on top of the existing resolver. Three facts stand in the way:
+The one production capability ([ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md)). It lifts the terminal fence of **one** discovery decision whose automatic attempts ended on unchanged evidence (`no_more_evidence`), so that the next ordinary resolver chunk may take the observation again. It calls no TMDB, runs no chunk and changes no other decision. Routes, refusals and the action record are in the [admin API](admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery); the gate is in the [recovery assessment](../domain/discovery-recovery.md#the-reconsideration-gate).
 
-- the candidate is readable only by parsing the whole discovery ledger, so no bounded preview exists;
-- the resolution decisions are one object without record versions that every chunk rewrites whole, so a single-record CAS needs a new fenced writer;
-- `POST /api/enrichment/discovery/resolve` runs a chunk over the global pending order and cannot target a key.
+The declaration is:
 
-What the owner can know about one observation is given by the pure [recovery assessment](../domain/discovery-recovery.md): whether a retry would help and what happens next. It always answers `execute.available: false`, `reason: no_targeted_writer`. A future reconsideration capability needs a bounded observation projection first, then its own ADR, card and owner gate; see the [dated analysis](../../evidence/discovery-targeted-recovery-no-go-2026-10-31.md).
+- subject kind `observation`, `healthActionCode: discovery_reconsider`;
+- budget: 1 record, 1 write per record, 0 external calls;
+- retry: 1 attempt, no backoff;
+- compensation `manual`: the action record keeps the before-image;
+- `confirmTtlMs`: 10 minutes.
+
+| Principle | In `discovery_reconsider` |
+| --- | --- |
+| Eligibility | The issue `reconsiderIssue` derives from the assessment, not the data health retry rule. Eligible only for a confirmed `no_more_evidence` on a fresh [observation index](../domain/discovery-observation-index.md) with no live lease, protected wait, throttle, ambiguity or missing configuration; unknown evidence is `null`, never eligible |
+| Record version | The index record's `decisionHash`, the SHA-256 of the full decision |
+| Preview | `GET /api/admin/discovery-recovery`, read-only, with cost, risk and effect |
+| Issuance | Server-side: the confirm route stores the issued confirmation as the action record, created only if absent. `checkSubmission` compares the submission with it |
+| Executor lease | The resolver lease (`epg/resolver-lease.json`), the same one every chunk writes under. It is refused when live (`lease_held`) or unreadable (`lease_unknown`, never taken over), and renewed as the fence just before the write |
+| Commit with CAS | R2 `onlyIf.etagMatches` on the decision map's etag, after the decision's digest matched; the intent with the before-image is stored before the write |
+| Receipt | `receiptOf`, stored in the action record; a replay returns it. A `running` intent without a receipt is `in_progress` / unknown and never redone |
+| Retry | None automatic. An `unknown` outcome asks for a fresh read; a lost compare-and-swap is `failed` |
+
+Deviations from the contract text, by design:
+
+- There is no fencing number. The fence is the lease id and its renewal, as for every resolver writer, and the commit is the R2 conditional put.
+- `lease_held` and `lease_unknown` refusals are answered before a receipt exists and are not stored, so the same confirmation can be executed once the resolver is free.
+- The receipt's audit names only `actor: owner`, and the action record's provenance adds `authority: cloudflare_access`. No e-mail, assertion or token is stored.
+
+Not covered: `discovery_retry` (a due retry is already taken by the next chunk), `ambiguous` decisions (they need identity review, which has no page yet), a future `retryAt` (backoff is policy), and more than one observation per action.
 
 ## Transport shape
 
-`fixtureActionRequest` shows the shape a future owner route must keep, without being one: `GET /preview` only previews; `POST /execute` only executes; any other method is 405, an unknown path 404, a non-owner principal 403 before anything else. A refused submission answers 409 for a concurrency or freshness refusal (`stale_pin`, `record_changed`, `eligibility_changed`, `idempotency_conflict`, `lease_held`, `in_progress`) and 400 otherwise. A production route built on this contract also keeps the Worker's same-origin check for non-GET requests and is subject to its own card, tests, ADR classification and owner approval.
+`fixtureActionRequest` shows the shape a live owner route keeps, without being one: `GET /preview` only previews; `POST /execute` only executes; any other method is 405, an unknown path 404, a non-owner principal 403 before anything else. A refused submission answers 409 for a concurrency or freshness refusal (`stale_pin`, `record_changed`, `eligibility_changed`, `idempotency_conflict`, `lease_held`, `in_progress`) and 400 otherwise. A production route built on this contract also keeps the Worker's same-origin check for non-GET requests and is subject to its own card, tests, ADR classification and owner approval. The `discovery_reconsider` routes follow this shape with a confirm step in front of the execution: `GET` previews, `POST …/confirm` issues, `POST …/reconsider` executes.
 
 ## Presentation layer (machine to human)
 

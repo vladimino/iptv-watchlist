@@ -154,7 +154,7 @@ Every EPG commit and discovery response includes `discovery`:
 
 ### One observation: no targeted retry
 
-There is no request that resolves, retries or reconsiders one observation. `POST /api/enrichment/discovery/resolve` takes only `limit` and `chunks`. It runs one chunk over every actionable candidate in priority order (hot first, then with a year, then the latest airing), with its own TMDB calls, and still honours a live lease, `chunk_budget` and a backoff. A forced call is therefore a series-level operation, not a retry of a chosen key.
+There is no request that resolves or retries one observation. `POST /api/enrichment/discovery/resolve` takes only `limit` and `chunks`. It runs one chunk over every actionable candidate in priority order (hot first, then with a year, then the latest airing), with its own TMDB calls, and still honours a live lease, `chunk_budget` and a backoff. A forced call is therefore a series-level operation, not a retry of a chosen key.
 
 Whether a retry of one observation would help follows from the resolver's own rules:
 
@@ -166,7 +166,7 @@ Whether a retry of one observation would help follows from the resolver's own ru
 - A series gate (TMDB or storage backoff, the chunk budget, an error delay) and a live resolver lease hold every observation back, and a retry must respect them too.
 - A `missing_secret` stop is cleared only by restoring the TMDB configuration, not by a retry or a new generation.
 
-The [recovery assessment](../domain/discovery-recovery.md) states this per observation.
+The [recovery assessment](../domain/discovery-recovery.md) states this per observation. For exactly one of these cases, a terminal decision on unchanged evidence, the owner can lift the terminal fence with the guarded action [`discovery_reconsider`](admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery). It writes one decision and looks nothing up: the next ordinary chunk of this route, or of `epg_sync_step`, takes the observation with its usual pacing, throttle and lease rules. After each chunk the resolver also writes the generation's [observation index](../domain/discovery-observation-index.md), fenced by the resolver lease; an index failure other than a lost lease never fails the chunk.
 
 Since [AIR-151](https://trello.com/c/iZ7TR7y0) a continuation response from `POST /api/sync/epg` and every `POST /api/enrichment/discovery/resolve` response also carry `diagnostic`: the branch `advanceDiscovery` took and its intermediate outcomes (continuation record before, lease state, decision, hop id, chunk summary, continuation record after). The same step is logged as `{"event":"epg_continuation"}` lines sharing one `id` (`entered` before any storage access, `checkpointed` once the hop's checkpoint is stored, then the outcome; `interrupted` when a later step closes an entry left without a terminal phase) and stored best effort in `epg/resolver-continuation-diagnostics.json`, a ring of the last 20 step entries that `GET /api/enrichment/pipeline/status` returns as `continuationDiagnostics`. Every value is a code from a closed vocabulary, a UUID, a timestamp or a count; thrown messages are classified into error codes, never copied. The field list is in [the MCP contract](mcp.md#continuation-diagnostics-air-151). Nothing in it changes a decision, retries a call or writes on a `GET`.
 

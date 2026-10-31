@@ -1,6 +1,6 @@
-# Owner admin read API (read-only)
+# Owner admin API
 
-`GET /api/admin/*` answers the owner's `/admin` page from one **published snapshot** of the programme: the generation pointer, that generation's programme object and the two localization dictionaries. It searches Film and Person projections, lists quality queues and returns one record, always from the same version tuple, which every answer names as an opaque `pin`. The routes only read; they never list the bucket, never fall back to the root `programme.json`, never write, never read a lease, the resolution ledger, the discovery snapshot or an enrichment object, and never call TMDB, Letterboxd, a model or MCP. The [GET side-effect test](../../../tests/get-side-effects.mjs) covers them like every other read.
+`GET /api/admin/*` answers the owner's `/admin` page from one **published snapshot** of the programme: the generation pointer, that generation's programme object and the two localization dictionaries. It searches Film and Person projections, lists quality queues and returns one record, always from the same version tuple, which every answer names as an opaque `pin`. The routes only read; they never list the bucket, never fall back to the root `programme.json`, never write, never read a lease, the resolution ledger, the discovery snapshot or an enrichment object, and never call TMDB, Letterboxd, a model or MCP. The [GET side-effect test](../../../tests/get-side-effects.mjs) covers them like every other read. The later sections add bounded reads with their own read sets, and the one guarded write under `/api/admin/`, the [discovery observation reconsideration](#discovery-observation-recovery-get-apiadmindiscovery-recovery).
 
 Access is the existing owner-only Cloudflare Access application in front of the Worker hostname ([ADR 0004](../../adr/0004-mcp-access-boundary.md)). The routes add no second login, no admin middleware, no token in the page and no bypass; the browser session is the only credential, and the page sends `credentials: 'same-origin'`.
 
@@ -143,20 +143,23 @@ The page distinguishes three states the owner must not confuse: **empty** (200 w
 
 ### What is read
 
-The five reads of the [snapshot above](#what-is-read), in the same order and with the same failures, then exactly two more objects. No `BUCKET.list`, no per-film object under `enrichment/films/`, no resolution ledger, discovery snapshot, lease or continuation.
+The five reads of the [snapshot above](#what-is-read), in the same order and with the same failures, then two more objects and the published generation's [observation index](../domain/discovery-observation-index.md). No `BUCKET.list`, no per-film object under `enrichment/films/`, no body of the resolution map or of the discovery ledger, no lease or continuation.
 
 | Step | Key | Use |
 | --- | --- | --- |
 | 6 | `enrichment/prediction-queue.json` | Outstanding films (`hotPending`, `coldPending`, `pending`), `retries` (`retryAt`, `attempts`, `kind`, `scope`, `lastRunId`), the per-film `work` plan, `programmeRunId`, `refreshedAt`, `lastCheckAt`. Absent is reported, not treated as an empty queue |
 | 7 | `enrichment/view-index.json` | The stored prediction's `generatedAt` and the `fingerprintHash` of an outstanding film: the clock of its last progress. Only entries of outstanding films are used |
+| 8 | `epg/published-generation.json` again, then `epg/generations/<run>/discovery-observations/manifest.json` | The run the index must belong to, and the manifest. A warm isolate reuses the parsed shards and cancels the manifest body when the manifest etag is unchanged |
+| 9 | `…/discovery-observations/shard-NN.json` | Only the shards the manifest counts records in |
+| 10 | `head` of `epg/discovery-resolution.json` and of `epg/generations/<run>/discovery-latest.json` | Freshness only: the etags are compared with the manifest's `sources`; no body is read |
 
-Both versions join the pin; a warm isolate reuses a parsed body only when its version is unchanged, as above.
+The queue and index versions and the manifest etag join the pin; a warm isolate reuses a parsed body only when its version is unchanged, as above. The index's freshness is judged on every request, never taken from the cache.
 
 ### Projection
 
 Film records are the snapshot's programme films ([projection](#the-projection)) with `programmeRunId` of the pinned generation, plus a minimal record (`id`, `storedId`, the queue's `programmeRunId`, `inProgramme: false`) for an outstanding queue film the programme does not carry, such as a catalog film. Only outstanding films get fingerprint and prediction state, from the queue's own verdict and stamped with the queue's `programmeRunId`: `prediction` is `stale` when the index has a prediction and `missing` otherwise, with the index `generatedAt` as `updatedAt`, the retry `attempts` and `kind`, and the work plan as `nextAction`; `fingerprint` is `current` for `prediction_only` work and `stale` or `missing` for `fingerprint_and_prediction`. A film the queue does not list carries neither field and stays unobserved for those subsystems, so the route never claims a prediction is current. When the queue was built for another generation than the published one, every such per-film diagnosis fails closed: cause `stale_projection`, action `wait` / `reread_snapshot`, `eligible: false`; `context` carries the queue-level `projection_generation_differs` issue, and programme-derived items of the same films keep their own verdict. Queue ids are translated to record ids with `canonicalFilmId`. The evaluation runs with `coverage.films: partial`, because a programme snapshot is not every Film.
 
-**Unresolved observations are not available.** They live only in the resolution ledger, which this route does not read. The answer says so in `coverage.observations` (`available: false`, `reason: no_bounded_projection`); a `kind=observation` filter returns an empty list beside that statement, never a claim that nothing is unresolved. Serving them needs a generation-scoped index object written at EPG publish, a separate writer change.
+**Unresolved observations come from the observation index.** With a `fresh` or `stale` index of the published generation, its records are supplied to the model as `observations` with `coverage.observations: partial` and `observedAt` = the index's `writtenAt`. They become observation items with the index title (`item.observation`). The index holds only current observations that already have a decision, so the list is never the whole population: an observation awaiting its first lookup is counted in `awaitingFirstLookup`, not listed. Without a readable index (`missing`, `other_generation`, `malformed`, `torn`, no published generation, or a storage failure) no observation is supplied. The answer says so in `coverage.observations` (`available: false`, `reason: index_<state>`), and a `kind=observation` filter returns an empty list beside that statement, never a claim that nothing is unresolved.
 
 ### Parameters
 
@@ -168,7 +171,7 @@ Film records are the snapshot's programme films ([projection](#the-projection)) 
 | `age` | Minimum days without progress, digits `0`–`365`; otherwise 400 `invalid_age`. Items of unknown age are kept |
 | `limit` | As for the collection routes: omitted is 25, present must be `1`–`25` |
 | `cursor` | The `nextCursor` of the previous page of the same filter, limit and pin; otherwise 400 `stale_cursor` |
-| `pin` | A limbo pin (`L1|…`). An admin catalogue pin is 400 `invalid_pin`; a limbo pin that is not the tuple just read is 409 `stale_pin` |
+| `pin` | A limbo pin (`L2|…`). An admin catalogue pin is 400 `invalid_pin`; a limbo pin that is not the tuple just read is 409 `stale_pin` |
 
 Parameters are validated before any read. No filter is required: the whole inventory is bounded by the snapshot.
 
@@ -176,18 +179,19 @@ Parameters are validated before any read. No filter is required: the whole inven
 
 `{pin, snapshot, kind, subsystem, cause, age, limit, items, nextCursor, total, counts, coverage, context, unread, thresholds, vocabulary}`.
 
-- `snapshot` is the catalogue snapshot object plus `evaluatedAt` (the clock of this evaluation), `sources` (the seven keys above), `clock` (skew anomalies), `queuePresent`, `queueRefreshedAt`, `queueProgrammeRunId`, `queueLastCheckAt`, `queueUploadedAt`, `indexPresent`, `indexUploadedAt`.
+- `snapshot` is the catalogue snapshot object plus `evaluatedAt` (the clock of this evaluation), `sources` (the keys above, with `<programmeRunId>` and `shard-NN` as placeholders), `clock` (skew anomalies), `queuePresent`, `queueRefreshedAt`, `queueProgrammeRunId`, `queueLastCheckAt`, `queueUploadedAt`, `indexPresent`, `indexUploadedAt`.
 - `items` are [limbo items](../domain/data-health.md#limbo-inventory) of the filtered list; `total` is that list's length; `counts` cover the whole unfiltered inventory.
 - `context` holds the whole-object health issues of the same evaluation (the published generation, the prediction queue), so an item is read with the pipeline state around it: a queue built for another generation, eligible work without runs. `unread` names the subsystems this route does not observe (`discovery`, `letterboxd_archive`, and `prediction_queue` when the object is absent); they are unknown, not healthy.
+- `coverage` is `{films, filmsObserved, observations, observationsObserved}`. `observations` is either `{available: false, reason, state, programmeRunId}` or `{available: true, state: fresh|stale, reasons, programmeRunId, writtenAt, writer, scope, indexed, eligible, omitted, complete, awaitingFirstLookup}` from the manifest; `stale` means the decision map or the ledger changed after the index was written.
 - `thresholds` are the model's thresholds in force.
 
-**Pin and cursor.** The pin is `L1|` + the catalogue pin + the queue version + the index version. A change of the queue or the index alone is a stale pin, as is any change of the catalogue tuple. The cursor carries the pin and the evaluation clock (`evaluatedAt`) in front of the inventory cursor: every later page is cut from the same evaluation, so an age or a due retry does not shift between pages, and a fresh first page evaluates at the current clock.
+**Pin and cursor.** The pin is `L2|` + the catalogue pin + the queue version + the index version + the observation manifest etag (empty without a readable index). A change of the queue, the view index or the observation manifest alone is a stale pin, as is any change of the catalogue tuple. The cursor carries the pin and the evaluation clock (`evaluatedAt`) in front of the inventory cursor: every later page is cut from the same evaluation, so an age or a due retry does not shift between pages, and a fresh first page evaluates at the current clock.
 
 **Errors.** Those of the catalogue routes, plus `unknown_kind`, `unknown_subsystem`, `unknown_cause`, `invalid_age` (400) and `evaluation_failed` (500, the model refused the snapshot; nothing is written).
 
 ### The page
 
-`/admin/limbo` holds the filter in the URL (`kind`, `subsystem`, `cause`, `age`), the pin and cursors in memory. Cause and subsystem chips carry the whole-inventory counts; a form sets kind and age; Escape and "Сбросить фильтры" clear the filter. Each item shows why it is waiting (reason, cause, progress, retry time), since when (days without progress and the last transition), the expected action and whether it is eligible, the threshold, the evidence source and read time, the identity provenance and the last diagnostic, and links to the film in `/admin` only when the film is in the published programme; a film known only from the queue says that the catalogue has no card for it. The side panel shows the snapshot, the pipeline context, the unread subsystems and the thresholds, and states that observations are unavailable. Empty, error and stale snapshot are distinct states as on `/admin`. The page is the third section of the admin navigation (Каталог, Здоровье данных, Лимбо, Постеры). A film item of the prediction or fingerprint subsystem carries «Разобрать прогноз», which opens the [prediction recovery panel](#the-prediction-recovery-panel) for that film. The page has no action button: no targeted prediction write exists ([why](admin-actions.md#prediction-recovery)), and retries and refreshes belong to the guarded action contract.
+`/admin/limbo` holds the filter in the URL (`kind`, `subsystem`, `cause`, `age`), the pin and cursors in memory. Cause and subsystem chips carry the whole-inventory counts; a form sets kind and age; Escape and "Сбросить фильтры" clear the filter. Each item shows why it is waiting (reason, cause, progress, retry time), since when (days without progress and the last transition), the expected action and whether it is eligible, the threshold, the evidence source and read time, the identity provenance and the last diagnostic, and links to the film in `/admin` only when the film is in the published programme; a film known only from the queue says that the catalogue has no card for it. The side panel shows the snapshot, the pipeline context, the unread subsystems and the thresholds, and the observation coverage: partial, with the indexed count, what the cap cut, how many await a first lookup and when the index was written, with a warning when it is stale; or unavailable, with the reason. Empty, error and stale snapshot are distinct states as on `/admin`. The page is the third section of the admin navigation (Каталог, Здоровье данных, Лимбо, Постеры). A film item of the prediction or fingerprint subsystem carries «Разобрать прогноз», which opens the [prediction recovery panel](#the-prediction-recovery-panel) for that film. An observation item carries «Разобрать наблюдение», which opens the [observation recovery panel](#the-observation-recovery-panel). That panel holds the page's only write control, the guarded reconsideration of one observation. There is no button for a film: no targeted prediction write exists ([why](admin-actions.md#prediction-recovery)).
 
 ## Prediction recovery: `GET /api/admin/prediction-recovery`
 
@@ -249,6 +253,131 @@ The 5 attempts and 24 hours are the data health thresholds `repeatedFailureAttem
 
 «Разобрать прогноз» on a limbo film item of the prediction or fingerprint subsystem toggles a panel under the item (`aria-expanded`, `aria-controls`) and issues one GET for that film. The panel shows, in Russian: the status and the cause, what is happening with the prediction, what will happen next (times in Europe/Madrid, the scheduled run labelled as an estimate), why there is no "retry" button for this case, the missing prerequisites, the facts (prediction, fingerprint, required work, lane, failed attempts, index agreement, run) and the snapshot line. Codes, ids, the pin and the source keys appear only inside the closed «Технические подробности». For `repeated_failures` the «why» text follows the reason: the model's output, the infrastructure, or an unrecognised kind; an infrastructure failure never tells the owner to fix the model output. An unknown run state reads «состояние запуска неизвестно». A status, cause, reason, next step, prerequisite or evidence code without declared copy, or an answer that claims an available action or an existing writer, renders «Невозможно достоверно объяснить состояние прогноза» instead of a partial explanation. «Проверить заново» repeats the GET with the held pin; a 409 is followed by one unpinned read and the panel says the state changed. The only control is that recheck.
 
+## Discovery observation recovery: `GET /api/admin/discovery-recovery`
+
+One discovery observation (one EPG candidate key) is explained from the [observation index](../domain/discovery-observation-index.md). When the explanation allows it, the owner can send that observation back to the ordinary resolver queue with the guarded action `discovery_reconsider@1` ([ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md)). The action lifts the terminal fence of one decision. It calls no TMDB, runs no chunk and starts no series: the next ordinary chunk decides what happens. Everything sits behind the same Access application.
+
+Source: [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recovery.js) (handlers and executor), [`src/domain/discovery-recovery.js`](../../../src/domain/discovery-recovery.js) (assessment and gate, bundled as `DiscoveryRecovery`), [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (the [guarded action contract](admin-actions.md), bundled as `AdminActions`), [`src/admin/discovery-recovery-view.js`](../../../src/admin/discovery-recovery-view.js) (the panel), and `loadDiscoveryRecovery`, `confirmDiscoveryReconsider` and `executeDiscoveryReconsider` in [`src/admin/limbo-client.js`](../../../src/admin/limbo-client.js). Tests: [`tests/discovery-reconsider.mjs`](../../../tests/discovery-reconsider.mjs), [`tests/admin-discovery-recovery-page.mjs`](../../../tests/admin-discovery-recovery-page.mjs), [`tests/discovery-recovery.mjs`](../../../tests/discovery-recovery.mjs); the [GET side-effect test](../../../tests/get-side-effects.mjs) pins the read sets of both GETs.
+
+| Route | Effect |
+| --- | --- |
+| `GET /api/admin/discovery-recovery?key=<key>[&pin=<pin>]` | Read-only assessment and action preview |
+| `POST /api/admin/discovery-recovery/confirm` | Issues a confirmation of one exact scope and stores it as an `approved` action record; changes no decision |
+| `POST /api/admin/discovery-recovery/reconsider` | Executes one issued confirmation |
+| `GET /api/admin/discovery-recovery/receipt?idempotencyKey=<key>` | Returns the stored action record; read-only |
+
+Any other method is 405 `method_not_allowed`, and an unknown path under `/api/admin/discovery-recovery/` is 404.
+
+### What is read
+
+The GET routes get a bucket wrapper with only `get` and `head`, so they cannot put, list or delete. The assessment reads exactly:
+
+| Key | Use |
+| --- | --- |
+| `epg/published-generation.json` | The published run |
+| `epg/generations/<run>/discovery-observations/manifest.json` and the one shard of the key | The record, its `decisionHash`, the index state |
+| `head` of `epg/discovery-resolution.json` and `epg/generations/<run>/discovery-latest.json` | Index freshness; no body |
+| `epg/resolver-continuation.json`, `epg/discovery-status.json`, `epg/resolver-lease.json` | The series state, the TMDB throttle (`retryAt`) and the live writer |
+
+A shard is read only when the manifest is readable. The receipt route reads only `admin/actions/discovery_reconsider/v1/<idempotencyKey>.json`. Nothing reads the ledger or the map body.
+
+### Parameters and pin
+
+| Parameter | Rule |
+| --- | --- |
+| `key` | Required: 1–200 characters, no control characters; otherwise 400 `invalid_key`, before any read |
+| `pin` | Optional: `D1.` + 32 lowercase hex digits; otherwise 400 `invalid_pin`. A pin that is not the version set just read is 409 `{error: "stale_pin", pin}` |
+
+The pin is a digest of every key read with its etag (`absent`, `unavailable`). The resolver lease is left out: it is judged on its own, and the executor's own lease must not make the pin it compares stale. The page uses the pin to say "the state changed", and the action uses it as the confirmed scope.
+
+### Answer
+
+`{pin, evaluatedAt, atomic: false, target: {key}, index, indexed, observation, assessment, action, coordination, sources}`:
+
+- `index`: `{state, reasons, programmeRunId, writtenAt, writer, coverage, counts}`.
+- `indexed`: whether the key has an index record. Without one, `observation` and `assessment` are `null`.
+- `observation`: the index record (title, year, durations, shows, activity fields, `decision`, `decisionHash`).
+- `assessment`: the [recovery assessment](../domain/discovery-recovery.md), with `execute` as the [gate](../domain/discovery-recovery.md#the-reconsideration-gate).
+- `action`: the contract preview, `{capability, version, status, reason, gate, scopeFingerprint, affected, excluded, budget, confirmTtlMs, compensation, atomic: false, cost}`. `status` is `eligible` only when the gate is available on complete evidence. `cost` is `{tmdbCalls: 0, chunksStarted: 0, writes: {resolutionMap: 1, actionRecord: 3, observationIndex: 2}}`.
+- `coordination`: the read status (`recorded`, `not_recorded`, `unavailable`) of the lease, the continuation and the status.
+- `sources`: the keys read.
+
+**Errors.** 400 `invalid_key`, 400 `invalid_pin`, 405, 409 `stale_pin`, 503 `storage_unavailable`.
+
+### Owner requests and refusals
+
+Both POSTs need all of these, or they answer 403 `access_denied` before any read:
+
+- the Cloudflare Access assertion header (`Cf-Access-Jwt-Assertion`), which the edge adds to every request it admits;
+- `Origin` equal to the Worker's origin; the Worker itself refuses any other origin earlier with 403 `Origin not allowed`;
+- `X-IPTV-Admin-Action: discovery_reconsider`;
+- `Content-Type: application/json`.
+
+The body is a JSON object of at most 16 KB. The Worker does not verify the assertion's signature; the Access application in front of the Worker is the authority, as for every other owner route.
+
+**Confirm.** The body is `{key, pin, idempotencyKey, accepted: true}`, where `idempotencyKey` is 16–80 letters, digits, `_` or `-` and the page generates it randomly. The route judges the observation again and refuses with nothing written when:
+
+- `pin` differs: 409 `stale_pin` with the current `pin`;
+- the preview is not eligible: 409 `not_eligible` with the gate `reason`.
+
+Otherwise it issues the contract confirmation (10 minutes) and creates the action record only if none exists under that key (409 `idempotency_conflict` otherwise). The answer is `{confirmation, preview}`. 400 `invalid_request` and 400 `confirmation_missing` (`accepted` not `true`) come before any read.
+
+**Reconsider.** The body is `{confirmation}`, exactly as issued. In this order:
+
+1. An invalid confirmation is 400 `invalid_request`, an unknown capability version 400 `unsupported_capability`, and no stored record 409 `confirmation_missing`.
+2. A stored receipt is returned as `{replayed: true, receipt, state}`, and nothing is written. A stored `running` intent without a receipt is 409 `in_progress` with `state: unknown`: an earlier submission started and its outcome is unknown, and it is never redone.
+3. The resolver lease is checked. If it cannot be read, the answer is 503 `storage_unavailable`. If the stored lease is not one the resolver would write (no string `id` or no finite `expiresAt` ≥ 0), it is 409 `lease_unknown` and the lease is not taken over. A live lease is 409 `lease_held`. Neither of these consumes the confirmation.
+4. Under the acquired lease, a fresh read is checked against the issued confirmation by the contract's `checkSubmission`. It can refuse with `access_denied`, `confirmation_mismatch`, `confirmation_expired`, `stale_pin`, `record_changed` or `eligibility_changed`.
+5. The decision map is read. The action refuses with `record_changed` when the map's etag differs from the one the fresh index named, or the decision's digest differs from `decisionHash`.
+6. The `running` intent is stored by compare-and-swap, with the before-image `{resolutionEtag, decisionHash, decision}` and the planned after-image.
+7. The lease is renewed as the fence. Then the map is written with `onlyIf.etagMatches`, changing only that key, to [`reconsideredDecision`](../domain/discovery-recovery.md#the-reconsideration-gate).
+8. The decision is read back and compared by digest.
+9. The index record and the manifest are refreshed, each by compare-and-swap behind the fence.
+10. The final record with the receipt is stored.
+
+A refusal in step 4 or 5 is stored as a `refused` receipt, so that key is used up; a new check and confirmation are needed. The lease is released in every case.
+
+| Outcome | `receipt.state` | HTTP |
+| --- | --- | --- |
+| Written and read back | `succeeded` | 200 |
+| The map changed between read and write (compare-and-swap lost) | `failed` (`skipped_changed`, `conflict`) | 200 |
+| The put threw, or the read-back did not show the new decision | `unknown` (`storage_error`); read the observation again, nothing is retried | 200 |
+| The lease was lost before the write | `aborted` (`fence_lost`); nothing written | 200 |
+| A refusal of step 4 or 5 | `refused` with `refusal` | 409 |
+
+The answer is `{replayed: false, receipt, durable, state, index, refusal?}`. `durable: false` means the final action record could not be stored, so the receipt exists only in this answer. `index` is `{refreshed, reason}`. With `refreshed: false` (`fence_lost`, `shard_changed`, `manifest_changed`, `source_unread`, `record_absent`, `error` or an index state), the index stays stale until the next chunk.
+
+**Action record.** `admin/actions/discovery_reconsider/v1/<idempotencyKey>.json`:
+
+```text
+{schemaVersion: 1, kind: "discovery_reconsider_action", idempotencyKey, state, issued, createdAt, startedAt, finishedAt,
+ provenance: {actor: "owner", authority: "cloudflare_access", programmeRunId, manifestEtag, observationKey},
+ beforeImage, afterImage, receipt, index}
+```
+
+`state` is `approved`, `running` or a receipt state. The receipt route returns `{idempotencyKey, state, record}`, with `state: unknown` for a `running` record. It answers 404 `not_found` when no record exists and 400 `invalid_request` for a malformed key.
+
+### The observation recovery panel
+
+«Разобрать наблюдение» on a limbo observation item toggles a panel under the item (`aria-expanded`, `aria-controls`) and issues one GET for that key. In Russian, the panel shows:
+
+- the verdict and what happened;
+- what will happen next;
+- the facts: title, year, durations, the next airings in Europe/Madrid, the programme window, the decision, attempts, last and next attempt, whether the airings changed, the resolver series, the terminal reason and identity;
+- the snapshot line.
+
+The identifiers (key, pin, digests, etags, the idempotency key, source keys and raw codes) appear only inside the closed «Технические подробности». A verdict, reason, gate, next step, series state or effect without declared copy renders «Невозможно достоверно объяснить состояние наблюдения» with no action. A stale or unavailable index says so, and offers only «Проверить заново».
+
+**Action block «Повторно направить на проверку».**
+
+- **Unavailable.** When the gate is unavailable, the block names the reason in plain words.
+- **Preview.** When the gate is available, the block shows the effect, the cost (TMDB requests 0, resolver runs 0, the writes) and the risk: the lease, the compare-and-swap, one extra ordinary attempt, no automatic undo. Then comes a checkbox naming the exact observation («Я хочу снять терминальную отметку только с наблюдения «…» (год)…»).
+- **Confirm.** The checkbox only enables «Подтвердить», without redrawing the panel, so focus stays on it. «Подтвердить» sends the confirm POST.
+- **Execute.** The panel then shows the issued confirmation with its expiry in Madrid time, «Повторно направить на проверку» (focused) and «Отменить», which drops the confirmation and returns focus to the checkbox. Execution is sent once; whatever comes back, the panel reads the observation again with the held pin. The receipt (focused) stays above the fresh state: written, refused with the reason, aborted, failed or unknown, plus a warning when it was not stored or the index was not refreshed.
+- **Retry after a busy resolver.** A `lease_held` or `lease_unknown` refusal keeps the confirmation. «Проверить заново» then keeps it until it expires, so the owner can execute once the resolver is free; the execute button is offered only when the gate is available again.
+
+Below 800 px the controls are full width. The page sends no token: the Access session is the only credential.
+
 ## Poster coverage
 
 `GET /api/admin/posters` is the read behind the owner page `/admin/posters`: how many catalog records lack a poster, how many of them can be restored from TMDB by a verified id, which ones cannot, and the next bounded batch of the restoration queue. It is read-only and behind the same Access application. The only write the page can cause is an owner-confirmed call of the existing maintenance route `POST /api/enrichment/catalog/posters` ([catalog reference](catalog.md#poster-hydration), [ADR 0048](../../adr/0048-permanent-catalog-poster-maintenance-route.md)); this route never calls it. Source: [`src/admin/posters.js`](../../../src/admin/posters.js) (handler), [`src/admin/posters-client.js`](../../../src/admin/posters-client.js), [`src/admin/posters-run.js`](../../../src/admin/posters-run.js) and [`public/admin-posters.js`](../../../public/admin-posters.js) (the page). Tests: [`tests/admin-posters-api.mjs`](../../../tests/admin-posters-api.mjs), [`tests/admin-posters-run.mjs`](../../../tests/admin-posters-run.mjs), [`tests/admin-posters-page.mjs`](../../../tests/admin-posters-page.mjs); the [GET side-effect test](../../../tests/get-side-effects.mjs) pins its read set.
@@ -297,7 +426,8 @@ A manual run follows the guarded-action principles of [admin actions](admin-acti
 - The catalogue is the pinned generation's programme: watchlist films and the people on them. Catalog-only films (`epg/discovered-films.json`), unresolved observations and the resolution ledger are not searched; identity codes that need the ledger (`ambiguous`, `rejected`) are not produced here.
 - The catalogue routes do not read fingerprint and prediction state; see `queue_unavailable` above. Only the [prediction recovery read](#prediction-recovery-get-apiadminprediction-recovery) reads them, for one film per request.
 - Pages run over an in-memory projection of the whole programme object; a cold request costs five R2 reads and one parse of the programme, a warm one five reads and no parse of the programme.
-- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; this API has no `POST`. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
-- `/admin/posters` is the one admin page that calls a write route, and only the existing `POST /api/enrichment/catalog/posters`, after the owner's confirmation. Outcomes `no_poster_on_tmdb` and `tmdb_id_mismatch` are not stored by that route, so those records stay in `verifiedMissing`; only the browser history remembers them.
+- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; the catalogue routes have no `POST`. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
+- Two admin pages can cause a write, each only after the owner's confirmation. `/admin/posters` calls the existing `POST /api/enrichment/catalog/posters`; `/admin/limbo` calls the two `POST /api/admin/discovery-recovery/*` routes of one observation.
+- On `/admin/posters`: Outcomes `no_poster_on_tmdb` and `tmdb_id_mismatch` are not stored by that route, so those records stay in `verifiedMissing`; only the browser history remembers them.
 
-Rollback is a revert of the routes and the pages: the read routes wrote no R2 object. Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback).
+Rollback is a revert of the routes and the pages: the read routes wrote no R2 object. Decisions reconsidered by confirmed actions stay reconsidered, and their action records stay ([runbook](../../runbooks/discovery-ledger.md#one-stuck-observation)). Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback).

@@ -37,24 +37,38 @@ In bounded mode no discovery chunk and no status read touches the archive. `POST
 
   Do not follow `current.json` for history.
 
-## One stuck observation: will a retry help?
+## One stuck observation
 
-There is no per-observation retry, and there is no owner page that shows one observation: the limbo inventory reports observations as unavailable until a bounded projection exists. Do not improvise a targeted retry.
+There is no per-observation retry or lookup. The owner page explains one observation, and for one case it offers a guarded write that sends the observation back to the ordinary queue ([ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md)). Do not improvise anything else.
 
-1. **Read the series, read-only.** In `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`), read `continuation`, `continuationHealth` and `lastBatch`. The [recovery assessment](../reference/domain/discovery-recovery.md#series-states) names the series state they add up to:
+1. **Read it, read-only.** Open `/admin/limbo?kind=observation` and press «Разобрать наблюдение» on the item: one `GET /api/admin/discovery-recovery` ([contract](../reference/api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery)). If the page says observations are unavailable, the generation's [observation index](../reference/domain/discovery-observation-index.md) is missing, torn or of another generation. The next ordinary resolver chunk writes it. Wait for it; a chunk run only to build the index is a series-level operation that needs the owner's approval.
+2. **Read the series.** The panel names the series state; the same is in `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`): `continuation`, `continuationHealth`, `lastBatch`. The [series states](../reference/domain/discovery-recovery.md#series-states):
    - `continuing` and `recovering`: the next scheduled step takes the queue.
-   - `waiting` (TMDB throttling, chunk budget, error delay) and `live_writer` (a live resolver lease): the series moves after the gate or the lease expiry. These are fences: no retry may pass them.
+   - `waiting` (TMDB throttling, chunk budget, error delay) and `live_writer` (a live resolver lease): the series moves after the gate or the lease expiry. These are fences that nothing may pass.
    - `stopped` for `missing_secret`: nothing moves until the owner restores `TMDB_API_READ_ACCESS_TOKEN` ([MCP connectivity](mcp-connectivity.md)). A new EPG commit stops the same way.
    - `interrupted` and every other `stopped`: nothing moves until the next EPG commit.
-2. **Judge the observation by the rules, not by hope.**
+3. **Judge by the rules.** The [verdict table](../reference/domain/discovery-recovery.md#verdicts) gives the answer for each case:
    - An actionable observation is already queued.
    - A future `retryAt` is policy.
-   - A terminal or `ambiguous` decision needs identity review.
+   - An `ambiguous` decision needs identity review, which has no page yet.
    - A candidate outside the EPG window cannot be resolved until it airs again.
+   - A terminal decision on unchanged evidence (`no_more_evidence`) stays out of the resolver's work until new airings arrive. This is the one case the action addresses.
+4. **Reconsider, only as the owner.** This is a production write. Agents never run it without the owner's explicit approval of that run. When the panel offers «Повторно направить на проверку», it states the cost (no TMDB request, no resolver run, one decision written), the risk and the effect.
+   1. Tick the checkbox naming the exact observation, then press «Подтвердить». This issues a confirmation valid for 10 minutes and changes no decision.
+   2. Press «Повторно направить на проверку» once.
    
-   The [verdict table](../reference/domain/discovery-recovery.md#verdicts) gives the answer for each case.
-3. **Do not use a forced `POST /api/enrichment/discovery/resolve` as a targeted retry.** It runs a whole chunk over other observations, with TMDB calls. Running it is a separate owner-approved operation, decided at the series level.
-4. **Never edit `epg/discovery-resolution.json` or the resolver lease by hand.** A running chunk rewrites the whole decision map from its own copy, so a manual edit is lost or overwrites the chunk's decisions.
+   The action clears the terminal reason under the resolver lease and keeps the attempt count. The next ordinary chunk makes exactly one more attempt; an uncertain result on the same airings is terminal again at once.
+5. **Read the receipt.**
+   - **Записано** (`succeeded`): nothing else to do. The next ordinary chunk decides. The panel's fresh read shows the observation back in the ordinary queue.
+   - **Резолвер занят** (`lease_held`) or **блокировка в непонятном состоянии** (`lease_unknown`): nothing was written, and the confirmation is kept. Press «Проверить заново» later and execute while it is valid. A malformed lease is replaced by the next ordinary chunk; never edit it.
+   - **Отказ** (`refused`, for example `stale_pin` or `record_changed`): the data changed after the check. Check again and confirm anew.
+   - **Не записано** (`failed`, a lost compare-and-swap): a chunk wrote the map at the same moment. Check again.
+   - **Прервано** (`aborted`): the lease was lost before the write. Nothing was written. Check again.
+   - **Исход неизвестен** (`unknown`, or `in_progress` for a key that started and left no receipt): do **not** repeat. Read the observation again. A decision with the `reconsidered` marker of that idempotency key landed. `GET /api/admin/discovery-recovery/receipt?idempotencyKey=…` returns the stored record with its before-image.
+   - A warning that the receipt was not stored, or that the index was not refreshed: the write itself is as the receipt says. The index reads as stale until the next chunk, and the action is not offered meanwhile.
+6. **Undo is manual.** The action record under `admin/actions/discovery_reconsider/v1/` keeps the previous decision. Restoring it is a separate owner-approved write and rarely needed, because the next uncertain attempt on the same airings makes the observation terminal again.
+7. **Do not use a forced `POST /api/enrichment/discovery/resolve` as a targeted retry.** It runs a whole chunk over other observations, with TMDB calls. Running it is a separate owner-approved operation, decided at the series level.
+8. **Never edit `epg/discovery-resolution.json`, the index or the resolver lease by hand.** A running chunk rewrites the whole decision map from its own copy, so a manual edit is lost or overwrites the chunk's decisions. The guarded action is the only single-decision write, and it compare-and-swaps under the lease.
 
 ## Rollback
 
@@ -67,6 +81,7 @@ There is no per-observation retry, and there is no owner page that shows one obs
 
   A plain code revert without these steps drops archived history.
 - Archive objects are never deleted by the Worker. Removing unreferenced versions is a separate, owner-approved maintenance decision.
+- **Observation index and reconsideration.** A code revert stops the index writes and the action. Index objects already written stay under their generation and are ignored, and a decision already reconsidered stays so until the next chunk decides it. Action records stay.
 
 ## Offline split (AIR-221 rehearsal)
 

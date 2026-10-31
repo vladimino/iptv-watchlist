@@ -7,9 +7,9 @@
 - what the pipeline will do next and when;
 - whether its identity needs review instead of a retry.
 
-It is pure and deterministic: no I/O, no clock of its own, no network. No route, Worker bundle or action capability loads it. It is the judgement a future read-only per-observation view runs over a bounded projection. Tests: [`tests/discovery-recovery.mjs`](../../../tests/discovery-recovery.mjs).
+It is pure and deterministic: no I/O, no clock of its own, no network. The Worker bundles it as `DiscoveryRecovery`. The [per-observation recovery read](../api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery) and the guarded action run it over a record of the [observation index](discovery-observation-index.md). Tests: [`tests/discovery-recovery.mjs`](../../../tests/discovery-recovery.mjs).
 
-**Execution is never available.** No writer can retry one observation safely today. The candidate exists only inside the whole discovery ledger. The decisions are one shared object that every chunk rewrites whole under the resolver lease. The only resolver entry point, `POST /api/enrichment/discovery/resolve`, runs a chunk over the global pending order. Every assessment therefore carries `execute: {available: false, capability: null, reason: "no_targeted_writer"}`. The analysis and the proposed separate execution scope are in the [dated evidence](../../evidence/discovery-targeted-recovery-no-go-2026-10-31.md).
+**No retry, one reconsideration.** Nothing here looks an observation up or runs a chunk. `execute` says only whether the one guarded write of this subsystem, `discovery_reconsider@1`, may be offered: it [lifts the terminal fence](#the-reconsideration-gate) of an observation whose automatic attempts ended on unchanged evidence, so that the next ordinary resolver chunk may take it again. Decision: [ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md).
 
 ## Parity with the resolver
 
@@ -34,8 +34,12 @@ assessObservationRecovery({
   observation,                           // the candidate for target.key; null = the ledger has no such key; undefined = not supplied
   decision,                              // the resolution entry for the key; null = none; undefined = not supplied
   series: {record, health, lease},       // raw continuation record (null when absent), its continuation health, raw resolver lease (null when absent)
+  index: {state},                        // the observation index state the observation was read from; only `fresh` lets the action be offered
+  throttle: {retryAt},                   // the resolver's last TMDB throttle time from epg/discovery-status.json, or null
 })
 ```
+
+`index` and `throttle` affect only `execute`.
 
 - **`observation`:**
   - identity and generation: `key`, `programmeRunId`;
@@ -67,7 +71,7 @@ Errors return `{error}` and nothing else: `invalid_input` (not an object), `inva
 
 ## Output
 
-`{schemaVersion, target, verdict, reason, observation, decision, series, retry, next, review, execute, evidence}`
+`{schemaVersion, target, verdict, reason, observation, decision, series, retry, next, review, execute, evidence}`; `schemaVersion` is 2.
 
 | Field | Meaning |
 | --- | --- |
@@ -78,7 +82,7 @@ Errors return `{error}` and nothing else: `invalid_input` (not an object), `inva
 | `retry` | `{helps, reason}`: `no`, `only_sooner`, `unlikely`, `series_level` or `unknown`. Never `yes` |
 | `next` | `{actor, at}`: `none`, `scheduled_step`, `epg_commit`, `new_epg_evidence`, `owner_investigation` or `reread`, with a time when one is known |
 | `review` | `{suggested, reason, target, available, unavailableReason}`. Review is suggested for an ambiguous or terminal identity. `available` is `false` until an identity review page exists (`identity_review_not_built`) |
-| `execute` | Always `{available: false, capability: null, reason: "no_targeted_writer"}` |
+| `execute` | `{available, capability: "discovery_reconsider", version: 1, reason, effect: {when, at}}`, the [reconsideration gate](#the-reconsideration-gate) |
 | `evidence` | `{completeness, missing, anomalies}`: `missing` when a required part was not supplied; `partial` when the series is unknown for a verdict that depends on it, or the decision has an unparseable retry time |
 
 ### Verdicts
@@ -119,6 +123,29 @@ Two other states keep the observation queued, but a retry would not even be soon
 - **Live fence (`live_writer`):** another writer holds the resolver lease. A retry must wait for the lease like any chunk, so `retry.helps` is `no`.
 
 A missing TMDB secret is not a stop that a generation resets. Each EPG commit starts a series that stops the same way, and a whole-series action fails the same way, until the owner restores the configuration. So `retry.helps` is `no` with reason `configuration_required`, and `next.actor` is `owner_investigation` rather than `epg_commit`. The other stops do reset with the next EPG commit.
+
+## The reconsideration gate
+
+`execute` is decided after the verdict, in this order; the first that applies wins:
+
+| Order | `execute.reason` | `available` | When |
+| --- | --- | --- | --- |
+| 1 | `index_not_current` | no | `index.state` is not `fresh` |
+| 2 | by verdict | no | The verdict is not `no_more_evidence`. The reason is `already_resolved`, `not_a_film`, `not_current`, `already_eligible` (`queued`), `identity_ambiguous` (`identity_conflict`), `backoff_is_policy`, `generation_changed`, `target_absent` (`not_found`) or `evidence_incomplete` (`unknown`) |
+| 3 | `terminal_reason_unknown` | no | The terminal reason is not `repeated_uncertain_match` or `awaiting_confirmation` |
+| 4 | `identity_ambiguous` | no | The decision is `ambiguous` |
+| 5 | `writer_active` | no | `series.state` is `live_writer`: the resolver lease is live |
+| 6 | `series_unknown` | no | `series.state` is `unknown`, including a malformed lease |
+| 7 | `series_backoff` | no | `waiting` for anything but the chunk budget: TMDB or storage backoff, an error delay |
+| 8 | `configuration_required` | no | Stopped for a missing TMDB secret |
+| 9 | `tmdb_throttled` | no | `throttle.retryAt` is in the future |
+| 10 | `eligible` | yes | `effect.when` is `next_ordinary_chunk` (`continuing`, `recovering`), `after_series_wait` with `effect.at` (waiting for the chunk budget), or `next_series` (stopped or interrupted: the next EPG commit opens a series that takes it) |
+
+`DISCOVERY_RECONSIDER_REASONS` and `DISCOVERY_RECONSIDER_EFFECTS` are the closed vocabularies.
+
+`reconsiderIssue(assessment)` turns the gate into the data health issue the [guarded action contract](../api/admin-actions.md) judges a preview by: `{id: "discovery_reconsider:<key>", subject: {kind: "observation", id: key}, action: {code: "discovery_reconsider", eligible, reason}, evidence: {completeness}}`. `eligible` is `true` when the gate is available. It is `null` (unknown, never eligible) for an `unknown` verdict, `index_not_current` and `series_unknown`, and `false` otherwise.
+
+`reconsideredDecision(previous, {at, idempotencyKey})` is the decision the action writes. It is the same record with `terminalReason: null` and `retryAt: null`, plus `reconsidered: {at, idempotencyKey, capability: "discovery_reconsider@1", previousTerminalReason, previousRetryAt, attemptsAtReconsider}`. `attempts`, `evidenceKey`, `status` and the scoring are kept. The resolver's `resolutionActionability` then finds the decision actionable, and its next uncertain outcome on the same evidence reaches the attempt limit and is terminal again at once: the owner buys exactly one more ordinary attempt. The resolver's next write of the decision drops the marker; the action record keeps the history.
 
 ## Relation to the data health model
 

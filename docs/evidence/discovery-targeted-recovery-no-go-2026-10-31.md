@@ -8,6 +8,8 @@
 
 **Evidence lifecycle:** dated code analysis. **Operational authority:** none. No R2 or D1 write, deployment, flag, Task, Access change, discovery chunk, TMDB request or lease change.
 
+**Later decision:** after this analysis the owner widened the scope. The obstacles below are addressed by a generation-scoped observation index and one guarded action, proposed in [ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md). The NO-GO stands for the code it describes; the current contracts are in the [admin API](../reference/api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery) and the [recovery assessment](../reference/domain/discovery-recovery.md).
+
 ## Question
 
 Can the owner retry or reconsider **one** stalled or failed discovery observation (one EPG candidate key) without rerunning discovery, resetting a lease, bypassing a backoff or calling TMDB outside an approved action, and with the preview, confirmation, CAS, idempotency and receipt the [guarded action contract](../reference/api/admin-actions.md) requires?
