@@ -39,7 +39,10 @@ const LetterboxdRatings=(()=>{
   if(run.lease?.step)return Date.parse(run.lease.expiresAt)>now?null:'interrupted';
   return now-Date.parse(run.updatedAt||run.startedAt)>ABANDONED_MS?'abandoned':null;
  }
- const sameCheckpoint=(a,b)=>!!a&&!!b&&['diaryPagesRead','diaryNextPage','diaryMode','removalChecked','legacyPagesLinked'].every(key=>(a[key]??null)===(b[key]??null));
+ // An absent legacyPagesLinked is zero: a run recorded before this field still matches a new run that linked no page.
+ // Zero does not match one. Every other checkpoint field still treats absence as null, not as zero.
+ const checkpointValue=(checkpoint,key)=>key==='legacyPagesLinked'?(checkpoint?.[key]??0):(checkpoint?.[key]??null);
+ const sameCheckpoint=(a,b)=>!!a&&!!b&&['diaryPagesRead','diaryNextPage','diaryMode','removalChecked','legacyPagesLinked'].every(key=>checkpointValue(a,key)===checkpointValue(b,key));
  const summaryOf=run=>({runId:run.runId,trigger:run.trigger,state:run.state,outcome:run.outcome??null,cause:run.cause??null,interruptedPhase:run.interruptedPhase??null,startedAt:run.startedAt,endedAt:run.finishedAt||run.closedAt||null,checkpoint:clone(run.checkpoint||{})});
  const withRecent=run=>({...run,recent:[summaryOf(run),...(run.recent||[])].slice(0,RECENT)});
  // Closed as `unknown`, never resumed. Two consecutive interrupted runs that died in the same phase at the same
@@ -173,7 +176,7 @@ const LetterboxdRatings=(()=>{
  }
 
  // The removal phase: first, while a rated legacy entry still has no finished event scan, one page of `events/items/`
- // (ADR 0070). That page only adds references for an exact film id and does not reopen the entry. Then the event writes
+ // (ADR 0071). That page only adds references for an exact film id and does not reopen the entry. Then the event writes
  // of rated entries with unresolved references, at most 100 per step, least recently checked first; the run visits each
  // reference once (those checked since the run started are skipped) and goes on with further steps while unvisited ones
  // are left, so references that never resolve neither keep a run going nor hide later ones. A legacy scan that has not

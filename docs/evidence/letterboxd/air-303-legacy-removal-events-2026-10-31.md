@@ -20,7 +20,7 @@
 
 The same film was removed, added again, and removed again (29 Oct 18:07, 30 Oct 17:03 and 31 Oct 10:55 Europe/Madrid). Both removal events remained in «Остальные удаления». The Diary rating is a fact on the legacy entry. `settleRemovalRefs` writes only events named by `refs`, and this entry has none.
 
-**Verdict.** The gap is real on those counts. The repair in [ADR 0070](../../adr/0070-legacy-removal-event-link.md) is a checkpointed page inside a later ratings removal step, not a write performed by this note.
+**Verdict.** The gap is real on those counts. The repair in [ADR 0071](../../adr/0071-legacy-removal-event-link.md) is a checkpointed page inside a later ratings removal step, not a write performed by this note.
 
 **Authority.** Authorizes no ratings run, flag, Task, migration, EPG commit or R2/D1 write. A deploy of the repair does not itself list or update the events.
 

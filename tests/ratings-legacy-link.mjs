@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,migrated,QUEUE,SEPARATE,DAY,eventKeyOf,film,plain,g} from './ratings-harness.mjs';
 
-// ADR 0070: a rated legacy entry is linked to existing removal events of the same film id, one event-list page per
+// ADR 0071: a rated legacy entry is linked to existing removal events of the same film id, one event-list page per
 // ratings step, then the stored rating is settled. A removal is not a viewing, and a rating is never invented.
 const T0=Date.parse('2026-10-31T12:00:00.000Z');
 const FIRST='2026-10-29T17:07:00.000Z',SECOND='2026-10-31T09:55:00.000Z';
@@ -135,4 +135,31 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
  assert.equal(runLists(),2,'a later run does not scan events again');
 }
 
-console.log('Ratings legacy link: two removals, alias, kept rating, missing event, killed page, no list without a confirmed rating, and a checkpointed ratings step passed');
+// 4. A checkpoint stored before legacyPagesLinked compares as zero against a new run that linked no page, so the
+// repeated-interruption guard still isolates. One completed page does not match. Another absent field is not zero.
+{
+ const oldCheckpoint={diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0};
+ const prior={runId:'old-run',trigger:'manual',state:'unknown',outcome:null,cause:'interrupted',interruptedPhase:'removal',startedAt:at(T0-3600000),endedAt:at(T0-3600000),checkpoint:{...oldCheckpoint}};
+ const plant=(bucket,checkpoint,recentCheckpoint=prior.checkpoint)=>{
+  bucket.set('letterboxd/ratings/run.json',{schemaVersion:1,runId:'new-run',trigger:'manual',state:'running',phase:'removal',lease:{step:'dead',expiresAt:at(T0-60000)},startedAt:at(T0-120000),updatedAt:at(T0-120000),lastStepAt:at(T0-120000),finishedAt:null,closedAt:null,checkpoint,outcome:null,cause:null,interruptedPhase:null,diary:null,removal:null,isolation:null,lastStartAt:at(T0-120000),recent:[{...prior,checkpoint:recentCheckpoint}]});
+ };
+ async function open(checkpoint,recentCheckpoint){
+  const {clock:runClock,FakeDate:RunDate,crypto:runCrypto}=makeClock(T0),runNet=makeNetwork(),runBucket=makeBucket();
+  const runCtx=loadContext({net:runNet,clock:runClock,FakeDate:RunDate,crypto:runCrypto});
+  const runEnv=baseEnv(runBucket,SEPARATE);
+  migrated(runBucket);plant(runBucket,checkpoint,recentCheckpoint);
+  return {bucket:runBucket,reply:plain(await g(runCtx,'LetterboxdRatings').start(runEnv,{trigger:'manual'}))};
+ }
+ const matched=await open({...oldCheckpoint,legacyPagesLinked:0});
+ assert.equal(matched.reply.reason,'isolated');
+ assert.equal(matched.reply.isolation.phase,'removal');
+ eq(matched.reply.isolation.runIds,['old-run','new-run']);
+ const progressed=await open({...oldCheckpoint,legacyPagesLinked:1});
+ assert.equal(progressed.reply.reason,'started');
+ assert.equal(progressed.bucket.value('letterboxd/ratings/run.json').isolation,null,'one linked page is not the same checkpoint as none');
+ const otherField=await open({...oldCheckpoint,legacyPagesLinked:0},{diaryNextPage:1,diaryMode:'incremental',removalChecked:0});
+ assert.equal(otherField.reply.reason,'started','an absent diaryPagesRead stays null and does not match 0');
+ assert.equal(otherField.bucket.value('letterboxd/ratings/run.json').isolation,null);
+}
+
+console.log('Ratings legacy link: two removals, alias, kept rating, missing event, killed page, no list without a confirmed rating, a checkpointed ratings step, and isolation across a checkpoint without legacyPagesLinked passed');

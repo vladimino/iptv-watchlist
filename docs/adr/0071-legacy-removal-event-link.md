@@ -1,4 +1,4 @@
-# ADR 0070: A rated legacy removal entry is linked to existing events of the same film id
+# ADR 0071: A rated legacy removal entry is linked to existing events of the same film id
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-31  
@@ -14,6 +14,7 @@
 - **Diary resolution does not add a reference.** `resolveRemovalByDiary` marks the queue entry `rated` with `lastResult: diary` and leaves `legacy` and `refs` as they are. The fact is stored. The historical watchlist events are not.
 - **Production shape on 2026-10-31, as recorded on AIR-303 from read-only checks.** One legacy queue entry (`entries: 1`, `legacy: 1`, `refs: 0`, hand-over films `0`, `ratings_storage_migrate` `dry_run` `writes: 0`). The same film was removed twice, and both removal events stayed in «Остальные удаления» after a Diary rating. The manual EPG run `d035ce87-3fbc-4edd-aeac-ecf5a84d8aed` reached `programme` complete; inline ratings were interrupted in `post_commit` with `ratingAttempt: unknown` and `removalRatingLookup.checked: 0`. This record does not repeat those reads and does not include a diary row or a rating value. Counts and the run id are in the evidence note.
 - **A full scan on every EPG commit or every ordinary ratings step is the wrong repair.** `enrichRecentRemovalRatings` already lists up to 100 events on the inline path. Putting that on the EPG commit, or on every removal step after the repair, walks `events/items/` for no further work. `addRemovalRef` must not be reused for this repair: a new reference on a finished entry reopens it to `pending` and would start another Letterboxd lookup.
+- **Number.** On 2026-10-31, `main` ended at ADR 0069. Open [PR #291](https://github.com/vladimino/iptv-watchlist/pull/291) already carries Accepted ADR 0070, the metadata-sync freshness clocks ([AIR-311](https://trello.com/c/81P7wg4u)). That acceptance belongs to that record. This record is 0071. No other open branch held 0071.
 
 ## Decision
 
@@ -26,7 +27,7 @@ A ratings removal step links a rated legacy entry to existing watchlist-removal 
 - When the list is exhausted, each snapshotted candidate gets `legacyLink.done`. If it has at least one reference, `legacy` is cleared and the new references stay unresolved for `settleRemovalRefs`. If it has none, `legacy` and `refs: []` stay, so version 1 retention still applies, and later steps do not list.
 - Settle then writes the stored half-star. `withRemovalRatings` does not replace a confirmed rating already on the event. The reference resolves when the stored event lists that film as removed with a confirmed rating. A missing event stays `event_missing` and is not recreated.
 - Retention does not run while the scan is unfinished, so an old unmatched `refs: []` entry is not deleted between pages. After the scan, unresolved references follow the existing rule and are not pruned.
-- The run checkpoint `legacyPagesLinked` counts pages whose queue write succeeded. Two interrupted runs at different page counts are not the same checkpoint. The queue cursor is the authority; the counter only feeds isolation.
+- The run checkpoint `legacyPagesLinked` counts pages whose queue write succeeded. Two interrupted runs at different page counts are not the same checkpoint. The queue cursor is the authority; the counter only feeds isolation. An absent `legacyPagesLinked` compares as 0, so a run stored before this field still matches a new run that linked no page. 0 does not match 1. Other checkpoint fields still treat absence as null, not as zero.
 - The EPG commit, `ratings_sync_status`, and `ratings_storage_migrate` do not list events for this repair. A code deploy does not start a ratings run.
 
 What this record does **not** decide: a production ratings run, a flag change, a Task edit, a storage migration, a backfill outside the next owner-approved ratings removal phase, a new Letterboxd request, or a change to how a new v2 removal enqueues its own event.
@@ -41,7 +42,7 @@ What this record does **not** decide: a production ratings run, a flag change, a
 
 - The first removal steps after this code is deployed, and only if an owner-approved ratings run is later started while a rated legacy entry remains, walk `events/items/` twenty keys at a time. The observed volume is one legacy entry and two removal events for that film. The cost is the length of the event prefix, once, not a list on later steps.
 - A second removal of the same film after the scan uses the existing v2 enqueue. It is not another full scan.
-- Two diagrams in `docs/architecture/scheduling-and-orchestration.md` change: the ratings sequence diagram gains one optional list page, and the ratings state diagram's removal loop names that page. The drift sequence diagram does not change. Both changed diagrams need the owner's visual approval before merge. This record stays Proposed until the owner accepts or declines it.
+- Two diagrams in `docs/architecture/scheduling-and-orchestration.md` change: the ratings sequence diagram gains one optional list page, and the ratings state diagram's removal loop names that page. The drift sequence diagram does not change. Both changed diagrams need the owner's visual approval before merge. This record stays Proposed until the owner accepts or declines it. Open PR #291 splits the earlier scheduling diagrams for the metadata-sync clocks and does not edit these two ratings diagrams. If that pull request reaches `main` first, keep both edits.
 
 ## Recovery and migration boundary
 
