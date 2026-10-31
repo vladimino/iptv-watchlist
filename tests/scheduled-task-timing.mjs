@@ -97,6 +97,28 @@ const backoff={stage:'paused',reason:'backoff',remainingChunks:3,nextCatchUpAt:'
 assert.equal(decide(backoff,'2026-10-28T07:20:00Z').run,false,'the 07:20 trigger still waits for a 07:25 backoff');
 assert.equal(decide(backoff,'2026-10-28T08:20:00Z').run,true);
 
+// AIR-299: a zero-budget same-generation checkpoint is not terminal once its hourly gate has passed.
+// The stored discoveryContract can still say "wait"; the next ordinary step evaluates continuationDecision
+// and starts a new bounded series. The external Scheduled Task has an additional read-only safety preflight.
+const exhausted={...budget,programmeRunId:'programme-1'};
+const exhaustedDue=decide(exhausted,'2026-10-28T06:22:00Z');
+assert.equal(exhaustedDue.run,true,'past-due exhausted budget must not deadlock catch-up');
+assert.equal(exhaustedDue.budget,12,'the Worker replenishes a bounded series, not an unlimited loop');
+assert.equal(contractOf("{stage:'paused',reason:'chunk_budget',remainingChunks:0,nextCatchUpAt:'2026-10-28T06:00:00.000Z'}").nextAction,'wait','the stored wait snapshot can remain wait after the gate');
+assert.equal(decide({...exhausted,nextCatchUpAt:'2026-10-28T07:00:00.000Z'},'2026-10-28T06:22:00Z').run,false,'never renew ahead of the gate');
+assert.equal(decide({...exhausted,retryAt:'2026-10-28T07:00:00.000Z'},'2026-10-28T06:22:00Z').run,false,'future retry still blocks renewal');
+assert.equal(decide({...exhausted,stage:'complete'},'2026-10-28T06:22:00Z').run,false,'complete is terminal, unlike exhausted paused');
+assert.equal(decide({...exhausted,reason:'interrupted'},'2026-10-28T06:22:00Z').run,false,'interrupted is fail-closed');
+assert.equal(decide({...exhausted,reason:'backoff',retryAt:'2026-10-28T07:00:00.000Z'},'2026-10-28T06:22:00Z').run,false,'do not treat a future backoff as due chunk_budget');
+assert.equal(run("generationHandoff({stage:'paused',reason:'chunk_budget',remainingChunks:0,programmeRunId:'programme-1'},{status:'settled'},'programme-1',{runId:'programme-1'})"),null,'same generation is due renewal, not handoff');
+assert.equal(run("generationHandoff({stage:'paused',reason:'chunk_budget',remainingChunks:0,programmeRunId:'programme-0'},{status:'settled'},'programme-1',{runId:'programme-1'})"),'recover','old generation is a different recovery path');
+const settledWithOtherLease=JSON.parse(JSON.stringify(run("continuationHealth({stage:'paused',reason:'chunk_budget',remainingChunks:0,programmeRunId:'programme-1'},{id:'another-writer',expiresAt:Date.now()+120000},null,Date.now(),'programme-1')")));
+assert.equal(settledWithOtherLease.status,'settled');
+assert.equal(settledWithOtherLease.lease,null,'settled health does not itself prove absence of another live lease');
+assert.match(contract,/Due exhausted `chunk_budget` \(AIR-299\)/,'the maintained contract must document the new scheduled-task exception');
+assert.match(contract,/epg_status\.stage=complete/,'do not lose the hourly global EPG stage gate');
+
+
 // Downstream: the footer, the queue status and a wait over HTTP all carry the nominal :20 trigger.
 records.set('enrichment/profile/current.json',{version:7,updatedAt:'2026-10-12T18:00:00Z',profileHash:'profile-7',profile:{}});
 records.set('programme.json',{runId:'programme-1',updatedAt:'2026-10-28T04:00:00Z',watchlistCount:0,films:[],stats:{}});
