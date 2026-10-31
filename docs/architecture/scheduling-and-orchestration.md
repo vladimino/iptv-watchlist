@@ -92,7 +92,7 @@ sequenceDiagram
         Projector->>D1: Read change keys
     end
     opt D1_ENRICHMENT_WRITE is on and the inputs are complete
-        Projector->>D1: Changed Films and Persons with their keys, one batch each
+        Projector->>D1: Changed Films and Persons with their keys, one batch each; sync clocks only when schema version is 5
     end
 ```
 

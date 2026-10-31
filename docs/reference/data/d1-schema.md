@@ -1,6 +1,6 @@
 # D1 schema v1
 
-[AIR-49](https://trello.com/c/YNaLFwtW) is this schema and the storage boundary. The schema is `migrations/0001_schema_v1.sql` with `0002`, `0003` and `0004` (schema v4). Production D1 database `iptv` holds schema v3 and the backfilled copy of R2, and is bound to the Worker as `DB`. Migration `0004` adds the enrichment projector's checkpoint ([ADR 0056](../../adr/0056-d1-enrichment-write-through.md)); applying it to `iptv` is a separate owner approval. The Worker reads D1 through the [D1 catalog views](../api/d1-catalog.md). Its only write path is the [enrichment projector](#enrichment-projector-schema-v4), which stays inert while `D1_ENRICHMENT_WRITE` is unset. R2 bucket `iptv` remains the authoritative store.
+[AIR-49](https://trello.com/c/YNaLFwtW) is this schema and the storage boundary. The repository schema is `migrations/0001_schema_v1.sql` through `0005` (schema v5). Production D1 database `iptv` holds schema v4 and the backfilled copy of R2, and is bound to the Worker as `DB`. Migration `0004` is the enrichment projector's checkpoint ([ADR 0056](../../adr/0056-d1-enrichment-write-through.md)) and is applied. Migration `0005` adds the metadata sync clocks ([ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md)); applying it is a separate owner approval, and until then the projector does not write those clocks. The Worker reads D1 through the [D1 catalog views](../api/d1-catalog.md). Its only write path is the [enrichment projector](#enrichment-projector-schema-v4), which stays inert while `D1_ENRICHMENT_WRITE` is unset. R2 bucket `iptv` remains the authoritative store.
 
 [AIR-70](https://trello.com/c/8PRWRx2C), [AIR-71](https://trello.com/c/UAUUQ2jh), and [AIR-72](https://trello.com/c/MfAGc1Dd) are the later repositories. [AIR-73](https://trello.com/c/gX2xdQAz) is the later offline importer. Live backfill starts only at [AIR-74](https://trello.com/c/5AdAmKPe), after [AIR-69](https://trello.com/c/FlcWZX7W). [AIR-42](https://trello.com/c/drLBuWjl) still owns identity transitions, [AIR-43](https://trello.com/c/7NY6n1Az) still owns scoring, and [AIR-48](https://trello.com/c/rVf8rRoJ) still owns which observation is current. This schema does not copy those rules. [AIR-53](https://trello.com/c/gkuy1awG) is not built here.
 
@@ -163,6 +163,28 @@ The projector fails closed on its R2 inputs. Missing, malformed or unpublished i
 - **Invalid as a whole** (bad JSON, schema, entry or a duplicate). The run stops before any write, with `outcome: failed`, `reason: input_invalid`, `inputKey: identity/tmdb-retirements.json`.
 - **Held Film** (review, see the contract). It is neither written nor released, also when it has left every R2 source (`film_missing`): its D1 rows, watchlist membership and change key stay as they are until the review settles, and the membership guard does not count it. The summary carries `tmdbRetirements: {valid, applied, held, reasons}` (at most 20 entries each) whenever the object exists.
 - **Rollback.** Deleting the object makes the next run write each Film's previous identity back from the records.
+
+## Metadata sync clocks (schema v5)
+
+[ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md) (Proposed): migration `0005` adds `film_sync_state`. It is not applied to production by a deploy. The same enrichment projector writes it, and only when `schema_contract.version` is 5 and the table exists. There is no new flag and no new cron. `metadataSync` does not read the table.
+
+| Column | Holds |
+| --- | --- |
+| `film_id` | `film:<letterboxd lid>`, primary key, referencing `film`. |
+| `metadata_at` | The `metadataAt` string from `metadata.json`, or NULL when that clock is missing or empty. |
+| `synopsis_fetched_at` | The `synopsisFetchedAt` string, or NULL. |
+| `people_names_version` | The integer `peopleNamesVersion`, or NULL when the value is not an integer. The integer 2 means the name attempt finished. |
+| `people_localized_at` | The `peopleLocalizedAt` string, or NULL. The sync branch writes it and does not read it back. |
+
+`people_version` stays on `film_metadata`. The 30-day window is not a column. Reviewed titles and reviewed names stay on `film_dimension` and `person_dimension`. `titles.json` and `people.json` are inputs to those dimensions and are not copied here.
+
+No row means `metadata.json` has no entry for the Film. A row of NULLs means the entry exists and its clocks are absent. Deleting the entry deletes the row and stores the sync change key `absent`. Releasing a Film deletes the row in that same batch. The Film row stays.
+
+The sync change key is a second `projection_state` projection, `metadata_sync`, kind `film`. It is not part of the enrichment film change key, so a schema v4 database does not rewrite its Films when this code is deployed. A failed batch keeps the old sync key. The next run reads R2 again. The projector never writes R2.
+
+`/api/d1/status` reports `projector.schema: true` for version 4 with the three projection tables, including when `film_sync_state` is absent. Version 5 with the table adds `schemaVersion: 5`, `syncCheckpoints` and `syncAbsent`. Version 5 without the table is `schema: false`; Film and Person writes still run, and the sync write does not.
+
+The offline import does not write `film_sync_state`. Do not seed `metadata_sync` keys: a key without a row would hide the missing write. After `0005`, the next projector runs fill one row per Film that `metadata.json` names, inside the existing query budget (800) and wall budget (60 s). A reload that returns the database to schema v4 drops the table; `0005` is applied again under its own approval, and the projector fills the rows from R2. See the [backfill runbook](../../runbooks/d1-backfill.md#metadata-sync-clocks-schema-v5).
 
 `scripts/d1-projection-seed.mjs` writes the change keys of a snapshot into a database the offline import filled: a local SQLite build in one transaction (`--database`), or production D1 through the HTTP API (`--target d1`, read-only without `--apply`). In D1 mode it refuses to write unless the database identity, the full schema v4, the baseline receipt, an idle projector lease, a held entity for every key and agreement with any stored key all hold. With `--apply` it holds the projector's own lease in `projection_run` for the whole run, so the projector refuses to start. Every request fences on that lease, renews it and writes an idempotent chunk of 250 rows; a lost lease fails the request whole. It verifies every key afterwards. It is not one transaction. It writes only for Films and Persons the database holds, and replaces the projection's earlier keys.
 

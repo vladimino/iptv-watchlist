@@ -162,6 +162,20 @@ Once the [enrichment projector](../adr/0056-d1-enrichment-write-through.md) writ
 
 Do not run a D1-only write step while the projector is `on` without pausing it: the projector reads a watchlist Film's D1-only credits before its batch, so a credit inserted between that read and the batch is dropped.
 
+## Metadata sync clocks (schema v5)
+
+Migration `0005_film_sync_state.sql` adds `film_sync_state` and sets the contract version to 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md), Proposed). A code deploy does not apply it. The enrichment projector writes the rows only after the version is 5 and the table exists. `metadataSync` does not read them. R2 stays authoritative.
+
+Each production step below is a separate owner approval.
+
+1. **Bookmark.** Record the D1 bookmark before applying `0005`. Time Travel restores the whole database, not one table.
+2. **Apply `0005`.** Accept it only when `film_sync_state` exists and `schema_contract.version` is 5. `/api/d1/status` then reports `projector.schema: true` with `schemaVersion: 5`. Version 4 stays `schema: true` without those fields. Version 5 without the table is `schema: false`; Film and Person writes continue, and the sync write does not.
+3. **Do not seed `metadata_sync` keys.** The offline import does not write `film_sync_state`. A seeded key with no row would make the projector skip the write. Leave the sync keys empty. The next projector runs, with `D1_ENRICHMENT_WRITE=on`, insert one row per Film that `metadata.json` names. A clock that does not change the Film is its own batch. A Film that is already being written takes the row in that same batch. The query budget stays 800 and the wall budget stays 60 seconds. What one run does not reach, the next run writes.
+4. **Retry and tombstones.** A failed batch keeps the previous sync key, so the next run reads R2 again and writes the current clocks. It does not write those clocks back to R2. Removing a `metadata.json` entry deletes the row and stores the key `absent`. A Film that leaves the view loses the row in the release batch and keeps its Film row.
+5. **Reload.** The backfill executor still requires schema version 4. A database at version 5 stops with `schema_version_mismatch` before any write. The reload procedure restores the empty-schema bookmark and loads a dump without `schema_contract`, which returns the database to version 4. Apply `0005` again after that load, under its own approval. The projector then fills the rows from R2. Do not treat a missing `film_sync_state` as evidence that the writer is off: on schema v4 the table is absent by design.
+
+Unsetting `D1_ENRICHMENT_WRITE` stops further writes. Rows already written stay until a Time Travel restore. A Worker revert does not drop the table and does not restore R2.
+
 ## GO/NO-GO for one run
 
 | Outcome in `report.json` | Meaning | Next step |

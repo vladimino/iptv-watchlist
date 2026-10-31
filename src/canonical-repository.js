@@ -14,6 +14,8 @@ export function createCanonicalRepository(db){
   projectLink:input=>projectLink(db,input),
   projectPerson:input=>projectPerson(db,input),
   releaseFilm:id=>releaseFilm(db,id),
+  // Schema v5 only. The projector calls this inside its own batch once film_sync_state exists. It does not read the row back.
+  projectFilmSyncState:input=>projectFilmSyncState(db,input),
  };
 }
 
@@ -29,6 +31,16 @@ async function releaseFilm(db,id){
  const filmId=requiredFilm(id);
  if(await db.get('SELECT to_film_id FROM film_redirect WHERE from_id=?',[filmId]))return;
  await db.run('DELETE FROM watchlist_film WHERE film_id=?',[filmId]);
+}
+// metadata_at, synopsis_fetched_at and people_localized_at are the strings metadata.json stored, or null when that clock
+// is missing. people_names_version is the integer metadata.json stored, or null. people_version stays on film_metadata.
+// A null sync deletes the row: the metadata.json entry is gone. The Film row stays.
+const FILM_SYNC_UPSERT='INSERT INTO film_sync_state (film_id,metadata_at,synopsis_fetched_at,people_names_version,people_localized_at) VALUES (?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET metadata_at=excluded.metadata_at,synopsis_fetched_at=excluded.synopsis_fetched_at,people_names_version=excluded.people_names_version,people_localized_at=excluded.people_localized_at';
+async function projectFilmSyncState(db,input){
+ const filmId=requiredFilm(input?.filmId);
+ const sync=input?.sync??null;
+ if(!sync){await db.run('DELETE FROM film_sync_state WHERE film_id=?',[filmId]);return;}
+ await db.run(FILM_SYNC_UPSERT,[filmId,sync.metadataAt??null,sync.synopsisFetchedAt??null,Number.isInteger(sync.peopleNamesVersion)?sync.peopleNamesVersion:null,sync.peopleLocalizedAt??null]);
 }
 
 async function saveFilm(db,input){
