@@ -142,7 +142,7 @@ const LetterboxdRatings=(()=>{
   return out;
  }
 
- // The Diary phase: the first page once per run (ADR 0064). A run that already read it, or a gate that is off, does
+ // The Diary phase: the first page once per run (ADR 0067). A run that already read it, or a gate that is off, does
  // not fetch. After the page: its history merge, its facts and the diary resolution of queued films, the cursor join,
  // then the run checkpoint. `more` is only a retry of that same page when the lease stopped the step before the request.
  async function diaryPhase(env,run,{stepId,own,remaining,clock}){

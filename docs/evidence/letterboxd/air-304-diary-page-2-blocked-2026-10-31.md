@@ -2,7 +2,7 @@
 
 **Captured:** 2026-10-31, from the production ratings run named in [AIR-304](https://trello.com/c/5M7hmLfM). This report copies counts only. It contains no diary row, title, rating value or account payload.
 
-**Code:** the multi-page Diary reader deployed before [ADR 0064](../../adr/0064-diary-recent-window.md). The run is not a measurement of the page-1 reader.
+**Code:** the multi-page Diary reader deployed before [ADR 0067](../../adr/0067-diary-recent-window.md). The run is not a measurement of the page-1 reader.
 
 **Scope:** one Ratings Task `run_now` while `RATINGS_PIPELINE=separate`, after the version-2 storage migration. Worker run `66d57611-c2de-4245-8618-1fa71dee167c`.
 
@@ -18,7 +18,7 @@ The page-1 write was useful. The run still ended as an error, and the stored res
 
 ## Verdict
 
-**Page 2 is not a routine read.** The owner decided on 2026-10-31 that the daily Diary sync is page 1 only, and that a rating visible on that page is used ([ADR 0064](../../adr/0064-diary-recent-window.md), Proposed). This report does not authorize a retry, a flag change, a Task edit, or another ratings run.
+**Page 2 is not a routine read.** The owner decided on 2026-10-31 that the daily Diary sync is page 1 only, and that a rating visible on that page is used ([ADR 0067](../../adr/0067-diary-recent-window.md), Proposed). This report does not authorize a retry, a flag change, a Task edit, or another ratings run.
 
 ## Uncertainty
 

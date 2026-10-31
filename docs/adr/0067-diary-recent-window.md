@@ -1,4 +1,4 @@
-# ADR 0064: The routine Diary read is the first page only, and a rating visible on that page is the rating
+# ADR 0067: The routine Diary read is the first page only, and a rating visible on that page is the rating
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-31  

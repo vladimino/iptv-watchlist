@@ -1,4 +1,4 @@
-// AIR-287 / ADR 0054, recent window AIR-304 / ADR 0064: Diary-first EPG ratings. Synthetic diary pages only; no real Letterboxd request.
+// AIR-287 / ADR 0054, recent window AIR-304 / ADR 0067: Diary-first EPG ratings. Synthetic diary pages only; no real Letterboxd request.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -36,7 +36,7 @@ const report=runId=>({runId,updatedAt:new Date().toISOString(),watchlistCount:0,
 const run=runId=>({runId,stage:'epg',events:[],ratingPending:['letterboxd-diary'],watchlist:[],pending:[]});
 const commit=async runId=>{records.set('programme.json',report(runId));return ctx.completeWithRatings(env,run(runId),report(runId));};
 
-// The rule, on the page just read, in display order (ADR 0064). The stored history is not the evidence.
+// The rule, on the page just read, in display order (ADR 0067). The stored history is not the evidence.
 // Latest watched date on that page; the first row of that day that shows a rating. An open edge, a next link,
 // an uncertain count and a later row of the same day do not hide it. An older day does not stand in. No page: nothing.
 const H={entries:{}};

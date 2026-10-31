@@ -502,7 +502,7 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
  run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
 }
-// AIR-287 (ADR 0054) and ADR 0064: the ratings after an EPG commit are Diary-first, and the diary stage reads the first
+// AIR-287 (ADR 0054) and ADR 0067: the ratings after an EPG commit are Diary-first, and the diary stage reads the first
 // page only. After that page's history commit, every film on it becomes a watched fact and, where the page shows a
 // rating, a rating fact. Then the bounded per-film removal lookup runs, only for removed films the diary did not give
 // a rating. The public films list is no longer scanned. Nothing here is fatal to the commit; with

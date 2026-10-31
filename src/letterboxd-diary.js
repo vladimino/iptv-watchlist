@@ -1,4 +1,4 @@
-// Letterboxd Diary viewing history (AIR-51, ADR 0049; the recent window is ADR 0064): one entry per diary row that
+// Letterboxd Diary viewing history (AIR-51, ADR 0049; the recent window is ADR 0067): one entry per diary row that
 // carries a viewing id, otherwise one entry per film and day that counts its viewings (a lower bound unless one page
 // proved it), kept apart from the current actualRating. A run reads the first diary page only, same origin, no retry
 // and no challenge handling. A row is never itself the rating fact, and absence from the diary never means "not watched".
@@ -144,7 +144,7 @@ const LetterboxdDiary=(()=>{
   return films;
  }
  const emptyHistory=()=>({schemaVersion:1,entries:{}});
- // What the page just read shows about one film, by lid (ADR 0064). The rows are in Diary display order. The candidate
+ // What the page just read shows about one film, by lid (ADR 0067). The rows are in Diary display order. The candidate
  // day is the film's latest watched date on that page. Its rating is the first row of that day that shows one, top to
  // bottom; a later row of the same day, an open page edge, a next link or an uncertain viewing count does not hide it
  // and is not a conflict. A day with no visible rating proves a viewing only. An older day on the page does not stand
@@ -172,7 +172,7 @@ const LetterboxdDiary=(()=>{
  // its progress part is a join (newest = later, oldest = earlier, reachedEnd = either, resumePage = the larger, null
  // once reachedEnd; an absent page counts as page 2) and its diagnostic part (lastOutcome, stopReason, counts, writer)
  // is one record, last writer wins by (lastAttemptAt, writer.runId, writer.step, content). Serialization is canonical,
- // so equal states are equal bytes. `resumePage` and `reachedEnd` stay monotone and are not a fetch plan (ADR 0064):
+ // so equal states are equal bytes. `resumePage` and `reachedEnd` stay monotone and are not a fetch plan (ADR 0067):
  // a run reads page 1 only and never sets `reachedEnd`. `coverage.window: recent` is kept once either side has it.
  const emptyState=()=>({schemaVersion:1,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null});
  const cursorMigrated=state=>state?.schemaVersion===2&&!!state.writer&&typeof state.writer==='object';
@@ -182,7 +182,7 @@ const LetterboxdDiary=(()=>{
  function joinProgress(a,b){
   const ca=a?.coverage||{},cb=b?.coverage||{},reachedEnd=ca.reachedEnd===true||cb.reachedEnd===true;
   const pa=backfillPage(a?.resumePage),pb=backfillPage(b?.resumePage);
-  // `window: recent` is the page-1 contract (ADR 0064). Once either side has it, the join keeps it: it is not a
+  // `window: recent` is the page-1 contract (ADR 0067). Once either side has it, the join keeps it: it is not a
   // progress value and it does not clear `reachedEnd` or `resumePage`, which stay monotone and are not a fetch plan.
   const window=ca.window==='recent'||cb.window==='recent'?'recent':null;
   return {coverage:{newestWatchedDate:later(ca.newestWatchedDate??null,cb.newestWatchedDate??null),oldestWatchedDate:earlier(ca.oldestWatchedDate??null,cb.oldestWatchedDate??null),reachedEnd,...(window?{window}:{})},resumePage:reachedEnd||pa==null&&pb==null?null:Math.max(pa??2,pb??2)};
@@ -215,7 +215,7 @@ const LetterboxdDiary=(()=>{
   throw new Error('Diary state changed during write');
  }
 
- // One run reads the first diary page and no other page (ADR 0064). A stored `resumePage`, a next link, a page of
+ // One run reads the first diary page and no other page (ADR 0067). A stored `resumePage`, a next link, a page of
  // entirely new rows and a caller's old checkpoint never select another URL. The page is committed before its facts;
  // the state is written last, so a killed run only repeats the same page. Errors are reported, never thrown, and they
  // do not record a success. `reachedEnd` and `resumePage` are kept as stored: this run never sets the first and never

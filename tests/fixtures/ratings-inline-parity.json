@@ -1,5 +1,5 @@
 {
- "about": "Inline EPG sync with the Diary recent window (ADR 0064): one Diary page, R2 objects after the run, step replies and requests. Synthetic fixture data only. Not a byte copy of the multi-page reader.",
+ "about": "Inline EPG sync with the Diary recent window (ADR 0067): one Diary page, R2 objects after the run, step replies and requests. Synthetic fixture data only. Not a byte copy of the multi-page reader.",
  "snapshot": {
   "enrichment/films/film3/actual.json": {
    "rating": 3.5,
