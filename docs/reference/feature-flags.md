@@ -45,8 +45,9 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 - **`RATINGS_PIPELINE`**, proposed by [ADR 0059](../adr/0059-independent-letterboxd-ratings-pipeline.md) (`Proposed`):
   - **Values:** `inline` and `separate`.
   - **Default:** absent or any other value is `inline`. Exact-string and whitespace rules are fixed with the code.
-  - **`inline`:** keeps the current behavior: the routine EPG commit runs the Diary stage and the removal lookups. The proposed `ratings_sync_start` and `ratings_sync_step` answer `disabled` and write nothing.
+  - **`inline`:** keeps the current behavior: the routine EPG commit runs the Diary stage and the removal lookups. While the removal queue is still `schemaVersion: 1` and the Diary cursor unmigrated, it writes exactly today's formats with today's rules, so deploying the code changes no production write. The proposed `ratings_sync_start` and `ratings_sync_step` answer `disabled` and write nothing.
   - **`separate`:** the EPG commit only enqueues removal events. The ratings tools run the Diary reads and lookups in their own run record `letterboxd/ratings/run.json`, which changes what the Ratings Task's calls request from Letterboxd and write to R2. The two paths never run ratings together.
+  - **Storage migration:** the first write under `separate` migrates `enrichment/removal-rating-lookups.json` to `schemaVersion: 2` and gives the Diary cursor its forward-only join. Setting `separate` is therefore a storage migration: it needs an owner-approved read-only export before it and a read-back after it. Migrated objects stay migrated: `inline` with the same code keeps the version 2 rules. After the migration, a code revert is not a rollback path ([ADR 0059 decision 10](../adr/0059-independent-letterboxd-ratings-pipeline.md#10-inert-deployment-and-a-separate-owner-approved-migration)).
   - **Ordering:** `separate` is set before the Ratings Task is enabled. On rollback, `inline` is set after the task is disabled.
   - **Approvals:** each setting change is a production writer change that needs its own owner approval.
   - **Lifecycle:** the code delivery also creates its removal card.

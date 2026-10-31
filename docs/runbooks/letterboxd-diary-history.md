@@ -35,7 +35,13 @@ A deploy does not activate anything. Each step below that changes production nee
 
 - **Run record:** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`) and `outcome`/`cause`. A run with `lease.live: false` is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response.
 - **`isolated`:** two runs interrupted at the same phase and checkpoint. Record it and stop; only an owner-approved manual start with `clearIsolation` lifts it.
-- **Cutover and rollback** are owner actions in this order: `RATINGS_PIPELINE=separate`, then enable the Ratings Task, then extend the drift monitor; back: disable the task, then `RATINGS_PIPELINE=inline`. The Diary state and the removal queue carry over both ways.
+- **Cutover** is a sequence of owner actions:
+  1. Read-only export of `enrichment/removal-rating-lookups.json` and `letterboxd/diary/state.json`.
+  2. Set `RATINGS_PIPELINE=separate`. This is the storage migration: the first write converts the queue to `schemaVersion: 2` and the cursor to the join.
+  3. Read back `removal.schemaVersion`, `unresolved` and `legacy`, and check that the cursor's coverage and `resumePage` are unchanged.
+  4. Enable the Ratings Task.
+  5. Extend the drift monitor.
+- **Rollback:** disable the task, then set `RATINGS_PIPELINE=inline`. The commit keeps the migrated queue and cursor rules, so nothing is lost. Once migrated, a code revert is not a rollback; it needs a separate owner decision on the queue.
 
 ## Rollback
 
