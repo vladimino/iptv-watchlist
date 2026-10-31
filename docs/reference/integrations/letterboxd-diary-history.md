@@ -108,7 +108,7 @@ After the page's history commit, the films on that page become facts. `Letterbox
   - A reread of the same value and source reference is the same observation (`ingestedAt` is not part of the observation id), so nothing is written.
   - A later read of a different rating on that same watched date replaces the earlier diary rating, including when the second read is days afterwards and the Diary row still shows the original watched date. A late write of an earlier read does not. A diary rating stored without `ingestedAt` loses to one that has it. The same value read again is the same observation.
   - Any newer observation from another source wins: a film page, the owner, a films-list summary floor, or a newer diary date. The rating is never rolled back to an older diary value, and it is never dated at the sync time.
-  - `ratingHistory` gets `first_observed` or `changed` only when the effective rating changes.
+  - `ratingHistory` gets `first_observed` or `changed` only when the effective rating changes. A later read that returns to a rating already in the list appends another `changed`. An identical reread of the value that is already current, a compare-and-swap retry of the transition just written, and a late write of an earlier read append nothing.
 - **Batch writer.** `LetterboxdFacts.applyDiaryEvidence` writes one batch per page:
   - one links compare-and-swap;
   - one record compare-and-swap per film whose view index does not already show the same watched and rating;

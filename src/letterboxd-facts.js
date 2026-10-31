@@ -71,17 +71,20 @@ const LetterboxdFacts=(()=>{
   if(fact==='rating')recordRatingChange(record,incoming,effective);
   return {outcome:stored?'replaces':'new',tie};
  }
- // Rating history: an append-only list in the record, written in the same compare-and-swap as the fact, so it is never ahead
- // of or behind the current value. An entry is added only when the effective rating changes (a newer observation of the same
- // value is a confirmation, not a change) or when the film's rating is observed for the first time ('first_observed': the
- // value existed before the observation, so it says nothing about when it was given). The observation id keeps it idempotent.
- function recordRatingChange(record,incoming,effective){
-  if(effective&&JSON.stringify(effective.value)===JSON.stringify(incoming.value))return;
-  const history=Array.isArray(record.ratingHistory)?record.ratingHistory:[];
-  const last=history.filter(entry=>entry.observationId===incoming.observationId).at(-1);
-  if(last&&last.kind!=='rolled_back')return;
-  record.ratingHistory=[...history,{kind:effective?'changed':'first_observed',recordedAt:new Date().toISOString(),value:incoming.value,observedAt:incoming.observedAt,source:incoming.source,sourceRef:incoming.sourceRef??null,observationId:incoming.observationId,previous:effective?{value:effective.value,observedAt:effective.observedAt,source:effective.source,observationId:effective.observationId}:null}];
- }
+// Rating history: an append-only list in the record, written in the same compare-and-swap as the fact, so it is never ahead
+// of or behind the current value. An entry is added only when the effective rating changes (a newer observation of the same
+// value is a confirmation, not a change) or when the film's rating is observed for the first time ('first_observed': the
+// value existed before the observation, so it says nothing about when it was given). Idempotency is the transition at the
+// tail, not the observation id: `ingestedAt` is outside that id, so a later read can return to a value already in the list
+// and that return is a new `changed`. A compare-and-swap retry of the transition just written is already the tail and adds
+// nothing. A rollback still lets the same observation be applied again.
+function recordRatingChange(record,incoming,effective){
+ if(effective&&JSON.stringify(effective.value)===JSON.stringify(incoming.value))return;
+ const history=Array.isArray(record.ratingHistory)?record.ratingHistory:[];
+ const tail=history.at(-1),previousId=effective?.observationId??null;
+ if(tail&&tail.kind!=='rolled_back'&&tail.observationId===incoming.observationId&&(tail.previous?.observationId??null)===previousId)return;
+ record.ratingHistory=[...history,{kind:effective?'changed':'first_observed',recordedAt:new Date().toISOString(),value:incoming.value,observedAt:incoming.observedAt,source:incoming.source,sourceRef:incoming.sourceRef??null,observationId:incoming.observationId,previous:effective?{value:effective.value,observedAt:effective.observedAt,source:effective.source,observationId:effective.observationId}:null}];
+}
  // A rollback restores a before-image; the history keeps the rolled-back entry and records the reversal after it.
  function recordRatingRollback(record,observationId,at){
   const history=Array.isArray(record.ratingHistory)?record.ratingHistory:[];

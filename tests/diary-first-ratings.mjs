@@ -239,4 +239,36 @@ fs.writeFileSync(process.env.DIARY_WORST_CASE_OUT||'/dev/null',JSON.stringify({f
  assert.equal(record('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1);
 }
 
-console.log('Diary-first ratings (AIR-304): page order, first visible rating, one page of 50 as facts, no films list, replay without writes, newer observation wins either way, re-rating once, a rating revised days later on the same viewing replaces the stored one and a repeat is idempotent, owner precedence holds, unrated newer day and watched-only prove no rating, older day does not override, page 1 blocked then retried, failed facts write re-reads page 1, facts gate, edge rating kept with an inexact count, both viewing ids kept, stored rating never taken as diary proof, bounded R2 operations for 50 new films passed');
+// 12. The same viewing goes 4.0 → 4.5 → 4.0 → 4.5 across four reads. Each change is a history event, in that order,
+// even though the observation id of 4.0 and of 4.5 is reused. The identical fifth read and a late write of the first
+// read add nothing.
+{
+ const dayWatched='2026-10-20';
+ const oct20=Date.parse('2026-10-20T18:00:00.000Z'),oct25=Date.parse('2026-10-25T18:00:00.000Z'),oct27=Date.parse('2026-10-27T18:00:00.000Z'),oct28=Date.parse('2026-10-28T18:00:00.000Z'),oct29=Date.parse('2026-10-29T18:00:00.000Z');
+ let now=oct20;
+ const NativeDate=ctx.Date;
+ class Clock extends NativeDate{constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}static parse(value){return NativeDate.parse(value);}static UTC(...args){return NativeDate.UTC(...args);}}
+ ctx.Date=Clock;
+ records.clear();etags.clear();requests.length=0;
+ const page=stars=>[{lid:'Cycle',date:dayWatched,stars,viewing:'501'}];
+ const history=()=>(record('Cycle').ratingHistory||[]).map(entry=>[entry.kind,entry.value]);
+ publish(page(8));await commit('cycle-4');
+ now=oct25;publish(page(9));await commit('cycle-45');
+ now=oct27;publish(page(8));await commit('cycle-4-again');
+ now=oct28;publish(page(9));await commit('cycle-45-again');
+ assert.equal(record('Cycle').rating.value,4.5);
+ assert.equal(record('Cycle').rating.ingestedAt,new Date(oct28).toISOString());
+ assert.deepEqual(history(),[['first_observed',4],['changed',4.5],['changed',4],['changed',4.5]]);
+ const id4=record('Cycle').ratingHistory[0].observationId,id45=record('Cycle').ratingHistory[1].observationId;
+ assert.equal(record('Cycle').ratingHistory[2].observationId,id4);
+ assert.equal(record('Cycle').ratingHistory[3].observationId,id45);
+ const before=history().length;
+ now=oct29;publish(page(9));await commit('cycle-reread');
+ assert.equal(history().length,before,'the identical later read adds no history event');
+ assert.equal(record('Cycle').rating.ingestedAt,new Date(oct28).toISOString());
+ const Facts=vm.runInContext('LetterboxdFacts',ctx);
+ await Facts.applyDiaryEvidence(env,[{lid:'Cycle',watchedDate:dayWatched,rating:4,sourceRef:'diary:viewing:501',readAt:new Date(oct20).toISOString()}]);
+ assert.equal(record('Cycle').rating.value,4.5);assert.equal(history().length,before,'a late earlier read adds no history event');
+}
+
+console.log('Diary-first ratings (AIR-304): page order, first visible rating, one page of 50 as facts, no films list, replay without writes, newer observation wins either way, re-rating once, a rating revised days later on the same viewing replaces the stored one and a repeat is idempotent, a return to a previous rating is kept in history, owner precedence holds, unrated newer day and watched-only prove no rating, older day does not override, page 1 blocked then retried, failed facts write re-reads page 1, facts gate, edge rating kept with an inexact count, both viewing ids kept, stored rating never taken as diary proof, bounded R2 operations for 50 new films passed');
