@@ -208,9 +208,20 @@ assert.equal(exhausted.status,502);assert.equal(exhausted.data.error,'storage_er
 assert.equal(queue().retries?.[target],undefined);assert.equal(runRecord(run.runId).status,'partial');assert.equal(runRecord(run.runId).retryHeal,'pending');
 assert.equal(runRecord(run.runId).failures[target].kind,'parse_error','the run record holds the failure');
 assert.equal(records.get(LEASE).runId,run.runId);assert.equal(records.get(LEASE).expiresAt,0,'the stopped run released its lease');
-const gated=await begin();
-assert.equal(gated.status,503);assert.equal(gated.data.status,'blocked');assert.equal(gated.data.code,'prediction_retry_heal_pending');assert.equal(gated.data.pendingRunId,run.runId);
-assert.equal(records.get(LEASE).runId,run.runId,'a start that cannot settle takes no lease and selects nothing');
+// Repeated starts that cannot settle are fail-closed start outcomes, not stops: no lease, no run, no stop record or
+// Event, and the last run stays the last run.
+const keys=prefix=>[...records.keys()].filter(key=>key.startsWith(prefix)).sort();
+const quiet={latest:structuredClone(records.get('enrichment/latest-run.json')),lease:structuredClone(records.get(LEASE)),leaseEtag:etags.get(LEASE),runs:keys('enrichment/runs/'),stops:keys('enrichment/stop-events/'),events:keys('events/'),sources:keys('enrichment/sources/')};
+assert.equal(quiet.latest.runId,run.runId);
+for(let attempt=0;attempt<3;attempt++){
+ const gated=await begin();
+ assert.equal(gated.status,503);assert.equal(gated.data.status,'blocked');assert.equal(gated.data.code,'prediction_retry_heal_pending');assert.equal(gated.data.pendingRunId,run.runId);
+ assert.equal(gated.data.reason,'retry_heal_pending','not turned into a storage_error stop');assert.equal(gated.data.runId,undefined);
+}
+assert.deepEqual(records.get('enrichment/latest-run.json'),quiet.latest,'latest-run.json still names the unsettled run');
+assert.deepEqual(records.get(LEASE),quiet.lease);assert.equal(etags.get(LEASE),quiet.leaseEtag,'no lease acquired or released');
+assert.deepEqual(keys('enrichment/runs/'),quiet.runs,'no run record created');assert.deepEqual(keys('enrichment/sources/'),quiet.sources,'nothing selected');
+assert.deepEqual(keys('enrichment/stop-events/'),quiet.stops,'no blocked-* stop record');assert.deepEqual(keys('events/'),quiet.events,'no stop Event');
 assert.equal(runRecord(run.runId).retryHeal,'pending');
 hook=null;await deferredAcrossNextRun(run.runId,target);
 // Five conflicts at the submit route only: the stop's write lands, and the next run defers the film.
