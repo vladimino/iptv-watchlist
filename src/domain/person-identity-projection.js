@@ -7,7 +7,7 @@
 // loads it. R2 stays the authority for the site. Nothing here is stored, so an owner `different`
 // is undone by projecting again.
 
-import {canonicalPersons} from './canonical-person.js';
+import {canonicalPersons, filmVerified, personKey} from './canonical-person.js';
 
 export const PERSON_IDENTITY_PROJECTION_VERSION = 1;
 export const PERSON_REFERENCE_STATES = ['trusted', 'unresolved', 'ambiguous', 'conflicting'];
@@ -64,8 +64,9 @@ function reviewOf(candidate, humanIds) {
   };
 }
 
-function crossSourceOf(links, reviews) {
-  if (links.some(link => link.basis === 'co_credit' || link.basis === 'owner')) return 'verified';
+function crossSourceOf(memberIds, links, reviews) {
+  const sources = new Set(memberIds.map(id => personKey(id)?.source).filter(Boolean));
+  if (sources.has('letterboxd') && sources.has('tmdb') && links.some(link => link.basis === 'co_credit' || link.basis === 'owner')) return 'verified';
   const reasons = new Set(reviews.map(review => review.reason));
   if (reasons.has('owner_different') || reasons.has('conflicting_keys')) return 'refused';
   if (reasons.has('ambiguous_co_credit')) return 'ambiguous';
@@ -91,7 +92,7 @@ function referenceFrom(human, reviews, surfaceOf) {
     humanId: human.id,
     formerIds: human.formerIds.slice(),
     state: stateOf(links, reviews),
-    crossSource: crossSourceOf(links, reviews),
+    crossSource: crossSourceOf(human.memberIds, links, reviews),
     memberIds: human.memberIds.slice(),
     roles: human.roles.slice(),
     externalIds: human.externalIds.map(item => ({
@@ -112,11 +113,76 @@ function referenceFrom(human, reviews, surfaceOf) {
       destructive: false,
       stored: false,
       formerIds: human.formerIds.slice(),
-      splits: links
-        .filter(link => link.basis === 'co_credit' || link.basis === 'owner')
-        .map(link => ({personIds: link.personIds.slice(), verdict: 'different'}))
+      splits: splitPairs(links)
     }
   };
+}
+
+// One owner `different` names exactly two records. A coCredit link can list every role of both
+// source groups, so the inverse is one pair per pair of groups: the smallest record of each group.
+// Applying those pairs on the next projection separates the groups and leaves a source key intact.
+function splitPairs(links) {
+  const pairs = [];
+  const seen = new Set();
+  for (const link of links) {
+    if (link.basis !== 'co_credit' && link.basis !== 'owner') continue;
+    const byNode = new Map();
+    for (const id of list(link.personIds)) {
+      const node = personKey(id)?.node;
+      if (!node) continue;
+      if (!byNode.has(node)) byNode.set(node, []);
+      byNode.get(node).push(id);
+    }
+    const nodes = [...byNode.keys()].sort(text);
+    if (nodes.length < 2) continue;
+    const anchor = byNode.get(nodes[0]).sort(text)[0];
+    for (const node of nodes.slice(1)) {
+      const personIds = [anchor, byNode.get(node).sort(text)[0]].sort(text);
+      const key = personIds.join('\n');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({personIds, verdict: 'different', at: link.at ?? null, basis: 'reversal'});
+    }
+  }
+  pairs.sort((a, b) => text(a.personIds.join('\n'), b.personIds.join('\n')) || text(a.at, b.at));
+  return pairs;
+}
+
+function trustedIdentity(film) {
+  return list(film.externalIds)
+    .filter(item => item && (item.scheme === 'tmdb' || item.scheme === 'tmdb_tv') && item.trusted === true && item.conflicting !== true)
+    .map(item => item.scheme + ':' + String(item.value))
+    .sort(text)
+    .join(',');
+}
+
+// A film id given twice is coCredit evidence only when the copies agree. A contradictory surface,
+// verification or trusted identity is passed as unverified, so it cannot join two sources. The
+// credit itself stays on each record.
+function evidenceFilms(films) {
+  const groups = new Map();
+  for (const film of list(films)) {
+    if (!film || typeof film.id !== 'string' || !film.id) continue;
+    if (!groups.has(film.id)) groups.set(film.id, []);
+    groups.get(film.id).push(film);
+  }
+  const issues = [];
+  const out = [];
+  for (const [id, copies] of [...groups.entries()].sort((a, b) => text(a[0], b[0]))) {
+    const surfaces = new Set(copies.map(film => (SURFACES.includes(film.surface) ? film.surface : null)));
+    const flags = copies.map(film => filmVerified(film));
+    const identities = new Set(copies.map(trustedIdentity).filter(Boolean));
+    const canons = new Set(copies.map(film => (typeof film.canonicalIdentity === 'string' ? film.canonicalIdentity : '')).filter(Boolean));
+    const contradictory = copies.length > 1 && (surfaces.size > 1 || new Set(flags).size > 1 || identities.size > 1 || canons.size > 1);
+    if (contradictory) {
+      if (new Set(flags).size > 1 || identities.size > 1 || canons.size > 1) issues.push({code: 'conflicting_film', filmId: id});
+      out.push({id, verified: false});
+      continue;
+    }
+    out.push({id, verified: flags[0] === true});
+  }
+  issues.sort((a, b) => text(a.filmId, b.filmId));
+  return {films: out, issues};
 }
 
 function unknown(status = 'unknown') {
@@ -140,7 +206,8 @@ function unknown(status = 'unknown') {
 export function projectPersonIdentity(input) {
   const source = input && typeof input === 'object' ? input : {};
   const surfaces = surfacesOf(source.films);
-  const grouping = canonicalPersons({persons: source.persons, credits: source.credits, films: source.films, decisions: source.decisions});
+  const evidence = evidenceFilms(source.films);
+  const grouping = canonicalPersons({persons: source.persons, credits: source.credits, films: evidence.films, decisions: source.decisions});
   const reviewsOf = new Map();
   for (const candidate of grouping.candidates) {
     const humanIds = candidateHumans(candidate, grouping.humanOf);
@@ -158,7 +225,7 @@ export function projectPersonIdentity(input) {
     .sort((a, b) => text(a.humanId, b.humanId));
   const totals = {references: references.length, trusted: 0, unresolved: 0, ambiguous: 0, conflicting: 0};
   for (const reference of references) totals[reference.state] += 1;
-  const issues = [...grouping.issues, ...surfaces.issues].sort((a, b) => text(JSON.stringify(a), JSON.stringify(b)));
+  const issues = [...grouping.issues, ...surfaces.issues, ...evidence.issues].sort((a, b) => text(JSON.stringify(a), JSON.stringify(b)));
   return {version: PERSON_IDENTITY_PROJECTION_VERSION, totals, references, issues};
 }
 
@@ -222,7 +289,7 @@ export function personSurfaces(projection, selector, role) {
   const watchlist = filmsForPerson(projection, {selector, role, surface: 'watchlist'});
   const catalog = filmsForPerson(projection, {selector, role, surface: 'catalog'});
   return {
-    same: watchlist.status === catalog.status && watchlist.humanId === catalog.humanId,
+    same: watchlist.humanId !== null && watchlist.status === catalog.status && watchlist.humanId === catalog.humanId,
     status: watchlist.status,
     crossSource: watchlist.crossSource,
     humanId: watchlist.humanId,

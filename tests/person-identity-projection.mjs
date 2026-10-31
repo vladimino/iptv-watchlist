@@ -49,7 +49,14 @@ const shared = freeze({
   assert.deepEqual(ann.memberIds, ['person:actor/ann', 'person:director/ann', 'person:tmdb_actor/1', 'person:tmdb_director/1']);
   assert.deepEqual(ann.formerIds, ['human:tmdb:1']);
   assert.deepEqual(ann.externalIds.map(item => [item.scheme, item.value, item.provenance.source]), [['letterboxd_person', 'ann', 'person_record_id'], ['tmdb_person', '1', 'person_record_id']]);
-  assert.deepEqual(ann.reversal, {destructive: false, stored: false, formerIds: ['human:tmdb:1'], splits: [{personIds: ['person:actor/ann', 'person:director/ann', 'person:tmdb_actor/1', 'person:tmdb_director/1'], verdict: 'different'}]});
+  assert.deepEqual(ann.reversal, {destructive: false, stored: false, formerIds: ['human:tmdb:1'], splits: [{personIds: ['person:actor/ann', 'person:tmdb_actor/1'], verdict: 'different', at: null, basis: 'reversal'}]});
+  const undone = projectPersonIdentity({...shared, decisions: ann.reversal.splits});
+  const letterboxd = ref(undone, 'person:actor/ann');
+  const tmdb = ref(undone, 'person:tmdb_actor/1');
+  assert.notEqual(letterboxd.humanId, tmdb.humanId, 'the pairwise different separates the two sources');
+  assert.deepEqual(letterboxd.memberIds, ['person:actor/ann', 'person:director/ann'], 'the Letterboxd source key keeps both roles');
+  assert.deepEqual(tmdb.memberIds, ['person:tmdb_actor/1', 'person:tmdb_director/1'], 'the TMDB source key keeps both roles');
+  assert.deepEqual(personSurfaces(undone, {recordId: 'person:actor/ann'}, 'actor').catalog, []);
   assert.deepEqual(ann.reviews, []);
   const surfaces = personSurfaces(projection, {recordId: 'person:actor/ann'}, 'actor');
   assert.equal(surfaces.same, true);
@@ -220,12 +227,76 @@ const shared = freeze({
 {
   const doubled = projectPersonIdentity({
     persons: [person('person:actor/ann', 'Ann')],
-    films: [film('film:one', 'watchlist'), {id: 'film:one', surface: 'catalog'}],
+    films: [film('film:one', 'watchlist'), {id: 'film:one', surface: 'catalog', verified: true}],
     credits: [credit('film:one', 'person:actor/ann')]
   });
   assert.deepEqual(doubled.issues, [{code: 'conflicting_surface', filmId: 'film:one'}]);
   assert.deepEqual(filmsForPerson(doubled, {selector: {recordId: 'person:actor/ann'}, role: 'actor'}).films, ['film:one'], 'an omitted surface still returns the credit');
   assert.deepEqual(personSurfaces(doubled, {recordId: 'person:actor/ann'}, 'actor').watchlist, [], 'a contradicted surface matches neither side');
+}
+
+// A film id that disagrees with itself is not coCredit evidence. The other source's own catalog film stays on that source.
+{
+  const leak = {
+    persons: [person('person:actor/ann', 'Ann'), person('person:tmdb_actor/1', 'Ann')],
+    films: [film('film:shared', 'watchlist'), {id: 'film:shared', surface: 'catalog', verified: true}, film('film:catalog-only', 'catalog')],
+    credits: [credit('film:shared', 'person:actor/ann'), credit('film:shared', 'person:tmdb_actor/1'), credit('film:catalog-only', 'person:tmdb_actor/1')]
+  };
+  const projection = projectPersonIdentity(leak);
+  assert.notEqual(ref(projection, 'person:actor/ann').humanId, ref(projection, 'person:tmdb_actor/1').humanId);
+  assert.deepEqual(personSurfaces(projection, {recordId: 'person:actor/ann'}, 'actor').catalog, []);
+  assert.deepEqual(personSurfaces(projection, {recordId: 'person:tmdb_actor/1'}, 'actor').catalog, ['film:catalog-only']);
+  assert.deepEqual(filmsForPerson(projection, {selector: {recordId: 'person:actor/ann'}, role: 'actor'}).films, ['film:shared'], 'the contradicted credit stays on its own record');
+  const shuffled = projectPersonIdentity({persons: reverse(leak.persons), films: reverse(leak.films), credits: reverse(leak.credits)});
+  assert.deepEqual(plain(shuffled), plain(projection), 'a contradicted film is unverified in either order');
+}
+{
+  const flags = {
+    persons: [person('person:actor/ann', 'Ann'), person('person:tmdb_actor/1', 'Ann')],
+    films: [film('film:shared', 'watchlist'), {id: 'film:shared', surface: 'watchlist', verified: false}, film('film:catalog-only', 'catalog')],
+    credits: [credit('film:shared', 'person:actor/ann'), credit('film:shared', 'person:tmdb_actor/1'), credit('film:catalog-only', 'person:tmdb_actor/1')]
+  };
+  const projection = projectPersonIdentity(flags);
+  assert.deepEqual(projection.issues.map(issue => issue.code), ['conflicting_film']);
+  assert.notEqual(ref(projection, 'person:actor/ann').humanId, ref(projection, 'person:tmdb_actor/1').humanId);
+  assert.deepEqual(personSurfaces(projection, {recordId: 'person:actor/ann'}, 'actor'), {same: true, status: ref(projection, 'person:actor/ann').state, crossSource: ref(projection, 'person:actor/ann').crossSource, humanId: ref(projection, 'person:actor/ann').humanId, watchlist: ['film:shared'], catalog: []});
+  const swapped = projectPersonIdentity({...flags, films: [flags.films[1], flags.films[0], flags.films[2]]});
+  assert.deepEqual(plain(swapped), plain(projection));
+}
+{
+  const ids = projectPersonIdentity({
+    persons: [person('person:actor/ann', 'Ann'), person('person:tmdb_actor/1', 'Ann')],
+    films: [
+      {id: 'film:shared', surface: 'watchlist', externalIds: [{scheme: 'tmdb', value: '5', trusted: true}]},
+      {id: 'film:shared', surface: 'watchlist', externalIds: [{scheme: 'tmdb', value: '6', trusted: true}]}
+    ],
+    credits: [credit('film:shared', 'person:actor/ann'), credit('film:shared', 'person:tmdb_actor/1')]
+  });
+  assert.deepEqual(ids.issues, [{code: 'conflicting_film', filmId: 'film:shared'}]);
+  assert.notEqual(ref(ids, 'person:actor/ann').humanId, ref(ids, 'person:tmdb_actor/1').humanId);
+}
+
+// An owner same of two Letterboxd keys is one human inside that source.
+{
+  const owned = projectPersonIdentity({
+    persons: [person('person:actor/a-one', 'Alex'), person('person:actor/a-two', 'Alex')],
+    decisions: [{personIds: ['person:actor/a-one', 'person:actor/a-two'], verdict: 'same', at: '2026-10-31T00:00:00.000Z', basis: 'owner checked'}]
+  });
+  const alex = ref(owned, 'person:actor/a-one');
+  assert.equal(alex.state, 'trusted');
+  assert.equal(alex.crossSource, 'none');
+  assert.deepEqual(alex.memberIds, ['person:actor/a-one', 'person:actor/a-two']);
+  assert.deepEqual(alex.reversal.splits, [{personIds: ['person:actor/a-one', 'person:actor/a-two'], verdict: 'different', at: '2026-10-31T00:00:00.000Z', basis: 'reversal'}]);
+  const split = projectPersonIdentity({
+    persons: [person('person:actor/a-one', 'Alex'), person('person:actor/a-two', 'Alex')],
+    decisions: [{personIds: ['person:actor/a-one', 'person:actor/a-two'], verdict: 'same', at: '2026-10-31T00:00:00.000Z', basis: 'owner checked'}, ...alex.reversal.splits]
+  });
+  assert.notEqual(ref(split, 'person:actor/a-one').humanId, ref(split, 'person:actor/a-two').humanId, 'the same-time different undoes the owner same');
+}
+{
+  const missing = personSurfaces(projectPersonIdentity({persons: [person('person:actor/ann', 'Ann')]}), {recordId: 'person:missing'}, 'actor');
+  assert.equal(missing.humanId, null);
+  assert.equal(missing.same, false);
 }
 
 // A reviewed name is kept, and the input record is not rewritten.

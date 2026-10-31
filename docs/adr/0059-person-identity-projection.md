@@ -23,7 +23,13 @@ Watchlist and catalog person filters call one function, `filmsForPerson` in `src
 - `ambiguous` — a shared name, namesakes, or coCredit that is not unique;
 - `conflicting` — the owner refused the join, or the join would put two keys of one source in one human.
 
-A review is not a member. Actor and director filters use the credits of the members in that role only. The same selector yields the same human id on both surfaces. A name is not a selector. Two keys that name different humans yield no films.
+A review is not a member. Actor and director filters use the credits of the members in that role only. The same selector yields the same human id on both surfaces when it resolves a human. A name is not a selector. Two keys that name different humans yield no films.
+
+`crossSource: verified` means the members include both a Letterboxd record and a TMDB record. An owner `same` of two keys of one source does not.
+
+A film id supplied more than once is coCredit evidence only when the copies agree on surface, verification and trusted identity. A contradictory copy stays a credit of each record and does not join sources.
+
+The reversal of a join is a list of owner `different` decisions of exactly two record ids, one from each joined source group. Projecting again with those decisions separates the groups. A source key is not split.
 
 The human id and the external ids (`letterboxd_person`, `tmdb_person`) come from the grouping. Provenance is the link basis and the record ids. Nothing is written. Projecting again with an owner `different` splits a coCredit or owner join; a source key is not split. `formerIds` still resolve.
 
