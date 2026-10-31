@@ -85,11 +85,17 @@ function limboLinks(kind, record) {
   return {film: '/admin?kind=film&id=' + encodeURIComponent(record.id), filmUnavailable: null, identityReview: null};
 }
 
+function limboObservation(key, record) {
+  return {key, title: typeof record?.title === 'string' ? record.title : null, year: record?.year ?? null, programmeRunId: record?.programmeRunId ?? null};
+}
+
 // One item per film or observation issue of the inventory subsystems, in the order of the health result. `context.films`
-// maps a record id to the Film record the evaluation saw, so an item can name the film and link to it.
+// maps a record id to the Film record the evaluation saw, so an item can name the film and link to it; `context.observations`
+// lists the observation index records the evaluation saw, so an observation item can name its title.
 export function limboItems(health, context) {
   const issues = Array.isArray(health?.issues) ? health.issues : [];
   const films = context?.films instanceof Map ? context.films : new Map((Array.isArray(context?.films) ? context.films : []).filter(record => record && typeof record.id === 'string').map(record => [record.id, record]));
+  const observations = new Map((Array.isArray(context?.observations) ? context.observations : []).filter(record => record && typeof record.key === 'string').map(record => [record.key, record]));
   const items = [];
   for (const issue of issues) {
     const kind = issue?.subject?.kind;
@@ -115,6 +121,7 @@ export function limboItems(health, context) {
       diagnostics: limboDiagnostics(issue),
       affected: issue.affected ?? null,
       links: limboLinks(kind, record),
+      ...(kind === 'observation' ? {observation: limboObservation(issue.subject.id, observations.get(issue.subject.id))} : {}),
     });
   }
   return items;

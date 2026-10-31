@@ -2,15 +2,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {
-  DISCOVERY_NEXT_ACTORS, DISCOVERY_RECOVERY_EXECUTE_REASON, DISCOVERY_RECOVERY_VERDICTS, DISCOVERY_RETRY_HELPS, DISCOVERY_SERIES_STATES,
-  assessObservationRecovery, discoverySeriesState, observationActionable, observationActivity, observationEvidenceKey,
+  DISCOVERY_NEXT_ACTORS, DISCOVERY_RECONSIDER_EFFECTS, DISCOVERY_RECONSIDER_REASONS, DISCOVERY_RECOVERY_VERDICTS, DISCOVERY_RETRY_HELPS, DISCOVERY_SERIES_STATES,
+  assessObservationRecovery, discoverySeriesState, observationActionable, observationActivity, observationEvidenceKey, reconsiderIssue, reconsideredDecision,
 } from '../src/domain/discovery-recovery.js';
+import {OBS_GATE_COPY} from '../src/admin/discovery-recovery-view.js';
 
-// Pure and offline, and not part of the Worker: no route consumes it and no capability is registered for it.
+// Pure and offline. In the Worker it is consumed only by the discovery recovery adapter, scoped; no other read wires it.
 const source = fs.readFileSync('src/domain/discovery-recovery.js', 'utf8');
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|crypto/);
-for (const file of ['build.mjs', 'src/worker.js', 'src/admin/limbo.js', 'src/admin/health.js', 'src/admin/actions-fixture.js', 'public/admin-actions.js']) {
-  assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /discovery-recovery|assessObservationRecovery/, file + ' must not wire the assessment');
+assert.match(fs.readFileSync('build.mjs', 'utf8'), /scoped\('src\/domain\/discovery-recovery\.js','DiscoveryRecovery'\)\+'\\n'\+fs\.readFileSync\('src\/admin\/discovery-recovery\.js','utf8'\)/);
+for (const file of ['src/worker.js', 'src/admin/limbo.js', 'src/admin/health.js', 'src/admin/actions-fixture.js', 'public/admin-actions.js', 'src/discovery.js']) {
+  assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /DiscoveryRecovery\.|assessObservationRecovery/, file + ' must not wire the assessment');
 }
 
 // The resolver itself, loaded the way the Worker bundle concatenates it.
@@ -78,12 +80,12 @@ for (const c of candidates) {
     // a known alias is verified by the chunk's cheap pass without a lookup.
     const willLookUp = result.verdict === 'queued' && result.reason !== 'known_alias' || result.verdict === 'identity_conflict' && result.next.at === null;
     if (result.reason !== 'known_alias') assert.equal(willLookUp, actionable, JSON.stringify({verdict: result.verdict, reason: result.reason, decision}));
-    // Vocabulary is closed and execution is never offered.
+    // Vocabulary is closed; without a current observation index the action is never offered.
     assert.ok(DISCOVERY_RECOVERY_VERDICTS.includes(result.verdict));
     assert.ok(DISCOVERY_SERIES_STATES.includes(result.series.state));
     assert.ok(DISCOVERY_RETRY_HELPS.includes(result.retry.helps));
     assert.ok(DISCOVERY_NEXT_ACTORS.includes(result.next.actor));
-    assert.deepEqual(result.execute, {available: false, capability: null, reason: DISCOVERY_RECOVERY_EXECUTE_REASON});
+    assert.deepEqual(result.execute, {available: false, capability: 'discovery_reconsider', version: 1, reason: 'index_not_current', effect: {when: 'none', at: null}});
     assert.equal(result.review.available, false);
     // A retry is never claimed to be the fix.
     assert.notEqual(result.retry.helps, 'yes');
@@ -365,4 +367,72 @@ const freeze = value => { if (value && typeof value === 'object') { Object.value
 const input = freeze({now: NOW, target: {key: 'sever|2020'}, published: {programmeRunId: RUN}, observation: candidate(), decision: {status: 'ambiguous', attempts: 2, evidenceKey: same, retryAt: iso(-H)}, series: structuredClone(quietSeries)});
 assert.deepEqual(assessObservationRecovery(input), assessObservationRecovery(input));
 
-console.log('discovery recovery assessment: ok');
+// 4. The gate of `discovery_reconsider`: offered only for a terminal observation on unchanged evidence, judged from a
+// current index, with no live or unknown writer, no protected series wait, no TMDB throttle and no missing secret.
+const terminal = (fields = {}) => ({status: 'no_confident_match', attempts: 5, evidenceKey: same, retryAt: null, terminalReason: 'repeated_uncertain_match', ...fields});
+const fresh = {index: {state: 'fresh'}, throttle: {retryAt: null}};
+const gateOf = fields => assess({...fresh, decision: terminal(), ...fields}).execute;
+assert.deepEqual(gateOf({}), {available: true, capability: 'discovery_reconsider', version: 1, reason: 'eligible', effect: {when: 'next_ordinary_chunk', at: null}});
+assert.deepEqual(gateOf({decision: terminal({status: 'needs_verification', terminalReason: 'awaiting_confirmation'})}).reason, 'eligible');
+for (const state of ['stale', 'missing', 'other_generation', 'torn', 'malformed', 'unavailable']) assert.equal(gateOf({index: {state}}).reason, 'index_not_current', state);
+assert.equal(gateOf({index: undefined}).reason, 'index_not_current');
+assert.equal(gateOf({series: {...quietSeries, lease: {id: OTHER_HOP, expiresAt: NOW_MS + 45000}}}).reason, 'writer_active');
+assert.equal(gateOf({series: {...quietSeries, lease: {id: OTHER_HOP}}}).reason, 'series_unknown');
+assert.equal(gateOf({series: {...quietSeries, record: {stage: 'paused', reason: 'backoff', remainingChunks: 4, retryAt: iso(20 * 60000), nextCatchUpAt: iso(20 * 60000), programmeRunId: RUN}}}).reason, 'series_backoff');
+assert.equal(gateOf({series: {...quietSeries, record: {stage: 'error', reason: 'discovery_failed', remainingChunks: 3, nextCatchUpAt: iso(H), programmeRunId: RUN}}}).reason, 'series_backoff');
+assert.deepEqual(gateOf({series: {...quietSeries, record: {stage: 'paused', reason: 'chunk_budget', remainingChunks: 0, nextCatchUpAt: iso(H), programmeRunId: RUN}}}), {available: true, capability: 'discovery_reconsider', version: 1, reason: 'eligible', effect: {when: 'after_series_wait', at: iso(H)}});
+assert.equal(gateOf({series: {...quietSeries, record: {stage: 'error', reason: 'missing_secret', remainingChunks: 0, programmeRunId: RUN}}}).reason, 'configuration_required');
+assert.equal(gateOf({throttle: {retryAt: iso(10 * 60000)}}).reason, 'tmdb_throttled');
+assert.equal(gateOf({throttle: {retryAt: iso(-10 * 60000)}}).reason, 'eligible', 'a throttle in the past no longer protects TMDB');
+assert.deepEqual(gateOf({series: {...quietSeries, record: {stage: 'complete', remainingChunks: 3, programmeRunId: RUN}}}).effect, {when: 'next_series', at: null});
+assert.equal(gateOf({series: {record: running, health: healthOf(running, orphanLease, null), lease: orphanLease}}).effect.when, 'next_ordinary_chunk', 'an orphaned series resumes with the next ordinary step');
+// Every other verdict names why there is nothing to lift.
+for (const [fields, reason] of [
+  [{decision: terminal({status: 'ambiguous'})}, 'identity_ambiguous'],
+  [{decision: {status: 'ambiguous', attempts: 2, evidenceKey: same, retryAt: iso(D)}}, 'identity_ambiguous'],
+  [{decision: {status: 'no_confident_match', attempts: 2, evidenceKey: same, retryAt: iso(2 * D)}}, 'backoff_is_policy'],
+  [{decision: null}, 'already_eligible'],
+  [{decision: terminal({evidenceKey: 'other'})}, 'already_eligible'],
+  [{decision: {status: 'verified', tmdbId: '1'}}, 'already_resolved'],
+  [{observation: candidate({nonfilmReason: 'news'})}, 'not_a_film'],
+  [{observation: candidate({seenInLatestSnapshot: false, shows: [], lastSeenAt: NOW_MS - 10 * D, lastAiring: NOW_MS - 10 * D})}, 'not_current'],
+  [{observation: candidate({programmeRunId: 'run-older'})}, 'generation_changed'],
+  [{observation: null}, 'target_absent'],
+  [{observation: candidate({shows: {}})}, 'evidence_incomplete'],
+  [{decision: terminal({terminalReason: 'something_new'})}, 'terminal_reason_unknown'],
+]) {
+  const execute = gateOf(fields);
+  assert.equal(execute.available, false, reason);
+  assert.equal(execute.reason, reason, JSON.stringify(fields));
+  assert.deepEqual(execute.effect, {when: 'none', at: null});
+}
+// The closed vocabularies, and Russian copy for every reason the gate can give.
+assert.deepEqual(Object.keys(OBS_GATE_COPY).sort(), [...DISCOVERY_RECONSIDER_REASONS].sort());
+assert.deepEqual(DISCOVERY_RECONSIDER_EFFECTS, ['next_ordinary_chunk', 'after_series_wait', 'next_series', 'none']);
+
+// The issue the action contract judges by: eligible, ineligible, or unknown when the evidence cannot tell.
+let issue = reconsiderIssue(assess({...fresh, decision: terminal()}));
+assert.deepEqual(issue, {id: 'discovery_reconsider:sever|2020', subject: {kind: 'observation', id: 'sever|2020'}, action: {code: 'discovery_reconsider', eligible: true, reason: 'eligible'}, evidence: {completeness: 'complete'}});
+assert.equal(reconsiderIssue(assess({...fresh, decision: {status: 'verified', tmdbId: '1'}})).action.eligible, false);
+assert.equal(reconsiderIssue(assess({decision: terminal()})).action.eligible, null, 'no current index: unknown, not ineligible');
+assert.equal(reconsiderIssue(assess({...fresh, decision: terminal(), series: {...quietSeries, lease: {id: OTHER_HOP}}})).action.eligible, null);
+assert.equal(reconsiderIssue(assess({...fresh, decision: undefined})).action.eligible, null);
+
+// The decision the action writes lifts the fence and nothing else; the resolver takes it on its next pass, and the next
+// uncertain outcome on the same evidence is terminal again at once: one more ordinary attempt, history kept.
+const previous = terminal({lastAttemptAt: iso(-D), checkedAt: iso(-D), scoring: {scorerVersion: 3, status: 'rejected'}});
+const lifted = reconsideredDecision(previous, {at: NOW, idempotencyKey: 'idem-0000000000000001'});
+assert.deepEqual(lifted, {...previous, terminalReason: null, retryAt: null, reconsidered: {at: NOW, idempotencyKey: 'idem-0000000000000001', capability: 'discovery_reconsider@1', previousTerminalReason: 'repeated_uncertain_match', previousRetryAt: null, attemptsAtReconsider: 5}});
+assert.equal(call('resolutionActionability', candidate(), previous, NOW_MS), false);
+assert.equal(call('resolutionActionability', candidate(), lifted, NOW_MS), true);
+assert.equal(assess({...fresh, decision: lifted}).verdict, 'queued');
+assert.equal(assess({...fresh, decision: lifted}).execute.reason, 'already_eligible', 'a lifted decision is not lifted twice');
+ctx.__decisions = {'sever|2020': structuredClone(lifted)};
+ctx.__candidate = candidate();
+vm.runInContext(`recordUncertain(__decisions, __candidate, 'no_confident_match', ${NOW_MS})`, ctx);
+const after = JSON.parse(JSON.stringify(ctx.__decisions['sever|2020']));
+assert.equal(after.attempts, 6);
+assert.equal(after.terminalReason, 'repeated_uncertain_match');
+assert.equal(assess({...fresh, decision: after}).verdict, 'no_more_evidence');
+
+console.log('discovery recovery assessment: ok (resolver parity, series, situations, reconsider gate, issue and lifted decision)');

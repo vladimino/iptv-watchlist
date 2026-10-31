@@ -6,7 +6,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {createHash} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
+import * as DI from '../src/domain/discovery-observation-index.js';
 
 const source=fs.readFileSync('src/admin/limbo.js','utf8');
 assert.doesNotMatch(source,/loadJSON|saveJSON|recoverStopEvents|enrichmentView|BUCKET\.(?:put|list|delete|head)|\.put\(|\.list\(|\.delete\(|\bfetch\(|waitUntil|resolver-lease|resolver-continuation|discovery-latest|discovery-resolution|discovered-films|enrichment\/films|get\('programme\.json'|\.prepare\(|readFilmState|refreshPredictionQueue/,'the limbo read never writes, lists, scans films, falls back or reaches another store');
@@ -22,7 +24,7 @@ assert.match(build,/src\/admin\/limbo-client\.js/);
 
 // R2 stand-in with etags and counters, as in the admin read test: every body is a real stream that must be consumed or cancelled.
 const records=new Map(),etags=new Map(),uploaded=new Map();
-let gets=[],puts=[],lists=0,fetches=[];
+let gets=[],heads=[],puts=[],lists=0,fetches=[];
 const streams={opened:[],consumed:[],cancelled:[]};
 const bucket={
  async get(key){
@@ -34,6 +36,7 @@ const bucket={
   const read=async()=>{const consumed=await new Response(body).text();streams.consumed.push(key);return consumed;};
   return {etag,uploaded:uploaded.has(key)?uploaded.get(key):undefined,body,json:async()=>JSON.parse(await read()),text:read};
  },
+ async head(key){heads.push(key);return records.has(key)?{etag:etags.get(key),uploaded:uploaded.get(key)}:null;},
  async put(key){puts.push(key);},
  async delete(key){puts.push('delete:'+key);},
  async list(){lists++;return {objects:[],truncated:false};},
@@ -44,12 +47,16 @@ const FrozenDate=class extends Date{constructor(...args){super(...(args.length?a
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date:FrozenDate,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,Uint32Array,DataView,atob,btoa,crypto:webcrypto,console,setTimeout,structuredClone,
  ASSETS:{},INITIAL_PERSONAL_RATINGS:{},FILM_TITLE_DICTIONARY:[],PERSON_NAME_DICTIONARY:[],
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
+vm.runInContext(scoped('src/domain/discovery-observation-index.js','DiscoveryIndex'),context);
 for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
 vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);
 vm.runInContext(scoped('src/domain/data-health.js','DataHealth'),context);
 vm.runInContext(scoped('src/domain/limbo-inventory.js','LimboInventory'),context);
 vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);
 vm.runInContext(source,context);
+vm.runInContext(scoped('src/domain/admin-actions.js','AdminActions'),context);
+vm.runInContext(scoped('src/domain/discovery-recovery.js','DiscoveryRecovery'),context);
+vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker;
 const resetCache=()=>vm.runInContext('ADMIN_SNAPSHOT_CACHE=null;ADMIN_LIMBO_CACHE=null',context);
@@ -93,7 +100,7 @@ function indexOf(){
  };
 }
 function seed({run=G1,queueRun=run,queue=true,index=true}={}){
- records.clear();etags.clear();uploaded.clear();gets=[];puts=[];lists=0;fetches=[];resetCache();resetStreams();clockNow=Date.parse(NOW);
+ records.clear();etags.clear();uploaded.clear();gets=[];heads=[];puts=[];lists=0;fetches=[];resetCache();resetStreams();clockNow=Date.parse(NOW);
  records.set(POINTER,{phase:'published',programmeRunId:run,publishedAt:at(-5*H)});etags.set(POINTER,'ptr-'+run);uploaded.set(POINTER,new Date(NOW));
  records.set(programmeKey(run),programmeOf(run));etags.set(programmeKey(run),'prog-'+run);uploaded.set(programmeKey(run),new Date(NOW));
  records.set('programme.json',{runId:'root-must-not-be-read',films:[]});etags.set('programme.json','root');
@@ -106,25 +113,27 @@ function seed({run=G1,queueRun=run,queue=true,index=true}={}){
 const openStreams=()=>streams.opened.length-streams.consumed.length-streams.cancelled.length;
 const resetStreams=()=>{streams.opened.length=0;streams.consumed.length=0;streams.cancelled.length=0;};
 const call=async(path,init)=>{const response=await worker.fetch(new Request('https://iptv.example'+path,init),env,{waitUntil(){throw new Error('background work on a GET');}});assert.equal(openStreams(),0,'every opened R2 body is consumed or cancelled after '+path);return {status:response.status,body:await response.json()};};
-const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json',QUEUE,INDEX];
+const manifestKey=run=>DI.observationIndexManifestKey(run);
+const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json',QUEUE,INDEX,POINTER,manifestKey(G1)];
 const byId=(r,id)=>r.body.items.find(item=>item.id===id);
 const q=object=>'?'+new URLSearchParams(object).toString();
 
-// 1. The whole inventory: seven reads in order, no list, no write, no request, no ledger; the pin, the snapshot and the vocabularies.
+// 1. The whole inventory: the seven snapshot reads in order, then the pointer and the observation index manifest; no list,
+// no write, no request, no ledger; the pin, the snapshot and the vocabularies.
 seed();
 let r=await call('/api/admin/limbo');
 assert.equal(r.status,200,JSON.stringify(r.body));
 assert.deepEqual(gets,SNAPSHOT_KEYS);
-assert.equal(lists,0);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+assert.equal(lists,0);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);assert.deepEqual(heads,[],'no index, nothing to compare');
 assert.ok(!gets.includes('epg/discovery-resolution.json')&&!gets.includes('programme.json'));
-assert.match(r.body.pin,/^L1\|1%7C/);
+assert.match(r.body.pin,/^L2\|1%7C/);
 assert.equal(r.body.snapshot.programmeRunId,G1);
 assert.equal(r.body.snapshot.evaluatedAt,NOW);
 assert.equal(r.body.snapshot.queuePresent,true);assert.equal(r.body.snapshot.queueRefreshedAt,at(-H));assert.equal(r.body.snapshot.queueProgrammeRunId,G1);assert.equal(r.body.snapshot.indexPresent,true);
-assert.deepEqual(r.body.snapshot.sources,[POINTER,'epg/generations/<programmeRunId>/programme.json','titles.json','people.json',QUEUE,INDEX]);
+assert.deepEqual(r.body.snapshot.sources,[POINTER,'epg/generations/<programmeRunId>/programme.json','titles.json','people.json',QUEUE,INDEX,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json']);
 assert.deepEqual(r.body.vocabulary.causes,['retry_eligible','stalled','backoff','pending','manual_review','stale_projection','external_archive','unknown']);
 assert.equal(r.body.limit,25);assert.equal(r.body.kind,null);assert.equal(r.body.age,null);
-assert.deepEqual(r.body.coverage.observations,{available:false,reason:'no_bounded_projection',detail:r.body.coverage.observations.detail});
+assert.deepEqual(r.body.coverage.observations,{available:false,reason:'index_missing',state:'missing',programmeRunId:G1},'no index: unavailable, never none');
 assert.equal(r.body.coverage.films,'partial');
 assert.equal(r.body.coverage.filmsObserved,40,'39 programme films and one catalog film from the queue');
 assert.equal(r.body.total,r.body.counts.total);
@@ -289,7 +298,7 @@ assert.equal(r.body.context.some(issue=>issue.subsystem==='prediction_queue'),fa
 assert.equal(r.body.items.some(item=>item.subsystem==='prediction'),false,'without the queue no prediction state is observed');
 assert.ok((await walkAll('/api/admin/limbo?limit=25')).some(item=>item.id==='metadata/stale/film:film:stale2'),'the programme part still answers');
 r=await call('/api/admin/limbo');
-assert.match(r.body.pin,/\|\|index-1$/,'a missing queue is an empty version in the pin');
+assert.match(r.body.pin,/\|\|index-1\|$/,'a missing queue is an empty version in the pin');
 seed({index:false});
 r=await call('/api/admin/limbo');
 assert.equal(r.body.snapshot.indexPresent,false);
@@ -305,15 +314,88 @@ assert.equal(response.status,503);assert.equal((await response.json()).error,'st
 seed();
 r=await call('/api/admin/limbo',{method:'POST'});assert.equal(r.status,405);assert.equal(r.body.error,'method_not_allowed');
 
-// 10. Warm isolate: the same tuple re-reads the seven versions and reuses the parsed bodies; a changed queue is reparsed alone.
+// 10. Warm isolate: the same tuple re-reads the versions and reuses the parsed bodies; a changed queue is reparsed alone.
 seed();await call('/api/admin/limbo');
 resetStreams();gets=[];
 r=await call('/api/admin/limbo');
 assert.deepEqual(gets,SNAPSHOT_KEYS);
-assert.deepEqual(streams.consumed.sort(),[POINTER,POINTER],'only the pointers are parsed on a warm read');
+assert.deepEqual(streams.consumed.sort(),[POINTER,POINTER,POINTER],'only the pointers are parsed on a warm read');
 assert.equal(streams.cancelled.length,5,'the five reused bodies are cancelled');
 etags.set(QUEUE,'queue-3');resetStreams();
 r=await call('/api/admin/limbo');
-assert.deepEqual(streams.consumed.sort(),[POINTER,POINTER,QUEUE].sort());
+assert.deepEqual(streams.consumed.sort(),[POINTER,POINTER,POINTER,QUEUE].sort());
 
-console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects and warm isolate passed');
+// 11. The observation index of the published generation: observation items with their titles, the index's own coverage,
+// shards read only where the manifest names records, the resolution map and the ledger compared by `head` only, and
+// unavailable (never empty) when the index is missing, of another generation, torn or malformed.
+const sha=text=>createHash('sha256').update(text).digest('hex');
+const RESOLUTION='epg/discovery-resolution.json',LEDGER=run=>'epg/generations/'+run+'/discovery-latest.json';
+const obsShow=start=>({channelId:'c1',channel:'Первый',start,end:start+2*H});
+const obsCandidate=(key,title)=>({key,title,normalizedTitle:title.toLowerCase(),year:2001,durations:[95],shows:[obsShow(Date.parse(NOW)+H)],seenInLatestSnapshot:true,lastSeenAt:Date.parse(NOW)-H,lastAiring:Date.parse(NOW)+H});
+const obsDecisions={
+ 'тихий|2001':{status:'no_confident_match',attempts:5,evidenceKey:'ev-1',retryAt:null,terminalReason:'repeated_uncertain_match',lastAttemptAt:at(-20*D),checkedAt:at(-20*D)},
+ 'двойник|2001':{status:'ambiguous',attempts:2,evidenceKey:'ev-2',retryAt:at(D),lastAttemptAt:at(-H),checkedAt:at(-H)},
+};
+function seedIndex(run=G1,{writer='resolver_chunk'}={}){
+ const built=DI.buildObservationIndex({programmeRunId:run,entries:[{candidate:obsCandidate('тихий|2001','Тихий'),decision:obsDecisions['тихий|2001']},{candidate:obsCandidate('двойник|2001','Двойник'),decision:obsDecisions['двойник|2001']}]});
+ const shards=built.shards.map(items=>{const withHash=items.map(record=>({...record,decisionHash:sha(DI.canonicalJson(obsDecisions[record.key]))}));return {items:withHash,revision:sha(DI.canonicalJson(withHash))};});
+ records.set(RESOLUTION,obsDecisions);etags.set(RESOLUTION,'res-1');
+ records.set(LEDGER(run),{programmeRunId:run,items:[]});etags.set(LEDGER(run),'ledger-1');
+ shards.forEach((shard,index)=>{const key=DI.observationIndexShardKey(run,index);records.set(key,DI.observationShardDocument(run,index,shard.items,shard.revision));etags.set(key,'shard-'+index+'-1');});
+ records.set(manifestKey(run),DI.observationIndexManifest({programmeRunId:run,writtenAt:at(-H),writer:{kind:writer,hopId:'hop-1'},sources:{resolutionEtag:'res-1',ledgerEtag:'ledger-1'},shards:shards.map(shard=>({items:shard.items.length,revision:shard.revision})),coverage:built.coverage,counts:{awaitingFirstLookup:4}}));
+ etags.set(manifestKey(run),'manifest-1');
+ return shards;
+}
+seed();const obsShards=seedIndex();gets=[];heads=[];
+r=await call('/api/admin/limbo?kind=observation');
+assert.equal(r.status,200,JSON.stringify(r.body));
+const withRecords=obsShards.map((shard,index)=>shard.items.length?DI.observationIndexShardKey(G1,index):null).filter(Boolean);
+assert.deepEqual(gets.slice(SNAPSHOT_KEYS.length),withRecords,'only the shards that hold records');
+assert.deepEqual(heads.sort(),[LEDGER(G1),RESOLUTION].sort(),'the resolution map and the ledger by head only');
+assert.ok(!gets.includes(RESOLUTION)&&!gets.includes(LEDGER(G1))&&lists===0&&puts.length===0);
+assert.deepEqual(r.body.items.map(item=>[item.subjectId,item.observation.title,item.kind]).sort(),[['двойник|2001','Двойник','observation'],['тихий|2001','Тихий','observation']]);
+assert.equal(r.body.items.find(item=>item.subjectId==='тихий|2001').cause,'manual_review','a terminal decision is not a wait');
+assert.equal(r.body.items.find(item=>item.subjectId==='двойник|2001').reason,'identity_ambiguous');
+assert.deepEqual(r.body.coverage.observations,{available:true,state:'fresh',reasons:[],programmeRunId:G1,writtenAt:at(-H),writer:'resolver_chunk',scope:'current_unresolved_with_decision',indexed:2,eligible:2,omitted:{cap:0,oversized:0,malformed:0},complete:true,awaitingFirstLookup:4});
+assert.equal(r.body.coverage.observationsObserved,2);
+const obsPin=r.body.pin;
+assert.match(obsPin,/\|manifest-1$/,'the manifest version is part of the pin');
+// Warm: the same manifest reuses the parsed shards and cancels its body.
+gets=[];resetStreams();
+r=await call('/api/admin/limbo?kind=observation&pin='+encodeURIComponent(obsPin));
+assert.equal(r.status,200);
+assert.deepEqual(gets.slice(SNAPSHOT_KEYS.length),[],'no shard is read again');
+assert.ok(streams.cancelled.includes(manifestKey(G1)));
+// A chunk rewrote the index: the pin is stale.
+etags.set(manifestKey(G1),'manifest-2');
+r=await call('/api/admin/limbo?pin='+encodeURIComponent(obsPin));assert.equal(r.status,409);assert.equal(r.body.error,'stale_pin');
+// The resolution map moved since the index was written: stale, still shown, and said so.
+etags.set(RESOLUTION,'res-2');
+r=await call('/api/admin/limbo?kind=observation');
+assert.equal(r.body.coverage.observations.state,'stale');
+assert.deepEqual(r.body.coverage.observations.reasons,['resolution_changed']);
+assert.equal(r.body.items.length,2);
+// Torn: a shard of another revision than the manifest names.
+seed();seedIndex();
+const tornIndex=obsShards.findIndex(shard=>shard.items.length);
+records.set(DI.observationIndexShardKey(G1,tornIndex),{...records.get(DI.observationIndexShardKey(G1,tornIndex)),revision:sha('other')});
+r=await call('/api/admin/limbo?kind=observation');
+assert.deepEqual([r.body.coverage.observations.available,r.body.coverage.observations.reason],[false,'index_torn']);
+assert.deepEqual(r.body.items,[],'a torn index lists nothing and says it is unavailable');
+// Another generation's manifest under this generation's key, and a malformed one.
+seed();seedIndex();records.set(manifestKey(G1),{...records.get(manifestKey(G1)),programmeRunId:G2});
+r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.reason,'index_other_generation');
+seed();seedIndex();records.set(manifestKey(G1),{kind:'something'});
+r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.reason,'index_malformed');
+// The index of the previous generation is never read for the new one.
+seed();seedIndex(G2);
+r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.reason,'index_missing');
+assert.ok(!gets.some(key=>key.includes('/'+G2+'/')));
+// Storage failure on the index alone: the inventory answers, observations unavailable.
+seed();seedIndex();
+const failingIndex={...bucket,async get(key){gets.push(key);if(key===manifestKey(G1))throw new Error('r2 down');return bucket.get(key);}};
+const indexResponse=await worker.fetch(new Request('https://iptv.example/api/admin/limbo'),{BUCKET:failingIndex},{waitUntil(){throw new Error('background');}});
+assert.equal(indexResponse.status,200);
+assert.equal((await indexResponse.json()).coverage.observations.available,false);
+
+console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');

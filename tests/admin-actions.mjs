@@ -12,14 +12,17 @@ import {FIXTURE_CAPABILITY, createFixtureStore, executeFixtureAction, fixtureAct
 import {evaluateDataHealth} from '../src/domain/data-health.js';
 
 // Boundaries: the contract is pure; neither it nor the fixture reaches storage, network or a clock of its own; the Worker
-// bundle does not include them and no Worker route serves them.
+// bundle carries the contract only for its one registered capability (discovery_reconsider), never the fixture, and no
+// generic actions route.
 const contract = fs.readFileSync('src/domain/admin-actions.js', 'utf8');
 const fixture = fs.readFileSync('src/admin/actions-fixture.js', 'utf8');
 assert.doesNotMatch(contract, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|\.prepare\(/);
 assert.doesNotMatch(fixture, /\bfetch\b|BUCKET|env\.|cloudflare:|node:|\.prepare\(|localStorage|Authorization|Bearer|CF-Access/);
 const build = fs.readFileSync('build.mjs', 'utf8');
 const workerBundle = build.slice(build.indexOf("fs.writeFileSync('dist/server/index.js'"));
-assert.equal(workerBundle.includes('admin-actions'), false, 'the Worker script does not carry the action contract');
+assert.equal(workerBundle.includes("scoped('src/domain/admin-actions.js','AdminActions')"), true, 'the Worker script carries the contract, scoped');
+assert.deepEqual([...fs.readFileSync('src/admin/discovery-recovery.js', 'utf8').matchAll(/AdminActions\.defineCapability\(\{\s*id:'([a-z_]+)'/g)].map(match => match[1]), ['discovery_reconsider'], 'the Worker registers exactly one capability');
+assert.doesNotMatch(fs.readFileSync('src/worker.js', 'utf8'), /defineCapability|createRegistry/, 'the Worker entry point registers no capability of its own');
 assert.equal(workerBundle.includes('actions-fixture'), false, 'the Worker script does not carry the fixture executor');
 assert.doesNotMatch(fs.readFileSync('src/worker.js', 'utf8'), /\/api\/admin\/actions|executeFixtureAction|previewAction/, 'no Worker route for actions');
 assert.equal(ADMIN_ACTION_SCHEMA_VERSION, 1);

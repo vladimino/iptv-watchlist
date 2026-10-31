@@ -1,27 +1,36 @@
 // Owner-only limbo inventory behind the existing Cloudflare Access application: GET /api/admin/limbo. One request reads
 // the same published snapshot as the other admin reads (pointer, generation programme, pointer again, titles.json,
-// people.json) plus two bounded enrichment objects, the prediction queue and the view index, evaluates the pure data
-// health model over that projection and pages the film issues it yields. Nothing here lists the bucket, reads a
-// per-film enrichment object, the resolution ledger, the discovery snapshot, a lease or a continuation, writes, starts
-// work or calls another service. Unresolved observations have no bounded projection yet and are reported as unavailable.
+// people.json) plus two bounded enrichment objects, the prediction queue and the view index, and the generation's
+// observation index (its manifest and the shards that hold records, compared with the resolution map and the ledger by
+// etag only), evaluates the pure data health model over that projection and pages the issues it yields. Nothing here
+// lists the bucket, reads a per-film enrichment object, the body of the resolution ledger or of the discovery snapshot, a
+// lease or a continuation, writes, starts work or calls another service. Without a readable index of the published
+// generation, unresolved observations are reported as unavailable, never as none.
 // The contract is docs/reference/api/admin.md; the model is docs/reference/domain/data-health.md.
 const LIMBO_QUEUE_KEY=ENRICHMENT_KEY+'prediction-queue.json',LIMBO_INDEX_KEY=ENRICHMENT_KEY+'view-index.json';
-const LIMBO_SOURCES=['epg/published-generation.json','epg/generations/<programmeRunId>/programme.json','titles.json','people.json',LIMBO_QUEUE_KEY,LIMBO_INDEX_KEY];
-const LIMBO_OBSERVATIONS={available:false,reason:'no_bounded_projection',detail:'Unresolved observations live in the resolution ledger, which this read does not load; a generation-scoped index written at EPG publish is required.'};
+const LIMBO_SOURCES=['epg/published-generation.json','epg/generations/<programmeRunId>/programme.json','titles.json','people.json',LIMBO_QUEUE_KEY,LIMBO_INDEX_KEY,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json'];
 let ADMIN_LIMBO_CACHE=null;
 
-function limboEncodePin(tuple){return ['L1',adminEncodePin(tuple),tuple.queueVersion??'',tuple.indexVersion??''].map(part=>encodeURIComponent(part)).join('|');}
+function limboEncodePin(tuple){return ['L2',adminEncodePin(tuple),tuple.queueVersion??'',tuple.indexVersion??'',tuple.observationsVersion??''].map(part=>encodeURIComponent(part)).join('|');}
 function limboDecodePin(raw){
  if(typeof raw!=='string'||!raw||raw.length>ADMIN_PIN_MAX)return null;
  const parts=raw.split('|');
- if(parts.length!==4||parts[0]!=='L1')return null;
+ if(parts.length!==5||parts[0]!=='L2')return null;
  let decoded;
  try{decoded=parts.map(part=>decodeURIComponent(part));}catch{return null;}
  const base=adminDecodePin(decoded[1]);
  if(!base)return null;
- return {...base,queueVersion:decoded[2]||null,indexVersion:decoded[3]||null};
+ return {...base,queueVersion:decoded[2]||null,indexVersion:decoded[3]||null,observationsVersion:decoded[4]||null};
 }
-function limboSameTuple(left,right){return adminSameTuple(left,right)&&left.queueVersion===right.queueVersion&&left.indexVersion===right.indexVersion;}
+function limboSameTuple(left,right){return adminSameTuple(left,right)&&left.queueVersion===right.queueVersion&&left.indexVersion===right.indexVersion&&left.observationsVersion===right.observationsVersion;}
+// What the inventory says about unresolved observations: unavailable without a readable index of the published
+// generation; otherwise the index's own coverage (always partial: it holds only observations that already have a
+// decision) and whether its sources moved since it was written.
+function limboObservationCoverage(observations){
+ if(!observations||!['fresh','stale'].includes(observations.state))return {available:false,reason:observations?'index_'+observations.state:'index_unavailable',state:observations?.state??'unavailable',programmeRunId:observations?.programmeRunId??null};
+ const manifest=observations.manifest;
+ return {available:true,state:observations.state,reasons:observations.reasons,programmeRunId:manifest.programmeRunId,writtenAt:manifest.writtenAt,writer:manifest.writer.kind,scope:manifest.coverage.scope,indexed:manifest.coverage.indexed,eligible:manifest.coverage.eligible??null,omitted:manifest.coverage.omitted??null,complete:manifest.coverage.complete,awaitingFirstLookup:manifest.counts?.awaitingFirstLookup??null};
+}
 // The page cursor carries the pin and the evaluation clock it was minted under in front of the inventory cursor, so a
 // later page is cut from the same evaluation of the same snapshot or refused.
 function limboEncodeCursor(tuple,nowMs,inner){return encodeURIComponent(limboEncodePin(tuple))+'~'+nowMs+'~'+inner;}
@@ -69,13 +78,18 @@ async function adminLimboLoad(env,hasPin){
  const cache=ADMIN_LIMBO_CACHE;
  const queue=await adminReadObject(env.BUCKET,LIMBO_QUEUE_KEY,cache?.queue||null);
  const index=await adminReadObject(env.BUCKET,LIMBO_INDEX_KEY,cache?.index||null);
- const tuple={...base.tuple,queueVersion:queue.present?queue.version:null,indexVersion:index.present?index.version:null};
- if(cache&&limboSameTuple(cache.tuple,tuple))return cache;
+ let observations;
+ try{observations=await discoveryIndexRead(env.BUCKET,{cached:cache?.observations||null});}
+ catch{observations={state:'unavailable',reasons:['storage_unavailable'],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};}
+ const readable=['fresh','stale'].includes(observations.state);
+ const tuple={...base.tuple,queueVersion:queue.present?queue.version:null,indexVersion:index.present?index.version:null,observationsVersion:readable?observations.manifestEtag:null};
+ // The index's freshness is judged on every request; only its records are reused with the rest of the snapshot.
+ if(cache&&limboSameTuple(cache.tuple,tuple))return {...cache,observations};
  const queueBody=queue.present&&queue.body&&typeof queue.body==='object'&&!Array.isArray(queue.body)?queue.body:null;
  const indexBody=index.present&&index.body&&typeof index.body==='object'&&!Array.isArray(index.body)?index.body:null;
  const snapshot={
   tuple,base,queue:{version:queue.version,body:queue.body,present:queue.present},index:{version:index.version,body:index.body,present:index.present},
-  queueBody,films:limboFilms(base,queueBody,indexBody),
+  queueBody,films:limboFilms(base,queueBody,indexBody),observations,
   info:{...base.info,queuePresent:queue.present,queueRefreshedAt:typeof queueBody?.refreshedAt==='string'?queueBody.refreshedAt:null,queueProgrammeRunId:typeof queueBody?.programmeRunId==='string'?queueBody.programmeRunId:null,queueLastCheckAt:typeof queueBody?.lastCheckAt==='string'?queueBody.lastCheckAt:null,queueUploadedAt:queue.uploaded,indexPresent:index.present,indexUploadedAt:index.uploaded},
  };
  ADMIN_LIMBO_CACHE=snapshot;
@@ -94,11 +108,13 @@ function limboEvaluate(snapshot,nowMs){
  const now=new Date(nowMs).toISOString(),run=snapshot.tuple.programmeRunId;
  const films=snapshot.films.map(record=>({...record,observedAt:now}));
  const queue=snapshot.queueBody?limboQueueForHealth(snapshot.queueBody,now):snapshot.queue.present?{observedAt:now}:null;
+ const index=snapshot.observations,readable=['fresh','stale'].includes(index?.state);
  return DataHealth.evaluateDataHealth({
   now,
   published:{programmeRunId:run,phase:'published',publishedAt:snapshot.base.info.programmeUpdatedAt,observedAt:now},
-  coverage:{films:'partial'},
+  coverage:readable?{films:'partial',observations:'partial'}:{films:'partial'},
   films,
+  ...(readable?{observations:DiscoveryIndex.observationHealthEntries(index.records,index.manifest.writtenAt)}:{}),
   predictionQueue:queue,
  });
 }
@@ -124,7 +140,7 @@ async function adminLimboRoute(request,env,url){
  if(cursor!==null){const decoded=limboDecodeCursor(cursor,snapshot.tuple);if(!decoded)return adminError('stale_cursor',400);nowMs=decoded.nowMs;inner=decoded.inner;}
  const health=limboEvaluate(snapshot,nowMs);
  if(health.error)return adminError('evaluation_failed',500);
- const all=LimboInventory.limboItems(health,{films:snapshot.films});
+ const all=LimboInventory.limboItems(health,{films:snapshot.films,observations:['fresh','stale'].includes(snapshot.observations?.state)?snapshot.observations.records:[]});
  const filtered=LimboInventory.filterLimboItems(all,filter);
  if(filtered.error)return adminError(filtered.error,400);
  const page=LimboInventory.pageLimboItems(filtered.items,{limit,key:filtered.key,cursor:inner});
@@ -136,7 +152,7 @@ async function adminLimboRoute(request,env,url){
   kind:filter.kind,subsystem:filter.subsystem,cause:filter.cause,age:filter.minAgeDays,limit,
   items:page.items,nextCursor:page.nextCursor?limboEncodeCursor(snapshot.tuple,nowMs,page.nextCursor):null,total:page.total,
   counts:LimboInventory.limboCounts(all),
-  coverage:{films:health.scope.coverage.films,filmsObserved:health.scope.subjects.films.length,observations:LIMBO_OBSERVATIONS},
+  coverage:{films:health.scope.coverage.films,filmsObserved:health.scope.subjects.films.length,observations:limboObservationCoverage(snapshot.observations),observationsObserved:health.scope.subjects.observations.length},
   context:context.issues,unread:context.unread,
   thresholds:health.thresholds,
   vocabulary:{kinds:LimboInventory.LIMBO_KINDS,subsystems:LimboInventory.LIMBO_SUBSYSTEMS,causes:LimboInventory.LIMBO_CAUSES},

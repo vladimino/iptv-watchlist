@@ -5,17 +5,27 @@
 // orphan rules of `advanceDiscovery`); tests/discovery-recovery.mjs runs both on the same inputs, so a change to one that
 // is not made to the other fails the build.
 //
-// Execution is never available. No writer can retry one observation safely: the candidate lives only inside the whole
-// discovery ledger, the decisions are one shared object that every chunk rewrites whole under the resolver lease, and the
-// only resolver entry point runs a chunk over the global pending order. See
-// docs/evidence/discovery-targeted-recovery-no-go-2026-10-31.md.
+// `execute` says whether the one guarded write of this subsystem, `discovery_reconsider`, may be offered for the
+// observation. It never retries or looks anything up: it only lifts the terminal fence of an observation whose automatic
+// attempts ended on unchanged evidence, so that the next ordinary resolver chunk may take it again. It is offered only
+// for a confirmed `no_more_evidence` verdict on a current index, with no live writer, no protected wait, no TMDB throttle,
+// no ambiguous identity and no missing configuration. Every other verdict names why not.
 
-export const DISCOVERY_RECOVERY_VERSION = 1;
+export const DISCOVERY_RECOVERY_VERSION = 2;
 export const DISCOVERY_RECOVERY_VERDICTS = ['resolved', 'excluded_nonfilm', 'not_current', 'queued', 'identity_conflict', 'backoff', 'no_more_evidence', 'stale_generation', 'not_found', 'unknown'];
 export const DISCOVERY_SERIES_STATES = ['continuing', 'waiting', 'live_writer', 'recovering', 'interrupted', 'stopped', 'unknown'];
 export const DISCOVERY_RETRY_HELPS = ['no', 'only_sooner', 'unlikely', 'series_level', 'unknown'];
 export const DISCOVERY_NEXT_ACTORS = ['none', 'scheduled_step', 'epg_commit', 'new_epg_evidence', 'owner_investigation', 'reread'];
-export const DISCOVERY_RECOVERY_EXECUTE_REASON = 'no_targeted_writer';
+export const DISCOVERY_RECONSIDER_CAPABILITY = 'discovery_reconsider';
+export const DISCOVERY_RECONSIDER_VERSION = 1;
+export const DISCOVERY_RECONSIDER_REASONS = [
+  'eligible', 'index_not_current', 'already_resolved', 'not_a_film', 'not_current', 'already_eligible', 'identity_ambiguous',
+  'backoff_is_policy', 'generation_changed', 'target_absent', 'evidence_incomplete', 'terminal_reason_unknown', 'writer_active',
+  'series_unknown', 'series_backoff', 'tmdb_throttled', 'configuration_required',
+];
+// When the next ordinary chunk can take a reconsidered observation: the series' next step, after its pacing wait, or
+// only the series the next EPG commit opens.
+export const DISCOVERY_RECONSIDER_EFFECTS = ['next_ordinary_chunk', 'after_series_wait', 'next_series', 'none'];
 
 const RECOVERY_HOT_BEFORE_MS = 72 * 3600000;
 const RECOVERY_HOT_AFTER_MS = 24 * 3600000;
@@ -197,8 +207,61 @@ function assessment(fields) {
     retry: fields.retry,
     next: fields.next,
     review: fields.review ?? review(false, null),
-    execute: {available: false, capability: null, reason: DISCOVERY_RECOVERY_EXECUTE_REASON},
+    execute: null,
     evidence: fields.evidence,
+  };
+}
+
+const VERDICT_REFUSAL = {
+  resolved: 'already_resolved', excluded_nonfilm: 'not_a_film', not_current: 'not_current', queued: 'already_eligible',
+  identity_conflict: 'identity_ambiguous', backoff: 'backoff_is_policy', stale_generation: 'generation_changed',
+  not_found: 'target_absent', unknown: 'evidence_incomplete',
+};
+
+function reconsiderGate(result, input, nowMs) {
+  const gate = (available, reason, effect = {when: 'none', at: null}) => ({available, capability: DISCOVERY_RECONSIDER_CAPABILITY, version: DISCOVERY_RECONSIDER_VERSION, reason, effect});
+  if (!recoveryObject(input.index) || input.index.state !== 'fresh') return gate(false, 'index_not_current');
+  if (result.verdict !== 'no_more_evidence') return gate(false, VERDICT_REFUSAL[result.verdict] || 'evidence_incomplete');
+  if (!RECOVERY_TERMINAL_REASONS.includes(result.reason)) return gate(false, 'terminal_reason_unknown');
+  if (result.decision?.status === 'ambiguous') return gate(false, 'identity_ambiguous');
+  const series = result.series;
+  if (series.state === 'live_writer') return gate(false, 'writer_active');
+  if (series.state === 'unknown') return gate(false, 'series_unknown');
+  if (series.state === 'waiting' && series.reason !== 'chunk_budget') return gate(false, 'series_backoff');
+  if (seriesNeedsOwner(series)) return gate(false, 'configuration_required');
+  const throttleAt = recoveryObject(input.throttle) && typeof input.throttle.retryAt === 'string' ? Date.parse(input.throttle.retryAt) : NaN;
+  if (Number.isFinite(throttleAt) && throttleAt > nowMs) return gate(false, 'tmdb_throttled');
+  if (series.state === 'continuing' || series.state === 'recovering') return gate(true, 'eligible', {when: 'next_ordinary_chunk', at: null});
+  if (series.state === 'waiting') return gate(true, 'eligible', {when: 'after_series_wait', at: series.at});
+  return gate(true, 'eligible', {when: 'next_series', at: null});
+}
+
+// The data health issue the guarded action contract (src/domain/admin-actions.js) judges this observation by: eligible
+// only when `execute` is available on complete evidence; unknown evidence is unknown, never eligible.
+export function reconsiderIssue(result) {
+  const key = result.target.key, execute = result.execute;
+  const eligible = execute.available ? true : result.verdict === 'unknown' || execute.reason === 'index_not_current' || execute.reason === 'series_unknown' ? null : false;
+  return {
+    id: DISCOVERY_RECONSIDER_CAPABILITY + ':' + key,
+    subject: {kind: 'observation', id: key},
+    action: {code: DISCOVERY_RECONSIDER_CAPABILITY, eligible, reason: execute.reason},
+    evidence: {completeness: result.evidence.completeness},
+  };
+}
+
+// The decision the action writes: the same record with the terminal fence and the stale retry time lifted, and a marker
+// of who lifted them. `attempts`, `evidenceKey`, `status` and the scoring stay as they were, so the resolver's next
+// uncertain outcome on the same evidence is terminal again at once: the owner buys exactly one more ordinary attempt.
+export function reconsideredDecision(previous, {at, idempotencyKey}) {
+  return {
+    ...previous,
+    terminalReason: null,
+    retryAt: null,
+    reconsidered: {
+      at, idempotencyKey, capability: DISCOVERY_RECONSIDER_CAPABILITY + '@' + DISCOVERY_RECONSIDER_VERSION,
+      previousTerminalReason: previous.terminalReason ?? null, previousRetryAt: previous.retryAt ?? null,
+      attemptsAtReconsider: Number.isInteger(previous.attempts) ? previous.attempts : null,
+    },
   };
 }
 
@@ -216,13 +279,21 @@ function unknown(target, reason, series, missing) {
 // such key, undefined when not supplied): `key`, `programmeRunId`, `normalizedTitle`, `year`, `durations`, `shows`,
 // `seenInLatestSnapshot`, `lastSeenAt`, `lastAiring`, `confirmedTmdbId`, and `nonfilmReason` (the screening result of
 // its title, null when it passes). `decision` is the resolution ledger entry for the key (null when none). `series` is
-// described at `discoverySeriesState`. Errors: `invalid_input`, `invalid_clock`, `invalid_target`.
+// described at `discoverySeriesState`. `index` = {state} is the observation index the observation was read from (only
+// `fresh` lets the action be offered) and `throttle` = {retryAt} the resolver's last TMDB throttle; both only affect
+// `execute`. Errors: `invalid_input`, `invalid_clock`, `invalid_target`.
 export function assessObservationRecovery(input) {
   if (!recoveryObject(input)) return {error: 'invalid_input'};
   const nowMs = typeof input.now === 'string' ? Date.parse(input.now) : NaN;
   if (!Number.isFinite(nowMs)) return {error: 'invalid_clock'};
   const key = recoveryObject(input.target) ? recoveryText(input.target.key) : null;
   if (!key) return {error: 'invalid_target'};
+  const result = judgeObservation(input, nowMs, key);
+  result.execute = reconsiderGate(result, input, nowMs);
+  return result;
+}
+
+function judgeObservation(input, nowMs, key) {
   const target = {key};
   const publishedRunId = recoveryObject(input.published) ? recoveryText(input.published.programmeRunId) : null;
   const series = discoverySeriesState(input.series, publishedRunId, nowMs);
