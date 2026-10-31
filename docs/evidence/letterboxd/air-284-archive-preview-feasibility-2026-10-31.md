@@ -1,6 +1,6 @@
 # AIR-284: Letterboxd archive preview in the Workers runtime, feasibility and resource bounds (2026-10-31)
 
-**Card:** [AIR-284](https://trello.com/c/Y9udReUR). **Decision:** [ADR 0061](../../adr/0061-ephemeral-letterboxd-archive-preview.md) (Proposed).
+**Card:** [AIR-284](https://trello.com/c/Y9udReUR). **Decision:** [ADR 0066](../../adr/0066-ephemeral-letterboxd-archive-preview.md) (Proposed).
 **Code:** route and limits at commit `2ac7c89`, probe [`scripts/letterboxd-archive-probe.mjs`](../../../scripts/letterboxd-archive-probe.mjs) at `98cbfdb`, on branch `cursor/air-284-letterboxd-archive-preview-f220` over `main` `dab57b9`.
 **Captured:** 2026-10-31, about 07:40–07:49 UTC.
 **Runtime:** `wrangler dev --local` 4.156.0 with workerd 1.20261023.1, compatibility date 2026-10-18, `cpu_ms` 120,000, local R2 simulator. Node v22.23.4 for the capped-heap run.

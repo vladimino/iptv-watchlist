@@ -1,4 +1,4 @@
-// Owner-only Letterboxd archive preview behind the existing Cloudflare Access application (ADR 0061):
+// Owner-only Letterboxd archive preview behind the existing Cloudflare Access application (ADR 0066):
 // POST /api/admin/letterboxd-archive/preview. The owner's browser sends the standard export ZIP as multipart form data;
 // the Worker reads it in memory within this request (LetterboxdArchiveZip), parses the four CSV files with the offline
 // parser (LetterboxdExport), matches them with the offline matcher (LetterboxdMatch) against single named R2 objects and
@@ -9,7 +9,7 @@
 const LBA_PATH='/api/admin/letterboxd-archive/preview';
 const LBA_FORM_OVERHEAD=64*1024,LBA_NAME_MAX=255,LBA_DECLARED_MAX=40;
 const LBA_LID=/^[A-Za-z0-9_-]{1,80}$/,LBA_TMDB=/^[1-9]\d{0,11}$/;
-// One preview at a time per isolate: a single worst-case preview needs about half of the isolate's memory (ADR 0061).
+// One preview at a time per isolate: a single worst-case preview needs about half of the isolate's memory (ADR 0066).
 // The slot is a start time, not a flag: a request the runtime cancels never reaches `finally`, so a slot older than
 // LBA_SLOT_MS is taken over.
 const LBA_SLOT_MS=60000;

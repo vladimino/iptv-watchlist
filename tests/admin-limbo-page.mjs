@@ -14,10 +14,11 @@ const client = fs.readFileSync('src/admin/client.js', 'utf8');
 const limboClient = fs.readFileSync('src/admin/limbo-client.js', 'utf8');
 const css = fs.readFileSync('public/admin.css', 'utf8');
 const shell = fs.readFileSync('public/admin.html', 'utf8');
-const bundle = bundleAdmin([client, limboClient, fs.readFileSync('src/admin/prediction-recovery-view.js', 'utf8'), page]);
+const bundle = bundleAdmin([client, limboClient, fs.readFileSync('src/admin/prediction-recovery-view.js', 'utf8'), fs.readFileSync('src/admin/discovery-recovery-view.js', 'utf8'), page]);
 
-// Static boundary: GET only through the client, no token, no other API, no action button.
-assert.match(html, /ТОЛЬКО ЧТЕНИЕ/);
+// Static boundary: reads go through the client; the one write method is the guarded discovery action's POST to its own
+// route; no token, no other API, no generic action button.
+assert.match(html, /ЧТЕНИЕ И ОДНО ДЕЙСТВИЕ С ПОДТВЕРЖДЕНИЕМ/);
 for (const id of ['limbo-snapshot-text', 'limbo-causes', 'limbo-subsystems', 'limbo-form', 'limbo-kind', 'limbo-age', 'limbo-reset', 'limbo-loading', 'limbo-stale', 'limbo-refresh', 'limbo-error', 'limbo-empty', 'limbo-results', 'limbo-total', 'limbo-context-body']) assert.match(html, new RegExp(`id="${id}"`), id);
 assert.ok(html.indexOf('id="limbo-causes"') < html.indexOf('id="limbo-results"'), 'filters come before results in tab order');
 assert.match(html, /<script src="\/admin-limbo\.js"><\/script>/);
@@ -26,10 +27,16 @@ assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limbo" id
 assert.match(html, /<a href="\/admin\/limbo" aria-current="page">Лимбо<\/a>/, 'the inventory is the current section on its own page');
 assert.doesNotMatch(html, /fetch\(|\/api\/|programme\.json/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
-assert.doesNotMatch(bundle, /\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
+assert.doesNotMatch(bundle, /\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|method:\s*['"](?:PUT|PATCH|DELETE)/);
+assert.deepEqual([...bundle.matchAll(/method:\s*['"]POST/g)].length, 1, 'one write method');
+assert.match(bundle, /fetchImpl\(ADMIN_API\+'\/discovery-recovery\/'\+path,\{method:'POST'/, 'and it goes to the discovery action route only');
 assert.doesNotMatch(page, /Повторить<|retry\(|data-limbo-action/, 'no action button: retries are another card');
 assert.match(css, /\.limbo-facts/);
+assert.match(css, /\.limbo-actions\{display:flex;flex-wrap:wrap;[^}]*min-width:0/);
+assert.match(css, /\.limbo-actions \.limbo-recovery-open\{display:inline-flex/);
 assert.match(css, /@media\(max-width:800px\)\{\.limbo-facts div\{grid-template-columns:minmax\(0,1fr\)/);
+assert.match(css, /@media\(max-width:800px\)\{[\s\S]*?\.limbo-actions\{flex-direction:column;align-items:stretch\}/);
+const limboVisible = html => html.replace(/<details class="limbo-tech">[\s\S]*?<\/details>/g, '');
 
 // Worker over an R2 stand-in.
 const records = new Map(), etags = new Map();
@@ -49,12 +56,16 @@ const FrozenDate = class extends Date {constructor(...args) {super(...(args.leng
 const workerContext = vm.createContext({Response, Request, Headers, URL, URLSearchParams, AbortSignal, Date: FrozenDate, Intl, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, Uint32Array, DataView, atob, btoa, crypto: webcrypto, console, setTimeout, structuredClone,
   ASSETS: {}, INITIAL_PERSONAL_RATINGS: {}, FILM_TITLE_DICTIONARY: [], PERSON_NAME_DICTIONARY: [],
   fetch: async () => {throw new Error('the Worker makes no outbound request for the limbo page');}});
+vm.runInContext(scoped('src/domain/discovery-observation-index.js', 'DiscoveryIndex'), workerContext);
 for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
 vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), workerContext);
 vm.runInContext(scoped('src/domain/limbo-inventory.js', 'LimboInventory'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/limbo.js', 'utf8'), workerContext);
+vm.runInContext(scoped('src/domain/admin-actions.js', 'AdminActions'), workerContext);
+vm.runInContext(scoped('src/domain/discovery-recovery.js', 'DiscoveryRecovery'), workerContext);
+vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), workerContext);
 
 const G1 = '11111111-1111-4111-8111-111111111111';
@@ -132,6 +143,8 @@ assert.match(results.innerHTML, /Застряло/);
 assert.match(results.innerHTML, /20 дн\./, 'the age is shown');
 assert.match(results.innerHTML, /последний переход 10\.10\.2026/);
 assert.match(results.innerHTML, /нет прогресса дольше порога/);
+assert.match(limboVisible(results.innerHTML), /Повтор не назначен\. Эта страница ничего не запускает\. Разбор прогноза только объясняет, запуск отсюда не делается/);
+assert.doesNotMatch(limboVisible(results.innerHTML), /не применимо|недопустимо|Identity Review|admin-status-plain/);
 assert.match(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Astuck"/, 'a link to the film detail');
 assert.match(results.innerHTML, /доверенная идентичность tmdb:1/);
 assert.doesNotMatch(results.innerHTML, /Позже/, 'a valid backoff is not stalled');
@@ -143,11 +156,11 @@ assert.match(nodes.get('#limbo-snapshot-text').textContent, /Поколение 
 assert.match(nodes.get('#limbo-snapshot-text').textContent, /очередь прогнозов от 30\.10\.2026/);
 assert.match(nodes.get('#limbo-causes').innerHTML, /data-limbo-cause="stalled" aria-pressed="true"/);
 assert.match(nodes.get('#limbo-causes').innerHTML, /Ждёт по backoff<\/span><small>1</);
-assert.match(nodes.get('#limbo-context-body').innerHTML, /Нерешённые наблюдения EPG недоступны этим чтением/, 'observations are honestly unavailable');
+assert.match(nodes.get('#limbo-context-body').innerHTML, /Нерешённые наблюдения EPG недоступны: индекса наблюдений для опубликованного поколения ещё нет/, 'observations are honestly unavailable');
 assert.match(nodes.get('#limbo-context-body').innerHTML, /неизвестны, а не здоровы/);
 assert.equal(loading.hidden, true); assert.equal(error.hidden, true); assert.equal(stale.hidden, true); assert.equal(empty.hidden, true);
 const heldPin = run('limboLive.pin');
-assert.match(heldPin, /^L1\|/);
+assert.match(heldPin, /^L2\|/);
 
 // 2. Toggle to backoff through a chip: the URL changes, the request sends the held pin, the item says it is a normal wait.
 requests = [];
@@ -157,7 +170,9 @@ assert.match(requests[0].path, /pin=/);
 assert.match(results.innerHTML, /Позже/);
 assert.match(results.innerHTML, /повтор назначен и ещё не наступил/);
 assert.match(results.innerHTML, /parse_error/);
-assert.match(results.innerHTML, /недопустимо \(идёт backoff\)/);
+assert.match(limboVisible(results.innerHTML), /Ждать: повтор уже назначен и наступит сам/);
+assert.match(results.innerHTML, /<details class="limbo-tech">[\s\S]*недопустимо \(идёт backoff\)/);
+assert.doesNotMatch(limboVisible(results.innerHTML), /недопустимо|parse_error/);
 
 // 3. Back restores the previous filter.
 window.history.back();

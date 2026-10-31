@@ -5,7 +5,10 @@ import {PERSON_CROSS_SOURCE, PERSON_IDENTITY_PROJECTION_VERSION, PERSON_REFERENC
 const source = fs.readFileSync('src/domain/person-identity-projection.js', 'utf8');
 assert.match(source, /from '\.\/canonical-person\.js'/);
 assert.doesNotMatch(source, /\b(fetch|require|BUCKET|wrangler|prepare|Date\.now|new Date|Math\.random)\b/);
-for (const file of ['build.mjs', 'src/worker.js', 'src/catalog-d1.js', 'src/d1-enrichment.js', 'src/canonical-repository.js', 'src/enrichment-projection.js', 'public/app.js']) {
+assert.match(fs.readFileSync('build.mjs', 'utf8'), /scopePersonIdentity\(\['src\/domain\/canonical-person\.js','src\/domain\/person-identity-projection\.js'\]\)/);
+assert.match(fs.readFileSync('src/catalog-d1.js', 'utf8'), /PersonIdentity\.projectPersonIdentity/);
+assert.doesNotMatch(fs.readFileSync('src/catalog-d1.js', 'utf8'), /canonical-person/);
+for (const file of ['src/worker.js', 'src/d1-enrichment.js', 'src/canonical-repository.js', 'src/enrichment-projection.js', 'public/app.js']) {
   assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /person-identity-projection|canonical-person/, `${file} does not load the projection`);
 }
 

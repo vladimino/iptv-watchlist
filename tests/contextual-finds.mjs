@@ -3,13 +3,14 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
 // Contextual finds: the watchlist filters that a catalog record can answer from its own fields narrow «Находки» as hard
-// constraints, mechanics and moods rank above genres, and nothing names a person.
+// constraints, mechanics and moods rank above genres, and a person name never matches. A selected actor or director
+// stays empty until a confirmed identity GET names that film by typed tmdb id.
 const now=Date.UTC(2026,5,15,10,0,0),hour=3600000;
 const app=fs.readFileSync('public/app.js','utf8');
 const node=()=>({hidden:true,textContent:'',innerHTML:''});
 const nodes={'#finds':node(),'#finds-cards':node(),'#finds-caption':node(),'#finds-title':{...node(),textContent:'Находки'},'#finds-notice':node(),'#watchlist-title':node(),'#empty':node()};
 let fetches=0;
-const ui=vm.createContext({Date,Intl,Set,Map,URL,console,fetch:async()=>{fetches++;throw new Error('no network in this test');},document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
+const ui=vm.createContext({Date,Intl,Set,Map,URL,Promise,console,fetch:async()=>{fetches++;throw new Error('no network in this test');},document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
 vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
 vm.runInContext(`viewClock=${now};report={runId:'G1',films:[],window:{from:${now-72*hour},to:${now+24*hour}},cutoff:${now}};MAX_YEAR=2026;`,ui);
 ui.now=now;
@@ -92,7 +93,7 @@ reset();set(`state.query='нолан';state.searchScopes={titles:true,people:tru
 assert.deepEqual(finds(credited),[],'a credit name never makes a find: no person matching');
 set(`state.query='обычное'`);assert.deepEqual(finds(credited),['tmdb_30'],'the people scope does not hide a title match');
 
-// Person filters, «Начатые» and «Пересмотреть» are watchlist facts: the section has no find for them.
+// Without a confirmed identity, a person filter still leaves no find. A catalog credit id is not a match.
 reset();set(`state.directors='lb_director/1'`);assert.deepEqual(finds(credited),[]);
 reset();set(`state.actors='tmdb_actor/2'`);assert.deepEqual(finds(credited),[],'not even a catalog credit with the same id');
 reset();set(`state.startedOnly=true`);assert.deepEqual(finds(catalog),[]);
@@ -198,4 +199,232 @@ assert.deepEqual(ids(vm.runInContext(`renderFinds(${now})`,ui)),['tmdb_70'],'the
 assert.equal(fetches,fetchesBeforeGenre,'no request for a genre change');
 assert.equal(vm.runInContext('urlForState("https://iptv.local/").searchParams.get("genre")',ui),'Криминал','the URL keeps the raw label');
 
-console.log('contextual finds: filters, ranking, exclusions, genre identity and render passed');
+// Person identity: Finds reads one GET per selected role and binds film:tmdb:N only to a catalog row whose id is tmdb_N
+// and whose canonicalIdentity is tmdb:N. The watchlist grid keeps matching the stored role id. No person, no request.
+const identityCalls=[];
+const waiters=new Map();
+ui.fetch=async(url,init)=>{
+ fetches++;
+ const path=String(url);
+ identityCalls.push({url:path,method:init?.method||'GET'});
+ if(!path.startsWith('/api/d1/persons/')||!path.endsWith('/identity'))throw new Error('no network in this test');
+ return new Promise(resolve=>{const list=waiters.get(path)||[];list.push(resolve);waiters.set(path,list);});
+};
+const reply=(path,response)=>{const list=waiters.get(path)||[];const resolve=list.shift();if(!resolve)throw new Error('no waiter for '+path);resolve(response);};
+const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
+const http=(status,body)=>({ok:status>=200&&status<300,status,json:async()=>body});
+const personBody=(id,role,catalog,{state='trusted',cross='verified',bounded=false,limitations=['owner_decisions_not_stored','role_links_not_stored'],links,actorCatalog,directorCatalog}={})=>{
+ const evidence=links||[{basis:'co_credit',personIds:['person:'+id,'person:tmdb_'+role+'/9'],films:catalog,roles:[role],names:['Имя']}];
+ const surface=(which,ids)=>({state,crossSource:cross,humanId:'human:1',watchlist:[],catalog:ids});
+ return {source:'d1',authoritative:false,recordId:'person:'+id,bounded,limitations,reference:{state,crossSource:cross,humanId:'human:1',formerIds:[],memberIds:[],links:evidence,reviews:[],externalIds:[],reversal:{destructive:false,stored:false,formerIds:[],splits:[]}},films:{actor:surface('actor',actorCatalog||(role==='actor'?catalog:[])),director:surface('director',directorCatalog||(role==='director'?catalog:[]))}};
+};
+const arm=()=>{set(`findsPeople={generation:undefined,cache:new Map(),inflight:new Set()};findsSource={films:${JSON.stringify(catalog)},programmeRunId:'G1',generatedAt:null,ready:true,error:false,watchedMarkEnabled:false};report={...report,runId:'G1',people:{directors:[{id:'director/nolan',name:'Кристофер Нолан'}],actors:[{id:'actor/hardy',name:'Том Харди'},{id:'actor/<b>',name:'<b>Харди</b>'}]}};`);};
+const showFinds=()=>ids(vm.runInContext(`renderFinds(${now})`,ui));
+for(const item of Object.values(nodes)){item.attributes={};item.setAttribute=(name,value)=>{item.attributes[name]=value;};item.getAttribute=name=>item.attributes[name]??null;}
+const quiet=fetches;
+reset();arm();
+assert.deepEqual(showFinds(),['tmdb_1','tmdb_2','tmdb_3','tmdb_4','tmdb_5']);
+assert.equal(fetches,quiet,'no person selected: no identity request');
+assert.equal(identityCalls.length,0);
+
+// Verified Letterboxd actor to TMDB catalog films. The co_credit is for the actor role.
+reset();arm();set(`state.actors='actor/hardy'`);
+assert.deepEqual(showFinds(),[]);
+assert.equal(nodes['#finds'].hidden,false);
+assert.match(nodes['#finds-cards'].innerHTML,/Проверяем фильмы этого человека/);
+assert.equal(nodes['#finds'].getAttribute('aria-busy'),'true');
+assert.deepEqual(identityCalls.map(call=>call.url),['/api/d1/persons/actor/hardy/identity']);
+assert.deepEqual(identityCalls.map(call=>call.method),['GET']);
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1','film:tmdb:3'])));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_1','tmdb_3'],'verified co_credit catalog ids become finds');
+ui.input=catalog[0];
+assert.match(vm.runInContext('findsCard(input,now,findsScope(),findsContext())',ui),/Совпадает с фильтрами: Том Харди/);
+assert.doesNotMatch(vm.runInContext('findsCard(input,now,findsScope(),findsContext())',ui),/owner|решени/i,'the card does not claim an owner decision');
+
+// The watchlist grid still matches the stored role id and does not need the identity answer.
+set(`films=[{id:'lb-1',title:'Дозор',original:'Watch',year:2010,runtime:100,genres:['Драма'],directors:[],actors:[{id:'actor/hardy',name:'Том Харди'}],shows:[]}]`);
+assert.equal(vm.runInContext('films.filter(eligible).map(film=>film.id).join()',ui),'lb-1');
+set(`films=[]`);
+
+// Role awareness: a director filter reads films.director, not the actor catalog of the same human.
+reset();arm();identityCalls.length=0;set(`state.directors='director/nolan'`);
+showFinds();
+reply('/api/d1/persons/director/nolan/identity',http(200,personBody('director/nolan','director',['film:tmdb:2'],{actorCatalog:['film:tmdb:1'],directorCatalog:['film:tmdb:2']})));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_2'],'the director role does not take the actor catalog');
+
+// Actor AND director, and AND with another facet. OR inside genres still applies to the person matches.
+reset();arm();identityCalls.length=0;
+set(`state.actors='actor/hardy';state.directors='director/nolan'`);
+showFinds();
+assert.deepEqual(identityCalls.map(call=>call.url),['/api/d1/persons/director/nolan/identity','/api/d1/persons/actor/hardy/identity']);
+reply('/api/d1/persons/director/nolan/identity',http(200,personBody('director/nolan','director',['film:tmdb:1','film:tmdb:2'])));
+await flush();
+assert.deepEqual(showFinds(),[],'one confirmed role is not enough while the other is still loading');
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1','film:tmdb:4'])));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_1'],'actor AND director');
+set(`state.genres=new Set(['Криминал','Комедия'])`);
+assert.deepEqual(showFinds(),['tmdb_1'],'a genre the film does not carry still excludes it');
+set(`state.genres=new Set(['Криминал','Драма'])`);
+assert.deepEqual(showFinds(),['tmdb_1'],'OR within genres, AND with both people');
+
+// Person relevance is compared before mechanics and moods. Both films still have to pass every hard facet.
+reset();arm();set(`state.actors='actor/hardy';state.moods=new Set(['dark','tense'])`);
+showFinds();
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1','film:tmdb:2'])));
+await flush();
+const moodRanked=[
+ film('tmdb_1',{title:'Человек',rating:4.9,genres:['Драма'],moods:['dark']}),
+ film('tmdb_2',{title:'Два настроения',rating:4.1,genres:['Драма'],moods:['dark','tense']}),
+ film('tmdb_3',{title:'Чужой',rating:4.8,genres:['Драма'],moods:['dark','tense']}),
+];
+assert.deepEqual(finds(moodRanked),['tmdb_2','tmdb_1'],'among verified people, more moods still rank first; a mood match that is not this person is not a find');
+ui.a=film('tmdb_1',{rating:4.1,moods:[]});ui.b=film('tmdb_9',{rating:4.9,moods:['dark','tense']});
+assert.ok(vm.runInContext('findsCompare(a,b,now,findsScope(),findsContext())<0',ui),'a verified person outranks more moods on another film');
+ui.input=moodRanked[1];
+assert.match(vm.runInContext('findsCard(input,now,findsScope(),findsContext())',ui),/Совпадает с фильтрами: Том Харди · Мрачный · Напряжённый/);
+
+// Fail closed: name-only, ambiguous, conflicting, bounded, unknown, a broken body, 404 and 503.
+async function expectClosed(label,response){
+ reset();arm();identityCalls.length=0;set(`state.actors='actor/hardy'`);
+ showFinds();
+ reply('/api/d1/persons/actor/hardy/identity',response);
+ await flush();
+ assert.deepEqual(showFinds(),[],label);
+ assert.match(nodes['#finds-cards'].innerHTML,/Подтверждённых фильмов этого человека/,label);
+}
+const verified=personBody('actor/hardy','actor',['film:tmdb:1']);
+await expectClosed('name only',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'ambiguous',cross:'none',links:[{basis:'same_name',roles:['actor'],personIds:[],films:[],names:['Том']}]})));
+await expectClosed('ambiguous',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'ambiguous',cross:'ambiguous',links:[]})));
+await expectClosed('conflicting',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'conflicting',cross:'refused',links:[]})));
+await expectClosed('bounded',http(200,{...verified,bounded:true,limitations:[...verified.limitations,'neighborhood_bounded']}));
+await expectClosed('unknown state',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'unresolved',cross:'none',links:[]})));
+await expectClosed('co_credit for the other role',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{links:[{basis:'co_credit',roles:['director'],personIds:[],films:['film:tmdb:1'],names:['Имя']}]})));
+await expectClosed('broken body',http(200,{source:'d1',authoritative:false}));
+await expectClosed('404',http(404,{error:'Person not found'}));
+await expectClosed('503',http(503,{error:'no db'}));
+reset();arm();set(`state.actors='actor/hardy'`);
+ui.fetch=async()=>{fetches++;throw new Error('offline');};
+showFinds();
+await flush();
+assert.deepEqual(showFinds(),[],'a network error matches nothing');
+assert.match(nodes['#finds-cards'].innerHTML,/Подтверждённых фильмов этого человека/);
+ui.fetch=async(url,init)=>{
+ fetches++;
+ const path=String(url);
+ identityCalls.push({url:path,method:init?.method||'GET'});
+ if(!path.startsWith('/api/d1/persons/'))throw new Error('no network in this test');
+ return new Promise(resolve=>{const list=waiters.get(path)||[];list.push(resolve);waiters.set(path,list);});
+};
+
+// Identity namespaces. A TV id, a retired movie id and a second row of the same typed identity do not match.
+const movie=film('tmdb_9',{title:'Фильм'});
+const tv={...film('tmdb_9',{title:'Сериал'}),id:'tmdb_tv_9',canonicalIdentity:'tmdb_tv:9',tmdbId:'9'};
+const retired={...film('tmdb_17266',{title:'Снятый id'}),canonicalIdentity:null};
+const sameTyped=[film('tmdb_8',{title:'Один'}),{...film('tmdb_8',{title:'Другой'}),title:'Другой'}];
+function bind(ids,rows){ui.ids=ids;ui.rows=rows;return vm.runInContext('findsBindPerson(ids,rows)',ui);}
+assert.deepEqual([...bind(['film:tmdb:9'],[movie])],['tmdb_9']);
+assert.deepEqual([...bind(['film:tmdb_tv:9'],[movie])],[],'a TV id does not bind a movie with the same number');
+assert.deepEqual([...bind(['film:tmdb:9'],[tv])],[],'a movie id does not bind a TV row');
+assert.deepEqual([...bind(['film:tmdb:17266'],[retired])],[],'a row without the typed canonical identity does not bind');
+assert.deepEqual([...bind(['film:retired:1','film:letterboxd:abc'],[movie])],[],'only film:tmdb:N can bind');
+assert.deepEqual([...bind(['film:tmdb:8'],sameTyped)],[],'two catalog rows of one typed identity bind nothing');
+assert.deepEqual([...bind(['film:tmdb:8'],[{...movie,id:'other',canonicalIdentity:'tmdb:8',tmdbId:'8'}])],[],'a bare number or a mismatched catalog id does not bind');
+
+// Counts: 0, 1, 5 and more than 5. Eligibility is unchanged, so a weak film in the catalog ids is still not a find.
+function personFilms(count){return Array.from({length:count},(_,i)=>film('tmdb_'+(100+i),{title:'Человек '+i,rating:4.2+i/100}));}
+async function withActor(rows,catalogIds){
+ reset();arm();
+ set(`findsSource={films:${JSON.stringify(rows)},programmeRunId:'G1',generatedAt:null,ready:true,error:false,watchedMarkEnabled:false};state.actors='actor/hardy'`);
+ showFinds();
+ reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',catalogIds)));
+ await flush();
+ return showFinds();
+}
+assert.deepEqual(await withActor(personFilms(3),['film:tmdb:999']),[],'no catalog row for the D1 id');
+assert.equal((await withActor(personFilms(3),['film:tmdb:100'])).length,1);
+assert.equal((await withActor(personFilms(5),personFilms(5).map(item=>'film:tmdb:'+item.tmdbId))).length,5);
+assert.equal((await withActor(personFilms(8),personFilms(8).map(item=>'film:tmdb:'+item.tmdbId))).length,5,'more than five still shows five');
+const weakPerson=film('tmdb_100',{rating:3.2});
+assert.deepEqual(await withActor([weakPerson],['film:tmdb:100']),[],'a weak prediction stays ineligible');
+
+// Async: reset, Back/Forward, a rapid switch and a generation change never show the previous answer.
+reset();arm();identityCalls.length=0;
+set(`state.actors='actor/hardy'`);
+showFinds();
+const callsBeforeReset=identityCalls.length;
+set(`state.actors=''`);
+assert.deepEqual(showFinds(),['tmdb_1','tmdb_2','tmdb_3','tmdb_4','tmdb_5'],'clearing the person restores the plain section');
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1'])));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_1','tmdb_2','tmdb_3','tmdb_4','tmdb_5'],'a late answer for a cleared person is not shown');
+assert.equal(identityCalls.length,callsBeforeReset,'clearing the person makes no second request');
+
+reset();arm();identityCalls.length=0;
+set(`Object.assign(state,readUrlState(new URL('https://iptv.local/?actor=actor%2Fhardy')))`);
+showFinds();
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:2'])));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_2'],'a deeplink loads that person');
+set(`Object.assign(state,readUrlState(new URL('https://iptv.local/')))`);
+assert.deepEqual(showFinds(),['tmdb_1','tmdb_2','tmdb_3','tmdb_4','tmdb_5'],'Back to no person restores the section without a request');
+const beforeForward=identityCalls.length;
+set(`Object.assign(state,readUrlState(new URL('https://iptv.local/?actor=actor%2Fhardy')))`);
+assert.deepEqual(showFinds(),['tmdb_2'],'Forward uses the cached answer for this generation');
+assert.equal(identityCalls.length,beforeForward,'Forward does not ask again');
+
+reset();arm();identityCalls.length=0;
+set(`state.actors='actor/hardy'`);
+showFinds();
+set(`state.actors='actor/other'`);
+showFinds();
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1'])));
+await flush();
+assert.deepEqual(showFinds(),[],'the first person arriving late does not fill the second selection');
+assert.match(nodes['#finds-cards'].innerHTML,/Проверяем фильмы этого человека/);
+reply('/api/d1/persons/actor/other/identity',http(200,personBody('actor/other','actor',['film:tmdb:4'])));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_4']);
+
+reset();arm();
+set(`state.actors='actor/hardy'`);
+showFinds();
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:1'])));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_1']);
+const beforeGeneration=identityCalls.length;
+set(`report={...report,runId:'G2'}`);
+assert.deepEqual(showFinds(),[],'a new programme generation hides the old catalog and the old person answer');
+assert.equal(nodes['#finds'].hidden,true);
+set(`findsSource={...findsSource,programmeRunId:'G2'}`);
+showFinds();
+assert.equal(identityCalls.length,beforeGeneration+1,'the new generation asks again');
+reply('/api/d1/persons/actor/hardy/identity',http(200,personBody('actor/hardy','actor',['film:tmdb:5'])));
+await flush();
+assert.deepEqual(showFinds(),['tmdb_5'],'only the answer for the current generation is shown');
+
+// An invalid stored id fails closed and does not request. «Начатые» and «Пересмотр» stay empty with a person selected.
+reset();arm();const beforeInvalid=identityCalls.length;
+set(`state.directors='lb_director/1'`);
+assert.deepEqual(showFinds(),[]);
+assert.equal(identityCalls.length,beforeInvalid,'an id that is not a person route is not fetched');
+assert.match(nodes['#finds-cards'].innerHTML,/Подтверждённых фильмов этого человека/);
+set(`state.directors='director/nolan';state.startedOnly=true`);
+showFinds();
+assert.deepEqual(showFinds(),[],'«Начатые» still leaves no find');
+set(`state.startedOnly=false;state.viewing='rewatch'`);
+assert.deepEqual(showFinds(),[],'«Пересмотр» still leaves no find');
+
+// HTML in a person name is escaped inside the match line.
+reset();arm();set(`state.actors='actor/<b>'`);
+showFinds();
+assert.equal(identityCalls.at(-1).url,'/api/d1/persons/actor/%3Cb%3E/identity');
+reply('/api/d1/persons/actor/%3Cb%3E/identity',http(200,personBody('actor/<b>','actor',['film:tmdb:1'])));
+await flush();
+const escaped=nodes['#finds-cards'].innerHTML;
+assert.match(escaped,/Совпадает с фильтрами: &lt;b&gt;Харди&lt;\/b&gt;/);
+assert.doesNotMatch(escaped,/<b>Харди<\/b>/);
+
+console.log('contextual finds: filters, ranking, exclusions, genre identity, person identity and render passed');

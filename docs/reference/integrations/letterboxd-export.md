@@ -87,7 +87,7 @@ Title normalization is the matcher's. Cross-film checks look at every observed f
 
 ## In the Worker
 
-The owner's archive preview (`POST /api/admin/letterboxd-archive/preview`, [admin API](../api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview), [ADR 0061](../../adr/0061-ephemeral-letterboxd-archive-preview.md)) applies this contract to a ZIP the owner uploads, in memory and without storing it:
+The owner's archive preview (`POST /api/admin/letterboxd-archive/preview`, [admin API](../api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview), [ADR 0066](../../adr/0066-ephemeral-letterboxd-archive-preview.md)) applies this contract to a ZIP the owner uploads, in memory and without storing it:
 
 - **ZIP.** [`src/letterboxd-zip.js`](../../../src/letterboxd-zip.js) uses Node's `Buffer` and `zlib` and stays offline. The Worker uses [`src/domain/letterboxd-archive-zip.js`](../../../src/domain/letterboxd-archive-zip.js), on Web APIs only, with hard limits on size, entries, ratio and rows. For an archive within those limits it returns the same four texts, SHA-256 and export time as the offline reader; tests pin the equivalence.
 - **Index.** The matcher's index is built from the published generation's programme, `metadata.json` and the published ratings generation, read as single objects from live R2 instead of from a snapshot. The generation's catalog copy is not read, so the Worker finds fewer `title_year` candidates than an offline run with a snapshot; `lid_exact` and `tmdb_verified` are unaffected.

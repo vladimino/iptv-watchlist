@@ -730,8 +730,108 @@ function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
 // effective viewing window count, so a film airing only on another channel, outside the period or in the black zone is not a find.
-const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5;
+const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5,FINDS_PERSON_CACHE=8;
 let findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false,watchedMarkEnabled:false},findsLoading=false;
+// One identity GET per selected actor or director. The cache keeps a few answers for this programme generation.
+// A generation change drops them. An in-flight answer for another generation or another selection is not shown.
+let findsPeople={generation:undefined,cache:new Map(),inflight:new Set()};
+function findsPersonRoute(field,id){
+ const role=field==='directors'?'director':'actor';
+ if(typeof id!=='string'||id.length>200||/[\s#&?]/.test(id))return null;
+ const match=/^(tmdb_)?(actor|director)\/([^/]+)$/.exec(id);
+ if(!match||match[2]!==role)return null;
+ return {field,role,id,path:'/api/d1/persons/'+(match[1]||'')+match[2]+'/'+encodeURIComponent(match[3])+'/identity'};
+}
+function findsPersonLabel(field,id){
+ const people=report?.people?.[field];
+ const found=Array.isArray(people)?people.find(person=>person&&person.id===id):null;
+ const name=typeof found?.name==='string'?found.name.trim():'';
+ return name||(field==='directors'?'режиссёр':'актёр');
+}
+// A confirmed cross-source answer is unbounded, trusted and verified, and carries co_credit for this role.
+// Owner decisions and role links are not in D1; a body that does not say so is not applied. Anything else matches no catalog film.
+function findsPersonAccepted(body,route){
+ if(!body||typeof body!=='object'||Array.isArray(body))return null;
+ if(body.source!=='d1'||body.authoritative!==false||body.bounded!==false)return null;
+ if(body.recordId!=='person:'+route.id)return null;
+ const limitations=body.limitations;
+ if(!Array.isArray(limitations)||limitations.includes('neighborhood_bounded')||limitations.includes('namesakes_truncated'))return null;
+ if(!limitations.includes('owner_decisions_not_stored')||!limitations.includes('role_links_not_stored'))return null;
+ const reference=body.reference;
+ if(!reference||reference.state!=='trusted'||reference.crossSource!=='verified'||!Array.isArray(reference.links))return null;
+ const evidence=reference.links.filter(link=>link&&link.basis==='co_credit'&&Array.isArray(link.roles)&&link.roles.includes(route.role));
+ if(!evidence.length)return null;
+ const surface=body.films?.[route.role];
+ if(!surface||surface.state!=='trusted'||surface.crossSource!=='verified'||!Array.isArray(surface.catalog))return null;
+ const ids=[];
+ for(const id of surface.catalog)if(typeof id==='string'&&/^film:tmdb:\d+$/.test(id))ids.push(id);
+ return ids;
+}
+function findsTypedMovie(film){
+ const id=typeof film?.id==='string'?film.id:'';
+ const match=/^tmdb_(\d+)$/.exec(id);
+ if(!match)return null;
+ const typed='tmdb:'+match[1];
+ return film.canonicalIdentity===typed?typed:null;
+}
+function findsBindPerson(d1Ids,films){
+ const wanted=new Set();
+ for(const id of d1Ids||[]){const match=/^film:tmdb:(\d+)$/.exec(id);if(match)wanted.add('tmdb:'+match[1]);}
+ const hits=new Map();
+ for(const film of films||[]){
+  const typed=findsTypedMovie(film);
+  if(!typed||!wanted.has(typed))continue;
+  const list=hits.get(typed)||[];list.push(String(film.id));hits.set(typed,list);
+ }
+ const out=new Set();
+ for(const list of hits.values())if(list.length===1)out.add(list[0]);
+ return out;
+}
+function findsPersonView(){
+ const selected=[];
+ for(const field of ['directors','actors']){const id=state[field];if(id)selected.push({field,id,route:findsPersonRoute(field,id)});}
+ if(!selected.length)return {active:false,ready:true,pending:false,closed:false,people:[],ids:new Set()};
+ const generation=report?.runId??null;
+ let pending=false,closed=false;
+ const people=[];
+ for(const item of selected){
+  if(!item.route){closed=true;continue;}
+  const cached=findsPeople.cache.get(generation+'\n'+item.route.path);
+  if(!cached||cached.status==='loading'){pending=true;continue;}
+  if(cached.status!=='ready'){closed=true;continue;}
+  people.push({label:findsPersonLabel(item.field,item.id),catalogIds:findsBindPerson(cached.ids,findsSource.films)});
+ }
+ if(closed)return {active:true,ready:false,pending:false,closed:true,people:[],ids:new Set()};
+ if(pending||people.length!==selected.length)return {active:true,ready:false,pending:true,closed:false,people:[],ids:new Set()};
+ let ids=null;
+ for(const item of people){const next=item.catalogIds;ids=ids?new Set([...ids].filter(id=>next.has(id))):new Set(next);}
+ return {active:true,ready:true,pending:false,closed:false,people,ids};
+}
+function syncFindsPeople(){
+ const generation=report?.runId??null;
+ if(findsPeople.generation!==generation){findsPeople.generation=generation;findsPeople.cache.clear();}
+ const routes=[];
+ for(const field of ['directors','actors']){const route=state[field]?findsPersonRoute(field,state[field]):null;if(route)routes.push(route);}
+ for(const route of routes){
+  const cacheKey=generation+'\n'+route.path;
+  if(findsPeople.cache.has(cacheKey)||findsPeople.inflight.has(cacheKey))continue;
+  while(findsPeople.cache.size>=FINDS_PERSON_CACHE)findsPeople.cache.delete(findsPeople.cache.keys().next().value);
+  findsPeople.cache.set(cacheKey,{status:'loading'});
+  findsPeople.inflight.add(cacheKey);
+  loadFindsPerson(route,cacheKey,generation);
+ }
+}
+async function loadFindsPerson(route,cacheKey,generation){
+ let ids=null;
+ try{
+  const response=await fetch(route.path);
+  if(response.ok)ids=findsPersonAccepted(await response.json(),route);
+ }catch{ids=null;}
+ findsPeople.inflight.delete(cacheKey);
+ if(findsPeople.generation!==generation)return;
+ findsPeople.cache.set(cacheKey,ids?{status:'ready',ids}:{status:'closed'});
+ renderFinds();
+}
 // The owner's «Смотрел» mark (ADR-0032): POST /api/catalog/watched with the card's TMDB id only. A marked film leaves Finds at once,
 // before the catalog answer is refreshed; the notice offers an undo, which posts watched: false.
 const findsMarks=new Map();let findsNotice=null;
@@ -750,12 +850,15 @@ function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film
 function findsStrong(prediction){return !!prediction&&!prediction.stale&&Number.isFinite(prediction.predictedRating)&&prediction.predictedRating>=FINDS_MIN_RATING&&Number.isFinite(prediction.probability4Plus)&&prediction.probability4Plus>=FINDS_MIN_PROBABILITY&&typeof prediction.confidence==='string'&&prediction.confidence!==''&&prediction.confidence!=='low';}
 // Contextual finds: every filter a catalog record can answer from its own fields (title search, genres, years, runtime, mechanics,
 // moods, execution, prediction thresholds, last chance, channel and period) is a hard constraint, with the same AND/OR rules as the
-// watchlist grid. Mechanics, moods and execution come only from the record's current fingerprint and prediction. Nothing here names a
-// person: the people search scope is not evaluated on a catalog record, and a selected director or actor, «Только начатые» or «Пересмотр»
-// (watchlist-only facts) leave no find. The record carries no synopsis or aliases, so the plot scope reads only genres and facets.
+// watchlist grid. Mechanics, moods and execution come only from the record's current fingerprint and prediction. The people search
+// scope is not evaluated on a catalog record. A selected director or actor is a hard constraint too, but only through the identity
+// GET: no confirmed cross-source catalog ids means no find. «Только начатые» and «Пересмотр» stay watchlist-only and still leave no
+// find. The record carries no synopsis or aliases, so the plot scope reads only genres and facets. The watchlist grid keeps matching
+// the stored role id and does not read this answer.
 function findsContext(){
  const validYear=Number.isInteger(state.from)&&Number.isInteger(state.to)&&state.from>=1900&&state.to<=MAX_YEAR&&state.from<=state.to,validRuntime=state.maxRuntime===null||(Number.isInteger(state.maxRuntime)&&state.maxRuntime>0);
- return {valid:validYear&&validRuntime,query:searchTokens(state.query),scopes:activeSearchScopes(state.searchScopes),genres:new Set(state.genres),genreKeys:findsGenreKeys(state.genres),mechanics:new Set(state.mechanics),moods:new Set(state.moods),execution:Object.fromEntries(EXECUTION_FILTERS.map(dimension=>[dimension.id,new Set(state.execution[dimension.id]||[])])),from:state.from,to:state.to,maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,viewing:state.viewing,startedOnly:state.startedOnly,lastChanceOnly:state.lastChanceOnly,person:!!(state.directors||state.actors)};
+ const person=!!(state.directors||state.actors);
+ return {valid:validYear&&validRuntime,query:searchTokens(state.query),scopes:activeSearchScopes(state.searchScopes),genres:new Set(state.genres),genreKeys:findsGenreKeys(state.genres),mechanics:new Set(state.mechanics),moods:new Set(state.moods),execution:Object.fromEntries(EXECUTION_FILTERS.map(dimension=>[dimension.id,new Set(state.execution[dimension.id]||[])])),from:state.from,to:state.to,maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,viewing:state.viewing,startedOnly:state.startedOnly,lastChanceOnly:state.lastChanceOnly,person,people:person?findsPersonView():null};
 }
 function findsContextActive(context){return !!context&&(context.query.tokens.length>0||context.genres.size>0||context.mechanics.size>0||context.moods.size>0||Object.values(context.execution).some(selected=>selected.size)||context.from!==1900||context.to!==MAX_YEAR||context.maxRuntime!==null||context.minPrediction!==null||context.minProbability!==null||context.lastChanceOnly||context.viewing!=='any'||context.startedOnly||context.person);}
 // Genres are matched by canonical key, not by label: the watchlist carries the Letterboxd labels mapped by GENRE_MAP («Криминал»,
@@ -783,9 +886,11 @@ function findsSearchRank(film,context){
  const entry={names:searchTexts([film.title,film.original]),people:[],facets:[...facets.mechanics].flatMap(id=>searchTexts([id,MECHANIC_LABELS[id]])).concat([...facets.moods].flatMap(id=>searchTexts([id,moodLabel(id)]))).concat(searchTexts(film.genres||[])),synopsis:''};
  return rankSearchEntry(entry,normalized,tokens,{titles:!!context.scopes.titles,people:false,plot:!!context.scopes.plot});
 }
+function findsPersonHit(film,context){return !!context?.people?.ready&&context.people.ids.has(String(film.id));}
 function findsMatchesContext(film,context,now,scope){
  if(!context)return true;
- if(!context.valid||context.person||context.startedOnly||context.viewing==='rewatch')return false;
+ if(!context.valid||context.startedOnly||context.viewing==='rewatch')return false;
+ if(context.person&&!findsPersonHit(film,context))return false;
  const p=film.prediction,facets=findsFacets(film),year=Number(film.year),runtime=Number(film.runtime);
  if(context.minPrediction!==null&&!(p.predictedRating>=context.minPrediction))return false;
  if(context.minProbability!==null&&!(p.probability4Plus>=context.minProbability))return false;
@@ -800,11 +905,12 @@ function findsMatchesContext(film,context,now,scope){
 }
 // What a find matched among the selected genres, mechanics and moods; mechanics and moods weigh above genres in the ranking.
 function findsMatched(film,context){
- if(!context)return {mechanics:[],moods:[],genres:[]};
+ if(!context)return {people:[],mechanics:[],moods:[],genres:[]};
  const facets=findsFacets(film),keys=findsGenreKeys(film.genres),seen=new Set();
  // The matched genres are the selected labels (as the owner picked them), one per canonical genre the film carries.
  const genres=[...context.genres].filter(genre=>{const key=findsGenreKey(genre);if(!key||!keys.has(key)||seen.has(key))return false;seen.add(key);return true;});
- return {mechanics:[...context.mechanics].filter(id=>facets.mechanics.has(id)),moods:[...context.moods].filter(id=>facets.moods.has(id)),genres};
+ const people=context.people?.ready?context.people.people.filter(item=>item.catalogIds.has(String(film.id))).map(item=>item.label):[];
+ return {people,mechanics:[...context.mechanics].filter(id=>facets.mechanics.has(id)),moods:[...context.moods].filter(id=>facets.moods.has(id)),genres};
 }
 function findsEligible(film,now=nowMs(),known=watchlistIdentities(),scope=findsScope()){
  if(!film||film.id===undefined||film.id===null)return false;
@@ -818,7 +924,7 @@ function findsEligible(film,now=nowMs(),known=watchlistIdentities(),scope=findsS
 function franchiseKey(film){const base=String(film.original||film.title||'').normalize('NFKC').toLocaleLowerCase('ru').replace(/[:\-–—]/g,' ');return base.replace(/(?:^|\s)(?:part|часть|глава|chapter|episode|эпизод|vol\.?|том)\s*[\divxlc]+(?=\s|$)/gu,' ').replace(/\s(?:\d|[ivxlc]{1,5})\s*$/,' ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();}
 function findsSignal(film){return `${film.prediction.predictedRating.toFixed(1)}|${film.prediction.probability4Plus.toFixed(2)}`;}
 function findsCompare(a,b,now,scope=findsScope(),context=null){
- if(context){const ma=findsMatched(a,context),mb=findsMatched(b,context);const facet=(mb.mechanics.length+mb.moods.length)-(ma.mechanics.length+ma.moods.length)||mb.genres.length-ma.genres.length;if(facet)return facet;}
+ if(context){const ma=findsMatched(a,context),mb=findsMatched(b,context);const person=mb.people.length-ma.people.length;if(person)return person;const facet=(mb.mechanics.length+mb.moods.length)-(ma.mechanics.length+ma.moods.length)||mb.genres.length-ma.genres.length;if(facet)return facet;}
  return b.prediction.predictedRating-a.prediction.predictedRating||b.prediction.probability4Plus-a.prediction.probability4Plus||(findsUntil(a,now,scope)??Infinity)-(findsUntil(b,now,scope)??Infinity)||String(a.title||'').localeCompare(String(b.title||''),'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
 function buildFinds(input=findsSource.films,now=nowMs(),scope=findsScope(),context=findsContext()){
  const known=watchlistIdentities();
@@ -851,7 +957,7 @@ function findsLabels(film){
  const out=[];if(mechanics[0])out.push(mechanics[0]);if(moods[0])out.push(moods[0]);if(out.length<2&&mechanics[1])out.push(mechanics[1]);if(out.length<2&&moods[1])out.push(moods[1]);
  return out.slice(0,2);
 }
-function findsMatchText(film,context){const matched=findsMatched(film,context);return [...matched.mechanics.map(id=>MECHANIC_LABELS[id]),...matched.moods.map(moodLabel),...matched.genres].slice(0,3).join(' · ');}
+function findsMatchText(film,context){const matched=findsMatched(film,context);const facets=[...matched.mechanics.map(id=>MECHANIC_LABELS[id]),...matched.moods.map(moodLabel),...matched.genres].slice(0,3);return [...matched.people,...facets].join(' · ');}
 function findsCard(film,now=nowMs(),scope=findsScope(),context=null){
  const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),match=findsMatchText(film,context),chance=chance4Plus(p),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
@@ -931,14 +1037,19 @@ function syncResultSections(findsCount){
 }
 function renderFinds(now=nowMs()){
  const node=$('#finds');if(!node){syncResultSections(0);return [];}
+ syncFindsPeople();
  const scope=findsScope(),context=findsContext();
  const list=findsFresh()?buildFinds(findsSource.films,now,scope,context):[];
+ const person=context.people,blocked=!context.valid||context.startedOnly||context.viewing==='rewatch';
+ const pending=!!(person?.active&&person.pending&&findsFresh()&&!blocked),closed=!!(person?.active&&person.closed&&findsFresh()&&!blocked);
+ const status=pending?'<p class="finds-person-status" role="status">Проверяем фильмы этого человека…</p>':closed?'<p class="finds-person-status" role="alert">Подтверждённых фильмов этого человека в «Находках» нет. Список watchlist не изменён.</p>':'';
  // A re-render replaces the buttons; keyboard focus on a mark or undo button is put back on its replacement.
  const active=document.activeElement,refocus=active?.dataset?.findsWatched?`[data-finds-watched="${active.dataset.findsWatched}"]`:active?.dataset?.findsUndo?`[data-finds-undo="${active.dataset.findsUndo}"]`:null;
  const notice=$('#finds-notice');if(notice){const html=findsNoticeHTML();if(notice.innerHTML!==html)notice.innerHTML=html;notice.hidden=!findsNotice;}
- node.hidden=list.length===0&&!findsNotice;
+ if(typeof node.setAttribute==='function')node.setAttribute('aria-busy',pending?'true':'false');
+ node.hidden=list.length===0&&!findsNotice&&!status;
  const title=$('#finds-title');if(title)title.textContent=findsTitle(scope);
- const cards=$('#finds-cards');if(cards)cards.innerHTML=list.map(film=>findsCard(film,now,scope,context)).join('');
+ const cards=$('#finds-cards');if(cards)cards.innerHTML=status+list.map(film=>findsCard(film,now,scope,context)).join('');
  const caption=$('#finds-caption');if(caption)caption.textContent=findsCaption(list.length,scope,findsContextActive(context));
  syncResultSections(list.length);
  if(refocus&&document.activeElement!==active)document.querySelector(refocus)?.focus();

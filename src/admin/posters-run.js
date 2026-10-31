@@ -17,14 +17,15 @@ const POSTER_HISTORY_RECEIPTS = 10;
 const POSTER_HISTORY_OBSERVATIONS = 20;
 const POSTER_HISTORY_TERMINAL_IDS = 200;
 
-export const POSTER_TERMINAL = Object.freeze(['hydrated', 'already_present', 'no_poster_on_tmdb', 'tmdb_id_mismatch']);
+export const POSTER_TERMINAL = Object.freeze(['hydrated', 'already_present', 'no_poster_on_tmdb', 'tmdb_id_mismatch', 'not_eligible']);
 
 // Every record outcome the route can return (src/discovery.js catalogPosterHydration). `terminal` outcomes move the cursor.
 export const POSTER_OUTCOME_COPY = Object.freeze({
   hydrated: {terminal: true, tone: 'ready', text: 'Постер записан'},
   already_present: {terminal: true, tone: 'neutral', text: 'Постер уже был, ничего не менялось'},
-  no_poster_on_tmdb: {terminal: true, tone: 'blocked', text: 'На TMDB постера нет — повтор не поможет'},
+  no_poster_on_tmdb: {terminal: true, tone: 'blocked', text: 'На TMDB постера нет — обычный запуск пропустит её до срока повторной проверки'},
   tmdb_id_mismatch: {terminal: true, tone: 'blocked', text: 'TMDB ответил за другой фильм — нужен ручной разбор'},
+  not_eligible: {terminal: true, tone: 'neutral', text: 'Этой записи уже нет среди фильмов без постера — TMDB не запрашивался'},
   tmdb_failed: {terminal: false, tone: 'warning', text: 'Ошибка TMDB — можно повторить позже'},
   rate_limited: {terminal: false, tone: 'warning', text: 'TMDB ограничил частоту запросов — повтор после указанного времени'},
   not_attempted: {terminal: false, tone: 'warning', text: 'Не запрашивался: TMDB ограничил частоту раньше в этом пакете'},
@@ -38,7 +39,8 @@ export const POSTER_UNKNOWN_OUTCOME = 'Неизвестный результат
 
 // Why a run stopped. `retry` says whether another run can help without a change somewhere else.
 export const POSTER_STOP_COPY = Object.freeze({
-  done: {tone: 'ready', text: 'Очередь пройдена до конца: каждая проверяемая запись получила окончательный результат.', retry: false},
+  done: {tone: 'ready', text: 'Очередь дозагрузки пройдена: у каждой записи, которую сейчас можно запросить, есть окончательный результат. Запомненные отказы TMDB в эту очередь не входят.', retry: false},
+  negatives_unreadable: {tone: 'blocked', text: 'Память об отказах TMDB не прочиталась. Ничего не запрошено и не записано: очередь неизвестна, а не пуста.', retry: true},
   call_budget: {tone: 'neutral', text: 'Выполнено столько вызовов, сколько вы подтвердили. Остаток можно продолжить новым запуском с новой проверкой.', retry: true},
   no_progress: {tone: 'warning', text: `${POSTER_NO_PROGRESS_MAX} вызовов подряд без продвижения: ни одного нового постера и курсор не сдвинулся. Остановлено, чтобы не повторять одно и то же.`, retry: false},
   rate_limited: {tone: 'warning', text: 'TMDB ограничил частоту запросов. Следующая попытка — не раньше указанного времени.', retry: true},
@@ -55,6 +57,7 @@ export const POSTER_PREVIEW_COPY = Object.freeze({
   eligible: {tone: 'ready', headline: 'Можно запустить после подтверждения'},
   nothing: {tone: 'neutral', headline: 'У всех записей каталога есть постер'},
   unverified_only: {tone: 'blocked', headline: 'Восстанавливать нечего: у оставшихся записей нет проверенного TMDB id'},
+  held_only: {tone: 'neutral', headline: 'Сейчас дозагружать нечего: оставшиеся без постера уже проверены'},
   end_of_queue: {tone: 'neutral', headline: 'После этой позиции очередь пуста'},
   rate_limited: {tone: 'warning', headline: 'TMDB ограничил частоту запросов — запуск пока недоступен'},
   incomplete: {tone: 'blocked', headline: 'Данные неполные: покрытие неизвестно, запуск недоступен'},
@@ -70,6 +73,7 @@ export const POSTER_EVIDENCE_COPY = Object.freeze({
   generation_copy_unreadable: 'Копия каталога опубликованного поколения не читается.',
   live_copy_missing: 'Нет рабочей копии каталога.',
   live_copy_unreadable: 'Рабочая копия каталога не читается.',
+  negatives_unreadable: 'Память об отказах TMDB есть, но не читается. Очередь из-за этого неизвестна, а не пуста.',
   evidence_missing: 'Сервер не сообщил, полны ли данные.',
 });
 export function posterEvidenceText(code) {return POSTER_EVIDENCE_COPY[code] || 'Неизвестная проблема с данными.';}
@@ -89,6 +93,13 @@ const UNVERIFIED_COPY = Object.freeze({
   tmdb_id_missing: 'нет числового TMDB id',
   identity_not_tmdb: 'TMDB id есть, но идентичность не подтверждена этим id',
 });
+// The TMDB page of a film, built only from a numeric id; any other value, or text, yields no link. Callers pass only ids the
+// route has verified as the record's canonical identity: the queue and the outcomes never contain any other record.
+export function posterTmdbUrl(tmdbId) {
+  const id = typeof tmdbId === 'number' && Number.isSafeInteger(tmdbId) ? String(tmdbId) : tmdbId;
+  return typeof id === 'string' && /^[1-9]\d{0,11}$/.test(id) ? `https://www.themoviedb.org/movie/${id}` : null;
+}
+
 export function posterUnverifiedText(reason) {
   return UNVERIFIED_COPY[reason] || 'причина неизвестна';
 }
@@ -118,6 +129,9 @@ export function posterCoverage(read) {
     observedAt: typeof read.observedAt === 'string' ? read.observedAt : null,
     catalogRecords: value('catalogRecords'), missingPoster: value('missingPoster'),
     verifiedMissing: value('verifiedMissing'), unverifiedMissing: value('unverifiedMissing'),
+    actionable: complete ? (count(read.actionable) ?? read.verifiedMissing) : null,
+    noPosterHeld: complete ? (count(read.noPosterHeld) ?? 0) : null,
+    identityReview: complete ? (count(read.identityReview) ?? 0) : null,
     withPoster: complete ? read.catalogRecords - read.missingPoster : null,
     backlog: complete && read.health?.issue?.severity === 'warning' && read.health.issue.reason === 'posters_missing',
     backlogThreshold: count(read.health?.posterBacklogCount),
@@ -141,6 +155,7 @@ export function posterPreview(read, {limit, calls, retryAt = null, now}) {
   const gate = retryMs(retryAt);
   if (coverage.missingPoster === 0) return {...base, status: 'nothing'};
   if (coverage.verifiedMissing === 0) return {...base, status: 'unverified_only'};
+  if (coverage.actionable === 0) return {...base, status: 'held_only'};
   if (!items.length || remaining === 0) return {...base, status: 'end_of_queue'};
   if (gate !== null && gate > now) return {...base, status: 'rate_limited', retryAt: new Date(gate).toISOString()};
   return {...base, status: 'eligible', scopeKey: posterScopeKey(coverage.programmeRunId, cursor, batch, budget, items)};
@@ -153,16 +168,31 @@ export function posterScopeKey(programmeRunId, cursor, limit, calls, items) {
 // The owner's confirmation of one exact preview, valid for a short time and for one run.
 export function posterConfirm(preview, {accepted, now}) {
   if (!accepted) return {ok: false, reason: 'not_accepted'};
-  if (!preview || preview.status !== 'eligible' || !preview.scopeKey || !preview.coverage?.programmeRunId) return {ok: false, reason: 'not_eligible'};
+  if (!preview || (preview.status !== 'eligible' && preview.status !== 'recheck') || !preview.scopeKey || !preview.coverage?.programmeRunId) return {ok: false, reason: 'not_eligible'};
   return {ok: true, confirmation: {
-    scopeKey: preview.scopeKey, programmeRunId: preview.coverage.programmeRunId, cursor: preview.cursor, limit: preview.limit, calls: preview.calls,
+    scopeKey: preview.scopeKey, mode: preview.status === 'recheck' ? 'recheck' : 'sweep', programmeRunId: preview.coverage.programmeRunId,
+    cursor: preview.cursor, limit: preview.limit, calls: preview.calls, recheckIds: preview.status === 'recheck' ? preview.items.map(item => item.tmdbId) : null,
     issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + POSTER_CONFIRM_TTL_MS).toISOString(), consumedAt: null,
   }};
+}
+
+// One explicit recheck of records the owner picked from the remembered answers. Ids must still be in that sample.
+export function posterRecheckPreview(read, ids) {
+  const coverage = posterCoverage(read);
+  const wanted = Array.isArray(ids) ? [...new Set(ids.filter(id => typeof id === 'string' && /^[1-9]\d{0,11}$/.test(id)))].slice(0, POSTER_BATCH_MAX) : [];
+  if (!coverage) return {status: 'unknown', items: [], coverage: null, scopeKey: null, limit: wanted.length, calls: 1, cursor: null};
+  if (!coverage.complete) return {status: 'incomplete', items: [], coverage, scopeKey: null, limit: wanted.length, calls: 1, cursor: null};
+  const samples = [...(isObject(read.held) && isObject(read.held.noPoster) && Array.isArray(read.held.noPoster.sample) ? read.held.noPoster.sample : []), ...(isObject(read.held) && isObject(read.held.identityReview) && Array.isArray(read.held.identityReview.sample) ? read.held.identityReview.sample : [])];
+  const items = wanted.map(id => samples.find(item => isObject(item) && String(item.tmdbId) === id)).filter(Boolean)
+    .map(item => ({id: item.id, tmdbId: String(item.tmdbId), title: typeof item.title === 'string' ? item.title : null, year: Number.isInteger(item.year) ? item.year : null}));
+  if (!items.length || items.length !== wanted.length) return {status: 'not_eligible', items, coverage, scopeKey: null, limit: items.length, calls: 1, cursor: null};
+  return {status: 'recheck', items, coverage, cursor: null, limit: items.length, calls: 1, remaining: items.length, maxRecords: items.length, planned: items.length, retryAt: null, scopeKey: JSON.stringify(['recheck', coverage.programmeRunId || '', items.map(item => item.id + '=' + item.tmdbId)])};
 }
 
 // The check immediately before the first call: the confirmation is unused and fresh, and a new read made with the confirmed
 // cursor and limit yields the same generation and the same first batch. Success consumes the confirmation.
 export function posterBeginRun(confirmation, freshRead, {now, retryAt = null}) {
+  if (confirmation?.mode === 'recheck') return posterBeginRecheck(confirmation, freshRead, {now});
   if (!confirmation || typeof confirmation.scopeKey !== 'string') return {ok: false, reason: 'not_eligible'};
   if (confirmation.consumedAt) return {ok: false, reason: 'confirmation_used'};
   if (!(Date.parse(confirmation.expiresAt) > now)) return {ok: false, reason: 'confirmation_expired'};
@@ -175,13 +205,25 @@ export function posterBeginRun(confirmation, freshRead, {now, retryAt = null}) {
   return {ok: true, confirmation: {...confirmation, consumedAt: new Date(now).toISOString()}, preview};
 }
 
+function posterBeginRecheck(confirmation, freshRead, {now}) {
+  if (!confirmation || typeof confirmation.scopeKey !== 'string' || !Array.isArray(confirmation.recheckIds)) return {ok: false, reason: 'not_eligible'};
+  if (confirmation.consumedAt) return {ok: false, reason: 'confirmation_used'};
+  if (!(Date.parse(confirmation.expiresAt) > now)) return {ok: false, reason: 'confirmation_expired'};
+  const preview = posterRecheckPreview(freshRead, confirmation.recheckIds);
+  if (preview.status === 'unknown') return {ok: false, reason: 'read_failed', preview};
+  if (preview.status === 'incomplete') return {ok: false, reason: 'evidence_incomplete', preview};
+  if ((preview.coverage?.programmeRunId || null) !== (confirmation.programmeRunId || null)) return {ok: false, reason: 'stale_generation', preview};
+  if (preview.status !== 'recheck' || preview.scopeKey !== confirmation.scopeKey) return {ok: false, reason: 'scope_changed', preview};
+  return {ok: true, confirmation: {...confirmation, consumedAt: new Date(now).toISOString()}, preview};
+}
+
 function callRecord(index, cursor, answer) {
   const body = isObject(answer?.body) ? answer.body : null;
   return {
     index, cursor, httpStatus: Number.isInteger(answer?.status) ? answer.status : 0, error: answer?.error || null,
     programmeRunId: typeof body?.programmeRunId === 'string' ? body.programmeRunId : null,
     processed: count(body?.processed), hydrated: count(body?.hydrated) ?? 0,
-    outcomes: Array.isArray(body?.outcomes) ? body.outcomes.filter(isObject).map(item => ({id: String(item.id), tmdbId: item.tmdbId == null ? null : String(item.tmdbId), outcome: String(item.outcome), ...(Array.isArray(item.writtenTo) && item.writtenTo.length ? {writtenTo: item.writtenTo.map(String)} : {}), ...(typeof item.error === 'string' ? {error: item.error.slice(0, 200)} : {})})) : [],
+    outcomes: Array.isArray(body?.outcomes) ? body.outcomes.filter(isObject).map(item => ({id: String(item.id), tmdbId: item.tmdbId == null ? null : String(item.tmdbId), outcome: String(item.outcome), title: typeof item.title === 'string' && item.title ? item.title.slice(0, 200) : null, year: Number.isInteger(item.year) ? item.year : null, ...(item.negativeSaved === false ? {negativeSaved: false} : {}), ...(Array.isArray(item.writtenTo) && item.writtenTo.length ? {writtenTo: item.writtenTo.map(String)} : {}), ...(typeof item.error === 'string' ? {error: item.error.slice(0, 200)} : {})})) : [],
     writes: Array.isArray(body?.writes) ? body.writes.filter(isObject).map(write => ({key: String(write.key), written: write.written === true, reason: write.reason == null ? null : String(write.reason), records: count(write.records) ?? 0})) : [],
     nextCursor: body?.nextCursor === null || typeof body?.nextCursor === 'string' ? body.nextCursor : undefined,
     done: body?.done === true, retryAt: body?.retryAt ?? null, generationChanged: body?.generationChanged === true, leaseLost: body?.leaseLost === true,
@@ -197,6 +239,7 @@ function answerStop(answer, record) {
   if (answer.status === 409 && body?.generationChanged === true) return 'generation_changed';
   if (answer.status === 409 && body?.error === 'Resolver is writing the catalog') return 'resolver_busy';
   if (answer.status === 503 && body?.error === 'TMDB is not configured') return 'tmdb_unconfigured';
+  if (answer.status === 503 && body?.error === 'Poster negatives unreadable') return 'negatives_unreadable';
   if (answer.status === 400) return 'invalid_request';
   if (answer.status !== 200 || !body || body.dryRun !== false || !Array.isArray(body.outcomes) || record.nextCursor === undefined) return 'unknown_result';
   if (record.outcomes.some(item => !Object.hasOwn(POSTER_OUTCOME_COPY, item.outcome))) return 'unknown_result';
@@ -207,7 +250,7 @@ function answerStop(answer, record) {
 // read between calls only, so a call in flight always completes and is recorded. The receipt says why the run stopped.
 export async function runPosterSweep({confirmation, call, now, stopRequested = () => false, onProgress = () => {}}) {
   const receipt = {
-    startedAt: new Date(now()).toISOString(), finishedAt: null, programmeRunId: confirmation.programmeRunId, startCursor: confirmation.cursor,
+    startedAt: new Date(now()).toISOString(), finishedAt: null, mode: 'sweep', programmeRunId: confirmation.programmeRunId, startCursor: confirmation.cursor,
     limit: confirmation.limit, callsPlanned: confirmation.calls, calls: [], stop: null, nextCursor: confirmation.cursor, done: false, retryAt: null,
   };
   let cursor = confirmation.cursor, idle = 0;
@@ -239,6 +282,25 @@ export async function runPosterSweep({confirmation, call, now, stopRequested = (
     if (idle >= POSTER_NO_PROGRESS_MAX) {receipt.stop = 'no_progress'; break;}
     cursor = next;
   }
+  receipt.finishedAt = new Date(now()).toISOString();
+  return {...receipt, summary: posterReceiptSummary(receipt)};
+}
+
+// One confirmed call that asks TMDB again for the named ids only. It does not move the sweep's saved position.
+export async function runPosterRecheck({confirmation, call, now}) {
+  const receipt = {
+    startedAt: new Date(now()).toISOString(), finishedAt: null, mode: 'recheck', programmeRunId: confirmation.programmeRunId, startCursor: null,
+    limit: confirmation.recheckIds.length, callsPlanned: 1, calls: [], stop: null, nextCursor: null, done: false, retryAt: null,
+  };
+  let answer;
+  try {answer = await call({dryRun: false, limit: confirmation.recheckIds.length, expectedProgrammeRunId: confirmation.programmeRunId, recheck: confirmation.recheckIds});} catch {answer = null;}
+  const record = callRecord(1, null, answer);
+  receipt.calls.push(record);
+  const stop = answerStop(answer, record);
+  if (stop) receipt.stop = stop;
+  else if (record.done) {receipt.stop = 'done'; receipt.done = true;}
+  else if (record.retryAt != null) {receipt.stop = 'rate_limited'; receipt.retryAt = record.retryAt;}
+  else receipt.stop = 'unknown_result';
   receipt.finishedAt = new Date(now()).toISOString();
   return {...receipt, summary: posterReceiptSummary(receipt)};
 }
@@ -296,7 +358,7 @@ export function posterHistoryRecord(history, receipt) {
   }
   const kept = Object.fromEntries(Object.entries(terminal).slice(-POSTER_HISTORY_TERMINAL_IDS));
   // The resume position belongs to one generation, and an unknown result never advances it: the owner re-checks first.
-  const resume = receipt.done ? null : receipt.stop === 'unknown_result' ? history.resume : receipt.nextCursor ? {programmeRunId: receipt.programmeRunId, cursor: receipt.nextCursor} : null;
+  const resume = receipt.mode === 'recheck' ? history.resume : receipt.done ? null : receipt.stop === 'unknown_result' ? history.resume : receipt.nextCursor ? {programmeRunId: receipt.programmeRunId, cursor: receipt.nextCursor} : null;
   return {
     ...history,
     receipts: [...history.receipts, entry].slice(-POSTER_HISTORY_RECEIPTS),

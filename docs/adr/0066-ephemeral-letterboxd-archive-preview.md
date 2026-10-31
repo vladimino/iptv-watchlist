@@ -1,4 +1,4 @@
-# ADR 0061: The owner's Letterboxd archive is previewed by an ephemeral, read-only Worker request, never stored
+# ADR 0066: The owner's Letterboxd archive is previewed by an ephemeral, read-only Worker request, never stored
 
 **Status:** Proposed  
 **Original decision date:** 2026-10-31 (topology chosen by the owner; this record and its diagram await owner acceptance)  

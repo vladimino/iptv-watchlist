@@ -1,4 +1,4 @@
-// Reader of a Letterboxd account export ZIP for the Worker (ADR 0061). Web platform only: DataView, DecompressionStream
+// Reader of a Letterboxd account export ZIP for the Worker (ADR 0066). Web platform only: DataView, DecompressionStream
 // and crypto.subtle, no Buffer or node:zlib. It refuses before decompressing anything when the archive, its central
 // directory or an entry header is outside the limits below, and it counts every byte while it inflates, so a declared size
 // that lies, a ZIP bomb or a truncated entry stops the read instead of allocating. Only the four exact top-level CSV files

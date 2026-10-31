@@ -68,6 +68,15 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
 - Each page is committed before the next request, and the state is written last. A killed run only repeats reads.
 - A failure stops the run at once. It keeps the history and `lastSuccessAt`, and records where to resume.
 
+**Conditional writes and the merge form.** Every `state.json` write is a compare-and-swap on the version read, retried on a conflict.
+- **Version 1** (no `writer`): the run's state replaces the stored one, last writer wins, as before the merge form existed.
+- **Merge form** (`schemaVersion: 2` with `writer {runId, step}`): only `ratings_storage_migrate` creates it, progress and diagnostics unchanged. From then on every writer, the inline EPG stage included (`step: inline`), merges its state into the stored one:
+  - **Progress is a join.** `newestWatchedDate` the later, `oldestWatchedDate` the earlier, `reachedEnd` either, `resumePage` the larger (an absent page counts as page 2, the start of the backfill) and `null` once `reachedEnd`. No late or repeated write moves it back.
+  - **Diagnostics are one record.** `lastOutcome`, `stopReason`, `counts` and `writer` come from the write ordered last by (`lastAttemptAt`, `writer.runId`, `writer.step`, content); `lastAttemptAt`, `lastSuccessAt` and `lastFailureAt` are each the later. Diagnostics never plan a read.
+  - **Canonical bytes.** The merge is commutative, associative and idempotent, and keys are sorted, so equal states are equal bytes.
+  - **Per-page joins.** The separate run joins progress after each page; such a join carries no `lastAttemptAt` and never wins the diagnostics. On a version 1 cursor it writes nothing.
+- **No write turns a merge-form cursor back into version 1.** A cursor found at version 1 after the migration recorded it is reported `migration: regressed` by `ratings_sync_status`.
+
 **Coverage limit.** A backdated entry is found when it lands on page 1, or on a page a later backfill reaches. A periodic full rescan is not part of this contract.
 
 ## In the EPG commit
@@ -81,7 +90,7 @@ With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ra
 - **Never fatal.** The stage never fails the commit. A blocked, rate-limited or failed run ends the ratings attempt as `error` with that cause, and keeps every stored fact.
 - **Gate off.** Nothing is read or written by the stage. The ratings attempt ends `finished` with cause `diary_off`.
 
-**Accepted architecture, not deployed.** [ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md) (`Accepted`) would move this stage out of the EPG commit into a separate ratings run with its own record `letterboxd/ratings/run.json`. The stage would keep its order, overlap and stop rules and its per-page facts, with these changes: at most three pages per step and nine per run; after each page, `state.json` merged under compare-and-swap: its progress part (coverage and the next unread backfill page) is a join that no late write can move back, and its last-attempt diagnostics are a deterministic last-writer-wins record that never plans a read (a per-page checkpoint, instead of once at the end; it stays the authoritative Diary cursor, and the merge applies only after the owner-approved storage migration); the summary in the run record instead of `sync.json`. Until separately authorized implementation and activation, the behavior above remains the deployed contract.
+**Separate ratings pipeline.** With `RATINGS_PIPELINE=separate` and the storage migrated, the commit runs no Diary stage; the [separate ratings run](letterboxd-ratings.md#separate-ratings-pipeline) reads the Diary instead, with the same order, overlap and stop rules and per-page facts, at most three pages per step and nine per run, continued from its own checkpoint. After each page it joins its progress into the cursor (below), so a killed step loses at most the page in flight. Its summary is in the run record, not in `sync.json`.
 
 ## Rating facts
 

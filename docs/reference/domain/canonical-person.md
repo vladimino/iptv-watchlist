@@ -2,7 +2,7 @@
 
 **Role:** active technical reference for the pure canonical Person contract, `src/domain/canonical-person.js`. Decision: [ADR 0058](../../adr/0058-canonical-person-grouping.md) (Accepted). Verified against the source on **2026-10-30**.
 
-This is a **read model**, not a writer. The Worker bundle, the D1 projector, the D1 catalog views and the site filters do not load it. The [person identity projection](person-identity-projection.md) calls it with records the caller already loaded. It writes nothing, merges nothing in storage, mints no stored id and redirects nothing. A D1 table, a Worker route or a page that reads humans is separate, gated work.
+This is a **read model**, not a writer. The [person identity projection](person-identity-projection.md) calls it with records the caller already loaded. The Worker bundle includes both only as the `PersonIdentity` scope in front of the [person identity GET](../api/d1-catalog.md#person-identity). The enrichment projector, the site filters and the other catalog views do not load it. It writes nothing, merges nothing in storage, mints no stored id and redirects nothing. Storing humans, and pointing a page at them, stays separate work.
 
 ## Why
 
@@ -98,6 +98,6 @@ Pairs with evidence that do not join become **candidates**, never links:
 
 ## Not in this contract
 
-- No storage, route, page or D1 table. The [person identity projection](person-identity-projection.md) is the consumer reference over this grouping; persisting humans or decisions, and reading either from a Worker route, is separate gated work.
+- No stored human, owner decision or D1 table of either. The [person identity projection](person-identity-projection.md) is the consumer reference over this grouping. One GET loads a bounded neighborhood and calls that projection ([ADR 0062](../../adr/0062-d1-person-identity-read.md)). The Finds actor and director filter reads that GET and does not store a human ([ADR 0065](../../adr/0065-finds-person-filter-d1-read.md)). Persisting humans or decisions stays separate work.
 - No fetching of credits. Films without TMDB credits in D1 give no coCredit evidence until a separately approved credits step adds them; this includes the watchlist Films added after AIR-286.
 - No owner decision UI: [AIR-54](https://trello.com/c/yKtj1ahy) and AIR-126 cover owner input.

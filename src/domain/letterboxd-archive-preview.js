@@ -1,4 +1,4 @@
-// The owner's Letterboxd archive preview (ADR 0061): from the parsed export, the matching and the per-fact outcomes the
+// The owner's Letterboxd archive preview (ADR 0066): from the parsed export, the matching and the per-fact outcomes the
 // Worker computed against R2, one bounded answer the admin page shows. Pure: no storage, network or clock of its own.
 // Everything it returns is a proposal; nothing here decides a write. Bundled into the Worker by `scoped` as
 // LetterboxdArchivePreview; tests import it directly. Contract: docs/reference/api/admin.md.

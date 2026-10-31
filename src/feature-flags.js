@@ -13,6 +13,7 @@ const FEATURE_FLAGS=[
  onOff('REMOVAL_RATING_LOOKUP',env=>removalLookupEnabled(env)?'on':'off'),
  onOff('LETTERBOXD_DIARY_HISTORY',env=>LetterboxdDiary.enabled(env)?'on':'off'),
  {name:'D1_ENRICHMENT_WRITE',modes:['off','dry','on'],default:'off',tokens:['off','dry','on'],effective:env=>d1EnrichmentMode(env),note:'AIR-275 phase 2: dry logs the D1 diff without writing; on writes changed Films and Persons from a cron trigger'},
+ {name:'RATINGS_PIPELINE',modes:['inline','separate'],default:'inline',tokens:['inline','separate'],effective:env=>ratingsPipelineSwitch(env),note:'ADR 0060: separate acts only once ratings_storage_migrate reports migration complete (ratings_sync_status pipeline); until then it behaves as inline. This readout does not read storage'},
  // Retired: the code ignores the binding whatever it holds. Reported so a stale binding is visible.
  {name:'SCORED_RESOLUTION',modes:[],default:null,tokens:['off','shadow','on'],retired:true,effective:()=>null},
  {name:'RATINGS_REFRESH',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},

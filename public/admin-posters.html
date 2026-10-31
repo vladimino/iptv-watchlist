@@ -19,7 +19,7 @@
       <div>
         <p class="eyebrow">ВЛАДЕЛЕЦ · РУЧНАЯ ОПЕРАЦИЯ</p>
         <h1>Постеры каталога</h1>
-        <p class="admin-intro">Сколько записей каталога без постера, сколько из них можно восстановить из TMDB по проверенному id и сколько нельзя. Чтение ничего не меняет; запись идёт только после вашего подтверждения, пакетами не больше 10 записей.</p>
+        <p class="admin-intro">Сколько записей каталога без постера, сколько можно дозагрузить сейчас, сколько TMDB уже ответил отказом и сколько без проверенного id. Чтение ничего не меняет; запись идёт только после вашего подтверждения, пакетами не больше 10 записей.</p>
       </div>
     </section>
     <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin?view=health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limbo">Лимбо</a><a href="/admin/posters" aria-current="page">Постеры</a></nav>
@@ -57,6 +57,13 @@
       <p id="posters-refusal" class="admin-state admin-state-error" role="alert" hidden></p>
       <div id="posters-progress" class="posters-progress" role="status" aria-live="polite" hidden></div>
       <div id="posters-receipt" class="action-receipt" hidden></div>
+    </section>
+    <section aria-labelledby="posters-held-title" class="admin-card posters-held">
+      <h2 id="posters-held-title">Проверенные ответы TMDB</h2>
+      <p class="posters-source">Сервер помнит отказ по числовому TMDB id. «Нет постера» не попадает в обычную очередь 90 дней, ответ за другой фильм — пока id не сменится. Перепроверка — один отдельный вызов только для выбранной записи, после своего подтверждения.</p>
+      <div id="posters-held"><p class="muted">Список появится после чтения каталога.</p></div>
+      <label class="action-accept" id="posters-held-accept-label" hidden><input type="checkbox" id="posters-held-accept"><span id="posters-held-accept-text"></span></label>
+      <div class="action-buttons"><button type="button" id="posters-held-run" disabled>Перепроверить выбранное</button></div>
     </section>
     <section aria-labelledby="posters-unverified-title" class="admin-card posters-unverified">
       <h2 id="posters-unverified-title">Без проверенного TMDB id</h2>
