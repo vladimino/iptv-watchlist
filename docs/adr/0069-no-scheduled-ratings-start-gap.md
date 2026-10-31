@@ -1,9 +1,9 @@
 # ADR 0069: A scheduled ratings start has no minimum interval after the previous one
 
-**Status:** Proposed  
+**Status:** Accepted (owner decision 2026-10-31)  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** Owner acceptance of this record is still required, as is visual approval of the two changed sequence diagrams in `docs/architecture/scheduling-and-orchestration.md`. The removal of the guard is the owner's decision of 2026-10-31 on [AIR-310](https://trello.com/c/yoaqG5b6). Accepting this record permits the ordinary PR delivery only. It does not authorize a ratings run, an EPG run, a flag change, a Task edit, a storage write or clearing an isolation.  
+**Approval source:** The owner explicitly **Accepted** ADR 0069 on 2026-10-31 (Europe/Madrid) after a positive [independent review of PR #290 HEAD `370c2005180eccc533b2a9e67fda52938b78fec2`](https://github.com/vladimino/iptv-watchlist/pull/290#pullrequestreview-5723998806) and two successful exact-HEAD `Test and build` jobs. The owner **visually approved both rendered sequence diagrams** in `docs/architecture/scheduling-and-orchestration.md`: EPG / Hourly / Drift and the separate Ratings pipeline. [Recorded owner decision](https://github.com/vladimino/iptv-watchlist/pull/290#issuecomment-6546668319); [AIR-310](https://trello.com/c/yoaqG5b6). Acceptance permits the ordinary PR delivery only, not a separate production Ratings/EPG run, flag or Scheduled Task edit, R2/D1 storage write, migration or isolation clearing.  
 **Related work:** [AIR-310](https://trello.com/c/yoaqG5b6); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md); [ADR 0043](0043-removal-rating-lookup-queue.md); [ADR 0067](0067-diary-recent-window.md); the live Ratings Task change is a separate owner approval already carried out and is not repeated here  
 **Supersedes:** In part: [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md) decision 7, the `too_soon` answer (a scheduled start less than six hours after the last start, with `nextStartAt`). The 403/429 six-hour queue pause in decision 5, and every other decision of that record, stay.  
 **Superseded by:** None
@@ -52,7 +52,7 @@ Removing the guard is a code change. Restoring it is a later code change; no sto
 - **Original decision:** the owner decision of 2026-10-31 in the body of [AIR-310](https://trello.com/c/yoaqG5b6).
 - **Implementation:** the pull request that delivers this record. The historical text of ADR 0060 decision 7 is left in place; the supersession is the header pointer on that record.
 - **Dated verification:** offline tests in `tests/ratings-run.mjs` and `tests/ratings-api.mjs`. No production ratings start or step is part of this record.
-- **Uncertainty:** whether the owner accepts this record and visually approves the two changed sequence diagrams. Both are pre-merge gates.
+- **Owner gates completed:** ADR 0069 Accepted and both changed rendered sequence diagrams visually approved on 2026-10-31 ([owner decision](https://github.com/vladimino/iptv-watchlist/pull/290#issuecomment-6546668319)).
 
 ## Follow-ups
 
