@@ -250,7 +250,8 @@ for (const label of ['programme unavailable', 'metadata unavailable']) {
   assert.equal(chunks.reduce((sum, chunk) => sum + chunk.values.newValues + chunk.values.changedValues, 0), 0);
   const html = presentation.archivePreviewHtml({...answer, batches: {size: 50, confirmable: false, reason: null, chunks}});
   assert.match(html, /Архив успешно прочитан: 4\/4 CSV, ошибок нет, создан 1 дн\. назад/);
-  assert.match(html, /Сравнение с R2 частичное: проверен 281 из 282 сопоставленных фильма, ещё 1 не проверен из-за лимита чтения/);
+  assert.match(html, /Сравнение с R2 частичное: сопоставлено фильмов: 282; проверено: 281; не проверено: 1 из-за лимита чтения/);
+  assert.doesNotMatch(html, /сопоставленных фильма|из 282/);
   assert.match(html, /только ради этого сообщения скачивать новый ZIP не нужно/);
   assert.match(html, /Ещё 1 фильм архива не сопоставлен и в это сравнение не входит/);
   assert.doesNotMatch(html, /Нужен свежий архив/);
@@ -340,24 +341,29 @@ for (const label of ['programme unavailable', 'metadata unavailable']) {
   assert.match(stale, /archive-callout-ok/);
 }
 
-// Count agreement for 1, 2, 5, 11, 21, 22 and 121. 121 follows 21, not 11.
+// Film counts in the coverage line do not decline. Observation updates still do: 121 follows 21.
 {
-  const forms = [
-    [1, 'проверен 1 из 1 сопоставленного фильма', 'ещё 1 не проверен', 'обновится 1 наблюдение'],
-    [2, 'проверены 2 из 2 сопоставленных фильма', 'ещё 2 не проверены', 'обновятся 2 наблюдения'],
-    [5, 'проверено 5 из 5 сопоставленных фильмов', 'ещё 5 не проверено', 'обновятся 5 наблюдений'],
-    [11, 'проверено 11 из 11 сопоставленных фильмов', 'ещё 11 не проверено', 'обновятся 11 наблюдений'],
-    [21, 'проверен 21 из 21 сопоставленного фильма', 'ещё 21 не проверен', 'обновится 21 наблюдение'],
-    [22, 'проверены 22 из 22 сопоставленных фильма', 'ещё 22 не проверены', 'обновятся 22 наблюдения'],
-    [121, 'проверен 121 из 121 сопоставленного фильма', 'ещё 121 не проверен', 'обновится 121 наблюдение'],
-  ];
-  for (const [n, matched, unread, observations] of forms) {
+  for (const n of [1, 2, 5, 11, 21, 22, 121]) {
     const coverage = presentation.archiveCoverageHtml({freshness: {verdict: 'inconclusive', reasons: ['ratings_unconfirmed']}, proposal: {films: {compared: n, accepted: n, unverified: n}, recordReads: {limit: 300, needed: n, done: n}}});
-    assert.match(coverage, new RegExp(matched + '(?![а-яё])'), String(n));
-    assert.match(coverage, new RegExp(unread + '(?![а-яё])'), String(n));
-    const paragraph = presentation.archiveValueParagraph({proposal: {values: {changedValues: 0, newValues: 0, sameValueUpdates: n, byFact: {watched: {sameValueUpdates: 0}, rating: {sameValueUpdates: 0}, watchlist: {sameValueUpdates: n}}}, films: {compared: n, unverified: 0}}, export: {films: n}});
-    assert.match(paragraph, new RegExp(observations + '(?![а-яё])'), String(n));
+    assert.match(coverage, new RegExp(`сопоставлено фильмов: ${n}; проверено: ${n}; не проверено: ${n}(?! из-за)`), String(n));
+    assert.doesNotMatch(coverage, /сопоставленных фильма|из \d+/, String(n));
   }
+  const observations = [
+    [1, 'обновится 1 наблюдение'],
+    [2, 'обновятся 2 наблюдения'],
+    [5, 'обновятся 5 наблюдений'],
+    [11, 'обновятся 11 наблюдений'],
+    [21, 'обновится 21 наблюдение'],
+    [22, 'обновятся 22 наблюдения'],
+    [121, 'обновится 121 наблюдение'],
+  ];
+  for (const [n, phrase] of observations) {
+    const paragraph = presentation.archiveValueParagraph({proposal: {values: {changedValues: 0, newValues: 0, sameValueUpdates: n, byFact: {watched: {sameValueUpdates: 0}, rating: {sameValueUpdates: 0}, watchlist: {sameValueUpdates: n}}}, films: {compared: n, unverified: 0}}, export: {films: n}});
+    assert.match(paragraph, new RegExp(phrase + '(?![а-яё])'), String(n));
+  }
+  const production = presentation.archiveCoverageHtml({freshness: {verdict: 'inconclusive', reasons: ['ratings_unconfirmed']}, proposal: {films: {compared: 300, accepted: 421, unverified: 121}, recordReads: {limit: 300, needed: 421, done: 300}}});
+  assert.match(production, /сопоставлено фильмов: 421; проверено: 300; не проверено: 121 из-за лимита чтения/);
+  assert.doesNotMatch(production, /сопоставленных фильма|из 421|проверен 300/);
 }
 
 // The production shape: 0 / 0 / 487 facts beside 121 unread films. The last tile stays a film count.

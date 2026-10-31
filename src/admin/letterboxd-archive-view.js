@@ -183,10 +183,7 @@ function archiveCoverageHtml(answer) {
   const limit = typeof films.compared === 'number' && typeof films.unverified === 'number' && films.unverified > 0 && reads.limit && reads.done >= reads.limit;
   let text;
   if (typeof films.compared === 'number' && typeof films.accepted === 'number' && typeof films.unverified === 'number' && films.unverified > 0) {
-    const checked = archivePlural(films.compared, 'проверен', 'проверены', 'проверено');
-    const accepted = archivePlural(films.accepted, 'сопоставленного фильма', 'сопоставленных фильма', 'сопоставленных фильмов');
-    const unread = archivePlural(films.unverified, 'не проверен', 'не проверены', 'не проверено');
-    text = `Сравнение с R2 частичное: ${checked} ${films.compared} из ${films.accepted} ${accepted}, ещё ${films.unverified} ${unread}${limit ? ' из-за лимита чтения' : ''}. Свежесть остальных оценок подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.`;
+    text = `Сравнение с R2 частичное: сопоставлено фильмов: ${films.accepted}; проверено: ${films.compared}; не проверено: ${films.unverified}${limit ? ' из-за лимита чтения' : ''}. Свежесть остальных оценок подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.`;
   } else text = 'Сравнение с R2 частичное: не все оценки проверены. Свежесть остальных подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.';
   if (films.heldForIdentity) text += ` Ещё ${films.heldForIdentity} ${archivePlural(films.heldForIdentity, 'фильм', 'фильма', 'фильмов')} архива ${archivePlural(films.heldForIdentity, 'не сопоставлен', 'не сопоставлены', 'не сопоставлены')} и в это сравнение ${archivePlural(films.heldForIdentity, 'не входит', 'не входят', 'не входят')}.`;
   return `<div class="archive-callout archive-callout-warn" role="status"><b>Сравнение с R2 частичное</b><span>${archiveEscape(text)}</span></div>`;
