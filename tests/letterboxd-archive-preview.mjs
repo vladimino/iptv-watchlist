@@ -87,6 +87,8 @@ function freshnessOf(comparison, generatedAt = recentArchive.generatedAt) {
 for (const [label, comparison] of [
   ['unverified record', oneComparison({state: 'unverified', reason: 'record_read_limit', outcomes: [{fact: 'rating', outcome: 'unverified', tie: false, current: null}]})],
   ['ratings generation unavailable', oneComparison({sources: {ratingsGeneration: {evidence: 'unavailable'}}})],
+  ['programme unavailable', oneComparison({sources: {programme: {evidence: 'unavailable'}}})],
+  ['metadata unavailable', oneComparison({sources: {metadata: {evidence: 'unavailable'}}})],
   ['scan summary unavailable', oneComparison({sources: {filmsListSummary: {evidence: 'unavailable'}}})],
   ['drift', oneComparison({consistency: {status: 'drift', changed: ['letterboxd/facts/links.json']}})],
 ]) {
@@ -102,10 +104,36 @@ for (const [label, comparison] of [
   assert.deepEqual(provenGap.reasons, ['ratings_newer_in_r2', 'ratings_unconfirmed']);
 }
 {
+  const provedDespiteGap = freshnessOf(oneComparison({sources: {metadata: {evidence: 'unavailable'}}, outcomes: [{fact: 'rating', outcome: 'older', tie: false, current: {value: 5, observedAt: '2026-10-29T00:00:00.000Z', source: 'letterboxd_films_list'}}]}));
+  assert.equal(provedDespiteGap.needsFreshArchive, true);
+  assert.equal(provedDespiteGap.verdict, 'needs_fresh');
+  assert.deepEqual(provedDespiteGap.reasons, ['ratings_newer_in_r2', 'ratings_unconfirmed']);
+}
+{
   const absent = freshnessOf(oneComparison({sources: {ratingsGeneration: {evidence: 'object_missing'}}}));
   assert.equal(absent.needsFreshArchive, false);
   assert.equal(absent.verdict, 'verified');
   assert.deepEqual(absent.reasons, []);
+}
+function freshnessWithFiles(files, generatedAt = recentArchive.generatedAt) {
+  return buildPreview({archive: {...recentArchive, generatedAt}, parsed: {...parsed, films: oneFilm, files, invalidRows: []}, comparison: oneComparison(), now: NOW, archiveStaleMs: 60 * DAY}).freshness;
+}
+{
+  const noRatingsFile = freshnessWithFiles({watched: present.watched, ratings: {present: false}, watchlist: present.watched, diary: present.watched});
+  assert.equal(noRatingsFile.needsFreshArchive, false);
+  assert.equal(noRatingsFile.verdict, 'inconclusive');
+  assert.deepEqual(noRatingsFile.reasons, ['ratings_unconfirmed']);
+}
+{
+  const staleNoRatings = freshnessWithFiles({watched: present.watched, ratings: {present: false}, watchlist: present.watched, diary: present.watched}, '2026-07-01T00:00:00.000Z');
+  assert.equal(staleNoRatings.needsFreshArchive, true);
+  assert.equal(staleNoRatings.verdict, 'needs_fresh');
+  assert.deepEqual(staleNoRatings.reasons, ['archive_stale', 'ratings_unconfirmed']);
+}
+{
+  const diaryOnly = freshnessWithFiles({watched: present.watched, ratings: present.watched, watchlist: present.watched, diary: {present: false}});
+  assert.equal(diaryOnly.verdict, 'verified');
+  assert.deepEqual(diaryOnly.reasons, []);
 }
 {
   const unread = buildPreview({archive: recentArchive, parsed, comparison: null, now: NOW, archiveStaleMs: 60 * DAY});
@@ -132,4 +160,14 @@ assert.match(shown.fresh, /Нужен свежий архив/);
 assert.match(shown.fresh, /оценка в R2 новее этого архива/);
 assert.match(shown.fresh, /Остальные оценки не подтверждены/);
 assert.doesNotMatch(shown.fresh, /Архив достаточно свежий/);
+for (const label of ['programme unavailable', 'metadata unavailable']) {
+  const html = banner(freshnessOf(oneComparison({sources: label.startsWith('programme') ? {programme: {evidence: 'unavailable'}} : {metadata: {evidence: 'unavailable'}}})));
+  assert.match(html, /Сравнение неполное, свежесть оценок не подтверждена/, label);
+  assert.doesNotMatch(html, /Архив достаточно свежий|Нужен свежий архив/, label);
+}
+{
+  const html = banner(freshnessWithFiles({watched: present.watched, ratings: {present: false}, watchlist: present.watched, diary: present.watched}));
+  assert.match(html, /Сравнение неполное, свежесть оценок не подтверждена/);
+  assert.doesNotMatch(html, /Архив достаточно свежий/);
+}
 console.log('letterboxd-archive-preview: ok');

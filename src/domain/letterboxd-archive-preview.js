@@ -65,7 +65,8 @@ function row(film, match, extra = {}) {
 function bounded(list, limit) {return {total: list.length, rows: list.slice(0, limit)};}
 
 // needsFreshArchive is only a proven reason: the export is older than the threshold, or a compared rating is newer.
-// Missing rating evidence is ratings_unconfirmed. It never by itself asks for a new archive.
+// verified also needs the ratings file, a complete match and a complete proposal. A gap is ratings_unconfirmed and
+// does not by itself ask for a new archive. object_missing stays evidence of absence: only unavailable opens a gap.
 function previewFreshness({ageMs, archiveStaleMs, ratingsNewer, unchecked}) {
   const proven = [];
   if (ageMs > archiveStaleMs) proven.push('archive_stale');
@@ -76,7 +77,6 @@ function previewFreshness({ageMs, archiveStaleMs, ratingsNewer, unchecked}) {
   if (typeof ratingsNewer === 'number') freshness.ratingsNewerInR2 = ratingsNewer;
   return freshness;
 }
-const RATING_EVIDENCE = ['ratingsGeneration', 'links', 'filmsListSummary', 'watchlistSummary'];
 
 // input: {archive, parsed, comparison, now, archiveStaleMs, limits}
 //  archive: {sha256, bytes, entries, ignoredEntries, nameStandard, generatedAt, generatedAtSource, files: {<name>: {sha256, bytes}}}
@@ -154,7 +154,7 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
     recordReads: comparison.recordReads,
   };
   const ratingsNewer = byFact.rating.older;
-  const ratingsUnchecked = state.unverified > 0 || comparison.consistency.status !== 'stable' || RATING_EVIDENCE.some(name => comparison.sources[name]?.evidence === 'unavailable');
+  const ratingsUnchecked = missing.includes('ratings.csv') || answer.matching.status !== 'complete' || answer.proposal.status !== 'complete';
   answer.freshness = previewFreshness({ageMs, archiveStaleMs, ratingsNewer, unchecked: ratingsUnchecked});
   answer.consistency = comparison.consistency;
   answer.status = answer.completeness.status === 'complete' && answer.matching.status === 'complete' && answer.proposal.status === 'complete' ? 'complete' : 'partial';

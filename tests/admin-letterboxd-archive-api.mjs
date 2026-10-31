@@ -315,6 +315,10 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   assert.equal(noMetadata.body.matching.sources.metadata.evidence, 'unavailable');
   assert.equal(noMetadata.body.matching.status, 'partial');
   assert.equal(noMetadata.body.status, 'partial');
+  assert.equal(noMetadata.body.freshness.needsFreshArchive, true);
+  assert.equal(noMetadata.body.freshness.verdict, 'needs_fresh');
+  assert.ok(noMetadata.body.freshness.reasons.includes('ratings_newer_in_r2'));
+  assert.ok(noMetadata.body.freshness.reasons.includes('ratings_unconfirmed'));
   await seedWorld();
   failing = new Set([Facts.FACTS_KEYS.links]);
   const noLinks = await send({bytes: archive});
@@ -329,6 +333,8 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   const noProgramme = await send({bytes: archive});
   assert.equal(noProgramme.status, 200);
   assert.equal(noProgramme.body.matching.sources.programme.evidence, 'unavailable');
+  assert.equal(noProgramme.body.freshness.needsFreshArchive, false);
+  assert.equal(noProgramme.body.freshness.verdict, 'inconclusive');
   await seedWorld();
   failing = new Set([Facts.recordKey('tmdb-103')]);
   const noRecord = await send({bytes: archive});
@@ -370,6 +376,42 @@ assert.doesNotMatch(JSON.stringify(answer), /demo-user|letterboxd-demo/, 'the ar
   assert.equal(quietDrift.body.freshness.ratingsNewerInR2, 0);
   assert.equal(quietDrift.body.freshness.needsFreshArchive, false);
   assert.equal(quietDrift.body.freshness.verdict, 'inconclusive');
+  const quiet = exportArchive(exportFilms.slice(0, 2));
+  await seedWorld();
+  failing = new Set(['metadata.json']);
+  const quietMeta = await send({bytes: quiet});
+  assert.equal(quietMeta.body.matching.status, 'partial');
+  assert.equal(quietMeta.body.freshness.ratingsNewerInR2, 0);
+  assert.equal(quietMeta.body.freshness.needsFreshArchive, false);
+  assert.equal(quietMeta.body.freshness.verdict, 'inconclusive');
+  assert.deepEqual(quietMeta.body.freshness.reasons, ['ratings_unconfirmed']);
+  await seedWorld();
+  failing = new Set(['epg/published-generation.json']);
+  const quietProgramme = await send({bytes: quiet});
+  assert.equal(quietProgramme.body.matching.sources.programme.evidence, 'unavailable');
+  assert.equal(quietProgramme.body.proposal.films.accepted, 0);
+  assert.equal(quietProgramme.body.freshness.ratingsNewerInR2, 0);
+  assert.equal(quietProgramme.body.freshness.needsFreshArchive, false);
+  assert.equal(quietProgramme.body.freshness.verdict, 'inconclusive');
+  await seedWorld();
+  failing = new Set(['metadata.json']);
+  const provedMeta = await send({bytes: exportArchive(exportFilms.slice(2, 3))});
+  assert.equal(provedMeta.body.matching.status, 'partial');
+  assert.ok(provedMeta.body.freshness.ratingsNewerInR2 > 0);
+  assert.equal(provedMeta.body.freshness.needsFreshArchive, true);
+  assert.equal(provedMeta.body.freshness.verdict, 'needs_fresh');
+  assert.ok(provedMeta.body.freshness.reasons.includes('ratings_unconfirmed'));
+  await seedWorld();
+  const noRatingsFile = await send({bytes: exportArchive(exportFilms.slice(0, 2), {omit: ['ratings.csv']})});
+  assert.ok(noRatingsFile.body.completeness.missing.includes('ratings.csv'));
+  assert.equal(noRatingsFile.body.freshness.ratingsNewerInR2, 0);
+  assert.equal(noRatingsFile.body.freshness.needsFreshArchive, false);
+  assert.equal(noRatingsFile.body.freshness.verdict, 'inconclusive');
+  assert.deepEqual(noRatingsFile.body.freshness.reasons, ['ratings_unconfirmed']);
+  const staleNoRatings = await send({bytes: exportArchive(exportFilms.slice(0, 2), {omit: ['ratings.csv']}), name: 'letterboxd-demo-user-2026-07-01-10-00-utc.zip'});
+  assert.equal(staleNoRatings.body.freshness.needsFreshArchive, true);
+  assert.equal(staleNoRatings.body.freshness.verdict, 'needs_fresh');
+  assert.deepEqual(staleNoRatings.body.freshness.reasons, ['archive_stale', 'ratings_unconfirmed']);
 }
 
 // 8. The record read cap: films past it are unverified, never guessed.
