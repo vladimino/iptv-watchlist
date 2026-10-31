@@ -747,7 +747,7 @@ async function predictionWriter(env,work){
  if(saved===null)return json({status:'busy',reason:'prediction_writer_busy',...scheduledRunFields()},409);
  try{return await work();}finally{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
 }
-// ADR 0062: every write of the prediction queue is conditional on the etag of the object it read. A conflict re-reads the
+// ADR 0064: every write of the prediction queue is conditional on the etag of the object it read. A conflict re-reads the
 // queue and its inputs and rebuilds, a bounded number of times; exhaustion throws and writes nothing. A put that throws is
 // an unknown outcome and is never repeated blindly.
 const PREDICTION_QUEUE_ATTEMPTS=5;

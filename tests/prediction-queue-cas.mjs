@@ -1,4 +1,4 @@
-// AIR-298 / ADR 0062: every prediction queue writer is conditional on the etag it read. Each race below parks one writer
+// AIR-298 / ADR 0064: every prediction queue writer is conditional on the etag it read. Each race below parks one writer
 // between its read and its put, lets another writer commit, then releases it; the storage stub enforces R2 conditions.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 
@@ -44,7 +44,7 @@ const putRetry=(id,record)=>mutate(q=>{q.retries={...(q.retries||{}),[id]:record
 async function startRun(){const start=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(start.status,'running',JSON.stringify(start));const next=(await api('next',{runId:start.runId,batchSize:5})).data;assert(next.items.length>0);return {runId:start.runId,items:next.items};}
 const fail=(runId,filmId)=>api('submit',{runId,items:[{filmId,failure:{kind:'parse_error'}}]});
 
-// 1. Retry write ↔ EPG commit refresh, both orders. Before ADR 0062 the refresh put its stale `retries` over the record.
+// 1. Retry write ↔ EPG commit refresh, both orders. Before ADR 0064 the refresh put its stale `retries` over the record.
 reset();await refresh(programme(),'programme_updated');
 let run=await startRun(),target=run.items[0].filmId;
 park(byTrigger('programme_updated'),async()=>{const answer=(await fail(run.runId,target)).data;assert.equal(answer.results[0].status,'retryable_failure');});

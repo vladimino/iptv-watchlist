@@ -52,7 +52,7 @@ The "Read schema" step and the "Isolated invalid output" branch share [one valid
 
 ## Queue writes
 
-The prediction runner is one of several writers of the queue object `enrichment/prediction-queue.json`. Every writer, with or without a lease, goes through the same conditional write ([ADR 0062](../adr/0062-prediction-queue-conditional-writes.md), Proposed).
+The prediction runner is one of several writers of the queue object `enrichment/prediction-queue.json`. Every writer, with or without a lease, goes through the same conditional write ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Proposed).
 
 ```mermaid
 flowchart TD

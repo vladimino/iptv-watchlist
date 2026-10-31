@@ -1,7 +1,9 @@
 # AIR-298: prediction queue writer inventory and offline race tests
 
 **Captured:** 2026-10-31, code reading of `main` `dab57b9` and offline tests on the AIR-298 branch. No production read or write, no run, no reconcile.  
-**Card:** [AIR-298](https://trello.com/c/VBVLAbuW). **Decision:** [ADR 0062](../../adr/0062-prediction-queue-conditional-writes.md) (Proposed). **Root finding:** [AIR-281 audit](air-281-targeted-recovery-no-go-2026-10-31.md).
+**Card:** [AIR-298](https://trello.com/c/VBVLAbuW). **Decision:** [ADR 0064](../../adr/0064-prediction-queue-conditional-writes.md) (Proposed). **Root finding:** [AIR-281 audit](air-281-targeted-recovery-no-go-2026-10-31.md).
+
+**Number:** 0064, assigned by the owner on 2026-10-31. This ADR was drafted as 0062. 0062 is [PR #281](https://github.com/vladimino/iptv-watchlist/pull/281) and 0063 is [PR #282](https://github.com/vladimino/iptv-watchlist/pull/282); neither is on `main` at this capture, so the register on this branch lists 0064 directly after 0061.
 
 ## Hypothesis versus observation
 

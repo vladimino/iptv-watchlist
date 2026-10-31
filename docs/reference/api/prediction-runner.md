@@ -17,7 +17,7 @@ Four observations are kept apart. **Run completion** is `status: complete` (or `
 
 ## Queue writes
 
-`enrichment/prediction-queue.json` has several writers ([ADR 0062](../../adr/0062-prediction-queue-conditional-writes.md), Proposed):
+`enrichment/prediction-queue.json` has several writers ([ADR 0064](../../adr/0064-prediction-queue-conditional-writes.md), Proposed):
 
 - the runner routes (`start`, `next`, `submit`, `complete`);
 - the EPG commit tail (`programme_updated`) and the EPG scan (`epg_scan`);
