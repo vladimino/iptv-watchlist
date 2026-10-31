@@ -1,9 +1,9 @@
 # ADR 0070: Metadata sync freshness clocks are projected into D1 by the existing enrichment projector
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** pending owner decision  
+**Approval source:** [Owner decision on 2026-10-31](https://trello.com/c/81P7wg4u#comment-6ae638e0e3414efb7b5bad51), after independent PASS review of PR #291 at `979e4f3a551e21309f542b4e04670cc5557cfc79`. Acceptance is architectural only; Mermaid visual approval and production migration/write permission are separate.  
 **Related work:** [AIR-311](https://trello.com/c/81P7wg4u), [PR #291](https://github.com/vladimino/iptv-watchlist/pull/291), [ADR 0056](0056-d1-enrichment-write-through.md)  
 **Supersedes:** None  
 **Superseded by:** None
