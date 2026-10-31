@@ -6,6 +6,9 @@ Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron
 sequenceDiagram
     actor Daily as Daily EPG Task (17:00)
     actor Hourly as Hourly Task (hourly)
+    actor Monitor as Drift monitor (17:45, read-only)
+    actor Owner as Owner
+    participant Registry as Task registry
     participant Access as Cloudflare Access
     participant MCP as Worker MCP
     participant EPG as EPG and discovery
@@ -69,6 +72,17 @@ sequenceDiagram
         end
     end
     Hourly->>MCP: prediction_complete on allowed owned stop
+    Note over Monitor,Registry: Read-only monitor, never a producer or a task editor
+    Monitor->>Registry: Read the EPG and hourly task entries
+    Registry-->>Monitor: Enabled state, recurrence, prompt, latest run
+    Monitor->>Access: Authorize read-only status
+    Access->>MCP: JWT verified
+    Monitor->>MCP: epg_status
+    MCP-->>Monitor: stage, runId, updatedAt, ratings outcome
+    Note over Monitor,Owner: Compare with the Scheduled Task contract on main
+    opt Disabled task, failed run, drift, no live evidence or no EPG today
+        Monitor->>Owner: Notification with the observed state
+    end
     Note over Cron,D1: The one Worker cron trigger, inert while D1_ENRICHMENT_WRITE is unset (ADR 0056)
     Cron->>Projector: Scheduled event, hourly
     opt D1_ENRICHMENT_WRITE is dry or on
@@ -79,6 +93,8 @@ sequenceDiagram
         Projector->>D1: Changed Films and Persons with their keys, one batch each
     end
 ```
+
+The drift monitor is a third, read-only automation in the same registry. It compares the two producers' live entries with the [contract](../reference/scheduled-tasks.md#read-only-drift-monitor), reads `epg_status` through the same Access-protected MCP and only notifies the owner; it cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. A staged Ratings Task also exists in the registry but is disabled and is not drawn: ratings still run inside the EPG commit that the daily task's `epg_sync_step` triggers.
 
 A scheduled trigger does not imply successful completion. `already_running`, `busy`, lease ownership and deferred backoff may prevent new work. Discovery uses **one chunk per explicit request**; it does not recursively self-fetch through an Access bypass or an internal continuation service. The [MCP security boundary](authentication-and-mcp.md) verifies signed identity and restricts tool arguments.
 
