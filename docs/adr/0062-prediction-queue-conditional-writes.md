@@ -47,9 +47,14 @@ The prediction queue keeps its single object and format, and every write of it b
    - `attempts` is the larger of the run's count and the stored count plus one;
    - `retryAt` is the latest of the run's time, the stored time and the backoff of the merged count (1 hour doubling, at most 6 hours);
    - a record whose `lastRunId` is the run is written once;
-   - the completion and a systemic stop record any failure of the run that the submit's write did not land.
+   - the completion and every stop record any failure of the run that the submit's write did not land.
 
    A film that is no longer outstanding drops its record on the next rebuild, as before.
+9. **A failed retry write fails closed.** A queued run's failure is saved on the run record with `retryHeal: pending` before the queue write. Only a queue write that confirms all of the run's failures clears the mark: the submit's, the completion's or a stop's.
+   - When every attempt fails (a conflict through 5 attempts, a put that throws, or no queue object), the run still stops, but the mark stays.
+   - The runner lease keeps naming its last run after release or expiry. Before acquiring the lease, the next start writes that run's marked retries.
+   - If that write fails too, the start selects nothing, takes no lease and answers `503 prediction_retry_heal_pending`. A failed film therefore never becomes eligible before its `retryAt` because a write was lost.
+   - A repeated attempt re-reads the queue, and a record that already carries the run's `lastRunId` is left as it is. An unknown outcome is therefore never doubled.
 6. **Bounded conflict.** At most 5 attempts per call, with a short jittered pause between them (about 20 to 170 ms each, at most about 340 ms in total).
    - Exhaustion throws `PredictionQueueConflictError` (`code: prediction_queue_conflict`) and writes nothing of the caller's.
    - The owner reconcile answers `409 {code: prediction_queue_conflict}`.
@@ -59,7 +64,7 @@ The prediction queue keeps its single object and format, and every write of it b
 
 **Not decided:**
 
-- no new lease and no change of lease ownership or TTL;
+- no new lease and no change of lease ownership or TTL (the start reads the released lease's last run name, which it always kept);
 - no separate retry object and no change of the queue format or any migration;
 - no change of the retry policy, hot-first selection, batch sizing or which films are outstanding;
 - no per-film recovery;
@@ -88,7 +93,8 @@ The code is delivered in the AIR-298 PR. Deploying it changes how future schedul
 
 - No silent lost update of retries, batch state or counters; a stale generation or profile cannot overwrite a newer queue. Tests: `tests/prediction-queue-cas.mjs`.
 - Storage per write is unchanged without contention: one read of the queue (formerly part of the inputs) and one put. A conflict adds one rebuild, at most 5 per call. The number of storage operations per rebuild does not grow with the queue size.
-- A conflict that persists through 5 attempts is now an explicit error where it used to be a silent overwrite. For a runner it means a `storage_error` stop, after which the next scheduled run continues; its retries are healed by the completion or stop.
+- A conflict that persists through 5 attempts is now an explicit error where it used to be a silent overwrite. For a runner it means a `storage_error` stop, after which the next scheduled run continues. Its retries are written by the stop or, failing that, by the next start before it selects anything. While they cannot be written, starts answer `503 prediction_retry_heal_pending` and run nothing: availability is traded for the backoff guarantee.
+- Deleting or resetting the runner lease by hand would drop the pointer to an unsettled run; the runbook forbids it.
 - Retry records written by the completion now also carry `failedAt` and `validation` when the run knows them. That is a superset of the former shape, and readers ignore unknown fields.
 - Each rebuild of a caller whose programme differs from the stored queue's generation reads the published programme once more. This happens only in that case, which keeps the memory-sensitive EPG tail at its current reads.
 

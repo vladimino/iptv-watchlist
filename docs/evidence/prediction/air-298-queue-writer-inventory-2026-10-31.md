@@ -45,10 +45,19 @@ The [Workers API reference](https://developers.cloudflare.com/r2/api/workers/wor
 - **Retry monotonicity:** merge rules, and 11 independent rebuilds that never lower an outstanding record.
 - **Cost:** storage operations per rebuild are equal for 10 and 3,000 films; one conflict costs one more rebuild.
 - **Static check:** no unconditional queue write is left in the source.
+- **Failed retry writes, end to end through the real routes.** Each case is followed by the next `start` and `next`, which must leave the failed film deferred (`retryAt` about an hour ahead, `lastRunId` the stopped run):
+  - five conflicts at `POST /api/enrichment/submit`, with the stop's own write conflicting too: the run stops `partial`, still marked, with its lease released. The next start answers `503 prediction_retry_heal_pending`, selects nothing and leaves the lease naming the run. Once the conflicts stop, the start writes the retry first.
+  - five conflicts at submit only: the stop's write lands.
+  - a `complete` with reason `quota` whose retry write keeps conflicting: the stop is recorded with `retryHeal: pending`, and the next start fails closed until the write lands.
+  - a stop whose retry write has an unknown outcome: exactly one queue put. The next attempt re-reads, finds the record and does not double it.
+  - a crashed runner, with the run still `running` and the lease expired: the recovering start writes the retry before selecting.
 
-**Results on the branch:** `prediction-queue-cas.mjs` passed. `npm test` passed all 169 test files.
+**Results on the branch:** `prediction-queue-cas.mjs` passed. After merging `main` `566f2d8`, `npm test` passed all 183 test files.
 
-**Counter-check:** the same test file run against `src/enrichment.js` of `dab57b9` fails at its first race: "the EPG refresh keeps the retry written while it was parked". The rebuild put back the `retries` it had read before the submit's write.
+**Counter-checks:**
+
+- The first version of the test file, run against `src/enrichment.js` of `dab57b9`, fails at its first race: "the EPG refresh keeps the retry written while it was parked". The rebuild put back the `retries` it had read before the submit's write.
+- The failed-write cases were also run against the branch's first conditional-write version, without the run mark and the start check, with only the mark assertions removed. They fail with "the next start finds the retry in the queue". The film whose submit write was exhausted had no retry record when the next run started. That is the gap the independent review found.
 
 ## Not verified
 

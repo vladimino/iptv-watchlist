@@ -34,7 +34,7 @@ Every write is a conditional put on the etag of the object the writer read (`eta
   - `attempts` is the larger of the run's count and the stored count plus one.
   - `retryAt` is the latest of the run's time, the stored time and the backoff of that count.
   - A record whose `lastRunId` is the run is written once.
-  - The completion and a `complete` with a systemic reason add any failure of the run that the submit did not land.
+  - The completion and every stop add any failure of the run that the submit did not land (below).
 
   The submit answer and the run record follow a merged record that came out larger.
 - **On conflict** the writer re-reads and starts again, at most 5 attempts with a short jittered pause. Exhaustion throws `PredictionQueueConflictError` (`code: prediction_queue_conflict`), and nothing of the caller's is written.
@@ -44,6 +44,13 @@ Every write is a conditional put on the etag of the object the writer read (`eta
   - The resolver records `prediction_queue_checkpoint: …` in its status.
   - The profile publication stands; the next rebuild picks the new profile up.
 - **A put that throws** is an unknown outcome. It is not repeated, and the error propagates. A lease holder's `beforeWrite` renews before every attempt, so a lost lease writes nothing.
+
+**A run's retries survive a queue write that fails.** A queued run's per-film failure is saved on the run record, with `retryHeal: "pending"`, before the submit writes it to the queue. The mark is cleared only by a queue write that confirms every failure of the run.
+
+- **At the stop.** Every stop writes the run's missing retries again before it marks the run `partial` and releases the lease. This covers a `storage_error` stop after a submit conflict and a `complete` with a systemic reason. A normal completion writes them in its `batch_complete` rebuild. A write that still fails keeps the mark. The stop answer then carries `retryHeal: "pending"`.
+- **At the next start.** A released or expired runner lease keeps naming its last run. Before acquiring the lease, `start` reads that run. If the run is still marked, `start` writes its retries to the queue first, in a recorded change with trigger `start_retries`. When that write fails, `start` selects nothing, takes no lease and answers `503 {status: "blocked", reason: "retry_heal_pending", code: "prediction_retry_heal_pending", pendingRunId}`. The step ends as a `storage_error` stop. The lease keeps naming the marked run, so every later start tries again.
+- **Unknown outcome.** A write with an unknown outcome is not repeated blindly. The next attempt re-reads the queue, and a record that already carries the run's `lastRunId` is left as it is.
+- **No queue object.** If the queue object is absent, the retries cannot be confirmed, and the mark stays until a rebuild creates the queue.
 
 The queue format, the retry policy, hot-first selection and batch sizing do not change. Tests: `node tests/prediction-queue-cas.mjs`.
 
