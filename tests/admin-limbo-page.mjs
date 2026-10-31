@@ -32,7 +32,11 @@ assert.deepEqual([...bundle.matchAll(/method:\s*['"]POST/g)].length, 1, 'one wri
 assert.match(bundle, /fetchImpl\(ADMIN_API\+'\/discovery-recovery\/'\+path,\{method:'POST'/, 'and it goes to the discovery action route only');
 assert.doesNotMatch(page, /Повторить<|retry\(|data-limbo-action/, 'no action button: retries are another card');
 assert.match(css, /\.limbo-facts/);
+assert.match(css, /\.limbo-actions\{display:flex;flex-wrap:wrap;[^}]*min-width:0/);
+assert.match(css, /\.limbo-actions \.limbo-recovery-open\{display:inline-flex/);
 assert.match(css, /@media\(max-width:800px\)\{\.limbo-facts div\{grid-template-columns:minmax\(0,1fr\)/);
+assert.match(css, /@media\(max-width:800px\)\{[\s\S]*?\.limbo-actions\{flex-direction:column;align-items:stretch\}/);
+const limboVisible = html => html.replace(/<details class="limbo-tech">[\s\S]*?<\/details>/g, '');
 
 // Worker over an R2 stand-in.
 const records = new Map(), etags = new Map();
@@ -139,6 +143,8 @@ assert.match(results.innerHTML, /Застряло/);
 assert.match(results.innerHTML, /20 дн\./, 'the age is shown');
 assert.match(results.innerHTML, /последний переход 10\.10\.2026/);
 assert.match(results.innerHTML, /нет прогресса дольше порога/);
+assert.match(limboVisible(results.innerHTML), /Повтор не назначен\. Эта страница ничего не запускает\. Разбор прогноза только объясняет, запуск отсюда не делается/);
+assert.doesNotMatch(limboVisible(results.innerHTML), /не применимо|недопустимо|Identity Review|admin-status-plain/);
 assert.match(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Astuck"/, 'a link to the film detail');
 assert.match(results.innerHTML, /доверенная идентичность tmdb:1/);
 assert.doesNotMatch(results.innerHTML, /Позже/, 'a valid backoff is not stalled');
@@ -164,7 +170,9 @@ assert.match(requests[0].path, /pin=/);
 assert.match(results.innerHTML, /Позже/);
 assert.match(results.innerHTML, /повтор назначен и ещё не наступил/);
 assert.match(results.innerHTML, /parse_error/);
-assert.match(results.innerHTML, /недопустимо \(идёт backoff\)/);
+assert.match(limboVisible(results.innerHTML), /Ждать: повтор уже назначен и наступит сам/);
+assert.match(results.innerHTML, /<details class="limbo-tech">[\s\S]*недопустимо \(идёт backoff\)/);
+assert.doesNotMatch(limboVisible(results.innerHTML), /недопустимо|parse_error/);
 
 // 3. Back restores the previous filter.
 window.history.back();

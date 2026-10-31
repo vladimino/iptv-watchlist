@@ -50,7 +50,7 @@ There is no per-observation retry or lookup. The owner page explains one observa
 3. **Judge by the rules.** The [verdict table](../reference/domain/discovery-recovery.md#verdicts) gives the answer for each case:
    - An actionable observation is already queued.
    - A future `retryAt` is policy.
-   - An `ambiguous` decision needs identity review, which has no page yet.
+   - An `ambiguous` decision needs identity review, which has no page yet. The panel says «Автоматическое исправление этой проблемы пока недоступно», and «Разобрать наблюдение» only explains it.
    - A candidate outside the EPG window cannot be resolved until it airs again.
    - A terminal decision on unchanged evidence (`no_more_evidence`) stays out of the resolver's work until new airings arrive. This is the one case the action addresses.
 4. **Reconsider, only as the owner.** This is a production write. Agents never run it without the owner's explicit approval of that run. When the panel offers «Повторно направить на проверку», it states the cost (no TMDB request, no resolver run, one decision written), the risk and the effect.
