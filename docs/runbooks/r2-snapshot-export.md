@@ -9,6 +9,8 @@
 - It writes only inside the output directory, which must be an absolute path outside the Git repository. Object bodies, the manifest, listing pages and reports stay there and are never committed, uploaded or logged.
 - It does not infer changes from timestamps and does not call two equal listings a snapshot. The proof is the one below, or an explicit NO-GO.
 
+This **full fenced export** is the right tool for a migration/backfill baseline whose every object must agree across a single cut. It is **not** a required preflight for creating one previously absent, independently reversible R2 key or for checking one existing record. Use the [risk-proportional classification](../process/agent-workflow.md#risk-proportional-operational-safeguards) and that operation's target-specific runbook instead. None of the fence and integrity requirements **inside an actual full export** are relaxed.
+
 ## The consistency proof
 
 **Planned ([ADR 0034](../adr/0034-bounded-discovery-ledger.md), not implemented):** once the bounded discovery ledger is active, the fence must also include `epg/discovery-archive/v1/current.json`. The archive's manifest and segment versions are write-once, so the listing proof covers them as ordinary objects.
@@ -23,7 +25,9 @@ The manifest status is `consistent_fenced` only when steps 2 to 4 all hold. Any 
 
 Transient failures (`429`, `5xx`, a dropped connection) are retried a bounded number of times with backoff; a failure past the bound ends the run as `incomplete` without a manifest. A `401`/`403` is an authorization failure and is not retried.
 
-## Procedure (each run needs its own approval)
+## Procedure (one approval per explicitly bounded export)
+
+The approval covers the listed read-only planning, export and manifest-verification steps for that export, including an ordinary safe resume after a transient read failure, when the bucket, credential scope and output manifest identity remain unchanged. A new bucket, expanded credential, materially different scope or additional production operation requires a new approval. This does not authorize copying snapshot contents into production.
 
 1. **Plan without a credential.** `node scripts/r2-snapshot-export.mjs --plan --output /absolute/private/snapshot` prints the endpoint, bucket, fence keys, the requests an approved run would make and the exit codes. It reads no secret and sends nothing. This is the dry-run for a review.
 2. **Rehearse against the fake bucket.** `node tests/r2-snapshot-export.mjs` runs the exporter against a local S3-compatible server: concurrent writer, changed and deleted keys, ETag drift, fence and lease changes, bounded retries, resume and aggregate verification. It needs no credential and no network.
