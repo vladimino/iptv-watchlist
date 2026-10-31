@@ -38,7 +38,7 @@ A deploy does not activate anything. Each step below that changes production nee
 - **Cutover** is a sequence of owner actions. Each step is approved separately and checked before the next one:
   1. Read-only export of `enrichment/removal-rating-lookups.json` and `letterboxd/diary/state.json`, with sizes and hashes recorded.
   2. `ratings_storage_migrate` `dry_run`. It writes nothing; its counts must match the export.
-  3. `ratings_storage_migrate` `apply`, still under `inline`. Read back `migration: complete`, `removal.schemaVersion: 2`, `unresolved` and `legacy` as predicted, and cursor progress (coverage, `resumePage`) equal to the export. On `partial` or `failed`, repeat `apply`; the commit keeps running ratings meanwhile.
+  3. `ratings_storage_migrate` `apply`, still under `inline`. Run it only after at least one routine EPG commit has completed on the deployed version, while `epg_status` shows `stage: complete` with no step in the last 15 minutes, and outside the daily EPG window. Read back `migration: complete`, `removal.schemaVersion: 2`, `unresolved` and `legacy` as predicted, and cursor progress (coverage, `resumePage`) equal to the export. On `partial` or `failed`, repeat `apply`; the commit keeps running ratings meanwhile. A later status of `migration: regressed` is a defect: stop the cutover and report it.
   4. Set `RATINGS_PIPELINE=separate`; the switch writes no storage. Read back `pipeline: idle`, and check that the next EPG commit makes no Diary or lookup request. On a problem, set `inline` back.
   5. One manual `ratings_sync_start` and its steps. Expect `finished` or `error` with a cause; the cursor and queue only move forward. On a problem, set `inline`.
   6. Enable the Ratings Task, then extend the drift monitor.
