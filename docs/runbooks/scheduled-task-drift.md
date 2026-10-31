@@ -4,6 +4,10 @@
 
 The expected configuration and checks of the `IPTV Scheduled Task Drift` automation are in the [Scheduled Task contract](../reference/scheduled-tasks.md#read-only-drift-monitor): daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, read-only. It reads the daily programme task, the hourly task and the Ratings Task, plus `epg_status` and read-only `ratings_sync_status`, and reports only anomalies. The live ChatGPT Scheduled Tasks registry, not this page, says what is configured now. This page does not edit the task.
 
+## Recovery cost and alert triage
+
+A delayed Task, stale footer, or one transient failure is not an outage requiring a full EPG replay, immediate schedule edit or multi-tool forensic audit. First compare the task's last run with the single relevant Worker status; if the ordinary next scheduled execution can replay the missing work without harmful side effects, record the delay and observe that next execution. Escalate when the source repeatedly fails, the EPG publication is genuinely stale past the accepted window, or pending work cannot make progress. This is an operations triage rule, **not** permission to invoke a Task, skip its required validation, or change its schedule. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
+
 ## Reading a notification
 
 Re-read the live evidence before acting; a notification is the monitor's observation at its run time, and the state can have changed since.

@@ -2,6 +2,14 @@
 
 `scripts/letterboxd-baseline-import.mjs` imports the owner's Letterboxd account export as fact observations under [ADR-0023](../adr/0023-letterboxd-user-facts.md). The storage rules, the merge order and the request contract are the [user facts contract](../reference/integrations/letterboxd-user-facts.md). This page is the procedure. The route is a permanent owner-only maintenance tool with no switch of its own ([ADR 0053](../adr/0053-permanent-letterboxd-baseline-import-route.md)). Nothing on this page is authorized by a merge or a deploy: issuing an Access credential, every `validate`, every `commit` and every `rollback` against production each need their own owner approval.
 
+## Proportionality and existing tooling limits
+
+This CLI currently **requires** a verified `consistent_fenced` snapshot for `plan`; a small archive, limited number of accepted Films or repeated import does not remove that input requirement. Do not invent a supported target-only import mode. The snapshot protects cross-source identity matching and freshness at planning time, while the Worker uses chunk receipts, create-only intents and fact precedence to avoid overwriting newer observations. Those are data-integrity requirements, not general availability ceremonies.
+
+Once a plan is fixed to its archive SHA-256, chunking and accepted identities, **one owner authorization may name a bounded execution** (for example validate plus explicitly enumerated commit chunks), including internal integrity reads and safe receipt-based resume. A new archive, changed plan, additional chunks, conflicting identity or a rollback outside the approved bounds requires a new decision. A failed or timed-out commit is handled through the existing idempotent intent/replay protocol, **not** a new full snapshot or a new plan for each retry. Do not require repeating a successful validate merely to reproduce an identical result; validate again when source facts or the accepted plan may have changed.
+
+A future snapshot-free, target-scoped planner would require a separate implementation and contract review (identity alias completeness, freshness and competing writers), not a documentation-only promise. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
+
 ## What the tool never does
 
 - `plan` sends nothing and reads only the export ZIP (in memory) and a verified snapshot; its outputs stay in a private directory outside the repository.
