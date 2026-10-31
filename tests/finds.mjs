@@ -14,7 +14,8 @@ assert(css.includes('.finds-card{position:relative;display:flex;flex-direction:c
 assert(css.includes('.finds{margin-top:28px;padding:18px;border:1px solid #3b6346'),'finds section is a separate container below the grid');
 assert.match(css,/\.finds-cards\{display:grid;grid-template-columns:repeat\(auto-fill,minmax\(360px,1fr\)\);gap:12px\}/,'one find keeps a column: auto-fill does not collapse the empty tracks');
 assert.doesNotMatch(css,/\.finds-cards\{[^}]*auto-fit/,'auto-fit is what stretched a single card to the section width');
-assert.match(css,/@media\(max-width:760px\)\{\.finds\{padding:14px\}\.finds-cards\{grid-template-columns:1fr\}/,'a narrow width keeps one full-width column');
+assert.match(css,/\.finds-card\{[^}]*;width:100%;max-width:440px;justify-self:start\}/,'a lone 1fr track cannot grow one card past the two-column width');
+assert.match(css,/@media\(max-width:760px\)\{\.finds\{padding:14px\}\.finds-cards\{grid-template-columns:1fr\}\.finds-card\{max-width:none\}/,'below 760px the card cap lifts and the column stays full width');
 // DOM order: the watchlist grid and its empty state come first, the finds section follows them inside the results column.
 const orderOf=marker=>{const at=html.indexOf(marker);assert(at>=0,marker);return at;};
 assert(orderOf('id="shortlist"')<orderOf('id="movies"'),'shortlist stays above the grid');
