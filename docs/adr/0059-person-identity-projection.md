@@ -6,7 +6,7 @@
 **Approval source:** [explicit owner acceptance of ADR 0059 and visual approval of the amended Mermaid on 2026-10-31](https://trello.com/c/1uvzKiGg#comment-6ae589359fddf40d03a6a966), following [positive independent review of PR #265 HEAD 6b0a03f](https://github.com/vladimino/iptv-watchlist/pull/265#pullrequestreview-5721603785). This accepts the code-only derived read-model architecture, not production data writes, D1 read/authority cutover, feature flags, Scheduled Tasks or external calls.  
 **Related work:** [AIR-201](https://trello.com/c/1uvzKiGg), [AIR-44](https://trello.com/c/ojtZjVc9), [AIR-16](https://trello.com/c/LtoEguNS)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** [ADR 0062](0062-d1-person-identity-read.md) in part: one opt-in GET loads this projection from current D1 rows. The live site filters stay on the stored role id. Everything else here stands.
 
 ## Context
 
