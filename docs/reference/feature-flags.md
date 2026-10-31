@@ -38,6 +38,19 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 - `LETTERBOXD_DIARY_HISTORY=on` changes what the **routine EPG commit requests from Letterboxd and writes to R2**: up to three diary pages per commit and two new objects under `letterboxd/diary/`. Since [ADR 0054](../adr/0054-diary-first-epg-ratings.md) it is also the routine source of watched and rating facts, with no facts switch since `LETTERBOXD_FACTS` was retired ([ADR 0055](../adr/0055-retire-letterboxd-facts-switch.md)): every film read gets `watched: true` and, where the diary proves it, a rating observed at the watched date. Removed films the diary rated skip the removal lookup. It is a production writer change that needs its own owner approval before the value is set ([AIR-51](https://trello.com/c/33d4hKJ3)). Switching back to `off` stops the requests and writes on the next commit; stored history stays.
 - These switches are **not** Cloudflare Worker Cron settings, external ChatGPT Scheduled Tasks, secrets, API tokens or `wrangler.jsonc` deployment/binding parameters. `BUCKET`, `TMDB_API_READ_ACCESS_TOKEN`, `LETTERBOXD_USERNAME`, and `EPG_XML_URL` are dependencies/configuration, not feature flags.
 
+### Proposed flags (not implemented)
+
+**Not registered in the deployed Worker, not read by any code, not set in production.** `feature_flags` does not report it. It joins the configuration contract above only with the code that reads it.
+
+- **`RATINGS_PIPELINE`**, proposed by [ADR 0059](../adr/0059-independent-letterboxd-ratings-pipeline.md) (`Proposed`):
+  - **Values:** `inline` and `separate`.
+  - **Default:** absent or any other value is `inline`. Exact-string and whitespace rules are fixed with the code.
+  - **`inline`:** keeps the current behavior: the routine EPG commit runs the Diary stage and the removal lookups. The proposed `ratings_sync_start` and `ratings_sync_step` answer `disabled` and write nothing.
+  - **`separate`:** the EPG commit only enqueues removal events. The ratings tools run the Diary reads and lookups in their own run record `letterboxd/ratings/run.json`, which changes what the Ratings Task's calls request from Letterboxd and write to R2. The two paths never run ratings together.
+  - **Ordering:** `separate` is set before the Ratings Task is enabled. On rollback, `inline` is set after the task is disabled.
+  - **Approvals:** each setting change is a production writer change that needs its own owner approval.
+  - **Lifecycle:** the code delivery also creates its removal card.
+
 ## Reading the deployed values
 
 The MCP tool `feature_flags` ([MCP contract](api/mcp.md), [ADR 0039](../adr/0039-allowlisted-feature-flag-readout.md)) returns, in one call, every flag of this page plus the retired `SCORED_RESOLUTION`, `RATINGS_REFRESH`, `FINDS_TITLE_EXCLUSION`, `FINDS_WATCHED_MARK`, `PREDICTION_PROFILE_COMPATIBILITY`, `PREDICTION_VERSION_OBJECTS`, `FINGERPRINT_VERSION_OBJECTS`, `PREDICTION_FINGERPRINT_COMPATIBILITY`, `CATALOG_POSTER_HYDRATION`, `PREDICTION_MATERIALIZATION`, `LETTERBOXD_BASELINE_IMPORT` and `LETTERBOXD_FACTS`, from the bindings of the Worker version that answers. The registry it reads is `src/feature-flags.js`; a test keeps it, the contract table above and the governance checker's flag list in step.
