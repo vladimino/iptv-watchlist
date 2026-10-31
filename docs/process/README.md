@@ -7,3 +7,5 @@ These are the maintained collaboration policies for this repository, not a snaps
 - [Trello card conventions](trello-card-conventions.md): atomic cards, native dependencies, labels and language.
 
 Start with [AGENTS.md](../../AGENTS.md). Current statuses and approvals must be verified in Trello/GitHub, not inferred from these documents.
+
+- [Cross-system risk-proportional safeguard audit](risk-proportional-safeguard-audit.md) — decisions, justified protections and limits of supported operations.
