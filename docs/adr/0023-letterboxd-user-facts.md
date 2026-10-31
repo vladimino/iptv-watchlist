@@ -6,7 +6,7 @@
 **Approval source:** explicit owner acceptance of ADR-0023 and visual QA of the GitHub-rendered Mermaid diagram, 2026-10-27 (AIR-170; PR #137)  
 **Related work:** [AIR-170](https://trello.com/c/UaOFSsF9), [AIR-169 reconciliation](../evidence/letterboxd/air-169-reconciliation-2026-10-26.md), [AIR-171 importer](https://trello.com/c/uvGt48sq), [AIR-172 finds](https://trello.com/c/FvqqJ8H0), [AIR-173 production import](https://trello.com/c/w2bVRb72), [AIR-74](https://trello.com/c/5AdAmKPe), [ADR-0018](0018-letterboxd-last-good-ratings.md), [ADR-0009](0009-canonical-film-person-identity.md), [ADR-0002](0002-cloudflare-worker-r2-authority.md), [ADR-0019](0019-live-d1-backfill-boundaries.md)  
 **Supersedes:** None  
-**Superseded by:** [ADR-0024](0024-letterboxd-scan-summary.md) in part: decision 4 for complete films-list and watchlist scans (scan summaries); [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md) in part, accepted 2026-10-27: an owner "watched" mark may create a record with only a trusted TMDB alias
+**Superseded by:** [ADR-0024](0024-letterboxd-scan-summary.md) in part: decision 4 for complete films-list and watchlist scans (scan summaries); [ADR-0032](0032-owner-watched-mark-by-tmdb-identity.md) in part, accepted 2026-10-27: an owner "watched" mark may create a record with only a trusted TMDB alias; [ADR 0067](0067-diary-recent-window.md) (Accepted 2026-10-31) in part: decision 4 only when both observations are `letterboxd_diary` at the same `observedAt`, where the later page read wins. Every other pair stays on this order.
 
 ## Context
 

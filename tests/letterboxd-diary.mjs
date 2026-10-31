@@ -80,76 +80,81 @@ assert.equal(records.has(D.KEYS.history),false);assert.equal(records.has(D.KEYS.
 assert.equal(records.get('sync.json').diaryHistory,undefined);
 assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause],['finished','diary_off']);
 
-// 3. First run with the gate on: bounded to three pages, partial, resumable; no rating or watched fact written.
+// 3. First run: page 1 only, however many pages the diary has and however new they are. No facts are written here.
 records.clear();etags.clear();requests.length=0;writes.length=0;
 const diary=Array.from({length:230},(_,i)=>({lid:'E'+i,slug:'e-'+i,date:day(i),stars:(i%10)+1}));
 publish(diary);
 let result=await D.syncHistory(env);
-assert.deepEqual([diaryRequests().length,result.counts.pages,result.counts.added,result.lastOutcome,result.resumePage],[3,3,150,'partial',4]);
+assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)]);
 assert.equal(diaryRequests().every(r=>r.redirect==='manual'),true);
-assert.equal(Object.keys(history().entries).length,150);
+assert.deepEqual([result.counts.pages,result.counts.added,result.lastOutcome,result.stopReason,result.resumePage],[1,50,'recent_window','recent_window_only',null]);
+assert.equal(result.historicalCoverage,'incomplete');assert.equal(result.coverage.window,'recent');assert.equal(result.coverage.reachedEnd,false);
+assert.equal(result.counts.overflowSuspected,true,'every row was new and the page links onward');
+assert.equal(Object.keys(history().entries).length,50);
+assert.equal(result.coverage.newestWatchedDate,day(0));assert.equal(result.coverage.oldestWatchedDate,day(49));
 assert.equal(writes.every(key=>key.startsWith('letterboxd/diary/')),true,'only the diary objects');
 assert.equal(writes.some(key=>key.includes('facts/')||key.includes('view-index')||key.includes('actual.json')),false);
-assert.equal(result.coverage.reachedEnd,false);
-// 4. Second run: page 1 known, the backfill resumes one page early (overlap) and goes on; nothing duplicated.
+// 4. A stored resume page is not a fetch plan: page 2 and the rest stay unrequested, and the page is not moved backward.
+state().resumePage=4;records.set(D.KEYS.state,state());
 requests.length=0;result=await D.syncHistory(env);
-assert.deepEqual(diaryRequests().map(r=>r.url),[url(1),url(3),url(4)]);
-assert.deepEqual([result.counts.added,result.counts.unchanged,result.resumePage,result.lastOutcome],[50,100,5,'partial']);
-assert.equal(Object.keys(history().entries).length,200);
-// 5. Third run reaches the last page: complete, nothing left to resume.
-requests.length=0;result=await D.syncHistory(env);
-assert.deepEqual(diaryRequests().map(r=>r.url),[url(1),url(4),url(5)]);
-assert.deepEqual([result.lastOutcome,result.resumePage,result.coverage.reachedEnd,Object.keys(history().entries).length],['complete',null,true,230]);
-assert.equal(result.coverage.oldestWatchedDate,day(229));assert.equal(result.coverage.newestWatchedDate,day(0));
-// 6. Steady state: one new viewing at the top, a re-watch of an old film, a rating edit: one request, all three seen.
+assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)]);
+assert.equal(result.resumePage,4);assert.equal(result.counts.added,0);assert.equal(Object.keys(history().entries).length,50);
+// 5. Steady state: one new viewing at the top and a rating edit on the page, still one request.
 requests.length=0;
 const newer=[{lid:'E5',slug:'e-5',date:'2026-10-30',stars:9,rewatch:true},...diary.map((e,i)=>i===1?{...e,stars:9}:e)];
 publish(newer);result=await D.syncHistory(env);
-assert.deepEqual([diaryRequests().length,result.counts.added,result.counts.updated,result.lastOutcome],[1,1,1,'complete']);
+assert.deepEqual([diaryRequests().length,result.counts.added,result.counts.updated,result.lastOutcome],[1,1,1,'recent_window']);
 const e5=Object.values(history().entries).filter(e=>e.identity?.value==='E5');
 assert.equal(e5.length,2,'two viewings of one film');
 assert.deepEqual(plain(e5.map(e=>[e.watchedDate,e.rewatch])).sort(),[['2026-10-24','unknown'],['2026-10-30',true]]);
 const edited=history().entries['day:lid:E1|'+day(1)];
 assert.equal(edited.ratingAtEntry,4.5);assert.deepEqual(plain(edited.changes.map(c=>[c.field,c.from,c.to])),[['ratingAtEntry',1,4.5],['ratingsAtEntry',[1],[4.5]]]);
-// 7. Re-import of the same pages adds nothing.
+// 6. Re-import of the same page adds nothing.
 requests.length=0;result=await D.syncHistory(env);
-assert.deepEqual([result.counts.added,result.counts.updated,Object.keys(history().entries).length],[0,0,231]);
+assert.deepEqual([result.counts.added,result.counts.updated,Object.keys(history().entries).length],[0,0,51]);
 
-// 8. A backdated entry that lands on page 1 is found; the stored history is never shrunk by absence.
+// 7. A backdated entry that lands on page 1 is found; a row missing from the page is kept.
 publish([{lid:'Back',slug:'back',date:day(3),stars:6},...newer.slice(0,45)]);requests.length=0;result=await D.syncHistory(env);
-assert.equal(result.counts.added,1);assert.equal(Object.keys(history().entries).length,232,'rows missing from the page are kept');
+assert.equal(result.counts.added,1);assert.equal(Object.keys(history().entries).length,52,'rows missing from the page are kept');
 
-// 8b. Day entries. Pages are separate requests, so a day count is never summed across pages: a day cut by a page
-// boundary is a lower bound from one page, marked uncertain, and one entry; a page that holds the whole day proves it.
+// 8b. Day entries. A day cut at the bottom of page 1 is a lower bound from that page, one entry; a later page 1 that
+// holds the whole day proves it. Page 2 is never requested.
 records.delete(D.KEYS.history);records.delete(D.KEYS.state);
 const twinKey='day:lid:Twin|'+day(60),twin=()=>history().entries[twinKey];
 const filler=(prefix,n,from)=>Array.from({length:n},(_,i)=>({lid:prefix+i,date:day(from+i)}));
 const split=[...filler('S',49,0),{lid:'Twin',date:day(60),stars:8},{lid:'Twin',date:day(60),stars:6,rewatch:true},...filler('T',60,61)];
 publish(split);requests.length=0;result=await D.syncHistory(env);
-assert.deepEqual(plain([twin().viewings,twin().viewingsCertain,twin().ratingsAtEntry]),[1,false,[4]],'cut on page 1, cut again on page 2: one viewing at least, not exact');
-assert.equal(twin().rewatchRows,1);
+assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)]);
+assert.deepEqual(plain([twin().viewings,twin().viewingsCertain,twin().ratingsAtEntry]),[1,false,[4]],'cut at the bottom of page 1: one viewing at least, not exact');
+assert.equal(twin().rewatchRows,0);
 assert.equal(Object.values(history().entries).filter(e=>e.identity?.value==='Twin').length,1);
-// A later read where one page holds the whole day completes it: two viewings, certain, both ratings, one re-watch row.
-const closed=[{lid:'New1',date:'2026-10-31'},{lid:'New2',date:'2026-10-31'},...split];
+// A later page 1 that holds the whole day completes it: two viewings, certain, both ratings, one re-watch row.
+const closed=[{lid:'New1',date:'2026-10-31'},{lid:'Twin',date:day(60),stars:8},{lid:'Twin',date:day(60),stars:6,rewatch:true},{lid:'New2',date:'2026-10-30'}];
 records.delete(D.KEYS.state);publish(closed);requests.length=0;result=await D.syncHistory(env);
-assert.deepEqual(diaryRequests().slice(0,2).map(r=>r.url),[url(1),url(2)]);
+assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)]);
 assert.deepEqual(plain([twin().viewings,twin().viewingsCertain,twin().ratingsAtEntry,twin().rewatch,twin().rewatchRows]),[2,true,[4,3],true,1]);
-assert.deepEqual(plain(twin().changes.map(c=>c.field)),['rewatchRows','viewings','viewingsCertain','ratingAtEntry','ratingsAtEntry','rewatch'],'page 2 of the first read raised the re-watch lower bound');
+assert.deepEqual(plain(twin().changes.map(c=>c.field)),['viewings','viewingsCertain','rewatchRows','ratingAtEntry','ratingsAtEntry','rewatch']);
 let twinFilm=(await D.readHistory(env,{filmId:'Twin'})).film;
 assert.deepEqual([twinFilm.viewingCount,twinFilm.viewingCountExact,twinFilm.rewatches,twinFilm.rewatchesExact],[2,true,1,false],'first viewing unmarked, so re-watches are a lower bound');
-// A shift that cuts the day again never lowers, inflates or duplicates it; an uncertain read leaves a proved count alone.
-publish([...filler('N',50,-10).map(e=>({...e,date:'2026-11-0'+(1+Number(e.lid.slice(1))%5)})),...split]);requests.length=0;result=await D.syncHistory(env);
-assert.deepEqual(plain([twin().viewings,twin().viewingsCertain]),[2,true],'a page shift never lowers or inflates the count');
+// A page that does not show the day, and an uncertain cut of one row, never lower, inflate or duplicate the proved count.
+publish([...filler('N',50,0),...split]);requests.length=0;result=await D.syncHistory(env);
+assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)]);
+assert.deepEqual(plain([twin().viewings,twin().viewingsCertain]),[2,true],'a page that omits the day leaves the proved count');
+const cut=[...filler('C',49,0),{lid:'Twin',date:day(60),stars:8},...filler('Z',10,80)];
+publish(cut);requests.length=0;result=await D.syncHistory(env);
+assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)]);
+assert.equal(result.counts.conflicts,0);
+assert.deepEqual(plain([twin().viewings,twin().viewingsCertain]),[2,true],'an uncertain smaller read does not lower a proved count');
 assert.equal(Object.values(history().entries).filter(e=>e.identity?.value==='Twin').length,1);
 
-// 8c. Non-atomic pagination: an entry added between the page 1 and page 2 requests repeats page 1's last row at the top
-// of page 2. The repeated row is not a second viewing.
+// 8c. A published page 2 that repeats page 1's last row is never fetched, so the repeat is not a second viewing.
 records.delete(D.KEYS.history);records.delete(D.KEYS.state);
 const once=[...filler('S',49,0),{lid:'Twin',date:day(60),stars:8},...filler('T',60,61)];
 publish(once);const later=[{lid:'Late',date:'2026-10-31'},...once];
 site.set(url(2),page(later.slice(50,100),true));site.set(url(3),page(later.slice(100),false));
-result=await D.syncHistory(env);
-assert.deepEqual(plain([twin().viewings,twin().viewingsCertain]),[1,false],'a repeated row never becomes an exact second viewing');
+requests.length=0;result=await D.syncHistory(env);
+assert.deepEqual(diaryRequests().map(r=>r.url),[url(1)]);
+assert.deepEqual(plain([twin().viewings,twin().viewingsCertain]),[1,false],'an unread page never becomes a second viewing');
 
 // 8d. False exactness: a stored lower bound above a later proved count is a conflict, never an exact count.
 records.delete(D.KEYS.history);records.delete(D.KEYS.state);
@@ -185,7 +190,7 @@ for(const [status,outcome] of [[403,'blocked'],[429,'rate_limited'],[500,'failed
  assert.deepEqual([diaryRequests().length,result.lastOutcome,result.stopReason],[1,outcome,'http_'+status+'_page_1']);
  assert.equal(JSON.stringify(history()),before);assert.equal(state().lastSuccessAt,lastGood);assert.ok(state().lastFailureAt);
 }
-assert.equal(state().coverage.reachedEnd,true);
+assert.equal(state().coverage.reachedEnd,false,'a recent window never claims the last page');
 site.set(url(1),()=>respond(200,'<html><head><title>Just a moment...</title></head></html>'));result=await D.syncHistory(env);
 assert.deepEqual([result.lastOutcome,result.stopReason],['blocked','challenge_page_1']);
 site.set(url(1),()=>{throw new Error('timed out');});result=await D.syncHistory(env);
@@ -207,19 +212,19 @@ assert.equal(JSON.stringify(history()),before,'no failure rewrote the history');
 records.delete(D.KEYS.history);records.delete(D.KEYS.state);site.clear();site.set(url(1),'<html><head><title>Something else</title></head></html>');
 result=await D.syncHistory(env);
 assert.deepEqual([result.lastOutcome,result.coverage.reachedEnd,result.lastSuccessAt,records.has(D.KEYS.history)],['failed',false,null,false]);
-// A 403 on page 2 of a baseline keeps page 1 and resumes at page 2.
+// A 403 published on page 2 is never requested: page 1 still finishes as a recent window and does not move the resume page.
 records.delete(D.KEYS.history);records.delete(D.KEYS.state);publish(diary);site.set(url(2),()=>respond(403,'<title>Just a moment...</title>'));requests.length=0;
 result=await D.syncHistory(env);
-assert.deepEqual([diaryRequests().length,result.lastOutcome,result.resumePage,Object.keys(history().entries).length],[2,'blocked',2,50]);
+assert.deepEqual([diaryRequests().length,result.lastOutcome,result.stopReason,result.resumePage,Object.keys(history().entries).length],[1,'recent_window','recent_window_only',null,50]);
+assert.equal(state().coverage.reachedEnd,false);assert.ok(state().lastSuccessAt);
 
-// 10. Killed after a page commit, before the state write: the next run repeats reads only, nothing duplicates.
+// 10. Killed after a page commit, before the state write: the next run repeats the same page, nothing duplicates.
 records.delete(D.KEYS.history);records.delete(D.KEYS.state);publish(diary);
 failState=true;await assert.rejects(D.syncHistory(env),/isolate killed/);failState=false;
-assert.equal(Object.keys(history().entries).length,150);assert.equal(records.has(D.KEYS.state),false);
+assert.equal(Object.keys(history().entries).length,50);assert.equal(records.has(D.KEYS.state),false);
 result=await D.syncHistory(env);
-assert.deepEqual([Object.keys(history().entries).length,result.counts.added,result.counts.unchanged,result.resumePage],[150,0,150,4],'the reads repeat, nothing duplicates');
-result=await D.syncHistory(env);
-assert.deepEqual([Object.keys(history().entries).length,result.counts.added],[200,50]);
+assert.deepEqual(diaryRequests().slice(-1).map(r=>r.url),[url(1)]);
+assert.deepEqual([Object.keys(history().entries).length,result.counts.added,result.counts.unchanged,result.resumePage],[50,0,50,null],'the same page repeats, nothing duplicates');
 
 // 11. An entry whose viewing id comes back with another film is a conflict: the stored identity stays.
 records.delete(D.KEYS.history);records.delete(D.KEYS.state);
@@ -246,7 +251,7 @@ const completed=await ctx.completeWithRatings(env,run('r-on'),report('r-on'));
 assert.equal(completed.stage,'complete');
 assert.deepEqual(requests.map(r=>r.url),[url(1)],'one diary page and nothing else');
 const sync=records.get('sync.json');
-assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.counts.added,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.enabled],['complete',50,50,true]);
+assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.stopReason,sync.diaryHistory.counts.added,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.enabled],['recent_window','recent_window_only',50,50,true]);
 assert.deepEqual([sync.ratingAttempt.state,sync.ratingAttempt.phase,sync.ratingAttempt.source,sync.ratingPending,sync.ratingError],['finished','diary','letterboxd_diary',undefined,undefined]);
 assert.equal(writes.some(key=>key.includes('facts/films/')),true,'the diary facts are written without any facts switch');
 // A blocked diary: the commit completes, nothing else is requested, the attempt is an error with its cause.
@@ -258,4 +263,4 @@ assert.equal(records.get('sync.json').diaryHistory.outcome,'blocked');
 assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause],['error','blocked']);
 assert.match(records.get('sync.json').ratingError,/Letterboxd diary blocked/);
 
-console.log('Letterboxd diary history (AIR-51): parser on a 50-row page, day entries proved by one page, lower bounds across page boundaries, shifts and non-atomic pages, no false exactness, re-watches per row, gate off untouched, bounded resumable backfill with overlap, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery, identity conflict, read API, one diary read per commit passed');
+console.log('Letterboxd diary history (AIR-304): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, gate off untouched, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API, one diary read per commit passed');

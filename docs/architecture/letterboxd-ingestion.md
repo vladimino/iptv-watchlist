@@ -1,6 +1,6 @@
 # Letterboxd ingestion and last-good ratings
 
-This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0043-removal-rating-lookup-queue.md), [diary history ADR](../adr/0049-letterboxd-diary-viewing-history.md), [Diary-first ratings ADR](../adr/0054-diary-first-epg-ratings.md), [archive preview ADR](../adr/0066-ephemeral-letterboxd-archive-preview.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
+This sequence distinguishes the routine watchlist/EPG synchronization from the retired ratings-only refresh route. **A Letterboxd HTTP 403 is an observed upstream failure, not a reason to bypass the challenge.** Sources: [Letterboxd ratings contract](../reference/integrations/letterboxd-ratings.md), [last-good ADR](../adr/0018-letterboxd-last-good-ratings.md), [retirement ADR](../adr/0040-retire-ratings-only-refresh.md), [removal lookup ADR](../adr/0043-removal-rating-lookup-queue.md), [diary history ADR](../adr/0049-letterboxd-diary-viewing-history.md), [Diary-first ratings ADR](../adr/0054-diary-first-epg-ratings.md), [archive preview ADR](../adr/0066-ephemeral-letterboxd-archive-preview.md), [recent-window ADR](../adr/0067-diary-recent-window.md), [Worker sources](../../src/sources.js), [enrichment API](../reference/api/enrichment.md).
 
 ```mermaid
 sequenceDiagram
@@ -15,7 +15,7 @@ sequenceDiagram
     LB-->>Sync: Complete watchlist
     Sync->>R2: Commit EPG generation, watchlist and its events
     opt LETTERBOXD_DIARY_HISTORY=on
-        Sync->>LB: Diary page 1, then at most 2 more pages
+        Sync->>LB: Diary page 1 only
         alt Page read
             LB-->>Sync: Diary rows (lid, watched date, rating at entry)
             Sync->>R2: Viewing history entries for the page
@@ -44,11 +44,11 @@ sequenceDiagram
     Note over Retired,R2: No Letterboxd request, no R2 read or write
 ```
 
-The ratings after a commit are **Diary-first** ([ADR 0054](../adr/0054-diary-first-epg-ratings.md)). The first optional block is the **Diary viewing history** of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), off by default. It is a bounded, incremental read of the owner's diary. After each page's history commit, every film on that page becomes a watched fact; a rating fact is added where the diary proves one. That rating is the one at the film's latest watched date, observed at that date, so a newer observation from any source wins ([contract](../reference/integrations/letterboxd-diary-history.md#rating-facts)).
+The ratings after a commit are **Diary-first** ([ADR 0054](../adr/0054-diary-first-epg-ratings.md)). The first optional block is the **Diary viewing history** of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), off by default, and it reads the first diary page only ([ADR 0067](../adr/0067-diary-recent-window.md)). After that page's history commit, every film on it becomes a watched fact, and a rating fact where the page shows a rating: the first visible rated row of the film's latest day on that page, observed at that watched date, so a newer observation from any source wins ([contract](../reference/integrations/letterboxd-diary-history.md#rating-facts)). The read does not claim the rest of the diary. More than 50 new viewings between runs can miss this page; an archive import is a separate path and is not started here.
 
 The second optional block is the **removal lookup** of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md), off by default. It now runs after the diary, and only for films the watchlist diff removed that the diary gave no rating. They are looked up on their own member pages through a bounded queue in `enrichment/removal-rating-lookups.json`, and it never fails the commit ([contract](../reference/integrations/letterboxd-ratings.md#removed-films)). The 31-page public films list is no longer scanned after a commit.
 
-The diagram shows the default `RATINGS_PIPELINE=inline`. With `separate` after the owner-approved storage migration, both blocks leave the commit: it only adds the removed films to the queue as references to their removal event, and a separate leased ratings run reads the Diary and makes the lookups ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline-deployed-inactive-by-default), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)).
+The diagram shows the default `RATINGS_PIPELINE=inline`. With `separate` after the owner-approved storage migration, both blocks leave the commit: it only adds the removed films to the queue as references to their removal event, and a separate leased ratings run reads the Diary and makes the lookups ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline-production-inline-remains-the-worker-default), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)).
 
 The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
 

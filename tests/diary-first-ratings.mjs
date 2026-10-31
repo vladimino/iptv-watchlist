@@ -1,4 +1,4 @@
-// AIR-287 / ADR 0054: Diary-first EPG ratings. Synthetic diary pages only; no real Letterboxd request.
+// AIR-287 / ADR 0054, recent window AIR-304 / ADR 0067: Diary-first EPG ratings. Synthetic diary pages only; no real Letterboxd request.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -36,36 +36,41 @@ const report=runId=>({runId,updatedAt:new Date().toISOString(),watchlistCount:0,
 const run=runId=>({runId,stage:'epg',events:[],ratingPending:['letterboxd-diary'],watchlist:[],pending:[]});
 const commit=async runId=>{records.set('programme.json',report(runId));return ctx.completeWithRatings(env,run(runId),report(runId));};
 
-// The rule, on stored history alone: latest watched date; rated only when that date's rows are all known and agree.
-const H={entries:{
- a1:{key:'a1',keyBasis:'identity_date',identity:{type:'letterboxd_lid',value:'A'},watchedDate:'2026-01-01',viewings:1,viewingsCertain:true,ratingsAtEntry:[3]},
- a2:{key:'a2',keyBasis:'identity_date',identity:{type:'letterboxd_lid',value:'A'},watchedDate:'2026-05-01',viewings:1,viewingsCertain:true,ratingsAtEntry:[4.5]},
- b:{key:'b',keyBasis:'identity_date',identity:{type:'letterboxd_lid',value:'B'},watchedDate:'2026-05-01',viewings:2,viewingsCertain:true,ratingsAtEntry:[4,3]},
- c:{key:'c',keyBasis:'identity_date',identity:{type:'letterboxd_lid',value:'C'},watchedDate:'2026-05-01',viewings:2,viewingsCertain:false,ratingsAtEntry:[4]},
- d1:{key:'d1',keyBasis:'identity_date',identity:{type:'letterboxd_lid',value:'D'},watchedDate:'2026-01-01',viewings:1,viewingsCertain:true,ratingsAtEntry:[2]},
- d2:{key:'d2',keyBasis:'identity_date',identity:{type:'letterboxd_lid',value:'D'},watchedDate:'2026-06-01',viewings:1,viewingsCertain:true,ratingsAtEntry:[null]},
- e:{key:'viewing:9',keyBasis:'viewing_id',identity:{type:'letterboxd_lid',value:'E'},watchedDate:'2026-05-01',viewings:1,viewingsCertain:true,ratingAtEntry:5},
- f:{key:'f',keyBasis:'identity_date',identity:{type:'letterboxd_lid',value:'F'},watchedDate:'2026-05-01',viewings:2,viewingsCertain:true,ratingsAtEntry:[4,4]},
- u:{key:'u',keyBasis:'identity_date',identity:null,aliases:[{type:'letterboxd_slug',value:'unresolved'}],watchedDate:'2026-05-01',viewings:1,viewingsCertain:true,ratingsAtEntry:[5]}
-}};
-assert.deepEqual(plain(D.ratingEvidence(H).map(e=>[e.lid,e.watchedDate,e.rating,e.ratingState])),[
- ['A','2026-05-01',4.5,'rated'],['B','2026-05-01',null,'ambiguous'],['C','2026-05-01',null,'partial'],['D','2026-06-01',null,'unrated'],['E','2026-05-01',5,'rated'],['F','2026-05-01',4,'rated']]);
-assert.deepEqual(plain(D.ratingEvidence(H,new Set(['A'])).map(e=>e.lid)),['A']);
+// The rule, on the page just read, in display order (ADR 0067). The stored history is not the evidence.
+// Latest watched date on that page; the first row of that day that shows a rating. An open edge, a next link,
+// an uncertain count and a later row of the same day do not hide it. An older day does not stand in. No page: nothing.
+const H={entries:{}};
+const pageRows=[
+ {lid:'D',watchedDate:'2026-06-01',ratingAtEntry:null,key:'d-new'},
+ {lid:'A',watchedDate:'2026-01-01',ratingAtEntry:3,key:'a-old'},
+ {lid:'A',watchedDate:'2026-05-01',ratingAtEntry:4.5,key:'a-new'},
+ {lid:'B',watchedDate:'2026-05-01',ratingAtEntry:4,key:'b1'},
+ {lid:'B',watchedDate:'2026-05-01',ratingAtEntry:3,key:'b2'},
+ {lid:'C',watchedDate:'2026-05-01',ratingAtEntry:4,key:'c'},
+ {lid:'E',watchedDate:'2026-05-01',ratingAtEntry:5,key:'viewing:9'},
+ {lid:'F',watchedDate:'2026-05-01',ratingAtEntry:4,key:'f1'},
+ {lid:'F',watchedDate:'2026-05-01',ratingAtEntry:4,key:'f2'},
+ {lid:'D',watchedDate:'2026-01-01',ratingAtEntry:2,key:'d-old'}
+];
+assert.deepEqual(plain(D.ratingEvidence(H)),[]);
+assert.deepEqual(plain(D.ratingEvidence(H,null,{rows:pageRows}).map(e=>[e.lid,e.watchedDate,e.rating,e.ratingState])),[
+ ['A','2026-05-01',4.5,'rated'],['B','2026-05-01',4,'rated'],['C','2026-05-01',4,'rated'],['D','2026-06-01',null,'unrated'],['E','2026-05-01',5,'rated'],['F','2026-05-01',4,'rated']]);
+assert.deepEqual(plain(D.ratingEvidence(H,new Set(['A']),{rows:pageRows}).map(e=>e.lid)),['A']);
 
-// 1. Sixty diary rows over two pages: every film becomes a watched fact and its proved rating a rating fact, with no cap;
-// the films list is never requested; ratingHistory says first_observed at the watched date.
+// 1. Sixty diary rows over two pages: page 1 only. Every film on it becomes a watched fact and its visible rating a
+// rating fact, including the last row; the films list is never requested; ratingHistory says first_observed at the watched date.
 const sixty=Array.from({length:60},(_,i)=>({lid:'R'+i,date:day(i),stars:(i%10)+1}));
 publish(sixty);
 let done=await commit('r1');
 assert.equal(done.stage,'complete');
-assert.deepEqual(requests,[url(1),url(2)],'two diary pages, nothing else');
+assert.deepEqual(requests,[url(1)],'one diary page, nothing else');
 let sync=records.get('sync.json');
-// The two rows at the page boundary (R49, R50) are watched but their day is not proved by one page: no rating yet.
-assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.counts.added,sync.diaryHistory.facts.written,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.partial],['complete',60,60,58,2]);
+assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.counts.added,sync.diaryHistory.facts.written,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.partial,sync.diaryHistory.facts.ambiguous],['recent_window',50,50,50,0,0]);
 assert.deepEqual([sync.ratingAttempt.state,sync.ratingAttempt.source,sync.ratingPending],['finished','letterboxd_diary',undefined]);
-for(let i=0;i<60;i++){const r=record('R'+i);assert.equal(r.watched.value,true);if(i===49||i===50){assert.equal(r.rating,undefined);continue;}assert.equal(r.rating.value,((i%10)+1)/2);assert.equal(r.rating.observedAt,day(i)+'T00:00:00.000Z');assert.equal(r.rating.source,'letterboxd_diary');}
+for(let i=0;i<50;i++){const r=record('R'+i);assert.equal(r.watched.value,true);assert.equal(r.rating.value,((i%10)+1)/2);assert.equal(r.rating.observedAt,day(i)+'T00:00:00.000Z');assert.equal(r.rating.source,'letterboxd_diary');}
+assert.equal(record('R55'),undefined,'page 2 is not imported');
 assert.deepEqual(plain(record('R3').ratingHistory.map(h=>[h.kind,h.value,h.observedAt])),[['first_observed',2,day(3)+'T00:00:00.000Z']]);
-assert.deepEqual([view().R0.actualRating,view().R0.watched,view().R59.actualRating],[0.5,true,5]);
+assert.deepEqual([view().R0.actualRating,view().R0.watched,view().R49.actualRating,view().R59],[0.5,true,5,undefined]);
 
 // 2. Replay: the same diary again writes no fact record and adds no history.
 writes.length=0;requests.length=0;
@@ -86,40 +91,44 @@ assert.equal(view().R5.actualRating,1);
 assert.equal(record('R7').rating.value,4,'a diary entry newer than the stored observation replaces it');
 assert.equal(record('R7').ratingHistory.at(-1).value,4);
 
-// 4. A re-rating on a newer diary date changes the rating once; an unrated newer viewing, an ambiguous day and a watched
-// film without any rating prove no rating and change none.
-const next=[{lid:'R1',date:'2026-10-30',stars:10},{lid:'R2',date:'2026-10-30'},{lid:'R4',date:'2026-10-30',stars:2},{lid:'R4',date:'2026-10-30',stars:8},{lid:'Plain',date:'2026-10-30'},...sixty];
+// 4. A re-rating on a newer diary date changes the rating once. Two same-day rows keep both history entries and the
+// first visible rating. An unrated newer viewing and a watched film without a rating prove no rating. An older day
+// on the same page does not override the chosen visible rating.
+const next=[{lid:'R1',date:'2026-10-30',stars:10},{lid:'R2',date:'2026-10-30'},{lid:'R4',date:'2026-10-30',stars:2,viewing:'401'},{lid:'R4',date:'2026-10-30',stars:8,viewing:'402'},{lid:'Older',date:day(20),stars:10},{lid:'Older',date:'2026-10-30',stars:4},{lid:'Plain',date:'2026-10-30'},...sixty];
 publish(next);writes.length=0;
 done=await commit('r4');
 sync=records.get('sync.json');
 assert.equal(record('R1').rating.value,5);assert.equal(record('R1').ratingHistory.filter(h=>h.kind==='changed').length,1);
 assert.equal(record('R2').rating.value,1.5,'an unrated newer viewing keeps the earlier rating');
-assert.equal(record('R4').rating.value,2.5,'an ambiguous day keeps the earlier rating');
+assert.equal(record('R4').rating.value,1,'the first visible rated row of that day');
+const r4entries=Object.values(records.get('letterboxd/diary/history.json').entries).filter(e=>e.identity?.value==='R4'&&e.watchedDate==='2026-10-30');
+assert.equal(r4entries.length,2,'both viewing ids are kept');
+assert.equal(record('Older').rating.value,2,'an older viewing on the page does not override the latest day');
 assert.deepEqual([record('Plain').watched.value,record('Plain').rating],[true,undefined]);
-assert.ok(sync.diaryHistory.facts.ambiguous>=1&&sync.diaryHistory.facts.unrated>=2);
+assert.equal(sync.diaryHistory.facts.ambiguous,0);assert.equal(sync.diaryHistory.facts.partial,0);assert.ok(sync.diaryHistory.facts.unrated>=2);
 done=await commit('r4b');
 assert.equal(record('R1').ratingHistory.filter(h=>h.kind==='changed').length,1,'no duplicate history on replay');
 
-// 5. Partial coverage: page 2 blocked keeps page 1's facts, reports blocked with its resume point; a later run resumes.
+// 5. Page 1 blocked keeps no new facts and names no resume page. A later run reads page 1 only; page 2 stays unread.
 records.clear();etags.clear();requests.length=0;
-publish(sixty);site.set(url(2),()=>respond(403,'<title>Just a moment...</title>'));
+publish(sixty);site.set(url(1),()=>respond(403,'<title>Just a moment...</title>'));
 done=await commit('r5');
 sync=records.get('sync.json');
-assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.stopReason,sync.diaryHistory.resumePage,sync.ratingAttempt.state,sync.ratingAttempt.cause],['blocked','http_403_page_2',2,'error','blocked']);
-assert.equal(record('R0').rating.value,0.5);assert.equal(record('R55'),undefined);
-publish(sixty);requests.length=0;
+assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.stopReason,sync.diaryHistory.resumePage,sync.ratingAttempt.state,sync.ratingAttempt.cause],['blocked','http_403_page_1',null,'error','blocked']);
+assert.equal(record('R0'),undefined);
+publish(sixty);site.set(url(2),()=>respond(403,'<title>Just a moment...</title>'));requests.length=0;
 done=await commit('r6');
-assert.deepEqual(requests,[url(1),url(2)]);assert.equal(record('R55').rating.value,3);
+assert.deepEqual(requests,[url(1)]);assert.equal(record('R0').rating.value,0.5);assert.equal(record('R55'),undefined);
 
-// 6. A facts write that fails stops the run at that page; the next run reads it again and completes, nothing lost.
-records.clear();etags.clear();requests.length=0;publish(sixty);failFactsFor='R55';
+// 6. A facts write that fails stops the run at page 1; the next run reads that same page again and completes.
+records.clear();etags.clear();requests.length=0;publish(sixty);failFactsFor='R10';
 done=await commit('r7');
 sync=records.get('sync.json');
 assert.equal(done.stage,'complete','the commit completes');
-assert.match(sync.diaryHistory.stopReason,/^after_page:.*_page_2$/);assert.equal(sync.ratingAttempt.state,'error');
+assert.match(sync.diaryHistory.stopReason,/^after_page:.*_page_1$/);assert.equal(sync.ratingAttempt.state,'error');
 failFactsFor=null;requests.length=0;
 done=await commit('r8');
-assert.deepEqual(requests,[url(1),url(2)],'page 2 is read again');assert.equal(record('R55').rating.value,3);
+assert.deepEqual(requests,[url(1)],'page 1 is read again');assert.equal(record('R10').rating.value,0.5);
 
 // 7. LETTERBOXD_FACTS is retired (ADR 0055): no stale value of it (absent, off, a near miss, an object) stops the diary
 // facts; each run writes the same fact records and reports the facts as enabled.
@@ -131,22 +140,28 @@ for(const stale of [undefined,'off','On',{token:'x'}]){
  assert.equal(records.get('sync.json').diaryHistory.facts.enabled,true,JSON.stringify(stale));
 }
 
-// 8. Review fixes. Two viewing ids of one film on one day split by the page boundary, with different ratings: page 1
-// alone never publishes its row's rating; with page 2 read the day is ambiguous; with page 2 blocked it stays unrated.
-const fill=n=>Array.from({length:n},(_,i)=>({lid:'P'+i,date:day(i)}));
+// 8. A rating on the last day of page 1 is used even when the viewing count is not exact. Two viewing ids of one film
+// on that day keep both history entries and the first visible rating. A published or blocked page 2 is not fetched.
+const fill=n=>Array.from({length:n},(_,i)=>({lid:'P'+i,date:day(i),stars:2}));
 for(const blocked of [false,true]){
- records.clear();etags.clear();
- publish([...fill(49),{lid:'Split',date:day(60),stars:8,viewing:'901'},{lid:'Split',date:day(60),stars:10,viewing:'902'},...fill(10).map(e=>({...e,lid:'Q'+e.lid,date:day(61)}))]);
+ records.clear();etags.clear();requests.length=0;
+ publish([...fill(47),{lid:'Edge',date:day(80),stars:8},{lid:'Split',date:day(80),stars:6,viewing:'901'},{lid:'Split',date:day(80),stars:10,viewing:'902'},...fill(10).map(e=>({...e,lid:'Q'+e.lid,date:day(81)}))]);
  if(blocked)site.set(url(2),()=>respond(403,'<title>Just a moment...</title>'));
  await commit('split-'+blocked);
- assert.deepEqual([record('Split').watched.value,record('Split').rating],[true,undefined],'no rating from half a day, blocked='+blocked);
- assert.equal(view().Split.actualRating,undefined);
+ assert.deepEqual(requests,[url(1)],'blocked='+blocked);
+ assert.equal(record('Edge').rating.value,4);
+ const edge=(await D.readHistory(env,{filmId:'Edge'})).film;
+ assert.equal(edge.viewingCountExact,false,'the cut day stays a lower bound and the rating is still used');
+ assert.equal(record('Split').rating.value,3,'the first visible rated row');
+ const splits=Object.values(records.get('letterboxd/diary/history.json').entries).filter(e=>e.identity?.value==='Split');
+ assert.equal(splits.length,2);
+ assert.equal(records.get('sync.json').diaryHistory.facts.partial,0);
+ assert.equal(records.get('sync.json').diaryHistory.facts.ambiguous,0);
 }
-// Whole on one page later: the two viewings disagree, so still no rating; agreeing viewings inside a page are rated.
 records.clear();etags.clear();
 publish([...fill(10),{lid:'Split',date:day(60),stars:8,viewing:'901'},{lid:'Split',date:day(60),stars:10,viewing:'902'},{lid:'Same',date:day(61),stars:6,viewing:'903'},{lid:'Same',date:day(61),stars:6,viewing:'904'},{lid:'Last',date:day(62),stars:4}]);
 await commit('split-whole');
-assert.equal(record('Split').rating,undefined);assert.equal(record('Same').rating.value,3);
+assert.equal(record('Split').rating.value,4);assert.equal(record('Same').rating.value,3);
 
 // 9. A removed film with a stored rating whose latest diary entry proves none is not spared the per-film lookup, and
 // the stored rating is not reported as diary proof.
@@ -163,15 +178,97 @@ assert.ok(requests.some(u=>u.includes(`/${USER}/film/gone/`)),'the lookup still 
 assert.equal(records.get('sync.json').removalDiaryResolved,undefined);
 assert.equal(record('Gone').rating.value,4,'the stored rating stays');
 
-// 10. Worst case for one commit: three full pages of films never seen (150 facts records), bounded R2 operations.
+// 10. Worst case for one commit: one full page of films never seen (50 facts records), bounded R2 operations.
 records.clear();etags.clear();let ops=0;const realGet=bucket.get,realPut=bucket.put;
 bucket.get=async function(...a){ops++;return realGet.apply(this,a);};bucket.put=async function(...a){ops++;return realPut.apply(this,a);};
 publish(Array.from({length:200},(_,i)=>({lid:'W'+i,date:day(i),stars:(i%10)+1})));requests.length=0;
 const started=Date.now();await commit('worst');const elapsed=Date.now()-started;
 bucket.get=realGet;bucket.put=realPut;
-assert.deepEqual(requests,[url(1),url(2),url(3)]);
-assert.equal(Object.keys(records.get('letterboxd/diary/history.json').entries).length,150);
-assert.ok(ops<=700,'R2 operations for 150 new films: '+ops);
-fs.writeFileSync(process.env.DIARY_WORST_CASE_OUT||'/dev/null',JSON.stringify({films:150,r2Operations:ops,ms:elapsed}));
+assert.deepEqual(requests,[url(1)]);
+assert.equal(Object.keys(records.get('letterboxd/diary/history.json').entries).length,50);
+assert.ok(ops<=250,'R2 operations for 50 new films: '+ops);
+fs.writeFileSync(process.env.DIARY_WORST_CASE_OUT||'/dev/null',JSON.stringify({films:50,r2Operations:ops,ms:elapsed}));
 
-console.log('Diary-first ratings (AIR-287): rule on latest watched date, 60 rows over two pages as facts with no cap, no films list, replay without writes, newer observation wins either way, re-rating once, unrated/ambiguous/watched-only prove no rating, blocked page 2 resumes, failed facts write re-reads its page, facts gate, no rating from half a page-split day with viewing ids (read or blocked), stored rating never taken as diary proof, bounded R2 operations for 150 new films passed');
+// 11. A rating revised days later. The Diary row keeps the watched date and the viewing id. Ingest 4.0 for a viewing
+// dated 20 Oct; on 25 Oct page 1 shows that same row as 4.5. The stored rating becomes 4.5 even though that observation
+// id sorts below 4.0. The same page on 26 Oct writes nothing. An owner observation dated 22 Oct still wins. A late
+// write of the 20 Oct read does not put 4.0 back.
+{
+ const Facts=vm.runInContext('LetterboxdFacts',ctx),dayWatched='2026-10-20',ref='diary:viewing:401';
+ const oct20=Date.parse('2026-10-20T18:00:00.000Z'),oct25=Date.parse('2026-10-25T18:00:00.000Z'),oct26=Date.parse('2026-10-26T18:00:00.000Z');
+ let now=oct20;
+ const NativeDate=ctx.Date;
+ class Clock extends NativeDate{constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}static parse(value){return NativeDate.parse(value);}static UTC(...args){return NativeDate.UTC(...args);}}
+ ctx.Date=Clock;
+ const bare=value=>Facts.observation({factKey:'lb-Edit',fact:'rating',value,observedAt:dayWatched+'T00:00:00.000Z',source:'letterboxd_diary',sourceRef:ref});
+ assert.ok((await bare(4.5)).observationId<(await bare(4)).observationId,'4.5 sorts below 4.0; the hash must not be what saves it');
+ records.clear();etags.clear();requests.length=0;
+ const page=stars=>[{lid:'Edit',date:dayWatched,stars,viewing:'401'},{lid:'Own',date:dayWatched,stars,viewing:'403'}];
+ publish(page(8));
+ await commit('revise-oct-20');
+ assert.equal(record('Edit').rating.value,4);
+ assert.equal(record('Edit').rating.observedAt,dayWatched+'T00:00:00.000Z');
+ assert.equal(record('Edit').rating.ingestedAt,new Date(oct20).toISOString());
+ assert.equal(record('Edit').rating.sourceRef,ref);
+ const own=record('Own');
+ own.rating={value:5,observedAt:'2026-10-22T12:00:00.000Z',source:'owner',sourceRef:'edit',observationId:'owner-own',replaced:own.rating};
+ records.set('letterboxd/facts/films/lb-Own.json',own);
+ records.set('enrichment/view-index.json',{...view(),Own:{...view().Own,actualRating:5}});
+ now=oct25;
+ publish(page(9));
+ requests.length=0;
+ await commit('revise-oct-25');
+ assert.deepEqual(requests,[url(1)]);
+ assert.equal(record('Edit').rating.value,4.5);
+ assert.equal(record('Edit').rating.observedAt,dayWatched+'T00:00:00.000Z');
+ assert.equal(record('Edit').rating.ingestedAt,new Date(oct25).toISOString());
+ assert.equal(record('Edit').rating.sourceRef,ref);
+ assert.equal(record('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1);
+ assert.equal(record('Own').rating.value,5);assert.equal(record('Own').rating.source,'owner');
+ const readAt=record('Edit').rating.ingestedAt;
+ await Facts.applyDiaryEvidence(env,[{lid:'Edit',watchedDate:dayWatched,rating:4,sourceRef:ref,readAt:new Date(oct20).toISOString()}]);
+ assert.equal(record('Edit').rating.value,4.5);assert.equal(record('Edit').rating.ingestedAt,readAt);
+ const factWrites=()=>writes.filter(key=>key==='letterboxd/facts/films/lb-Edit.json').length;
+ const before=factWrites();
+ now=oct26;
+ publish(page(9));
+ await commit('revise-oct-26');
+ assert.equal(factWrites(),before,'the identical later read writes no fact');
+ assert.equal(record('Edit').rating.value,4.5);
+ assert.equal(record('Edit').rating.ingestedAt,readAt);
+ assert.equal(record('Edit').ratingHistory.filter(entry=>entry.kind==='changed').length,1);
+}
+
+// 12. The same viewing goes 4.0 → 4.5 → 4.0 → 4.5 across four reads. Each change is a history event, in that order,
+// even though the observation id of 4.0 and of 4.5 is reused. The identical fifth read and a late write of the first
+// read add nothing.
+{
+ const dayWatched='2026-10-20';
+ const oct20=Date.parse('2026-10-20T18:00:00.000Z'),oct25=Date.parse('2026-10-25T18:00:00.000Z'),oct27=Date.parse('2026-10-27T18:00:00.000Z'),oct28=Date.parse('2026-10-28T18:00:00.000Z'),oct29=Date.parse('2026-10-29T18:00:00.000Z');
+ let now=oct20;
+ const NativeDate=ctx.Date;
+ class Clock extends NativeDate{constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}static parse(value){return NativeDate.parse(value);}static UTC(...args){return NativeDate.UTC(...args);}}
+ ctx.Date=Clock;
+ records.clear();etags.clear();requests.length=0;
+ const page=stars=>[{lid:'Cycle',date:dayWatched,stars,viewing:'501'}];
+ const history=()=>(record('Cycle').ratingHistory||[]).map(entry=>[entry.kind,entry.value]);
+ publish(page(8));await commit('cycle-4');
+ now=oct25;publish(page(9));await commit('cycle-45');
+ now=oct27;publish(page(8));await commit('cycle-4-again');
+ now=oct28;publish(page(9));await commit('cycle-45-again');
+ assert.equal(record('Cycle').rating.value,4.5);
+ assert.equal(record('Cycle').rating.ingestedAt,new Date(oct28).toISOString());
+ assert.deepEqual(history(),[['first_observed',4],['changed',4.5],['changed',4],['changed',4.5]]);
+ const id4=record('Cycle').ratingHistory[0].observationId,id45=record('Cycle').ratingHistory[1].observationId;
+ assert.equal(record('Cycle').ratingHistory[2].observationId,id4);
+ assert.equal(record('Cycle').ratingHistory[3].observationId,id45);
+ const before=history().length;
+ now=oct29;publish(page(9));await commit('cycle-reread');
+ assert.equal(history().length,before,'the identical later read adds no history event');
+ assert.equal(record('Cycle').rating.ingestedAt,new Date(oct28).toISOString());
+ const Facts=vm.runInContext('LetterboxdFacts',ctx);
+ await Facts.applyDiaryEvidence(env,[{lid:'Cycle',watchedDate:dayWatched,rating:4,sourceRef:'diary:viewing:501',readAt:new Date(oct20).toISOString()}]);
+ assert.equal(record('Cycle').rating.value,4.5);assert.equal(history().length,before,'a late earlier read adds no history event');
+}
+
+console.log('Diary-first ratings (AIR-304): page order, first visible rating, one page of 50 as facts, no films list, replay without writes, newer observation wins either way, re-rating once, a rating revised days later on the same viewing replaces the stored one and a repeat is idempotent, a return to a previous rating is kept in history, owner precedence holds, unrated newer day and watched-only prove no rating, older day does not override, page 1 blocked then retried, failed facts write re-reads page 1, facts gate, edge rating kept with an inexact count, both viewing ids kept, stored rating never taken as diary proof, bounded R2 operations for 50 new films passed');

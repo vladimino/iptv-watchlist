@@ -502,16 +502,16 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
  run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
 }
-// AIR-287 (ADR 0054): the ratings after an EPG commit are Diary-first. The diary history stage reads at most
-// LetterboxdDiary.MAX_PAGES pages; after each page's history commit, every film on that page becomes a watched fact and,
-// where the diary proves it, a rating fact (no cap on rows). Then the bounded per-film removal lookup runs, only for
-// removed films the diary did not give a rating. The public films list is no longer scanned. Nothing here is fatal to
-// the commit; with LETTERBOXD_DIARY_HISTORY off, only the removal lookup runs.
+// AIR-287 (ADR 0054) and ADR 0067: the ratings after an EPG commit are Diary-first, and the diary stage reads the first
+// page only. After that page's history commit, every film on it becomes a watched fact and, where the page shows a
+// rating, a rating fact. Then the bounded per-film removal lookup runs, only for removed films the diary did not give
+// a rating. The public films list is no longer scanned. Nothing here is fatal to the commit; with
+// LETTERBOXD_DIARY_HISTORY off, only the removal lookup runs.
 async function diaryRatingsStage(env,run){
  const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0},ratings={};
- const afterPage=async({page,rows,next,history})=>{
+ const afterPage=async({page,rows,next,history,readAt})=>{
   const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
-  const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next});
+  const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next}).map(item=>({...item,readAt}));
   for(const item of evidence)facts[item.ratingState]++;
   // Only a rating the diary proved counts: it reaches the removal event (as the film's effective rating, which a newer
   // observation may hold) and spares the per-film lookup. A stored rating without diary proof does neither.

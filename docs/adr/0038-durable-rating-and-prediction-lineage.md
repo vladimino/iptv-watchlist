@@ -6,7 +6,7 @@
 **Approval source:** explicit owner acceptance of ADR 0038 in the AIR-12 delivery session, 2026-10-28, after the coordinator review of [PR #210](https://github.com/vladimino/iptv-watchlist/pull/210) (review 5687357082); architecture only, no backfill, flag, R2 or D1 write authorized  
 **Related work:** [AIR-12](https://trello.com/c/kh3xGQSp), [AIR-262](https://trello.com/c/48ImXYoq), [AIR-263](https://trello.com/c/TEq1NFbA), [AIR-164](https://trello.com/c/iZzON44A); [ADR 0018](0018-letterboxd-last-good-ratings.md), [ADR 0023](0023-letterboxd-user-facts.md), [ADR 0024](0024-letterboxd-scan-summary.md), [ADR 0026](0026-historical-prediction-version-materialization.md); [gap matrix](../evidence/prediction/air-12-history-gap-matrix-2026-10-28.md)  
 **Supersedes:** None. It extends the ADR 0023 fact record; its decision 6 (`replaced` as the one-level before-image) is unchanged  
-**Superseded by:** None
+**Superseded by:** [ADR 0067](0067-diary-recent-window.md) (Accepted 2026-10-31) in part: decision 1's claim that the observation id alone makes a history write idempotent. A later transition back to that same observation appends another entry. A retry of the transition just written still adds nothing, and the entry identity (observation id, apply or reverse, occurrence count) is unchanged.
 
 ## Context
 
