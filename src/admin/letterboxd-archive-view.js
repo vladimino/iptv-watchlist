@@ -166,12 +166,13 @@ function archiveZipStatusHtml(answer) {
   const present = list.filter(file => file.present).length;
   const conflicts = list.reduce((sum, file) => sum + (file.present ? file.conflicts || 0 : 0), 0);
   const invalid = answer.export.invalidRows || 0;
+  const mismatches = answer.export.crossFileMismatches || 0;
   const age = archiveAgePhrase((answer.archive && answer.archive.ageMs) ?? (answer.freshness && answer.freshness.ageMs));
-  const clean = present === list.length && invalid === 0 && conflicts === 0;
+  const clean = present === list.length && invalid === 0 && conflicts === 0 && mismatches === 0;
   const title = clean
     ? `Архив успешно прочитан: ${present}/${list.length} CSV, ошибок нет, ${age}`
-    : `Архив прочитан: ${present}/${list.length} CSV, ${invalid ? 'негодных строк ' + invalid : 'негодных строк нет'}, конфликтов CSV ${conflicts}, ${age}`;
-  return `<div class="archive-callout archive-callout-ok" role="status"><b>${archiveEscape(title)}</b></div>`;
+    : `Архив прочитан: ${present}/${list.length} CSV, негодных строк ${invalid}, конфликтов CSV ${conflicts}, расхождений между файлами ${mismatches}, ${age}`;
+  return `<div class="archive-callout ${clean ? 'archive-callout-ok' : 'archive-callout-warn'}" role="status"><b>${archiveEscape(title)}</b></div>`;
 }
 function archiveCoverageHtml(answer) {
   const freshness = answer.freshness || {};
@@ -182,7 +183,10 @@ function archiveCoverageHtml(answer) {
   const limit = typeof films.compared === 'number' && typeof films.unverified === 'number' && films.unverified > 0 && reads.limit && reads.done >= reads.limit;
   let text;
   if (typeof films.compared === 'number' && typeof films.accepted === 'number' && typeof films.unverified === 'number' && films.unverified > 0) {
-    text = `Сравнение с R2 частичное: проверено ${films.compared} из ${films.accepted} сопоставленного фильма, ещё ${films.unverified} не проверен${limit ? ' из-за лимита чтения' : ''}. Свежесть остальных оценок подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.`;
+    const checked = archivePlural(films.compared, 'проверен', 'проверены', 'проверено');
+    const accepted = archivePlural(films.accepted, 'сопоставленного фильма', 'сопоставленных фильма', 'сопоставленных фильмов');
+    const unread = archivePlural(films.unverified, 'не проверен', 'не проверены', 'не проверено');
+    text = `Сравнение с R2 частичное: ${checked} ${films.compared} из ${films.accepted} ${accepted}, ещё ${films.unverified} ${unread}${limit ? ' из-за лимита чтения' : ''}. Свежесть остальных оценок подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.`;
   } else text = 'Сравнение с R2 частичное: не все оценки проверены. Свежесть остальных подтвердить нельзя; только ради этого сообщения скачивать новый ZIP не нужно.';
   if (films.heldForIdentity) text += ` Ещё ${films.heldForIdentity} ${archivePlural(films.heldForIdentity, 'фильм', 'фильма', 'фильмов')} архива ${archivePlural(films.heldForIdentity, 'не сопоставлен', 'не сопоставлены', 'не сопоставлены')} и в это сравнение ${archivePlural(films.heldForIdentity, 'не входит', 'не входят', 'не входят')}.`;
   return `<div class="archive-callout archive-callout-warn" role="status"><b>Сравнение с R2 частичное</b><span>${archiveEscape(text)}</span></div>`;
@@ -214,10 +218,10 @@ function archiveValueParagraph(answer) {
   const films = answer.proposal.films || {};
   const exportFilms = answer.export && answer.export.films;
   const partial = (typeof exportFilms === 'number' && typeof films.compared === 'number' && exportFilms !== films.compared) || (films.unverified || 0) > 0;
-  const scope = partial ? ' Числа — только проверенные фильмы, не весь архив.' : '';
+  const scope = partial ? ' Эти числа — факты среди проверенных фильмов, не весь архив.' : '';
   const same = values.sameValueUpdates || 0;
   const sameText = same
-    ? ` При записи этого архива обновятся ${same} наблюдений без изменения оценок, просмотренного и watchlist (${watched}/${rating}/${watchlist}). Изменятся источник и время подтверждения; это реальные R2 writes и может влиять на последующие синхронизации.`
+    ? ` При записи этого архива ${archivePlural(same, 'обновится', 'обновятся', 'обновятся')} ${same} ${archivePlural(same, 'наблюдение', 'наблюдения', 'наблюдений')} без изменения оценок, просмотренного и watchlist (${watched}/${rating}/${watchlist}). Изменятся источник и время подтверждения; это реальные R2 writes и может влиять на последующие синхронизации.`
     : ' Обновлений наблюдений с тем же значением нет.';
   return `<p>Изменений значений: ${values.changedValues || 0}. Новых значений: ${values.newValues || 0}.${sameText} Пока ничего не записано.${scope}</p>`;
 }
@@ -230,12 +234,12 @@ function archiveSummaryHtml(answer) {
     ['то же значение, новое наблюдение', values.sameValueUpdates ?? '—'],
     ['наблюдение совпало', values.unchanged ?? '—'],
     ['в R2 новее', values.older ?? '—'],
-    ['не проверено', details.unverified ? details.unverified.total : '—'],
+    ['не проверено (фильмов)', details.unverified ? details.unverified.total : '—'],
   ];
   return `<div class="archive-summary-head">${archiveBadge(tone, answer.status === 'complete' ? 'полный предпросмотр' : 'частичный предпросмотр')}${archiveBadge('plain', 'ничего не записано')}<span class="muted">оценка на ${archiveEscape(archiveDate(answer.evaluatedAt))}</span></div>`
     + `<div class="archive-totals">${cards.map(([name, value]) => `<div class="archive-total"><b>${archiveEscape(value)}</b><span>${archiveEscape(name)}</span></div>`).join('')}</div>`
     + archiveValueParagraph(answer)
-    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}; проверено: ${proposal.films ? proposal.films.compared : '—'}. «Новых» и «изменённых» — факты, у которых значение появится или станет другим. «То же значение, новое наблюдение» — факт с исходом replaces, но прежним значением: запись обновит источник и время. «Наблюдение совпало» — полностью то же наблюдение, это не «значение не менялось». Запись — отдельное подтверждение конкретной партии ниже.</p>`
+    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}; проверено: ${proposal.films ? proposal.films.compared : '—'}. Пять первых плиток считают факты среди проверенных фильмов. «Не проверено (фильмов)» считает фильмы, чьи записи не читались, и не входит в эти факты. «Новых» и «изменённых» — факты, у которых значение появится или станет другим. «То же значение, новое наблюдение» — факт с исходом replaces, но прежним значением: запись обновит источник и время. «Наблюдение совпало» — полностью то же наблюдение, это не «значение не менялось». Запись — отдельное подтверждение конкретной партии ниже.</p>`
     + (answer.consistency && answer.consistency.status !== 'stable' ? '<p class="archive-callout archive-callout-warn" role="alert"><b>Данные в R2 менялись во время проверки.</b> Сравнение смешивает два состояния: повтори проверку.</p>' : '')
     + (archive.generatedAtSource === 'owner_declared' ? '<p class="muted archive-note">Время экспорта указано вручную: имя файла нестандартное.</p>' : '');
 }

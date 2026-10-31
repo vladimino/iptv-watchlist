@@ -131,7 +131,8 @@ assert.doesNotMatch(shown, /создан менее часа назад|скач
 assert.match(shown, /Нужен свежий архив/);
 assert.match(shown, /оценка в R2 новее этого архива/);
 assert.match(shown, /Изменений значений: 0\. Новых значений: 2\./);
-assert.match(shown, /Числа — только проверенные фильмы, не весь архив/);
+assert.match(shown, /Эти числа — факты среди проверенных фильмов, не весь архив/);
+assert.match(shown, /не проверено \(фильмов\)/);
 assert.match(shown, /Новых или изменённых значений: 2\. Обновлений наблюдений без смены значения: 0\./);
 assert.match(shown, /20\.10\.2026, 10:15 Madrid/, 'the export time in Madrid time');
 assert.match(shown, /из имени файла/);

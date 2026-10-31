@@ -250,12 +250,14 @@ for (const label of ['programme unavailable', 'metadata unavailable']) {
   assert.equal(chunks.reduce((sum, chunk) => sum + chunk.values.newValues + chunk.values.changedValues, 0), 0);
   const html = presentation.archivePreviewHtml({...answer, batches: {size: 50, confirmable: false, reason: null, chunks}});
   assert.match(html, /Архив успешно прочитан: 4\/4 CSV, ошибок нет, создан 1 дн\. назад/);
-  assert.match(html, /Сравнение с R2 частичное: проверено 281 из 282 сопоставленного фильма, ещё 1 не проверен из-за лимита чтения/);
+  assert.match(html, /Сравнение с R2 частичное: проверен 281 из 282 сопоставленных фильма, ещё 1 не проверен из-за лимита чтения/);
   assert.match(html, /только ради этого сообщения скачивать новый ZIP не нужно/);
   assert.match(html, /Ещё 1 фильм архива не сопоставлен и в это сравнение не входит/);
   assert.doesNotMatch(html, /Нужен свежий архив/);
   assert.match(html, /Изменений значений: 0\. Новых значений: 0\. При записи этого архива обновятся 487 наблюдений без изменения оценок, просмотренного и watchlist \(103\/103\/281\)/);
-  assert.match(html, /Числа — только проверенные фильмы, не весь архив/);
+  assert.match(html, /Эти числа — факты среди проверенных фильмов, не весь архив/);
+  assert.match(html, /не проверено \(фильмов\)/);
+  assert.doesNotMatch(html, /Числа — только проверенные фильмы/);
   assert.match(html, /Пока ничего не записано/);
   assert.doesNotMatch(html, /без изменений: 0|без изменений<\/span>/);
   assert.match(html, /то же значение 487, другое значение 0/);
@@ -318,7 +320,7 @@ for (const label of ['programme unavailable', 'metadata unavailable']) {
   assert.match(html, /Архив успешно прочитан: 4\/4 CSV, ошибок нет, создан менее часа назад/);
   assert.match(html, /Среди проверенных фильмов архив не устарел/);
   assert.doesNotMatch(html, /Нужен свежий архив|Сравнение с R2 частичное/);
-  assert.match(html, /Изменений значений: 2\. Новых значений: 1\. При записи этого архива обновятся 2 наблюдений/);
+  assert.match(html, /Изменений значений: 2\. Новых значений: 1\. При записи этого архива обновятся 2 наблюдения/);
   assert.match(html, /заменит наблюдение, значение другое/);
   assert.match(html, /обновит наблюдение, значение то же/);
   assert.match(html, /Другое значение <small>2<\/small>/);
@@ -335,5 +337,54 @@ for (const label of ['programme unavailable', 'metadata unavailable']) {
   assert.match(stale, /Нужен свежий архив/);
   assert.match(stale, /больше порога/);
   assert.doesNotMatch(stale, /скачивать новый ZIP не нужно|Сравнение с R2 частичное/);
+  assert.match(stale, /archive-callout-ok/);
+}
+
+// Count agreement for 1, 2, 5, 11, 21, 22 and 121. 121 follows 21, not 11.
+{
+  const forms = [
+    [1, 'проверен 1 из 1 сопоставленного фильма', 'ещё 1 не проверен', 'обновится 1 наблюдение'],
+    [2, 'проверены 2 из 2 сопоставленных фильма', 'ещё 2 не проверены', 'обновятся 2 наблюдения'],
+    [5, 'проверено 5 из 5 сопоставленных фильмов', 'ещё 5 не проверено', 'обновятся 5 наблюдений'],
+    [11, 'проверено 11 из 11 сопоставленных фильмов', 'ещё 11 не проверено', 'обновятся 11 наблюдений'],
+    [21, 'проверен 21 из 21 сопоставленного фильма', 'ещё 21 не проверен', 'обновится 21 наблюдение'],
+    [22, 'проверены 22 из 22 сопоставленных фильма', 'ещё 22 не проверены', 'обновятся 22 наблюдения'],
+    [121, 'проверен 121 из 121 сопоставленного фильма', 'ещё 121 не проверен', 'обновится 121 наблюдение'],
+  ];
+  for (const [n, matched, unread, observations] of forms) {
+    const coverage = presentation.archiveCoverageHtml({freshness: {verdict: 'inconclusive', reasons: ['ratings_unconfirmed']}, proposal: {films: {compared: n, accepted: n, unverified: n}, recordReads: {limit: 300, needed: n, done: n}}});
+    assert.match(coverage, new RegExp(matched + '(?![а-яё])'), String(n));
+    assert.match(coverage, new RegExp(unread + '(?![а-яё])'), String(n));
+    const paragraph = presentation.archiveValueParagraph({proposal: {values: {changedValues: 0, newValues: 0, sameValueUpdates: n, byFact: {watched: {sameValueUpdates: 0}, rating: {sameValueUpdates: 0}, watchlist: {sameValueUpdates: n}}}, films: {compared: n, unverified: 0}}, export: {films: n}});
+    assert.match(paragraph, new RegExp(observations + '(?![а-яё])'), String(n));
+  }
+}
+
+// The production shape: 0 / 0 / 487 facts beside 121 unread films. The last tile stays a film count.
+{
+  const html = presentation.archiveSummaryHtml({
+    status: 'partial', evaluatedAt: '2026-10-31T09:00:00.000Z', export: {films: 2461},
+    proposal: {films: {accepted: 421, compared: 300, unverified: 121}, values: {newValues: 0, changedValues: 0, sameValueUpdates: 487, unchanged: 0, older: 0, unverified: 0, byFact: {watched: {sameValueUpdates: 103}, rating: {sameValueUpdates: 103}, watchlist: {sameValueUpdates: 281}}}},
+    details: {unverified: {total: 121, rows: []}},
+  });
+  assert.match(html, /<b>0<\/b><span>новых значений<\/span>/);
+  assert.match(html, /<b>0<\/b><span>изменённых значений<\/span>/);
+  assert.match(html, /<b>487<\/b><span>то же значение, новое наблюдение<\/span>/);
+  assert.match(html, /<b>121<\/b><span>не проверено \(фильмов\)<\/span>/);
+  assert.match(html, /обновятся 487 наблюдений без изменения оценок, просмотренного и watchlist \(103\/103\/281\)/);
+  assert.match(html, /Эти числа — факты среди проверенных фильмов, не весь архив/);
+  assert.match(html, /«Не проверено \(фильмов\)» считает фильмы/);
+  assert.doesNotMatch(html, /<b>0<\/b><span>не проверено/);
+  assert.doesNotMatch(html, /Числа — только проверенные фильмы/);
+}
+
+{
+  const dirty = presentation.archiveZipStatusHtml({
+    archive: {ageMs: DAY},
+    export: {files: {watched: {present: true, conflicts: 0}, ratings: {present: false}, watchlist: {present: true, conflicts: 1}, diary: {present: true, conflicts: 0}}, invalidRows: 2, crossFileMismatches: 3},
+  });
+  assert.match(dirty, /archive-callout-warn/);
+  assert.doesNotMatch(dirty, /archive-callout-ok|ошибок нет|Архив успешно прочитан/);
+  assert.match(dirty, /Архив прочитан: 3\/4 CSV, негодных строк 2, конфликтов CSV 1, расхождений между файлами 3/);
 }
 console.log('letterboxd-archive-preview: ok');
