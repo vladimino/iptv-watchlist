@@ -87,22 +87,67 @@ async function d1Chunk(db,sql,ids){
  }
  return out;
 }
+// Distinct ids, stopped at the database. Each chunk asks for only the rows still needed, plus one. A full page means
+// another row exists past the cap, so the neighborhood is incomplete and the caller must not use a partial list.
+async function d1CappedIds(db,sql,ids,cap){
+ if(!ids.length)return {ids:[],truncated:false};
+ const seen=new Set(),found=[],marks=sql.split('/*ids*/').length-1;
+ for(let i=0;i<ids.length;i+=80){
+  const room=cap+1-found.length;
+  if(room<=0)return {ids:found.slice(0,cap),truncated:true};
+  const chunk=ids.slice(i,i+80),place=chunk.map(()=>'?').join(',');
+  const rows=await d1Rows(db,sql.replaceAll('/*ids*/',place)+' limit ?',[...Array(marks).fill(chunk).flat(),room]);
+  for(const row of rows){
+   if(seen.has(row.id))continue;
+   seen.add(row.id);found.push(row.id);
+  }
+  if(rows.length===room)return {ids:found.slice(0,cap),truncated:true};
+ }
+ return {ids:found,truncated:false};
+}
+async function d1IdentityCredits(db,filmIds,personIds){
+ if(!filmIds.length||!personIds.length)return [];
+ const out=[];
+ for(let i=0;i<filmIds.length;i+=80){
+  const films=filmIds.slice(i,i+80);
+  for(let j=0;j<personIds.length;j+=80){
+   const people=personIds.slice(j,j+80);
+   out.push(...await d1Rows(db,`select film_id filmId,person_id personId,role from film_person_credit where role in ('actor','director') and film_id in (${films.map(()=>'?').join(',')}) and person_id in (${people.map(()=>'?').join(',')}) order by film_id,role,person_id`,[...films,...people]));
+  }
+ }
+ return out;
+}
 async function d1HumanIds(db,ids){
  const keys=[...new Set(ids.map(id=>personSource(id)+':'+personSlug(id)))];
  const rows=await d1Chunk(db,`select id from person where ${HUMAN_KEY_SQL('id')} in (/*ids*/) order by id`,keys);
  return rows.map(row=>row.id);
 }
+function d1NameNeedles(value){
+ const text=String(value??''),folded=PersonIdentity.personFold(text);
+ const variants=new Set([text,text.toLocaleLowerCase('ru'),folded].filter(Boolean));
+ for(const item of [...variants]){
+  variants.add(item.split('ё').join('е').split('Ё').join('Е'));
+  variants.add(item.split('е').join('ё').split('Е').join('Ё'));
+ }
+ return [...variants].filter(Boolean);
+}
 async function d1Namesakes(db,ids){
  const own=await d1Chunk(db,`select value name from person_alias where kind='name' and person_id in (/*ids*/) union select value from person_dimension where dimension='localization' and status in ('reviewed','provisional') and value is not null and person_id in (/*ids*/)`,ids);
  const folded=new Set(own.map(row=>PersonIdentity.personFold(row.name)).filter(Boolean));
  if(!folded.size)return {ids:[],truncated:false};
- const needles=[...new Set(own.flatMap(row=>{const value=String(row.name??'');return [value,value.toLocaleLowerCase('ru')];}).filter(Boolean))];
- const rows=await d1Chunk(db,`select id,name from (select person_id id,value name from person_alias where kind='name' union select person_id,value from person_dimension where dimension='localization' and status in ('reviewed','provisional') and value is not null) where lower(name) in (/*ids*/) order by id,name`,needles);
- const seen=new Set(ids),found=[];
- for(const row of rows){
-  if(!folded.has(PersonIdentity.personFold(row.name))||seen.has(row.id))continue;
-  seen.add(row.id);found.push(row.id);
-  if(found.length>=IDENTITY_NAMESAKES)return {ids:found,truncated:true};
+ const needles=[...new Set(own.flatMap(row=>d1NameNeedles(row.name)))];
+ const seen=new Set(ids),found=[],exclude=[...ids].sort();
+ const names=`select person_id id,value name from person_alias where kind='name' union select person_id,value from person_dimension where dimension='localization' and status in ('reviewed','provisional') and value is not null`;
+ for(let i=0;i<needles.length;i+=80){
+  const room=IDENTITY_NAMESAKES+1-found.length;
+  if(room<=0)return {ids:found.slice(0,IDENTITY_NAMESAKES),truncated:true};
+  const chunk=needles.slice(i,i+80);
+  const rows=await d1Rows(db,`select id,min(name) name from (${names}) where lower(name) in (${chunk.map(()=>'?').join(',')}) and id not in (${exclude.map(()=>'?').join(',')}) group by id order by id limit ?`,[...chunk,...exclude,room]);
+  for(const row of rows){
+   if(!folded.has(PersonIdentity.personFold(row.name))||seen.has(row.id))continue;
+   seen.add(row.id);found.push(row.id);
+  }
+  if(rows.length===room)return {ids:found.slice(0,IDENTITY_NAMESAKES),truncated:true};
  }
  return {ids:found,truncated:false};
 }
@@ -139,58 +184,55 @@ function d1IdentityBody(recordId,projection,limitations,bounded){
  }
  return {source:'d1',authoritative:false,recordId,reference,films,limitations,bounded};
 }
-async function d1IdentityProjection(db,personIds){
+const IDENTITY_FILM_SQL=`select film_id id from film_person_credit where role in ('actor','director') and person_id in (/*ids*/) group by film_id order by film_id`;
+const IDENTITY_WITNESS_SQL=`select person_id id from film_person_credit where role in ('actor','director') and film_id in (/*ids*/) group by person_id order by person_id`;
+// Same-key records only. Their own films are loaded only when that list itself fits the film cap; a partial credit list
+// is not projected, because the omitted film might have been the one that kept a join from looking unique.
+async function d1SameKeyProjection(db,personIds){
  const persons=await d1IdentityPersons(db,personIds);
- const loaded=new Set(persons.map(person=>person.id));
- const credits=(await d1Chunk(db,`select film_id filmId,person_id personId,role from film_person_credit where role in ('actor','director') and person_id in (/*ids*/) order by film_id,role,person_id`,personIds)).filter(credit=>loaded.has(credit.personId));
- const filmIds=[...new Set(credits.map(credit=>credit.filmId))].sort();
- const films=filmIds.length?await d1IdentityFilms(db,filmIds):[];
- return PersonIdentity.projectPersonIdentity({persons,credits,films,decisions:[]});
+ const loaded=persons.map(person=>person.id);
+ const films=await d1CappedIds(db,IDENTITY_FILM_SQL,loaded,IDENTITY_FILM_CAP);
+ if(films.truncated||!films.ids.length)return PersonIdentity.projectPersonIdentity({persons,credits:[],films:[],decisions:[]});
+ const credits=await d1IdentityCredits(db,films.ids,loaded);
+ return PersonIdentity.projectPersonIdentity({persons,credits,films:await d1IdentityFilms(db,films.ids),decisions:[]});
 }
 // One person, not the catalog. Same-key records stay together. People credited on those films are witnesses,
 // so a second person of the same name keeps a coCredit from looking unique. A witness joins the core only when
 // the projection says they are the same human, and the next round then loads that human's other films.
 // Namesakes are loaded with no extra films. Owner decisions and role links are not stored in D1.
-// A neighborhood past the cap answers from the same-key records only, so a partial witness list cannot add a film.
+// The film, witness and namesake probes each stop at cap+1 rows. Past a cap the answer is the same-key records
+// only, so a partial witness or namesake list cannot add a film.
 async function d1PersonIdentity(db,id){
  if(!await d1First(db,`select id from person where id=?`,[id]))return null;
  const seed=new Set(await d1HumanIds(db,[id]));
  seed.add(id);
  const limitations=['owner_decisions_not_stored','role_links_not_stored'];
- let core=new Set(seed),truncated=false;
+ let core=new Set(seed),namesakeCut=false;
  for(let round=0;round<IDENTITY_ROUNDS;round++){
   const coreIds=[...core].sort();
-  const coreCredits=await d1Chunk(db,`select film_id filmId,person_id personId,role from film_person_credit where role in ('actor','director') and person_id in (/*ids*/) order by film_id,role,person_id`,coreIds);
-  const filmIds=[...new Set(coreCredits.map(credit=>credit.filmId))].sort();
-  const witnessCredits=filmIds.length?await d1Chunk(db,`select film_id filmId,person_id personId,role from film_person_credit where role in ('actor','director') and film_id in (/*ids*/) order by film_id,role,person_id`,filmIds):[];
+  const filmProbe=await d1CappedIds(db,IDENTITY_FILM_SQL,coreIds,IDENTITY_FILM_CAP);
+  if(filmProbe.truncated)break;
+  const witnessProbe=filmProbe.ids.length?await d1CappedIds(db,IDENTITY_WITNESS_SQL,filmProbe.ids,IDENTITY_PERSON_CAP):{ids:[],truncated:false};
+  if(witnessProbe.truncated)break;
   const namesakes=await d1Namesakes(db,coreIds);
-  if(namesakes.truncated)truncated=true;
-  const witnessIds=witnessCredits.map(credit=>credit.personId).filter(personId=>!core.has(personId));
-  const personIds=[...new Set([...coreIds,...witnessIds,...namesakes.ids])].sort();
-  if(personIds.length>IDENTITY_PERSON_CAP||filmIds.length>IDENTITY_FILM_CAP)break;
+  if(namesakes.truncated){namesakeCut=true;break;}
+  const personIds=[...new Set([...coreIds,...witnessProbe.ids,...namesakes.ids])].sort();
+  if(personIds.length>IDENTITY_PERSON_CAP)break;
   const persons=await d1IdentityPersons(db,personIds);
   const loaded=new Set(persons.map(person=>person.id));
-  const seen=new Set(),credits=[];
-  for(const credit of [...coreCredits,...witnessCredits]){
-   if(!loaded.has(credit.personId))continue;
-   const key=credit.filmId+'\n'+credit.role+'\n'+credit.personId;
-   if(seen.has(key))continue;
-   seen.add(key);credits.push({filmId:credit.filmId,personId:credit.personId,role:credit.role});
-  }
-  const films=filmIds.length?await d1IdentityFilms(db,filmIds):[];
+  const credits=(await d1IdentityCredits(db,filmProbe.ids,personIds)).filter(credit=>loaded.has(credit.personId));
+  const films=filmProbe.ids.length?await d1IdentityFilms(db,filmProbe.ids):[];
   const projection=PersonIdentity.projectPersonIdentity({persons,credits,films,decisions:[]});
   const members=PersonIdentity.resolvePersonReference(projection,{recordId:id}).memberIds;
   const missing=members.filter(personId=>!core.has(personId));
-  if(!missing.length){
-   if(truncated)limitations.push('namesakes_truncated');
-   return d1IdentityBody(id,projection,limitations,false);
-  }
+  if(!missing.length)return d1IdentityBody(id,projection,limitations,false);
   const grown=await d1HumanIds(db,missing);
   if(core.size+grown.length>IDENTITY_PERSON_CAP)break;
   for(const personId of grown)core.add(personId);
  }
+ if(namesakeCut)limitations.push('namesakes_truncated');
  limitations.push('neighborhood_bounded');
- return d1IdentityBody(id,await d1IdentityProjection(db,[...seed].sort()),limitations,true);
+ return d1IdentityBody(id,await d1SameKeyProjection(db,[...seed].sort()),limitations,true);
 }
 async function catalogD1Route(request,env,url){
  if(request.method!=='GET')return json({error:'Method not allowed'},405);

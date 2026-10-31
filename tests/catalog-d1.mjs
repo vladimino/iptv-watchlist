@@ -167,6 +167,88 @@ assert.equal((await get('persons/actor/nobody/identity')).status,404);
 assert.equal((await get('persons/writer/ann/identity')).status,404);
 assert.equal((await get('persons/actor/al-pacino/identity',{DB},'POST')).status,405);
 assert.equal((await get('persons/actor/al-pacino/identity',{})).status,503);
+sqlite(`
+INSERT INTO film VALUES('film:retired:1',1,NULL,'Retired Only Film','${T}');
+INSERT INTO film_external_id VALUES('film:retired:1','tmdb','17266',0,0,NULL);
+INSERT INTO person VALUES('person:actor/retired-only','actor/retired-only',1,'${T}'),('person:tmdb_actor/77','tmdb_actor/77',1,'${T}'),('person:actor/pyotr','actor/pyotr',1,'${T}'),('person:actor/petr','actor/petr',1,'${T}');
+INSERT INTO person_alias VALUES('person:actor/retired-only','name','Retired Only',NULL),('person:tmdb_actor/77','name','Retired Only',NULL),('person:actor/pyotr','name','Пётр',NULL),('person:actor/petr','name','Петр',NULL);
+INSERT INTO film_person_credit VALUES('film:retired:1','person:actor/retired-only','actor',0),('film:retired:1','person:tmdb_actor/77','actor',1);
+`);
+r=await get('persons/actor/retired-only/identity');
+assert.equal(r.body.reference.crossSource,'none','an untrusted retired movie id does not verify a coCredit');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/retired-only']);
+assert.equal(r.body.reference.links.some(link=>link.basis==='co_credit'),false);
+r=await get('persons/actor/pyotr/identity');
+assert.equal(r.body.bounded,false);
+assert.equal(r.body.reference.reviews.some(review=>review.reason==='same_name'),true,'ё and е still meet as a review');
+assert.deepEqual(r.body.reference.memberIds,['person:actor/pyotr']);
+const countTable=table=>Number(sqlite(`select count(*) from ${table}`));
+const before={person:countTable('person'),film:countTable('film'),credit:countTable('film_person_credit')};
+function watchDb(){
+ const stats={creditRows:0,maxCredit:0,nameRows:0,maxName:0,unlimited:0};
+ const db={prepare(sql){return {bind(...params){const statement=DB.prepare(sql).bind(...params);return {async all(){const out=await statement.all();const n=out.results.length;if(sql.includes('film_person_credit')){stats.creditRows+=n;if(n>stats.maxCredit)stats.maxCredit=n;if(!sql.includes('limit')&&n>IDENTITY_SENTINEL)stats.unlimited++;}if(sql.includes('limit')&&sql.includes('person_alias')){stats.nameRows+=n;if(n>stats.maxName)stats.maxName=n;}return out;},async first(){return (await this.all()).results[0]??null;}};}};}};
+ return {db,stats};
+}
+const IDENTITY_SENTINEL=801;
+const wideFilms=[],wideCredits=[];
+for(let n=0;n<801;n++){wideFilms.push(`('film:wide:${n}',1,NULL,'Wide ${n}','${T}')`);wideCredits.push(`('film:wide:${n}','person:actor/wide','actor',0)`);}
+sqlite(`
+INSERT INTO person VALUES('person:actor/wide','actor/wide',1,'${T}'),('person:tmdb_actor/wide','tmdb_actor/wide',1,'${T}');
+INSERT INTO person_alias VALUES('person:actor/wide','name','Wide Credit',NULL),('person:tmdb_actor/wide','name','Wide Credit',NULL);
+INSERT INTO film VALUES ${wideFilms.join(',')};
+INSERT INTO film_external_id VALUES('film:wide:800','tmdb','1800',1,0,NULL);
+INSERT INTO film_person_credit VALUES ${wideCredits.join(',')},('film:wide:800','person:tmdb_actor/wide','actor',1);
+`);
+let watched=watchDb();
+r=await get('persons/actor/wide/identity',{DB:watched.db});
+assert.equal(r.body.bounded,true);
+assert.ok(r.body.limitations.includes('neighborhood_bounded'));
+assert.deepEqual(r.body.reference.memberIds,['person:actor/wide']);
+assert.equal(r.body.reference.crossSource,'none');
+assert.equal(r.body.reference.links.some(link=>link.basis==='co_credit'),false);
+assert.equal(r.body.films.actor.catalog.includes('film:wide:800'),false);
+assert.ok(watched.stats.maxCredit<=801,`film probe returned ${watched.stats.maxCredit} rows`);
+assert.ok(watched.stats.creditRows<=1602,`film reads returned ${watched.stats.creditRows} rows`);
+assert.equal(watched.stats.unlimited,0);
+const crowdPeople=[],crowdAliases=[],crowdCredits=[];
+for(let n=0;n<401;n++){crowdPeople.push(`('person:actor/crowd-${n}','actor/crowd-${n}',1,'${T}')`);crowdAliases.push(`('person:actor/crowd-${n}','name','Crowd ${n}',NULL)`);crowdCredits.push(`('film:crowd','person:actor/crowd-${n}','actor',${n+2})`);}
+sqlite(`
+INSERT INTO film VALUES('film:crowd',1,'tmdb:9000','Crowd','${T}');
+INSERT INTO film_external_id VALUES('film:crowd','tmdb','9000',1,0,NULL);
+INSERT INTO person VALUES('person:actor/crowd','actor/crowd',1,'${T}'),('person:tmdb_actor/9000','tmdb_actor/9000',1,'${T}'),${crowdPeople.join(',')};
+INSERT INTO person_alias VALUES('person:actor/crowd','name','Crowd Lead',NULL),('person:tmdb_actor/9000','name','Crowd Lead',NULL),${crowdAliases.join(',')};
+INSERT INTO film_person_credit VALUES('film:crowd','person:actor/crowd','actor',0),('film:crowd','person:tmdb_actor/9000','actor',1),${crowdCredits.join(',')};
+`);
+watched=watchDb();
+r=await get('persons/actor/crowd/identity',{DB:watched.db});
+assert.equal(r.body.bounded,true);
+assert.ok(r.body.limitations.includes('neighborhood_bounded'));
+assert.deepEqual(r.body.reference.memberIds,['person:actor/crowd']);
+assert.equal(r.body.reference.crossSource,'none');
+assert.equal(r.body.reference.links.some(link=>link.basis==='co_credit'),false);
+assert.ok(watched.stats.maxCredit<=401,`witness probe returned ${watched.stats.maxCredit} rows`);
+assert.equal(watched.stats.unlimited,0);
+const alsoPeople=[],alsoAliases=[];
+for(let n=0;n<41;n++){alsoPeople.push(`('person:actor/also-${n}','actor/also-${n}',1,'${T}')`);alsoAliases.push(`('person:actor/also-${n}','name','Popular Name',NULL)`);}
+sqlite(`
+INSERT INTO film VALUES('film:pop',1,'tmdb:9100','Popular','${T}');
+INSERT INTO film_external_id VALUES('film:pop','tmdb','9100',1,0,NULL);
+INSERT INTO person VALUES('person:actor/popular','actor/popular',1,'${T}'),('person:tmdb_actor/9100','tmdb_actor/9100',1,'${T}'),${alsoPeople.join(',')};
+INSERT INTO person_alias VALUES('person:actor/popular','name','Popular Name',NULL),('person:tmdb_actor/9100','name','Popular Name',NULL),${alsoAliases.join(',')};
+INSERT INTO film_person_credit VALUES('film:pop','person:actor/popular','actor',0),('film:pop','person:tmdb_actor/9100','actor',1);
+`);
+watched=watchDb();
+r=await get('persons/actor/popular/identity',{DB:watched.db});
+assert.equal(r.body.bounded,true);
+assert.deepEqual(r.body.limitations,['owner_decisions_not_stored','role_links_not_stored','namesakes_truncated','neighborhood_bounded']);
+assert.deepEqual(r.body.reference.memberIds,['person:actor/popular']);
+assert.equal(r.body.reference.crossSource,'none');
+assert.equal(r.body.reference.links.some(link=>link.basis==='co_credit'),false);
+assert.ok(watched.stats.maxName<=41,`namesake probe returned ${watched.stats.maxName} rows`);
+assert.ok(watched.stats.nameRows<=41,`namesake reads returned ${watched.stats.nameRows} rows`);
+assert.equal(countTable('person'),before.person+2+401+2+41+2);
+assert.equal(countTable('film'),before.film+801+1+1);
+assert.equal(countTable('film_person_credit'),before.credit+802+403+2);
 // guards
 assert.equal((await get('status',{DB},'POST')).status,405);
 assert.equal((await get('status',{})).status,503);
