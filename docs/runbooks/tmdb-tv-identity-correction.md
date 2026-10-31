@@ -32,7 +32,7 @@ node scripts/tmdb-tv-identity-plan.mjs --artifact /private/air286 --output /priv
 - The Film's current state comes from one of three sources:
   - a local SQLite copy of D1 (`-readonly`);
   - the D1 HTTP API (`--database-id`, with `D1_BACKFILL_*` in the environment; a production read needs owner approval);
-  - a fenced R2 snapshot (`--snapshot`, read-only, via `scripts/snapshot-store.mjs`; a fresh production snapshot needs owner approval).
+  - an existing fenced R2 snapshot (`--snapshot`, read-only, via `scripts/snapshot-store.mjs`) when a broader snapshot is independently needed. **Do not create a full snapshot solely for an additive, single-key correction.** A new production snapshot remains a separate owner-approved read operation.
 - The plan is written to `--output` (mode 600). The command prints counts only. It makes no TMDB or Letterboxd request and writes nothing to R2 or D1.
 
 For each Film the plan states:
@@ -53,38 +53,36 @@ For each Film the plan states:
 
 ## Production correction (AIR-291)
 
-Each step needs its own explicit owner approval. A code deploy authorizes none of them.
+This procedure describes future corrections; it does not retroactively change the historical execution or evidence. Classify each action using [risk-proportional operational safeguards](../process/agent-workflow.md#risk-proportional-operational-safeguards). Creating an absent `identity/tmdb-retirements.json` with four approved entries and a single writer is **lightweight additive**. Overwriting an existing object, changing additional identities or encountering another writer is **not**: stop and use the elevated/high-impact path. The owner must explicitly approve the production write and any separately needed operational call; code deployment is never that approval.
 
-1. **Read-only preflight.**
-   - Confirm the runtime card is deployed and both post-merge jobs passed.
-   - Run the dry-run against a fresh fenced R2 snapshot and against production D1 (read).
-   - All four Films must be `ready`. Any `owner_review` or `refused` stops the run for review.
-2. **Recovery points.**
-   - Record the fenced snapshot identity and a D1 Time Travel bookmark.
-   - Confirm that no AIR-275 reload, metadata refresh or discovery run is due inside the window.
+1. **Bounded read-only preflight.**
+   - Confirm the relevant runtime and projector code is deployed and both post-merge jobs passed. Check the approved evidence and exact four Film identities against the current authoritative source. A targeted D1 readback/dry-run is sufficient when it establishes the required before-state and no collisions; do not require an unrelated full R2 snapshot merely to prove the new key is absent.
+   - Confirm all four targeted Films are `ready` under the applicable plan, with no `owner_review` or `refused`; unexpected identity conflicts stop the operation. For a new key, confirm key absence with a direct target-specific GET immediately before the write, not a bucket-wide snapshot.
+2. **Bounded recovery and concurrency.**
+   - Record the exact approved body bytes, SHA-256, target key, target absence and the four Films' relevant pre-write identity/readback; identify the simple rollback (remove the newly created key and let the normal projector converge). Keep the complete plan privately where appropriate.
+   - Confirm no competing writer for this exact key and no active projector/metadata operation that would invalidate the four Films' identity assumptions. A full fenced R2 snapshot and D1 Time Travel bookmark are **not default prerequisites** for this additive case. Escalate to scoped before-images, fencing, snapshot and bookmark only if an existing object, competing writer, non-reversible change or materially larger blast radius is found.
 3. **R2 write.**
-   - Write the plan's `r2Retirements.body` to `identity/tmdb-retirements.json`, once, with a conditional put (`onlyIf` absent, or the expected etag).
-   - Read it back.
-   - **Alternative: the Cloudflare API, unconditionally.** Use this when no S3 writer credential is available. The Cloudflare REST API (`PUT /accounts/{account_id}/r2/buckets/iptv/objects/identity%2Ftmdb-retirements.json`) has no conditional put. It is acceptable only because no Worker, Task or script writes this key. It needs its own owner gate:
-     - Before the gate, show the owner the exact body, its SHA-256 and byte length, the four Films with their old and new ids, the target key and the recovery point. The approval names that SHA-256.
-     - Immediately before the put, `GET` the key and require `404`. If it exists, stop.
+   - Write the approved plan's `r2Retirements.body` to `identity/tmdb-retirements.json` once, preferring a conditional put (`onlyIf` absent) when the available writer supports it. Existing-key updates require separate elevated-risk review and an expected-etag conditional write; never treat an existing object as an additive creation.
+   - Read it back and verify bytes/SHA-256 against the approved payload.
+   - **Alternative: the Cloudflare API, unconditionally.** Use this when no S3 writer credential is available. The Cloudflare REST API (`PUT /accounts/{account_id}/r2/buckets/iptv/objects/identity%2Ftmdb-retirements.json`) has no conditional put. It is acceptable only because no Worker, Task or script writes this key. It requires the action-specific owner approval described above:
+     - Before the write, show the owner the exact body, its SHA-256 and byte length, the four Films with their old and new ids, the target key and the **bounded rollback**. The action-specific approval names that SHA-256. It is not a second gate on top of an equivalent approval solely because the Cloudflare API lacks conditional PUT.
+     - Immediately before the PUT, `GET` the exact key and require `404`. Confirm single-writer ownership and no conflicting operation; a GET followed by PUT is **not atomic**. If it exists or exclusive ownership cannot be established, stop and choose a conditional-capable/elevated path.
      - Put the approved bytes once, with `content-type: application/json`. Do not retry blindly: after any error, `GET` first.
-     - `GET` the key back and require the same SHA-256 and byte length.
-     - Check the body with `tmdbRetirementSet` (`ok: true`, four retirements) before the put and again on the read-back bytes.
+     - `GET` the key back and require identical bytes (or the same SHA-256 and byte length). On conflict, mismatch or unknown outcome, stop instead of repeating an unconditional PUT.
+     - Check the body with `tmdbRetirementSet` (`ok: true`, four retirements) before PUT; read-back integrity and the downstream projector's scoped result complete the normal lightweight checks.
 4. **D1.** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owns each Film's identity rows and rewrites them from R2, so one projector run after the R2 write carries the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
    - The run's summary (`GET /api/d1/status`, `lastRun.summary`) carries `tmdbRetirements`. Expect `valid: true`, `applied: 4`, `held: []`.
    - `outcome: failed` with `reason: input_invalid` and `inputKey: identity/tmdb-retirements.json` means the object failed its check: nothing was written. Stop, and roll back R2 or correct the object under a new approval.
    - A Film in `held` is owner review. Examples: `link_changed` (the refreshed Letterboxd page shows no TMDB link or another one), `attributes_changed` (its `data-tmdb-*` attributes changed), `film_missing` (no R2 source lists it). The projector neither writes nor releases it, so its D1 rows and watchlist membership stay as they were.
-5. **Readback.**
-   - `d1Readback` against the preflight plan: all four must be `corrected`. A `mismatch` stops for review.
-   - Re-run the dry-run: all four must be `unchanged`, `preserved` must equal the preflight values, and there must be no collisions.
-   - Check that the `coCredit` pairs of the four Films are unchanged.
+5. **One scoped downstream acceptance.**
+   - Once the existing projector has run (do **not** trigger it without separate owner approval), check its targeted `tmdbRetirements` summary and `d1Readback` against the accepted plan: the four Films must be `corrected`; `held` or `mismatch` stops for review. If the projector is inactive, record D1 as `pending` rather than inventing success.
+   - Check relevant identity / coCredit preservation in the **same scoped verification** when the plan requires it. Do not automatically re-run the entire dry-run merely to duplicate `d1Readback`; re-run it only if the scoped result is ambiguous, a conflict appears or the plan's assumptions changed.
 
 ## Rollback
 
 - **R2.** Remove the four entries from `identity/tmdb-retirements.json` (or delete the object if it holds only them). The projection then reads the records' movie ids again. Through the Cloudflare API this is a `DELETE` of the key, under its own owner approval, followed by a `GET` that must answer `404`.
 - **D1.** No hand-written inverse SQL. After the R2 rollback, the next projector run writes the four Films' previous identity back from R2. `d1Readback` against the preflight plan must then show them `pending`.
-- **Whole-database restore.** A D1 Time Travel restore to the bookmark is a separate, separately authorized recovery for the whole database. It also discards every other D1 write made after the bookmark, including the projector's.
+- **Whole-database restore (exceptional).** A D1 Time Travel restore is not the routine rollback for a single additive R2 key. It requires a separately authorized, high-impact recovery decision and can discard unrelated newer writes. Do not take a D1 bookmark as a prerequisite for every lightweight change.
 
 - Code rollback restores neither R2 nor D1. The retired movie ids are never deleted, so no rollback needs them back.
 - A code rollback to a release whose projection does not read the object, while the object exists, is a D1 rollback too. That projector ignores the object, so its next run writes the four Films' movie identity back. The object stays in R2, and redeploying the runtime reapplies it on the next run.
