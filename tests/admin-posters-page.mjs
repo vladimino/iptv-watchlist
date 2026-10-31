@@ -197,7 +197,7 @@ assert.equal(receipt.summary.noPoster, 1);
 const box = text('#posters-receipt');
 assert.match(box, /Выполнено столько вызовов, сколько вы подтвердили/);
 assert.match(box, /<dt>Записано постеров<\/dt><dd>9<\/dd>/);
-assert.match(box, /<b>Фильм f02 \(2002\)<\/b><span>На TMDB постера нет — повтор не поможет<\/span>/);
+assert.match(box, /<b><a class="posters-tmdb" href="https:\/\/www\.themoviedb\.org\/movie\/2" target="_blank" rel="noopener noreferrer">Фильм f02 \(2002\)<\/a><\/b><span>На TMDB постера нет — повтор не поможет<\/span>/);
 assert.match(box, /<details class="action-tech"><summary>Технические подробности<\/summary>/);
 assert.equal(nodes.get('#posters-receipt').hidden, false);
 assert.match(document.querySelector('#posters-recheck-note').textContent, /без постера 16 → 7, можно восстановить 15 → 6/);
@@ -330,4 +330,34 @@ assert.deepEqual([puts, tmdbCalls], [[], []]);
 assert.match(text('#posters-coverage'), /Нет копии каталога опубликованного поколения/);
 assert.equal(nodes.get('#posters-accept-label').hidden, true);
 
-console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure, the expected-generation fence across a G1 → G2 publish, and unknown-not-zero coverage for a missing live copy, a missing or malformed generation copy and a missing pointer passed');
+// 12. Film names link to their TMDB page by the verified numeric id, in the preview and in the receipt of every batch, with the
+// real title in the second batch too; text is escaped, the unverified list stays plain text, and no extra request is made.
+seed();
+for (const key of [LIVE, COPY]) {const catalog = records.get(key); catalog.f13 = {...catalog.f13, title: '<img src=x onerror=alert(1)>'}; records.set(key, catalog);}
+tmdb[12] = {id: 999, poster_path: '/other.jpg'};
+nodes.get('#posters-start').value = 'first';
+nodes.get('#posters-calls').value = '2';
+await fire('#posters-calls', 'change');
+await settle();
+const link = (id, label) => `<a class="posters-tmdb" href="https://www.themoviedb.org/movie/${id}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+assert.ok(text('#posters-preview').includes('<b>' + link(1, 'Фильм f01 (2001)') + '</b>'), 'a preview name links to its TMDB page');
+assert.equal((text('#posters-preview').match(/class="posters-tmdb"/g) || []).length, 10);
+assert.doesNotMatch(text('#posters-unverified'), /posters-tmdb|themoviedb/, 'a record without a verified TMDB id is plain text');
+await accept();
+requests = []; tmdbCalls = []; puts = [];
+result = await exec('onPostersRun()');
+await settle();
+assert.equal(result.stop, 'done');
+assert.equal(posts().length, 2);
+assert.equal(tmdbCalls.length, 14, 'one TMDB request per record, none for the links');
+assert.deepEqual(requests.map(request => request.method), ['GET', 'POST', 'POST', 'GET'], 'no read between the batches');
+const receiptBox = text('#posters-receipt');
+assert.ok(receiptBox.includes('<b>' + link(11, 'Фильм f11 (2011)') + '</b>'), 'a second-batch record shows its real title, linked');
+assert.ok(receiptBox.includes('<b>' + link(2, 'Фильм f02 (2002)') + '</b><span>На TMDB постера нет — повтор не поможет</span>'), 'no_poster_on_tmdb is linked');
+assert.ok(receiptBox.includes('<b>' + link(12, 'Фильм f12 (2012)') + '</b><span>TMDB ответил за другой фильм — нужен ручной разбор</span>'), 'tmdb_id_mismatch links to the stored id');
+assert.ok(receiptBox.includes(link(13, '&lt;img src=x onerror=alert(1)&gt; (2013)')), 'a title is escaped inside the link');
+assert.doesNotMatch(receiptBox, /<img/);
+assert.doesNotMatch(receiptBox, /<b>f1[1-4]<\/b>/, 'no internal id in place of a title');
+assert.equal((receiptBox.match(/class="posters-tmdb"/g) || []).length, 14);
+
+console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure, the expected-generation fence across a G1 → G2 publish, and unknown-not-zero coverage for a missing live copy, a missing or malformed generation copy and a missing pointer, and TMDB links with real titles in every batch passed');

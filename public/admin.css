@@ -188,6 +188,8 @@
 .posters-list li{margin:4px 0;overflow-wrap:anywhere}
 .posters-warning{color:#f3dd9a}
 .posters-backlog{border-color:#8a7a45;color:#f3dd9a;margin-top:14px}
+.posters-tmdb{color:var(--lime);text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere}
+.posters-tmdb:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .posters-progress{margin:14px 0 0;padding:10px 12px;border-left:3px solid var(--lime);font-size:14px;line-height:1.5}
 .posters-outcomes span{color:var(--muted)}
 .posters-dynamics h3{margin:12px 0 6px;font-size:15px}

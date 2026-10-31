@@ -50,6 +50,12 @@ function postersTitle(item) {
   return item.year ? `${title} (${item.year})` : title;
 }
 
+// A film's name as HTML: a link to its TMDB page when the id is a verified numeric TMDB id, otherwise plain text.
+function postersFilmName(text, tmdbId) {
+  const url = posterTmdbUrl(tmdbId);
+  return url ? `<a class="posters-tmdb" href="${postersEscape(url)}" target="_blank" rel="noopener noreferrer">${postersEscape(text)}</a>` : postersEscape(text);
+}
+
 function postersShow(selector, visible) {document.querySelector(selector).hidden = !visible;}
 
 // One coverage read. A saved position is used only for the generation it was saved under; otherwise the queue starts over.
@@ -133,7 +139,7 @@ function postersPreviewHtml(preview) {
   if (preview.status === 'eligible') {
     const terminal = postersLive.history.terminal || {};
     lines.push(`<p>В очереди ${postersEscape(postersStartText(preview.cursor))}: <b>${preview.remaining}</b> записей. За этот запуск — до ${preview.calls} вызовов по ${preview.limit}, то есть не больше <b>${preview.maxRecords}</b> записей (сейчас подходит ${preview.planned}).</p>`);
-    lines.push(`<h3 class="action-result-title">Первый пакет</h3><ol class="action-items">${preview.items.map(item => `<li><b>${postersEscape(postersTitle(item))}</b><span class="muted">TMDB ${postersEscape(item.tmdbId)} · ${postersEscape(item.id)}${terminal[item.id] ? ' · в прошлый раз: ' + postersEscape(posterOutcomeText(terminal[item.id])) : ''}</span></li>`).join('')}</ol>`);
+    lines.push(`<h3 class="action-result-title">Первый пакет</h3><ol class="action-items">${preview.items.map(item => `<li><b>${postersFilmName(postersTitle(item), item.tmdbId)}</b><span class="muted">TMDB ${postersEscape(item.tmdbId)} · ${postersEscape(item.id)}${terminal[item.id] ? ' · в прошлый раз: ' + postersEscape(posterOutcomeText(terminal[item.id])) : ''}</span></li>`).join('')}</ol>`);
     lines.push('<p class="action-next">Проверка ничего не записала и не обращалась к TMDB.</p>');
   }
   return lines.join('');
@@ -221,7 +227,7 @@ function postersReceiptHtml(receipt, titles) {
   const partial = summary.partialWrites ? '<p class="action-unexplainable">Одна копия каталога записана, другая — нет. Записанное не откатывается; смотрите копии в технических подробностях и повторите после новой проверки.</p>' : '';
   const unknown = summary.unknown ? `<p class="action-unexplainable">${postersEscape(POSTER_UNKNOWN_OUTCOME)}</p>` : '';
   const retry = receipt.retryAt != null ? `<p class="action-next">Следующая попытка — не раньше ${postersDate(receipt.retryAt)}.</p>` : '';
-  const items = summary.outcomes.map(item => `<li><b>${postersEscape(titles.get(item.id) || item.id)}</b><span>${postersEscape(posterOutcomeText(item.outcome))}</span></li>`).join('');
+  const items = summary.outcomes.map(item => `<li><b>${postersFilmName(item.title ? postersTitle(item) : titles.get(item.id) || item.id, item.tmdbId)}</b><span>${postersEscape(posterOutcomeText(item.outcome))}</span></li>`).join('');
   const technical = receipt.calls.map(call => `<div><dt>Вызов ${call.index}</dt><dd>HTTP ${call.httpStatus || '—'}${call.error ? ' · ' + postersEscape(call.error) : ''} · курсор ${postersEscape(call.cursor || '∅')} → ${postersEscape(call.nextCursor === undefined ? '?' : call.nextCursor === null ? 'конец' : call.nextCursor || '∅')} · обработано ${call.processed ?? '—'} · записано ${call.hydrated}${call.retryAt != null ? ' · retryAt ' + postersEscape(call.retryAt) : ''}${call.generationChanged ? ' · generationChanged' : ''}${call.leaseLost ? ' · leaseLost' : ''}${call.writes.map(write => ` · ${postersEscape(write.key)}: ${write.written ? 'записано ' + write.records : 'не записано (' + postersEscape(write.reason || '—') + ')'}`).join('')}${call.outcomes.length ? ' · ' + postersEscape(call.outcomes.map(item => item.id + '=' + item.outcome + (item.error ? '(' + item.error + ')' : '')).join(', ')) : ''}</dd></div>`).join('');
   return `<h3 class="action-result-title" id="posters-receipt-title" tabindex="-1">Результат запуска</h3>
     <div class="action-status action-tone-${stop.tone}"><p><b>${postersEscape(stop.text)}</b></p>${retry}</div>${partial}${unknown}

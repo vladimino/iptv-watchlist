@@ -270,6 +270,16 @@ assert.equal(records.get(COPY2).tmdb_1.poster,null);assert.equal(records.get(COP
  assert.equal(etags.get(COPY2),'g2-copy','nothing reached the G2 copy');assert.equal(records.get(COPY2).tmdb_1.poster,null);
 }
 
+// 16. Every outcome carries the record's display fields from the catalog already read: bounded title text and an integer year.
+seed();records.get(LIVE).tmdb_6.title='x'.repeat(500);records.get(LIVE).tmdb_3.title={html:'<b>'};records.get(LIVE).tmdb_3.year='2001';
+fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.deepEqual(Array.from(r.body.outcomes.map(item=>[item.id,item.outcome,item.title===null?null:item.title.length,item.year])),[['heat','hydrated',9,2001],['tmdb_1','hydrated',11,2001],['tmdb_3','no_poster_on_tmdb',null,null],['tmdb_4','tmdb_failed',11,2001],['tmdb_6','tmdb_id_mismatch',200,2001]]);
+assert.equal(outcomeOf(r,'tmdb_1').title,'Film tmdb_1');
+assert.equal(fetches.every(url=>url.startsWith('https://api.themoviedb.org/3/movie/')),true,'no extra request for the display fields');
+seed();tmdb[3]=()=>new Response('slow down',{status:429,headers:{'Retry-After':'120'}});
+r=await post({dryRun:false,limit:5},{});
+assert.deepEqual(Array.from(r.body.outcomes.filter(item=>item.outcome!=='hydrated').map(item=>[item.outcome,item.title])),[['rate_limited','Film tmdb_3'],['not_attempted','Film tmdb_4'],['not_attempted','Film tmdb_6']]);
+
 // 14. Route inventory: the hydration is a POST only; GET is not a route.
 const get=await worker.fetch(new Request('https://iptv.example/api/enrichment/catalog/posters'),{...baseEnv},{waitUntil(){}});
 assert.equal(get.status,404);
