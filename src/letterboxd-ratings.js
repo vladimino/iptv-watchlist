@@ -174,7 +174,8 @@ const LetterboxdRatings=(()=>{
  }
 
  // The removal phase: first the event writes of rated entries with unresolved references, at most 100 per step (the
- // run goes on with further steps while some are left), then the retention rules, then at most five lookups per run
+ // run goes on with further steps while some are left and the step resolved at least one, so references waiting for an
+ // event that was never written cannot keep a run going), then the retention rules, then at most five lookups per run
  // with the claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue. A paused queue or
  // REMOVAL_RATING_LOOKUP off ends the lookups for this run.
  async function removalPhase(env,run,{own,remaining,clock}){
@@ -182,7 +183,7 @@ const LetterboxdRatings=(()=>{
   const lookup={checked:0,rated:0,notRated:0,failed:0,refused:0,stoppedBy:null,pausedUntil:null};
   const budget=Math.min(STEP_LOOKUPS,RUN_LOOKUPS-(run.checkpoint.removalChecked||0));
   let more=false;
-  if(settled.left>0){lookup.stoppedBy='settling';return {settled,lookup,more:true};}
+  if(settled.left>0&&settled.resolved>0){lookup.stoppedBy='settling';return {settled,lookup,more:true};}
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
   if(!removalLookupEnabled(env)){lookup.stoppedBy='lookup_off';return {settled,lookup,more};}
   if(budget<=0)return {settled,lookup,more};

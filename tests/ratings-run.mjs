@@ -152,6 +152,18 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.ok(Object.values(bucket.value(QUEUE).films).every(entry=>entry.refs.every(ref=>ref.resolved)));
 }
 
+// 5c. References to events that were never written wait without keeping the run going: 150 of them end in one step.
+{
+ const {bucket,env,R,net}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
+ const films={};
+ for(let n=0;n<10;n++)films['w'+n]={url:film('w'+n).url,state:'rated',rating:3,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:Array.from({length:15},(_,r)=>({eventKey:eventKeyOf(at(T0-(r+1)*H),'lost-'+r+'-watchlist'),sourceRunId:'lost-'+r,at:at(T0-(r+1)*H),resolved:false}))};
+ migrated(bucket,{films});
+ const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ const first=plain(await R.step(env,{runId}));
+ eq([first.reason,first.summary.removal.settled.waiting,first.summary.removal.settled.resolved,net.memberFetches().length],['finished',100,0,0]);
+ assert.ok(Object.values(bucket.value(QUEUE).films).every(entry=>entry.refs.every(ref=>!ref.resolved)));
+}
+
 // 6. A film the Diary proves resolves its queue entry without a lookup, and its removal events get the rating.
 {
  const {bucket,env,R,net,ctx}=setup({pages:0});
