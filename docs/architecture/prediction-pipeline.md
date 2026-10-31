@@ -52,21 +52,22 @@ The prediction runner is one of several writers of the queue object `enrichment/
 
 ```mermaid
 flowchart TD
-    runner["Prediction runner: start, next, submit, complete"]
-    epg["EPG commit tail and EPG scan"]
-    profile["Taste profile publication"]
-    resolver["Discovery resolver checkpoint"]
-    reconcile["Owner queue reconcile"]
-    read["Read the queue and its etag"]
-    kind{"Rebuild, or record one change?"}
-    inputs["Read profile, view index and catalogue; the published programme when the queue names another generation"]
-    build["Rebuild membership; carry retries, last batch and counters from the queue just read"]
-    amend["Apply the run's bookkeeping, if any"]
-    change["Apply the change to the queue just read; retry records only grow"]
-    fence["Renew the caller's lease, if it holds one"]
-    put{"Conditional put: is the etag unchanged?"}
+    runner["Prediction runner:<br/>start, next, submit, complete"]
+    epg["EPG commit tail<br/>and EPG scan"]
+    profile["Taste profile<br/>publication"]
+    resolver["Discovery resolver<br/>checkpoint"]
+    reconcile["Owner queue<br/>reconcile"]
+    read["Read the queue<br/>and its etag"]
+    kind{"Rebuild, or<br/>record one change?"}
+    inputs["Read profile, view index,<br/>catalogue; published programme<br/>if the queue's generation differs"]
+    build["Rebuild membership;<br/>carry retries, last batch<br/>and counters from the queue read"]
+    amend["Apply the run's<br/>bookkeeping, if any"]
+    change["Apply the change to<br/>the queue read;<br/>retry records only grow"]
+    fence["Renew the caller's lease,<br/>if it holds one"]
+    put{"Conditional put:<br/>etag unchanged?"}
     done["Queue written"]
-    conflict["prediction_queue_conflict: this caller writes nothing"]
+    again["Short pause,<br/>start again"]
+    conflict["prediction_queue_conflict:<br/>this caller writes nothing"]
     runner --> read
     epg --> read
     profile --> read
@@ -77,11 +78,12 @@ flowchart TD
     inputs --> build
     build --> amend
     amend --> fence
-    kind -->|retry record or idle check| change
-    change --> put
     fence --> put
+    kind -->|retry record<br/>or idle check| change
+    change --> put
     put -->|yes| done
-    put -->|no, attempts left| read
+    put -->|no, attempts left| again
+    again -.->|re-read| read
     put -->|no, after 5 attempts| conflict
 ```
 
