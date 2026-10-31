@@ -328,6 +328,33 @@ assert.equal(r.status,200);assert.equal(r.body.recheck,true);assert.equal(r.body
 assert.deepEqual(fetches.map(url=>url.match(/movie\/(\d+)/)[1]),['6']);
 assert.equal(outcomeOf(r,'tmdb_6').outcome,'tmdb_id_mismatch');assert.equal(outcomeOf(r,'tmdb_6').negativeSaved,true);
 assert.equal(records.get(NEG).entries['6'].status,'tmdb_id_mismatch');assert.equal(records.get(NEG).entries['6'].nextCheckAt,undefined);
+// An HTTP 200 with no valid movie id is retryable and is not stored. A different valid id still is.
+for(const movie of [{},{id:null},{id:0},{id:'0'},{id:'nope'},{id:6.5},{id:false}]){
+ seed();tmdb[6]=movie;
+ r=await post({dryRun:false,limit:5},{});
+ assert.equal(outcomeOf(r,'tmdb_6').outcome,'tmdb_failed',JSON.stringify(movie));
+ assert.equal(outcomeOf(r,'tmdb_6').error,'TMDB detail has no movie id');
+ assert.equal(Object.hasOwn(outcomeOf(r,'tmdb_6'),'negativeSaved'),false);
+ assert.equal(records.get(NEG)?.entries?.['6'],undefined,JSON.stringify(movie));
+}
+seed();tmdb[6]=()=>new Response('null',{status:200,headers:{'Content-Type':'application/json'}});
+r=await post({dryRun:false,limit:5},{});
+assert.equal(outcomeOf(r,'tmdb_6').outcome,'tmdb_failed');assert.equal(records.get(NEG).entries['6'],undefined,'a JSON null body is not a mismatch');
+seed();tmdb[6]={id:'6',poster_path:null};
+r=await post({dryRun:false,limit:5},{});
+assert.equal(outcomeOf(r,'tmdb_6').outcome,'no_poster_on_tmdb','a string id equal to the requested id is the same film');
+assert.equal(records.get(NEG).entries['6'].status,'no_poster_on_tmdb');
+seed();tmdb[6]={};
+r=await post({dryRun:false,limit:5},{});
+assert.equal(r.body.nextCursor,'tmdb_3','the cursor stops before the first retryable record');
+fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.equal(fetches.some(url=>url.includes('/movie/6?')),true,'a malformed 200 is requested again by the ordinary queue');
+assert.equal(outcomeOf(r,'tmdb_6').outcome,'tmdb_failed');assert.equal(records.get(NEG).entries['6'],undefined);
+tmdb[6]={id:66,poster_path:'/other.jpg'};
+fetches=[];r=await post({dryRun:false,limit:5},{});
+assert.equal(fetches.some(url=>url.includes('/movie/6?')),true);
+assert.equal(outcomeOf(r,'tmdb_6').outcome,'tmdb_id_mismatch');assert.equal(outcomeOf(r,'tmdb_6').negativeSaved,true);
+assert.equal(records.get(NEG).entries['6'].status,'tmdb_id_mismatch');
 // A rate limit, a skipped tail and a plain TMDB failure never become entries.
 seed();tmdb[3]=()=>new Response('slow down',{status:429,headers:{'Retry-After':'30'}});
 r=await post({dryRun:false,limit:5},{});

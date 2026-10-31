@@ -254,11 +254,17 @@ async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
 const CATALOG_POSTER_LIMIT=20,CATALOG_POSTER_DEFAULT_LIMIT=10,CATALOG_POSTER_ID_SAMPLE=50;
 // One compact index of terminal TMDB answers, keyed by the verified numeric TMDB id, not by a catalog id or a generation.
 // A missing object is an empty index. Remembered answers are no_poster_on_tmdb (skipped until nextCheckAt, 90 days after
-// checkedAt) and tmdb_id_mismatch (never returned to the ordinary queue). Transient failures are not stored.
+// checkedAt) and tmdb_id_mismatch (never returned to the ordinary queue). A mismatch is only a different valid positive
+// numeric movie id. A 200 body with no such id is tmdb_failed. Transient failures are not stored.
 const CATALOG_POSTER_NEGATIVES_KEY='epg/catalog-poster-negatives.json',CATALOG_POSTER_NEGATIVES_MAX=2000,CATALOG_POSTER_NEGATIVE_TTL_MS=90*24*60*60*1000,CATALOG_POSTER_TMDB_ID=/^[1-9]\d{0,11}$/;
 function catalogPosterPresent(value){return typeof value==='string'&&value.startsWith('https://');}
 function catalogPosterVerified(film){return !!film&&typeof film==='object'&&film.tmdbId!=null&&film.tmdbId!==''&&/^\d+$/.test(String(film.tmdbId))&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId);}
 function catalogPosterFromDetail(movie){const path=movie?.poster_path;return typeof path==='string'&&/^\/[A-Za-z0-9._-]+$/.test(path)?'https://image.tmdb.org/t/p/w342'+path:null;}
+function catalogPosterMovieId(movie){
+ const id=movie?.id;
+ const text=typeof id==='number'&&Number.isSafeInteger(id)?String(id):typeof id==='string'?id:'';
+ return CATALOG_POSTER_TMDB_ID.test(text)?text:null;
+}
 async function catalogPosterObject(env,key){const object=await env.BUCKET.get(key);return object?{key,etag:object.etag,films:await object.json()}:{key,etag:null,films:null};}
 function catalogPosterMissing(sources){
  const records=new Map();
@@ -451,7 +457,9 @@ async function catalogPosterHydration(env,body={}){
    const detail=await catalogPosterDetail(env,tmdbId);
    if(detail.retryAt){retryAt=detail.retryAt;outcomes.push({id:row.id,tmdbId,...shown,outcome:'rate_limited'});continue;}
    if(detail.error){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_failed',error:detail.error});continue;}
-   if(String(detail.movie?.id)!==tmdbId){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_id_mismatch'});continue;}
+   const movieId=catalogPosterMovieId(detail.movie);
+   if(!movieId){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_failed',error:'TMDB detail has no movie id'});continue;}
+   if(movieId!==tmdbId){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_id_mismatch'});continue;}
    const poster=catalogPosterFromDetail(detail.movie);
    if(!poster){outcomes.push({id:row.id,tmdbId,...shown,outcome:'no_poster_on_tmdb'});continue;}
    found.push({id:row.id,tmdbId,poster});outcomes.push({id:row.id,tmdbId,...shown,outcome:'pending',poster});
