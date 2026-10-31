@@ -1,8 +1,8 @@
 # D1 catalog views (read-only)
 
-`GET /api/d1/*` answers from the D1 database `iptv` (binding `DB`), not from R2. The routes only `SELECT`. The enrichment projector is the Worker's D1 write and is enabled in production; these routes do not write. R2 stays authoritative for every existing page and for the metadata step's own cache. They sit under `/api/`, behind the same Cloudflare Access policy as the rest of the API. Source: [`src/catalog-d1.js`](../../../src/catalog-d1.js), test [`tests/catalog-d1.mjs`](../../../tests/catalog-d1.mjs).
+`GET /api/d1/*` answers from the D1 database `iptv` (binding `DB`), not from R2. The routes only `SELECT`; no Worker path writes D1, and R2 stays authoritative for every other route. They sit under `/api/`, behind the same Cloudflare Access policy as the rest of the API. Source: [`src/catalog-d1.js`](../../../src/catalog-d1.js), test [`tests/catalog-d1.mjs`](../../../tests/catalog-d1.mjs).
 
-Enrichment rows follow R2 through that projector and can trail it by about an hour. Other domains still change only when the database is reloaded (see the [D1 backfill runbook](../../runbooks/d1-backfill.md)).
+The data is the backfilled copy of R2 (see the [D1 backfill runbook](../../runbooks/d1-backfill.md)); it does not follow R2 changes made after the backfill until a later phase writes D1 directly.
 
 ## Identifiers
 
@@ -26,10 +26,6 @@ Errors: `405` for any method but GET, `503` when the Worker has no `DB` binding,
 
 - Name matching uses SQLite `lower()`, which folds ASCII only; Cyrillic names compare as stored.
 - Cross-source evidence follows [ADR 0009](../../adr/0009-canonical-film-person-identity.md) and [ADR 0058](../../adr/0058-canonical-person-grouping.md): only a shared verified Film with the same role and name is evidence; a name alone is a candidate. The filmography and the review queues do not compute the [person identity projection](../domain/person-identity-projection.md). The [identity route](#person-identity) does. None of these routes link, merge or edit a person.
-
-## Metadata step roster
-
-Not a route. `d1MetadataSyncRoster` reads the films whose names the metadata step is already localizing, at most 24, keyed `film:<letterboxd lid>`. Three parameterized selects load the metadata snapshot, the `letterboxd`, `tmdb` and `tmdb_tv` external ids, and the role credits with the original name alias. The step walks those existing credit objects in D1 role and ordinal order only when `updated_at` and `people_version` match the film, the film is on `watchlist_film`, the Letterboxd id is the one trusted non-conflicting value equal to the film id, a `tmdbId` already on the film is the one trusted non-conflicting movie id and agrees with `canonical_identity`, and a trusted `tmdb_tv` value is not that number. TMDB-source credits are not copied onto the film. Person localization rows are not read, so a reviewed name is not taken from D1. Any other result, or a database error, leaves the credit objects on the film untouched. The selects write nothing.
 
 ## Person identity
 

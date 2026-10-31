@@ -336,31 +336,10 @@ async function metadataSync(env,run){
  try{recordLifecycle(run,'metadata',localizationMode,await localizeFilmTitles(titleBatch,titles,localizationMode));}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  await saveJSON(env,'titles.json',titles);
  const people=await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>creditsChanged.has(f.id)&&f.peopleVersion===1);
- let filmPersonRead=null;
- if(batch.length){
-  if(typeof d1MetadataSyncRoster==='function'){
-   try{
-    const verdicts=await d1MetadataSyncRoster(env,batch);
-    if(!verdicts)filmPersonRead={queried:0,proven:0,fallback:batch.length,reason:'unbound'};
-    else{
-     let proven=0;
-     for(const film of batch){
-      const verdict=verdicts.get(String(film.id));if(!verdict?.ok)continue;
-      const byId=new Map([...(film.directors||[]),...(film.actors||[])].map(person=>[person.id,person]));
-      const order=verdict.order.map(id=>byId.get(id));
-      if(order.some(person=>!person))continue;
-      film.rosterOrder=order;proven++;
-     }
-     filmPersonRead={queried:verdicts.size,proven,fallback:batch.length-proven};
-    }
-   }catch{filmPersonRead={queried:batch.length,proven:0,fallback:batch.length,reason:'error'};}
-  }else filmPersonRead={queried:0,proven:0,fallback:batch.length,reason:'unbound'};
- }
  try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
- finally{for(const f of batch)delete f.rosterOrder;}
  for(const f of batch)cache[f.id]=f;
  await saveJSON(env,'people.json',people);
- run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await saveJSON(env,'metadata.json',cache);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length,...(filmPersonRead?{filmPersonRead}:{})};
+ run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await saveJSON(env,'metadata.json',cache);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
 async function finishSync(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)});
  // A complete watchlist is one observation of every listed film (ADR-0024).

@@ -13,7 +13,7 @@ import {BackfillStop,D1Error,createD1Adapter,probeAtomicity,readTarget,renderSql
 const source=fs.readFileSync('scripts/d1-backfill.mjs','utf8');
 assert.doesNotMatch(source,/\bBUCKET\b|wrangler|d1_databases|env\.DB\b|BEGIN|COMMIT/);
 assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/d1-backfill/);
-// The Worker is bound to D1 as DB. These sources do not name that binding. The read-only catalog module reaches it, including the metadata roster.
+// AIR-275 phase 1: the Worker is bound to D1 as DB, and only the read-only catalog views reach it.
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"d1_databases"[\s\S]*"binding": "DB"[\s\S]*"database_name": "iptv"/);
 for(const file of ['src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/letterboxd-facts.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\.DB\b/,file);
 
