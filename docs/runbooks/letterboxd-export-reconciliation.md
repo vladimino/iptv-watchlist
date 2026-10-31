@@ -2,6 +2,8 @@
 
 `scripts/letterboxd-reconcile.mjs` compares the owner's Letterboxd account export with the films stored in production. It is offline: it reads the extracted CSV files and, optionally, a local R2 snapshot, and writes an aggregate report plus a private row file. The parsing and matching rules are the [export contract](../reference/integrations/letterboxd-export.md).
 
+For a quick check without a snapshot, the owner can use the [archive preview](../reference/api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview) on `/admin/letterboxd`: it applies the same parser and matcher to the uploaded ZIP in one Worker request against live R2, writes nothing and stores nothing, and shows what an import would change. It reads no catalog copy, so it finds fewer title-and-year candidates than this offline command with a snapshot.
+
 A complete reconciliation needs a production R2 snapshot made by the [read-only snapshot export](r2-snapshot-export.md). Taking that snapshot is a separately approved operation; this page does not grant it. Without a snapshot the command still parses the export and reports set counts, with matching marked `blocked: snapshot_missing`.
 
 ## What the command never does
@@ -65,4 +67,4 @@ Procedure:
 
 ## Rollback
 
-Neither command changes anything outside its output directory; deleting that directory removes the result. Deleting `scripts/letterboxd-identity-resolve.mjs`, `src/letterboxd-identity.js` and `tests/letterboxd-identity-resolve.mjs` removes the identity resolver; deleting `scripts/letterboxd-reconcile.mjs`, `src/letterboxd-export.js`, `src/letterboxd-match.js`, `tests/letterboxd-reconcile.mjs` and this page removes the reconciliation tool.
+Neither command changes anything outside its output directory; deleting that directory removes the result. Deleting `scripts/letterboxd-identity-resolve.mjs`, `src/letterboxd-identity.js` and `tests/letterboxd-identity-resolve.mjs` removes the identity resolver; deleting `scripts/letterboxd-reconcile.mjs`, `tests/letterboxd-reconcile.mjs` and this page removes the reconciliation tool. `src/letterboxd-export.js` and `src/letterboxd-match.js` are also part of the Worker's archive preview and stay while it exists.

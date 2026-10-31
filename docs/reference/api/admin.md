@@ -282,7 +282,7 @@ Parameters are validated before any read. Any other method is 405 `method_not_al
 
 ### The page
 
-`/admin/posters` is the fourth section of the admin navigation. It shows the coverage (records, with a poster, without one, restorable, not restorable) with the per-copy figures in a closed «Технические подробности»; a warning when the restorable backlog reaches `posterBacklogCount`; the records without a verified TMDB id; when the read is incomplete, «Покрытие неизвестно: данные неполные» with each problem and each copy's state in plain Russian, every figure as «неизвестно», no preview batch and no confirmation; and the browser's own history: the last successful restoration, recent coverage readings and runs. The server keeps no run journal, so that history lives only in this browser's `localStorage` (`iptv.admin.posters.v1`), is labelled as such, and can be forgotten; it is never an input to the route.
+`/admin/posters` is the last section of the admin navigation. It shows the coverage (records, with a poster, without one, restorable, not restorable) with the per-copy figures in a closed «Технические подробности»; a warning when the restorable backlog reaches `posterBacklogCount`; the records without a verified TMDB id; when the read is incomplete, «Покрытие неизвестно: данные неполные» with each problem and each copy's state in plain Russian, every figure as «неизвестно», no preview batch and no confirmation; and the browser's own history: the last successful restoration, recent coverage readings and runs. The server keeps no run journal, so that history lives only in this browser's `localStorage` (`iptv.admin.posters.v1`), is labelled as such, and can be forgotten; it is never an input to the route.
 
 A manual run follows the guarded-action principles of [admin actions](admin-actions.md#the-poster-page):
 
@@ -292,12 +292,99 @@ A manual run follows the guarded-action principles of [admin actions](admin-acti
 4. **Bounded execution.** One `POST /api/enrichment/catalog/posters` with `{dryRun: false, limit, expectedProgrammeRunId}` and the route's `nextCursor` per call, never in parallel and never above ten records. `expectedProgrammeRunId` is the confirmed generation on every call, the first included, so the route refuses a call once another generation is published, before any TMDB request and any write ([generation fence](catalog.md#poster-hydration)). The run stops at the first of: `done`; the confirmed call budget; five consecutive calls with no new poster and an unchanged cursor; `retryAt` (TMDB rate limit, kept as a gate for the next preview); a generation change, refused by the route's fence (409 `generationChanged`), reported in its outcomes or seen in its answer; the resolver lease held by discovery (409); a lost lease (409, with the copies already written); TMDB not configured (503); a rejected request (400); an answer the page cannot read or an outcome code it has no sentence for. "Остановить после текущего пакета" stops between calls; a call in flight always completes and is recorded.
 5. **Receipt.** The stop reason in plain Russian, the totals (written, already present, no poster on TMDB, TMDB answered for another film, retryable), a partial-write warning when one copy was written without the other, the latest outcome of every record, and per call the HTTP status, cursors and writes per copy in «Технические подробности». The page then re-reads the coverage and shows before → after.
 
+## Letterboxd archive preview: `POST /api/admin/letterboxd-archive/preview`
+
+The read behind `/admin/letterboxd`: the owner sends the Letterboxd account export ZIP and gets back what it contains and what an import of it would do to the stored facts now. It **writes nothing**: the archive, its rows and the answer exist only in the request and its `no-store` response; nothing is put to R2, D1, KV or a cache, nothing is logged, `waitUntil` is not used and no outbound request is made, not even to a URL in the archive ([ADR 0061](../../adr/0061-ephemeral-letterboxd-archive-preview.md)). Applying an archive is the separately approved [baseline import](../../runbooks/letterboxd-baseline-import.md); this route has no apply mode. Source: [`src/admin/letterboxd-archive.js`](../../../src/admin/letterboxd-archive.js) (handler), [`src/domain/letterboxd-archive-zip.js`](../../../src/domain/letterboxd-archive-zip.js) (ZIP reader, `LetterboxdArchiveZip`), [`src/domain/letterboxd-archive-preview.js`](../../../src/domain/letterboxd-archive-preview.js) (answer, `LetterboxdArchivePreview`), the bundled offline [parser and matcher](../integrations/letterboxd-export.md), [`src/admin/letterboxd-archive-client.js`](../../../src/admin/letterboxd-archive-client.js), [`src/admin/letterboxd-archive-view.js`](../../../src/admin/letterboxd-archive-view.js) and [`public/admin-letterboxd.js`](../../../public/admin-letterboxd.js) (the page). Tests: [`tests/letterboxd-archive-zip.mjs`](../../../tests/letterboxd-archive-zip.mjs), [`tests/letterboxd-archive-preview.mjs`](../../../tests/letterboxd-archive-preview.mjs), [`tests/admin-letterboxd-archive-api.mjs`](../../../tests/admin-letterboxd-archive-api.mjs), [`tests/admin-letterboxd-page.mjs`](../../../tests/admin-letterboxd-page.mjs); the real-runtime probe is [`scripts/letterboxd-archive-probe.mjs`](../../../scripts/letterboxd-archive-probe.mjs).
+
+### Request
+
+`multipart/form-data` with exactly the field `archive` (the ZIP file) and, only for a renamed archive, `generatedAt` (the export time in UTC, `YYYY-MM-DDTHH:MMZ` with optional seconds and milliseconds). The export time comes from the Letterboxd file name `letterboxd-<user>-YYYY-MM-DD-HH-MM-utc.zip`; a standard name with `generatedAt` is refused, so the two never disagree. The checks run in this order, and a refused request reads nothing from R2: path, method, `Origin` equal to the Worker origin, content type, `Content-Length` present and within 10 MiB plus 64 KiB of form overhead, the per-isolate slot, the body read with the same cap, the form fields, the file name (at most 255 characters) and size, the export time, the ZIP, the CSV files.
+
+### Archive limits
+
+| Limit | Value |
+| --- | --- |
+| Compressed archive | 10 MiB |
+| Central directory entries | 2,000 |
+| Entry name | 255 bytes; no absolute or drive path, empty, `.` or `..` segment, backslash or control character |
+| One inflated CSV | 4 MiB |
+| The inflated CSVs together | 8 MiB |
+| Declared inflated size over compressed size | 100 |
+| Lines per CSV | 10,000 |
+| Wall time of the read | 20 s, checked between inflated chunks |
+
+Only `watched.csv`, `ratings.csv`, `watchlist.csv` and `diary.csv` at the top level are inflated, each checked for size, CRC-32 and strict UTF-8; every other entry is only checked for a safe name, method and flags. `watched.csv` is required; a missing other file makes the answer `partial`.
+
+### Errors
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 404 | `not_found` | another path under `/api/admin/letterboxd-archive/` |
+| 405 | `method_not_allowed` | not a POST |
+| 403 | `origin_not_allowed` | `Origin` missing or not the Worker's own |
+| 415 | `unsupported_media_type` | not `multipart/form-data` with a boundary |
+| 411 | `length_required` | no numeric `Content-Length` |
+| 413 | `archive_too_large` | the declared or read body, or the file, is above the cap |
+| 429 | `preview_busy` | another preview runs on this isolate (below) |
+| 400 | `invalid_form` | unreadable form, a missing, repeated or extra field, or an unusable file name |
+| 422 | `generated_at_required`, `generated_at_conflict`, `generated_at_invalid`, `generated_at_future`, `generated_at_too_old` | a renamed archive without a time; a standard name with one; not the UTC form; later than now; before 2011 |
+| 422 | `archive_invalid` with `code` and `file` | the ZIP reader refused: `not_zip`, `archive_too_large`, `zip64_unsupported`, `multi_disk_unsupported`, `too_many_entries`, `central_directory_invalid`, `entry_name_invalid`, `duplicate_entry`, `encrypted_entry`, `unsupported_method`, `local_header_invalid`, `entry_truncated`, `entry_overlap`, `entry_too_large`, `total_too_large`, `ratio_exceeded`, `entry_size_mismatch`, `inflate_failed`, `checksum_failed`, `invalid_utf8`, `too_many_rows`, `time_budget`, `aborted` |
+| 422 | `csv_invalid` with `file` and `record` | a CSV file the parser cannot read |
+| 422 | `missing_watched` | the archive has no `watched.csv` |
+| 500 | `preview_failed` | anything else; no detail is returned |
+
+**One preview per isolate.** A worst-case preview needs about half of the isolate's 128 MB, so the handler holds one slot per isolate and answers 429 to a second concurrent request on the same isolate. The slot is the start time of the running preview and is taken over after 60 s, because a request the runtime cancels never reaches its `finally`.
+
+### What is read
+
+Through a bucket wrapper that exposes only `get`; no key is listed:
+
+| Read | Use |
+| --- | --- |
+| The admin snapshot (five reads above) | The published programme for the matcher; failure leaves matching `partial` |
+| `metadata.json` | Catalog metadata for the matcher |
+| `enrichment/ratings/published.json`, then its generation when `projected: true` | The ratings the matcher uses as evidence |
+| `letterboxd/facts/links.json` | The link index: which films already have a fact record and under which key |
+| `letterboxd/facts/scans/films-list.json`, `letterboxd/facts/scans/watchlist.json` | The scan summaries, the floor of every observation ([ADR 0024](../../adr/0024-letterboxd-scan-summary.md)) |
+| `letterboxd/imports/<sha256>/chunks/0.intent.json`, `0.receipt.json` | Whether **this** archive was already imported (`committed`, `opened`, `absent`) |
+| `letterboxd/facts/films/<key>.json` | Only for accepted films whose alias is in the link index, at most 300, six at a time, one redirect hop; a record that is migrating, a second redirect or a failed read makes the film `unverified` |
+| The pointer, `metadata.json`, the ratings pointer, the link index and both summaries again | ETag fence: any change makes `consistency.status` `drift` and the proposal `partial` |
+
+Not read: the generation catalog copy (several megabytes; it only adds `title_year` candidates) and `enrichment/view-index.json` (a projection of the records). `matching.omitted` names both. The keys actually read are listed in `reads`.
+
+### Answer, 200
+
+```text
+{
+  schemaVersion: 1, mode: "preview", writes: false, evaluatedAt, status: complete|partial,
+  archive: {sha256, bytes, entries, ignoredEntries, nameStandard, generatedAt, generatedAtSource: archive_name|owner_declared, ageMs, files: {<name>: {sha256, bytes}}},
+  completeness: {status, missing: [file, ...]},
+  export: {files: {watched|ratings|watchlist|diary: {name, present, records, valid, invalid, duplicates, conflicts, missingYear, auxiliary}}, sets: {<set>: count}, films, crossFileMismatches, invalidRows, invalidByReason},
+  baseline: {status: "unknown", reason: "no_bounded_summary", confirmedAt: null, sha256: null, thisArchive: {status: committed|opened|absent|unavailable, committedAt}},
+  freshness: {needsFreshArchive, reasons: [archive_stale, ratings_newer_in_r2], archiveStaleMs, ageMs, ratingsNewerInR2},
+  matching: {status, sources: {<source>: {evidence, key, ...}}, omitted, index, byStatus, acceptedByMethod: {lid_exact, tmdb_verified, title_year}, reasons, lidHypothesis},
+  proposal: {status, reasons, films: {accepted, compared, unverified, aliasConflict, invalidIdentity, heldForIdentity}, facts: {new, replaces, unchanged, older, tie, unverified}, byFact: {watched|rating|watchlist: {...}}, recordReads: {limit, needed, done}},
+  consistency: {status: stable|drift, changed: [key, ...]},
+  details: {limit: 25, adds, updates, heldNewer, unverified, conflicts, identity, invalidRows},   // each {total, rows ≤ 25}
+  reads: [key, ...]
+}
+```
+
+- **Outcomes** are the baseline commit's, computed on a copy of each record with the same observation ids and summary floors: `new` (no value yet), `replaces` (the export's observation is greater), `unchanged`, `older` (a stored or scanned observation is newer and wins), `tie` (counted beside the outcome when the observation equals the stored one), `unverified` (the record was not read).
+- **Held** films are not proposed: `heldNewer` (R2 is newer for some fact), `unverified` (`record_read_limit`, `record_unavailable`, `record_converging`, `links_unavailable`), `conflicts` (`alias_conflict`: the Letterboxd and TMDB aliases point to two records; `invalid_identity`), and `identity` (every film the matcher did not accept, with its status, method, reason and number of candidates). Only `accepted` films are compared, as in the import.
+- **Rows** carry the film's export code, name, year, match status and method, the proposed facts, the outcome per fact and the current value where one exists. They are capped at 25 per list; `total` is the full count. They are personal data and appear only in this response.
+- `baseline` is always `unknown`: the import stores receipts per archive and no summary, so the latest confirmed baseline cannot be found without listing the bucket. `freshness.reasons` has `archive_stale` when the export is older than the data health `archiveStaleMs` (60 days) and `ratings_newer_in_r2` when R2 holds a newer rating than the archive for at least one compared film.
+
+### The page
+
+`/admin/letterboxd` («Архив Letterboxd») sits between data health and limbo in the admin navigation. Opening it sends nothing. The form takes the ZIP and, for a renamed archive, the export time; the page checks the name, the size and the time locally, then sends one `POST` with `credentials: 'same-origin'` and `cache: 'no-store'` and accepts only an answer with `mode: "preview"` and `writes: false`. States: idle, loading (with «Отменить», also on Escape, which aborts the request), error (focused, the code's Russian text), result (focused): the freshness banner («Нужен свежий архив» with its reasons, or «Архив достаточно свежий»), the totals, the archive's files and SHA-256, the baseline as «неизвестно» with the reason, the matching by method and status, the proposal by fact and outcome, and the detail lists in closed `<details>`. Times are shown in Europe/Madrid. «Очистить» drops the answer and returns focus to the file field; leaving the page drops it too. There is no import, commit or validate control, and nothing is put in `localStorage` or the URL.
+
 ## Limits
 
 - The catalogue is the pinned generation's programme: watchlist films and the people on them. Catalog-only films (`epg/discovered-films.json`), unresolved observations and the resolution ledger are not searched; identity codes that need the ledger (`ambiguous`, `rejected`) are not produced here.
 - The catalogue routes do not read fingerprint and prediction state; see `queue_unavailable` above. Only the [prediction recovery read](#prediction-recovery-get-apiadminprediction-recovery) reads them, for one film per request.
 - Pages run over an in-memory projection of the whole programme object; a cold request costs five R2 reads and one parse of the programme, a warm one five reads and no parse of the programme.
-- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; this API has no `POST`. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
+- The route edits nothing. Reviewed titles and names are still the dictionaries in `data/` and the writers of other cards; these routes have no `POST`; the only `POST` under `/api/admin/` is the [archive preview](#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview), which writes nothing. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
 - `/admin/posters` is the one admin page that calls a write route, and only the existing `POST /api/enrichment/catalog/posters`, after the owner's confirmation. Outcomes `no_poster_on_tmdb` and `tmdb_id_mismatch` are not stored by that route, so those records stay in `verifiedMissing`; only the browser history remembers them.
 
-Rollback is a revert of the routes and the pages: the read routes wrote no R2 object. Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback).
+Rollback is a revert of the routes and the pages: the read routes and the archive preview wrote no R2 object. Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback).

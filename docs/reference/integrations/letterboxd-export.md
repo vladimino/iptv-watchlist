@@ -1,6 +1,6 @@
 # Letterboxd account export — parsing and matching contract
 
-The owner can download a Letterboxd account export (a ZIP of CSV files). [`src/letterboxd-export.js`](../../../src/letterboxd-export.js) parses it and [`src/letterboxd-match.js`](../../../src/letterboxd-match.js) matches its rows with films stored in a production R2 snapshot. Both modules are pure: they read no file, storage or network and are not part of the Worker bundle. The operator procedure is the [reconciliation runbook](../../runbooks/letterboxd-export-reconciliation.md). This contract does not import ratings, change the watchlist or write R2; it only describes what an offline comparison may conclude.
+The owner can download a Letterboxd account export (a ZIP of CSV files). [`src/letterboxd-export.js`](../../../src/letterboxd-export.js) parses it and [`src/letterboxd-match.js`](../../../src/letterboxd-match.js) matches its rows with films stored in a production R2 snapshot. Both modules are pure: they read no file, storage or network. The Worker bundles them unchanged (`scoped` as `LetterboxdExport` and `LetterboxdMatch`) for the owner's [archive preview](#in-the-worker); offline, the same files are imported directly. The operator procedure is the [reconciliation runbook](../../runbooks/letterboxd-export-reconciliation.md). This contract does not import ratings, change the watchlist or write R2; it only describes what an offline comparison may conclude.
 
 ## Files read
 
@@ -84,3 +84,11 @@ A film the matcher leaves unresolved can get its identity only from the Letterbo
 | `pending` | Not observed yet (`not_fetched`) or the fetch failed within its retry bound (`fetch_failed`) |
 
 Title normalization is the matcher's. Cross-film checks look at every observed film, so a decision can change while the queue is incomplete. Decisions are final only when the report says `final: true`, that is, no queued film is `pending`; `accepted` exists only then. A run bounded to the priority wave (`candidate` and `ambiguous`) reports that wave as observed in `progress` but decides it provisionally; the later `unmatched` films are still compared with it before anything is accepted. An `accepted` decision is an identity proposal for a later, separately approved import; nothing here writes facts.
+
+## In the Worker
+
+The owner's archive preview (`POST /api/admin/letterboxd-archive/preview`, [admin API](../api/admin.md#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview), [ADR 0061](../../adr/0061-ephemeral-letterboxd-archive-preview.md)) applies this contract to a ZIP the owner uploads, in memory and without storing it:
+
+- **ZIP.** [`src/letterboxd-zip.js`](../../../src/letterboxd-zip.js) uses Node's `Buffer` and `zlib` and stays offline. The Worker uses [`src/domain/letterboxd-archive-zip.js`](../../../src/domain/letterboxd-archive-zip.js), on Web APIs only, with hard limits on size, entries, ratio and rows. For an archive within those limits it returns the same four texts, SHA-256 and export time as the offline reader; tests pin the equivalence.
+- **Index.** The matcher's index is built from the published generation's programme, `metadata.json` and the published ratings generation, read as single objects from live R2 instead of from a snapshot. The generation's catalog copy is not read, so the Worker finds fewer `title_year` candidates than an offline run with a snapshot; `lid_exact` and `tmdb_verified` are unaffected.
+- **Facts.** For `accepted` films only, the facts an import would write are compared with the stored fact records by the [user facts](letterboxd-user-facts.md) merge rules. Nothing else in this contract changes.
