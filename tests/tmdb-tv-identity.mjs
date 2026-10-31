@@ -7,8 +7,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {CONFIRMED_RETIREMENTS,RETIREMENTS_KEY,buildPlan,d1Expected,d1Holders,d1Readback,d1State,loadDomain,r2References,sqliteReader} from '../scripts/tmdb-tv-identity-plan.mjs';
 
-// Offline only: the domain file stays out of the Worker bundle, and the planner neither requests nor writes.
-assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/tmdb-tv-identity/);
+// AIR-297: the domain file is in the Worker bundle (tests/tmdb-tv-runtime.mjs covers the runtime); the planner still neither
+// requests nor writes.
+assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/tmdb-tv-identity\.js/);
 const planner=fs.readFileSync('scripts/tmdb-tv-identity-plan.mjs','utf8');
 assert.doesNotMatch(planner,/\bfetch\(|\bBUCKET\b|writeFile\(.*objects|\.transaction\(|\.run\(|\b(INSERT|UPDATE|DELETE|REPLACE)\b/,'the planner writes no statement and makes no request: D1 follows R2 through the projector');
 assert.doesNotMatch(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),/\bfetch\b|\benv\./);
