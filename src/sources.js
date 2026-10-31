@@ -183,13 +183,14 @@ async function loadPeopleNameIndex(films){
  for(const row of data.results.bindings){const key=row.tmdb.value+':'+norm(row.en.value);const names=index.get(key)||new Set();names.add(row.ru.value);index.set(key,names);}
  return index;
 }
-function applyPeopleNames(films,cache,index,mode){for(const f of films)for(const p of [...f.directors,...f.actors]){if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p,mode==='on'?'on':'off');cache[p.id]={...p};continue;}if(index){const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}}if(!cache[p.id])continue;if(mode==='on')applyCachedPersonName(p,cache[p.id],'on');else p.name=cache[p.id].name;}}
+function rosterPeople(film){return Array.isArray(film?.rosterOrder)?film.rosterOrder:[...(film?.directors||[]),...(film?.actors||[])];}
+function applyPeopleNames(films,cache,index,mode){for(const f of films)for(const p of rosterPeople(f)){if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p,mode==='on'?'on':'off');cache[p.id]={...p};continue;}if(index){const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}}if(!cache[p.id])continue;if(mode==='on')applyCachedPersonName(p,cache[p.id],'on');else p.name=cache[p.id].name;}}
 async function localizePeople(films,cache,mode){
  if(mode==='on'||mode==='shadow'){const index=await loadPeopleNameIndex(films);return branchState(films,cache,mode,(list,store)=>applyPeopleNames(list,store,index,'off'),(list,store)=>applyPeopleNames(list,store,index,'on'));}
- for(const f of films)for(const p of [...f.directors,...f.actors])if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);cache[p.id]={...p};}
+ for(const f of films)for(const p of rosterPeople(f))if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);cache[p.id]={...p};}
  const index=await loadPeopleNameIndex(films);
  if(!index)return {compared:0,mismatched:0};
- for(const f of films)for(const p of [...f.directors,...f.actors]){if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);continue;}const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}if(cache[p.id])p.name=cache[p.id].name;}
+ for(const f of films)for(const p of rosterPeople(f)){if(REVIEWED_PEOPLE[p.id]){applyReviewedPerson(p);continue;}const names=index.get(f.tmdbId+':'+norm(p.original));if(names?.size===1){const raw=[...names][0];const name=raw.includes(', ')?raw.split(', ').reverse().join(' '):raw;cache[p.id]={name,original:p.original};}if(cache[p.id])p.name=cache[p.id].name;}
  return {compared:0,mismatched:0};
 }
 function peopleCatalog(films){const collect=key=>[...new Map(films.flatMap(f=>f[key]||[]).map(p=>[p.id,p])).values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));return {directors:collect('directors'),actors:collect('actors')};}

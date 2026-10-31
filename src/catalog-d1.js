@@ -234,6 +234,76 @@ async function d1PersonIdentity(db,id){
  limitations.push('neighborhood_bounded');
  return d1IdentityBody(id,await d1SameKeyProjection(db,[...seed].sort()),limitations,true);
 }
+// The metadata step's Film/Person roster. One bounded SELECT batch for the films whose names that step is already
+// localizing. The verdict is proven only when the row is that film's metadata snapshot, the Letterboxd id and the
+// typed movie id agree, and the Letterboxd credits are the same people. TMDB-source credits stay off the film.
+// A miss returns a reason and the step keeps the credit objects it already holds. No DB binding returns null. This function only reads.
+const D1_METADATA_ROSTER_CAP=24;
+function d1MetadataLetterboxdId(id){
+ const text=String(id??'');
+ if(text.startsWith('tmdb_')||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(text))return null;
+ return 'film:'+text;
+}
+function d1MetadataRosterVerdict(film,row){
+ if(!row)return {ok:false,reason:'missing'};
+ if(row.inWatchlist!==true)return {ok:false,reason:'not_watchlist'};
+ if(row.metadataAt!==film?.metadataAt||Number(row.peopleVersion)!==1||film?.peopleVersion!==1)return {ok:false,reason:'lag'};
+ const external=row.externalIds||[];
+ if(external.some(item=>item.conflicting&&(item.scheme==='letterboxd'||item.scheme==='tmdb'||item.scheme==='tmdb_tv')))return {ok:false,reason:'identity'};
+ const letterboxd=external.filter(item=>item.scheme==='letterboxd'&&item.trusted&&!item.conflicting);
+ if(letterboxd.length!==1||letterboxd[0].value!==String(film.id))return {ok:false,reason:'identity'};
+ const movies=external.filter(item=>item.scheme==='tmdb'&&item.trusted&&!item.conflicting);
+ const tv=external.filter(item=>item.scheme==='tmdb_tv'&&item.trusted&&!item.conflicting);
+ const canonical=row.canonicalIdentity??null;
+ if(typeof canonical==='string'&&canonical.startsWith('tmdb_tv:'))return {ok:false,reason:'tmdb_tv'};
+ if(film.tmdbId){
+  const tmdbId=String(film.tmdbId);
+  if(tv.some(item=>item.value===tmdbId))return {ok:false,reason:'tmdb_tv'};
+  if(movies.length!==1||movies[0].value!==tmdbId)return {ok:false,reason:'identity'};
+  if(canonical&&canonical!=='tmdb:'+tmdbId)return {ok:false,reason:'identity'};
+ }else if(movies.length||tv.length||canonical)return {ok:false,reason:'identity'};
+ const byId=new Map();
+ for(const person of [...(film.directors||[]),...(film.actors||[])]){
+  if(!person?.id||byId.has(person.id))return {ok:false,reason:'credits'};
+  byId.set(person.id,person);
+ }
+ const credits=(row.credits||[]).filter(item=>item?.roleId&&!String(item.roleId).startsWith('tmdb_')&&(item.role==='actor'||item.role==='director'));
+ credits.sort((a,b)=>a.role===b.role?Number(a.ordinal)-Number(b.ordinal):(a.role==='director'?-1:1));
+ const seen=new Set(),order=[];
+ for(const credit of credits){
+  if(seen.has(credit.roleId))return {ok:false,reason:'credits'};
+  seen.add(credit.roleId);
+  const person=byId.get(credit.roleId);
+  if(!person)return {ok:false,reason:'credits'};
+  if(String(credit.original||'')!==String(person.original||person.name||''))return {ok:false,reason:'credits'};
+  order.push(credit.roleId);
+ }
+ if(seen.size!==byId.size)return {ok:false,reason:'credits'};
+ return {ok:true,reason:'proven',order};
+}
+async function d1MetadataSyncRoster(env,films){
+ const db=env&&env.DB;
+ if(!db)return null;
+ const chosen=[],seenIds=new Set();
+ for(const film of films||[]){
+  const id=d1MetadataLetterboxdId(film?.id);
+  if(!id||seenIds.has(id))continue;
+  seenIds.add(id);chosen.push(film);
+  if(chosen.length>=D1_METADATA_ROSTER_CAP)break;
+ }
+ const out=new Map();
+ if(!chosen.length)return out;
+ const ids=chosen.map(film=>'film:'+film.id);
+ const filmRows=await d1Chunk(db,`select f.id,f.canonical_identity canonicalIdentity,m.updated_at metadataAt,m.people_version peopleVersion,(select 1 from watchlist_film w where w.film_id=f.id) inWatchlist from film f left join film_metadata m on m.film_id=f.id where f.id in (/*ids*/) order by f.id`,ids);
+ const externalRows=await d1Chunk(db,`select film_id filmId,scheme,value,trusted,conflicting from film_external_id where scheme in ('letterboxd','tmdb','tmdb_tv') and film_id in (/*ids*/) order by film_id,scheme,value`,ids);
+ const creditRows=await d1Chunk(db,`select c.film_id filmId,c.role,c.ordinal,p.role_id roleId,(select a.value from person_alias a where a.person_id=p.id and a.kind='name' order by a.value limit 1) original from film_person_credit c join person p on p.id=c.person_id where c.role in ('actor','director') and c.film_id in (/*ids*/) order by c.film_id,c.role,c.ordinal`,ids);
+ const byFilm=new Map();
+ for(const row of filmRows)byFilm.set(row.id,{id:row.id,canonicalIdentity:row.canonicalIdentity??null,metadataAt:row.metadataAt??null,peopleVersion:row.peopleVersion??null,inWatchlist:row.inWatchlist===1,externalIds:[],credits:[]});
+ for(const row of externalRows){const film=byFilm.get(row.filmId);if(film)film.externalIds.push({scheme:row.scheme,value:String(row.value),trusted:row.trusted===1,conflicting:row.conflicting===1});}
+ for(const row of creditRows){const film=byFilm.get(row.filmId);if(film)film.credits.push({role:row.role,ordinal:row.ordinal,roleId:row.roleId,original:row.original??''});}
+ for(const film of chosen)out.set(String(film.id),d1MetadataRosterVerdict(film,byFilm.get('film:'+film.id)||null));
+ return out;
+}
 async function catalogD1Route(request,env,url){
  if(request.method!=='GET')return json({error:'Method not allowed'},405);
  if(!env.DB)return json({error:'D1 is not bound to this Worker'},503);
