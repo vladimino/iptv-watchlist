@@ -151,7 +151,7 @@ Once the [enrichment projector](../adr/0056-d1-enrichment-write-through.md) writ
    1. Restore `iptv` to its empty-schema bookmark.
    2. Load the dump with the D1 Import API.
    3. Record the bookmark the import returns.
-5. **Replay the D1-only steps** in their recorded order, each reproducible from its private artifact. Today that is the AIR-286 TMDB credits of the watchlist Films; the AIR-44 person links will join it. The projector keeps those credits on later rewrites, but a reload drops them until they are replayed.
+5. **Replay the D1-only steps** in their recorded order, each reproducible from its private artifact. Today that is the TMDB credits of the watchlist Films ([runbook](tmdb-watchlist-credits.md)). A derived Person reference is not stored, so a reload has nothing of it to replay. The projector keeps those credits on later rewrites, but a reload drops them until they are replayed.
 6. **Verify** per-table counts against the build, plus the replayed rows.
 7. **Projector.** Set `D1_ENRICHMENT_WRITE=dry` and read the summary in the Worker logs (`event: d1_enrichment_projection`). The changed counts should be only what R2 changed since the snapshot. The outcomes that stop a run:
    - `failed` with `reason` `input_missing`, `input_invalid` or `generation_unpublished` names the R2 input (`inputKey`) that was not complete. Nothing was written; the next hourly run tries again.
