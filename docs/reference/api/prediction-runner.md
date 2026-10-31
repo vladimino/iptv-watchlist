@@ -15,6 +15,45 @@ The same start/next/submit/complete protocol serves manual and scheduled trigger
 
 Four observations are kept apart. **Run completion** is `status: complete` (or `partial` when a stop reason or a still-pending selected film remains); a run that ends with item failures deferred to a retry is `complete` with `failed > 0`, not an error. **Drained** means the refreshed queue has no outstanding film: `complete` stores `stopReason: queue_empty` only when `hotRemaining + coldRemaining` is zero after its final queue refresh, whatever reason the caller sent. **Eligible** is the subset of outstanding films the runner would take now (`queueReadyIds`: the hot lane while any hot film is outstanding, otherwise the cold lane, minus films whose stored `retryAt` is in the future); when work remains but none of it is eligible, `complete` stores `eligible_queue_empty`, and `next` answers the same with `mustComplete: true`. **Deferred** films are the outstanding films held back by a retry timestamp; `start` on a queue that is outstanding but not eligible answers `retry_backoff` instead of opening a run. The completion Event and the footer status publish these counts as `snapshot.queue` / `predictions` (`outstanding`, `eligibleNow`, `deferredByRetry`, `nextRetryAt`, see [the footer and Event slices](enrichment.md#failure-behavior)); the retry time of a film is not the time of the next scheduled run. None of this changes the retry policy, the delay, the batch size or which films are selected.
 
+## Queue writes
+
+`enrichment/prediction-queue.json` has several writers ([ADR 0064](../../adr/0064-prediction-queue-conditional-writes.md), Proposed):
+
+- the runner routes (`start`, `next`, `submit`, `complete`);
+- the EPG commit tail (`programme_updated`) and the EPG scan (`epg_scan`);
+- the profile publication (`profile_updated`);
+- the resolver checkpoint (`resolver_checkpoint`);
+- `POST /api/enrichment/queue/reconcile` (`manual_reconcile`).
+
+Every write is a conditional put on the etag of the object the writer read (`etagMatches`, or `etagDoesNotMatch: '*'` when absent).
+
+- **A rebuild** (`refreshPredictionQueue`, its `trigger` stored on the queue) reads the queue first and its inputs after it. When the stored queue names another programme generation than the caller's programme, the rebuild uses the published programme. `retries` of films still outstanding, `lastBatch`, `lastCheckAt` and `metrics` come from the queue just read.
+- **A recorded change** is the submit's per-film retry, the start's idle check (`lastBatch` with `runId: null`) or a stopped run's missing retries. It is applied to the queue just read and never creates an absent queue.
+- **The completion** writes its retries, `lastBatch`, `lastCheckAt` and `metrics.hotProcessedTotal` inside its own `batch_complete` rebuild. The counter moves only when `lastBatch.runId` is not yet the run, so a repeated completion counts once.
+- **A retry record only grows while its film is outstanding.**
+  - `attempts` is the larger of the run's count and the stored count plus one.
+  - `retryAt` is the latest of the run's time, the stored time and the backoff of that count.
+  - A record whose `lastRunId` is the run is written once.
+  - The completion and every stop add any failure of the run that the submit did not land (below).
+
+  The submit answer and the run record follow a merged record that came out larger.
+- **On conflict** the writer re-reads and starts again, at most 5 attempts with a short jittered pause. Exhaustion throws `PredictionQueueConflictError` (`code: prediction_queue_conflict`), and nothing of the caller's is written.
+  - The reconcile route answers `409 {error, code: "prediction_queue_conflict"}`.
+  - A runner route ends through its ordinary error path as a `storage_error` stop.
+  - The EPG commit tail records `enrichmentQueueError` and completes the commit.
+  - The resolver records `prediction_queue_checkpoint: …` in its status.
+  - The profile publication stands; the next rebuild picks the new profile up.
+- **A put that throws** is an unknown outcome. It is not repeated, and the error propagates. A lease holder's `beforeWrite` renews before every attempt, so a lost lease writes nothing.
+
+**A run's retries survive a queue write that fails.** A queued run's per-film failure is saved on the run record, with `retryHeal: "pending"`, before the submit writes it to the queue. The mark is cleared only by a queue write that confirms every failure of the run.
+
+- **At the stop.** Every stop writes the run's missing retries again before it marks the run `partial` and releases the lease. This covers a `storage_error` stop after a submit conflict and a `complete` with a systemic reason. A normal completion writes them in its `batch_complete` rebuild. A write that still fails keeps the mark. The stop answer then carries `retryHeal: "pending"`.
+- **At the next start.** A released or expired runner lease keeps naming its last run. Before acquiring the lease, `start` reads that run. If the run is still marked, `start` writes its retries to the queue first, in a recorded change with trigger `start_retries`. When that write fails, `start` selects nothing, takes no lease and answers `503 {status: "blocked", reason: "retry_heal_pending", code: "prediction_retry_heal_pending", pendingRunId}`. This is a start outcome, not a stop, because no run exists to stop. No run record, stop record or Event is written, and `latest-run.json` keeps naming the marked run. Only the start's own diagnostic row records `blocked`. The lease keeps naming the marked run, so every later start tries again.
+- **Unknown outcome.** A write with an unknown outcome is not repeated blindly. The next attempt re-reads the queue, and a record that already carries the run's `lastRunId` is left as it is.
+- **No queue object.** If the queue object is absent, the retries cannot be confirmed, and the mark stays until a rebuild creates the queue.
+
+The queue format, the retry policy, hot-first selection and batch sizing do not change. Tests: `node tests/prediction-queue-cas.mjs`.
+
 Run counters and film outcomes persist after each submission. Current-batch film reads stay bounded; completed batches are counted from saved outcomes rather than loading every completed film on every next request.
 
 Which films are outstanding after a taste-profile change is decided by the queue rule in [prediction compatibility](../domain/prediction-compatibility.md#prediction-queue): the selective profile rule, with no switch ([ADR 0044](../../adr/0044-retire-profile-compatibility-switch.md)). The runner's own checks (pending count, completion, `already_current`) use the same rule, so a kept prediction is never recalculated.
