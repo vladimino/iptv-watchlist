@@ -130,9 +130,15 @@ assertUnexplainable({...eligible, budget: {...eligible.budget, externalCalls: 2}
 assertUnexplainable({...eligible, subject: {kind: 'observation', id: 'x'}}, context, null, 'another subject kind');
 for (const value of [null, undefined, 'eligible', 42, []]) assert.equal(presentPreview(value, descriptors, context).explainable, false);
 assert.equal(presentPreview(eligible, null, context).explainable, false, 'no descriptor registry');
-// An excluded record without a title is still described without inventing a name or showing its id.
-const untitled = presentPreview(eligible, descriptors, {titles: {'film:a': 'Альфа', 'film:b': 'Бета'}, issues});
+// A confirmable scope must name every subject it mentions: an unnamed skipped record also makes it unexplainable.
+assertUnexplainable(eligible, {titles: {'film:a': 'Альфа', 'film:b': 'Бета'}, issues}, 'film:c', 'an excluded record without a trusted title in a confirmable preview');
+// Only a preview that cannot be confirmed anyway keeps the honest fallback label, without inventing a name or showing the id.
+const blocked = previewAction(registry, request(), observe([{id: 'film:c', version: 'v1'}], [issue('film:c', false)]));
+const untitled = presentPreview(blocked, descriptors, {titles: {}, issues});
+assert.equal(untitled.explainable, true);
+assert.equal(untitled.confirm, null);
 assert.equal(untitled.excluded[0].name, 'Запись без проверенного названия');
+assert.ok(!primaryText(untitled).includes('film:c'));
 
 // 4. Receipts: N of M, per-record next steps, refusals with a fix, and fail closed on undeclared codes.
 const confirmationFields = {schemaVersion: 1, capability: FIXTURE_CAPABILITY.id, version: 1};
@@ -154,6 +160,18 @@ for (const refusal of ADMIN_ACTION_REFUSALS) {
   assert.equal(refused.headline, 'Отказано: ничего не выполнялось');
   assert.ok(refused.summary.startsWith('Причина: ') && refused.next.startsWith('Как исправить: '));
   assert.ok(!primaryText(refused).includes(refusal), 'refusal ' + refusal + ' is not shown raw');
+}
+// Unfinished runs: no completion denominator and no final guidance, whatever the outcomes so far say.
+for (const state of ['approved', 'running']) {
+  for (const outcomes of [[], [{id: 'film:a', outcome: 'written'}]]) {
+    const pending = presentReceipt(receipt(state, outcomes), descriptors, context);
+    assert.equal(pending.explainable, true);
+    assert.equal(pending.headline, ACTION_RUN_STATE_COPY[state].headline);
+    assert.doesNotMatch(pending.summary + pending.next, /Удалось для|из \d|Больше ничего делать не нужно/, state + ' with ' + outcomes.length + ' outcomes is not final');
+    assert.match(pending.summary, /не завершено/);
+    assert.match(pending.next, /Обновите статус или проверьте позже/);
+    assert.equal(pending.lines.length, outcomes.length, 'results so far are listed');
+  }
 }
 for (const [value, raw] of [
   [{state: 'future_state', outcomes: []}, 'future_state'],
@@ -177,8 +195,8 @@ assert.equal(FIXTURE_DESCRIPTOR.compensation, FIXTURE_CAPABILITY.compensation.ki
 assert.ok(FIXTURE_CAPABILITY.subjectKinds.includes(FIXTURE_DESCRIPTOR.subjectKind));
 for (const broken of [
   null, {}, {...FIXTURE_DESCRIPTOR, version: 0}, {...FIXTURE_DESCRIPTOR, title: ''}, {...FIXTURE_DESCRIPTOR, problem: '  '},
-  {...FIXTURE_DESCRIPTOR, subjectLabel: 'фильм'}, {...FIXTURE_DESCRIPTOR, confirm: 'Подтверждаю'}, {...FIXTURE_DESCRIPTOR, noun: {one: 'фильм'}},
-  {...FIXTURE_DESCRIPTOR, fields: []}, {...FIXTURE_DESCRIPTOR, risks: [1]}, {...FIXTURE_DESCRIPTOR, compensation: 'rollback'},
+  {...FIXTURE_DESCRIPTOR, subjectLabel: 'фильм'}, {...FIXTURE_DESCRIPTOR, confirm: 'Подтверждаю'}, {...FIXTURE_DESCRIPTOR, confirm: 'Подтверждаю {count}'}, {...FIXTURE_DESCRIPTOR, confirm: 'Подтверждаю {names}'}, {...FIXTURE_DESCRIPTOR, noun: {one: 'фильм'}},
+  {...FIXTURE_DESCRIPTOR, fields: []}, {...FIXTURE_DESCRIPTOR, risks: [1]}, {...FIXTURE_DESCRIPTOR, risks: []}, {...FIXTURE_DESCRIPTOR, compensation: 'rollback'},
   {...FIXTURE_DESCRIPTOR, simulation: 'yes'}, {...FIXTURE_DESCRIPTOR, simulationNote: ''}, {...FIXTURE_DESCRIPTOR, externalCalls: ''},
 ]) assert.equal(validDescriptor(broken), false);
 assert.throws(() => createDescriptorRegistry([{...FIXTURE_DESCRIPTOR, cta: ''}]), /invalid action descriptor/);

@@ -152,7 +152,18 @@ const scenarios = JSON.parse(vm.runInContext('JSON.stringify(Object.entries(ACTI
 assert.deepEqual(scenarios.map(([code]) => code), ['eligible', 'partial', 'unknown', 'stale', 'ineligible']);
 for (const [, title, text] of scenarios) {assert.ok(title.length > 3); assert.match(text, /^Имитируем: .+ Увидим: .+/);}
 
-// 8. A hostile fictional title is escaped everywhere; an unknown action code never enables the simulate button.
+// 8. An eligible situation with one unnamed skipped film cannot be acknowledged or executed.
+vm.runInContext(`delete ACTION_DEMO_TITLES['film:blank'];`, ctx);
+await scenario('eligible');
+assert.match(preview.innerHTML, /Невозможно достоверно объяснить действие; выполнение недоступно/);
+assert.equal(accept.disabled, true); assert.equal(confirm.disabled, true, 'an unnamed skipped film blocks the acknowledgement and the button');
+accept.checked = true; await fire('[data-action-accept]', 'change');
+assert.equal(accept.checked, false); assert.equal(confirm.disabled, true);
+assert.equal(await vm.runInContext('actionDemo.panel.confirm()', ctx), null, 'execution is impossible');
+assert.deepEqual(writes(), []);
+vm.runInContext(`ACTION_DEMO_TITLES['film:blank'] = 'Пустой лист';`, ctx);
+
+// 9. A hostile fictional title is escaped everywhere; an unknown action code never enables the simulate button.
 vm.runInContext(`ACTION_DEMO_TITLES['film:north'] = '<img src=x onerror=alert(1)>';`, ctx);
 await scenario('eligible');
 assert.doesNotMatch(preview.innerHTML + receipt.innerHTML, /<img/);

@@ -118,9 +118,9 @@ Each capability version has one display descriptor, plain data registered with `
 | `change`, `fields`, `untouched`, `effect` | «Что мы собираемся изменить»: the change, the fields that may change, what does not change, the expected effect |
 | `simulation`, `simulationNote` | a simulation says so in the change section, the headline and the result |
 | `externalCalls` | the sentence describing external calls; required when the capability's budget declares any, `null` otherwise |
-| `risks` | the capability's own risks and what to do about them |
+| `risks` | at least one risk of the capability itself and what to do about it; an empty list is rejected |
 | `cta` | the action button; the panel adds the count, e.g. «Смоделировать изменение (2 тестовых фильма)». A live capability names its real change here |
-| `confirm` | the scope acknowledgement, with `{count}` and `{names}` |
+| `confirm` | the scope acknowledgement; must contain both `{count}` and `{names}`, so it lists the whole scope (the domain scope key is enforced independently) |
 
 ### Inputs and the explanation
 
@@ -143,9 +143,12 @@ The whole preview is unexplainable, shown as «Невозможно достов
 
 - there is no descriptor for the capability version, or its compensation, subject kind or external calls disagree with the preview;
 - a state, reason or exclusion code has no declared copy;
-- an included record has no trusted title, no typed issue of this capability's action code and subject kind, an issue reason without copy, or evidence that is not `complete`.
+- an included record has no trusted title, no typed issue of this capability's action code and subject kind, an issue reason without copy, or evidence that is not `complete`;
+- the preview is `eligible` and an excluded record has no trusted title: a confirmable scope names every subject it mentions.
 
-A receipt with an undeclared state, refusal, outcome or error code is shown as «Невозможно достоверно объяснить результат…» and asks for a manual check before any retry. An excluded record without a trusted title is called «запись без проверенного названия»; no name is invented and the id is not shown in its place.
+A receipt with an undeclared state, refusal, outcome or error code is shown as «Невозможно достоверно объяснить результат…» and asks for a manual check before any retry. Only in a preview that cannot be confirmed anyway is an excluded record without a trusted title called «запись без проверенного названия»; no name is invented and the id is not shown in its place.
+
+A receipt of an unfinished run (`approved`, `running`) is never shown as final: it has no «N из M» summary and no «nothing more to do», lists only the results already known, and asks to refresh the status or check later without starting the action again.
 
 ### What the primary view never shows
 

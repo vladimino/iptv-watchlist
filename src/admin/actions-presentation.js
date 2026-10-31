@@ -106,6 +106,9 @@ export const ACTION_RUN_STATE_COPY = Object.freeze({
   refused: {tone: 'blocked', headline: 'Отказано: ничего не выполнялось'},
 });
 
+// Run states in which the run is not finished: a receipt in one of them never shows a completion summary.
+export const ACTION_PENDING_RUN_STATES = Object.freeze(['approved', 'running']);
+
 export const ACTION_OUTCOME_COPY = Object.freeze({
   written: {text: 'изменено', next: ''},
   already_applied: {text: 'уже было изменено раньше, повторно не меняли', next: ''},
@@ -172,14 +175,15 @@ function presentCapitalize(text) {
 }
 
 // A display descriptor is the human contract of one capability version. It is plain data; every text field is required,
-// `noun` gives the Russian count forms (one/few/many, and ofOne/ofMany after «из»), `fields` lists what may change, `risks` the capability's own risks.
+// `noun` gives the Russian count forms (one/few/many, and ofOne/ofMany after «из»), `fields` lists what may change, `risks` at least one
+// risk of the capability itself, and `confirm` must name both `{count}` and `{names}` so the acknowledgement lists the whole scope.
 export function validDescriptor(descriptor) {
   if (!presentIsObject(descriptor) || !Number.isInteger(descriptor.version) || descriptor.version < 1) return false;
   if (ACTION_DESCRIPTOR_TEXT.some(key => !presentNonEmpty(descriptor[key]))) return false;
-  if (!descriptor.subjectLabel.includes('{name}') || !descriptor.confirm.includes('{count}')) return false;
+  if (!descriptor.subjectLabel.includes('{name}') || !descriptor.confirm.includes('{count}') || !descriptor.confirm.includes('{names}')) return false;
   if (!presentIsObject(descriptor.noun) || !['one', 'few', 'many', 'ofOne', 'ofMany'].every(key => presentNonEmpty(descriptor.noun[key]))) return false;
   if (!Array.isArray(descriptor.fields) || !descriptor.fields.length || !descriptor.fields.every(presentNonEmpty)) return false;
-  if (!Array.isArray(descriptor.risks) || !descriptor.risks.every(presentNonEmpty)) return false;
+  if (!Array.isArray(descriptor.risks) || !descriptor.risks.length || !descriptor.risks.every(presentNonEmpty)) return false;
   if (descriptor.externalCalls !== null && !presentNonEmpty(descriptor.externalCalls)) return false;
   if (typeof descriptor.simulation !== 'boolean' || (descriptor.simulation && !presentNonEmpty(descriptor.simulationNote))) return false;
   return Boolean(presentOwn(ACTION_COMPENSATION_COPY, descriptor.compensation));
@@ -274,8 +278,12 @@ export function presentPreview(preview, descriptors, context) {
   for (const item of preview.excluded || []) {
     const copy = presentOwn(ACTION_EXCLUSION_COPY, item.reason);
     if (!copy) return presentUnexplainable(descriptor, technical);
-    const label = presentLabelOf(descriptor, context, item.id) ?? 'запись без проверенного названия';
-    excluded.push({name: presentCapitalize(label), text: `Не будем изменять ${label}: ${copy.why}.`, next: copy.next});
+    const label = presentLabelOf(descriptor, context, item.id);
+    // A confirmable scope must name every subject it mentions, skipped ones included; only a preview that cannot be
+    // confirmed anyway may fall back to an honest "no verified title" label.
+    if (!label && preview.status === 'eligible') return presentUnexplainable(descriptor, technical);
+    const shown = label ?? 'запись без проверенного названия';
+    excluded.push({name: presentCapitalize(shown), text: `Не будем изменять ${shown}: ${copy.why}.`, next: copy.next});
   }
 
   const count = included.length;
@@ -342,6 +350,11 @@ export function presentReceipt(receipt, descriptors, context) {
     let next = outcome.next;
     if (entry.outcome === 'failed' && retryable.has(entry.id)) next = 'Можно повторить: запустите проверку заново и подтвердите новый список.';
     lines.push({outcome: entry.outcome, name: presentCapitalize(label), text: presentCapitalize(outcome.text) + (error ? ` — ${error}` : '') + '.', next});
+  }
+  if (ACTION_PENDING_RUN_STATES.includes(receipt.state)) {
+    // A run that has not finished: no denominator and no final guidance, whatever the outcomes so far say.
+    return {explainable: true, tone: state.tone, headline: state.headline, summary: 'Выполнение ещё не завершено, итог пока неизвестен.' + (lines.length ? ' Ниже — фильмы, по которым результат уже есть.' : ''),
+      next: 'Обновите статус или проверьте позже. Не запускайте действие повторно, пока оно не завершится.', replay: null, lines, technical};
   }
   const total = lines.length, done = lines.filter(line => line.outcome === 'written' || line.outcome === 'already_applied').length;
   const summary = `Удалось для ${done} из ${actionCountOf(total, descriptor.noun)}.` + (descriptor.simulation ? ' Это моделирование: реальные фильмы не менялись.' : '');
