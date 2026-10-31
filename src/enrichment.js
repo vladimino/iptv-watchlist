@@ -603,10 +603,60 @@ async function predictionWriter(env,work){
  if(saved===null)return json({status:'busy',reason:'prediction_writer_busy',...scheduledRunFields()},409);
  try{return await work();}finally{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
 }
-// `beforeWrite` lets a lease-holding caller renew its lease immediately before the queue write; other callers pass nothing.
-async function refreshPredictionQueue(env,report,trigger='reconcile',beforeWrite=null){
+// ADR 0061: every write of the prediction queue is conditional on the etag of the object it read. A conflict re-reads the
+// queue and its inputs and rebuilds, a bounded number of times; exhaustion throws and writes nothing. A put that throws is
+// an unknown outcome and is never repeated blindly.
+const PREDICTION_QUEUE_ATTEMPTS=5;
+class PredictionQueueConflictError extends Error{constructor(trigger){super('Prediction queue changed during write ('+trigger+')');this.name='PredictionQueueConflictError';this.code='prediction_queue_conflict';this.trigger=trigger;}}
+const predictionQueuePause=attempt=>attempt?new Promise(resolve=>setTimeout(resolve,10*2**attempt+Math.floor(Math.random()*10))):null;
+const putPredictionQueue=(env,object,queue)=>env.BUCKET.put(predictionQueueKey,JSON.stringify(queue),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+// A change of the stored queue that is not a rebuild. `apply` gets a copy of the current queue and returns the next value,
+// or null to leave it as it is; an absent queue is never created here.
+async function mutatePredictionQueue(env,apply,trigger){
+ for(let attempt=0;attempt<PREDICTION_QUEUE_ATTEMPTS;attempt++){
+  await predictionQueuePause(attempt);
+  const object=await env.BUCKET.get(predictionQueueKey);if(!object)return null;
+  const current=await object.json(),next=apply(cloneJSON(current));if(next==null)return current;
+  if(await putPredictionQueue(env,object,next)!==null)return next;
+ }
+ throw new PredictionQueueConflictError(trigger);
+}
+// A retry record only grows while its film is outstanding: attempts and retryAt never go back, and the same run's record
+// is written once.
+function mergeRetryRecord(existing,failure,runId){
+ if(existing?.lastRunId===runId)return existing;
+ const attempts=Math.max(failure.attempts||0,(existing?.attempts||0)+1),failedMs=Date.parse(failure.failedAt)||Date.now();
+ return {...failure,attempts,retryAt:Math.max(failure.retryAt||0,existing?.retryAt||0,failedMs+Math.min(6*3600000,3600000*2**(attempts-1))),lastRunId:runId};
+}
+// The run's failures not yet in the queue (a lost or failed submit write) are recorded; returns whether any was added.
+function recordRunRetries(queue,run){
+ queue.retries||={};let added=false;
+ for(const [id,failure] of Object.entries(run.failures||{})){
+  const record=failure&&typeof failure==='object'?failure:{kind:failure};
+  const merged=mergeRetryRecord(queue.retries[id],{kind:record.kind||'storage_error',scope:record.scope||'run',retryable:true,failedAt:record.failedAt||run.completedAt||new Date().toISOString(),retryAt:record.retryAt||0,attempts:record.attempts||0,...(record.validation?{validation:record.validation}:{})},run.runId);
+  if(merged!==queue.retries[id]){queue.retries[id]=merged;added=true;}
+ }
+ return added;
+}
+// `beforeWrite` lets a lease-holding caller renew its lease immediately before each queue write; `amend` changes the rebuilt
+// queue inside the same conditional write (run bookkeeping), so a conflict re-applies it to the fresh rebuild.
+async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrite=null,amend=null}={}){
+ for(let attempt=0;attempt<PREDICTION_QUEUE_ATTEMPTS;attempt++){
+  await predictionQueuePause(attempt);
+  // The queue is read before its inputs, so a rebuild never rests on a profile, index or programme older than the queue it
+  // replaces. A caller's programme of another generation than the stored queue is replaced by the published one.
+  const object=await env.BUCKET.get(predictionQueueKey),previous=object?await object.json():null;
+  const source=previous?.programmeRunId&&previous.programmeRunId!==report?.runId?await loadJSON(env,'programme.json')||report:report;
+  const queue=await buildPredictionQueue(env,source,trigger,previous);if(!queue)return null;
+  const next=amend?amend(queue)||queue:queue;
+  if(beforeWrite)await beforeWrite();
+  if(await putPredictionQueue(env,object,next)!==null)return next;
+ }
+ throw new PredictionQueueConflictError(trigger);
+}
+async function buildPredictionQueue(env,report,trigger,previous){
  const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
- const [profile,index,previous,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,predictionQueueKey),loadJSON(pinned,'epg/discovered-films.json')]);
+ const [profile,index,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'epg/discovered-films.json')]);
  if(!profile||!report?.films)return null;
  const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
@@ -649,7 +699,7 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',beforeWrite
  const hotPending=missing.filter(f=>priority[f.id].hot).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))],currentIds=new Set(missing.map(f=>String(f.id))),retries=Object.fromEntries(Object.entries(previous?.retries||{}).filter(([id])=>currentIds.has(id)));
  const hotCount=films.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-hotPending.length,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
  const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:report.runId,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
- if(beforeWrite)await beforeWrite();await saveJSON(env,predictionQueueKey,queue);return queue;
+ return queue;
 }
 async function queueStatus(env){return queueStatusView(await loadJSON(env,predictionQueueKey));}
 function queueStatusView(q){return q?{schemaVersion:q.schemaVersion,hotCount:q.hotCount,coldCount:q.coldCount,coldWithoutPrediction:q.coldWithoutPrediction,hotPredicted:q.hotPredicted,profileVersion:q.profileVersion,programmeRunId:q.programmeRunId,refreshedAt:q.refreshedAt,pendingCount:q.pending.length,priorityCount:q.priorityCount,hotRemaining:q.priorityCount,coldRemaining:q.coldRemaining??q.coldWithoutPrediction??0,urgentCount:q.urgentCount||0,adaptiveBatch:adaptivePredictionBatch(q),compatibility:q.compatibility||null,fingerprintCompatibility:q.fingerprintCompatibility||null,fingerprintSchemaVersion:q.fingerprintSchemaVersion??null,fingerprintPromptVersion:q.fingerprintPromptVersion??null,predictionPromptVersion:q.predictionPromptVersion??null,discovery:q.discovery||null,metrics:q.metrics||null,lastBatch:q.lastBatch,lastCheckAt:q.lastCheckAt,...scheduledRunFields()}:null;}
@@ -813,7 +863,7 @@ async function enrichmentStart(env,body,acquired=null){
  if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
 
  const selected=mode==='queued'?queueBatchIds(queue,queueReadyIds(queue),batchSize).map(id=>eligible.find(f=>String(f.id)===id)).filter(Boolean):body.limit===undefined?eligible:eligible.slice(0,body.limit);
- if(mode==='queued'&&!selected.length){await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';queue.lastCheckAt=at;queue.lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await saveJSON(env,predictionQueueKey,queue);if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...queue.lastBatch,...scheduledRunFields()});return json({status:stage,...queue.lastBatch,...scheduledRunFields()});}
+ if(mode==='queued'&&!selected.length){await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});}
  const states=await Promise.all(selected.map(f=>readFilmState(env,f.id))),baseline=Object.fromEntries(selected.map((f,i)=>[String(f.id),states[i].predictions?.current?.generatedAt||null])),freshness=await predictionFreshness(env,profile),pendingCount=mode==='queued'?queue.pending.length:states.filter((s,i)=>!freshness.state(s.predictions?.current,s.fingerprint,selected[i].genres)).length;
 
  const createdAt=new Date().toISOString(),run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,status:'running',mode,trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:acquired?.diagnosticStartedAt||createdAt,leaseAcquiredAt:acquired?.heartbeatAt||createdAt,startResult:acquired?.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:freshness.registryDigest??(await fingerprintRegistryDigests()).registry,eligibleCount:eligible.length,batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(f=>String(f.id)),selectionKind:Object.fromEntries(selected.map(f=>[String(f.id),mode==='queued'&&queue.priority[f.id]?.hot?'hot':'cold'])),baseline,failures:{},results:{}};
@@ -897,7 +947,10 @@ async function enrichmentSubmit(env,body){
   }
   run.lastActivityAt=new Date().toISOString();const renewed=await runnerLease(env,run.runId);if(renewed.status!=='owned')return json(renewed,409);run.lastHeartbeatAt=renewed.heartbeatAt;await savePredictionRun(env,run);
   // Retry state is persisted immediately, not postponed until the eventual run completion.
-  if(run.failures[id]){const queue=await loadJSON(env,predictionQueueKey);if(queue){queue.retries||={};queue.retries[id]={...run.failures[id],lastRunId:run.runId};await saveJSON(env,predictionQueueKey,queue);}}
+  if(run.failures[id]){const failure=run.failures[id];let record=null;
+   await mutatePredictionQueue(env,queue=>{queue.retries||={};const merged=mergeRetryRecord(queue.retries[id],failure,run.runId);if(merged===queue.retries[id])return null;queue.retries[id]=record=merged;return queue;},'submit_failure');
+   // A concurrent record of the same film (another run's) can only raise attempts and retryAt; the run and the answer follow it.
+   if(record&&(record.attempts!==failure.attempts||record.retryAt!==failure.retryAt)){failure.attempts=record.attempts;failure.retryAt=record.retryAt;const answer=results.findLast(r=>r.filmId===id);if(answer?.retryAt!==undefined)answer.retryAt=record.retryAt;await savePredictionRun(env,run);}}
   if(run.systemicStopReason)break;
  }
  let queue=null;if(run.mode==='queued')queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_progress');await runnerProgress(env,run,queue);
@@ -911,7 +964,7 @@ async function enrichmentComplete(env,body){
  if(fault.value&&!FAULT_REASONS.includes(faultReason))return json({error:'Fault requires an external stop reason'},400);
  const attributed=externalAttribution(faultReason,fault.value);if(attributed)run.callerFault=attributed;
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
- if(body.reason&&!NORMAL_COMPLETE.includes(body.reason))return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));
+ if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){if(run.mode==='queued'){try{await mutatePredictionQueue(env,queue=>recordRunRetries(queue,run)?queue:null,'stop_retries');}catch{}}return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&!body.reason)return json({error:'Profile changed; start a new run'},409);
  if(!body.reason&&await runContractChanged(run))return contractChangedResponse();
  if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'completion_check');if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
@@ -921,12 +974,12 @@ async function enrichmentComplete(env,body){
  created=Object.values(run.results).filter(x=>x==='created').length;recalculated=Object.values(run.results).filter(x=>x==='recalculated').length;const failed=Object.keys(run.failures).length;run.counts={created,recalculated,failed,pending};run.reason=['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason)?null:safePredictionReason(body.reason||run.interruption);run.reason=run.systemicStopReason||run.reason;run.stopReason=run.reason||(failed?'eligible_queue_empty':pending?'external_termination':'queue_empty');run.status=pending||run.reason?'partial':'complete';run.completedAt=new Date().toISOString();
  const summary=runSummary(run);let hotRemaining=null,coldRemaining=null,remaining=pending;
  if(run.mode==='queued'){
-  const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete');remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
+  // Retries, the batch summary and the counter go into the rebuild's own conditional write; the counter moves once per run.
+  const amend=queue=>{recordRunRetries(queue,run);if(queue.lastBatch?.runId!==run.runId)queue.metrics.hotProcessedTotal+=summary.hotProcessed;queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining:queue.pending.length,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,reason:run.reason,perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;return queue;};
+  const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete',{amend});remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
   // A normal completion is "drained" only when the refreshed queue has no outstanding film; otherwise work remains that
   // this run could not take (deferred by retry or waiting behind hot). Run completion and a drained queue stay separate.
   if(queue&&!run.reason&&!pending)run.stopReason=queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty';
-  if(queue){for(const id of Object.keys(run.failures)){if(queue.retries[id]?.lastRunId===run.runId)continue;const failure=run.failures[id],tries=(queue.retries[id]?.attempts||0)+1;queue.retries[id]={attempts:tries,retryAt:failure.retryAt||Date.now()+Math.min(6*3600000,3600000*2**(tries-1)),retryable:true,scope:failure.scope||'run',kind:failure.kind||failure,lastRunId:run.runId};}
-   queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining,hotRemaining,coldRemaining,reason:run.reason,perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;queue.metrics.hotProcessedTotal+=summary.hotProcessed;await saveJSON(env,predictionQueueKey,queue);}
  }
  const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
@@ -1210,7 +1263,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>runnerHeartbeat(env,body)),'heartbeat',requestId);
  if(path==='/api/enrichment/start'&&request.method==='POST')return diagnosedStart(env,body,requestId);
  if(path==='/api/enrichment/runs'&&request.method==='GET'){const text=url.searchParams.get('limit')||'10';if(!/^\d+$/.test(text)||Number(text)<1||Number(text)>100)return json({error:'Invalid limit (1–100)'},400);return json(await diagnosticHistory(env,Number(text)));}
- if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');const queue=await refreshPredictionQueue(env,report,'manual_reconcile');return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
+ if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,...scheduledRunFields()});
  if(path==='/api/enrichment/footer/status'&&request.method==='GET')return json(await footerStatus(env));
  if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body)),'next',requestId);
