@@ -12,6 +12,9 @@ assert.match(html,/NEW означает фильм вне твоего watchlist
 assert(css.includes('.finds-badge{position:absolute;top:-6px;left:-6px'),'NEW badge sits at the top left of the poster');
 assert(css.includes('.finds-card{position:relative;display:flex;flex-direction:column;min-width:0;border:1px solid #3f7a52;border-radius:12px;background:#1a2d21'),'finds card has its own soft green frame');
 assert(css.includes('.finds{margin-top:28px;padding:18px;border:1px solid #3b6346'),'finds section is a separate container below the grid');
+assert.match(css,/\.finds-cards\{display:grid;grid-template-columns:repeat\(auto-fill,minmax\(360px,1fr\)\);gap:12px\}/,'one find keeps a column: auto-fill does not collapse the empty tracks');
+assert.doesNotMatch(css,/\.finds-cards\{[^}]*auto-fit/,'auto-fit is what stretched a single card to the section width');
+assert.match(css,/@media\(max-width:760px\)\{\.finds\{padding:14px\}\.finds-cards\{grid-template-columns:1fr\}/,'a narrow width keeps one full-width column');
 // DOM order: the watchlist grid and its empty state come first, the finds section follows them inside the results column.
 const orderOf=marker=>{const at=html.indexOf(marker);assert(at>=0,marker);return at;};
 assert(orderOf('id="shortlist"')<orderOf('id="movies"'),'shortlist stays above the grid');
