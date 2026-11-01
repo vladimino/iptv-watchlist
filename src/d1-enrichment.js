@@ -152,15 +152,32 @@ async function d1EnrichmentDiff(env,db,now,summary){
  const {store,programmeRunId}=await d1EnrichmentStore(env);
  summary.programmeRunId=programmeRunId;
  summary.loadMs=Date.now()-started;
- // Schema v6 is the only version that can name a D1 metadata cache. v4 and v5 keep the R2 object
+ // Schema v6 and every later version can name a D1 metadata cache. v4 and v5 keep the R2 object
  // and do not query the cache tables. Mode d1 replaces that object before the view is built.
- // Version 6 without the cache tables or a valid marker fails the run before any write
+ // Version 6 or newer without the cache tables or a valid marker fails the run before any write
  // and does not project from the R2 object. A failed cache read does the same.
+ // Version 7 or newer with this domain installed requires every prediction table and a valid marker.
+ // The projector does not write that domain. A partial set of those tables fails the run before a write.
+ // None of the tables means a later migration advanced the contract without this domain. Prediction stays
+ // on the objects, and the run does not fail for that absence.
  const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
  summary.schemaVersion=version;
- if(version===6){
+ if(Number(version)>=6){
   try{await MetadataCache.useAuthoritativeMetadata(db,store);}
   catch(error){if(error?.code==='metadata_cache_unavailable')throw new D1EnrichmentInputError('metadata_cache_unavailable','metadata_cache');throw error;}
+ }
+ if(Number(version)>=7){
+  try{
+   const authority=await PredictionD1.readPredictionAuthority(db,env);
+   if(authority.domain!=='absent'){
+    if(!authority.tables)throw new D1EnrichmentInputError('prediction_domain_unavailable','prediction_domain');
+    summary.predictionMode=authority.mode;
+   }
+  }catch(error){
+   if(error instanceof D1EnrichmentInputError)throw error;
+   if(error?.code==='prediction_domain_unavailable')throw new D1EnrichmentInputError('prediction_domain_unavailable','prediction_domain');
+   throw error;
+  }
  }
  const view=LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),retirements=view.tmdbRetirements||null;
  if(retirements){
@@ -180,7 +197,7 @@ async function d1EnrichmentDiff(env,db,now,summary){
  // Schema v4 keeps the plan above and writes nothing else. Sync clocks are written when the contract
  // is version 5 or 6 and film_sync_state exists. A version without the table does not write them.
  // The film change key is not involved, so a v4 database does not rewrite its Films because these fields exist.
- plan.syncReady=(version===5||version===6)&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
+ plan.syncReady=Number(version)>=5&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
  plan.sync=[];
  if(plan.syncReady){
   const storedSync=new Map((await db.all("SELECT id,change_key FROM projection_state WHERE projection=? AND kind='film'",[METADATA_SYNC_PROJECTION])).map(row=>[row.id,row.change_key]));
@@ -318,30 +335,40 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
 }
 
 // The read-only status of the projector for /api/d1/status. schema is true for the whole of migration 0004 (its three tables
-// and schema_contract version 4), for migration 0005 (those tables, film_sync_state and version 5), and for migration 0006
-// (those plus metadata_cache, metadata_cache_authority, metadata_cache_cas and version 6). A partial schema is false.
+// and schema_contract version 4), for migration 0005 (those tables, film_sync_state and version 5), for migration 0006
+// (those plus metadata_cache, metadata_cache_authority, metadata_cache_cas and version 6), and for version 7 or newer
+// when the ten prediction-domain tables are all present or all absent. A partial prediction domain is false.
+// A later additive version without those tables stays true: another migration may have advanced the contract.
 // Version 4 stays true when the sync table is absent. Version 5 stays true when the cache tables are absent.
+// Version 6 stays true when the prediction-domain tables are absent.
 async function d1EnrichmentStatus(binding,env){
  const mode=d1EnrichmentMode(env);
- const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas')").bind().all()).results||[]).map(row=>row.name);
+ const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas','prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent')").bind().all()).results||[]).map(row=>row.name);
  const tables=present.filter(name=>name==='projection_state'||name==='projection_run'||name==='projection_fence').sort();
  const syncTable=present.includes('film_sync_state');
  const cacheReady=present.includes('metadata_cache')&&present.includes('metadata_cache_authority')&&present.includes('metadata_cache_cas');
+ const predictionNames=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent'];
+ const predictionReady=predictionNames.every(name=>present.includes(name));
+ const predictionAbsent=predictionNames.every(name=>!present.includes(name));
  const version=(await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first())?.version??null;
- if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
+ if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)||(Number(version)>=7&&syncTable&&cacheReady&&(predictionReady||predictionAbsent))))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
  const [run,counts]=await Promise.all([
   binding.prepare('SELECT lease_until leaseUntil,started_at startedAt,finished_at finishedAt,outcome,summary_json summary FROM projection_run WHERE projection=?').bind(D1_ENRICHMENT_PROJECTION).first(),
   binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),
  ]);
  let summary=null;try{summary=run?.summary?JSON.parse(run.summary):null;}catch{}
  const status={mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
- if(version===5||version===6){
+ if(Number(version)>=5){
   const sync=await binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(METADATA_SYNC_PROJECTION).first();
   status.schemaVersion=version;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;
  }
- if(version===6){
+ if(Number(version)>=6){
   const marker=await binding.prepare('SELECT mode AS cacheMode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration FROM metadata_cache_authority WHERE id=1').bind().first();
   status.cacheMode=marker?.cacheMode??null;status.cacheGeneration=marker?.cacheGeneration??null;status.mirrorGeneration=marker?.mirrorGeneration??null;
+ }
+ if(Number(version)>=7&&predictionReady){
+  const marker=await binding.prepare('SELECT mode AS predictionMode, generation AS predictionGeneration, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes AS predictionWrites FROM prediction_domain_authority WHERE id=1').bind().first();
+  status.predictionMode=marker?.predictionMode??null;status.predictionGeneration=marker?.predictionGeneration??null;status.queueGeneration=marker?.queueGeneration??null;status.profileGeneration=marker?.profileGeneration??null;status.predictionWrites=marker?.predictionWrites??null;
  }
  return status;
 }
