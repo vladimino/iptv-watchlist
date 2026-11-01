@@ -6,7 +6,7 @@
 **Approval source:** explicit owner decision on 2026-10-31 (Europe/Madrid): ADR 0064 **Accepted**, both GitHub-rendered Mermaid diagrams in `docs/architecture/prediction-pipeline.md` **visually approved**, after independent PASS review of PR #271 at `8fca456` ([owner decision](https://trello.com/c/VBVLAbuW#comment-6ae5d948481f3132e371ae82))  
 **Related work:** [AIR-298](https://trello.com/c/VBVLAbuW), root finding in [AIR-281](https://trello.com/c/bjKa4hRj) / [PR #269](https://github.com/vladimino/iptv-watchlist/pull/269)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** [ADR 0078](0078-d1-authoritative-prediction-domain.md) for the queue compare-and-swap only when `prediction_domain_authority.mode` becomes `d1`: D1 generation is the fence and the R2 etag is a compatibility mirror. In `r2` mode the existing conditional object write remains in force.
 
 ## Context
 
