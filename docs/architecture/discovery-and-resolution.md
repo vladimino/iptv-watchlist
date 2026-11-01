@@ -23,6 +23,7 @@ flowchart TD
     obsindex[("Observation index per published generation:<br/>manifest and 16 shards in R2")]
     ownerread["Owner page /admin/limbo:<br/>read-only explanation of one observation"]
     reconsider["discovery_reconsider:<br/>confirmed terminal no_more_evidence only;<br/>resolver lease, CAS, receipt"]
+    identity["discovery_identity_correct:<br/>one movie id, assign or reject;<br/>resolver lease, CAS, receipt"]
     epg --> ledger --> eligible
     eligible -->|no| unresolved
     eligible -->|yes| search --> scorer
@@ -44,8 +45,11 @@ flowchart TD
     ledger -.->|each chunk after its checkpoint, fenced| obsindex
     obsindex -->|bounded read; ledger and decisions by etag only| ownerread
     ownerread -->|explicit owner confirmation of one key| reconsider
+    ownerread -->|explicit owner confirmation of one key and one movie id| identity
     reconsider -->|lifts terminal fence of one decision; no TMDB, no chunk| ledger
+    identity -->|writes one current decision; no TMDB, no chunk| ledger
     reconsider -.->|refreshes its record| obsindex
+    identity -.->|refreshes its record| obsindex
 ```
 
 Before an observation reaches the ledger, and again before each resolver chunk, the [non-film screen](../reference/domain/nonfilm-screening.md) removes high-confidence series episodes and TV shows by title, or by XMLTV `episode-num` during the EPG scan. A reliable watchlist/catalog match or a verified decision outranks that screen. A stored `excluded_nonfilm` decision that the current rule no longer reproduces makes the observation eligible again in the normal cycle; it is not cleaned up or backfilled.
@@ -60,9 +64,10 @@ The catalogue upsert above is the only writer that creates or re-identifies cata
 
 - **Index.** After its checkpoint, each resolver chunk writes a bounded index of the current unresolved observations that already have a decision. It is fenced by the resolver lease and written only for the published generation. The manifest names the etags of the decisions and the ledger it was built from, so any later write to either makes the index stale.
 - **Owner read.** The owner page explains one observation from that index alone, never from the ledger or the decision body. A missing, torn or foreign index is unavailable, not empty.
-- **Guarded action.** The one write, `discovery_reconsider`, is offered only for a confirmed terminal `no_more_evidence` on a fresh index with no live lease, protected wait, throttle or ambiguity. It changes one decision: it clears the terminal reason and the retry time and keeps the attempts and the evidence key. It writes under the resolver lease, by compare-and-swap on the decision map's etag and the decision's digest, with a stored before-image and receipt. It calls no TMDB and starts no chunk: the next ordinary chunk takes the observation through the `eligible` gate above, and an uncertain result on the same evidence makes it terminal again.
+- **Guarded reconsideration.** `discovery_reconsider` is offered only for a confirmed terminal `no_more_evidence` on a fresh index with no live lease, protected wait, throttle or ambiguity. It changes one decision: it clears the terminal reason and the retry time and keeps the attempts and the evidence key. It writes under the resolver lease, by compare-and-swap on the decision map's etag and the decision's digest, with a stored before-image and receipt. It calls no TMDB and starts no chunk: the next ordinary chunk takes the observation through the `eligible` gate above, and an uncertain result on the same evidence makes it terminal again.
+- **Identity correction** ([ADR 0080](../adr/0080-discovery-identity-correction.md), Proposed). `discovery_identity_correct` assigns or rejects one numeric movie id on one current decision. A trusted choice is the observation's own confirmed movie id, or a typed id that one catalogue object supports. A title and the scorer's hypothesis are not trusted. The same lease, compare-and-swap and receipt apply. The write is the decision. Shows follow the next ordinary chunk only when that chunk's cheap pass can touch a catalogue film that is already there. A rejected id is not searched and is not fetched as movie detail. The action does not start the chunk. An unknown store marker writes nothing.
 
-Contracts: [admin API](../reference/api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery), [observation index](../reference/domain/discovery-observation-index.md), [recovery assessment](../reference/domain/discovery-recovery.md).
+Contracts: [admin API](../reference/api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery), [observation index](../reference/domain/discovery-observation-index.md), [recovery assessment](../reference/domain/discovery-recovery.md), [identity correction](../adr/0080-discovery-identity-correction.md).
 
 At the end of a chunk the resolver rebuilds the prediction queue for the published programme. It renews its discovery lease before each write attempt, and the write is conditional on the queue it read ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31). A conflict it cannot resolve ends as `prediction_queue_checkpoint` in the chunk's status, never as an overwrite.
 

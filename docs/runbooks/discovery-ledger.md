@@ -41,7 +41,7 @@ In bounded mode no discovery chunk and no status read touches the archive. `POST
 
 ## One stuck observation
 
-There is no per-observation retry or lookup. The owner page explains one observation, and for one case it offers a guarded write that sends the observation back to the ordinary queue ([ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md)). Do not improvise anything else.
+There is no per-observation retry or lookup. The owner page explains one observation. It offers two guarded writes, and nothing else: sending one terminal observation back to the ordinary queue ([ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md)), and assigning or rejecting one movie id on one current observation ([ADR 0080](../adr/0080-discovery-identity-correction.md)). Do not improvise a third write.
 
 1. **Read it, read-only.** Open `/admin/limbo?kind=observation` and press «Разобрать наблюдение» on the item: one `GET /api/admin/discovery-recovery` ([contract](../reference/api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery)). If the page says observations are unavailable, the generation's [observation index](../reference/domain/discovery-observation-index.md) is missing, torn or of another generation. The next ordinary resolver chunk writes it. Wait for it; a chunk run only to build the index is a series-level operation that needs the owner's approval.
 2. **Read the series.** The panel names the series state; the same is in `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`): `continuation`, `continuationHealth`, `lastBatch`. The [series states](../reference/domain/discovery-recovery.md#series-states):
@@ -52,7 +52,7 @@ There is no per-observation retry or lookup. The owner page explains one observa
 3. **Judge by the rules.** The [verdict table](../reference/domain/discovery-recovery.md#verdicts) gives the answer for each case:
    - An actionable observation is already queued.
    - A future `retryAt` is policy.
-   - An `ambiguous` decision needs identity review, which has no page yet. The panel says «Автоматическое исправление этой проблемы пока недоступно», and «Разобрать наблюдение» only explains it.
+   - An `ambiguous` decision with no confirmed movie id and no id already on the decision has no identity form. The panel says that a choice from the title alone is not possible. Reconsideration stays unavailable for that case.
    - A candidate outside the EPG window cannot be resolved until it airs again.
    - A terminal decision on unchanged evidence (`no_more_evidence`) stays out of the resolver's work until new airings arrive. This is the one case the action addresses.
 4. **Reconsider, only as the owner.** This is a production write. Agents never run it without the owner's explicit approval of that run. When the panel offers «Повторно направить на проверку», it states the cost (no TMDB request, no resolver run, one decision written), the risk and the effect.
@@ -70,7 +70,17 @@ There is no per-observation retry or lookup. The owner page explains one observa
    - A warning that the receipt was not stored, or that the index was not refreshed: the write itself is as the receipt says. The index reads as stale until the next chunk, and the action is not offered meanwhile.
 6. **Undo is manual.** The action record under `admin/actions/discovery_reconsider/v1/` keeps the previous decision. Restoring it is a separate owner-approved write and rarely needed, because the next uncertain attempt on the same airings makes the observation terminal again.
 7. **Do not use a forced `POST /api/enrichment/discovery/resolve` as a targeted retry.** It runs a whole chunk over other observations, with TMDB calls. Running it is a separate owner-approved operation, decided at the series level.
-8. **Never edit `epg/discovery-resolution.json`, the index or the resolver lease by hand.** A running chunk rewrites the whole decision map from its own copy, so a manual edit is lost or overwrites the chunk's decisions. The guarded action is the only single-decision write, and it compare-and-swaps under the lease.
+8. **Never edit `epg/discovery-resolution.json`, the index or the resolver lease by hand.** A running chunk rewrites the whole decision map from its own copy, so a manual edit is lost or overwrites the chunk's decisions. The two guarded actions are the only single-decision writes, and each compare-and-swaps under the lease.
+
+## One wrong identity
+
+This is a production write of one decision. Agents do not run it. The owner does, on one real observation, after the code is deployed. [ADR 0080](../adr/0080-discovery-identity-correction.md). It does not start a chunk, call TMDB, or change another observation, a film title, a person name, or a past generation.
+
+1. Open the same panel as above. Read the title, year, duration, airings, evidence key, decision, hypothesis and the coverage sentence. The hypothesis is not a choice. A radio exists only for a movie id the observation already confirmed. A typed id is checked against one catalogue object at confirm, not against a title search.
+2. Choose «Подтвердить фильм» or «Отклонить совпадение», the one id, and a short basis. Tick the checkbox that names that key and that generation. Press «Подтвердить идентичность», then «Записать идентичность».
+3. Read the receipt. **Записано** means the decision was written. The sentence under it says what the next ordinary chunk will do with shows. It does not mean the catalogue, search and detail were rewritten by this click. A rejection blocks that id on this decision only. **Исход неизвестен** means do not repeat: the same confirmation replays the receipt. **Не записано** means the other writer kept the map. A refusal such as a year conflict or a television id writes nothing.
+4. If the panel says the index was not refreshed, the list may still show the row until the next ordinary chunk. Do not start a chunk to hide the row.
+5. **Undo is manual.** The record under `admin/actions/discovery_identity_correct/v1/` keeps the before-image. Restoring it is a separate owner-approved write. A code revert stops the route and leaves the decision and the record in place. The next ordinary chunk must not verify a rejected id and must not request its movie card.
 
 ## Rollback
 
@@ -83,7 +93,7 @@ There is no per-observation retry or lookup. The owner page explains one observa
 
   A plain code revert without these steps drops archived history.
 - Archive objects are never deleted by the Worker. Removing unreferenced versions is a separate, owner-approved maintenance decision.
-- **Observation index and reconsideration.** A code revert stops the index writes and the action. Index objects already written stay under their generation and are ignored, and a decision already reconsidered stays so until the next chunk decides it. Action records stay.
+- **Observation index, reconsideration and identity correction.** A code revert stops the index writes and both actions. Index objects already written stay under their generation and are ignored by an older reader. A decision already reconsidered or identity-corrected stays so. Action records stay. Restoring a before-image is a separate owner-approved write, not a revert.
 
 ## Offline split (AIR-221 rehearsal)
 

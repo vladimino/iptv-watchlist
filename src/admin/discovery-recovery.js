@@ -2,16 +2,22 @@
 //   GET  /api/admin/discovery-recovery?key=<observation key>[&pin=]   read-only assessment and action preview
 //   POST /api/admin/discovery-recovery/confirm                          server-issued confirmation of one exact scope
 //   POST /api/admin/discovery-recovery/reconsider                       the guarded write discovery_reconsider@1
-//   GET  /api/admin/discovery-recovery/receipt?idempotencyKey=<key>     the stored action record and its receipt
+//   GET  /api/admin/discovery-recovery/receipt?idempotencyKey=<key>     the stored reconsider record and its receipt
+//   POST /api/admin/discovery-recovery/identity-confirm                 confirmation of one assign or reject
+//   POST /api/admin/discovery-recovery/identity-correct                 the guarded write discovery_identity_correct@1
+//   GET  /api/admin/discovery-recovery/identity-receipt?idempotencyKey= the stored identity record and its receipt
 // Every read of the observation comes from the generation-scoped observation index (src/domain/discovery-observation-index.js),
 // never from the discovery ledger or the body of the resolution map; the GET routes get a bucket that has nothing but `get`
 // and `head`, so they cannot write, list or delete. Nothing here calls TMDB, runs a chunk, starts a series or dispatches
-// work. The one write lifts the terminal fence of one decision in the resolution map under the resolver lease, an etag
-// compare-and-swap and the decision's own digest; the next ordinary resolver chunk then decides what happens to it.
+// work. Two writes share that lease: discovery_reconsider lifts one terminal fence, and discovery_identity_correct
+// assigns or rejects one movie id on one current decision. Each compare-and-swaps the resolution map on its etag and
+// the decision's own digest. Neither calls TMDB nor starts a chunk.
 // Contracts: docs/reference/api/admin.md (routes), docs/reference/api/admin-actions.md (the action),
 // docs/reference/domain/discovery-recovery.md (the assessment).
 const DR_RESOLUTION_KEY='epg/discovery-resolution.json',DR_STATUS_KEY='epg/discovery-status.json',DR_CONTINUATION_KEY='epg/resolver-continuation.json';
 const DR_ACTION_PREFIX='admin/actions/discovery_reconsider/v1/';
+const DI_ACTION_PREFIX='admin/actions/discovery_identity_correct/v1/';
+const DI_CATALOG_KEY='epg/discovered-films.json';
 const DR_PIN=/^D1\.[0-9a-f]{32}$/,DR_IDEMPOTENCY=/^[A-Za-z0-9_-]{16,80}$/,DR_BODY_MAX=16384;
 const DR_CAPABILITY=AdminActions.defineCapability({
  id:'discovery_reconsider',version:1,title:'Reconsider one terminal discovery observation',
@@ -20,7 +26,14 @@ const DR_CAPABILITY=AdminActions.defineCapability({
  compensation:{kind:'manual',guidance:'No automatic undo. The action record keeps the before-image of the decision; the next ordinary uncertain outcome on the same evidence makes the observation terminal again.'},
  confirmTtlMs:10*60000,
 });
-const DR_REGISTRY=AdminActions.createRegistry([DR_CAPABILITY]);
+const DI_CAPABILITY=AdminActions.defineCapability({
+ id:'discovery_identity_correct',version:1,title:'Correct the identity of one discovery observation',
+ subjectKinds:['observation'],healthActionCode:'discovery_identity_correct',
+ budget:{maxRecords:1,maxWritesPerRecord:1,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
+ compensation:{kind:'manual',guidance:'No automatic undo. The action record keeps the before-image of the one decision. Restoring it is a separate owner-approved write. A rejection blocks only that movie id on this observation.'},
+ confirmTtlMs:10*60000,
+});
+const DR_REGISTRY=AdminActions.createRegistry([DR_CAPABILITY,DI_CAPABILITY]);
 
 // A bucket with `get` and `head` only. Every key it serves is recorded with the version it showed, except the resolver
 // lease: the lease is judged on its own (a live writer refuses the action), and the executor's own lease must not make
@@ -49,7 +62,7 @@ async function drPin(versions){
 async function discoveryIndexRead(bucket,options={}){
  const pointer=await bucket.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  const run=generation?.phase==='published'&&typeof generation.programmeRunId==='string'&&generation.programmeRunId?generation.programmeRunId:null;
- const base={programmeRunId:run,manifest:null,manifestEtag:null,records:[],reasons:[]};
+ const base={programmeRunId:run,manifest:null,manifestEtag:null,records:[],reasons:[],generation:generation&&typeof generation==='object'?generation:null};
  if(!run)return {...base,state:'unavailable',reasons:['no_published_generation']};
  const object=await bucket.get(DiscoveryIndex.observationIndexManifestKey(run));
  const manifestEtag=object?String(object.etag??''):null;
@@ -100,7 +113,8 @@ async function drObserve(bucket,versions,key,nowMs,ownLeaseId=null){
  const pin=await drPin(versions);
  const issues=assessment&&!assessment.error?[DiscoveryRecovery.reconsiderIssue(assessment)]:[];
  const preview=AdminActions.previewAction(DR_REGISTRY,{capability:DR_CAPABILITY.id,version:DR_CAPABILITY.version,subject:{kind:'observation',id:key},pin,ids:[key]},{pin,now,records:record?[{id:key,version:record.decisionHash}]:[],issues});
- return {pin,now,index,record,assessment,preview,lease,continuation,status};
+ const identity=DiscoveryIdentity.identityOffer({record,index:{state:index.state,complete:index.manifest?.coverage?.complete===true},generation:index.generation,series:assessment&&!assessment.error?assessment.series:null});
+ return {pin,now,index,record,assessment,preview,identity,lease,continuation,status};
 }
 function drObservationView(record){
  if(!record)return null;
@@ -133,6 +147,7 @@ async function adminDiscoveryRecoveryRoute(request,env,url){
   index:drIndexView(observed.index),indexed:!!observed.record,
   observation:drObservationView(observed.record),
   assessment:observed.assessment,
+  identity:observed.identity,
   action:drPreviewView(observed.preview,observed.assessment),
   coordination:{lease:observed.lease.status,continuation:observed.continuation.status,status:observed.status.status},
   sources:[...versions.keys()].sort((left,right)=>left.localeCompare(right,'en')),
@@ -292,9 +307,181 @@ async function drReceipt(env,url){
  return json({idempotencyKey,state,record});
 }
 
+function diPrincipal(request,url){
+ const assertion=request.headers.get('Cf-Access-Jwt-Assertion');
+ const type=(request.headers.get('Content-Type')||'').split(';')[0].trim().toLowerCase();
+ return {owner:typeof assertion==='string'&&assertion.length>0&&assertion.length<=8192&&request.headers.get('Origin')===url.origin&&request.headers.get('X-IPTV-Admin-Action')==='discovery_identity_correct'&&type==='application/json'};
+}
+function diActionKey(idempotencyKey){return DI_ACTION_PREFIX+idempotencyKey+'.json';}
+async function diCatalogFilm(env,tmdbId){
+ try{
+  const object=await env.BUCKET.get(DI_CATALOG_KEY);
+  if(!object)return {status:'absent',film:null};
+  const catalog=await object.json();
+  const film=catalog&&typeof catalog==='object'&&!Array.isArray(catalog)?catalog['tmdb_'+tmdbId]??null:null;
+  return {status:'recorded',film:film&&typeof film==='object'&&!Array.isArray(film)?film:null};
+ }catch{return {status:'unavailable',film:undefined};}
+}
+function diPlan(record,command){
+ const decision=record?.decision||{};
+ const before={status:decision.status??null,tmdbId:decision.tmdbId??null,rejectedTmdbIds:decision.rejectedTmdbIds||[]};
+ const after=command.effect==='assign'
+  ?{status:'verified',tmdbId:command.tmdbId,filmId:'tmdb_'+command.tmdbId,rejectedTmdbIds:(decision.rejectedTmdbIds||[]).filter(id=>id!==command.tmdbId)}
+  :{status:decision.status==='verified'?'needs_verification':decision.status??'needs_verification',tmdbId:decision.tmdbId===command.tmdbId?null:decision.tmdbId??null,rejectedTmdbIds:[...new Set([...(decision.rejectedTmdbIds||[]),command.tmdbId])]};
+ return {before,after};
+}
+// Best-effort index update for the one key. A verified decision leaves the unresolved shard; a rejection stays, with
+// the new decision view. Coverage counts move together when a row is removed so the manifest sum still matches.
+async function diRefreshIndex(env,run,key,decision,decisionHash,resolutionEtag,fence,idempotencyKey){
+ const manifestObject=await env.BUCKET.get(DiscoveryIndex.observationIndexManifestKey(run));
+ const read=DiscoveryIndex.readObservationIndexManifest(manifestObject?await manifestObject.json():null,run);
+ if(!read.ok)return {refreshed:false,reason:read.state};
+ const shard=DiscoveryIndex.observationShard(key),shardObject=await env.BUCKET.get(DiscoveryIndex.observationIndexShardKey(run,shard));
+ const current=DiscoveryIndex.readObservationIndexShard(shardObject?await shardObject.json():null,read.manifest,shard);
+ if(!current.ok)return {refreshed:false,reason:current.state};
+ if(!shardObject||!current.items.some(item=>item.key===key))return {refreshed:false,reason:'record_absent'};
+ const removing=decision?.status==='verified';
+ const items=removing?current.items.filter(item=>item.key!==key):current.items.map(item=>item.key===key?{...item,decision:DiscoveryIndex.observationDecisionView(decision),decisionHash}:item);
+ const revision=await discoveryDigest(DiscoveryIndex.canonicalJson(items));
+ if(!await fence())return {refreshed:false,reason:'fence_lost'};
+ const savedShard=await observationShardPut(env,run,shard,items,revision,{onlyIf:{etagMatches:shardObject.etag}});
+ if(savedShard===null)return {refreshed:false,reason:'shard_changed'};
+ const ledger=await env.BUCKET.head(epgGenerationKey(run,'discovery-latest.json'));
+ if(!ledger?.etag)return {refreshed:false,reason:'source_unread'};
+ const manifest=read.manifest;
+ const coverage=removing&&manifest.coverage&&typeof manifest.coverage==='object'?{...manifest.coverage}:manifest.coverage;
+ if(removing&&coverage){
+  if(Number.isInteger(coverage.indexed)&&coverage.indexed>0)coverage.indexed-=1;
+  if(Number.isInteger(coverage.eligible)&&coverage.eligible>0)coverage.eligible-=1;
+  if(Number.isInteger(coverage.indexed)&&Number.isInteger(coverage.eligible))coverage.complete=coverage.indexed===coverage.eligible;
+ }
+ const next=DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),writer:{kind:'discovery_identity_correct',idempotencyKey},sources:{resolutionEtag,ledgerEtag:ledger.etag},shards:manifest.shards.map((entry,index)=>index===shard?{items:items.length,revision}:{items:entry.items,revision:entry.revision}),coverage,counts:manifest.counts});
+ if(!await fence())return {refreshed:false,reason:'fence_lost'};
+ const savedManifest=await env.BUCKET.put(DiscoveryIndex.observationIndexManifestKey(run),JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:manifestObject.etag}});
+ return savedManifest===null?{refreshed:false,reason:'manifest_changed'}:{refreshed:true,reason:null,removed:removing};
+}
+async function diConfirm(request,env,url){
+ if(!diPrincipal(request,url).owner)return drRefused('access_denied',403);
+ const body=await drBody(request);
+ if(!body)return drRefused('invalid_request',400);
+ const key=drKey(body.key);
+ if(!key||typeof body.pin!=='string'||!DR_PIN.test(body.pin)||typeof body.idempotencyKey!=='string'||!DR_IDEMPOTENCY.test(body.idempotencyKey))return drRefused('invalid_request',400);
+ if(body.accepted!==true)return drRefused('confirmation_missing',400);
+ const {bucket,versions}=drReadOnly(env.BUCKET);
+ const observed=await drObserve(bucket,versions,key,Date.now());
+ if(observed.pin!==body.pin)return drRefused('stale_pin',409,{pin:observed.pin,reason:'stale_pin'});
+ const offer=observed.identity;
+ if(!offer?.available)return drRefused('not_eligible',409,{pin:observed.pin,reason:offer?.reason||'not_eligible'});
+ const film=body.effect==='assign'?await diCatalogFilm(env,typeof body.tmdbId==='string'?body.tmdbId:String(body.tmdbId??'')):{status:'recorded',film:null};
+ if(film.status==='unavailable')return drRefused('not_eligible',409,{pin:observed.pin,reason:'catalogue_unread'});
+ const command=DiscoveryIdentity.identityCommand(observed.record,body,film.film);
+ if(!command.ok)return drRefused('not_eligible',409,{pin:observed.pin,reason:command.reason});
+ const version=DiscoveryIdentity.identityVersion(observed.record.decisionHash,command.effect,command.tmdbId);
+ const issue=DiscoveryIdentity.identityIssue(key,offer,command);
+ const preview=AdminActions.previewAction(DR_REGISTRY,{capability:DI_CAPABILITY.id,version:DI_CAPABILITY.version,subject:{kind:'observation',id:key},pin:observed.pin,ids:[key]},{pin:observed.pin,now:observed.now,records:[{id:key,version}],issues:[issue]});
+ const issued=AdminActions.confirmAction(preview,{now:observed.now,idempotencyKey:body.idempotencyKey,accepted:true});
+ if(issued.error)return drRefused(issued.error,409,{pin:observed.pin,reason:command.reason});
+ const application=DiscoveryIdentity.identityApplication(command.effect,offer,command);
+ const plan=diPlan(observed.record,command);
+ const record={schemaVersion:1,kind:'discovery_identity_action',idempotencyKey:body.idempotencyKey,state:'approved',issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},application,plan,createdAt:observed.now,startedAt:null,finishedAt:null,
+  provenance:{actor:'owner',authority:'cloudflare_access',programmeRunId:observed.index.programmeRunId,manifestEtag:observed.index.manifestEtag,observationKey:key},
+  beforeImage:null,afterImage:null,receipt:null,index:null};
+ const saved=await env.BUCKET.put(diActionKey(body.idempotencyKey),JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ if(saved===null)return drRefused('idempotency_conflict',409);
+ return json({confirmation:issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},plan,application,scope:{key,programmeRunId:observed.index.programmeRunId,decisionHash:observed.record.decisionHash}});
+}
+async function diExecute(request,env,url){
+ if(!diPrincipal(request,url).owner)return drRefused('access_denied',403);
+ const body=await drBody(request);
+ const confirmation=body?.confirmation;
+ const submitted=AdminActions.validateConfirmation(confirmation);
+ if(!submitted||submitted.capability!==DI_CAPABILITY.id)return drRefused(submitted? 'unsupported_capability':'invalid_request',400);
+ const parsed=DiscoveryIdentity.parseIdentityVersion(submitted.records[0]?.version);
+ if(!parsed)return drRefused('invalid_request',400);
+ const object=await env.BUCKET.get(diActionKey(submitted.idempotencyKey));
+ const stored=object?{record:await object.json(),etag:object.etag}:{record:null,etag:null};
+ if(!stored.record)return drRefused('confirmation_missing',409);
+ if(stored.record.receipt){
+  if(stored.record.issued?.scopeKey!==confirmation.scopeKey)return drRefused('idempotency_conflict',409);
+  return json({replayed:true,receipt:stored.record.receipt,state:stored.record.state,application:stored.record.application??null,index:stored.record.index??null});
+ }
+ if(stored.record.state==='running')return drRefused('in_progress',409,{state:'unknown',note:'An earlier submission with this key started and left no receipt. Its outcome is unknown: read the observation again; nothing is retried.'});
+ const command=stored.record.command;
+ if(!command||command.effect!==parsed.effect||command.tmdbId!==parsed.tmdbId)return drRefused('confirmation_mismatch',409);
+ const held=await drJson(env.BUCKET,DISCOVERY_LEASE_KEY);
+ if(held.status==='unavailable')return drRefused('storage_unavailable',503);
+ if(held.status==='recorded'&&!drLeaseReadable(held.value))return drRefused('lease_unknown',409);
+ const lease=await acquireDiscoveryLease(env);
+ if(!lease)return drRefused('lease_held',409);
+ const startedAt=new Date().toISOString(),key=submitted.subject.id;
+ let action=stored;
+ const finish=async(fields,outcomes,options={})=>{
+  const receipt=AdminActions.receiptOf({confirmation,capability:DI_CAPABILITY,startedAt,finishedAt:new Date().toISOString(),outcomes,aborted:options.aborted===true,refusal:options.refusal||null});
+  const record={...action.record,...fields,state:receipt.state,finishedAt:receipt.finishedAt,receipt};
+  let durable=false;
+  try{const saved=await env.BUCKET.put(diActionKey(submitted.idempotencyKey),JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:action.etag?{etagMatches:action.etag}:{etagDoesNotMatch:'*'}});durable=saved!==null;}catch{durable=false;}
+  return json({replayed:false,receipt,durable,state:receipt.state,application:record.application??null,index:record.index??null,reason:options.reason||null,...(receipt.refusal?{refusal:receipt.refusal}:{})},receipt.state==='refused'?409:200);
+ };
+ try{
+  const {bucket,versions}=drReadOnly(env.BUCKET);
+  const observed=await drObserve(bucket,versions,key,Date.now(),lease.id);
+  const film=command.effect==='assign'?await diCatalogFilm(env,command.tmdbId):{status:'recorded',film:null};
+  const decided=film.status==='unavailable'?{ok:false,reason:'catalogue_unread'}:DiscoveryIdentity.identityCommand(observed.record,command,film.film);
+  const offer=observed.identity;
+  const version=observed.record?DiscoveryIdentity.identityVersion(observed.record.decisionHash,command.effect,command.tmdbId):null;
+  const issue=DiscoveryIdentity.identityIssue(key,offer,decided.ok&&version===submitted.records[0].version?decided:{ok:false,reason:decided.reason||'record_changed'});
+  const fresh={pin:observed.pin,now:observed.now,records:version?[{id:key,version}]:[],issues:[issue]};
+  const check=AdminActions.checkSubmission(DR_REGISTRY,confirmation,fresh,{principal:{owner:true},issued:stored.record.issued});
+  if(!check.ok)return await finish({startedAt},[{id:key,outcome:'not_attempted'}],{refusal:check.refusal,reason:decided.reason||check.refusal});
+  if(!decided.ok)return await finish({startedAt},[{id:key,outcome:'not_attempted'}],{refusal:'not_eligible',reason:decided.reason});
+  const mapObject=await env.BUCKET.get(DR_RESOLUTION_KEY);
+  if(!mapObject||mapObject.etag!==observed.index.resolutionEtag)return await finish({startedAt},[{id:key,outcome:'not_attempted'}],{refusal:'record_changed',reason:'record_changed'});
+  const decisions=await mapObject.json(),previous=decisions?.[key];
+  if(!previous||typeof previous!=='object'||await discoveryDigest(DiscoveryIndex.canonicalJson(previous))!==observed.record.decisionHash||parsed.decisionHash!==observed.record.decisionHash)return await finish({startedAt},[{id:key,outcome:'not_attempted'}],{refusal:'record_changed',reason:'record_changed'});
+  const next=DiscoveryIdentity.appliedIdentityDecision(previous,decided,{at:startedAt,requestId:submitted.idempotencyKey,programmeRunId:observed.index.programmeRunId});
+  const nextHash=await discoveryDigest(DiscoveryIndex.canonicalJson(next));
+  const application=DiscoveryIdentity.identityApplication(decided.effect,offer,decided);
+  const beforeImage={resolutionEtag:mapObject.etag,decisionHash:observed.record.decisionHash,decision:previous};
+  const intent={...action.record,state:'running',startedAt,application,beforeImage,afterImage:{resolutionEtag:null,decisionHash:nextHash,decision:next}};
+  const opened=await env.BUCKET.put(diActionKey(submitted.idempotencyKey),JSON.stringify(intent),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:action.etag}});
+  if(opened===null)return drRefused('in_progress',409,{state:'unknown'});
+  action={record:intent,etag:opened.etag};
+  if(!await renewDiscoveryLease(env,lease))return await finish({},[{id:key,outcome:'not_attempted',error:'fence_lost'}],{aborted:true});
+  let written;
+  try{written=await env.BUCKET.put(DR_RESOLUTION_KEY,JSON.stringify({...decisions,[key]:next}),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:mapObject.etag}});}
+  catch{return await finish({},[{id:key,outcome:'unknown',error:'storage_error'}]);}
+  if(written===null)return await finish({},[{id:key,outcome:'skipped_changed',error:'conflict'}]);
+  let landed=false;
+  try{const again=await env.BUCKET.get(DR_RESOLUTION_KEY),value=again?await again.json():null;landed=!!value?.[key]&&await discoveryDigest(DiscoveryIndex.canonicalJson(value[key]))===nextHash;}
+  catch{landed=false;}
+  if(!landed)return await finish({},[{id:key,outcome:'unknown',error:'storage_error'}]);
+  const resolutionEtag=written.etag??null;
+  let index={refreshed:false,reason:'source_unread'};
+  if(resolutionEtag){try{index=await diRefreshIndex(env,observed.index.programmeRunId,key,next,nextHash,resolutionEtag,()=>renewDiscoveryLease(env,lease),submitted.idempotencyKey);}catch{index={refreshed:false,reason:'error'};}}
+  return await finish({afterImage:{resolutionEtag,decisionHash:nextHash,decision:next},application,index},[{id:key,outcome:'written'}]);
+ }finally{await releaseDiscoveryLease(env,lease);}
+}
+async function diReceipt(env,url){
+ const idempotencyKey=url.searchParams.get('idempotencyKey');
+ if(!idempotencyKey||!DR_IDEMPOTENCY.test(idempotencyKey))return adminError('invalid_request',400);
+ const {bucket}=drReadOnly(env.BUCKET);
+ let object;
+ try{object=await bucket.get(diActionKey(idempotencyKey));}catch{return adminError('storage_unavailable',503);}
+ if(!object)return adminError('not_found',404);
+ const record=await object.json();
+ const state=record?.receipt?record.state:record?.state==='running'?'unknown':record?.state??'unknown';
+ return json({idempotencyKey,state,record});
+}
+
 async function adminDiscoveryReconsiderRoute(request,env,url){
  const action=url.pathname.slice('/api/admin/discovery-recovery/'.length);
  if(action==='receipt')return request.method==='GET'?await drReceipt(env,url):adminError('method_not_allowed',405);
+ if(action==='identity-receipt')return request.method==='GET'?await diReceipt(env,url):adminError('method_not_allowed',405);
+ if(action==='identity-confirm'||action==='identity-correct'){
+  if(request.method!=='POST')return adminError('method_not_allowed',405);
+  try{return action==='identity-confirm'?await diConfirm(request,env,url):await diExecute(request,env,url);}
+  catch{return drRefused('storage_unavailable',503);}
+ }
  if(action!=='confirm'&&action!=='reconsider')return adminError('not_found',404);
  if(request.method!=='POST')return adminError('method_not_allowed',405);
  try{return action==='confirm'?await drConfirm(request,env,url):await drExecute(request,env,url);}

@@ -1,6 +1,6 @@
 # Discovery observation index
 
-The observation index is a bounded projection of the current unresolved discovery observations of the published generation. It lets owner reads list or explain one observation without parsing the discovery ledger or the resolution map. The resolver chunk writes it. The limbo inventory, the per-observation recovery read and the guarded `discovery_reconsider` action read it. Decision: [ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md).
+The observation index is a bounded projection of the current unresolved discovery observations of the published generation. It lets owner reads list or explain one observation without parsing the discovery ledger or the resolution map. The resolver chunk writes it. The limbo inventory, the per-observation recovery read, `discovery_reconsider` and `discovery_identity_correct` read it. Decisions: [ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md), [ADR 0080](../../adr/0080-discovery-identity-correction.md).
 
 Source: [`src/domain/discovery-observation-index.js`](../../../src/domain/discovery-observation-index.js) (pure: shapes, sharding, bounds, manifest, validation, freshness; bundled as `DiscoveryIndex`); the writer `saveObservationIndex` in [`src/discovery.js`](../../../src/discovery.js); the reader `discoveryIndexRead` in [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recovery.js). Tests: [`tests/discovery-observation-index.mjs`](../../../tests/discovery-observation-index.mjs).
 
@@ -20,14 +20,14 @@ An observation key goes to shard `FNV-1a(key) % 16`, computed over the key's UTF
 
 - identity and evidence: `key`, `programmeRunId`, `title`, `normalizedTitle`, `year`, `durations`, `shows` (`{channelId, channel, start}`, sorted by start);
 - activity: `seenInLatestSnapshot`, `lastSeenAt`, `lastAiring`, `confirmedTmdbId`;
-- `decision`: the shown subset `status`, `attempts`, `evidenceKey`, `retryAt`, `terminalReason`, `lastAttemptAt`, `checkedAt` and `reconsidered`;
+- `decision`: the shown subset `status`, `attempts`, `evidenceKey`, `retryAt`, `terminalReason`, `lastAttemptAt`, `checkedAt`, `reconsidered`, `tmdbId`, `identitySource`, `scoring` (`status`, `reason`, `acceptedTmdbId`, `scorerVersion`), `ownerIdentity` (`effect`, `tmdbId`, `at`, `basis`) and `rejectedTmdbIds` (at most eight movie ids). Rows written before these fields existed stay readable; the fields appear when the next chunk or an identity correction rewrites the row;
 - `decisionHash`: the SHA-256 of the canonical JSON (keys sorted) of the **full** decision.
 
 `decisionHash` is the record version the guarded action compares.
 
 **Manifest:** `{schemaVersion: 1, kind: "discovery_observation_index", programmeRunId, writtenAt, writer, sources, shardCount: 16, shards, coverage, counts}`.
 
-- `writer`: `{kind, hopId, idempotencyKey}`, where `kind` is `resolver_chunk` or `discovery_reconsider`.
+- `writer`: `{kind, hopId, idempotencyKey}`, where `kind` is `resolver_chunk`, `discovery_reconsider` or `discovery_identity_correct`.
 - `sources`: `{resolutionEtag, ledgerEtag}`, the R2 etags of `epg/discovery-resolution.json` and of the generation ledger `epg/generations/<run>/discovery-latest.json`, read by `head` just before the manifest is written.
 - `shards`: `[{shard, items, revision}]`.
 - `counts`: the discovery counts of the chunk plus `awaitingFirstLookup`.

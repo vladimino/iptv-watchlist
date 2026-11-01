@@ -2,8 +2,8 @@
 // closed on any undeclared code or on an answer that claims an action or a writer, escaping, codes and the pin only inside
 // the closed technical details, Madrid times. The page: the panel opens only from a film item of the prediction or
 // fingerprint subsystem, toggles with aria-expanded, reads through the client with the held pin, and after a change says
-// so and shows the fresh state. The prediction panel has no write method and no action control; the bundle's only write
-// is the separate discovery action's POST.
+// so and shows the fresh state. The prediction panel has no write method and no action control; the bundle's writes
+// are the two separate discovery action POSTs.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -138,7 +138,7 @@ assert.doesNotMatch(V.recoveryErrorHtml('<b>x</b>'), /<b>/);
 // 4. The page over the Worker bundle.
 const page = fs.readFileSync('public/admin-limbo.js', 'utf8');
 const bundle = bundleAdmin([fs.readFileSync('src/admin/client.js', 'utf8'), fs.readFileSync('src/admin/limbo-client.js', 'utf8'), viewSource, fs.readFileSync('src/admin/discovery-recovery-view.js', 'utf8'), page]);
-assert.equal([...bundle.matchAll(/method:\s*['"]POST/g)].length, 1, 'the one write is the discovery action');
+assert.equal([...bundle.matchAll(/method:\s*['"]POST/g)].length, 2, 'the writes are the two discovery actions');
 assert.doesNotMatch(page.slice(page.indexOf('function limboRecoveryLoad'), page.indexOf('function limboRecoveryObservation')), /DiscoveryRecovery\(|DiscoveryReconsider\(|discoveryActionPost/, 'the prediction panel calls no action');
 assert.doesNotMatch(bundle, /method:\s*['"](?:PUT|PATCH|DELETE)|\/api\/enrichment|\/mcp|Authorization|Bearer|localStorage/);
 assert.doesNotMatch(page, /\bfetch\(/);
@@ -175,6 +175,7 @@ vm.runInContext(fs.readFileSync('src/prediction-diagnostics.js', 'utf8'), worker
 vm.runInContext(scoped('src/domain/prediction-recovery.js', 'PredictionRecovery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/prediction-recovery.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-actions.js', 'AdminActions'), workerContext);
+vm.runInContext(scoped('src/domain/discovery-identity-review.js', 'DiscoveryIdentity'), workerContext);
 vm.runInContext(scoped('src/domain/discovery-recovery.js', 'DiscoveryRecovery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), workerContext);

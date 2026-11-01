@@ -15,7 +15,7 @@ export const OBSERVATION_INDEX_SHARDS = 16;
 export const OBSERVATION_INDEX_MAX_ITEMS = 3000;
 export const OBSERVATION_INDEX_MAX_SHOWS = 96;
 export const OBSERVATION_INDEX_SCOPE = 'current_unresolved_with_decision';
-export const OBSERVATION_INDEX_WRITERS = ['resolver_chunk', 'discovery_reconsider'];
+export const OBSERVATION_INDEX_WRITERS = ['resolver_chunk', 'discovery_reconsider', 'discovery_identity_correct'];
 export const OBSERVATION_INDEX_STATES = ['fresh', 'stale', 'missing', 'other_generation', 'malformed', 'torn', 'unavailable'];
 
 const INDEX_DIRECTORY = 'discovery-observations';
@@ -23,6 +23,7 @@ const KEY_MAX = 200;
 const TEXT_MAX = 200;
 const DURATIONS_MAX = 24;
 const DECISION_TEXT_FIELDS = ['status', 'evidenceKey', 'retryAt', 'terminalReason', 'lastAttemptAt', 'checkedAt'];
+const MOVIE_ID = /^[1-9]\d{0,11}$/;
 const PRIORITY = {terminal: 0, ambiguous: 1, needs_verification: 2, other: 3};
 
 function indexObject(value) {
@@ -75,13 +76,51 @@ export function observationShard(key) {
   return hash % OBSERVATION_INDEX_SHARDS;
 }
 
+function movieId(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) value = String(value);
+  return typeof value === 'string' && MOVIE_ID.test(value) ? value : null;
+}
+
+function scoringView(scoring) {
+  if (!indexObject(scoring)) return null;
+  return {
+    status: indexText(scoring.status, 80),
+    reason: indexText(scoring.reason, 80),
+    acceptedTmdbId: movieId(scoring.acceptedTmdbId),
+    scorerVersion: indexText(scoring.scorerVersion, 40),
+  };
+}
+
+function ownerIdentityView(value) {
+  if (!indexObject(value) || (value.effect !== 'assign' && value.effect !== 'reject')) return null;
+  const tmdbId = movieId(value.tmdbId);
+  if (!tmdbId) return null;
+  return {effect: value.effect, tmdbId, at: indexText(value.at, 40), basis: indexText(value.basis, 200)};
+}
+
+function rejectedView(value) {
+  if (!Array.isArray(value)) return [];
+  const ids = [];
+  for (const item of value) {
+    const id = movieId(item);
+    if (id && !ids.includes(id)) ids.push(id);
+    if (ids.length === 8) break;
+  }
+  return ids;
+}
+
 // The decision fields an owner read needs. The full decision is what `decisionHash` covers; this subset is what is shown
-// and what the recovery assessment reads.
+// and what the recovery assessment reads. Identity fields are optional on decisions written before they existed.
 export function observationDecisionView(decision) {
   if (!indexObject(decision)) return null;
   const view = {};
   for (const field of DECISION_TEXT_FIELDS) view[field] = typeof decision[field] === 'string' ? decision[field] : null;
   view.attempts = Number.isInteger(decision.attempts) && decision.attempts >= 0 ? decision.attempts : null;
+  view.tmdbId = movieId(decision.tmdbId);
+  view.identitySource = indexText(decision.identitySource, 40);
+  view.scoring = scoringView(decision.scoring);
+  view.ownerIdentity = ownerIdentityView(decision.ownerIdentity);
+  view.rejectedTmdbIds = rejectedView(decision.rejectedTmdbIds);
   const marker = indexObject(decision.reconsidered) ? decision.reconsidered : null;
   view.reconsidered = marker ? {at: indexText(marker.at, 40), idempotencyKey: indexText(marker.idempotencyKey, 80), previousTerminalReason: indexText(marker.previousTerminalReason, 80)} : null;
   return view;

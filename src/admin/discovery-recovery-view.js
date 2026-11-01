@@ -111,6 +111,41 @@ export const OBS_REFUSAL_COPY = {
   network: 'Нет ответа от сервера. Исход неизвестен: проверь квитанцию и наблюдение, прежде чем повторять.',
 };
 
+export const OBS_IDENTITY_REASON_COPY = {
+  eligible: 'действие допустимо',
+  index_not_current: 'индекс наблюдений не соответствует текущим данным: решение о записи по нему не принимается',
+  index_incomplete: 'индекс неполный: подтверждать или отклонять идентичность по нему нельзя',
+  unknown_authority: 'авторитет хранилища идентичности не R2 или неизвестен: запись не делается',
+  writer_active: 'резолвер сейчас пишет: вмешиваться нельзя',
+  series_unknown: 'состояние серии резолвера неизвестно',
+  target_absent: 'наблюдения нет в индексе',
+  evidence_incomplete: 'данных недостаточно',
+  identity_ambiguous: 'идентичность неоднозначна, а уже известного id фильма нет: выбрать по одному названию нельзя',
+  already_current: 'Уже так. Новой записи нет.',
+  invalid_effect: 'Выберите: подтвердить фильм или отклонить совпадение.',
+  invalid_movie_id: 'Нужен числовой id фильма TMDB, не сериала.',
+  basis_required: 'Напишите, на каком основании.',
+  not_on_decision: 'Отклонить можно только id, который уже стоит на этом решении.',
+  ambiguous_needs_stronger: 'При неоднозначности можно подтвердить только id, который уже записан за наблюдением.',
+  film_absent: 'В каталоге нет такого фильма. По одному названию запись не создаётся.',
+  film_year_unknown: 'У фильма в каталоге нет года. Без уже известного id запись не делается.',
+  year_unknown: 'У наблюдения нет года, а этот id ещё не был за ним записан.',
+  year_conflict: 'Год наблюдения и год фильма расходятся больше чем на один.',
+  tmdb_tv: 'Это id сериала, не фильма.',
+  identity_inconsistent: 'Запись каталога не сходится в один фильм.',
+  conflicting_identity: 'У фильма конфликт идентификаторов.',
+  catalogue_unread: 'Каталог не прочитан. Ничего не записано.',
+  title_only: 'Одного названия недостаточно.',
+};
+
+const OBS_IDENTITY_SHOWS_COPY = {
+  next_ordinary_chunk: 'Показы каталога обновятся следующим обычным чанком, если фильм есть в каталоге и эфир в текущем окне. Сейчас ничего не запускается.',
+  after_series_wait: 'Серия ждёт по лимиту чанков. Показы обновятся обычным чанком после этого ожидания, если фильм есть в каталоге. Сейчас ничего не запускается.',
+  next_series: 'Серия этого поколения уже закончилась: показы обновятся в серии, которую откроет следующая публикация программы. Сейчас ничего не запускается.',
+  awaiting_catalog_film: 'Решение записано. В каталоге этой записи фильма нет, поэтому показы не изменятся, пока она не появится. Сейчас ничего не запускается.',
+  not_this_action: 'Отказ записан только для этого наблюдения и этого id. Похожие названия не блокируются. Следующий обычный чанк не подтвердит этот id и не запросит по нему карточку.',
+};
+
 const OBS_RECEIPT_COPY = {
   succeeded: {tone: 'reviewed', text: 'Записано: терминальная отметка снята, наблюдение вернулось в обычную очередь.'},
   refused: {tone: 'conflict', text: 'Отказ.'},
@@ -214,7 +249,12 @@ function obsFactsHtml(answer) {
   ];
   if (decision.terminalReason) rows.push(['терминальная причина', OBS_TERMINAL_COPY[decision.terminalReason] || 'другая']);
   if (decision.reconsidered) rows.push(['повторно направлено', (obsDate(decision.reconsidered.at) || 'время не распознано') + ' владельцем']);
-  if (assessment.review?.suggested) rows.push(['идентичность', 'нужен разбор идентичности; инструмента для наблюдений пока нет']);
+  if (assessment.review?.suggested) {
+    const identity = answer.identity;
+    const text = !identity ? 'нужен разбор идентичности; инструмента для наблюдений пока нет' : identity.available ? 'идентичность этого наблюдения можно подтвердить или отклонить в форме ниже' : (OBS_IDENTITY_REASON_COPY[identity.reason] || 'разбор идентичности сейчас недоступен');
+    rows.push(['идентичность', text]);
+  }
+  if (answer.identity?.hypothesis) rows.push(['гипотеза автоматики', answer.identity.hypothesis.tmdbId + ' (не доверенная: одного совпадения мало)']);
   return `<dl class="limbo-facts recovery-facts">${rows.map(([name, value]) => `<div><dt>${obsEscape(name)}</dt><dd>${obsEscape(value)}</dd></div>`).join('')}</dl>`;
 }
 
@@ -259,17 +299,112 @@ function obsActionHtml(answer, state) {
   return parts.join('');
 }
 
+function obsMovieId(value) {
+  return typeof value === 'string' && /^[1-9]\d{0,11}$/.test(value.trim()) ? value.trim() : '';
+}
+
+export function obsIdentityBlocked(answer, state) {
+  const identity = answer?.identity;
+  if (!identity?.available) return OBS_IDENTITY_REASON_COPY[identity?.reason] || 'Сейчас записать нельзя.';
+  const effect = state?.identityEffect === 'assign' || state?.identityEffect === 'reject' ? state.identityEffect : '';
+  const id = obsMovieId(state?.identityTarget || '');
+  const raw = String(state?.identityTarget || '').trim();
+  const basis = String(state?.identityBasis || '').trim();
+  if (!effect) return raw || basis ? OBS_IDENTITY_REASON_COPY.invalid_effect : '';
+  if (!raw) return '';
+  if (!id) return OBS_IDENTITY_REASON_COPY.invalid_movie_id;
+  if (effect === 'reject' && !(identity.rejectable || []).includes(id)) return OBS_IDENTITY_REASON_COPY.not_on_decision;
+  if (effect === 'reject' && (identity.rejectedTmdbIds || []).includes(id) && identity.current?.tmdbId !== id) return OBS_IDENTITY_REASON_COPY.already_current;
+  if (effect === 'assign' && identity.current?.status === 'ambiguous' && !(identity.trusted || []).some(item => item.tmdbId === id)) return OBS_IDENTITY_REASON_COPY.ambiguous_needs_stronger;
+  if (basis.length > 200) return 'Основание длиннее 200 знаков.';
+  return '';
+}
+
+export function obsIdentityPreviewText(answer, state) {
+  const effect = state?.identityEffect === 'assign' || state?.identityEffect === 'reject' ? state.identityEffect : '';
+  const id = obsMovieId(state?.identityTarget || '');
+  if (!effect || !id || obsIdentityBlocked(answer, state)) return '';
+  const identity = answer.identity || {};
+  const title = answer.observation?.title || answer.observation?.normalizedTitle || 'без названия';
+  const current = identity.hypothesis ? 'гипотеза ' + identity.hypothesis.tmdbId : identity.current?.tmdbId ? 'id ' + identity.current.tmdbId : 'решение не подтверждено';
+  if (effect === 'reject') return 'Сейчас: ' + current + ' → Станет: id ' + id + ' заблокирован только у наблюдения «' + title + '».';
+  const when = OBS_IDENTITY_SHOWS_COPY[identity.effect?.when] || OBS_IDENTITY_SHOWS_COPY.next_series;
+  return 'Сейчас: ' + current + ' → Станет: фильм ' + id + '. ' + when;
+}
+
+function obsIdentityReceiptHtml(state) {
+  const receipt = state.identityReceipt;
+  if (!receipt) return '';
+  const application = state.identityApplication || {};
+  const shows = OBS_IDENTITY_SHOWS_COPY[application.shows] || '';
+  if (receipt.state === 'succeeded') {
+    const index = state.identityIndex && state.identityIndex.refreshed === false ? '<p class="muted">Индекс наблюдений не обновился сразу: до следующего обычного чанка список может ещё показывать эту строку, а читатель увидит индекс устаревшим.</p>' : '';
+    return `<div class="obs-identity-receipt" role="status" tabindex="-1"><p><span class="admin-status admin-status-reviewed">Квитанция</span> Решение по этому наблюдению записано. ${obsEscape(shows)}</p>${index}</div>`;
+  }
+  if (receipt.state === 'unknown') return '<div class="obs-identity-receipt" role="status" tabindex="-1"><p><span class="admin-status admin-status-ambiguous">Квитанция</span> Исход неизвестен: запись могла пройти или нет. Повторно ничего не выполняется; перечитай наблюдение.</p></div>';
+  if (receipt.state === 'aborted') return '<div class="obs-identity-receipt" role="alert" tabindex="-1"><p>Прервано до записи. Ничего не записано.</p></div>';
+  if (receipt.state === 'failed') return '<div class="obs-identity-receipt" role="alert" tabindex="-1"><p>Не записано: карта решений изменилась в момент записи.</p></div>';
+  const reason = state.identityReason && OBS_IDENTITY_REASON_COPY[state.identityReason] ? OBS_IDENTITY_REASON_COPY[state.identityReason] : (OBS_REFUSAL_COPY[receipt.refusal] || '');
+  return `<div class="obs-identity-receipt" role="alert" tabindex="-1"><p>Отказ. ${obsEscape(reason)}</p></div>`;
+}
+
+function obsIdentityHtml(answer, state) {
+  const identity = answer?.identity;
+  if (!identity) return '';
+  const receipt = obsIdentityReceiptHtml(state);
+  if (!identity.available) {
+    const text = OBS_IDENTITY_REASON_COPY[identity.reason] || 'Разбор идентичности сейчас недоступен.';
+    return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4><p>${obsEscape(text)}</p><p class="muted">Индекс покрывает только текущие нерешённые наблюдения, по которым уже есть решение. Наблюдения без первой проверки в него не входят.</p></section>`;
+  }
+  const title = answer.observation?.title || answer.observation?.normalizedTitle || 'без названия';
+  const key = answer.observation?.key || answer.target?.key || '';
+  const run = identity.programmeRunId || answer.index?.programmeRunId || '';
+  const evidence = answer.observation?.decision?.evidenceKey;
+  const sourceCopy = {owner: 'владелец', tmdb_detail: 'карточка TMDB', known_epg_alias: 'уже известный фильм в программе'};
+  const source = sourceCopy[answer.observation?.decision?.identitySource] || '';
+  const provenance = `<p>Ключ доказательства: ${obsEscape(evidence || 'в индексе не назван')}. ${source ? 'Источник решения: ' + obsEscape(source) + '.' : 'Источник автоматического решения в этом индексе не назван: старая запись индекса называет его после следующего обычного чанка.'}</p>`;
+  const limit = '<p class="muted">Индекс покрывает только текущие нерешённые наблюдения с решением. Он не является всем реестром и не включает наблюдения без первой проверки. Другие наблюдения, фильмы, люди и прошлые поколения этим действием не меняются.</p>';
+  if (state.identityConfirmation) {
+    const plan = state.identityPlan || {};
+    const before = plan.before ? (plan.before.status || '—') + (plan.before.tmdbId ? ' · ' + plan.before.tmdbId : '') : '—';
+    const after = plan.after ? (plan.after.status || '—') + (plan.after.tmdbId ? ' · ' + plan.after.tmdbId : '') : '—';
+    const shows = OBS_IDENTITY_SHOWS_COPY[state.identityApplication?.shows] || OBS_IDENTITY_SHOWS_COPY[identity.effect?.when] || '';
+    return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4>${provenance}${limit}<p class="obs-identity-preview">Сейчас: ${obsEscape(before)} → Станет: ${obsEscape(after)}. ${obsEscape(shows)}</p><p class="obs-confirmed" role="status">Подтверждение выдано для ключа «${obsEscape(key)}» в поколении ${obsEscape(run)}. Запись ещё не сделана.</p><p class="recovery-controls"><button type="button" class="admin-more" data-obs-identity-execute${state.identityBusy ? ' disabled aria-busy="true"' : ''}>Записать идентичность</button> <button type="button" class="admin-more" data-obs-identity-cancel${state.identityBusy ? ' disabled' : ''}>Отменить</button></p></section>`;
+  }
+  const effect = state.identityEffect === 'assign' || state.identityEffect === 'reject' ? state.identityEffect : '';
+  const target = String(state.identityTarget || '');
+  const basis = String(state.identityBasis || '');
+  const preview = obsIdentityPreviewText(answer, state);
+  const hint = state.identityReason && OBS_IDENTITY_REASON_COPY[state.identityReason] ? OBS_IDENTITY_REASON_COPY[state.identityReason] : obsIdentityBlocked(answer, state);
+  const ready = effect && obsMovieId(target) && basis.trim() && basis.trim().length <= 200 && !obsIdentityBlocked(answer, state);
+  const choices = (identity.trusted || []).map(item => `<label class="obs-identity-option"><input type="radio" name="obs-identity-choice-${obsEscape(state.slot || '0')}" value="${obsEscape(item.tmdbId)}" data-obs-identity-choice${target === item.tmdbId ? ' checked' : ''}> id ${obsEscape(item.tmdbId)}, уже записан за наблюдением</label>`).join('');
+  const hypothesis = identity.hypothesis ? `<p>Гипотеза автоматики (не выбор): ${obsEscape(identity.hypothesis.tmdbId)}. Её нельзя подтвердить одним только этим совпадением.</p>` : '';
+  const rejectable = (identity.rejectable || []).length ? `<p>Можно отклонить только: ${obsEscape(identity.rejectable.join(', '))}.</p>` : '<p>На этом решении нет id, который можно отклонить.</p>';
+  const acceptId = 'obs-identity-accept-' + obsEscape(state.slot || '0');
+  return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4>${provenance}${limit}${hypothesis}${rejectable}`
+    + `<label class="obs-identity-option"><input type="radio" name="obs-identity-effect-${obsEscape(state.slot || '0')}" value="assign" data-obs-identity-effect${effect === 'assign' ? ' checked' : ''}> Подтвердить фильм</label>`
+    + `<label class="obs-identity-option"><input type="radio" name="obs-identity-effect-${obsEscape(state.slot || '0')}" value="reject" data-obs-identity-effect${effect === 'reject' ? ' checked' : ''}${identity.rejectable?.length ? '' : ' disabled'}> Отклонить совпадение</label>`
+    + choices
+    + `<label class="obs-identity-option">Другой id фильма <input type="text" inputmode="numeric" autocomplete="off" data-obs-identity-id value="${obsEscape(target)}"></label>`
+    + `<label class="obs-identity-option">Основание <input type="text" maxlength="200" data-obs-identity-basis value="${obsEscape(basis)}"></label>`
+    + `<p class="obs-identity-preview" data-obs-identity-preview${preview ? '' : ' hidden'}>${obsEscape(preview)}</p>`
+    + `<p class="obs-identity-hint" data-obs-identity-hint role="status">${obsEscape(hint)}</p>`
+    + `<p class="obs-identity-accept"><input type="checkbox" id="${acceptId}" data-obs-identity-accept${state.identityAccepted ? ' checked' : ''}> <label for="${acceptId}">Я меняю идентичность только наблюдения «${obsEscape(title)}», ключ ${obsEscape(key)}, поколение ${obsEscape(run)}. Подтверждение действует 10 мин.</label></p>`
+    + `<p class="recovery-controls"><button type="button" class="admin-more" data-obs-identity-confirm${ready && state.identityAccepted && !state.identityBusy ? '' : ' disabled'}${state.identityBusy ? ' aria-busy="true"' : ''}>Подтвердить идентичность</button></p></section>`;
+}
+
 // `state`: {slot, changed, accepted, confirmation, receipt, durable, index, busy, error}.
 export function obsRecoveryPanelHtml(answer, state = {}) {
   const changed = state.changed ? '<p class="recovery-changed" role="status">Состояние изменилось с прошлой проверки; ниже свежий разбор.</p>' : '';
   const recheck = '<button type="button" class="admin-more recovery-recheck" data-obs-recovery-recheck>Проверить заново</button>';
   const receipt = state.receipt ? obsReceiptHtml(state.receipt, state) : '';
+  const identityReceipt = state.identityReceipt && !answer?.indexed ? obsIdentityReceiptHtml(state) : '';
   const error = state.error ? `<p class="recovery-error" role="alert">${obsEscape(OBS_REFUSAL_COPY[state.error] || 'Запрос не выполнен. Перечитай наблюдение.')}</p>` : '';
-  if (!answer || typeof answer !== 'object') return `${receipt}${error}<p class="recovery-unexplained" role="alert">Ответ не получен.</p><p class="recovery-controls">${recheck}</p>`;
+  if (!answer || typeof answer !== 'object') return `${receipt}${identityReceipt}${error}<p class="recovery-unexplained" role="alert">Ответ не получен.</p><p class="recovery-controls">${recheck}</p>`;
   if (!answer.indexed) {
     const state_ = answer.index?.state;
     const text = state_ && state_ !== 'fresh' && OBS_INDEX_COPY[state_] ? OBS_INDEX_COPY[state_] : 'Наблюдения нет в индексе. Индекс хранит только текущие нерешённые наблюдения, по которым уже было решение: ключ может ждать первой проверки, быть распознан, исключён или не входить в текущее окно программы.';
-    return `${changed}${receipt}${error}<p class="recovery-unexplained">${obsEscape(text)}</p>${obsDetails(answer, state)}<p class="recovery-controls">${recheck}</p>`;
+    return `${changed}${receipt}${identityReceipt}${error}<p class="recovery-unexplained">${obsEscape(text)}</p>${obsDetails(answer, state)}<p class="recovery-controls">${recheck}</p>`;
   }
   if (!obsRecoveryExplainable(answer)) {
     return `${changed}${receipt}${error}<p class="recovery-unexplained" role="alert">Невозможно достоверно объяснить состояние наблюдения. Ничего не выполнялось; подробности ниже.</p>${obsDetails(answer, state)}<p class="recovery-controls">${recheck}</p>`;
@@ -283,8 +418,9 @@ export function obsRecoveryPanelHtml(answer, state = {}) {
   return `${changed}${receipt}${error}${stale}<p class="recovery-headline"><span class="admin-status admin-status-${obsTone(assessment.verdict)}">${obsEscape(copy.title)}</span></p>`
     + `<h4>Что с наблюдением</h4><p>${obsEscape(copy.what + reason)}</p>`
     + `<h4>Что будет дальше</h4><p>${obsEscape(obsNextText(assessment.next))}</p>`
-    + (assessment.review?.reason === 'identity_ambiguous' && !assessment.execute?.available ? '<p>Автоматическое исправление этой проблемы пока недоступно.</p>' : '')
+    + (assessment.review?.reason === 'identity_ambiguous' && !assessment.execute?.available && !answer.identity ? '<p>Автоматическое исправление этой проблемы пока недоступно.</p>' : '')
     + `<h4>Данные</h4>${obsFactsHtml(answer)}`
+    + obsIdentityHtml(answer, state)
     + obsActionHtml(answer, state)
     + (snapshot ? `<p class="muted recovery-snapshot">${obsEscape(snapshot)}.</p>` : '')
     + obsDetails(answer, state)

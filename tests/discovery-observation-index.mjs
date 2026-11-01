@@ -40,7 +40,7 @@ const candidate = (key, extra = {}) => ({key, title: key.split('|')[0], normaliz
 let shaped = DI.observationIndexRecord(candidate('Фильм|2020'), decision(), 'run-1');
 assert.deepEqual(shaped.record.shows.map(item => item.start), [1000, 2000], 'shows sorted');
 assert.equal(shaped.record.programmeRunId, 'run-1');
-assert.deepEqual(Object.keys(shaped.record.decision).sort(), ['attempts', 'checkedAt', 'evidenceKey', 'lastAttemptAt', 'reconsidered', 'retryAt', 'status', 'terminalReason']);
+assert.deepEqual(Object.keys(shaped.record.decision).sort(), ['attempts', 'checkedAt', 'evidenceKey', 'identitySource', 'lastAttemptAt', 'ownerIdentity', 'reconsidered', 'rejectedTmdbIds', 'retryAt', 'scoring', 'status', 'terminalReason', 'tmdbId']);
 assert.deepEqual(DI.observationIndexRecord(candidate('x|1', {shows: Array.from({length: 97}, (_, index) => show(index))}), decision(), 'run-1'), {omit: 'oversized'});
 assert.deepEqual(DI.observationIndexRecord(candidate('x|1', {shows: [{channelId: 'a'}]}), decision(), 'run-1'), {omit: 'malformed'});
 assert.deepEqual(DI.observationIndexRecord(candidate('x|1'), {attempts: 1}, 'run-1'), {omit: 'malformed'});

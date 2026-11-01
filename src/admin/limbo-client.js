@@ -80,3 +80,21 @@ async function confirmDiscoveryReconsider(key,pin,options={}){
 async function executeDiscoveryReconsider(confirmation,options={}){
  return await discoveryActionPost('reconsider',{confirmation},options);
 }
+// The owner correction of one observation's identity. A different action header from reconsideration, so a
+// reconsideration confirmation cannot be posted here and this body cannot be posted as a reconsideration.
+async function discoveryIdentityPost(path,body,options={}){
+ const fetchImpl=options.fetch||globalThis.fetch;
+ let response;
+ try{response=await fetchImpl(ADMIN_API+'/discovery-recovery/'+path,{method:'POST',headers:{Accept:'application/json','Content-Type':'application/json','X-IPTV-Admin-Action':'discovery_identity_correct'},credentials:'same-origin',body:JSON.stringify(body)});}
+ catch{return {ok:false,status:0,error:'network',body:null};}
+ let parsed=null;
+ try{parsed=await response.json();}catch{parsed=null;}
+ if(!response.ok)return {ok:false,status:response.status,error:parsed&&typeof parsed.refusal==='string'?parsed.refusal:parsed&&typeof parsed.error==='string'?parsed.error:'http_'+response.status,body:parsed};
+ return {ok:true,status:response.status,error:null,body:parsed};
+}
+async function confirmDiscoveryIdentity(body,options={}){
+ return await discoveryIdentityPost('identity-confirm',{...body,idempotencyKey:options.idempotencyKey||discoveryIdempotencyKey(),accepted:true},options);
+}
+async function executeDiscoveryIdentity(confirmation,options={}){
+ return await discoveryIdentityPost('identity-correct',{confirmation},options);
+}

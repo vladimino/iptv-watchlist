@@ -16,9 +16,9 @@ const css = fs.readFileSync('public/admin.css', 'utf8');
 const shell = fs.readFileSync('public/admin.html', 'utf8');
 const bundle = bundleAdmin([client, limboClient, fs.readFileSync('src/admin/prediction-recovery-view.js', 'utf8'), fs.readFileSync('src/admin/discovery-recovery-view.js', 'utf8'), page]);
 
-// Static boundary: reads go through the client; the one write method is the guarded discovery action's POST to its own
+// Static boundary: reads go through the client; the two write methods are the guarded discovery posts on their own
 // route; no token, no other API, no generic action button.
-assert.match(html, /ЧТЕНИЕ И ОДНО ДЕЙСТВИЕ С ПОДТВЕРЖДЕНИЕМ/);
+assert.match(html, /ЧТЕНИЕ И ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ/);
 for (const id of ['limbo-snapshot-text', 'limbo-causes', 'limbo-subsystems', 'limbo-form', 'limbo-kind', 'limbo-age', 'limbo-reset', 'limbo-loading', 'limbo-stale', 'limbo-refresh', 'limbo-error', 'limbo-empty', 'limbo-results', 'limbo-total', 'limbo-context-body']) assert.match(html, new RegExp(`id="${id}"`), id);
 assert.ok(html.indexOf('id="limbo-causes"') < html.indexOf('id="limbo-results"'), 'filters come before results in tab order');
 assert.match(html, /<script src="\/admin-limbo\.js"><\/script>/);
@@ -28,8 +28,8 @@ assert.match(html, /<a href="\/admin\/limbo" aria-current="page">Лимбо<\/a>
 assert.doesNotMatch(html, /fetch\(|\/api\/|programme\.json/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
 assert.doesNotMatch(bundle, /\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|method:\s*['"](?:PUT|PATCH|DELETE)/);
-assert.deepEqual([...bundle.matchAll(/method:\s*['"]POST/g)].length, 1, 'one write method');
-assert.match(bundle, /fetchImpl\(ADMIN_API\+'\/discovery-recovery\/'\+path,\{method:'POST'/, 'and it goes to the discovery action route only');
+assert.deepEqual([...bundle.matchAll(/method:\s*['"]POST/g)].length, 2, 'two write methods');
+assert.equal([...bundle.matchAll(/fetchImpl\(ADMIN_API\+'\/discovery-recovery\/'\+path,\{method:'POST'/g)].length, 2, 'both go to the discovery action route only');
 assert.doesNotMatch(page, /Повторить<|retry\(|data-limbo-action/, 'no action button: retries are another card');
 assert.match(css, /\.limbo-facts/);
 assert.match(css, /\.limbo-actions\{display:flex;flex-wrap:wrap;[^}]*min-width:0/);
@@ -65,6 +65,7 @@ vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), workerCon
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/limbo.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-actions.js', 'AdminActions'), workerContext);
+vm.runInContext(scoped('src/domain/discovery-identity-review.js', 'DiscoveryIdentity'), workerContext);
 vm.runInContext(scoped('src/domain/discovery-recovery.js', 'DiscoveryRecovery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), workerContext);
