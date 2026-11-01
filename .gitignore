@@ -36,3 +36,6 @@ __pycache__/
 *.py[cod]
 # Local agent worktrees
 .claude/worktrees/
+
+# Owner credential files shared into a worktree. Never commit.
+.config/
