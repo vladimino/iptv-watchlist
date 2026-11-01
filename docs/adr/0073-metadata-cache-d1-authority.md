@@ -1,11 +1,11 @@
 # ADR 0073: The metadata cache is owned by D1 only after its own marker is switched
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-01  
 **Recorded at:** 2026-11-01  
-**Approval source:** Owner approval to continue the metadata-cache move as a real reader and writer, recorded on [AIR-313](https://trello.com/c/jjjp0FhK). Acceptance of this record is architectural. Applying migration `0006`, importing rows, and switching the marker are separate approvals.  
+**Approval source:** [Explicit owner acceptance on 2026-11-01](https://trello.com/c/jjjp0FhK#comment-6ae705be56363c6c5cfa8e40), after independent technical PASS review of [PR #296](https://github.com/vladimino/iptv-watchlist/pull/296) at `b7548fbb317827eb3191ea79ba18129c801174de`. The owner also visually approved all three changed Mermaid diagrams (persistence and migration, runtime topology, scheduling and orchestration). Acceptance is architectural only. Applying migration `0006`, importing rows, switching the authority marker, and other production changes require separate action-specific approval.  
 **Related work:** [AIR-313](https://trello.com/c/jjjp0FhK), [ADR 0072](0072-owner-reviewed-localization-overlay.md), [ADR 0070](0070-metadatasync-freshness-clocks.md), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0051](0051-d1-domain-r2-blobs.md)
-**Supersedes:** [ADR 0070](0070-metadatasync-freshness-clocks.md) decision 6 in part, and only once this record is accepted and `metadata_cache_authority.mode` is `d1`: `beginSync` and `metadataSync` may use D1 as the working set. The four clocks and `film_sync_state` stay. [ADR 0056](0056-d1-enrichment-write-through.md) decision 1 in part, for metadata records only, in that same mode: the projector reads those records from D1 and still does not write R2. [ADR 0051](0051-d1-domain-r2-blobs.md) names this kind of per-domain flip; this record is that flip for the metadata cache alone. The rest of each record stands.  
+**Supersedes:** [ADR 0070](0070-metadatasync-freshness-clocks.md) decision 6 in part, and only while `metadata_cache_authority.mode` is `d1`: `beginSync` and `metadataSync` may use D1 as the working set. The four clocks and `film_sync_state` stay. [ADR 0056](0056-d1-enrichment-write-through.md) decision 1 in part, for metadata records only, in that same mode: the projector reads those records from D1 and still does not write R2. [ADR 0051](0051-d1-domain-r2-blobs.md) names this kind of per-domain flip; this record is that flip for the metadata cache alone. The rest of each record stands.  
 **Superseded by:** None
 
 ## Context
@@ -51,6 +51,7 @@ Code rollback does not drop the tables, does not return the contract version, an
 ## Evidence
 
 - **Original decision:** [AIR-313](https://trello.com/c/jjjp0FhK)
+- **Owner acceptance and Mermaid visual decisions:** [2026-11-01 AIR-313 owner gate](https://trello.com/c/jjjp0FhK#comment-6ae705be56363c6c5cfa8e40)
 - **Implementation:** this record's pull request
 - **Dated verification:** `not recorded` (no production migration, import or marker change in this delivery)
 - **Uncertainty:** the 421 / 396 / 25 sample is the 2026-10-31 production read from the schema v5 rollout. This delivery does not re-read the live database. Production schema v5 and `D1_ENRICHMENT_WRITE=on` are taken from that rollout.
