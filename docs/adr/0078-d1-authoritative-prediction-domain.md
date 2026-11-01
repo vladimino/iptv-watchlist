@@ -1,9 +1,9 @@
 # ADR 0078: Mutable prediction state is owned by D1 only after its own marker is switched
 
-**Status:** Proposed  
+**Status:** Accepted 2026-11-01 (architecture decision only; no production operation authorized)  
 **Original decision date:** 2026-11-01  
 **Recorded at:** 2026-11-01  
-**Approval source:** Owner GO to implement the domain ([AIR-317](https://trello.com/c/jj45y0JW)). Acceptance of this record, and visual approval of the changed diagrams, are still owner gates. Applying migration `0007`, importing rows, switching the marker, and any other production write are not authorized by that GO.  
+**Approval source:** Explicit owner decision on 2026-11-01 (Europe/Madrid): ADR 0078 **Accepted** after independent technical PASS of PR #312 at `e7d15737d9ce683814ce9263a65763c9a2368d0c` ([owner decision](https://trello.com/c/jj45y0JW#comment-6ae786fd6bc930644dff0e10)). The owner visually approved the five diagrams presented in the review; the additional changed runtime-topology diagram requires its own visual decision before merge. This is architecture acceptance only: migration `0007`, imports, authority activation, and any production data write remain separately gated.  
 **Related work:** [AIR-317](https://trello.com/c/jj45y0JW), [ADR 0073](0073-metadata-cache-d1-authority.md), [ADR 0064](0064-prediction-queue-conditional-writes.md), [ADR 0051](0051-d1-domain-r2-blobs.md), [ADR 0015](0015-queued-prediction-recovery.md)  
 **Supersedes:** [ADR 0064](0064-prediction-queue-conditional-writes.md) for the queue fence only while `prediction_domain_authority.mode` is `d1`: the compare-and-swap is the D1 generation, and the object etag is the mirror. [ADR 0002](0002-cloudflare-worker-r2-authority.md) for mutable prediction state only, in that same mode. Immutable fingerprint bodies, prediction version objects and profile version objects stay in R2. The rest of each record stands.  
 **Superseded by:** None
