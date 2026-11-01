@@ -22,7 +22,7 @@ flowchart TD
     archive --> importer --> local
     local -.-> gate
     r2 -->|one-off export| snapshot --> reload -->|one-off load, no live flow| d1
-    r2 -->|reads enrichment objects| projector -.->|on: Films and Persons; sync clocks at schema v5; metadata from D1 when the cache marker is d1| d1
+    r2 -->|reads enrichment objects| projector -.->|on: Films and Persons; sync clocks at schema v5 or v6; metadata from D1 when the cache marker is d1| d1
     worker -.->|metadata cache only when the schema v6 marker is d1| d1
     gate -.-> flipWrite -.->|future: Worker writes D1| d1
     flipWrite --> flipRead --> retire
