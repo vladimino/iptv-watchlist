@@ -6,7 +6,7 @@
 **Approval source:** [Owner decision on 2026-10-31](https://trello.com/c/81P7wg4u#comment-6ae638e0e3414efb7b5bad51), after independent PASS review of PR #291 at `979e4f3a551e21309f542b4e04670cc5557cfc79`. Acceptance is architectural only; Mermaid visual approval and production migration/write permission are separate.  
 **Related work:** [AIR-311](https://trello.com/c/81P7wg4u), [PR #291](https://github.com/vladimino/iptv-watchlist/pull/291), [ADR 0056](0056-d1-enrichment-write-through.md)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** [ADR 0073](0073-metadata-cache-d1-authority.md) (Accepted 2026-11-01) in part: decision 6's R2-only reader boundary changes only while `metadata_cache_authority.mode` is `d1`. The four clock fields and their projection remain in force.
 
 ## Context
 
@@ -57,4 +57,4 @@ Code rollback is a Worker revert. It does not remove `film_sync_state`, does not
 
 ## Follow-ups
 
-A reader of these rows, and the owner approval to apply migration `0005`, are separate cards. The apply approval has to name the live writes as well as the migration: the projector flag is already on. Neither card is implied by accepting this record.
+A reader of these rows, and the owner approval to apply migration `0005`, were separate cards. `0005` was later applied under its own approval. [ADR 0073](0073-metadata-cache-d1-authority.md) is the accepted D1 working-set authority contract; activation is separately gated. It keeps these columns.

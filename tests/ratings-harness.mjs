@@ -95,6 +95,7 @@ export function loadContext({net,clock,FakeDate,crypto,root='.',files=SERVER_FIL
  const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date:FakeDate||Date,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:crypto||webcrypto,console:{log(){},warn(){},error(){}},setTimeout,ASSETS:{},fetch:net.fetch,...extra});
  vm.runInContext(fs.readFileSync(root+'/src/domain/film-person.js','utf8'),context);
  if(fs.existsSync(root+'/src/domain/discovery-observation-index.js'))vm.runInContext(scoped(root+'/src/domain/discovery-observation-index.js','DiscoveryIndex'),context);
+ if(fs.existsSync(root+'/src/metadata-cache.js'))vm.runInContext(scoped(root+'/src/metadata-cache.js','MetadataCache'),context);
  for(const file of files){
   const path=root+'/'+file;if(!fs.existsSync(path))continue;
   vm.runInContext(fs.readFileSync(path,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context,{filename:file});
