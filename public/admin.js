@@ -499,19 +499,34 @@ function adminNameCommand(form, record, requestId) {
   return {command};
 }
 
+function adminNameRetryText(kept) {
+  const value = kept && typeof kept.value === 'string' ? kept.value : '';
+  const head = 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.';
+  if (kept && kept.effect === 'add_alias') return head + ' Она только добавит вариант «' + value + '». Предпочтительное имя не изменится.';
+  return head + ' Она сделает предпочтительным «' + value + '».';
+}
+
 function adminRestoreNameAttempt(form, kept) {
   if (!form || !kept || !kept.requestId) return;
   const manual = form.querySelector('#admin-name-manual');
   const basis = form.querySelector('#admin-name-basis');
-  if (manual) manual.value = kept.mode === 'manual' ? kept.value : '';
   if (basis) basis.value = kept.basis || '';
+  let shown = false;
   if (kept.mode === 'alias') {
-    for (const choice of form.querySelectorAll('input[name="person-name-alias"]')) choice.checked = choice.value === kept.value;
+    for (const choice of form.querySelectorAll('input[name="person-name-alias"]')) {
+      choice.checked = choice.value === kept.value;
+      if (choice.checked) shown = true;
+    }
   }
+  // A radio that the refresh removed is not a cancelled command. The variant field shows that
+  // value, and the retry still posts the original command until the owner edits the form.
+  if (manual) manual.value = shown ? '' : (kept.value || '');
   const wanted = new Set((kept.roles || []).map(role => role.id));
   for (const box of form.querySelectorAll('input[name="person-name-role"]')) box.checked = wanted.has(box.value);
   const prefer = form.querySelector('#admin-name-preferred');
-  if (prefer) prefer.checked = kept.effect === 'promote';
+  // A command that omits effect is the historical promote. The checkbox shows the effect the
+  // retry will apply, including when the card was rebuilt with the box off.
+  if (prefer) prefer.checked = kept.effect !== 'add_alias';
   adminNameSync(form, adminLive.entity);
   form.dataset.requestId = kept.requestId;
 }
@@ -545,7 +560,7 @@ function adminFinishUnknownName(kept, view) {
   }
   if (form) adminRestoreNameAttempt(form, kept);
   if (result) {
-    result.textContent = 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.';
+    result.textContent = adminNameRetryText(kept);
     if (typeof result.focus === 'function') result.focus();
   }
 }
@@ -607,7 +622,7 @@ async function onAdminNameSubmit(event) {
     return;
   }
   if (result.status === 503 && result.error === 'readback_failed') {
-    const kept = {requestId: command.requestId, value: command.value, mode: command.mode, basis: command.basis || '', roles: command.roles || []};
+    const kept = JSON.parse(JSON.stringify(command));
     status.textContent = 'Неизвестно, записалось ли имя. Сверяю карточку.';
     if (typeof status.focus === 'function') status.focus();
     const view = await onAdminRefresh();
