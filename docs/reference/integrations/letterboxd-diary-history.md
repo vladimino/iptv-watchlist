@@ -2,7 +2,7 @@
 
 [AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0049](../../adr/0049-letterboxd-diary-viewing-history.md). The routine read is the first page only ([ADR 0067](../../adr/0067-diary-recent-window.md)). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). Gate: `LETTERBOXD_DIARY_HISTORY`, off by default ([feature flags](../feature-flags.md)).
 
-The owner's public Letterboxd Diary is read into a viewing history. A row with a viewing id is its own entry; rows without one become one entry per film and day that counts its viewings, a lower bound unless one page held the whole day. Without a viewing id the per-viewing granularity is lost: two viewings of a film on one day keep only their count, their ratings in page order and how many rows were marked re-watch, not which viewing was which. The history is kept apart from the current rating. Under [ADR 0054](../../adr/0054-diary-first-epg-ratings.md) the EPG commit turns what it proves into watched and rating facts ([below](#rating-facts)). Absence from the diary means nothing.
+The owner's public Letterboxd Diary is read into a viewing history. A row with a viewing id is its own entry; rows without one become one entry per film and day that counts its viewings, a lower bound unless one page held the whole day. Without a viewing id the per-viewing granularity is lost: two viewings of a film on one day keep only their count, their ratings in page order and how many rows were marked re-watch, not which viewing was which. The history is kept apart from the current rating. The ratings run turns what page 1 proves into watched and rating facts ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md), [ADR 0074](../../adr/0074-retire-ratings-pipeline-switch.md), [below](#rating-facts)). The EPG commit does not. Absence from the diary means nothing.
 
 ## Source
 
@@ -69,7 +69,7 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
 
 **Conditional writes and the merge form.** Every `state.json` write is a compare-and-swap on the version read, retried on a conflict.
 - **Version 1** (no `writer`): the run's state replaces the stored one, last writer wins, as before the merge form existed.
-- **Merge form** (`schemaVersion: 2` with `writer {runId, step}`): only `ratings_storage_migrate` creates it, progress and diagnostics unchanged. From then on every writer, the inline EPG stage included (`step: inline`), merges its state into the stored one:
+- **Merge form** (`schemaVersion: 2` with `writer {runId, step}`): only `ratings_storage_migrate` creates it, progress and diagnostics unchanged. From then on the ratings run merges its state into the stored one. The inline EPG stage that wrote `step: inline` is removed ([ADR 0074](../../adr/0074-retire-ratings-pipeline-switch.md)). The merge is:
   - **Progress is a join.** `newestWatchedDate` the later, `oldestWatchedDate` the earlier, `reachedEnd` either, `resumePage` the larger (an absent page counts as page 2) and `null` once `reachedEnd`. `coverage.window: recent` is kept once either side has it, and omitted when both sides lack it. No late or repeated write moves `reachedEnd` or `resumePage` back. Neither one is a fetch plan ([ADR 0067](../../adr/0067-diary-recent-window.md)).
   - **Diagnostics are one record.** `lastOutcome`, `stopReason`, `counts` and `writer` come from the write ordered last by (`lastAttemptAt`, `writer.runId`, `writer.step`, content); `lastAttemptAt`, `lastSuccessAt` and `lastFailureAt` are each the later. Diagnostics never plan a read.
   - **Canonical bytes.** The merge is commutative, associative and idempotent, and keys are sorted, so equal states are equal bytes.
@@ -78,18 +78,17 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
 
 **Coverage limit.** A backdated entry is found when it lands on page 1. Page 1 holds at most 50 rows, so more than 50 new viewings between successful runs can miss this window. Those rows belong to a separate archive import, which this path does not start. `overflowSuspected` is the only automatic signal, and only in the case in the table above. A periodic full rescan is not part of this contract, and `reachedEnd` is not a claim that one happened.
 
-## In the EPG commit
+## In the ratings run
 
-With the gate on, `completeWithRatings` runs the stage in phase `diary` (see [ratings attempt](letterboxd-ratings.md#ratings-attempt)) right after the commit. The removal lookup follows it, and the public films list is not requested ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md)).
+The EPG commit does not run this stage ([ADR 0074](../../adr/0074-retire-ratings-pipeline-switch.md)). The [ratings run](letterboxd-ratings.md#separate-ratings-pipeline) reads Diary page 1 once when migration is complete, whatever the retired `RATINGS_PIPELINE` binding holds. The public films list is not requested ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md)). A step that already checkpointed that page does not fetch again. `more` retries the same page only when it was not started. After the page it joins its progress into the cursor, so a killed step loses at most the page in flight. A `recent_window` is a finished diary phase, not an error. When migration is not complete the commit publishes and does not read Diary.
 
-- **Summary.** It is stored in `sync.json` as `diaryHistory` and returned by the sync status. It holds `outcome`, `stopReason`, `counts`, `resumePage`, `coverage` and `at`, plus `facts`:
+- **Summary.** It is on the ratings run record, not in `sync.json`. It holds `outcome`, `stopReason`, `counts`, `resumePage`, `coverage` and `at`, plus `facts`:
   - `rated`, `unrated`, and `ambiguous` / `partial` (both stay 0: this reader does not produce those states);
   - `films`, `written`, `unchanged`, `older`, `skipped`, `conflicts`: the write outcomes;
   - `enabled`: always `true`; the former `LETTERBOXD_FACTS` switch is retired ([ADR 0055](../../adr/0055-retire-letterboxd-facts-switch.md)) and kept in the summary for its readers.
-- **Never fatal.** The stage never fails the commit. A blocked, rate-limited or failed run ends the ratings attempt as `error` with that cause, and keeps every stored fact.
-- **Gate off.** Nothing is read or written by the stage. The ratings attempt ends `finished` with cause `diary_off`.
-
-**Separate ratings pipeline.** With `RATINGS_PIPELINE=separate` and the storage migrated, the commit runs no Diary stage; the [separate ratings run](letterboxd-ratings.md#separate-ratings-pipeline) reads Diary page 1 once. A step that already checkpointed that page does not fetch again. `more` retries the same page only when it was not read. After the page it joins its progress into the cursor, so a killed step loses at most the page in flight. A `recent_window` is a finished diary phase, not an error. Its summary is in the run record, not in `sync.json`, and includes `historicalCoverage: incomplete`.
+  - `historicalCoverage: incomplete` on a finished recent window.
+- **Never fatal to EPG.** The stage is not part of the commit. A blocked, rate-limited or failed Diary ends the ratings run as `error` with that cause, and keeps every stored fact.
+- **Gate off.** Nothing is read or written by the stage. The ratings run ends `finished` with cause `diary_off`.
 
 ## Rating facts
 

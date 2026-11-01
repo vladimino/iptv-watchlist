@@ -18,11 +18,12 @@ ctx.fetch=async()=>({ok:true,status:200,text:async()=>listing});
 const run={runId:'published',stage:'epg',watchlist:report.films,pending:[],ratingPending:['public-films-list'],events:[]};ctx.run=run;ctx.report=report;ctx.env=env;
 const fetched=[];ctx.fetch=async url=>{fetched.push(String(url));return {ok:true,status:200,text:async()=>listing};};
 const completed=await vm.runInContext('completeWithRatings(env,run,report)',ctx);assert.equal(records.get('sync.json').stage,'complete');
-// AIR-287: the EPG commit no longer scans the public films list; with the diary gate off it requests nothing from Letterboxd.
+// ADR 0074: the EPG commit requests nothing from Letterboxd and opens no ratings attempt.
 assert.equal(fetched.length,0,'no films-list request');assert.equal(completed.personalRatings,undefined);
-assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause,records.get('sync.json').ratingPending],['finished','diary_off',undefined]);assert.deepEqual(records.get('programme.json'),report);
+assert.equal(completed.ratingsPipeline,'blocked');
+assert.equal(records.get('sync.json').ratingAttempt,undefined);assert.equal(records.get('sync.json').ratingPending,undefined);assert.deepEqual(records.get('programme.json'),report);
 ctx.fetch=async()=>({ok:true,status:200,text:async()=>listing});
-records.set('watchlist.json',{films:[film('rated')]});const poster=id=>`<div data-component-class="LazyPoster" data-item-name="${id} (2020)" data-item-link="/film/${id}/" data-postered-identifier='{"lid":"${id}"}'></div>`;const watchlistHtml='<span class="js-watchlist-count">2</span>'+poster('rated')+poster('new');ctx.getHTML=async()=>watchlistHtml;const syncStart=await vm.runInContext('beginSync(env)',ctx);assert.equal(syncStart.watchlistCount,2);assert.deepEqual(records.get('sync.json').ratingPending,['letterboxd-diary']);
+records.set('watchlist.json',{films:[film('rated')]});const poster=id=>`<div data-component-class="LazyPoster" data-item-name="${id} (2020)" data-item-link="/film/${id}/" data-postered-identifier='{"lid":"${id}"}'></div>`;const watchlistHtml='<span class="js-watchlist-count">2</span>'+poster('rated')+poster('new');ctx.getHTML=async()=>watchlistHtml;const syncStart=await vm.runInContext('beginSync(env)',ctx);assert.equal(syncStart.watchlistCount,2);assert.equal(records.get('sync.json').ratingPending,undefined);
 records.set('enrichment/diagnostics/baseline.json',{films:[{filmId:'rated',letterboxdUri:'https://letterboxd.com/film/rated/',actualAtFreeze:null}]});records.set('enrichment/view-index.json',{...(records.get('enrichment/view-index.json')||{}),rated:{actualRating:null},unrated:{actualRating:null},broken:{actualRating:null}});
 await vm.runInContext('refreshRatingsFromFilms(env,{runId:"after",films:[{id:"unrated"}]})',ctx);
 assert.equal(records.get('enrichment/view-index.json').rated.actualRating,4.5);

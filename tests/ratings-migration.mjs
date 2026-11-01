@@ -60,6 +60,23 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  assert.equal(bucket.value('sync.json').removalLookups.length,2,'the migration does not rewrite sync.json');
 }
 
+// 2b. removalRefs kept across blocked commits are copied into the queue by the migration and are not left behind.
+{
+ const {bucket,env,R}=setup();
+ const eventAt=at(T0-H),secondAt=at(T0-2*H);
+ const firstRef={eventKey:eventKeyOf(eventAt,'run-8-watchlist'),sourceRunId:'run-8',at:eventAt};
+ const secondRef={eventKey:eventKeyOf(secondAt,'run-9-watchlist'),sourceRunId:'run-9',at:secondAt};
+ bucket.set('sync.json',{runId:'run-9',stage:'complete',removalRefs:[{ref:firstRef,films:[film('c')]},{ref:secondRef,films:[film('d')]}]});
+ bucket.set(QUEUE,{schemaVersion:1,films:{}});bucket.set(CURSOR,V1_CURSOR);
+ const dry=plain(await R.migrate(env,{mode:'dry_run'}));
+ eq(dry.queue.handover,{films:2,withEvent:2});
+ await R.migrate(env,{mode:'apply'});
+ const q=bucket.value(QUEUE);
+ eq(q.films.c.refs,[{...firstRef,resolved:false}]);
+ eq(q.films.d.refs,[{...secondRef,resolved:false}]);
+ assert.equal(bucket.value('sync.json').removalRefs.length,2,'the migration does not rewrite sync.json');
+}
+
 // 3. Kill points. a) The cursor write fails after the queue converted: partial, and the separate pipeline stays inert
 // until a second apply completes it. b) The isolate dies between the queue write and its witness: the next apply
 // records the witness and goes on.
@@ -71,7 +88,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  bucket.hooks.beforePut=null;
  eq([first.queue.result,first.cursor.result,first.migration],['migrated','failed','partial']);
  eq(bucket.value(WITNESS),{schemaVersion:1,queue:{migratedAt:at(T0)}});
- assert.equal(plain(await R.status(env)).pipeline,'separate_pending_migration');
+ assert.equal(plain(await R.status(env)).pipeline,'blocked');
  assert.equal(plain(await R.start(env,{trigger:'manual'})).reason,'not_migrated');
  assert.equal(await R.separateActive(env),false);
  const second=plain(await R.migrate(env,{mode:'apply'}));
@@ -91,7 +108,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
 }
 
 // 4. An object found back at version 1 after the witness recorded it (a writer of older code) is `regressed`: the status
-// reports it without writing, the separate pipeline stays inert and the EPG commit acts as inline.
+// reports it without writing, and start stays not_migrated. The EPG commit fails closed; it does not fall back to inline.
 {
  const {bucket,env,R,net}=setup();
  bucket.set(QUEUE,{schemaVersion:1,films:{}});bucket.set(CURSOR,V1_CURSOR);
@@ -99,7 +116,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  bucket.set(QUEUE,{schemaVersion:1,films:{x:V1_ENTRY}});
  const writes=bucket.writes().length;
  const status=plain(await R.status(env));
- eq([status.migration,status.regressedObjects,status.pipeline],['regressed',['queue'],'separate_pending_migration']);
+ eq([status.migration,status.regressedObjects,status.pipeline],['regressed',['queue'],'blocked']);
  assert.equal(bucket.writes().length,writes,'the status writes nothing');assert.equal(net.fetches.length,0);
  eq(plain(await R.start(env,{trigger:'manual'})),{runId:null,created:false,nextAction:'stop',reason:'not_migrated',migration:'regressed'});
  assert.equal(await R.separateActive(env),false);

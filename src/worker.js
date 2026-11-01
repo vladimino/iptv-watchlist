@@ -271,7 +271,6 @@ function withRemovalRatings(event,ratings,observedAt){
  const removed=event.removed.map(film=>{if(removalRating(film))return eventRemovedFilm(film);const rating=confirmedHalfStar(source[String(film.id)]);if(rating==null)return eventRemovedFilm(film);changed=true;const stamp=typeof observedAt==='string'&&Number.isFinite(Date.parse(observedAt))?observedAt:null;return eventRemovedFilm({...film,rating,...(stamp?{ratingObservedAt:stamp}:{})});});
  return changed?{...event,added:(event.added||[]).map(film=>eventFilm(film)),removed}:null;
 }
-function removalFilmIds(run){const event=(run?.events||[]).find(item=>item?.type==='watchlist');return [...new Set((event?.removed||[]).map(film=>String(film.id)).filter(id=>/^[a-zA-Z0-9_-]{1,80}$/.test(id)))];}
 async function enrichKnownRemovalEvent(env,run,ratings,observedAt){
  try{
   const index=(run?.events||[]).findIndex(item=>item?.type==='watchlist'&&item.removed?.length);if(index<0)return;
@@ -324,9 +323,10 @@ async function beginSync(env){
  if(films.size!==total)throw new Error(`Incomplete watchlist: ${films.size}/${total}`);
  const verify=parseWatchlist(await getHTML(sources.watchlist));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
  const working=await MetadataCache.loadMetadataWorkingSet(env);const cache=working.records;const now=Date.now();const all=[...films.values()].map(f=>MetadataCache.mergeWatchlistFilm(f,cache[f.id]));const pending=all.filter(f=>MetadataCache.metadataPending(f,now)).map(f=>f.id);
- const ratingPending=['letterboxd-diary'],separate=await ratingsSeparate(env);
- if(separate&&current)await flushRemovalHandover(env,current);
- const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...(separate?{}:{ratingPending}),cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
+ const gate=await ratingsGate(env);
+ if(gate.active&&current)await flushRemovalHandover(env,current);
+ const carried=!gate.active&&current?{...(current.removalRefs?{removalRefs:current.removalRefs}:{}),...(current.removalLookups?{removalLookups:current.removalLookups}:{})}:{};
+ const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
 async function metadataSync(env,run){
@@ -454,22 +454,30 @@ async function publishGenerationWithLedger(env,runId,discovery,meta,files){
  if(old)return publishEpgGeneration(env,runId,{...files,'discovery-latest.json':{...meta,items:mergeDiscoveryCandidates(old.items,discovery,{replaceShows:true,programmeRunId:runId})}});
  return publishEpgGeneration(env,runId,files,{latest:discovery,meta,mode});
 }
-// AIR-268: queue and look up the films this run's watchlist diff removed. The hand-over stays in sync.json until the
-// queue holds it, so a request killed after finishSync is replayed by the next step on the completed run (syncStep).
-async function resumeRemovalLookups(env,run){
- const lookup=await lookupRemovalRatings(env,run.removalLookups,Date.now(),removalHandoverRef(run));if(!lookup)return null;
- if(!lookup.error)delete run.removalLookups;run.removalRatingLookup=lookup;await saveJSON(env,'sync.json',run);return lookup;
-}
-// ADR 0060: the separate pipeline acts once RATINGS_PIPELINE is `separate` and ratings_storage_migrate has migrated the
+// ADR 0074: the ratings pipeline is permanently separate. It acts once ratings_storage_migrate has migrated the
 // queue and the Diary cursor. The EPG commit then hands the films its watchlist diff removed to the queue as
 // references to the removal event, durably and before it publishes, and does no ratings work: no Diary read, no fact
-// write, no lookup. A hand-over left in sync.json (`removalRefs`, or a version 1 `removalLookups`) is flushed by the
-// next step on the run and by the next sync start before sync.json is replaced.
-const ratingsSeparate=async env=>env?.RATINGS_PIPELINE==='separate'&&await LetterboxdRatings.separateActive(env);
+// write, no lookup. The RATINGS_PIPELINE binding is ignored. While migration is none, partial or regressed the commit
+// still publishes and fails closed: it does not read Diary, look up films, enqueue or run the migration. It does record
+// `removalRefs` for the removal event it writes. A later blocked commit keeps every earlier reference and appends its
+// own, so watchlist advancement cannot drop them. Once migration is complete, the next step on the run and the next
+// sync start flush that list before sync.json is replaced. A version 1 `removalLookups` hand-over is flushed the same way.
+async function ratingsGate(env){
+ if(typeof LetterboxdRatings==='undefined')return {active:false,migration:'none'};
+ const state=await LetterboxdRatings.migrationState(env);
+ return {active:state.migration==='complete',migration:state.migration};
+}
 function removalHandoverRef(run){const event=(run?.events||[]).find(item=>item?.type==='watchlist');return event?.id&&Number.isFinite(Date.parse(event.at))?{eventKey:removalEventKey(event),sourceRunId:run.runId,at:event.at}:null;}
+// One saved hand-over is `{ref, films}`. Consecutive blocked commits store a list of those, one entry per removal event.
+function removalRefItems(value){
+ if(Array.isArray(value))return value.filter(item=>Array.isArray(item?.films)&&item.films.length&&item.ref);
+ if(Array.isArray(value?.films)&&value.films.length&&value.ref)return [value];
+ return [];
+}
+function storedRemovalRefs(items){const list=items.filter(item=>item?.films?.length&&item.ref);return list.length===1?list[0]:list.length?list:undefined;}
 async function flushRemovalHandover(env,run){
- if(!run?.removalRefs&&!run?.removalLookups)return false;
- const items=[...(run.removalRefs?.films?.length?[{films:run.removalRefs.films,ref:run.removalRefs.ref}]:[]),...LetterboxdRatings.syncHandover(run)];
+ const items=[...removalRefItems(run.removalRefs),...(typeof LetterboxdRatings==='undefined'?[]:LetterboxdRatings.syncHandover(run))];
+ if(!items.length)return false;
  for(const item of items)await enqueueRemovalRefs(env,item.films,item.ref);
  delete run.removalRefs;delete run.removalLookups;return true;
 }
@@ -502,59 +510,18 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
  run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
 }
-// AIR-287 (ADR 0054) and ADR 0067: the ratings after an EPG commit are Diary-first, and the diary stage reads the first
-// page only. After that page's history commit, every film on it becomes a watched fact and, where the page shows a
-// rating, a rating fact. Then the bounded per-film removal lookup runs, only for removed films the diary did not give
-// a rating. The public films list is no longer scanned. Nothing here is fatal to the commit; with
-// LETTERBOXD_DIARY_HISTORY off, only the removal lookup runs.
-async function diaryRatingsStage(env,run){
- const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0},ratings={};
- const afterPage=async({page,rows,next,history,readAt})=>{
-  const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
-  const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next}).map(item=>({...item,readAt}));
-  for(const item of evidence)facts[item.ratingState]++;
-  // Only a rating the diary proved counts: it reaches the removal event (as the film's effective rating, which a newer
-  // observation may hold) and spares the per-film lookup. A stored rating without diary proof does neither.
-  for(const item of evidence)if(item.rating!=null)ratings[item.lid]=item.rating;
-  const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
-  epgPhase(run.runId,'diary_facts_result','exit',{attemptId:run.ratingAttempt?.id||null,films:result.films,written:result.written,skipped:result.skipped});
-  for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
-  for(const lid of Object.keys(ratings))if(result.ratings[lid]!=null)ratings[lid]=result.ratings[lid];
- };
- try{
-  const started=Date.now(),trace=(phase,edge,fields)=>epgPhase(run.runId,phase,edge,{attemptId:run.ratingAttempt?.id||null,sinceDiaryMs:Date.now()-started,...fields});
-  const diary=await LetterboxdDiary.syncHistory(env,{afterPage,trace});
-  run.diaryHistory={outcome:diary.lastOutcome,stopReason:diary.stopReason,counts:diary.counts,resumePage:diary.resumePage,coverage:diary.coverage,facts:{...facts,enabled:true},at:diary.lastAttemptAt};
- }catch(e){run.diaryHistory={outcome:'failed',stopReason:'error:'+String(e.message).slice(0,120),facts:{...facts,enabled:true},at:new Date().toISOString()};}
- return ratings;
-}
+// ADR 0074: the EPG commit never reads Diary and never looks up films. Migrated storage enqueues removal references.
+// Any other migration state publishes the programme, keeps the removal references on the sync run and does not enqueue.
 async function completeWithRatings(env,run,report){
- if(await ratingsSeparate(env)){
+ const gate=await ratingsGate(env);
+ if(gate.active){
   await flushRemovalHandover(env,run);delete run.ratingPending;run.ratingsPipeline='separate';
   const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
   return {...result,ratingsPipeline:'separate'};
  }
- if(run.ratingPending?.length)run.ratingAttempt={id:crypto.randomUUID(),state:'started',startedAt:new Date().toISOString()};
- if(run.ratingAttempt?.state==='started')await ratingsPhase(env,run,'post_commit',false);
+ delete run.ratingPending;run.ratingsPipeline='blocked';run.ratingsMigration=gate.migration;
  const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
- const pending=!!run.ratingPending?.length,diaryOn=pending&&LetterboxdDiary.enabled(env);
- let diaryRatings={};
- if(diaryOn){await ratingsPhase(env,run,'diary');diaryRatings=await diaryRatingsStage(env,run);}
- // Removal events get the ratings the diary proved; the per-film lookup then runs only for the rest.
- const removed=removalFilmIds(run),proved=Object.fromEntries(removed.filter(id=>diaryRatings[id]!=null).map(id=>[id,diaryRatings[id]]));
- if(Object.keys(proved).length)await enrichKnownRemovalEvent(env,run,proved,run.diaryHistory?.at||new Date().toISOString());
- if(run.removalLookups&&Object.keys(proved).length){run.removalLookups=run.removalLookups.filter(film=>proved[film.id]==null);run.removalDiaryResolved=Object.keys(proved);}
- if(run.ratingAttempt?.state==='started'&&run.removalLookups)await ratingsPhase(env,run,'removal_lookup');
- const lookup=await tracedPhase(run.runId,'removal',()=>resumeRemovalLookups(env,run),value=>({checked:value?.checked??0}));
- if(!pending)return lookup?{...result,removalRatings:lookup}:result;
- const outcome=run.diaryHistory?.outcome||null,failed=diaryOn&&['failed','blocked','rate_limited'].includes(outcome);
- delete run.ratingPending;
- if(failed){run.ratingError=('Letterboxd diary '+outcome+': '+(run.diaryHistory.stopReason||'')).slice(0,200);}else delete run.ratingError;
- if(diaryOn&&!failed)run.ratingObservedAt=run.diaryHistory.at;
- const cause=!diaryOn?'diary_off':failed?(outcome==='failed'?'failed':outcome):null;
- run.ratingAttempt={...run.ratingAttempt,state:failed?'error':'finished',source:diaryOn?'letterboxd_diary':'none',...(cause?{cause}:{}),finishedAt:new Date().toISOString()};
- await saveJSON(env,'sync.json',run);
- return {...result,diaryHistory:run.diaryHistory||null,...(lookup?{removalRatings:lookup}:{}),...(failed?{personalRatingError:run.ratingError}:{})};
+ return {...result,ratingsPipeline:'blocked',ratingsMigration:gate.migration};
 }
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
@@ -577,7 +544,7 @@ async function syncStep(env,pathname,body,step){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';if(run.removalRefs||run.removalLookups){if(run.removalRefs||await ratingsSeparate(env)){if(await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);}else await resumeRemovalLookups(env,run);}if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const discovery=await queueDiscovery(env,'epg_committed',run.runId);step.discovery=discoverySummary(discovery);return json({...result,discovery});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
@@ -596,9 +563,9 @@ async function epgSync(env,run){
  const matched=[...fresh.values()].map(f=>({...f,shows:f.shows.sort((a,b)=>a.start-b.start)}));const currentById=new Map(matched.map(f=>[String(f.id),f]));const films=run.watchlist.map(f=>withAvailability({...f,...currentById.get(String(f.id)),shows:currentById.get(String(f.id))?.shows||[]}));const countShows=matched.reduce((n,f)=>n+f.shows.length,0);
  const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
- const separate=await ratingsSeparate(env);
- if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};if(separate){const films=removedFilms();if(films.length)run.removalRefs={ref:removalHandoverRef(run),films};}else if(removalLookupEnabled(env))run.removalLookups=removedFilms();await saveJSON(env,'sync.json',run);}
- if(separate&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
+ const gate=await ratingsGate(env);
+ if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};const films=removedFilms(),ref=films.length?removalHandoverRef(run):null;const prior=removalRefItems(run.removalRefs).filter(item=>!ref||item.ref.eventKey!==ref.eventKey);const next=ref?[...prior,{ref,films}]:prior;if(next.length)run.removalRefs=storedRemovalRefs(next);else delete run.removalRefs;await saveJSON(env,'sync.json',run);}
+ if(gate.active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report}));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
  await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
