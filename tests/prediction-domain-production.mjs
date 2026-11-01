@@ -535,5 +535,144 @@ const missingWriter=await runPredictionDomainProduction({argv:argv('--materializ
 assert.equal(missingWriter.exit,3);
 assert.equal(missingWriter.result.reason,'writer_missing');
 assert.equal(missingWriter.result.writes,false);
+async function lostPut(bucket,which){
+ const raw=bucket.put.bind(bucket);
+ let puts=0;
+ bucket.put=async(key,body,options)=>{
+  puts++;
+  const saved=await raw(key,body,options);
+  if(puts===which)throw new Error('socket hang up');
+  return saved;
+ };
+ return {puts:()=>puts};
+}
+const lostFirst=new MemoryBucket();
+await put(lostFirst,'enrichment/films/old/fingerprint.json',historical);
+const firstPuts=await lostPut(lostFirst,1);
+const uncertainFirst=await run(['--materialize-fingerprints','--confirm','materialize','--target','iptv'],migrated('0006_metadata_cache'),lostFirst);
+assert.equal(uncertainFirst.exit,3);
+assert.equal(uncertainFirst.result.reason,'write_uncertain');
+assert.equal(uncertainFirst.result.writes,true);
+assert.equal(uncertainFirst.result.writeState,'unknown');
+assert.equal(uncertainFirst.result.committedUnits,undefined);
+assert.equal(firstPuts.puts(),1);
+assert.equal(JSON.parse(lostFirst.objects.get('enrichment/films/old/fingerprints/'+fingerprintHash+'.json').text).fingerprintHash,fingerprintHash);
+const nextContent={...fingerprintContent,filmId:'next',plotMechanics:['chase']};
+const nextHash=await fingerprintContentHash(nextContent);
+const nextPointer={...nextContent,fingerprintHash:nextHash,generatedAt:'2026-10-01T00:00:00.000Z',invalidatedAt:null};
+const lostLater=new MemoryBucket();
+await put(lostLater,'enrichment/films/next/fingerprint.json',nextPointer);
+await put(lostLater,'enrichment/films/old/fingerprint.json',historical);
+const laterPuts=await lostPut(lostLater,2);
+const uncertainLater=await run(['--materialize-fingerprints','--confirm','materialize','--target','iptv'],migrated('0006_metadata_cache'),lostLater);
+assert.equal(uncertainLater.exit,3);
+assert.equal(uncertainLater.result.reason,'write_uncertain');
+assert.equal(uncertainLater.result.writes,true);
+assert.equal(uncertainLater.result.writeState,'unknown');
+assert.equal(uncertainLater.result.committedUnits,1);
+assert.equal(laterPuts.puts(),2);
+assert.ok(lostLater.objects.has('enrichment/films/next/fingerprints/'+nextHash+'.json'));
+assert.ok(lostLater.objects.has('enrichment/films/old/fingerprints/'+fingerprintHash+'.json'));
+const headOnly=new MemoryBucket();
+await put(headOnly,'enrichment/films/old/fingerprint.json',historical);
+headOnly.putIfAbsent=async()=>{const error=new Error('head down');error.phase='before-put';throw error;};
+const headFailed=await run(['--materialize-fingerprints','--confirm','materialize','--target','iptv'],migrated('0006_metadata_cache'),headOnly);
+assert.equal(headFailed.exit,1);
+assert.equal(headFailed.result.reason,'failed');
+assert.equal(headFailed.result.writes,false);
+assert.equal(headFailed.result.writeState,'none');
+assert.equal(headOnly.objects.has('enrichment/films/old/fingerprints/'+fingerprintHash+'.json'),false);
+let headCalls=0;
+const headAfter=new MemoryBucket();
+await put(headAfter,'enrichment/films/next/fingerprint.json',nextPointer);
+await put(headAfter,'enrichment/films/old/fingerprint.json',historical);
+headAfter.putIfAbsent=async(key,text)=>{
+ headCalls++;
+ if(headCalls>1){const error=new Error('head down');error.phase='before-put';throw error;}
+ headAfter.objects.set(key,{text,customMetadata:{}});
+ return {etag:'1'};
+};
+const headPartial=await run(['--materialize-fingerprints','--confirm','materialize','--target','iptv'],migrated('0006_metadata_cache'),headAfter);
+assert.equal(headPartial.exit,1);
+assert.equal(headPartial.result.reason,'failed');
+assert.equal(headPartial.result.writes,true);
+assert.equal(headPartial.result.writeState,'partial');
+assert.equal(headPartial.result.committedUnits,1);
+assert.equal(headCalls,2);
+function headerValue(headers,name){
+ if(!headers)return undefined;
+ if(typeof headers.get==='function')return headers.get(name);
+ const found=Object.keys(headers).find(key=>key.toLowerCase()===name);
+ return found?headers[found]:undefined;
+}
+function materializeFetch(objects,{fail}={}){
+ const calls={d1:0,put:0,head:0};
+ const fetchImpl=async(url,init={})=>{
+  const target=new URL(url);
+  if(target.hostname.includes('api.cloudflare.com')||target.pathname.includes('/d1/')){calls.d1++;throw new Error('d1');}
+  const method=init.method||'GET';
+  const parts=target.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  const key=parts.slice(1).join('/')||null;
+  if(parts[0]!=='iptv')return new Response('no',{status:404});
+  if(method==='GET'&&key==null){
+   const prefix=target.searchParams.get('prefix')||'';
+   const keys=[...objects.keys()].filter(name=>name.startsWith(prefix)).sort();
+   const xml='<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated>'+keys.map(name=>'<Contents><Key>'+name+'</Key><Size>'+Buffer.byteLength(objects.get(name))+'</Size><ETag>&quot;etag&quot;</ETag></Contents>').join('')+'</ListBucketResult>';
+   return new Response(xml,{status:200,headers:{'content-type':'application/xml'}});
+  }
+  if(method==='HEAD'&&fail==='head'&&key&&key.includes('/fingerprints/')){calls.head++;throw new Error('head down');}
+  if(method==='HEAD'||method==='GET'){
+   if(method==='HEAD')calls.head++;
+   const body=key==null?null:objects.get(key);
+   if(body==null)return new Response(null,{status:404});
+   return new Response(method==='HEAD'?null:body,{status:200,headers:{etag:'"etag"','content-length':String(Buffer.byteLength(body)),'content-type':'application/json'}});
+  }
+  if(method==='PUT'){
+   calls.put++;
+   if(fail==='put')throw new Error('socket hang up');
+   if(headerValue(init.headers,'if-none-match')==='*'&&objects.has(key))return new Response(null,{status:412});
+   const text=Buffer.isBuffer(init.body)?init.body.toString('utf8'):String(init.body);
+   objects.set(key,text);
+   return new Response(null,{status:200,headers:{etag:'"created"','content-length':'0'}});
+  }
+  return new Response('no',{status:405});
+ };
+ return {fetchImpl,calls};
+}
+const liveObjects=new Map([['enrichment/films/old/fingerprint.json',JSON.stringify(historical)]]);
+const live=materializeFetch(liveObjects);
+const createdLive=await runPredictionDomainProduction({argv:argv('--materialize-fingerprints','--confirm','materialize','--target','iptv'),env:installEnv('iptv'),fetchImpl:live.fetchImpl,now:()=>NOW});
+assert.equal(createdLive.exit,0,JSON.stringify(createdLive.result));
+assert.equal(createdLive.result.writes,true);
+assert.equal(createdLive.result.created,1);
+assert.equal(live.calls.d1,0);
+assert.equal(live.calls.put,1);
+assert.equal(JSON.parse(liveObjects.get('enrichment/films/old/fingerprints/'+fingerprintHash+'.json')).fingerprintHash,fingerprintHash);
+let refusedFetches=0;
+const refusedFetch=()=>{refusedFetches++;throw new Error('network');};
+const wrongMaterializeBucket=await runPredictionDomainProduction({argv:argv('--materialize-fingerprints','--confirm','materialize','--target','iptv'),env:installEnv('other-bucket'),fetchImpl:refusedFetch,now:()=>NOW});
+assert.equal(wrongMaterializeBucket.exit,3);
+assert.equal(wrongMaterializeBucket.result.reason,'bucket_identity');
+assert.equal(wrongMaterializeBucket.result.writes,false);
+const wrongMaterializeEndpoint=await runPredictionDomainProduction({argv:argv('--materialize-fingerprints','--confirm','materialize','--target','iptv'),env:installEnv('iptv','https://example.invalid'),fetchImpl:refusedFetch,now:()=>NOW});
+assert.equal(wrongMaterializeEndpoint.exit,3);
+assert.equal(wrongMaterializeEndpoint.result.reason,'endpoint_refused');
+assert.equal(refusedFetches,0);
+const lostRemote=materializeFetch(new Map([['enrichment/films/old/fingerprint.json',JSON.stringify(historical)]]),{fail:'put'});
+const uncertainRemote=await runPredictionDomainProduction({argv:argv('--materialize-fingerprints','--confirm','materialize','--target','iptv'),env:installEnv('iptv'),fetchImpl:lostRemote.fetchImpl,now:()=>NOW});
+assert.equal(uncertainRemote.exit,3);
+assert.equal(uncertainRemote.result.reason,'write_uncertain');
+assert.equal(uncertainRemote.result.writes,true);
+assert.equal(uncertainRemote.result.writeState,'unknown');
+assert.equal(lostRemote.calls.put,1);
+assert.equal(lostRemote.calls.d1,0);
+const headRemote=materializeFetch(new Map([['enrichment/films/old/fingerprint.json',JSON.stringify(historical)]]),{fail:'head'});
+const headRemoteResult=await runPredictionDomainProduction({argv:argv('--materialize-fingerprints','--confirm','materialize','--target','iptv'),env:installEnv('iptv'),fetchImpl:headRemote.fetchImpl,now:()=>NOW});
+assert.equal(headRemoteResult.exit,1);
+assert.equal(headRemoteResult.result.reason,'failed');
+assert.equal(headRemoteResult.result.writes,false);
+assert.equal(headRemoteResult.result.writeState,'none');
+assert.equal(headRemote.calls.put,0);
+assert.equal(headRemote.calls.d1,0);
 
 console.log('prediction domain production entry: confirm, lease, fence, parity and revert fail closed without a network call');

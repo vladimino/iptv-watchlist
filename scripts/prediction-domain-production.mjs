@@ -10,7 +10,9 @@
 // refuses inside the import, before the hold.
 // --materialize-fingerprints writes a missing immutable fingerprint body
 // create-only when the pointer reconstructs to that hash. An existing body
-// that disagrees refuses before any put. It does not touch D1.
+// that disagrees refuses before any put. It does not open D1. A PUT whose
+// response is lost is writeState unknown and is not retried. A HEAD that
+// fails before the PUT is not an uncertain write.
 // A generation that moves during the copy is read again (catch-up), not a permanent block.
 // --activate sets mode d1 only when that fence, the leases and the parity read-back still agree.
 // --revert repairs the mutable mirrors from D1, deletes a mutable mirror the
@@ -262,7 +264,13 @@ async function materializeFingerprintBodies(store){
  try{
   for(const item of planned){
    const put=typeof store.putIfAbsent==='function'?store.putIfAbsent(item.key,item.text):store.put(item.key,item.text,{onlyIf:{etagDoesNotMatch:'*'}});
-   const result=await put;
+   let result;
+   try{result=await put;}
+   catch(error){
+    if(error?.phase==='before-put')throw error;
+    if(error&&typeof error==='object'){error.kind='write_uncertain';error.phase=error.phase||'put';error.committedUnits=created;}
+    throw error;
+   }
    if(result==null){
     const again=await objectJson(store,item.key);
     if(!again||!await sameCanonical(again,JSON.parse(item.text))){
@@ -275,6 +283,7 @@ async function materializeFingerprintBodies(store){
    created++;
   }
  }catch(error){
+  if(error?.kind==='write_uncertain')throw error;
   if(error&&error.committedUnits==null)error.committedUnits=created;
   throw error;
  }
@@ -332,7 +341,7 @@ function writeStore(env,fetchImpl,keys){
  const allowed=keys||new Set();
  const allowedDeletes=new Set();
  const store=createS3Store({credentials,fetchImpl,allowedWrites:allowed,allowedDeletes});
- return {async get(key){return store.get(key);},async put(key,body){allowed.add(key);const head=await store.head(key);return store.put(key,body,{onlyIf:head?{etagMatches:head.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async putIfAbsent(key,body){allowed.add(key);const head=await store.head(key);if(head)return null;return store.put(key,body,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async delete(key){if(!predictionMutableKey(key))throw new OperatorStop('r2_write_refused',3);allowedDeletes.add(key);await store.delete(key);},async list(){const page=await store.list({prefix:'enrichment/'});return {objects:page.objects,truncated:false};},async keys(prefix){const page=await store.list({prefix});return page.objects.map(item=>item.key).filter(key=>!prefix||key.startsWith(prefix));}};
+ return {async get(key){return store.get(key);},async put(key,body){allowed.add(key);const head=await store.head(key);return store.put(key,body,{onlyIf:head?{etagMatches:head.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async putIfAbsent(key,body){allowed.add(key);let head;try{head=await store.head(key);}catch(error){if(error&&typeof error==='object')error.phase='before-put';throw error;}if(head)return null;try{return await store.put(key,body,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});}catch(error){if(error&&typeof error==='object'){error.kind='write_uncertain';error.phase='put';}throw error;}},async delete(key){if(!predictionMutableKey(key))throw new OperatorStop('r2_write_refused',3);allowedDeletes.add(key);await store.delete(key);},async list(){const page=await store.list({prefix:'enrichment/'});return {objects:page.objects,truncated:false};},async keys(prefix){const page=await store.list({prefix});return page.objects.map(item=>item.key).filter(key=>!prefix||key.startsWith(prefix));}};
 }
 
 export async function runPredictionDomainProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),binding=null,store=null}={}){
@@ -340,6 +349,10 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
   const parsed=parsePredictionArgs(argv);
   if(parsed.report)return {exit:0,result:parsed.report};
   const clock=typeof now==='function'?now():now;
+  if(parsed.command==='materialize-fingerprints'){
+   const bucket=store||writeStore(env,fetchImpl);
+   return {exit:0,result:await materializeFingerprintBodies(bucket)};
+  }
   let db=binding,bucket=store;
   if(!db){
    const target=productionTarget(env);
@@ -348,8 +361,7 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
    db=createPredictionBinding(adapter);
   }
-  if(!bucket&&parsed.command==='materialize-fingerprints')bucket=writeStore(env,fetchImpl);
-  if(!bucket&&parsed.command!=='apply'&&parsed.command!=='status'&&parsed.command!=='release'&&parsed.command!=='materialize-fingerprints')bucket=parsed.command==='revert'?writeStore(env,fetchImpl):readStore(env,fetchImpl);
+  if(!bucket&&parsed.command!=='apply'&&parsed.command!=='status'&&parsed.command!=='release')bucket=parsed.command==='revert'?writeStore(env,fetchImpl):readStore(env,fetchImpl);
   if(parsed.command==='status'){
    const authority=await readPredictionAuthority(db,REQUIRED);
    const tables=await tablesOf(db);
@@ -361,10 +373,6 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
    return {exit:0,result:await applyMigration(db)};
   }
   if(parsed.command==='release')return {exit:0,result:await releaseDomain(db)};
-  if(parsed.command==='materialize-fingerprints'){
-   if(!bucket)throw new OperatorStop('source_missing',3);
-   return {exit:0,result:await materializeFingerprintBodies(bucket)};
-  }
   if(!bucket)throw new OperatorStop('source_missing',3);
   if(parsed.command==='reconcile')return {exit:0,result:await reconcileDomain(db,bucket)};
   if(parsed.command==='load')return {exit:0,result:await loadDomain(db,bucket,clock)};
