@@ -203,10 +203,12 @@ function adminAliases(record, kind) {
   const person = kind === 'person';
   if (!aliases.length) return person ? '<p class="muted">Других имён нет.</p>' : '<p class="muted">Других названий нет.</p>';
   const items = aliases.map(alias => {
-    const body = `${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''}`;
-    // A film alias is a title the owner may pick. Its request id and provenance stay in the closed
-    // technical disclosure. A person alias keeps that provenance beside the name, as before.
-    return `<li>${body}${person ? ' ' + adminProvenance(alias.provenance) : ''}</li>`;
+    // A film row is the title text. `kind: title` is the model default, not a label. Provenance
+    // and kind stay in the closed technical disclosure. A person row keeps its kind and provenance.
+    const body = person
+      ? `${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''} ${adminProvenance(alias.provenance)}`
+      : adminEscape(alias.value ?? alias);
+    return `<li>${body}</li>`;
   }).join('');
   const label = person ? 'Другие имена' : 'Другие названия';
   return `<details class="other-titles"><summary>${label} (${aliases.length})</summary><ul>${items}</ul></details>`;
@@ -362,9 +364,26 @@ function adminRussianChoices(review) {
   return [...pinned, ...ordinary];
 }
 
+// The stored audit keeps the original UTC instant. The card shows Madrid civil time only.
+function adminMadridWhen(value) {
+  if (value == null || value === '') return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const formatted = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Madrid',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+  return formatted.replace(/[\u00a0\u202f]/g, ' ') + ' (Мадрид)';
+}
+
 function adminTitleHistory(review) {
   return ((review && review.reviews) || []).map(entry => {
-    const when = entry.at ? ' · ' + adminEscape(entry.at) : '';
+    const whenText = adminMadridWhen(entry.at);
+    const when = whenText ? ' · ' + adminEscape(whenText) : '';
     const basis = entry.basis ? ' · ' + adminEscape(entry.basis) : '';
     if (entry.effect === 'alias_added') return `<li>добавлен вариант «${adminEscape(entry.to && entry.to.value || '')}»${when}${basis}</li>`;
     const from = entry.from && entry.from.value;
@@ -392,7 +411,7 @@ function adminTitleForm(record) {
   const picker = options
     ? `<fieldset><legend>Варианты</legend><div class="title-review-options">${options}</div></fieldset>`
     : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите название.</p>';
-  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Вариант названия</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}" data-current="${adminEscape(current)}"><p class="title-review-current">Сейчас: <b>${adminEscape(current || 'нет')}</b></p>${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label class="title-review-prefer"><input type="checkbox" data-title-prefer> <span>Использовать как предпочтительное</span></label><p class="title-review-preview" data-title-preview>Добавится альтернативное название; текущее предпочтительное не изменится.</p><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><button type="submit" data-title-save>Сохранить вариант</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form></section>`;
+  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Вариант названия</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}" data-current="${adminEscape(current)}"><p class="title-review-current">Сейчас: <b>${adminEscape(current || 'нет')}</b></p>${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label class="title-review-prefer"><input type="checkbox" data-title-prefer> <span>Использовать как предпочтительное</span></label><p class="title-review-preview" data-title-preview hidden></p><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><button type="submit" data-title-save>Сохранить вариант</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form></section>`;
 }
 
 // The command that was posted and whose outcome is still unknown. A refresh replaces the card and
@@ -420,21 +439,89 @@ function adminTitleChosen(form) {
   return typed || (selected && selected.value) || '';
 }
 
+function adminTitleManual(form) {
+  const manual = form.querySelector('[data-title-manual]');
+  return manual ? manual.value.replace(/\s+/g, ' ').trim() : '';
+}
+
+function adminTitleSelected(form) {
+  return form.querySelector('input[name="title-review-choice"]:checked');
+}
+
+// An existing radio is already on the film. Adding it again is not a command. The current
+// preferred title is not a command either. A typed title is a command: the server decides duplicates.
+function adminTitleBlocked(form) {
+  const typed = adminTitleManual(form);
+  const selected = adminTitleSelected(form);
+  if (typed || !selected) return '';
+  const current = form.dataset.current || '';
+  if (selected.value === current) return 'Это уже предпочтительное название.';
+  const prefer = form.querySelector('[data-title-prefer]');
+  if (!(prefer && prefer.checked)) return 'Этот вариант уже есть. Включите «Использовать как предпочтительное», чтобы сделать его основным.';
+  return '';
+}
+
 function adminTitleSync(form) {
   if (!form) return;
   const save = form.querySelector('[data-title-save]');
-  if (save) save.disabled = form.dataset.busy === '1';
   const preview = form.querySelector('[data-title-preview]');
-  if (!preview) return;
+  const result = form.querySelector('[data-title-result]');
   const box = form.querySelector('[data-title-prefer]');
   const prefer = !!(box && box.checked);
   const next = adminTitleChosen(form);
-  const current = form.dataset.current || 'нет';
-  if (!prefer) {
-    preview.textContent = 'Добавится альтернативное название; текущее предпочтительное не изменится.';
+  const current = form.dataset.current || '';
+  const blocked = adminTitleBlocked(form);
+  const frozen = !!(form.dataset.requestId && adminTitleFrozen(form.dataset.storedId, form.dataset.requestId));
+  if (save) save.disabled = form.dataset.busy === '1' || (!frozen && !!blocked);
+  if (preview) {
+    const show = prefer && next && next !== current;
+    preview.hidden = !show;
+    preview.textContent = show
+      ? 'Сейчас: ' + (current || 'нет') + ' → Станет: ' + next + '. Предпочтительное название изменится во всех карточках и поиске.'
+      : '';
+  }
+  if (result && blocked && form.dataset.busy !== '1' && !frozen) result.textContent = blocked;
+}
+
+function adminControlName(target) {
+  if (!target) return '';
+  if (typeof target.getAttribute === 'function') {
+    const named = target.getAttribute('name');
+    if (typeof named === 'string' && named) return named;
+  }
+  return typeof target.name === 'string' ? target.name : '';
+}
+
+// Choosing another stored title means the owner wants it preferred. Typing a new title drops that
+// automatic check, so a new alias is not saved as a promote by accident.
+function adminTitleApplyChoice(form, target) {
+  if (!form || !target) return;
+  const manual = form.querySelector('[data-title-manual]');
+  const prefer = form.querySelector('[data-title-prefer]');
+  if (adminControlName(target) === 'title-review-choice') {
+    if (manual) manual.value = '';
+    const current = form.dataset.current || '';
+    if (prefer) {
+      const other = target.value !== current;
+      prefer.checked = other;
+      if (other) form.dataset.preferAuto = '1';
+      else delete form.dataset.preferAuto;
+    }
     return;
   }
-  preview.textContent = 'Сейчас: ' + current + ' → Станет: ' + (next || '…') + '. Предпочтительное название изменится во всех карточках и поиске.';
+  if (typeof target.hasAttribute === 'function' && target.hasAttribute('data-title-prefer')) {
+    delete form.dataset.preferAuto;
+    return;
+  }
+  if (manual && target === manual) {
+    const typed = manual.value.replace(/\s+/g, ' ').trim();
+    if (!typed) return;
+    for (const choice of form.querySelectorAll('input[name="title-review-choice"]')) choice.checked = false;
+    if (form.dataset.preferAuto === '1' && prefer) {
+      prefer.checked = false;
+      delete form.dataset.preferAuto;
+    }
+  }
 }
 
 function adminTitleRetryText(kept) {
@@ -465,9 +552,10 @@ function adminRestoreTitleAttempt(form, kept) {
   // A command that omits effect is the historical promote. The checkbox shows the effect the
   // retry will apply, including when the card was rebuilt with the box off.
   if (prefer) prefer.checked = kept.effect !== 'add_alias';
+  delete form.dataset.preferAuto;
   delete form.dataset.busy;
-  adminTitleSync(form);
   form.dataset.requestId = kept.requestId;
+  adminTitleSync(form);
 }
 
 // A 503 readback_failed can follow a put that already landed. The reread proves a promote only when
@@ -526,8 +614,19 @@ function adminBindTitleReview(detail) {
   const result = form.querySelector('[data-title-result]');
   const prefer = form.querySelector('[data-title-prefer]');
   const discardAttempt = () => { delete form.dataset.requestId; adminTitleDrop(); };
-  form.addEventListener('change', () => { discardAttempt(); adminTitleSync(form); });
-  form.addEventListener('input', () => { discardAttempt(); adminTitleSync(form); });
+  const noteCleared = () => { if (result && form.dataset.busy !== '1') result.textContent = ''; };
+  form.addEventListener('change', event => {
+    discardAttempt();
+    adminTitleApplyChoice(form, event.target);
+    noteCleared();
+    adminTitleSync(form);
+  });
+  form.addEventListener('input', event => {
+    discardAttempt();
+    adminTitleApplyChoice(form, event.target);
+    noteCleared();
+    adminTitleSync(form);
+  });
   adminTitleSync(form);
   form.addEventListener('submit', event => {
     event.preventDefault();
@@ -538,7 +637,9 @@ function adminBindTitleReview(detail) {
       const typed = manual.value.replace(/\s+/g, ' ').trim();
       const selected = form.querySelector('input[name="title-review-choice"]:checked');
       const value = typed || (selected ? selected.value : '');
-      if (!value) { result.textContent = form.querySelector('input[name="title-review-choice"]') ? 'Выберите вариант или введите название.' : 'Введите название.'; return; }
+      if (!value) { result.textContent = form.querySelector('input[name="title-review-choice"]') ? 'Выберите вариант или введите название.' : 'Введите название.'; if (typeof result.focus === 'function') result.focus(); return; }
+      const blocked = adminTitleBlocked(form);
+      if (blocked) { result.textContent = blocked; if (typeof result.focus === 'function') result.focus(); return; }
       if (!form.dataset.requestId) form.dataset.requestId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
       body = {filmId: form.dataset.filmId, requestId: form.dataset.requestId, mode: typed ? 'manual' : 'alias', value, expectedVersion: form.dataset.version, effect: prefer && prefer.checked ? 'promote' : 'add_alias'};
       const basis = form.querySelector('[name="basis"]').value;
@@ -553,13 +654,22 @@ function adminBindTitleReview(detail) {
     adminSaveFilmTitle(storedId, body).then(response => {
       form.dataset.busy = '0';
       if (response.ok) {
-        adminTitleDrop();
-        if (prefer) prefer.checked = false;
-        adminTitleSync(form);
         const payload = response.body;
         const duplicate = payload && payload.reason === 'duplicate_alias';
-        result.textContent = duplicate ? 'Такой вариант уже есть. Новой записи нет.' : payload && payload.changed === false ? 'Название уже такое. Новой записи нет.' : body.effect === 'add_alias' ? 'Вариант добавлен. Предпочтительное название не изменилось.' : 'Название записано. Обновляю карточку.';
-        result.focus();
+        const unchanged = payload && payload.changed === false && !payload.idempotent;
+        adminTitleDrop();
+        delete form.dataset.requestId;
+        if (duplicate || unchanged) {
+          adminTitleSync(form);
+          result.textContent = duplicate ? 'Такой вариант уже есть. Новой записи нет.' : 'Название уже такое. Новой записи нет.';
+          if (typeof result.focus === 'function') result.focus();
+          return;
+        }
+        if (prefer) prefer.checked = false;
+        delete form.dataset.preferAuto;
+        adminTitleSync(form);
+        result.textContent = body.effect === 'add_alias' ? 'Вариант добавлен. Предпочтительное название не изменилось.' : 'Название записано. Обновляю карточку.';
+        if (typeof result.focus === 'function') result.focus();
         onAdminRefresh();
         return;
       }
@@ -653,7 +763,10 @@ function adminNameForm(record) {
   const collisions = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}" disabled${item.linked ? ' checked' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
   const roleList = collisions ? `<fieldset><legend>Тот же человек в другой роли</legend><div class="admin-name-options">${collisions}</div></fieldset>` : '';
   const roleBlock = (review.collisions || []).length > 4 ? `<details class="admin-name-more"><summary>Тот же человек в другой роли (${review.collisions.length})</summary>${roleList}</details>` : roleList;
-  const audit = (review.reviews || []).map(entry => `<li>${adminEscape(entry.at || '')} · ${adminEscape(entry.mode || '')} · ${adminEscape(entry.from?.value || '—')} → ${adminEscape(entry.to?.value || '')}${entry.linkedFrom ? ' · из ' + adminEscape(entry.linkedFrom) : ''}</li>`).join('');
+  const audit = (review.reviews || []).map(entry => {
+    const when = adminMadridWhen(entry.at);
+    return `<li>${when ? adminEscape(when) + ' · ' : ''}${adminEscape(entry.mode || '')} · ${adminEscape(entry.from?.value || '—')} → ${adminEscape(entry.to?.value || '')}${entry.linkedFrom ? ' · из ' + adminEscape(entry.linkedFrom) : ''}</li>`;
+  }).join('');
   const preferred = review.preferred || {};
   return `<form id="admin-name-form" class="admin-name-form"><h3>Вариант имени</h3><p class="admin-name-current">Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b></p><p class="admin-name-current">Оригинал: <b>${adminEscape(review.original || record.original || 'нет')}</b></p><p class="muted">Без галочки сохранение только добавляет вариант. Предпочтительное имя, оригинал и показы не меняются.</p>${options ? `<fieldset><legend>Варианты</legend><div class="admin-name-options">${options}</div></fieldset>` : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите имя.</p>'}<label>Вариант<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><label class="admin-name-preferred"><input id="admin-name-preferred" name="person-name-preferred" type="checkbox"> <span>Использовать как предпочтительное</span></label><p id="admin-name-preview" class="admin-name-preview" hidden></p><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${roleBlock}<details class="admin-name-more"><summary>Остальные варианты и происхождение</summary>${folded ? `<ul>${folded}</ul>` : '<p class="muted">Других вариантов нет.</p>'}</details>${audit ? `<details class="admin-name-more"><summary>Журнал</summary><ul>${audit}</ul></details>` : ''}<p id="admin-name-status" class="admin-name-status" role="status" tabindex="-1"></p><button type="submit">Сохранить вариант</button></form>`;
 }
