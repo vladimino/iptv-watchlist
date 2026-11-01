@@ -15,7 +15,7 @@ assert.equal(build.status,0);
 const worker=await import(pathToFileURL(path.join(root,'dist/server/index.js')).href);
 const bucket=new MemoryBucket();
 await importFixtures(bucket,await loadLocalCatalog());
-const env={BUCKET:bucket};
+const env={BUCKET:bucket,PUBLISHED_EPG_DB_OPTIONAL:'standin'};
 
 async function get(pathname){
  const response=await worker.default.fetch(new Request('http://127.0.0.1'+pathname),env);
@@ -90,6 +90,9 @@ assert.notEqual(wrong.status,200);
 const wrongBody=await wrong.json();
 assert.equal(wrongBody.films,undefined);
 assert.match(wrongBody.error,/prediction_domain_unavailable/);
-const localEmpty=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb});
+const blocked=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb});
+assert.equal(blocked.status,502);
+assert.match((await blocked.json()).error,/published_epg_unavailable/);
+const localEmpty=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb,PUBLISHED_EPG_DB_OPTIONAL:'standin'});
 assert.equal(localEmpty.status,200);
 console.log('Local API: programme, started, and enrichment view match the fixture catalog');

@@ -79,7 +79,7 @@ async function adminLimboLoad(env,hasPin){
  const queue=await adminReadObject(env.BUCKET,LIMBO_QUEUE_KEY,cache?.queue||null);
  const index=await adminReadObject(env.BUCKET,LIMBO_INDEX_KEY,cache?.index||null);
  let observations;
- try{observations=await discoveryIndexRead(env.BUCKET,{cached:cache?.observations||null});}
+ try{observations=await discoveryIndexRead(env.BUCKET,{cached:cache?.observations||null,env});}
  catch{observations={state:'unavailable',reasons:['storage_unavailable'],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};}
  const readable=['fresh','stale'].includes(observations.state);
  const tuple={...base.tuple,queueVersion:queue.present?queue.version:null,indexVersion:index.present?index.version:null,observationsVersion:readable?observations.manifestEtag:null};

@@ -72,12 +72,19 @@ async function d1EnrichmentWritersIdle(env,now=Date.now()){
 async function d1EnrichmentStore(env){
  const etags=new Map();
  await d1EnrichmentWritersIdle(env);
- const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
- if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
- const runId=pointer.programmeRunId;
- const [watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
-  d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
-  d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
+ const published=typeof PublishedEpg==='undefined'?null:await PublishedEpg.authoritativeSnapshot(env);
+ let runId,watchlist,programme;
+ if(published){
+  if(!published.programmeRunId||!d1EnrichmentFilmList(published.programme)||!d1EnrichmentFilmList(published.watchlist))throw new D1EnrichmentInputError('generation_unpublished','published_epg');
+  runId=published.programmeRunId;watchlist=published.watchlist;programme=published.programme;
+ }else{
+  const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
+  if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
+  runId=pointer.programmeRunId;
+ }
+ const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
+  published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
+  published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'titles.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'people.json',d1EnrichmentRecord),
@@ -86,7 +93,12 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
  ]);
+ if(!published){watchlist=watchlistObject;programme=programmeObject;}
  for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);
+ if(published){
+  const again=await PublishedEpg.authoritativeSnapshot(env);
+  if(!again||again.generation!==published.generation||again.programmeRunId!==runId)throw new D1EnrichmentInputError('input_changed','published_epg');
+ }
  await d1EnrichmentWritersIdle(env);
  const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
  return {store,programmeRunId:runId};

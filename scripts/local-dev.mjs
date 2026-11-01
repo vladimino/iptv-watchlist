@@ -62,7 +62,7 @@ function startWatch(){
 }
 async function writeDevConfig(devConfig){
  await mkdir(path.dirname(devConfig),{recursive:true});
- await writeFile(devConfig,JSON.stringify({name:'iptv',main:path.join(root,'dist/server/index.js'),compatibility_date:'2026-05-03',workers_dev:true,r2_buckets:[{binding:'BUCKET',bucket_name:'iptv'}]},null,2));
+ await writeFile(devConfig,JSON.stringify({name:'iptv',main:path.join(root,'dist/server/index.js'),compatibility_date:'2026-05-03',workers_dev:true,vars:{PUBLISHED_EPG_DB_OPTIONAL:'standin'},r2_buckets:[{binding:'BUCKET',bucket_name:'iptv'}]},null,2));
 }
 async function openBucket(devConfig,persistDir){
  const {getPlatformProxy}=await import(pathToFileURL(wranglerEntrypoint()).href);

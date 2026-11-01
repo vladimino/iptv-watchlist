@@ -132,11 +132,13 @@ D1 table `film_sync_state` ([ADR 0070](../../adr/0070-metadatasync-freshness-clo
 
 An explicit `shows: []` is known **no availability**. When a published programme run is known, missing `shows` or a mismatched `showsProgrammeRunId` must not produce hot. `epgLastAiring` is a fallback only when no explicit shows, no shows programme run and no published run are known. A new published EPG generation atomically replaces the current show set; it does not append old availability. See [candidate discovery](candidate-discovery.md).
 
+When `published_epg_authority.mode` is `d1` ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md), Proposed; not the production marker until a later activation), availability is that generation's D1 document plus `published_epg_show`. `film_epg_last_airing` is not a write of this publisher. `programme.json` and `watchlist.json` are the compatibility mirror, not a second authority. An explicit empty show list is still a member and zero show rows. The publisher does not mint a Film for a programme id.
+
 ## Existing storage and projections
 
 | Existing store | Role (not a new canonical D1 entity) |
 | --- | --- |
-| `metadata.json`, `watchlist.json`, `programme.json` | Letterboxd/watchlist metadata and published programme snapshots; current user-facing read models |
+| `metadata.json`, `watchlist.json`, `programme.json` | Letterboxd/watchlist metadata and published programme snapshots. While the published EPG marker is `r2` or absent, these are the read models. While it is `d1`, `programme.json` and `watchlist.json` are the compatibility mirror of the D1 generation |
 | `epg/discovery-latest.json`, `epg/discovery-resolution.json` | EPG observation ledger and separately evaluated identity decisions; unresolved observation is **not** a Film |
 | `epg/discovered-films.json` | Verified discovered catalog records; current show lists tied to the published generation |
 | `admin/owner-reviews.json` | Owner-confirmed Film titles and Person names; stronger than the dictionary. The Film route writes `films` and copies `people`. |
