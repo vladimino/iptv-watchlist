@@ -123,7 +123,7 @@ sequenceDiagram
     end
     opt Flag on and source inputs complete
         Worker->>D1: Atomically write changed Films and Persons with keys
-        opt Schema v5 and film_sync_state present
+        opt Schema v5 or v6 with film_sync_state present
             Worker->>D1: Write metadata sync clocks with checkpoint
         end
     end
