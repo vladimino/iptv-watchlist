@@ -11,8 +11,6 @@
 // lookup. A null or absent rating is not watched. A new reference that reopens an entry does not by itself request.
 // One step probes at most five stored ratings, reads the films-list floor once, and does not request a film it has not
 // probed. A short lease leaves the rest pending and the step continues.
-// One step probes at most five stored ratings, reads the films-list floor once, and does not request a film it has not
-// probed. A short lease leaves the rest pending and the step continues.
 // ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdRatings=(()=>{
