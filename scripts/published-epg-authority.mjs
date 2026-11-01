@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Offline operator for the published EPG marker (ADR 0079). Default is read-only status.
 // --load copies local programme.json and watchlist.json into D1 and leaves mode r2.
-// --activate sets mode d1 only when the stored mirror etag is still that pointer file.
+// --activate holds the cutover, then opens it only when the local files still match. It does not leave a visible d1 before that.
 // --revert repairs the pointer, programme.json, watchlist.json and their generation copies, then sets mode r2. It keeps the rows.
 // Each write refuses without its own --confirm. This process never selects production D1 and never calls the network.
 import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
-import {activatePublished, importPublished, readAuthority, revertPublished} from '../src/published-epg.js';
+import {activatePublished, importPublished, readAuthority, revertPublished, sealPublished} from '../src/published-epg.js';
 
 const PRODUCTION=/3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb|(?:^|[\\/])iptv(?:[\\/]|$)/i;
 const args=process.argv.slice(2);
@@ -81,6 +81,6 @@ const env={...db,BUCKET:bucket()};
 const result=load
  ?await importPublished(env,{confirm:'load',programme,watchlist,programmeRunId:pointer.programmeRunId,publishedAt:programme.updatedAt??null,pointerEtag:etagOf(pointerText),watchlistEtag:etagOf(watchlistText)})
  :activate
-  ?await activatePublished(env,{confirm:'activate',pointerEtag:etagOf(pointerText)})
+  ?await sealPublished(env,await activatePublished(env,{confirm:'activate',pointerEtag:etagOf(pointerText)}))
   :await revertPublished(env,{confirm:'r2'});
 console.log(JSON.stringify({mode:result.mode,programmeRunId:result.programmeRunId??null,generation:result.generation??null,writes:true}));

@@ -5,8 +5,10 @@
 -- version 7 that is missing any prediction-domain table, before any CREATE.
 -- When the prerequisite holds, the version becomes 8 and never goes down.
 -- A deploy does not apply this file.
--- The inserted marker is mode r2. Applying this file does not publish a
--- generation and does not set mode d1.
+-- The inserted marker is mode r2 and cutover open. Applying this file does
+-- not publish a generation and does not set mode d1. cutover held is not a
+-- visible d1: readers and mirror repair ignore it. Opening the cutover, or
+-- returning mode to r2, is a later compare-and-swap and does not write R2.
 -- film_id is the id carried by the published document. It is not a foreign
 -- key: a membership does not mint a Film and does not require one.
 -- published_epg_cas is the batch fence, not a switch.
@@ -36,6 +38,7 @@ WHERE NOT EXISTS (
 CREATE TABLE published_epg_authority (
  id INTEGER PRIMARY KEY CHECK (id = 1),
  mode TEXT NOT NULL CHECK (mode IN ('r2', 'd1')),
+ cutover TEXT NOT NULL DEFAULT 'open' CHECK (cutover IN ('open', 'held')),
  programme_run_id TEXT,
  generation INTEGER NOT NULL,
  mirror_programme_run_id TEXT,
@@ -134,8 +137,8 @@ CREATE TABLE published_epg_stage_row (
  PRIMARY KEY (programme_run_id, chunk_index, ordinal)
 ) STRICT;
 
-INSERT INTO published_epg_authority (id, mode, programme_run_id, generation, mirror_programme_run_id, mirror_etag, watchlist_generation, mirror_watchlist_etag)
-VALUES (1, 'r2', NULL, 0, NULL, NULL, 0, NULL);
+INSERT INTO published_epg_authority (id, mode, cutover, programme_run_id, generation, mirror_programme_run_id, mirror_etag, watchlist_generation, mirror_watchlist_etag)
+VALUES (1, 'r2', 'open', NULL, 0, NULL, NULL, 0, NULL);
 INSERT INTO published_epg_cas (id, ok) VALUES (1, 1);
 
 CREATE TRIGGER schema_contract_no_downgrade

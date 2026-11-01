@@ -438,7 +438,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  if(effective==='full')return {items:mergeDiscoveryCandidates(previous?.items,latest,{replaceShows:true,programmeRunId:runId}),ledger:{}};
  const fence=async()=>{
   if(!await renewDiscoveryLease(env,lease))throw new Error('Discovery archive fence lost: lease');
-  if(typeof PublishedEpg!=='undefined'){const live=await PublishedEpg.currentGeneration(env);if(live){if(live.fence!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}return;}}
+  if(typeof PublishedEpg!=='undefined'){const gate=await PublishedEpg.readAuthority(env);if(gate.cutover==='held')throw new Error('Discovery archive fence lost: published generation changed');const live=await PublishedEpg.currentGeneration(env);if(live){if(live.fence!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}return;}}
   const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if((pointer?.etag??null)!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');
   if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}
  };
@@ -510,7 +510,7 @@ async function publishD1Generation(env,runId,files,ledger,watchlist,publication)
  }finally{await releaseDiscoveryLease(env,lease);}
 }
 async function publishEpgGeneration(env,runId,files,ledger=null,watchlist=null){
- if(typeof PublishedEpg!=='undefined'){const publication=await PublishedEpg.currentGeneration(env);if(publication)return publishD1Generation(env,runId,files,ledger,watchlist,publication);}
+ if(typeof PublishedEpg!=='undefined'){const gate=await PublishedEpg.readAuthority(env);if(gate.cutover==='held')throw new Error('published_epg_fence');const publication=await PublishedEpg.currentGeneration(env);if(publication)return publishD1Generation(env,runId,files,ledger,watchlist,publication);}
  const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
  try{
   const next={...files};

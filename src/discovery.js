@@ -236,6 +236,8 @@ function touchCanonicalFilm(film,candidate,programmeRunId){
 }
 async function publishedPointer(env){
  if(typeof PublishedEpg!=='undefined'){
+  const gate=await PublishedEpg.readAuthority(env);
+  if(gate.cutover==='held')throw new Error('published_epg_fence');
   const live=await PublishedEpg.currentGeneration(env);
   if(live)return {authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,etag:live.fence};
  }

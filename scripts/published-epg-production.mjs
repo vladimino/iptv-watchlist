@@ -5,13 +5,15 @@
 // published EPG tables are all absent. The inserted marker stays mode r2 and the
 // version becomes 8. Version 6 is refused before any statement is sent.
 // --load copies the live programme and watchlist into D1 and leaves mode r2.
-// --activate flips the marker r2 to d1 only when pointer, programme and watchlist
-// still match that load, and only after --producers-drained. That flag is the
-// operator's acknowledgment that every watchlist and EPG writer stays stopped
-// until this command exits. An idle sync, resolver or projector lease is not
-// that drain, and a deploy is not that drain. A source that changes between
-// the last R2 read and the marker compare-and-swap is put back to mode r2
-// without rewriting the new R2 object. --revert --confirm r2 repairs the pointer, programme.json,
+// --activate holds the marker (mode d1, cutover held) only when pointer,
+// programme and watchlist still match that load, and only after
+// --producers-drained. That flag is the operator's acknowledgment that every
+// watchlist and EPG writer stays stopped until this command exits. An idle
+// sync, resolver or projector lease is not that drain, and a deploy is not
+// that drain. While cutover is held the marker is not a visible d1: a public
+// read stays on R2 and does not repair mirrors. The command then re-reads R2.
+// A match opens the cutover. A changed watchlist returns mode to r2 and does
+// not write R2. A failed re-read leaves the hold and reports the D1 write. --revert --confirm r2 repairs the pointer, programme.json,
 // watchlist.json and the generation copies from D1 and flips the marker back to r2.
 // Revert writes only to https://<production-account>.r2.cloudflarestorage.com and
 // refuses R2_SNAPSHOT_ENDPOINT before any request. Each write needs its own --confirm and --target
@@ -24,7 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
-import {activatePublished, importPublished, readDocument, readMembers, revertPublished} from '../src/published-epg.js';
+import {activatePublished, importPublished, readDocument, readMembers, releasePublished, revertPublished, sealPublished} from '../src/published-epg.js';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials, rfc3986, signRequest} from './r2-snapshot-export.mjs';
@@ -232,8 +234,8 @@ async function readSnapshot(binding){
   const prediction=Object.fromEntries(PREDICTION_TABLES.map(name=>[name,names.includes(name)]));
   let marker=null;
   if(tables.published_epg_authority){
-   const row=await binding.prepare('SELECT mode, programme_run_id AS programmeRunId, generation, mirror_programme_run_id AS mirrorProgrammeRunId, mirror_etag AS mirrorEtag, watchlist_generation AS watchlistGeneration, mirror_watchlist_etag AS mirrorWatchlistEtag FROM published_epg_authority WHERE id=1').bind().first();
-   if(row)marker={mode:row.mode, programmeRunId:row.programmeRunId??null, generation:Number(row.generation), mirrorProgrammeRunId:row.mirrorProgrammeRunId??null, mirrorEtag:row.mirrorEtag??null, watchlistGeneration:Number(row.watchlistGeneration), mirrorWatchlistEtag:row.mirrorWatchlistEtag??null};
+   const row=await binding.prepare('SELECT mode, cutover, programme_run_id AS programmeRunId, generation, mirror_programme_run_id AS mirrorProgrammeRunId, mirror_etag AS mirrorEtag, watchlist_generation AS watchlistGeneration, mirror_watchlist_etag AS mirrorWatchlistEtag FROM published_epg_authority WHERE id=1').bind().first();
+   if(row)marker={mode:row.mode, cutover:row.cutover??null, programmeRunId:row.programmeRunId??null, generation:Number(row.generation), mirrorProgrammeRunId:row.mirrorProgrammeRunId??null, mirrorEtag:row.mirrorEtag??null, watchlistGeneration:Number(row.watchlistGeneration), mirrorWatchlistEtag:row.mirrorWatchlistEtag??null};
   }
   return {schemaVersion:Number.isFinite(version)?version:null, tables, prediction, marker};
  }catch(error){
@@ -399,7 +401,7 @@ async function applyMigration(opened, ctx, snapshot, writers){
  const statements=publishedEpgStatements();
  await opened.adapter.executeRendered(statements);
  const readback=await readSnapshot(opened.binding);
- if(readback.schemaVersion!==8||readback.marker?.mode!=='r2'||readback.marker.programmeRunId!==null||readback.marker.generation!==0||readback.marker.watchlistGeneration!==0)throw new OperatorStop('readback_mismatch',3);
+ if(readback.schemaVersion!==8||readback.marker?.mode!=='r2'||readback.marker.cutover!=='open'||readback.marker.programmeRunId!==null||readback.marker.generation!==0||readback.marker.watchlistGeneration!==0)throw new OperatorStop('readback_mismatch',3);
  return {operation:'apply', writes:true, writeState:'committed', bookmark:ctx.bookmark, writers, schemaVersion:readback.schemaVersion, mode:readback.marker.mode, generation:readback.marker.generation, programmeRunId:readback.marker.programmeRunId};
 }
 
@@ -486,36 +488,34 @@ async function activateMarker(opened, client, ctx, snapshot, source, clock){
   },
  };
  const after=await activatePublished({...opened.binding,BUCKET:bucket},{confirm:'activate',pointerEtag:source.pointer.etag,watchlistEtag:source.watchlist.etag});
+ if(after.mode!=='d1'||after.cutover!=='held')throw new OperatorStop('readback_mismatch',3);
  let fresh;
  try{fresh=await readPublished(client);}
  catch(error){
-  if(error instanceof OperatorStop&&(error.reason==='source_changed'||error.reason==='source_missing'||error.reason==='source_invalid')){
-   await releaseCutover(opened, after);
+  const stop=normalize(error);
+  if(stop.reason==='source_changed'||stop.reason==='source_missing'||stop.reason==='source_invalid'){
+   await releaseHeld(opened);
    throw new OperatorStop('cutover_race',3);
   }
-  throw error;
+  throw stop;
  }
  const programme=await readDocument(opened.binding,after.programmeRunId,'programme');
  const watchlist=await readDocument(opened.binding,after.programmeRunId,'watchlist');
  const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
  const moved=fresh.pointer.etag!==source.pointer.etag||fresh.programme.etag!==source.programme.etag||fresh.watchlist.etag!==source.watchlist.etag||fresh.pointerBody.programmeRunId!==after.programmeRunId||!same(fresh.programmeBody,programme)||!same(fresh.watchlistBody,watchlist);
  if(moved){
-  await releaseCutover(opened, after);
+  await releaseHeld(opened);
   throw new OperatorStop('cutover_race',3);
  }
+ const sealed=await sealPublished(opened.binding,{programmeRunId:after.programmeRunId,generation:after.generation});
  const readback=await readSnapshot(opened.binding);
- if(after.mode!=='d1'||readback.marker?.mode!=='d1'||readback.marker.programmeRunId!==snapshot.marker.programmeRunId)throw new OperatorStop('readback_mismatch',3);
- return {operation:'activate', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'d1', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
+ if(sealed.mode!=='d1'||sealed.cutover!=='open'||readback.marker?.mode!=='d1'||readback.marker?.cutover!=='open'||readback.marker.programmeRunId!==snapshot.marker.programmeRunId)throw new OperatorStop('readback_mismatch',3);
+ return {operation:'activate', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'d1', cutover:'open', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
 }
-async function releaseCutover(opened, after){
- const current=await readSnapshot(opened.binding);
- if(current.marker?.mode!=='d1')return;
- await opened.binding.batch([
-  opened.binding.prepare("UPDATE published_epg_authority SET mode='r2' WHERE id=1 AND mode='d1' AND programme_run_id=? AND generation=? AND mirror_etag=? AND mirror_watchlist_etag=?").bind(after.programmeRunId,after.generation,after.mirrorEtag,after.mirrorWatchlistEtag),
-  opened.binding.prepare('UPDATE published_epg_cas SET ok=changes() WHERE id=1').bind(),
- ]);
+async function releaseHeld(opened){
+ await releasePublished(opened.binding);
  const again=await readSnapshot(opened.binding);
- if(again.marker?.mode!=='r2')throw new OperatorStop('cutover_race',3);
+ if(again.marker?.mode!=='r2'||again.marker?.cutover!=='open')throw new OperatorStop('cutover_race',3);
 }
 
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
