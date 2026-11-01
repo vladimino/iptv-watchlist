@@ -17,7 +17,7 @@ export function projectorContext({log=()=>{}}={}){
  vm.runInContext(sources.match(/^const EPG_GENERATION_KEY=.*$/m)[0]+'\n'+sources.match(/^function epgGenerationKey\(.*$/m)[0],context);
  vm.runInContext(fs.readFileSync('src/discovery.js','utf8').match(/^const DISCOVERY_LEASE_KEY=.*$/m)[0],context);
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),context);
- for(const [file,name,names] of [['src/domain/film-person-reader.js','LifecycleReader',['readLifecycle']],['src/enrichment-projection.js','EnrichmentProjection'],['src/canonical-repository.js','CanonicalRepository'],['src/metadata-cache.js','MetadataCache'],['src/published-epg.js','PublishedEpg']])vm.runInContext(scoped(file,name,names),context);
+ for(const [file,name,names] of [['src/domain/film-person-reader.js','LifecycleReader',['readLifecycle']],['src/enrichment-projection.js','EnrichmentProjection'],['src/canonical-repository.js','CanonicalRepository'],['src/metadata-cache.js','MetadataCache'],['src/published-epg.js','PublishedEpg'],['src/prediction-d1.js','PredictionD1']])vm.runInContext(scoped(file,name,names),context);
  vm.runInContext(fs.readFileSync('src/d1-enrichment.js','utf8')+'\nglobalThis.projector={runD1EnrichmentProjection,d1EnrichmentMode,d1EnrichmentPlan,d1EnrichmentStatus,d1EnrichmentAdapter,CanonicalRepository,EnrichmentProjection,MetadataCache};',context);
  return context.projector;
 }

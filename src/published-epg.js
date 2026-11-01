@@ -168,8 +168,13 @@ export async function readAuthority(db){
  catch(error){throw failed('published_epg_unavailable',error);}
  const tables=TABLES.every(name=>names.includes(name));
  if(!tables){
-  if(Number(version)>=8)throw failed('published_epg_unavailable');
-  return {mode:'r2',tables:false,version,ready:false};
+  const numeric=Number(version);
+  if(version==null||!Number.isFinite(numeric)){
+   if(db?.PUBLISHED_EPG_DB_OPTIONAL==='standin')return {mode:'r2',tables:false,version:null,ready:false};
+   throw failed('published_epg_unavailable');
+  }
+  if(numeric>=8)throw failed('published_epg_unavailable');
+  return {mode:'r2',tables:false,version:numeric,ready:false};
  }
  if(!(Number(version)>=8))throw failed('published_epg_unavailable');
  let row;

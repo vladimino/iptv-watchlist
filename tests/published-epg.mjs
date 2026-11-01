@@ -11,6 +11,7 @@ import {CHUNK_BYTES,CHUNK_STATEMENTS,CLAIM_TTL_MS,MAX_STATEMENT_BYTES,activatePu
 import {DEFAULT_CHUNK_BYTES,DEFAULT_CHUNK_STATEMENTS,MAX_ROW_STATEMENT_BYTES} from '../src/generation-stage.js';
 import {generationProjection} from '../src/epg-repository.js';
 import {readAuthority as readCache} from '../src/metadata-cache.js';
+import {readPredictionAuthority, routeRead} from '../src/prediction-d1.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
@@ -24,6 +25,9 @@ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/env\.DB\b/);
 assert.doesNotMatch(fs.readFileSync('src/discovery.js','utf8'),/env\.DB\b/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/published-epg\.js','PublishedEpg'\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/PublishedEpg\.publishGeneration\(env,/);
+assert.match(fs.readFileSync('src/worker.js','utf8'),/PredictionD1\.routeRead\(env,key\)/);
+assert.match(fs.readFileSync('src/worker.js','utf8'),/PredictionD1\.overlayIndex\(env,value,canonicalMoodFacet\)/);
+assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/prediction-d1\.js','PredictionD1'\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/published_epg_unavailable/);
 const worker=fs.readFileSync('src/worker.js','utf8');
 assert.ok(worker.indexOf('removalRefs')<worker.indexOf('generation_publish'),'removal handover is saved before publication');
@@ -54,7 +58,7 @@ function open(stopAt=names.length,{onBatch=null}={}){
  const file=path.join(root,'epg-'+(databases++)+'.sqlite');
  const db=d1Standin(file,{onBatch});
  for(const name of names.slice(0,stopAt)){
-  if(name==='0008_published_epg_authority')installPrediction(db);
+  if(name==='0008_published_epg_authority')db.sql(fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'));
   db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
  }
  return db;
@@ -81,6 +85,33 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(blocked,true,'schema v6 cannot take the published EPG migration');
  assert.equal(one(v6,'SELECT version FROM schema_contract'),6);
  assert.equal(one(v6,"SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade'"),0);
+}
+
+{
+ const chain=d1Standin(path.join(root,'chain-'+(databases++)+'.sqlite'));
+ for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority'])chain.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
+ assert.equal(one(chain,'SELECT version FROM schema_contract'),8);
+ assert.equal(one(chain,"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent')"),10);
+ assert.equal(one(chain,"SELECT mode FROM prediction_domain_authority WHERE id=1"),'r2');
+ assert.equal(one(chain,"SELECT mode FROM published_epg_authority WHERE id=1"),'r2');
+ const required={PREDICTION_DB_REQUIRED:'on'};
+ assert.equal((await readPredictionAuthority(chain,required)).mode,'r2');
+ assert.equal((await routeRead({DB:chain,...required},'enrichment/prediction-queue.json')).handled,false);
+ assert.equal(await currentGeneration({DB:chain}),null);
+ chain.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
+ const routed=await routeRead({DB:chain,...required},'enrichment/prediction-queue.json');
+ assert.equal(routed.handled,true);
+ assert.equal(routed.value,null);
+ assert.equal(await currentGeneration({DB:chain}),null,'published EPG stays on R2 while its own marker is r2');
+ chain.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+ assert.equal((await currentGeneration({DB:chain})).authority,'d1');
+ assert.equal((await routeRead({DB:chain,...required},'enrichment/prediction-queue.json')).handled,true);
+ const projector=projectorContext();
+ const status=await projector.d1EnrichmentStatus(chain,{});
+ assert.equal(status.schema,true);
+ assert.equal(status.schemaVersion,8);
+ assert.equal(status.predictionMode,'d1');
+ assert.equal(status.cacheMode,'r2');
 }
 
 {
@@ -248,6 +279,14 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  await assert.rejects(readAuthority({DB:empty}),/published_epg_unavailable/);
  assert.equal((await readAuthority({DB:empty,PUBLISHED_EPG_DB_OPTIONAL:'standin'})).mode,'r2');
  assert.equal((await readAuthority({PUBLISHED_EPG_DB_OPTIONAL:'standin'})).mode,'r2');
+ const contractOnly=d1Standin(path.join(root,'contract-only-'+(databases++)+'.sqlite'));
+ contractOnly.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version, note)');
+ await assert.rejects(readAuthority(contractOnly),/published_epg_unavailable/);
+ assert.equal((await readAuthority({...contractOnly,PUBLISHED_EPG_DB_OPTIONAL:'standin'})).mode,'r2');
+ const invalidContract=d1Standin(path.join(root,'contract-invalid-'+(databases++)+'.sqlite'));
+ invalidContract.sql("CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version, note); INSERT INTO schema_contract (id, version, note) VALUES (1, 'nope', 'bad')");
+ await assert.rejects(readAuthority(invalidContract),/published_epg_unavailable/);
+ assert.equal((await readAuthority({...invalidContract,PUBLISHED_EPG_DB_OPTIONAL:'standin'})).mode,'r2');
  assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/PUBLISHED_EPG_DB_OPTIONAL/);
  assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/PUBLISHED_EPG_DB_OPTIONAL/);
  assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/PUBLISHED_EPG_DB_OPTIONAL:'standin'/);

@@ -6,8 +6,15 @@
 // version becomes 8. Version 6 is refused before any statement is sent.
 // --load copies the live programme and watchlist into D1 and leaves mode r2.
 // --activate flips the marker r2 to d1 only when pointer, programme and watchlist
-// still match that load. --revert --confirm r2 repairs the pointer, programme.json,
-// watchlist.json and the generation copies from D1 and flips the marker back to r2. Each write needs its own --confirm and --target
+// still match that load, and only after --producers-drained. That flag is the
+// operator's acknowledgment that every watchlist and EPG writer stays stopped
+// until this command exits. An idle sync, resolver or projector lease is not
+// that drain, and a deploy is not that drain. A source that changes between
+// the last R2 read and the marker compare-and-swap is put back to mode r2
+// without rewriting the new R2 object. --revert --confirm r2 repairs the pointer, programme.json,
+// watchlist.json and the generation copies from D1 and flips the marker back to r2.
+// Revert writes only to https://<production-account>.r2.cloudflarestorage.com and
+// refuses R2_SNAPSHOT_ENDPOINT before any request. Each write needs its own --confirm and --target
 // iptv. This script never calls Time Travel restore. The D1 token is sent only to
 // https://api.cloudflare.com/client/v4, and only for database iptv.
 // It does not replace scripts/published-epg-authority.mjs, which stays offline and
@@ -136,11 +143,15 @@ function parseArgs(argv){
  for(let index=0;index<args.length;index++){
   const arg=args[index];
   if(arg==='--target'||arg==='--confirm'){value(arg);index++;continue;}
+  if(arg==='--producers-drained')continue;
   if(!commands.includes(arg))throw new OperatorStop('usage',2);
  }
  const command=commands[0]?commands[0].slice(2):'status';
+ const producersDrained=args.includes('--producers-drained');
  const target=args.includes('--target')?value('--target'):undefined;
  const confirm=args.includes('--confirm')?value('--confirm'):undefined;
+ if(producersDrained&&command!=='activate')throw new OperatorStop('usage',2);
+ if(command==='activate'&&!producersDrained)throw new OperatorStop('producers_not_drained',2);
  if(target===undefined){
   if(command!=='status')throw new OperatorStop('target_required',2);
   return {report:{configured:false,writes:false,writeState:'none'}};
@@ -151,7 +162,7 @@ function parseArgs(argv){
  if(command==='activate'&&confirm!=='activate')throw new OperatorStop('confirm',2);
  if(command==='revert'&&confirm!=='r2')throw new OperatorStop('confirm',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
- return {command, confirm};
+ return {command, confirm, producersDrained};
 }
 
 function productionTarget(env){
@@ -242,6 +253,11 @@ function r2State(env){
  if(credentials.accountId!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('account_mismatch',3);
  if(credentials.bucket!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('bucket_identity',3);
  return credentials;
+}
+const PRODUCTION_R2_ENDPOINT='https://'+PRODUCTION_ACCOUNT_ID+'.r2.cloudflarestorage.com';
+function assertWriteEndpoint(credentials){
+ if(!credentials)throw new OperatorStop('source_missing',3);
+ if(credentials.endpoint!==PRODUCTION_R2_ENDPOINT||credentials.endpointOverride)throw new OperatorStop('endpoint_refused',3);
 }
 
 async function readObject(client, key, {required=true}={}){
@@ -343,6 +359,7 @@ export async function runPublishedEpgProduction({argv=process.argv, env=process.
  try{
   const parsed=parseArgs(argv);
   if(parsed.report)return {exit:0, result:parsed.report};
+  if(parsed.command==='revert')assertWriteEndpoint(r2State(env));
   const opened=await openProduction(env, fetchImpl, ctx);
   ctx.binding=opened.binding;
   ctx.identified=true;
@@ -409,6 +426,7 @@ function quoteEtag(etag){return /^".*"$/.test(etag)?etag:'"'+etag+'"';}
 function unquoteEtag(etag){return String(etag||'').trim().replace(/^"(.*)"$/,'$1');}
 const MIRROR_KEY=/^(?:programme\.json|watchlist\.json|epg\/published-generation\.json|epg\/generations\/[^/]+\/(?:programme|watchlist)\.json)$/;
 async function putMirror(credentials, fetchImpl, key, text, etag, ctx){
+ if(credentials.endpoint!==PRODUCTION_R2_ENDPOINT||credentials.endpointOverride)throw new OperatorStop('endpoint_refused',3);
  if(!MIRROR_KEY.test(key))throw new OperatorStop('mirror_refused',3);
  const url=new URL(credentials.endpoint);
  url.pathname='/'+rfc3986(credentials.bucket)+'/'+key.split('/').map(rfc3986).join('/');
@@ -468,9 +486,36 @@ async function activateMarker(opened, client, ctx, snapshot, source, clock){
   },
  };
  const after=await activatePublished({...opened.binding,BUCKET:bucket},{confirm:'activate',pointerEtag:source.pointer.etag,watchlistEtag:source.watchlist.etag});
+ let fresh;
+ try{fresh=await readPublished(client);}
+ catch(error){
+  if(error instanceof OperatorStop&&(error.reason==='source_changed'||error.reason==='source_missing'||error.reason==='source_invalid')){
+   await releaseCutover(opened, after);
+   throw new OperatorStop('cutover_race',3);
+  }
+  throw error;
+ }
+ const programme=await readDocument(opened.binding,after.programmeRunId,'programme');
+ const watchlist=await readDocument(opened.binding,after.programmeRunId,'watchlist');
+ const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
+ const moved=fresh.pointer.etag!==source.pointer.etag||fresh.programme.etag!==source.programme.etag||fresh.watchlist.etag!==source.watchlist.etag||fresh.pointerBody.programmeRunId!==after.programmeRunId||!same(fresh.programmeBody,programme)||!same(fresh.watchlistBody,watchlist);
+ if(moved){
+  await releaseCutover(opened, after);
+  throw new OperatorStop('cutover_race',3);
+ }
  const readback=await readSnapshot(opened.binding);
  if(after.mode!=='d1'||readback.marker?.mode!=='d1'||readback.marker.programmeRunId!==snapshot.marker.programmeRunId)throw new OperatorStop('readback_mismatch',3);
  return {operation:'activate', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'d1', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
+}
+async function releaseCutover(opened, after){
+ const current=await readSnapshot(opened.binding);
+ if(current.marker?.mode!=='d1')return;
+ await opened.binding.batch([
+  opened.binding.prepare("UPDATE published_epg_authority SET mode='r2' WHERE id=1 AND mode='d1' AND programme_run_id=? AND generation=? AND mirror_etag=? AND mirror_watchlist_etag=?").bind(after.programmeRunId,after.generation,after.mirrorEtag,after.mirrorWatchlistEtag),
+  opened.binding.prepare('UPDATE published_epg_cas SET ok=changes() WHERE id=1').bind(),
+ ]);
+ const again=await readSnapshot(opened.binding);
+ if(again.marker?.mode!=='r2')throw new OperatorStop('cutover_race',3);
 }
 
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
