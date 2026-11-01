@@ -1,6 +1,6 @@
 # Prediction pipeline
 
-The external ChatGPT caller performs model generation; the Worker manages the queue, profile and validation. Mutable prediction state stays in R2 until the schema v7 marker is `d1` ([ADR 0076](../adr/0076-d1-authoritative-prediction-domain.md)). Migration `0007` is not applied. This diagram reflects the [runner contract](../reference/api/prediction-runner.md), [Film lifecycle](../reference/domain/film-person.md) and [profile ADR](../adr/0013-versioned-taste-profile.md).
+The external ChatGPT caller performs model generation; the Worker manages the queue, profile and validation. Mutable prediction state stays in R2 until the schema v7 marker is `d1` ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). Migration `0007` is not applied. This diagram reflects the [runner contract](../reference/api/prediction-runner.md), [Film lifecycle](../reference/domain/film-person.md) and [profile ADR](../adr/0013-versioned-taste-profile.md).
 
 ```mermaid
 sequenceDiagram
@@ -50,7 +50,7 @@ sequenceDiagram
     end
 ```
 
-Migration `0007` is not applied. Until the schema v7 marker is `d1`, the persist step writes the mutable objects in R2. After that switch the same step writes the immutable body in R2, checks it, and commits the pointer and the queue in D1 ([ADR 0076](../adr/0076-d1-authoritative-prediction-domain.md)). The `d1` branch of the diagram is that contract. It is not the live marker.
+Migration `0007` is not applied. Until the prediction marker is `d1`, the persist step writes the mutable objects in R2. The contract starts at schema version 7. A later additive version keeps the same marker, and a version of 7 or newer that is missing a prediction table or a valid marker fails the step and does not read the objects. After the marker is `d1` the same step writes the immutable body in R2, checks it, and commits the pointer and the queue in D1 ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The `d1` branch of the diagram is that contract. It is not the live marker.
 
 The fingerprint schema/hash tracks the film independently from a personal prediction, which also requires the current profile version/hash and prompt version. A profile change makes predictions stale without forcing a fingerprint regeneration; EPG showtimes do not invalidate either. The persist step writes the immutable content body and generation record first and then `fingerprint.json` as a pointer with provenance ([fingerprint compatibility](../reference/domain/fingerprint-compatibility.md#storage)); a declared fingerprint schema or prompt transition re-queues only the films it reaches, bounded within each batch, under the transition rule ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md); no switch since [ADR 0047](../adr/0047-retire-fingerprint-compatibility-switch.md)), and a run ends when the Worker's versions change under it. One malformed film output is deferred with exponential backoff rather than discarding successes. This diagram is a conceptual view of the runner protocol, not an assertion that every branch occurs on each invocation.
 

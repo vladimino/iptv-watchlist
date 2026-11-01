@@ -1,7 +1,7 @@
 // Local D1 backfill executor. It imports a verified production baseline (the read-only exporter's manifest) into the target
 // D1 database through the Cloudflare D1 HTTP API, or into a local SQLite file for a dry-run, with the importer's identity,
 // evidence and parity rules. It writes only to the target it was given, never to R2, never through a Worker binding, and it
-// refuses to write until the target's identity, schema and batch atomicity have been checked in this very run.
+// refuses to write until the target's identity and schema have been checked in this very run.
 // Executing it against the production database is a separately approved operation; this module grants none.
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
@@ -20,7 +20,7 @@ import {SnapshotError} from './snapshot-store.mjs';
 
 export const TARGET_DATABASE_NAME='iptv';
 export const DEFAULT_ENDPOINT='https://api.cloudflare.com/client/v4';
-// Conservative defaults. The probe proves the configured size on the scratch database before any target write; a unit above it stops the run.
+// Conservative defaults. A unit above either cap stops the run. A unit is never split across requests.
 export const DEFAULT_MAX_BATCH_STATEMENTS=1000;
 export const DEFAULT_MAX_BATCH_BYTES=1024*1024;
 export const IDENTITY_SOURCE_KEY='manifest.json';
@@ -33,20 +33,18 @@ export class BackfillStop extends Error{constructor(reason,details={}){super('Ba
 // Every failure except a rejected statement is fatal to the run: it says nothing about the data and must not be booked as a conflict.
 export class D1Error extends Error{constructor(kind,message,details={}){super(message);this.name='D1Error';this.kind=kind;this.details=details;this.fatal=kind!=='statement';}}
 
-// The target comes from the local environment only. The scratch database is required for the atomicity probe that precedes every write.
+// The target comes from the local environment only. One database. A leftover scratch id in the environment is not read.
 export function readTarget(env=process.env){
  const accountId=String(env.D1_BACKFILL_ACCOUNT_ID||'').trim(),apiToken=String(env.D1_BACKFILL_API_TOKEN||'').trim();
- const databaseId=String(env.D1_BACKFILL_DATABASE_ID||'').trim(),scratchDatabaseId=String(env.D1_BACKFILL_SCRATCH_DATABASE_ID||'').trim();
+ const databaseId=String(env.D1_BACKFILL_DATABASE_ID||'').trim();
  const databaseName=String(env.D1_BACKFILL_DATABASE_NAME||TARGET_DATABASE_NAME).trim();
  if(!/^[0-9a-f]{32}$/.test(accountId))throw new ExportError('configuration','D1_BACKFILL_ACCOUNT_ID must be the 32-character account id');
  if(!apiToken)throw new ExportError('configuration','D1_BACKFILL_API_TOKEN is required in the environment');
  if(!/^[0-9a-f-]{36}$/.test(databaseId))throw new ExportError('configuration','D1_BACKFILL_DATABASE_ID must be the database uuid');
- if(!/^[0-9a-f-]{36}$/.test(scratchDatabaseId))throw new ExportError('configuration','D1_BACKFILL_SCRATCH_DATABASE_ID must be the scratch database uuid');
- if(scratchDatabaseId===databaseId)throw new ExportError('configuration','The scratch database must differ from the target database');
  if(!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(databaseName))throw new ExportError('configuration','D1_BACKFILL_DATABASE_NAME is not a database name');
  const endpoint=endpointFor(env.D1_BACKFILL_ENDPOINT);
  const maxBatchStatements=bounded(env.D1_BACKFILL_MAX_BATCH_STATEMENTS,DEFAULT_MAX_BATCH_STATEMENTS),maxBatchBytes=bounded(env.D1_BACKFILL_MAX_BATCH_BYTES,DEFAULT_MAX_BATCH_BYTES);
- return {accountId,apiToken,databaseId,scratchDatabaseId,databaseName,endpoint,endpointOverride:!!String(env.D1_BACKFILL_ENDPOINT||'').trim(),maxBatchStatements,maxBatchBytes};
+ return {accountId,apiToken,databaseId,databaseName,endpoint,endpointOverride:!!String(env.D1_BACKFILL_ENDPOINT||'').trim(),maxBatchStatements,maxBatchBytes};
 }
 function bounded(value,fallback){if(value==null||value==='')return fallback;const number=Number(value);if(!Number.isInteger(number)||number<1)throw new ExportError('configuration','Batch limits must be positive integers');return number;}
 export function endpointFor(override){
@@ -62,10 +60,11 @@ export function endpointFor(override){
 export function renderSql(sql,params=[]){let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('Missing SQL parameter');return literal(params[index++]);});if(index!==params.length)throw new Error('Unused SQL parameter');return text;}
 function literal(value){if(value==null)return 'NULL';if(typeof value==='number'){if(!Number.isFinite(value))throw new Error('Bad SQL number');return String(value);}if(typeof value==='boolean')return value?'1':'0';return "'"+String(value).replaceAll("'","''")+"'";}
 
-// The D1 HTTP adapter. Reads are single statements. Writes are buffered inside transaction() and sent as ONE request whose
-// statements are executed together; whether that execution is atomic is not assumed but proven by probeAtomicity on the
-// scratch database before the first production write. A write request whose outcome is unknown (the connection failed
-// after sending) is never retried: the run stops and the next run reconciles through the importer's read-back.
+// The D1 HTTP adapter. Reads are single statements. Writes buffered inside transaction() go out as ONE request whose
+// body is {sql}: the statements joined by newlines. That is the request the scratch measurement exercised. executeRendered
+// stays a separate {batch} body for callers that already send one. A write whose outcome is unknown (the connection
+// failed after sending, a transient status, or a success body that does not prove every statement) is never retried:
+// the run stops and the next run reconciles through the importer's read-back.
 export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sleep=sleepFor,timeoutMs=120000}){
  const stats={requests:0,reads:0,batches:0,statements:0,largestBatchStatements:0,largestBatchBytes:0,retries:0};
  const state={buffer:null};
@@ -90,11 +89,17 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
    return payload;
   }
  }
- async function query(sql,{write=false}={}){
-  const payload=await request('POST',base+'/query',{sql},{write});
+ async function query(sql){
+  const payload=await request('POST',base+'/query',{sql});
   const results=Array.isArray(payload?.result)?payload.result:[];
   if(results.some(item=>item&&item.success===false))throw new D1Error('statement',results.find(item=>item.success===false)?.error||'A statement failed');
   return results;
+ }
+ function proveWrite(payload,expected){
+  const results=Array.isArray(payload?.result)?payload.result:[];
+  const failed=results.find(item=>item&&item.success===false);
+  if(failed)throw new D1Error('statement',failed.error||'A statement failed');
+  if(results.length!==expected||results.some(item=>item?.success!==true))throw new D1Error('write_uncertain','A write response did not prove every statement; its outcome is unknown and it is not retried',{expected,reported:results.length});
  }
  return {
   stats,
@@ -103,7 +108,7 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
    const statement=renderSql(sql,params)+';';
    if(state.buffer){state.buffer.push(statement);return Promise.resolve();}
    stats.batches++;stats.statements++;
-   return query(statement,{write:true}).then(()=>undefined);
+   return request('POST',base+'/query',{sql:statement},{write:true}).then(payload=>{proveWrite(payload,1);});
   },
   async get(sql,params=[]){const rows=await this.all(sql,params);return rows[0]??null;},
   async all(sql,params=[]){
@@ -119,48 +124,30 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
     await fn();
     const statements=state.buffer;
     if(!statements.length)return;
+    if(statements.some(statement=>Buffer.byteLength(statement,'utf8')>100*1024))throw new D1Error('batch_too_large','A statement exceeds D1\'s 100 KB statement limit; it is not split');
     const text=statements.join('\n'),bytes=Buffer.byteLength(text,'utf8');
     if(statements.length>target.maxBatchStatements||bytes>target.maxBatchBytes)throw new D1Error('batch_too_large','A unit needs '+statements.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
     stats.batches++;stats.statements+=statements.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,statements.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
-    await query(text,{write:true});
+    proveWrite(await request('POST',base+'/query',{sql:text},{write:true}),statements.length);
    }finally{state.buffer=null;}
   },
   // Rendered statements, one HTTP batch. Each statement is its own batch entry so a semicolon inside a
-  // string is not a statement boundary. A write is not retried. Callers still prove atomicity on scratch.
-  async executeRendered(statements){
-   const batch=statements.map(sql=>{
-    const text=String(sql).trim().replace(/;+$/,'')+';';
-    if(Buffer.byteLength(text,'utf8')>100*1024)throw new D1Error('batch_too_large','A statement exceeds D1\'s 100 KB statement limit; it is not split');
-    return {sql:text};
-   });
-   const bytes=batch.reduce((sum,item)=>sum+Buffer.byteLength(item.sql,'utf8'),0);
-   if(!batch.length)return;
-   if(batch.length>target.maxBatchStatements||bytes>target.maxBatchBytes)throw new D1Error('batch_too_large','A unit needs '+batch.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
-   stats.batches++;stats.statements+=batch.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,batch.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
-   const payload=await request('POST',base+'/query',{batch},{write:true});
-   const results=Array.isArray(payload?.result)?payload.result:[];
-   if(results.some(item=>item&&item.success===false))throw new D1Error('statement',results.find(item=>item.success===false)?.error||'A statement failed');
-  },
+  // string is not a statement boundary. Callers of this path are not the backfill unit. A write is not retried.
+  executeRendered(statements){return sendBatch(statements);},
  };
-}
-
-// Proof, not assumption, at the configured size: a full-size batch must apply every statement, and the same batch whose last
-// statement fails must leave no row of its earlier statements. Both run on the scratch database only.
-export async function probeAtomicity(adapter,{statements=DEFAULT_MAX_BATCH_STATEMENTS,bytes=DEFAULT_MAX_BATCH_BYTES}={}){
- const table='backfill_atomicity_probe';
- const rows=Math.max(2,statements-1),pad='x'.repeat(Math.max(1,Math.floor(bytes*0.9/rows)-60));
- const fill=async()=>{for(let id=1;id<=rows;id++)await adapter.run('INSERT INTO '+table+' (id,note) VALUES (?,?)',[id,pad]);};
- await adapter.run('DROP TABLE IF EXISTS '+table);
- await adapter.run('CREATE TABLE '+table+' (id INTEGER PRIMARY KEY, note TEXT NOT NULL)');
- await adapter.transaction(fill);
- const applied=(await adapter.get('SELECT COUNT(*) AS n FROM '+table)).n;
- await adapter.run('DELETE FROM '+table);
- let failed=false;
- try{await adapter.transaction(async()=>{await fill();await adapter.run('INSERT INTO '+table+'_missing (id) VALUES (?)',[0]);});}
- catch(error){failed=error instanceof D1Error&&error.kind==='statement';if(!failed)throw error;}
- const remaining=(await adapter.get('SELECT COUNT(*) AS n FROM '+table)).n;
- await adapter.run('DROP TABLE IF EXISTS '+table);
- return {statements:rows+1,approxBytes:rows*(pad.length+60),multiStatement:applied===rows,lastStatementFailed:failed,rowsAfterFailure:remaining,atomic:applied===rows&&failed&&remaining===0};
+ function batchEntry(sql){
+  const text=String(sql).trim().replace(/;+$/,'')+';';
+  if(Buffer.byteLength(text,'utf8')>100*1024)throw new D1Error('batch_too_large','A statement exceeds D1\'s 100 KB statement limit; it is not split');
+  return {sql:text};
+ }
+ async function sendBatch(statements){
+  const batch=statements.map(batchEntry);
+  const bytes=batch.reduce((sum,item)=>sum+Buffer.byteLength(item.sql,'utf8'),0);
+  if(!batch.length)return;
+  if(batch.length>target.maxBatchStatements||bytes>target.maxBatchBytes)throw new D1Error('batch_too_large','A unit needs '+batch.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
+  stats.batches++;stats.statements+=batch.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,batch.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
+  proveWrite(await request('POST',base+'/query',{batch},{write:true}),batch.length);
+ }
 }
 
 // Every run needs the whole schema: 0001, the staging tables of 0002, the candidate show identity of 0003 (ADR-0025) and the
@@ -219,8 +206,8 @@ export async function readAcknowledged(file){
  return parsed.map(item=>({sourceKey:item.sourceKey,targetTable:item.targetTable??null,targetId:item.targetId,reason:item.reason}));
 }
 
-// One bounded run. mode 'd1' writes to the configured target through the HTTP adapter after the identity fence and the atomicity
-// probe; mode 'sqlite' is the dry-run against a local file with the same rules and report shape.
+// One bounded run. mode 'd1' writes to the configured target through the HTTP adapter after the identity fence;
+// mode 'sqlite' is the dry-run against a local file with the same rules and report shape.
 // stagedGeneration routes the programme generation unit through the staging tables of schema v2 (ADR-0021) instead of one request.
 // The stage owner token is derived from the target database and the baseline, so a resumed run of the same baseline continues the
 // stage and a run from another baseline cannot write into it.
@@ -242,15 +229,9 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
   if(!batch.production)throw new BackfillStop('snapshot_not_production',{});
   const refused=refusal(batch);
   if(refused)throw new BackfillStop(refused.stopReasons[0]||'refused',{blockers:refused.blockers});
-  let db,probe=null,identityFindings;
+  let db,identityFindings;
   if(mode==='d1'){
    if(!target)throw new ExportError('configuration','A D1 target is required');
-   const scratch=createD1Adapter({target,databaseId:target.scratchDatabaseId,fetchImpl,sleep});
-   const scratchIdentity=await scratch.describe();
-   if(scratchIdentity.uuid!==target.scratchDatabaseId||scratchIdentity.name===target.databaseName)throw new BackfillStop('scratch_identity_mismatch',{actual:scratchIdentity});
-   probe=await probeAtomicity(scratch,{statements:target.maxBatchStatements,bytes:target.maxBatchBytes});
-   report.probe={database:target.scratchDatabaseId,...probe};
-   if(!probe.atomic)throw new BackfillStop('batch_not_atomic',probe);
    db=createD1Adapter({target,databaseId:target.databaseId,fetchImpl,sleep});
    identityFindings=await verifyTargetIdentity(db,{databaseId:target.databaseId,databaseName:target.databaseName,aggregateSha256:batch.aggregateSha256,baselineAt:batch.finishedAt,delta,staged:stagedGeneration});
    report.target={kind:'d1',databaseId:target.databaseId,databaseName:target.databaseName,endpoint:new URL(target.endpoint).host,endpointOverride:target.endpointOverride,limits:{maxBatchStatements:target.maxBatchStatements,maxBatchBytes:target.maxBatchBytes}};
@@ -284,7 +265,7 @@ export async function runBackfill({snapshot,mode,target=null,sqliteFile=null,fet
   return await finish(result.stopped?'stopped':result.pending>0?'partial':'completed');
  }catch(error){
   if(error instanceof BackfillStop){report.stopReasons=[error.reason];return await finish('no_go',{noGo:{reason:error.reason,details:error.details}});}
-  // An uncertain or oversized write anywhere in the run (identity receipt, probe, unit) is a NO-GO with a report, never a silent retry.
+  // An uncertain or oversized write anywhere in the run (identity receipt or unit) is a NO-GO with a report, never a silent retry.
   if(error instanceof D1Error&&['write_uncertain','batch_too_large','statement'].includes(error.kind)){report.stopReasons=[error.kind];return await finish('no_go',{noGo:{reason:error.kind,details:{message:error.message,...error.details}}});}
   throw error;
  }

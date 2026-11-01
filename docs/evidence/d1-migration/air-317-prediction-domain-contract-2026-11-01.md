@@ -2,11 +2,11 @@
 
 **Captured:** 2026-11-01. Local tests only. Production D1 `iptv` and R2 bucket `iptv` were not read and were not written. No migration was applied, no snapshot was loaded, and the marker was not switched. No flag, cron, Access, Scheduled Task or model run.
 
-**Scope:** the schema v7 marker in `migrations/0007_prediction_authority.sql` and the Worker path in `src/prediction-d1.js`. Not a cutover, and not a measurement of the live queue.
+**Scope:** the schema v7 marker in `migrations/0007_prediction_authority.sql`, the Worker path in `src/prediction-d1.js`, and the production entry `scripts/prediction-domain-production.mjs` against an injected local binding. Not a cutover, and not a measurement of the live queue. The decision record is [ADR 0078](../../adr/0078-d1-authoritative-prediction-domain.md), still Proposed. ADR 0076 remains the accepted backfill decision.
 
 ## Method
 
-`node tests/prediction-domain.mjs` on a temporary SQLite file with migrations `0001` through `0007`, and the same file stopped at `0006`. The D1 binding is the test stand-in. The bucket is in memory. The projector run uses the Worker projector with `D1_ENRICHMENT_WRITE=on` against that file. The operator script is `scripts/prediction-domain-authority.mjs` against another temporary file. It is refused for a database path named `iptv`.
+`node tests/prediction-domain.mjs` on a temporary SQLite file with migrations `0001` through `0007`, and the same file stopped at `0006`. The D1 binding is the test stand-in. The bucket is in memory. The projector run uses the Worker projector with `D1_ENRICHMENT_WRITE=on` against that file. The operator script is `scripts/prediction-domain-authority.mjs` against another temporary file. It is refused for a database path named `iptv`. `node tests/prediction-domain-production.mjs` calls `scripts/prediction-domain-production.mjs` with that same stand-in and an in-memory bucket. The fetch implementation throws if it is called. No credential is read.
 
 ## Result
 
@@ -21,9 +21,14 @@
 | Projector on a complete v7 | Outcome `complete`, `schemaVersion` 7, `predictionMode` `r2`. The fingerprint table stays empty. Schema v6 status stays `schema: true` and has no `predictionMode`. |
 | One fingerprint read | Fewer than 8 D1 queries. |
 | Script | Status writes nothing. Load, activate and revert on the temporary file leave mode `r2`, then `d1`, then `r2`. |
+| Latest election | Saving an older run file after a newer latest-run leaves the latest run id unchanged. |
+| Version 8 | Mode `d1` does not read the R2 queue. Dropping `prediction_queue` fails the read and leaves the object. Projector status is `schema: true` with `predictionMode` `r2` while the nine tables exist, and `schema: false` after `prediction_fingerprint` is dropped. |
+| Import fence | A prior `r2` claim at generation 1 still loads. A stale fence of generation 0 throws `prediction_domain_cas` and does not replace the queue. An active lease throws `prediction_domain_busy` before a queue row is written. Three fingerprints are three batches, each at most 100 statements. |
+| Revert | A missing immutable body leaves mode `d1`. A successful revert rewrites a stale queue mirror to the D1 document. |
+| Production entry, local only | No arguments write nothing and do not call fetch. `--load` without `--confirm load` and a target other than `iptv` are refused before the binding is used. `--apply` on schema v6 reads back version 7, mode `r2`, generation 0, and a second apply is `already_applied`. Load after a claim stays at that generation. An active lease imports nothing. A generation move during the first batch is retried and the second attempt commits. Activation with a drifted snapshot stays `r2` with `prediction_domain_parity`. Revert with a missing body stays `d1`. Revert rewrites the stale queue mirror and then sets `r2`. |
 
 ## Verdict
 
 **The local contract holds.** Schema v7 defaults to `r2`. Mode `d1` is the only owner of the mutable rows, and it checks the immutable body before a pointer is trusted. The import does not create a Film. This does not apply `0007` and does not authorize a load, an activation, a revert, or a production write.
 
-**Limits.** One fixture, not the live queue. The 80-row history cap and the 900000-character queue cap were not compared with production. No scheduled run was observed.
+**Limits.** One fixture, not the live queue. The 80-row history cap and the 900000-character queue cap were not compared with production. Activation of the production entry refuses an over-cap snapshot; that refusal was not exercised against a live snapshot. No scheduled run was observed. No production database or bucket was contacted.

@@ -126,11 +126,30 @@ function adminFilmRecord(film,titles,clock,reviews){
  const aliases=typeof mergeAliases==='function'?mergeAliases(record.aliases,adminExtraTitleAliases(film,dictionary,preferred)):record.aliases;
  return adminApplyOwnerFilm({...record,aliases,storedId:id,preferred,year:Number.isFinite(film.year)?film.year:null,localizationConflicts:adminConflicts(film.titleConflicts)},reviews&&reviews[id]);
 }
+function adminMergeFilmAliases(viewAliases,storedAliases){
+ const merged=typeof mergeAliases==='function'?mergeAliases(storedAliases||[],viewAliases||[]):[...(storedAliases||[]),...(viewAliases||[])];
+ const stamped=new Map();
+ for(const alias of storedAliases||[]){
+  if(!alias?.value)continue;
+  const provenance=alias.provenance;
+  if(provenance?.previousPreferred||provenance?.authority==='owner'||provenance?.added==='alias')stamped.set((alias.kind||'title')+'\0'+alias.value,alias);
+ }
+ if(!stamped.size)return merged;
+ return merged.map(alias=>stamped.get((alias.kind||'title')+'\0'+alias.value)||alias);
+}
 function adminApplyOwnerFilm(record,entry){
- const localization=entry&&entry.localization;
- if(!localization||localization.status!=='reviewed'||localization.provenance?.authority!=='owner')return record;
- const aliases=typeof mergeAliases==='function'?mergeAliases(entry.aliases||[],record.aliases||[]):(entry.aliases||record.aliases);
- return {...record,localization,aliases,titleReviews:Array.isArray(entry.titleReviews)?entry.titleReviews:[],localizationConflicts:Array.isArray(entry.localizationConflicts)?entry.localizationConflicts:record.localizationConflicts,preferred:localization.value??null};
+ if(!entry||typeof entry!=='object')return record;
+ const localization=entry.localization;
+ const owner=localization&&localization.status==='reviewed'&&localization.provenance?.authority==='owner';
+ const storedAliases=Array.isArray(entry.aliases)?entry.aliases:[];
+ const hasAliases=storedAliases.length>0;
+ const hasReviews=Array.isArray(entry.titleReviews)&&entry.titleReviews.length>0;
+ if(!owner&&!hasAliases&&!hasReviews)return record;
+ const aliases=adminMergeFilmAliases(record.aliases,storedAliases);
+ const titleReviews=hasReviews?entry.titleReviews:(Array.isArray(record.titleReviews)?record.titleReviews:[]);
+ const localizationConflicts=Array.isArray(entry.localizationConflicts)?entry.localizationConflicts:record.localizationConflicts;
+ if(!owner)return {...record,aliases,titleReviews,localizationConflicts};
+ return {...record,localization,aliases,titleReviews,localizationConflicts,preferred:localization.value??null};
 }
 function adminTitleReview(film){return typeof titleReviewState==='function'?titleReviewState(film):null;}
 function adminPersonSlicePresent(stored){

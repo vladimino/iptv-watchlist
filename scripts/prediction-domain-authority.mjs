@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// Operator entry for the prediction-domain marker (ADR 0076). Default is read-only status.
-// --load copies a local snapshot into the tables and leaves mode r2.
+// Offline entry for the prediction-domain marker (ADR 0078). Default is read-only status.
+// --load copies a local snapshot into the tables in bounded batches and leaves mode r2.
+// It does not require the generations to still be 0: the fence is the generation just read.
 // --activate sets mode d1 only when the generations still match that load.
-// --revert sets mode r2 only when the generations still match, and it keeps the rows.
-// Each write refuses without its own --confirm. --load needs --snapshot.
+// --revert repairs the mutable mirrors from D1, checks them, then sets mode r2.
+// A mirror that cannot be repaired leaves mode d1. Each write refuses without its own --confirm.
 // This process never selects production D1 and never calls the network.
+// The production entry is scripts/prediction-domain-production.mjs.
 import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {activatePredictionDomain,importPredictionDomain,readPredictionAuthority,revertPredictionDomain} from '../src/prediction-d1.js';
@@ -55,8 +57,12 @@ const status=await readPredictionAuthority(db);
 if(!load&&!activate&&!revert){console.log(JSON.stringify({...status,writes:false}));process.exit(0);}
 const snapshot=load?JSON.parse(fs.readFileSync(snapshotPath,'utf8')):null;
 function bucket(){
- const objects=new Map(Object.entries(snapshot.objects||{}).map(([key,body])=>[key,JSON.stringify(body)]));
- return {async get(key){const text=objects.get(key);return text==null?null:{text:async()=>text,json:async()=>JSON.parse(text)};},async put(){throw new Error('this script does not write R2');}};
+ const objects=new Map(Object.entries(snapshot?.objects||{}).map(([key,body])=>[key,JSON.stringify(body)]));
+ return {
+  async get(key){const text=objects.get(key);return text==null?null:{text:async()=>text,json:async()=>JSON.parse(text)};},
+  async put(key,body){objects.set(key,typeof body==='string'?body:JSON.stringify(body));return {etag:'local'};},
+ };
 }
-const result=load?await importPredictionDomain(db,bucket(),snapshot):activate?await activatePredictionDomain(db,{generation:status.generation,queueGeneration:status.queueGeneration,profileGeneration:status.profileGeneration}):await revertPredictionDomain(db,{generation:status.generation,queueGeneration:status.queueGeneration,profileGeneration:status.profileGeneration});
+const expected={generation:status.generation,queueGeneration:status.queueGeneration,profileGeneration:status.profileGeneration};
+const result=load?await importPredictionDomain(db,bucket(),snapshot):activate?await activatePredictionDomain(db,expected):await revertPredictionDomain(db,bucket(),expected);
 console.log(JSON.stringify({...result,writes:true}));

@@ -1,11 +1,15 @@
-// ADR 0076. Mutable prediction state is owned by D1 only after its own marker is switched.
-// Schema v6 and earlier keep the R2 objects and do not write these tables. Schema v7 with a
-// missing table or marker fails closed. Mode d1 reads and writes these tables and does not
+// ADR 0078. Mutable prediction state is owned by D1 only after its own marker is switched.
+// Schema versions before 7 keep the R2 objects and do not write these tables. Version 7 or any
+// later additive version requires these tables and a valid marker, and fails closed when either
+// is missing or the binding does not answer. Mode d1 reads and writes these tables and does not
 // fall back to the objects. Immutable bodies stay in R2 and are verified before a pointer moves.
 // This module does not import. The Worker bundle wraps it in a scope. It does not insert a film row.
 
+export const PREDICTION_CONTRACT=7;
 export const PREDICTION_HISTORY_LIMIT=80;
 export const PREDICTION_QUEUE_CHARS=900000;
+export const PREDICTION_INDEX_CHUNK=80;
+export const PREDICTION_INDEX_LIMIT=5000;
 const FENCE_SQL='UPDATE prediction_domain_cas SET ok=changes() WHERE id=1';
 const QUEUE_KEY='enrichment/prediction-queue.json';
 const PROFILE_KEY='enrichment/profile/current.json';
@@ -66,15 +70,20 @@ export function predictionMutableKey(key){
 }
 function leaseName(kind){return kind==='writer'?'writer':'runner';}
 
+function idleAuthority(version,bindingPresent){
+ return {mode:'r2',tables:false,version,ready:false,binding:bindingPresent,generation:0,queueGeneration:0,profileGeneration:0};
+}
 export async function readPredictionAuthority(db){
- if(!db)return {mode:'r2',tables:false,version:null,ready:false,generation:0,queueGeneration:0,profileGeneration:0};
+ // No binding cannot prove a later contract, so local and pre-binding callers stay on the objects.
+ // A binding that does not answer, or a version of 7 or newer with a partial domain, fails closed.
+ if(db==null)return idleAuthority(null,false);
  let version;
  try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return {mode:'r2',tables:false,version:null,ready:false,generation:0,queueGeneration:0,profileGeneration:0};
+  if(/no such table/i.test(String(error?.message||error)))return idleAuthority(null,true);
   throw failed('prediction_domain_unavailable',error);
  }
- if(version!==7)return {mode:'r2',tables:false,version,ready:false,generation:0,queueGeneration:0,profileGeneration:0};
+ if(version==null||Number(version)<PREDICTION_CONTRACT)return idleAuthority(version,true);
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
  catch(error){throw failed('prediction_domain_unavailable',error);}
@@ -83,7 +92,7 @@ export async function readPredictionAuthority(db){
  try{row=await one(db,'SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration FROM prediction_domain_authority WHERE id=1');}
  catch(error){throw failed('prediction_domain_unavailable',error);}
  if(!row||(row.mode!=='r2'&&row.mode!=='d1'))throw failed('prediction_domain_unavailable');
- return {mode:row.mode,tables:true,version,ready:row.mode==='d1',generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration)};
+ return {mode:row.mode,tables:true,version:Number(version),ready:row.mode==='d1',binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration)};
 }
 
 async function claim(db,generation){
@@ -273,19 +282,23 @@ async function saveQueueDocument(env,queue,authority){
  await mirror(env.BUCKET,QUEUE_KEY,queue);
  return queueNext;
 }
-async function saveRun(env,run,authority){
+async function saveRun(env,run,authority,elect){
  const runId=run?.runId;
  if(typeof runId!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(runId))throw failed('prediction_domain_unavailable');
  const next=authority.generation+1;
  const text=JSON.stringify(run);
- await fenced(env.DB,[
+ const at=run.updatedAt||run.completedAt||run.createdAt||new Date().toISOString();
+ const statements=[
   ['UPDATE prediction_domain_authority SET generation=? WHERE id=1 AND mode=\'d1\' AND generation=?',[next,authority.generation]],
   [FENCE_SQL,[]],
-  ['UPDATE prediction_run SET latest=0 WHERE latest=1',[]],
-  ['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,1,?,?) ON CONFLICT(run_id) DO UPDATE SET latest=1, updated_at=excluded.updated_at, document_json=excluded.document_json',[runId,run.updatedAt||run.completedAt||run.createdAt||new Date().toISOString(),text]],
- ]);
+ ];
+ if(elect){
+  statements.push(['UPDATE prediction_run SET latest=0 WHERE latest=1',[]]);
+  statements.push(['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,1,?,?) ON CONFLICT(run_id) DO UPDATE SET latest=1, updated_at=excluded.updated_at, document_json=excluded.document_json',[runId,at,text]]);
+ }else statements.push(['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,0,?,?) ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at, document_json=excluded.document_json',[runId,at,text]]);
+ await fenced(env.DB,statements);
  await mirror(env.BUCKET,'enrichment/runs/'+runId+'.json',run);
- await mirror(env.BUCKET,LATEST_KEY,run);
+ if(elect)await mirror(env.BUCKET,LATEST_KEY,run);
 }
 async function saveLease(env,name,value,previousToken,authority){
  const token=crypto.randomUUID();
@@ -306,13 +319,14 @@ export async function saveMutable(env,key,value){
  const kind=predictionMutableKey(key);
  if(!kind)return {handled:false};
  const authority=await readPredictionAuthority(env?.DB);
- if(authority.version===7&&authority.mode==='r2'){await claim(env.DB,authority.generation);return {handled:false,claimed:true};}
+ if(authority.tables&&authority.mode==='r2'){await claim(env.DB,authority.generation);return {handled:false,claimed:true};}
  if(authority.mode!=='d1')return {handled:false};
  if(kind==='fingerprint')await saveFingerprint(env,filmIdFrom(key,'fingerprint'),value,authority);
  else if(kind==='predictions')await savePredictions(env,filmIdFrom(key,'predictions'),value,authority);
  else if(kind==='profile')await saveProfile(env,value,authority);
  else if(kind==='queue')await saveQueueDocument(env,value,authority);
- else if(kind==='run'||kind==='latest')await saveRun(env,value,authority);
+ else if(kind==='run')await saveRun(env,value,authority,false);
+ else if(kind==='latest')await saveRun(env,value,authority,true);
  else if(kind==='runner'||kind==='writer'){const name=leaseName(kind);const existing=await loadLease(env.DB,name);await saveLease(env,name,value,existing?.token??null,authority);}
  else return {handled:false};
  return {handled:true};
@@ -320,7 +334,7 @@ export async function saveMutable(env,key,value){
 
 export async function openQueue(env){
  const authority=await readPredictionAuthority(env?.DB);
- if(authority.mode==='d1')return {mode:'d1',version:7,generation:authority.generation,queueGeneration:authority.queueGeneration,queue:await loadQueue(env.DB),object:null};
+ if(authority.mode==='d1')return {mode:'d1',version:authority.version,generation:authority.generation,queueGeneration:authority.queueGeneration,queue:await loadQueue(env.DB),object:null};
  const object=await env.BUCKET.get(QUEUE_KEY);
  return {mode:'r2',version:authority.version,generation:authority.generation,object,queue:object?await object.json():null};
 }
@@ -329,7 +343,7 @@ export async function writeQueue(env,head,queue){
   try{await saveQueueDocument(env,queue,head);return {etag:'d1'};}
   catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
- if(head.version===7){
+ if(Number(head.version)>=PREDICTION_CONTRACT){
   try{await claim(env.DB,head.generation);}catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
  return env.BUCKET.put(QUEUE_KEY,JSON.stringify(queue),{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});
@@ -337,7 +351,7 @@ export async function writeQueue(env,head,queue){
 export async function openLease(env,key){
  const name=key===WRITER_KEY?'writer':'runner';
  const authority=await readPredictionAuthority(env?.DB);
- if(authority.mode==='d1'){const lease=await loadLease(env.DB,name);return {mode:'d1',version:7,generation:authority.generation,name,token:lease?.token??null,value:lease?.value??null,object:null};}
+ if(authority.mode==='d1'){const lease=await loadLease(env.DB,name);return {mode:'d1',version:authority.version,generation:authority.generation,name,token:lease?.token??null,value:lease?.value??null,object:null};}
  const object=await env.BUCKET.get(key);
  return {mode:'r2',version:authority.version,generation:authority.generation,name,object,value:object?await object.json():null,token:null};
 }
@@ -346,14 +360,14 @@ export async function writeLease(env,head,value){
   try{const token=await saveLease(env,head.name,value,head.token,head);return {etag:token};}
   catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
- if(head.version===7){
+ if(Number(head.version)>=PREDICTION_CONTRACT){
   try{await claim(env.DB,head.generation);}catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
  return env.BUCKET.put(head.name==='writer'?WRITER_KEY:RUNNER_KEY,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});
 }
 export async function openProfile(env){
  const authority=await readPredictionAuthority(env?.DB);
- if(authority.mode==='d1')return {mode:'d1',version:7,generation:authority.generation,profileGeneration:authority.profileGeneration,value:await loadProfile(env),object:null};
+ if(authority.mode==='d1')return {mode:'d1',version:authority.version,generation:authority.generation,profileGeneration:authority.profileGeneration,value:await loadProfile(env),object:null};
  const object=await env.BUCKET.get(PROFILE_KEY);
  return {mode:'r2',version:authority.version,generation:authority.generation,object,value:object?await object.json():null};
 }
@@ -362,24 +376,29 @@ export async function overlayIndex(env,index){
  const db=env?.DB??env;
  const authority=await readPredictionAuthority(db);
  if(authority.mode!=='d1')return index;
- const [fingerprints,pointers]=await Promise.all([
-  many(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint'),
-  many(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer'),
- ]);
  const next={...(index||{})};
+ const ids=Object.keys(next);
+ if(ids.length>PREDICTION_INDEX_LIMIT)throw failed('prediction_domain_budget');
  const byFilm=new Map();
- for(const row of fingerprints){
-  let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
-  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});
+ for(let start=0;start<ids.length;start+=PREDICTION_INDEX_CHUNK){
+  const chunk=ids.slice(start,start+PREDICTION_INDEX_CHUNK);
+  const marks=chunk.map(()=>'?').join(',');
+  const [fingerprints,pointers]=await Promise.all([
+   many(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint WHERE film_id IN ('+marks+')',chunk),
+   many(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer WHERE film_id IN ('+marks+')',chunk),
+  ]);
+  for(const row of fingerprints){
+   let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
+   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});
+  }
+  for(const row of pointers){
+   let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
+   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
+  }
  }
- for(const row of pointers){
-  let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
-  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
- }
- const ids=new Set([...Object.keys(next),...byFilm.keys()]);
  for(const filmId of ids){
   const item={...(next[filmId]||{})};
-  delete item.prediction;delete item.fingerprint;delete item.fingerprintHash;delete item.impactFeatures;
+  delete item.prediction;delete item.fingerprint;delete item.fingerprintHash;delete item.impactFeatures;delete item.moodFacet;
   const owned=byFilm.get(filmId);
   if(owned?.features){
    const features=owned.features;
@@ -388,67 +407,155 @@ export async function overlayIndex(env,index){
    item.impactFeatures={fingerprintHash:features.fingerprintHash,fingerprintSchemaVersion:features.fingerprintSchemaVersion??null,fingerprintPromptVersion:features.fingerprintPromptVersion??null,invalidatedAt:features.invalidatedAt||null,plotMechanics:features.plotMechanics,execution:features.execution};
   }
   if(owned?.display)item.prediction=owned.display;
+  if(typeof globalThis.canonicalMoodFacet==='function'&&(item.fingerprint||item.prediction))item.moodFacet=globalThis.canonicalMoodFacet(item.fingerprint,item.prediction);
   next[filmId]=item;
  }
  return next;
 }
 
-export async function importPredictionDomain(db,bucket,snapshot){
+function sameFence(authority,fence){
+ return !!authority?.tables&&authority.mode==='r2'&&authority.generation===fence?.generation&&authority.queueGeneration===fence?.queueGeneration&&authority.profileGeneration===fence?.profileGeneration;
+}
+function leasesBusy(leases,now){
+ return [leases?.runner,leases?.writer].some(lease=>lease&&Number(lease.expiresAt)>now);
+}
+function hold(fence){
+ return ['UPDATE prediction_domain_authority SET generation=generation WHERE id=1 AND mode=\'r2\' AND generation=? AND queue_generation=? AND profile_generation=?',[fence.generation,fence.queueGeneration,fence.profileGeneration]];
+}
+async function predictionStatements(bucket,item){
+ const history=Array.isArray(item.bundle?.history)?item.bundle.history:[];
+ if(history.length>PREDICTION_HISTORY_LIMIT)throw failed('prediction_domain_budget');
+ const records=[...(item.bundle?.current?[item.bundle.current]:[]),...history];
+ for(const record of records){
+  if(typeof record?.contentSha256!=='string'||typeof record?.r2Key!=='string')throw failed('prediction_domain_unlinked');
+  await verified(bucket,record.r2Key,record.contentSha256);
+ }
+ const statements=[
+  ['DELETE FROM prediction_pointer WHERE film_id=?',[item.filmId]],
+  ['DELETE FROM prediction_lineage WHERE film_id=?',[item.filmId]],
+ ];
+ if(item.bundle?.current){
+  const columns=pointerColumns(item.bundle.current);
+  if(columns[8]==null)throw failed('prediction_domain_unlinked');
+  statements.push(['INSERT INTO prediction_pointer (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at,display_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',[item.filmId,...columns,JSON.stringify(displayOf(item.bundle.current))]]);
+ }
+ for(const record of history){
+  if(typeof record?.replacedAt!=='string'||!record.replacedAt)throw failed('prediction_domain_unlinked');
+  statements.push(['INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profile_version,fingerprint_hash,r2_key,content_sha256,display_json) VALUES (?,?,?,?,?,?,?,?)',[item.filmId,record.replacedAt,record.predictedRating??null,record.tasteProfileVersion??null,record.fingerprintHash??null,record.r2Key,record.contentSha256,JSON.stringify({...displayOf(record),replacedAt:record.replacedAt})]]);
+ }
+ return statements;
+}
+export async function predictionParity(db){
+ const fingerprints=await many(db,'SELECT film_id AS filmId, fingerprint_hash AS fingerprintHash FROM prediction_fingerprint ORDER BY film_id');
+ const pointers=await many(db,'SELECT film_id AS filmId, content_sha256 AS contentSha256 FROM prediction_pointer ORDER BY film_id');
+ const lineage=await one(db,'SELECT COUNT(*) AS n FROM prediction_lineage');
+ const queue=await loadQueue(db);
+ const profile=await one(db,'SELECT version, profile_hash AS profileHash FROM prediction_profile WHERE active=1');
+ const latest=await one(db,'SELECT run_id AS runId FROM prediction_run WHERE latest=1');
+ const runs=await one(db,'SELECT COUNT(*) AS n FROM prediction_run');
+ const leases=await one(db,'SELECT COUNT(*) AS n FROM prediction_lease');
+ return {
+  fingerprints:fingerprints.map(row=>row.filmId+'\n'+row.fingerprintHash),
+  pointers:pointers.map(row=>row.filmId+'\n'+row.contentSha256),
+  lineage:Number(lineage?.n||0),
+  queue:queue==null?null:JSON.stringify(queue),
+  profile:profile?profile.version+'\n'+profile.profileHash:null,
+  latestRunId:latest?.runId??null,
+  runs:Number(runs?.n||0),
+  leases:Number(leases?.n||0),
+ };
+}
+export function snapshotParity(snapshot){
+ return expectedParity(snapshot);
+}
+function expectedParity(snapshot){
+ const fingerprints=(snapshot?.fingerprints||[]).map(item=>item.filmId+'\n'+item.record.fingerprintHash).sort();
+ const pointers=(snapshot?.predictions||[]).filter(item=>item.bundle?.current).map(item=>item.filmId+'\n'+item.bundle.current.contentSha256).sort();
+ const lineage=(snapshot?.predictions||[]).reduce((sum,item)=>sum+(Array.isArray(item.bundle?.history)?item.bundle.history.length:0),0);
+ const profile=snapshot?.profile?snapshot.profile.version+'\n'+snapshot.profile.profileHash:null;
+ return {fingerprints,pointers,lineage,queue:snapshot?.queue==null?null:JSON.stringify(snapshot.queue),profile,latestRunId:snapshot?.latestRunId??null,runs:(snapshot?.runs||[]).length,leases:0};
+}
+function parityAgrees(live,expected){
+ const normalized=value=>({...value,fingerprints:[...value.fingerprints].sort(),pointers:[...value.pointers].sort()});
+ return JSON.stringify(normalized(live))===JSON.stringify(normalized(expected));
+}
+export async function importPredictionDomain(db,bucket,snapshot,options={}){
  const authority=await readPredictionAuthority(db);
- if(authority.version!==7||authority.mode!=='d1'&&authority.mode!=='r2')throw failed('prediction_domain_not_ready');
- if(authority.mode!=='r2'||authority.generation!==0||authority.queueGeneration!==0||authority.profileGeneration!==0)throw failed('prediction_domain_not_ready');
+ if(!authority.tables||authority.mode!=='r2')throw failed('prediction_domain_not_ready');
+ const fence={generation:options.fence?.generation??authority.generation,queueGeneration:options.fence?.queueGeneration??authority.queueGeneration,profileGeneration:options.fence?.profileGeneration??authority.profileGeneration};
+ if(!sameFence(authority,fence))throw failed('prediction_domain_cas');
+ const now=options.now??Date.now();
+ if(leasesBusy(options.leases??snapshot?.leases,now))throw failed('prediction_domain_busy');
  const filmsBefore=await one(db,'SELECT COUNT(*) AS n FROM film');
- const statements=[[ 'UPDATE prediction_domain_authority SET generation=1 WHERE id=1 AND mode=\'r2\' AND generation=0 AND queue_generation=0 AND profile_generation=0',[]],[FENCE_SQL,[]]];
- if(snapshot?.profile){
-  const value=snapshot.profile;
-  const key=profileKey(value.version);
-  const body=await readBody(bucket,key);
-  if(body.profileHash!==value.profileHash||body.version!==value.version)throw failed('prediction_domain_body_mismatch');
-  statements.push(['INSERT INTO prediction_profile (version,profile_hash,active,created_at,r2_key,content_sha256,lineage_json) VALUES (?,?,1,?,?,?,?)',[value.version,value.profileHash,value.updatedAt,key,await sha256(body),value.lineage===undefined?null:JSON.stringify(value.lineage)]]);
+ const units=[];
+ if(snapshot&&Object.hasOwn(snapshot,'profile')){
+  if(snapshot.profile)units.push({kind:'profile',value:snapshot.profile});
+  else units.push({kind:'clear-profile'});
+ }else if(snapshot?.profile)units.push({kind:'profile',value:snapshot.profile});
+ if(Array.isArray(snapshot?.fingerprints)){
+  for(const item of snapshot.fingerprints)units.push({kind:'fingerprint',item});
+  units.push({kind:'prune',table:'prediction_fingerprint',ids:snapshot.fingerprints.map(item=>item.filmId)});
  }
- for(const item of snapshot?.fingerprints||[]){
-  const key=fingerprintKey(item.filmId,item.record.fingerprintHash);
-  const body=await readBody(bucket,key);
-  if(body.fingerprintHash!==item.record.fingerprintHash)throw failed('prediction_domain_body_mismatch');
-  const features=featuresOf(item.record);
-  statements.push(['INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES (?,?,?,?,?,?,?,?,?)',[item.filmId,item.record.fingerprintHash,features.fingerprintSchemaVersion??0,features.fingerprintPromptVersion,features.generatedAt,features.invalidatedAt,key,await sha256(body),JSON.stringify(features)]]);
+ if(Array.isArray(snapshot?.predictions)){
+  for(const item of snapshot.predictions)units.push({kind:'prediction',item});
+  units.push({kind:'prune',table:'prediction_pointer',ids:snapshot.predictions.filter(item=>item.bundle?.current).map(item=>item.filmId)});
+  units.push({kind:'prune',table:'prediction_lineage',ids:[...new Set(snapshot.predictions.map(item=>item.filmId))]});
  }
- for(const item of snapshot?.predictions||[]){
-  const history=Array.isArray(item.bundle?.history)?item.bundle.history:[];
-  if(history.length>PREDICTION_HISTORY_LIMIT)throw failed('prediction_domain_budget');
-  const records=[...(item.bundle?.current?[item.bundle.current]:[]),...history];
-  for(const record of records){
-   if(typeof record?.contentSha256!=='string'||typeof record?.r2Key!=='string')throw failed('prediction_domain_unlinked');
-   await verified(bucket,record.r2Key,record.contentSha256);
+ if(snapshot&&Object.hasOwn(snapshot,'queue')){
+  if(snapshot.queue)units.push({kind:'queue',value:snapshot.queue});
+  else units.push({kind:'clear-queue'});
+ }else if(snapshot?.queue)units.push({kind:'queue',value:snapshot.queue});
+ if(Array.isArray(snapshot?.runs)){
+  for(const run of snapshot.runs)units.push({kind:'run',run});
+  units.push({kind:'prune',table:'prediction_run',column:'run_id',ids:snapshot.runs.map(run=>run.runId)});
+ }
+ if(snapshot?.latestRunId)units.push({kind:'latest',runId:snapshot.latestRunId});
+ units.push({kind:'leases'});
+ for(const unit of units){
+  const current=await readPredictionAuthority(db);
+  if(!sameFence(current,fence))throw failed('prediction_domain_cas');
+  let body=[];
+  if(unit.kind==='profile'){
+   const value=unit.value;
+   const key=profileKey(value.version);
+   const stored=await readBody(bucket,key);
+   if(stored.profileHash!==value.profileHash||stored.version!==value.version)throw failed('prediction_domain_body_mismatch');
+   body=[['UPDATE prediction_profile SET active=0 WHERE active=1',[]],['INSERT INTO prediction_profile (version,profile_hash,active,created_at,r2_key,content_sha256,lineage_json) VALUES (?,?,1,?,?,?,?) ON CONFLICT(version) DO UPDATE SET profile_hash=excluded.profile_hash,active=1,created_at=excluded.created_at,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,lineage_json=excluded.lineage_json',[value.version,value.profileHash,value.updatedAt,key,await sha256(stored),value.lineage===undefined?null:JSON.stringify(value.lineage)]]];
+  }else if(unit.kind==='fingerprint'){
+   const key=fingerprintKey(unit.item.filmId,unit.item.record.fingerprintHash);
+   const stored=await readBody(bucket,key);
+   if(stored.fingerprintHash!==unit.item.record.fingerprintHash)throw failed('prediction_domain_body_mismatch');
+   const features=featuresOf(unit.item.record);
+   body=[['INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET fingerprint_hash=excluded.fingerprint_hash,schema_version=excluded.schema_version,prompt_version=excluded.prompt_version,generated_at=excluded.generated_at,invalidated_at=excluded.invalidated_at,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,features_json=excluded.features_json',[unit.item.filmId,unit.item.record.fingerprintHash,features.fingerprintSchemaVersion??0,features.fingerprintPromptVersion,features.generatedAt,features.invalidatedAt,key,await sha256(stored),JSON.stringify(features)]]];
+  }else if(unit.kind==='prediction')body=await predictionStatements(bucket,unit.item);
+  else if(unit.kind==='queue'){
+   const text=JSON.stringify(unit.value);
+   if(text.length>PREDICTION_QUEUE_CHARS)throw failed('prediction_domain_budget');
+   body=[['INSERT INTO prediction_queue (id,document_json,generation) VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET document_json=excluded.document_json, generation=excluded.generation',[text,fence.queueGeneration]]];
+  }else if(unit.kind==='run')body=[['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,0,?,?) ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at, document_json=excluded.document_json',[unit.run.runId,unit.run.updatedAt||unit.run.createdAt,JSON.stringify(unit.run)]]];
+  else if(unit.kind==='latest')body=[['UPDATE prediction_run SET latest=CASE WHEN run_id=? THEN 1 ELSE 0 END',[unit.runId]]];
+  else if(unit.kind==='clear-profile')body=[['UPDATE prediction_profile SET active=0 WHERE active=1',[]]];
+  else if(unit.kind==='clear-queue')body=[['DELETE FROM prediction_queue',[]]];
+  else if(unit.kind==='prune'){
+   const column=unit.column||'film_id';
+   body=unit.ids.length?[['DELETE FROM '+unit.table+' WHERE '+column+' NOT IN ('+unit.ids.map(()=>'?').join(',')+')',unit.ids]]:[['DELETE FROM '+unit.table,[]]];
   }
-  if(item.bundle?.current){
-   const columns=pointerColumns(item.bundle.current);
-   if(columns[8]==null)throw failed('prediction_domain_unlinked');
-   statements.push(['INSERT INTO prediction_pointer (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at,display_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',[item.filmId,...columns,JSON.stringify(displayOf(item.bundle.current))]]);
-  }
-  for(const record of history){
-   if(typeof record?.replacedAt!=='string'||!record.replacedAt)throw failed('prediction_domain_unlinked');
-   statements.push(['INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profile_version,fingerprint_hash,r2_key,content_sha256,display_json) VALUES (?,?,?,?,?,?,?,?)',[item.filmId,record.replacedAt,record.predictedRating??null,record.tasteProfileVersion??null,record.fingerprintHash??null,record.r2Key,record.contentSha256,JSON.stringify({...displayOf(record),replacedAt:record.replacedAt})]]);
-  }
+  else body=[['DELETE FROM prediction_lease',[]]];
+  await fenced(db,[hold(fence),[FENCE_SQL,[]],...body]);
  }
- if(snapshot?.queue){
-  const text=JSON.stringify(snapshot.queue);
-  if(text.length>PREDICTION_QUEUE_CHARS)throw failed('prediction_domain_budget');
-  statements.push(['INSERT INTO prediction_queue (id,document_json,generation) VALUES (1,?,0)',[text]]);
-  statements.push(['UPDATE prediction_domain_authority SET queue_generation=0 WHERE id=1',[]]);
- }
- for(const run of snapshot?.runs||[])statements.push(['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,0,?,?)',[run.runId,run.updatedAt||run.createdAt,JSON.stringify(run)]]);
- if(snapshot?.latestRunId)statements.push(['UPDATE prediction_run SET latest=CASE WHEN run_id=? THEN 1 ELSE 0 END',[snapshot.latestRunId]]);
- await fenced(db,statements);
  const filmsAfter=await one(db,'SELECT COUNT(*) AS n FROM film');
  if(Number(filmsBefore?.n)!==Number(filmsAfter?.n))throw failed('prediction_domain_phantom_film');
- const now=await readPredictionAuthority(db);
- if(now.mode!=='r2')throw failed('prediction_domain_cas');
- return now;
+ const parity=await predictionParity(db);
+ if(!parityAgrees(parity,expectedParity(snapshot)))throw failed('prediction_domain_parity');
+ const done=await readPredictionAuthority(db);
+ if(!sameFence(done,fence))throw failed('prediction_domain_cas');
+ return {...done,fence,parity};
 }
-export async function activatePredictionDomain(db,expected){
+export async function activatePredictionDomain(db,expected,options={}){
  const authority=await readPredictionAuthority(db);
- if(authority.mode!=='r2'||authority.generation!==expected?.generation||authority.queueGeneration!==expected?.queueGeneration||authority.profileGeneration!==expected?.profileGeneration)throw failed('prediction_domain_cas');
+ if(!sameFence(authority,expected))throw failed('prediction_domain_cas');
+ if(leasesBusy(options.leases,options.now??Date.now()))throw failed('prediction_domain_busy');
+ if(options.parity&&!parityAgrees(await predictionParity(db),options.parity))throw failed('prediction_domain_parity');
  await fenced(db,[
   ['UPDATE prediction_domain_authority SET mode=\'d1\' WHERE id=1 AND mode=\'r2\' AND generation=? AND queue_generation=? AND profile_generation=?',[authority.generation,authority.queueGeneration,authority.profileGeneration]],
   [FENCE_SQL,[]],
@@ -457,12 +564,51 @@ export async function activatePredictionDomain(db,expected){
  if(now.mode!=='d1')throw failed('prediction_domain_cas');
  return now;
 }
-export async function revertPredictionDomain(db,expected){
+async function putChecked(bucket,key,value){
+ const text=JSON.stringify(value);
+ await bucket.put(key,text,{httpMetadata:{contentType:'application/json'}});
+ const back=await objectText(bucket,key);
+ if(back!==text)throw failed('prediction_domain_parity');
+}
+async function repairMirrors(db,bucket){
+ const env={DB:db,BUCKET:bucket};
+ for(const row of await many(db,'SELECT film_id AS filmId FROM prediction_fingerprint ORDER BY film_id')){
+  const value=await loadFingerprint(env,row.filmId);
+  if(!value)throw failed('prediction_domain_parity');
+  await putChecked(bucket,'enrichment/films/'+encodeURIComponent(row.filmId)+'/fingerprint.json',value);
+ }
+ for(const row of await many(db,'SELECT film_id AS filmId FROM prediction_pointer ORDER BY film_id')){
+  const value=await loadPredictions(env,row.filmId);
+  if(!value?.current)throw failed('prediction_domain_parity');
+  await putChecked(bucket,'enrichment/films/'+encodeURIComponent(row.filmId)+'/predictions.json',value);
+ }
+ const queue=await loadQueue(db);
+ if(queue)await putChecked(bucket,QUEUE_KEY,queue);
+ const profile=await loadProfile(env);
+ if(profile)await putChecked(bucket,PROFILE_KEY,profile);
+ for(const row of await many(db,'SELECT run_id AS runId FROM prediction_run ORDER BY run_id')){
+  const value=await loadRun(db,row.runId);
+  if(!value)throw failed('prediction_domain_parity');
+  await putChecked(bucket,'enrichment/runs/'+row.runId+'.json',value);
+ }
+ const latest=await loadLatest(db);
+ if(latest)await putChecked(bucket,LATEST_KEY,latest);
+ for(const [name,key] of [['runner',RUNNER_KEY],['writer',WRITER_KEY]]){
+  const lease=await loadLease(db,name);
+  await putChecked(bucket,key,lease?.value??{expiresAt:0});
+ }
+}
+export async function revertPredictionDomain(db,bucket,expected){
  const authority=await readPredictionAuthority(db);
  if(authority.mode!=='d1'||authority.generation!==expected?.generation||authority.queueGeneration!==expected?.queueGeneration||authority.profileGeneration!==expected?.profileGeneration)throw failed('prediction_domain_cas');
+ await repairMirrors(db,bucket);
+ const repaired=await readPredictionAuthority(db);
+ if(repaired.mode!=='d1'||repaired.generation!==authority.generation||repaired.queueGeneration!==authority.queueGeneration||repaired.profileGeneration!==authority.profileGeneration)throw failed('prediction_domain_cas');
  await fenced(db,[
   ['UPDATE prediction_domain_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND generation=? AND queue_generation=? AND profile_generation=?',[authority.generation,authority.queueGeneration,authority.profileGeneration]],
   [FENCE_SQL,[]],
  ]);
- return readPredictionAuthority(db);
+ const now=await readPredictionAuthority(db);
+ if(now.mode!=='r2')throw failed('prediction_domain_cas');
+ return now;
 }

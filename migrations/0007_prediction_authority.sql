@@ -1,4 +1,4 @@
--- Schema v7: mutable prediction state and its authority marker (ADR 0076).
+-- Schema v7: mutable prediction state and its authority marker (ADR 0078).
 -- Additive. Changes nothing of 0001-0006. A deploy does not apply this file.
 -- The inserted marker is mode r2. Applying this file does not copy a queue,
 -- a profile, a fingerprint, a prediction, a run or a lease, and it does not

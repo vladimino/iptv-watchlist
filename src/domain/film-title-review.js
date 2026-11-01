@@ -82,6 +82,14 @@ function titleReviewState(film){
 // `preferred` is the localized value or null and never the original title.
 function titleReviewProjection(film){return {...film,preferred:film?.localization?.value||null};}
 function titleReviewFailure(reason,extra={}){return {ok:false,reason,...extra};}
+// A missing effect is the historical promote. An explicit effect is stored on the audit and is part
+// of the replay comparison, so an old entry that has no effect is not reread as a different command.
+function titleReviewEffect(command){
+ if(!command||command.effect==null)return {ok:true,effect:null};
+ if(command.effect==='promote')return {ok:true,effect:'preferred_changed'};
+ if(command.effect==='add_alias')return {ok:true,effect:'alias_added'};
+ return titleReviewFailure('invalid_effect');
+}
 // Shape checks: the command on its own against the Film's identity. These hold for a replay as
 // well as for a new review, so applyTitleReview runs them before it looks for an earlier requestId.
 function validateTitleReviewShape(film,command){
@@ -91,10 +99,12 @@ function validateTitleReviewShape(film,command){
  if(typeof command.requestId!=='string'||!command.requestId.trim())return titleReviewFailure('missing_request_id');
  for(const field of TITLE_REVIEW_IDENTITY_FIELDS)if(Object.prototype.hasOwnProperty.call(command,field))return titleReviewFailure('identity_change_forbidden',{field});
  if(!TITLE_REVIEW_MODES.includes(command.mode))return titleReviewFailure('invalid_mode',{modes:[...TITLE_REVIEW_MODES]});
+ const effect=titleReviewEffect(command);
+ if(!effect.ok)return effect;
  const value=reviewText(command.value);
  if(!validReviewTitle(value))return titleReviewFailure('invalid_title',{maxLength:TITLE_REVIEW_MAX_LENGTH});
  if(command.basis!=null&&(typeof command.basis!=='string'||command.basis.length>TITLE_REVIEW_BASIS_MAX_LENGTH))return titleReviewFailure('invalid_basis',{maxLength:TITLE_REVIEW_BASIS_MAX_LENGTH});
- return {ok:true,value,basis:reviewBasis(command.basis)};
+ return {ok:true,value,basis:reviewBasis(command.basis),effect:effect.effect};
 }
 // Validates one command against the current Film without changing anything: the shape checks,
 // then the state checks (rejected identity, compare-and-set token, alias membership).
@@ -113,7 +123,29 @@ function validateTitleReview(film,command){
 // A replay is the same committed request sent again: same Film, mode, normalized value and
 // normalized basis under the same requestId. Anything else under that requestId is a reuse.
 function sameTitleReview(review,film,command,shape){
- return review.filmId===film.id&&review.mode===command.mode&&review.to?.value===shape.value&&(review.basis??null)===shape.basis;
+ return review.filmId===film.id&&review.mode===command.mode&&review.to?.value===shape.value&&(review.basis??null)===shape.basis&&(review.effect??null)===(shape.effect??null);
+}
+// The previous preferred title stays selectable even when a programme alias of the same text was
+// stored first. mergeAliases keeps that first row, so the mark is written onto it.
+function titleReviewMarkPrevious(aliases,prior){
+ const priorValue=prior?.value;
+ if(!priorValue)return aliases||[];
+ return (aliases||[]).map(alias=>{
+  if(!alias||(alias.kind||'title')!=='title'||alias.value!==priorValue||alias.provenance?.previousPreferred)return alias;
+  const provenance={...(alias.provenance||{}),previousPreferred:true};
+  const historical=provenance.historicalSource||provenance.source||provenance.authority||prior.source||prior.provenance?.source||prior.provenance?.authority||null;
+  if(historical)provenance.historicalSource=historical;
+  return {...alias,provenance};
+ });
+}
+function applyTitleAlias(film,command,at,checked){
+ const value=checked.value;
+  if(titleReviewOptions(film).some(option=>option.value===value))return {ok:true,idempotent:false,changed:false,film,review:null,version:checked.version,reason:'duplicate_alias'};
+ const provenance={source:TITLE_REVIEW_AUTHORITY,authority:TITLE_REVIEW_AUTHORITY,mode:command.mode,basis:checked.basis,requestId:command.requestId,added:'alias'};
+ const review={contractVersion:TITLE_REVIEW_CONTRACT_VERSION,requestId:command.requestId,filmId:film.id,at:stamp(at),mode:command.mode,authority:TITLE_REVIEW_AUTHORITY,basis:checked.basis,selectedFrom:null,effect:'alias_added',from:{value:film.localization?.value??null,status:film.localization?.status??'missing',source:film.localization?.source??null},to:{value,status:film.localization?.status??'missing'},version:{before:checked.version,after:null}};
+ const next={...film,localization:film.localization??null,aliases:mergeAliases(film.aliases||[],[{kind:'title',value,provenance}]),titleReviews:[...(film.titleReviews||[]),review]};
+ review.version.after=titleReviewVersion(next);
+ return {ok:true,idempotent:false,changed:true,film:next,review,version:review.version.after};
 }
 // Applies one review. The result carries the next Film, the audit entry and the new version.
 // A repeated requestId with the same payload replays the earlier outcome without a second change,
@@ -128,6 +160,7 @@ function applyTitleReview(film,command,at){
  }
  const checked=validateTitleReview(film,command);
  if(!checked.ok)return checked;
+ if(shape.effect==='alias_added')return applyTitleAlias(film,command,at,checked);
  const {value,basis,selected}=checked;
  if(film.localization?.status==='reviewed'&&film.localization.value===value)return {ok:true,idempotent:false,changed:false,film,review:null,version:checked.version};
  // selectedFrom names where the picked text came from: an alias reports its own source (epg, letterboxd, wikidata...).
@@ -136,7 +169,8 @@ function applyTitleReview(film,command,at){
  const moved=applyReviewedLocalization(film,{value,authority:TITLE_REVIEW_AUTHORITY,source:TITLE_REVIEW_AUTHORITY,provenance},at,'title');
  if(moved.localization===film.localization)return titleReviewFailure('illegal_transition',{from:film.localization?.status??null});
  const review={contractVersion:TITLE_REVIEW_CONTRACT_VERSION,requestId:command.requestId,filmId:film.id,at:stamp(at),mode:command.mode,authority:TITLE_REVIEW_AUTHORITY,basis,selectedFrom:provenance.selectedFrom,from:{value:film.localization?.value??null,status:film.localization?.status??'missing',source:film.localization?.source??null},to:{value,status:'reviewed'},version:{before:checked.version,after:null}};
- const next={...moved,aliases:mergeAliases(moved.aliases.filter(alias=>!((alias.kind||'title')==='title'&&alias.value===value)),[]),titleReviews:[...(film.titleReviews||[]),review]};
+ if(shape.effect)review.effect=shape.effect;
+ const next={...moved,aliases:titleReviewMarkPrevious(mergeAliases(moved.aliases.filter(alias=>!((alias.kind||'title')==='title'&&alias.value===value)),[]),film.localization),titleReviews:[...(film.titleReviews||[]),review]};
  review.version.after=titleReviewVersion(next);
  return {ok:true,idempotent:false,changed:true,film:next,review,version:review.version.after};
 }
