@@ -88,19 +88,33 @@ const document = {
 let saved = [];
 let refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм'}};
 let refreshes = 0;
+let formAfterRefresh = null;
 const context = vm.createContext({
   document, URL, URLSearchParams, Promise, Date, JSON, Object, Array, String, Number, Boolean, Map, Set, Error, RegExp, Math,
   crypto: {randomUUID: () => 'req-fixed'},
   setTimeout, clearTimeout,
-  adminSaveFilmTitle: async (id, body) => { saved.push({id, body}); return context.nextResponse; },
+  adminSaveFilmTitle: async (id, body) => {
+    saved.push({id, body});
+    if (typeof context.editOnSave === 'function') context.editOnSave();
+    return context.nextResponse;
+  },
 });
 vm.runInContext(page, context);
 context.onAdminRefresh = () => {
   refreshes++;
-  buildForm();
+  if (formAfterRefresh) formAfterRefresh();
+  else buildForm();
   context.adminBindTitleReview(detail);
   return Promise.resolve(refreshView);
 };
+
+function refreshWithoutChoice() {
+  formAfterRefresh = () => {
+    const built = buildForm();
+    built.form.dataset.version = 'title-review:1:moved';
+    built.form.children = built.form.children.filter(child => child !== built.radio);
+  };
+}
 
 async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   parts.manual.value = manual;
@@ -115,6 +129,9 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
 
 {
   saved = []; refreshes = 0;
+  context.editOnSave = null;
+  formAfterRefresh = null;
+  refreshWithoutChoice();
   context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {error: 'storage_unavailable', reason: 'readback_failed'}};
   refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм'}};
   const parts = buildForm();
@@ -123,27 +140,36 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   const form = detail.querySelector('[data-title-review]');
   const result = form.querySelector('[data-title-result]');
   assert.equal(refreshes, 1);
+  assert.equal(form.dataset.version, 'title-review:1:moved');
+  assert.equal(form.querySelector('input[name="title-review-choice"]'), null);
   assert.equal(result.textContent.includes('не изменено'), false, result.textContent);
   assert.match(result.textContent, /Неизвестно, записалось ли название/);
   assert.equal(form.dataset.requestId, 'req-fixed');
   assert.equal(form.querySelector('[data-title-manual]').value, 'Хозяйское название');
   assert.equal(form.querySelector('[name="basis"]').value, 'карточка');
   assert.equal(form.querySelector('[data-title-accept]').checked, false);
-  form.querySelector('[data-title-accept]').checked = true;
-  form.querySelector('[data-title-save]').disabled = false;
+  const accept = form.querySelector('[data-title-accept]');
+  accept.checked = true;
+  for (const fn of form.listeners.get('input')) fn({target: accept});
+  for (const fn of form.listeners.get('change')) fn({target: accept});
+  assert.equal(form.dataset.requestId, 'req-fixed', 'the confirmation checkbox does not discard the frozen command');
+  assert.equal(form.querySelector('[data-title-save]').disabled, false);
   context.nextResponse = {ok: true, status: 200, error: null, body: {ok: true, changed: false, idempotent: true}};
   const replay = {preventDefault() {}, defaultPrevented: false};
   for (const fn of form.listeners.get('submit')) fn(replay);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(saved.length, 2);
-  assert.equal(saved[1].body.requestId, saved[0].body.requestId);
-  assert.equal(saved[1].body.value, 'Хозяйское название');
-  assert.equal(saved[1].body.mode, 'manual');
-  assert.equal(saved[1].body.basis, 'карточка');
+  assert.deepEqual(saved[1].body, saved[0].body);
+  assert.equal(saved[0].body.expectedVersion, 'title-review:1:abc');
+  assert.equal(saved[0].body.filmId, 'film:d5');
+  assert.notEqual(form.dataset.version, saved[1].body.expectedVersion);
+  formAfterRefresh = null;
 }
 
 {
   saved = []; refreshes = 0;
+  context.editOnSave = null;
+  formAfterRefresh = null;
   context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {error: 'storage_unavailable', reason: 'readback_failed'}};
   refreshView = {mode: 'ready', entity: {preferred: 'Хозяйское название'}};
   const parts = buildForm();
@@ -154,7 +180,76 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   assert.equal(result.textContent, 'Название записано. Карточка сверена.');
   assert.equal(result.textContent.includes('не изменено'), false);
   assert.equal(form.dataset.requestId, undefined);
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed'), null);
   assert.equal(refreshes, 1);
+}
+
+{
+  saved = []; refreshes = 0;
+  context.editOnSave = null;
+  refreshWithoutChoice();
+  context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {error: 'storage_unavailable', reason: 'readback_failed'}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм'}};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название', basis: 'карточка'});
+  const form = detail.querySelector('[data-title-review]');
+  const manual = form.querySelector('[data-title-manual]');
+  manual.value = 'Другое название';
+  for (const fn of form.listeners.get('input')) fn({target: manual});
+  assert.equal(form.dataset.requestId, undefined);
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed'), null);
+  form.querySelector('[data-title-accept]').checked = true;
+  form.querySelector('[data-title-save]').disabled = false;
+  context.nextResponse = {ok: true, status: 200, error: null, body: {ok: true, changed: true}};
+  const replay = {preventDefault() {}, defaultPrevented: false};
+  for (const fn of form.listeners.get('submit')) fn(replay);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(saved[1].body.value, 'Другое название');
+  assert.equal(saved[1].body.expectedVersion, 'title-review:1:moved');
+  assert.notDeepEqual(saved[1].body, saved[0].body);
+  formAfterRefresh = null;
+}
+
+{
+  saved = []; refreshes = 0;
+  formAfterRefresh = null;
+  context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {error: 'storage_unavailable', reason: 'readback_failed'}};
+  context.editOnSave = () => {
+    const form = detail.querySelector('[data-title-review]');
+    const manual = form.querySelector('[data-title-manual]');
+    manual.value = 'Уже другое';
+    for (const fn of form.listeners.get('input')) fn({target: manual});
+  };
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название'});
+  context.editOnSave = null;
+  const form = detail.querySelector('[data-title-review]');
+  assert.equal(refreshes, 0);
+  assert.match(form.querySelector('[data-title-result]').textContent, /Поле изменено/);
+  assert.equal(form.dataset.requestId, undefined);
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed'), null);
+  assert.equal(form.querySelector('[data-title-manual]').value, 'Уже другое');
+}
+
+{
+  saved = []; refreshes = 0;
+  formAfterRefresh = null;
+  context.editOnSave = null;
+  context.nextResponse = {ok: false, status: 0, error: 'network', body: null};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название', basis: 'карточка'});
+  assert.equal(refreshes, 0);
+  assert.equal(parts.form.dataset.requestId, 'req-fixed');
+  parts.form.dataset.version = 'title-review:1:moved';
+  context.nextResponse = {ok: true, status: 200, error: null, body: {ok: true, changed: false, idempotent: true}};
+  const replay = {preventDefault() {}, defaultPrevented: false};
+  for (const fn of parts.form.listeners.get('submit')) fn(replay);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(saved[1].body, saved[0].body);
+  assert.equal(saved[1].body.expectedVersion, 'title-review:1:abc');
 }
 
 {
@@ -165,6 +260,7 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   await submit(parts, {manual: 'Хозяйское название'});
   assert.equal(refreshes, 0);
   assert.equal(parts.form.dataset.requestId, undefined);
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed'), null);
   assert.match(parts.result.textContent, /Название не изменено/);
 }
 
@@ -188,17 +284,21 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
         ...programme,
         {value: 'Мошенница', origin: 'alias', provenance: {source: 'dictionary'}},
         {value: 'Своё старое', origin: 'alias', provenance: {source: 'letterboxd', authority: 'owner'}},
+        {value: 'Без источника', origin: 'alias', provenance: {authority: 'dictionary'}},
+        {value: 'Чужой источник', origin: 'alias', provenance: {source: 'programme', authority: 'dictionary'}},
       ],
       reviews: [{to: {value: 'Аферистка'}, at: '2026-01-01T00:00:00.000Z', basis: 'прокат'}],
     },
   };
   const html = context.adminTitleForm(record);
   const radios = html.match(/type="radio"/g) || [];
-  assert.equal(radios.length, 2, 'only the dictionary alias and the earlier owner title');
+  assert.equal(radios.length, 4, 'dictionary or owner on source or authority; programme text stays out');
   assert.equal(html.includes('Tytul'), false);
   assert.equal(html.includes('Кино'), false, 'Cyrillic programme text is not a Russian choice');
   assert.match(html, /Мошенница/);
   assert.match(html, /Своё старое/);
+  assert.match(html, /Без источника/);
+  assert.match(html, /Чужой источник/);
   const capped = context.adminTitleForm({...record, titleReview: {...record.titleReview, options: Array.from({length: 6}, (_, index) => ({value: `Словарь ${index}`, origin: 'alias', provenance: {source: 'dictionary'}}))}});
   assert.equal((capped.match(/type="radio"/g) || []).length, 5);
   assert.equal(capped.includes('Словарь 5'), false);
@@ -213,6 +313,12 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   assert.equal(aliases.includes('type="radio"'), false);
   assert.equal(aliases.includes('<details'), true);
   assert.equal(aliases.includes(' open'), false);
+  const person = context.adminAliases({aliases: [{value: 'Л. Норд', provenance: {source: 'dictionary'}}]}, 'person');
+  assert.match(person, /<summary>Другие имена \(1\)<\/summary>/);
+  assert.equal(person.includes('Другие названия'), false);
+  assert.match(context.adminAliases({aliases: []}, 'person'), /Других имён нет/);
+  assert.match(context.adminAliases({aliases: []}, 'film'), /Других названий нет/);
+  assert.match(context.adminAliases({aliases: []}), /Других названий нет/);
 }
 
 console.log('admin film title page: unknown readback keeps the request, a matching reread says stored');
