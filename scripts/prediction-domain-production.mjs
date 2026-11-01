@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 // Production entry for the prediction-domain cutover (ADR 0078). Default is read-only.
-// --apply sends only migrations/0007_prediction_authority.sql. --load copies the live mutable
-// objects in bounded batches while the runner and writer leases are idle, and leaves mode r2.
+// --apply sends only migrations/0007_prediction_authority.sql, and only after
+// --producers-drained and an idle runner and writer lease. A deploy is not that
+// drain. --load copies the live mutable objects in bounded batches while the
+// runner and writer leases are idle, and leaves mode r2.
 // A generation that moves during the copy is read again (catch-up), not a permanent block.
 // --activate sets mode d1 only when that fence, the leases and the parity read-back still agree.
 // --revert repairs the mutable mirrors from D1, deletes a mutable mirror the
 // rows no longer have, and sets mode r2 only after that read-back.
+// It writes and deletes only in the production bucket iptv on the account endpoint.
 // A repair that cannot verify an immutable body, or cannot prove an absent
-// mirror is gone, leaves mode d1. --reconcile clears an intent only when the
+// mirror is gone, leaves mode d1 and reports a partial or unknown write when a
+// mirror already changed. --reconcile clears an intent only when the
 // object bytes match the hash stored before the put. Each write needs its own
 // --confirm and --target iptv. This script does not replace scripts/prediction-domain-authority.mjs.
 import fs from 'node:fs';
@@ -43,15 +47,19 @@ export function parsePredictionArgs(argv){
  };
  const commands=['--apply','--load','--activate','--revert','--release','--reconcile'].filter(name=>args.includes(name));
  if(commands.length>1)throw new OperatorStop('usage',2);
- const known=new Set([...commands,'--target','--confirm']);
+ const known=new Set([...commands,'--target','--confirm','--producers-drained']);
  for(let index=0;index<args.length;index++){
   const arg=args[index];
   if(arg==='--target'||arg==='--confirm'){value(arg);index++;continue;}
+  if(arg==='--producers-drained')continue;
   if(!known.has(arg))throw new OperatorStop('usage',2);
  }
  const command=commands[0]?commands[0].slice(2):'status';
+ const producersDrained=args.includes('--producers-drained');
  const target=args.includes('--target')?value('--target'):undefined;
  const confirm=args.includes('--confirm')?value('--confirm'):undefined;
+ if(producersDrained&&command!=='apply')throw new OperatorStop('usage',2);
+ if(command==='apply'&&!producersDrained)throw new OperatorStop('producers_not_drained',2);
  if(target===undefined){
   if(command!=='status')throw new OperatorStop('target_required',2);
   return {report:{configured:false,writes:false,writeState:'none'}};
@@ -64,7 +72,7 @@ export function parsePredictionArgs(argv){
  if(command==='release'&&confirm!=='release')throw new OperatorStop('confirm',2);
  if(command==='reconcile'&&confirm!=='reconcile')throw new OperatorStop('confirm',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
- return {command,confirm};
+ return {command,confirm,producersDrained};
 }
 
 function filmIdFrom(key){
@@ -238,11 +246,20 @@ function productionTarget(env){
  return {accountId,apiToken,endpoint:endpoint||DEFAULT_ENDPOINT,maxBatchStatements:PREDICTION_BATCH_STATEMENTS,maxBatchBytes:PREDICTION_BATCH_BYTES};
 }
 function writeOutcome(error,stop){
- if(stop?.reason==='write_uncertain'||error?.kind==='write_uncertain')return {writes:true,writeState:'unknown'};
  const units=Number(error?.committedUnits??stop?.committedUnits??0);
+ if(stop?.reason==='write_uncertain'||error?.kind==='write_uncertain')return {writes:true,writeState:'unknown',...(units>0?{committedUnits:units}:{})};
  if(units>0)return {writes:true,writeState:'partial',committedUnits:units};
  return {writes:false,writeState:'none'};
 }
+async function assertProducersDrained(store,now){
+ let runner,writer;
+ try{
+  runner=await objectJson(store,RUNNER_KEY);
+  writer=await objectJson(store,WRITER_KEY);
+ }catch{throw new OperatorStop('quiescence_unproven',3);}
+ if(leasesBusy({leases:{runner,writer}},now))throw new OperatorStop('prediction_domain_busy',3);
+}
+const PRODUCTION_R2_ENDPOINT='https://'+PRODUCTION_ACCOUNT_ID+'.r2.cloudflarestorage.com';
 
 function readStore(env,fetchImpl){
  let credentials;
@@ -254,7 +271,9 @@ function readStore(env,fetchImpl){
 function writeStore(env,fetchImpl,keys){
  let credentials;
  try{credentials=readInstallCredentials(env);}catch{throw new OperatorStop('writer_missing',3);}
- if((credentials.accountId||env.R2_SNAPSHOT_ACCOUNT_ID)!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('bucket_identity',3);
+ const accountId=credentials.accountId||env.R2_SNAPSHOT_ACCOUNT_ID;
+ if(accountId!==PRODUCTION_ACCOUNT_ID||credentials.bucket!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('bucket_identity',3);
+ if(credentials.endpoint!==PRODUCTION_R2_ENDPOINT||credentials.endpointOverride)throw new OperatorStop('endpoint_refused',3);
  const allowed=keys||new Set();
  const allowedDeletes=new Set();
  const store=createS3Store({credentials,fetchImpl,allowedWrites:allowed,allowedDeletes});
@@ -280,7 +299,11 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
    const tables=await tablesOf(db);
    return {exit:0,result:{configured:true,writes:false,writeState:'none',schemaVersion:authority.version,mode:authority.mode,binding:authority.binding,tables:present(tables),generation:authority.generation,queueGeneration:authority.queueGeneration,profileGeneration:authority.profileGeneration}};
   }
-  if(parsed.command==='apply')return {exit:0,result:await applyMigration(db)};
+  if(parsed.command==='apply'){
+   if(!bucket)bucket=readStore(env,fetchImpl);
+   await assertProducersDrained(bucket,clock);
+   return {exit:0,result:await applyMigration(db)};
+  }
   if(parsed.command==='release')return {exit:0,result:await releaseDomain(db)};
   if(!bucket)throw new OperatorStop('source_missing',3);
   if(parsed.command==='reconcile')return {exit:0,result:await reconcileDomain(db,bucket)};
