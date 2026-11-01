@@ -282,11 +282,12 @@ function adminDetail(view) {
     ? `<details class="admin-folded"><summary>Алиасы, внешние id и конфликты</summary>${aliasBlock}<h3>Внешние id</h3>${adminExternalIds(record)}${conflictBlock}</details>`
     : `${aliasBlock}${conflictBlock}${adminFilmTechnical(record)}`;
   const filmTail = kind === 'film' ? `<h3>Другие статусы</h3><div class="admin-badges">${other}</div><p class="muted admin-outside-note">Отпечаток и прогноз хранятся вне опубликованной программы и этим чтением не читаются.</p>` : '';
+  const filmJournal = kind === 'film' ? adminTitleJournal(record) : '';
   const personForm = kind === 'person' ? adminNameForm(record) : '';
   const provenance = kind === 'film'
     ? `<p class="admin-provenance">Происхождение локализации: ${adminEscape(record.localization?.source || record.localization?.provenance?.authority || 'не указано')}. Происхождение идентичности: ${adminEscape(record.identity?.source || 'не указано')}.</p>`
     : `<p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>`;
-  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${personForm}`;
+  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${filmJournal}${personForm}`;
   if (kind === 'film') adminBindTitleReview(detail);
 }
 
@@ -373,6 +374,15 @@ function adminTitleHistory(review) {
   }).join('');
 }
 
+// The audit is not part of the form. An empty trail adds nothing. A trail is one closed
+// disclosure, and the card places it after every other film section.
+function adminTitleJournal(record) {
+  const review = record && record.titleReview;
+  const entries = (review && review.reviews) || [];
+  if (!entries.length) return '';
+  return `<details class="title-review-journal"><summary>Журнал (${entries.length})</summary><ul>${adminTitleHistory(review)}</ul></details>`;
+}
+
 function adminTitleForm(record) {
   const review = record.titleReview;
   if (!review || !review.version || !record.storedId) return '';
@@ -382,8 +392,7 @@ function adminTitleForm(record) {
   const picker = options
     ? `<fieldset><legend>Варианты</legend><div class="title-review-options">${options}</div></fieldset>`
     : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите название.</p>';
-  const history = adminTitleHistory(review);
-  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Вариант названия</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}" data-current="${adminEscape(current)}"><p class="title-review-current">Сейчас: <b>${adminEscape(current || 'нет')}</b></p>${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label class="title-review-prefer"><input type="checkbox" data-title-prefer> <span>Использовать как предпочтительное</span></label><p class="title-review-preview" data-title-preview>Добавится альтернативное название; текущее предпочтительное не изменится.</p><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><button type="submit" data-title-save>Сохранить вариант</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form><h3>История правок</h3>${history ? `<ul>${history}</ul>` : '<p class="muted">Записей ещё нет.</p>'}</section>`;
+  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Вариант названия</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}" data-current="${adminEscape(current)}"><p class="title-review-current">Сейчас: <b>${adminEscape(current || 'нет')}</b></p>${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label class="title-review-prefer"><input type="checkbox" data-title-prefer> <span>Использовать как предпочтительное</span></label><p class="title-review-preview" data-title-preview>Добавится альтернативное название; текущее предпочтительное не изменится.</p><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><button type="submit" data-title-save>Сохранить вариант</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form></section>`;
 }
 
 // The command that was posted and whose outcome is still unknown. A refresh replaces the card and

@@ -303,8 +303,14 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   assert.match(html, /Использовать как предпочтительное/);
   assert.doesNotMatch(html, /data-title-prefer[^>]*checked/);
   assert.match(html, /Добавится альтернативное название/);
-  assert.match(html, /прокат/);
+  assert.doesNotMatch(html, /История правок/);
+  assert.doesNotMatch(html, /прокат/, 'the form does not carry the audit');
   assert.doesNotMatch(html, /Выбрать из известных/);
+  const journal = context.adminTitleJournal(record);
+  assert.match(journal, /<details class="title-review-journal"><summary>Журнал \(1\)<\/summary>/);
+  assert.doesNotMatch(journal, / open/);
+  assert.match(journal, /прокат/);
+  assert.equal(context.adminTitleJournal({titleReview: {reviews: []}}), '');
   const aliases = context.adminAliases(record);
   assert.match(aliases, /<summary>Другие названия \(41\)<\/summary>/);
   assert.match(aliases, /Tytul 0/);
@@ -462,7 +468,7 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   assert.doesNotMatch(initial, /Мошенница/);
   assert.doesNotMatch(initial, /name="title-review-choice" value="I Care a Lot"/);
   assert.doesNotMatch(initial, /name="title-review-choice" value="Alias 0"/);
-  const added = context.adminTitleForm({
+  const addedRecord = {
     ...before,
     aliases: [...before.aliases, {kind: 'title', value: 'Мошенница', provenance: {source: 'owner', authority: 'owner', added: 'alias'}}],
     titleReview: {
@@ -470,11 +476,14 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
       options: [...before.titleReview.options, {value: 'Мошенница', origin: 'alias', provenance: {source: 'owner', authority: 'owner', added: 'alias'}}],
       reviews: [{effect: 'alias_added', at: '2026-11-01T11:00:00.000Z', to: {value: 'Мошенница'}, from: {value: 'Аферистка'}}],
     },
-  });
+  };
+  const added = context.adminTitleForm(addedRecord);
   const addedRadios = [...added.matchAll(/name="title-review-choice" value="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(addedRadios, ['Аферистка', 'Мошенница']);
-  assert.match(added, /добавлен вариант «Мошенница»/);
-  assert.doesNotMatch(added, /Аферистка → Мошенница/);
+  assert.doesNotMatch(added, /добавлен вариант/);
+  const addedJournal = context.adminTitleJournal(addedRecord);
+  assert.match(addedJournal, /добавлен вариант «Мошенница»/);
+  assert.doesNotMatch(addedJournal, /Аферистка → Мошенница/);
   const legacy = context.adminTitleForm({
     storedId: 'care', preferred: 'Мошенница', originalTitle: 'I Care a Lot',
     aliases: [{value: 'Аферистка', provenance: {source: 'programme'}}, {value: 'Кино', provenance: {source: 'programme'}}],
@@ -518,6 +527,71 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   assert.deepEqual(pinnedRadios, ['Аферистка', 'Старое', 'Словарь 0', 'Словарь 1', 'Словарь 2', 'Словарь 3', 'Словарь 4']);
   assert.match(pinned, /текущее предпочтительное/);
   assert.match(pinned, /было предпочтительным/);
+  const marks = html => [...html.matchAll(/name="title-review-choice" value="([^"]+)"> <span>[^<]*<\/span> <small class="muted">([^<]*)<\/small>/g)].map(match => [match[1], match[2]]);
+  const foreign = Array.from({length: 36}, (_, index) => ({value: `Alias ${index}`, origin: 'alias', provenance: {source: index % 2 ? 'programme' : 'wikidata'}}));
+  const firstPromote = {from: {value: 'Аферистка', status: 'provisional', source: 'wikidata'}, to: {value: 'Мошенница', status: 'reviewed'}, at: '2026-11-01T11:23:58.438Z', basis: 'Вариант перевода'};
+  const secondPromote = {from: {value: 'Мошенница', status: 'reviewed', source: 'owner'}, to: {value: 'Аферистка', status: 'reviewed'}, at: '2026-11-01T14:53:34.457Z', basis: 'Это и есть главный вариант'};
+  const restored = {
+    id: 'film:mcHk', storedId: 'mcHk', preferred: 'Аферистка', originalTitle: 'I Care a Lot', year: 2020,
+    canonicalIdentity: 'tmdb:601666',
+    aliases: [
+      ...foreign.map(option => ({kind: 'title', value: option.value, provenance: option.provenance})),
+      {kind: 'title', value: 'Мошенница', provenance: {source: 'programme'}},
+      {kind: 'title', value: 'I Care a Lot', provenance: {source: 'letterboxd'}},
+    ],
+    localization: {status: 'reviewed', source: 'owner'},
+    identity: {status: 'resolved', source: 'watchlist'},
+    externalIds: [{scheme: 'tmdb', value: '601666', trusted: true}],
+    localizationConflicts: [],
+    titleReview: {
+      version: 'title-review:1:mch', filmId: 'film:mcHk',
+      preferred: {value: 'Аферистка', status: 'reviewed', source: 'owner', authority: 'owner'},
+      options: [
+        {value: 'Аферистка', origin: 'preferred', provenance: {source: 'owner', authority: 'owner'}},
+        {value: 'Мошенница', origin: 'alias', provenance: {source: 'programme'}},
+        ...foreign,
+        {value: 'I Care a Lot', origin: 'original', provenance: {source: 'letterboxd'}},
+      ],
+      reviews: [firstPromote, secondPromote],
+    },
+  };
+  const restoredForm = context.adminTitleForm(restored);
+  assert.deepEqual(marks(restoredForm), [['Аферистка', 'текущее предпочтительное'], ['Мошенница', 'было предпочтительным']]);
+  assert.doesNotMatch(restoredForm, /name="title-review-choice" value="I Care a Lot"/);
+  assert.doesNotMatch(restoredForm, /name="title-review-choice" value="Alias 0"/);
+  assert.doesNotMatch(restoredForm, /Журнал|История правок/);
+  const promotedAgain = {
+    ...restored,
+    preferred: 'Мошенница',
+    titleReview: {
+      ...restored.titleReview,
+      preferred: {value: 'Мошенница', status: 'reviewed', source: 'owner', authority: 'owner'},
+      options: [
+        {value: 'Мошенница', origin: 'preferred', provenance: {source: 'owner', authority: 'owner'}},
+        {value: 'Аферистка', origin: 'alias', provenance: {source: 'programme', previousPreferred: true}},
+        ...foreign,
+        {value: 'I Care a Lot', origin: 'original', provenance: {source: 'letterboxd'}},
+      ],
+      reviews: [firstPromote, secondPromote, {from: {value: 'Аферистка', status: 'reviewed'}, to: {value: 'Мошенница', status: 'reviewed'}, at: '2026-11-01T15:10:00.000Z', basis: 'Снова вариант'}],
+    },
+  };
+  assert.deepEqual(marks(context.adminTitleForm(promotedAgain)), [['Мошенница', 'текущее предпочтительное'], ['Аферистка', 'было предпочтительным']]);
+  context.adminDetail({mode: 'ready', kind: 'film', id: 'mcHk', entity: restored});
+  const card = detail.innerHTML;
+  const order = ['data-title-review', '<h3>Сводка</h3>', 'Другие названия', 'Технические сведения', '<h3>Другие статусы</h3>', 'title-review-journal'].map(token => card.indexOf(token));
+  assert.ok(order.every((index, place) => index > (order[place - 1] ?? -1)), order.join(','));
+  assert.match(card, /<details class="title-review-journal"><summary>Журнал \(2\)<\/summary>/);
+  assert.doesNotMatch(card, /<details class="title-review-journal" open/);
+  assert.match(card, /Аферистка → Мошенница · 2026-11-01T11:23:58.438Z · Вариант перевода/);
+  assert.match(card, /Мошенница → Аферистка · 2026-11-01T14:53:34.457Z · Это и есть главный вариант/);
+  assert.equal(card.slice(0, card.indexOf('Технические сведения')).includes('tmdb:601666'), false);
+  assert.equal(context.adminTitleJournal({...restored, titleReview: {...restored.titleReview, reviews: []}}), '');
+  context.adminDetail({mode: 'ready', kind: 'film', id: 'mcHk', entity: {...restored, titleReview: {...restored.titleReview, reviews: []}}});
+  assert.doesNotMatch(detail.innerHTML, /Журнал|История правок/);
+  const personJournal = context.adminNameForm({id: 'person:actor/bruce-willis', original: 'Bruce Willis', nameReview: {version: 'v', original: 'Bruce Willis', preferred: {value: 'Брюс Уиллис'}, options: [], collisions: [], reviews: [{at: '2026-11-01T11:00:00.000Z', mode: 'manual', from: {value: 'Брюс Виллис'}, to: {value: 'Брюс Уиллис'}}], roleLinks: []}});
+  assert.match(personJournal, /<summary>Журнал<\/summary>/);
+  assert.doesNotMatch(personJournal, /Журнал \(/);
+  assert.doesNotMatch(personJournal, /title-review-journal/);
 }
 
 console.log('admin film title page: unknown readback keeps the request, a matching reread says stored');

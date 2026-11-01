@@ -276,5 +276,8 @@
 .admin-technical{min-width:0;margin:12px 0}
 .admin-technical summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
 .admin-technical summary:focus{outline:2px solid var(--lime);outline-offset:2px}
+.title-review-journal{margin:12px 0}
+.title-review-journal summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.title-review-journal summary:focus{outline:2px solid var(--lime);outline-offset:2px}
 .admin-technical dl,.admin-technical ul{overflow-wrap:anywhere}
 @media(max-width:800px){.title-review button,.title-review input[type="text"],.title-review textarea{width:100%}}
