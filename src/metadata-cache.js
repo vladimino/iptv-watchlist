@@ -1,12 +1,14 @@
 // ADR 0073. The metadata.json working set used by beginSync and metadataSync.
-// Mode r2, and any database that is not schema v6 with these tables, keeps the R2 object.
-// Mode d1 reads and writes this table. A failed read does not fall back to the object.
-// This module does not import. The Worker bundle wraps it in a scope.
+// Schema v5 keeps the R2 object and does not write these tables. Schema v6 with a missing
+// table or marker fails closed. Mode d1 reads and writes this table and does not fall back
+// to the object. This module does not import. The Worker bundle wraps it in a scope.
 
 export const METADATA_FRESH_MS=30*86400000;
 const MIRROR_KEY='metadata.json';
 const JSON_PUT={httpMetadata:{contentType:'application/json'}};
 const FENCE_SQL='UPDATE metadata_cache_cas SET ok=changes() WHERE id=1';
+// D1 rejects a statement with more than 100 bound parameters. Deletes must stay under that cap.
+const D1_BOUND_PARAMETERS=100;
 
 export function mergeWatchlistFilm(film,record){
  return record?{...record,...film,aliases:record.aliases}:film;
@@ -49,12 +51,17 @@ export async function readAuthority(db){
   if(/no such table/i.test(String(error?.message||error)))return {mode:'r2',tables:false,version:null,ready:false};
   throw failed('metadata_cache_unavailable',error);
  }
- const names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('metadata_cache','metadata_cache_authority','metadata_cache_cas')")).map(row=>row.name);
+ let names;
+ try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('metadata_cache','metadata_cache_authority','metadata_cache_cas')")).map(row=>row.name);}
+ catch(error){throw failed('metadata_cache_unavailable',error);}
  const tables=names.includes('metadata_cache')&&names.includes('metadata_cache_authority')&&names.includes('metadata_cache_cas');
- if(version!==6||!tables)return {mode:'r2',tables,version,ready:false};
- const row=await one(db,'SELECT mode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag FROM metadata_cache_authority WHERE id=1');
- if(!row||(row.mode!=='r2'&&row.mode!=='d1'))return {mode:'r2',tables:true,version,ready:false};
- return {mode:row.mode,tables:true,version,ready:row.mode==='d1',cacheGeneration:row.cacheGeneration,mirrorGeneration:row.mirrorGeneration,mirrorEtag:row.mirrorEtag??null};
+ if(version!==6)return {mode:'r2',tables,version,ready:false};
+ if(!tables)throw failed('metadata_cache_unavailable');
+ let row;
+ try{row=await one(db,'SELECT mode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag FROM metadata_cache_authority WHERE id=1');}
+ catch(error){throw failed('metadata_cache_unavailable',error);}
+ if(!row||(row.mode!=='r2'&&row.mode!=='d1'))throw failed('metadata_cache_unavailable');
+ return {mode:row.mode,tables:true,version,ready:row.mode==='d1',cacheGeneration:Number(row.cacheGeneration),mirrorGeneration:Number(row.mirrorGeneration),mirrorEtag:row.mirrorEtag??null};
 }
 
 export async function readAllRecords(db){
@@ -78,26 +85,45 @@ async function readMirror(env){
 function putMirror(bucket,text,onlyIf){
  return bucket.put(MIRROR_KEY,text,{...JSON_PUT,...(onlyIf?{onlyIf}:{})});
 }
+function owns(authority,generation,mode){
+ return !!authority&&authority.mode===mode&&authority.cacheGeneration===generation;
+}
 async function rememberMirror(db,generation,etag,mode){
  await db.prepare('UPDATE metadata_cache_authority SET mirror_generation=?, mirror_etag=? WHERE id=1 AND mode=? AND cache_generation=?').bind(generation,etag,mode,generation).run();
  return readAuthority(db);
 }
+async function sameMirror(object,records){
+ if(!object)return null;
+ let parsed;
+ try{parsed=await object.json();}catch{parsed=undefined;}
+ return parsed!==undefined&&sameValue(parsed,records)?{etag:object.etag}:null;
+}
+// Publishes only while this generation is still the cache generation. A newer commit
+// may replace this object. This generation must not replace a newer one.
 async function publishMirror(db,bucket,records,authority){
- const text=JSON.stringify(records);
- let saved=authority.mirrorEtag?await putMirror(bucket,text,{etagMatches:authority.mirrorEtag}):null;
+ const generation=authority.cacheGeneration,mode=authority.mode,text=JSON.stringify(records);
+ let current=await readAuthority(db);
+ if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+ let saved=current.mirrorEtag?await putMirror(bucket,text,{etagMatches:current.mirrorEtag}):null;
  if(!saved){
-  const current=await bucket.get(MIRROR_KEY);
-  if(!current)saved=await putMirror(bucket,text,{etagDoesNotMatch:'*'});
-  else{
-   let parsed;
-   try{parsed=await current.json();}catch{parsed=undefined;}
-   if(parsed!==undefined&&sameValue(parsed,records))saved={etag:current.etag};
-   else saved=await putMirror(bucket,text,{etagMatches:current.etag});
+  current=await readAuthority(db);
+  if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+  const object=await bucket.get(MIRROR_KEY);
+  saved=await sameMirror(object,records);
+  if(!saved){
+   current=await readAuthority(db);
+   if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+   saved=object?await putMirror(bucket,text,{etagMatches:object.etag}):await putMirror(bucket,text,{etagDoesNotMatch:'*'});
   }
  }
- if(!saved)return {mirrored:false,authority};
- const next=await rememberMirror(db,authority.cacheGeneration,saved.etag,authority.mode);
- return {mirrored:next.mirrorGeneration===authority.cacheGeneration&&next.mirrorEtag===saved.etag,etag:saved.etag,authority:next};
+ if(!saved){
+  current=await readAuthority(db);
+  if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+  saved=await sameMirror(await bucket.get(MIRROR_KEY),records);
+  if(!saved)return {mirrored:false,authority:current};
+ }
+ const next=await rememberMirror(db,generation,saved.etag,mode);
+ return {mirrored:next.mirrorGeneration===generation&&next.mirrorEtag===saved.etag,etag:saved.etag,authority:next};
 }
 
 export async function loadMetadataWorkingSet(env){
@@ -114,6 +140,7 @@ export async function loadMetadataWorkingSet(env){
 
 async function fenced(db,statements){
  if(typeof db.batch!=='function')throw failed('metadata_cache_unavailable');
+ if(statements.some(([,params])=>params.length>D1_BOUND_PARAMETERS))throw failed('metadata_cache_unavailable');
  const prepared=statements.map(([sql,params])=>db.prepare(sql).bind(...params));
  try{await db.batch(prepared);}
  catch(error){
@@ -126,9 +153,8 @@ function upsert(key,record,generation){
  const cols=metadataCacheColumns(record);
  return ['INSERT INTO metadata_cache (cache_key,payload_json,metadata_at,synopsis_fetched_at,people_names_version,people_localized_at,people_version,generation) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload_json=excluded.payload_json,metadata_at=excluded.metadata_at,synopsis_fetched_at=excluded.synopsis_fetched_at,people_names_version=excluded.people_names_version,people_localized_at=excluded.people_localized_at,people_version=excluded.people_version,generation=excluded.generation',[key,payload(record),cols.metadataAt,cols.synopsisFetchedAt,cols.peopleNamesVersion,cols.peopleLocalizedAt,cols.peopleVersion,generation]];
 }
-function deleteMissing(keys){
- if(!keys.length)return ['DELETE FROM metadata_cache',[]];
- return [`DELETE FROM metadata_cache WHERE cache_key NOT IN (${keys.map(()=>'?').join(',')})`,keys];
+function deleteStale(generation){
+ return ['DELETE FROM metadata_cache WHERE generation<>?',[generation]];
 }
 
 export async function commitMetadataCache(db,bucket,records,authority){
@@ -140,7 +166,7 @@ export async function commitMetadataCache(db,bucket,records,authority){
   [FENCE_SQL,[]],
   ...keys.map(key=>upsert(key,records[key],next)),
  ];
- if(authority.complete!==false)statements.push(deleteMissing(keys));
+ if(authority.complete!==false)statements.push(deleteStale(next));
  await fenced(db,statements);
  const committed=await readAuthority(db);
  if(committed.cacheGeneration!==next)throw failed('metadata_cache_cas');
@@ -151,11 +177,23 @@ export async function commitMetadataCache(db,bucket,records,authority){
 }
 
 export async function saveMetadataWorkingSet(env,records,working){
- if(!working||working.mode!=='d1'){
-  await putMirror(env.BUCKET,JSON.stringify(records));
-  return {mode:'r2'};
+ if(working?.mode==='d1')return commitMetadataCache(env.DB,env.BUCKET,records,{...working.authority,complete:working.complete!==false,mode:'d1'});
+ const authority=await readAuthority(env?.DB);
+ if(authority.version===6){
+  if(authority.mode!=='r2')throw failed('metadata_cache_not_authoritative');
+  const next=(authority.cacheGeneration??0)+1;
+  await fenced(env.DB,[
+   ['UPDATE metadata_cache_authority SET cache_generation=? WHERE id=1 AND mode=\'r2\' AND cache_generation=?',[next,authority.cacheGeneration]],
+   [FENCE_SQL,[]],
+  ]);
+  const saved=await putMirror(env.BUCKET,JSON.stringify(records));
+  if(!saved?.etag)throw failed('metadata_cache_fence');
+  const remembered=await rememberMirror(env.DB,next,saved.etag,'r2');
+  if(remembered.mode!=='r2'||remembered.cacheGeneration!==next||remembered.mirrorGeneration!==next)throw failed('metadata_cache_cas');
+  return {mode:'r2',cacheGeneration:next,authority:remembered};
  }
- return commitMetadataCache(env.DB,env.BUCKET,records,{...working.authority,complete:working.complete!==false,mode:'d1'});
+ await putMirror(env.BUCKET,JSON.stringify(records));
+ return {mode:'r2'};
 }
 
 async function fencedMirror(bucket){
@@ -214,18 +252,30 @@ export async function activateMetadataCache(db,bucket,{confirm}={}){
  return after;
 }
 
-// Leaves the rows in place and returns readers to metadata.json. It does not write R2.
-export async function revertMetadataCache(db,{confirm}={}){
+// Returns readers to metadata.json only when that object matches the latest cache generation.
+// A lagging mirror is published once. If it still does not verify, the mode stays d1.
+export async function revertMetadataCache(db,bucket,{confirm}={}){
  if(confirm!=='r2')throw failed('metadata_cache_confirm');
- const authority=await readAuthority(db);
+ if(!bucket||typeof bucket.get!=='function')throw failed('metadata_cache_mirror_missing');
+ let authority=await readAuthority(db);
  if(authority.version!==6||!authority.tables)throw failed('metadata_cache_schema');
  if(authority.mode!=='d1')throw failed('metadata_cache_not_authoritative');
+ if(authority.cacheGeneration!==authority.mirrorGeneration){
+  let repaired;
+  try{repaired=await publishMirror(db,bucket,await readAllRecords(db),authority);}
+  catch(error){throw failed('metadata_cache_fence',error);}
+  authority=repaired.authority||await readAuthority(db);
+  if(!repaired.mirrored||authority.mode!=='d1'||authority.cacheGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_fence');
+ }
+ const mirror=await fencedMirror(bucket);
+ if(mirror.etag!==authority.mirrorEtag||authority.cacheGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_fence');
+ await prove(db,mirror.records);
  await fenced(db,[
-  ['UPDATE metadata_cache_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND cache_generation=?',[authority.cacheGeneration]],
+  ['UPDATE metadata_cache_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND cache_generation=? AND mirror_generation=? AND mirror_etag=? AND cache_generation=mirror_generation',[authority.cacheGeneration,authority.mirrorGeneration,authority.mirrorEtag]],
   [FENCE_SQL,[]],
  ]);
  const after=await readAuthority(db);
- if(after.mode!=='r2'||after.cacheGeneration!==authority.cacheGeneration)throw failed('metadata_cache_cas');
+ if(after.mode!=='r2'||after.cacheGeneration!==authority.cacheGeneration||after.mirrorGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_cas');
  return after;
 }
 

@@ -70,6 +70,9 @@ const payload=(db,key)=>JSON.parse(db.sql(`SELECT payload_json p FROM metadata_c
  assert.equal('synopsis' in payloadSafe(kept.records.heat),true);
  const saved=await saveMetadataWorkingSet({DB:v6,BUCKET:bucket},{...kept.records,heat:{...kept.records.heat,synopsis:'Edited'}},kept);
  assert.equal(saved.mode,'r2');
+ assert.equal(saved.cacheGeneration,1,'an r2 save on schema v6 claims the generation before the put');
+ assert.equal(authority(v6).mode,'r2');
+ assert.equal(authority(v6).g,authority(v6).m);
  assert.equal(one(v6,'SELECT COUNT(*) FROM metadata_cache'),0);
  assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'Edited');
  let reads=0;
@@ -280,12 +283,220 @@ function payloadSafe(value){return value;}
  const flipped=run('--activate','--confirm','activate','--database',file,'--metadata',metadata);
  assert.equal(flipped.status,0,flipped.stderr);
  assert.equal(JSON.parse(flipped.stdout).mode,'d1');
- const back=run('--revert','--confirm','r2','--database',file);
+ const missingFile=run('--revert','--confirm','r2','--database',file);
+ assert.notEqual(missingFile.status,0);
+ assert.match(missingFile.stderr,/metadata/);
+ const back=run('--revert','--confirm','r2','--database',file,'--metadata',metadata);
  assert.equal(back.status,0,back.stderr);
  assert.equal(JSON.parse(back.stdout).mode,'r2');
  assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),2,'reverting the marker keeps the rows');
  const direct=migrated();
- await assert.rejects(revertMetadataCache(direct,{}),/metadata_cache_confirm/);
+ await assert.rejects(revertMetadataCache(direct,mirrorOf({}),{}),/metadata_cache_confirm/);
+}
+
+function holdMetadataPuts(bucket){
+ const real=bucket.put.bind(bucket);
+ const waiting=[];
+ let holding=false;
+ bucket.put=async(key,value,options)=>{
+  if(holding&&key==='metadata.json')await new Promise(resolve=>waiting.push(resolve));
+  return real(key,value,options);
+ };
+ return {hold(){holding=true;},pass(){holding=false;},release(){const resolve=waiting.shift();if(resolve)resolve();},get pending(){return waiting.length;}};
+}
+async function until(predicate){
+ for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0));}
+ throw new Error('timed out');
+}
+function limitBinds(db,limit=100){
+ const prepare=db.prepare.bind(db);
+ const seen=[];
+ db.prepare=sql=>{
+  const statement=prepare(sql);
+  return {
+   bind(...params){
+    seen.push({sql,count:params.length});
+    if(params.length>limit)throw new Error('D1_ERROR: too many SQL variables');
+    return statement.bind(...params);
+   },
+   first:()=>statement.first(),all:()=>statement.all(),run:()=>statement.run(),
+  };
+ };
+ return {max:()=>seen.reduce((max,item)=>Math.max(max,item.count),0),deletes:()=>seen.filter(item=>item.sql.startsWith('DELETE FROM metadata_cache'))};
+}
+
+// 8. A complete save of more than 100 keys stays inside D1's bound-parameter limit and still drops a departed key.
+{
+ const db=migrated();
+ const binds=limitBinds(db);
+ const body={};
+ for(let i=0;i<150;i++)body['k'+i]=record('k'+i,{synopsis:i===0?null:'kept'});
+ const bucket=mirrorOf(body);
+ await importMetadataCache(db,bucket,{confirm:'load'});
+ await activateMetadataCache(db,bucket,{confirm:'activate'});
+ assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),150);
+ const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ delete working.records.k0;
+ const committed=await commitMetadataCache(db,bucket,working.records,{...working.authority,complete:true,mode:'d1'});
+ assert.equal(committed.mirrored,true);
+ assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),149);
+ assert.equal(db.sql("SELECT cache_key FROM metadata_cache WHERE cache_key='k0'").length,0,'a departed key is deleted without a NOT IN list');
+ assert.equal(payload(db,'k1').synopsis,'kept');
+ assert.ok(binds.max()<=100,'no statement bound more than 100 parameters');
+ assert.deepEqual(binds.deletes().map(item=>item.count).filter(count=>count>0),[1]);
+ assert.throws(()=>db.prepare('SELECT '+Array(101).fill('?').join(',')).bind(...Array(101).fill(1)),/too many SQL variables/);
+}
+
+// 9. An older mirror publication cannot replace a newer one, in either completion order, including a read repair.
+{
+ const db=migrated();
+ const body={heat:record('heat'),orphan:record('orphan')};
+ const bucket=mirrorOf(body);
+ await importMetadataCache(db,bucket,{confirm:'load'});
+ await activateMetadataCache(db,bucket,{confirm:'activate'});
+ const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ const olderBody={...working.records,heat:{...working.records.heat,synopsis:'older'}};
+ const hold=holdMetadataPuts(bucket);
+ hold.hold();
+ const older=commitMetadataCache(db,bucket,olderBody,{...working.authority,complete:true,mode:'d1'});
+ await until(()=>hold.pending===1);
+ const mid=await readAuthority(db);
+ hold.pass();
+ const newerBody={...olderBody,heat:{...olderBody.heat,synopsis:'newer'}};
+ const newer=await commitMetadataCache(db,bucket,newerBody,{...mid,complete:true,mode:'d1'});
+ assert.equal(newer.mirrored,true);
+ hold.release();
+ const finished=await older;
+ assert.equal(finished.mirrored,false);
+ assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'newer');
+ assert.equal(payload(db,'heat').synopsis,'newer');
+ assert.equal(authority(db).g,authority(db).m);
+
+ const ordered=await commitMetadataCache(db,bucket,{...newerBody,heat:{...newerBody.heat,synopsis:'after'}},{...newer.authority,complete:true,mode:'d1'});
+ assert.equal(ordered.mirrored,true);
+ assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'after');
+ const real=bucket.put.bind(bucket);
+ const down={on:true};
+ bucket.put=async(key,value,options)=>{if(down.on&&key==='metadata.json')throw new Error('mirror down');return real(key,value,options);};
+ const laggedBody={...newerBody,heat:{...newerBody.heat,synopsis:'lagged'}};
+ const lagged=await commitMetadataCache(db,bucket,laggedBody,{...ordered.authority,complete:true,mode:'d1'});
+ assert.equal(lagged.mirrored,false);
+ assert.notEqual(authority(db).g,authority(db).m);
+ down.on=false;
+ bucket.put=real;
+ const repairHold=holdMetadataPuts(bucket);
+ repairHold.hold();
+ const repair=loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ await until(()=>repairHold.pending===1);
+ repairHold.pass();
+ const during=await readAuthority(db);
+ const overtook=await commitMetadataCache(db,bucket,{...laggedBody,heat:{...laggedBody.heat,synopsis:'overtook'}},{...during,complete:true,mode:'d1'});
+ assert.equal(overtook.mirrored,true);
+ repairHold.release();
+ await repair;
+ assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'overtook');
+ assert.equal(authority(db).g,authority(db).m);
+ const followed=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ assert.equal(followed.records.heat.synopsis,'overtook');
+}
+
+// 10. Revert refuses while the mirror lags, then flips only after a verified catch-up.
+{
+ const db=migrated();
+ const body={heat:record('heat'),orphan:record('orphan')};
+ const bucket=mirrorOf(body);
+ await importMetadataCache(db,bucket,{confirm:'load'});
+ await activateMetadataCache(db,bucket,{confirm:'activate'});
+ const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ const real=bucket.put.bind(bucket);
+ const down={on:true};
+ bucket.put=async(key,value,options)=>{if(down.on&&key==='metadata.json')throw new Error('mirror down');return real(key,value,options);};
+ const updated={...working.records,heat:{...working.records.heat,synopsis:'committed'}};
+ const committed=await commitMetadataCache(db,bucket,updated,{...working.authority,complete:true,mode:'d1'});
+ assert.equal(committed.mirrored,false);
+ await assert.rejects(revertMetadataCache(db,bucket,{confirm:'r2'}),/metadata_cache_fence/);
+ assert.equal(authority(db).mode,'d1');
+ assert.equal(payload(db,'heat').synopsis,'committed');
+ assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'Synopsis');
+ down.on=false;
+ const reverted=await revertMetadataCache(db,bucket,{confirm:'r2'});
+ assert.equal(reverted.mode,'r2');
+ assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),2);
+ assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'committed');
+ assert.equal(authority(db).g,authority(db).m);
+}
+
+// 11. Activation and an in-flight r2 save cannot both become the writer.
+{
+ const db=migrated();
+ const body={heat:record('heat'),orphan:record('orphan')};
+ const bucket=mirrorOf(body);
+ await importMetadataCache(db,bucket,{confirm:'load'});
+ const seen=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ assert.equal(seen.mode,'r2');
+ await activateMetadataCache(db,bucket,{confirm:'activate'});
+ const text=bucket.objects.get('metadata.json').text;
+ const rows=one(db,'SELECT COUNT(*) FROM metadata_cache');
+ await assert.rejects(saveMetadataWorkingSet({DB:db,BUCKET:bucket},{...seen.records,heat:{...seen.records.heat,synopsis:'late'}},seen),/metadata_cache_not_authoritative/);
+ assert.equal(bucket.objects.get('metadata.json').text,text);
+ assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),rows);
+ assert.equal(payload(db,'heat').synopsis,'Synopsis');
+ assert.equal(authority(db).mode,'d1');
+
+ const claimedDb=migrated();
+ const claimedBucket=mirrorOf(body);
+ await importMetadataCache(claimedDb,claimedBucket,{confirm:'load'});
+ const open=await loadMetadataWorkingSet({DB:claimedDb,BUCKET:claimedBucket});
+ const hold=holdMetadataPuts(claimedBucket);
+ hold.hold();
+ const saving=saveMetadataWorkingSet({DB:claimedDb,BUCKET:claimedBucket},{...open.records,heat:{...open.records.heat,synopsis:'claimed'}},open);
+ await until(()=>hold.pending===1);
+ assert.notEqual(authority(claimedDb).g,authority(claimedDb).m);
+ await assert.rejects(activateMetadataCache(claimedDb,claimedBucket,{confirm:'activate'}),/metadata_cache_fence/);
+ assert.equal(authority(claimedDb).mode,'r2');
+ hold.release();
+ const saved=await saving;
+ assert.equal(saved.mode,'r2');
+ assert.equal(JSON.parse(claimedBucket.objects.get('metadata.json').text).heat.synopsis,'claimed');
+ await assert.rejects(activateMetadataCache(claimedDb,claimedBucket,{confirm:'activate'}),/metadata_cache_loss/);
+ assert.equal(authority(claimedDb).mode,'r2');
+ assert.equal(one(claimedDb,'SELECT COUNT(*) FROM metadata_cache'),2);
+}
+
+// 12. Schema v6 without the cache tables or the marker fails closed. Schema v5 and a missing binding stay on R2.
+{
+ const db=migrated();
+ db.sql('DROP TABLE metadata_cache');
+ let reads=0;
+ const bucket=mirrorOf({heat:record('heat')});
+ const get=bucket.get.bind(bucket);
+ bucket.get=async(...args)=>{reads++;return get(...args);};
+ await assert.rejects(loadMetadataWorkingSet({DB:db,BUCKET:bucket}),/metadata_cache_unavailable/);
+ await assert.rejects(saveMetadataWorkingSet({DB:db,BUCKET:bucket},{heat:record('heat')},{mode:'r2'}),/metadata_cache_unavailable/);
+ assert.equal(reads,0,'partial schema v6 does not decide from metadata.json');
+ const marked=migrated();
+ marked.sql('DELETE FROM metadata_cache_authority');
+ await assert.rejects(loadMetadataWorkingSet({DB:marked,BUCKET:bucket}),/metadata_cache_unavailable/);
+ const unbound=await loadMetadataWorkingSet({BUCKET:mirrorOf({heat:record('heat')})});
+ assert.equal(unbound.mode,'r2');
+ assert.equal(unbound.records.heat.id,'heat');
+ const v5=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state']);
+ v5.sql('UPDATE schema_contract SET version=6');
+ const films=[{id:'heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',url:'https://letterboxd.com/film/heat/'}];
+ const programme=new MemoryBucket();
+ const put=(key,value)=>programme.put(key,JSON.stringify(value));
+ put('watchlist.json',{updatedAt:T,films});
+ put('metadata.json',{heat:record('heat')});
+ put('titles.json',{});
+ put('people.json',{});
+ put('epg/discovery-resolution.json',{});
+ put('epg/published-generation.json',{phase:'published',programmeRunId:'run-1'});
+ put('epg/generations/run-1/programme.json',{updatedAt:T,films:films.map(item=>({...item,shows:[]}))});
+ put('epg/generations/run-1/discovered-films.json',{});
+ const failed=await projectorContext().runD1EnrichmentProjection({DB:v5,BUCKET:programme,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(failed.outcome,'failed',JSON.stringify(failed));
+ assert.equal(failed.reason,'metadata_cache_unavailable');
+ assert.equal(one(v5,'SELECT COUNT(*) FROM film'),0,'a partial v6 run writes no Film');
 }
 
 console.log('metadata cache: r2 until the marker is d1, full records including orphans, fenced commit, mirror repair, no phantom Film');

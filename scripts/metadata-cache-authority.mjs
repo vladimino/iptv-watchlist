@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Operator entry for the metadata cache marker (ADR 0073). Default is read-only status.
 // --load fills D1 from a local metadata.json and leaves mode r2. --activate sets mode d1
-// only when the import still matches that file. --revert sets mode r2 and keeps the rows.
-// Each write refuses without its own --confirm.
+// only when the import still matches that file. --revert sets mode r2 only when that
+// file matches the latest cache generation, and it keeps the rows.
+// Each write refuses without its own --confirm. --load, --activate and --revert need --metadata.
 // This process never selects production D1 and never calls the network.
 import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
@@ -24,7 +25,7 @@ if(!database){
  process.exit(0);
 }
 if(PRODUCTION.test(database))refuse('this script does not select production D1');
-if((load||activate)&&!metadata)refuse('--metadata is required');
+if((load||activate||revert)&&!metadata)refuse('--metadata is required');
 
 const literal=item=>{
  if(item===undefined)throw new Error('undefined bound');
@@ -66,5 +67,5 @@ function bucket(){
 }
 const status=await readAuthority(db);
 if(!load&&!activate&&!revert){console.log(JSON.stringify({...status,writes:false}));process.exit(0);}
-const result=load?await importMetadataCache(db,bucket(),{confirm}):activate?await activateMetadataCache(db,bucket(),{confirm}):await revertMetadataCache(db,{confirm});
+const result=load?await importMetadataCache(db,bucket(),{confirm}):activate?await activateMetadataCache(db,bucket(),{confirm}):await revertMetadataCache(db,bucket(),{confirm});
 console.log(JSON.stringify(result));

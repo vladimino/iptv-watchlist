@@ -154,7 +154,8 @@ async function d1EnrichmentDiff(env,db,now,summary){
  summary.loadMs=Date.now()-started;
  // Schema v6 is the only version that can name a D1 metadata cache. v4 and v5 keep the R2 object
  // and do not query the cache tables. Mode d1 replaces that object before the view is built.
- // A failed cache read stops the run before any write.
+ // Version 6 without the cache tables or a valid marker fails the run before any write
+ // and does not project from the R2 object. A failed cache read does the same.
  const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
  summary.schemaVersion=version;
  if(version===6){
