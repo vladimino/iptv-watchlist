@@ -42,7 +42,7 @@ Accepting this record approves the architecture only. It does not authorize a pr
 ## Evidence
 
 - **Original decision:** [AIR-65 owner GO](https://trello.com/c/MKb4JMXi#comment-6ae76fceb83abfea99405ecb)
-- **Implementation:** this change; the pull request URL is recorded when the review opens
+- **Implementation:** [PR #318](https://github.com/vladimino/iptv-watchlist/pull/318)
 - **Dated verification:** not recorded; no production write is claimed
 - **Uncertainty:** production still has no `identityAuthority` marker. A future marker other than absent or `r2` refuses the write until a later decision names that store.
 
