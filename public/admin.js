@@ -409,8 +409,15 @@ function adminBindTitleReview(detail) {
 }
 
 
-// A radio is a Russian choice only when the record says so: owner or dictionary authority/source,
-// or an explicit language "ru". Script is not a language. The full option list stays on the record.
+// The current preferred text is always a choice, including a provisional Wikidata name. Every
+// other radio still needs a Russian mark: owner or dictionary authority/source, an explicit
+// language "ru", or previousPreferred. Script is not a language. The full option list stays
+// on the record. Showing the current name does not store another alias.
+function adminNameCurrentValue(review) {
+  const value = review && review.preferred && review.preferred.value;
+  return typeof value === 'string' && value.trim() ? value : '';
+}
+
 function adminNameRussian(option, review) {
   const provenance = option && option.provenance;
   if (provenance && typeof provenance === 'object') {
@@ -424,11 +431,36 @@ function adminNameRussian(option, review) {
   return preferred.source === 'dictionary' || preferred.source === 'owner' || preferred.authority === 'dictionary' || preferred.authority === 'owner';
 }
 
+function adminNameChoices(review) {
+  const current = adminNameCurrentValue(review);
+  const out = [];
+  const seen = new Set();
+  const push = option => {
+    if (!option || !option.value || seen.has(option.value)) return;
+    seen.add(option.value);
+    out.push(option);
+  };
+  if (current) push({value: current, origin: 'preferred', preferred: true});
+  for (const option of (review && review.options) || []) {
+    if (option && option.value === current) {
+      if (out.length && out[0].value === current) out[0] = option;
+      continue;
+    }
+    if (adminNameRussian(option, review)) push(option);
+  }
+  return out;
+}
+
 function adminNameForm(record) {
   const review = record.nameReview;
   if (!review || !review.version) return '';
-  const russian = (review.options || []).filter(option => adminNameRussian(option, review));
-  const options = russian.map(option => `<label class="admin-name-option"><input type="radio" name="person-name-alias" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span> <small class="muted">${adminEscape(option.origin || '')}${option.preferred ? ' · текущее' : ''}${option.provenance && option.provenance.previousPreferred ? ' · было предпочтительным' : ''}</small></label>`).join('');
+  const current = adminNameCurrentValue(review);
+  const russian = adminNameChoices(review);
+  const options = russian.map(option => {
+    const isCurrent = option.value === current;
+    const mark = isCurrent ? ' · текущее предпочтительное' : (option.provenance && option.provenance.previousPreferred ? ' · было предпочтительным' : '');
+    return `<label class="admin-name-option"><input type="radio" name="person-name-alias" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span> <small class="muted">${adminEscape(option.origin || '')}${mark}</small></label>`;
+  }).join('');
   const folded = (review.options || []).map(option => `<li>${adminEscape(option.value)} · ${adminEscape(option.origin || '')} ${adminProvenance(option.provenance)}</li>`).join('');
   const collisions = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}" disabled${item.linked ? ' checked' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
   const roleList = collisions ? `<fieldset><legend>Тот же человек в другой роли</legend><div class="admin-name-options">${collisions}</div></fieldset>` : '';
