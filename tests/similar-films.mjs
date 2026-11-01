@@ -55,7 +55,7 @@ const show=(offset,channel='Один')=>({channel,start:now+offset*hour,end:now+
 const strong=(rating=4.4,probability=.8,confidence='high')=>({predictedRating:rating,probability4Plus:probability,confidence,stale:false,moodIds:[]});
 const watch=(id,extra={})=>({id,title:extra.title||id,original:extra.original||extra.title||id,year:extra.year??2001,tmdbId:extra.tmdbId,canonicalIdentity:extra.canonicalIdentity,directors:extra.directors||[],actors:extra.actors||[],shows:extra.shows===undefined?[show(-5)]:extra.shows,url:extra.url,genres:extra.genres||['Драма'],catalogOnly:extra.catalogOnly===true});
 const catalog=(id,tmdb,extra={})=>({id,tmdbId:String(tmdb),canonicalIdentity:extra.canonicalIdentity||'tmdb:'+tmdb,title:extra.title||id,original:extra.original||extra.title||id,year:extra.year??2011,directors:extra.directors||[],actors:extra.actors||[],shows:extra.shows===undefined?[show(-4)]:extra.shows,url:Object.hasOwn(extra,'url')?extra.url:`https://www.themoviedb.org/movie/${tmdb}`,genres:extra.genres||['триллер'],fingerprint:Object.hasOwn(extra,'fingerprint')?extra.fingerprint:{plotMechanics:extra.mechanics||[],moodIds:extra.moods||[],execution:extra.execution||{}},prediction:extra.prediction===undefined?null:extra.prediction});
-const stored=(extra={})=>({fingerprint:Object.hasOwn(extra,'fingerprint')?extra.fingerprint:{plotMechanics:extra.mechanics||[],moodIds:extra.moods||[],execution:extra.execution||{}},prediction:extra.prediction===undefined?null:extra.prediction,actualRating:extra.actualRating});
+const stored=(extra={})=>{const row={fingerprint:Object.hasOwn(extra,'fingerprint')?extra.fingerprint:{plotMechanics:extra.mechanics||[],moodIds:extra.moods||[],execution:extra.execution||{}},prediction:extra.prediction===undefined?null:extra.prediction,actualRating:extra.actualRating};if(Object.hasOwn(extra,'watched'))row.watched=extra.watched;return row;};
 function load({films,enrichment,catalogFilms=null,runId='G1',filmId='open'}){
  ui.filmsList=films;
  ui.enrichmentFilms=enrichment;
@@ -291,17 +291,83 @@ const before=run('JSON.stringify(enrichment)');
 run('renderSimilar(now)');
 assert.equal(run('JSON.stringify(enrichment)'),before,'rendering does not write enrichment');
 
-// watched is not on the enrichment view the page loads. A flag beside the rating is not a rewatch, and started is not one either.
-load({films:[open,watch('seen',{title:'Смотрел без оценки'}),watch('forecast-only',{title:'Только прогноз'})],enrichment:{
+// watched true or a stored rating is a rewatch, and only with a real match. watched false, null, absent and started are not.
+load({films:[
+ open,
+ watch('seen',{title:'Смотрел без оценки'}),
+ watch('forecast-seen',{title:'Смотрел, только прогноз'}),
+ watch('denied',{title:'Явно не смотрел'}),
+ watch('forecast-denied',{title:'Не смотрел, только прогноз'}),
+ watch('unknown',{title:'Неизвестно'}),
+ watch('forecast-unknown',{title:'Неизвестно, только прогноз'}),
+ watch('absent',{title:'Нет поля'}),
+ watch('rated-denied',{title:'Оценка важнее'}),
+ watch('rated-unknown',{title:'Оценка без факта'}),
+ watch('started',{title:'Только начат'}),
+],enrichment:{
  open:openStored,
- seen:stored({mechanics:['heist'],prediction:strong(4.4,.8)}),
- 'forecast-only':stored({prediction:strong(4.6,.9)}),
+ seen:stored({mechanics:['heist'],watched:true,prediction:strong(4.4,.8)}),
+ 'forecast-seen':stored({watched:true,prediction:strong(4.8,.95)}),
+ denied:stored({mechanics:['heist'],watched:false,prediction:strong(4.4,.8)}),
+ 'forecast-denied':stored({watched:false,prediction:strong(4.8,.95)}),
+ unknown:stored({mechanics:['heist'],watched:null,prediction:strong(4.4,.8)}),
+ 'forecast-unknown':stored({watched:null,prediction:strong(4.8,.95)}),
+ absent:stored({mechanics:['heist'],prediction:strong(4.4,.8)}),
+ 'rated-denied':stored({mechanics:['heist'],watched:false,actualRating:4,prediction:strong(4.9,.99)}),
+ 'rated-unknown':stored({watched:null,actualRating:4,prediction:strong(4.9,.99)}),
+ started:stored({watched:false,prediction:strong(4.7,.9)}),
 }});
-vm.runInContext("enrichment.films.seen.watched=true;enrichment.films['forecast-only'].watched=true;startedIds=new Set(['seen'])",ui);
-const unseen=rows();
-assert.equal(unseen.find(row=>row.film.id==='seen').badge,'watchlist','a watched film with no stored rating stays on the watchlist until the view sends watched');
-assert.equal(unseen.find(row=>row.film.id==='forecast-only').label,'Подходит по прогнозу','the same gap still allows the prediction-only label');
-assert.equal(unseen.find(row=>row.film.id==='forecast-only').badge,'watchlist');
+vm.runInContext("startedIds=new Set(['started','seen'])",ui);
+const watchedRows=rows();
+const watchedBadge=(id,badge,message)=>assert.equal(watchedRows.find(row=>row.film.id===id)?.badge,badge,message);
+const watchedGone=(id,message)=>assert.equal(watchedRows.find(row=>row.film.id===id),undefined,message);
+watchedBadge('seen','rewatch','a confirmed viewing without a rating is a rewatch when the match is real');
+assert.equal(watchedRows.find(row=>row.film.id==='seen').label,'Ограбление');
+watchedGone('forecast-seen','a confirmed viewing with only a strong forecast is not shown');
+watchedBadge('denied','watchlist','an explicit watched:false without a rating stays on the watchlist');
+watchedBadge('forecast-denied','watchlist');
+assert.equal(watchedRows.find(row=>row.film.id==='forecast-denied').label,'Подходит по прогнозу');
+watchedBadge('unknown','watchlist','unknown is not a first viewing and not a rewatch');
+watchedBadge('forecast-unknown','watchlist');
+watchedBadge('absent','watchlist','a missing watched field is unknown, not false');
+watchedBadge('rated-denied','rewatch','a stored rating wins over watched:false');
+watchedGone('rated-unknown','a rating without a substantive match is not a prediction-only card');
+watchedBadge('started','watchlist','started is not watched');
+assert.equal(watchedRows.find(row=>row.film.id==='started').label,'Подходит по прогнозу');
+assert.equal(fetches.length,0,'the watched matrix does not fetch');
+const watchedBefore=run('JSON.stringify(enrichment)');
+run('renderSimilar(now)');
+assert.equal(run('JSON.stringify(enrichment)'),watchedBefore,'rendering a rewatch does not write enrichment');
+
+// A catalog candidate already confirmed watched or rated in the loaded view is dropped. The alias is a verified TMDB id.
+// A Letterboxd id with two TMDB ids does not bridge, and a shared title does not either.
+const alias=catalog('other-id',50,{title:'Другой ключ',mechanics:['heist'],prediction:strong(4.4,.8)});
+const link=catalog('solo-lid',90,{title:'Одна связь',shows:[]});
+const agreed=catalog('tmdb_90',90,{title:'Согласованный',mechanics:['investigation'],prediction:strong(4.3,.8)});
+const clashA=catalog('heat-lid',60,{title:'Связь А',shows:[]});
+const clashB=catalog('heat-lid',61,{title:'Связь Б',shows:[]});
+const disputed=catalog('tmdb_60',60,{title:'Спорный',mechanics:['heist'],prediction:strong(4.4,.8)});
+const namesake=catalog('tmdb_70',70,{title:'Жара',original:'Heat',year:1995,mechanics:['heist'],prediction:strong(4.4,.8)});
+const explicitNo=catalog('tmdb_80',80,{title:'Явно нет',mechanics:['heist'],prediction:strong(4.4,.8)});
+const ratedNo=catalog('tmdb_82',82,{title:'Оценка без просмотра',mechanics:['scam'],prediction:strong(4.4,.8)});
+const loose=catalog('loose-50',50,{title:'Без идентичности',canonicalIdentity:'unverified',mechanics:['investigation'],prediction:strong(4.2,.8)});
+load({films:[open],enrichment:{
+ open:openStored,
+ tmdb_50:stored({watched:true}),
+ 'solo-lid':stored({watched:true}),
+ 'heat-lid':stored({watched:true}),
+ tmdb_80:stored({watched:false}),
+ tmdb_82:stored({watched:false,actualRating:3}),
+},catalogFilms:[alias,link,agreed,clashA,clashB,disputed,namesake,explicitNo,ratedNo,loose]});
+const guarded=rows();
+assert.equal(guarded.find(row=>row.film.id==='other-id'),undefined,'a verified TMDB alias with watched:true drops the catalog row');
+assert.equal(guarded.find(row=>row.film.id==='tmdb_90'),undefined,'one agreed Letterboxd to TMDB link drops the catalog row');
+assert.equal(guarded.find(row=>row.film.id==='tmdb_60')?.badge,'new','two TMDB ids for one Letterboxd id do not bridge a watched fact');
+assert.equal(guarded.find(row=>row.film.id==='tmdb_70')?.badge,'new','a shared title is not a watched alias');
+assert.equal(guarded.find(row=>row.film.id==='tmdb_80')?.badge,'new','watched:false without a rating leaves the catalog row');
+assert.equal(guarded.find(row=>row.film.id==='tmdb_82'),undefined,'a rating still excludes a catalog row when watched is false');
+assert.equal(guarded.find(row=>row.film.id==='loose-50')?.badge,'new','an unverified catalog id is not joined to a watched TMDB key');
+assert.equal(fetches.length,0,'catalog guarding does not fetch');
 
 // A same-generation refresh keeps the focused control. A real markup change restores it when that film is still shown.
 function richCards(){

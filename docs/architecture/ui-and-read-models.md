@@ -32,7 +32,7 @@ flowchart LR
     ratings --> details
 ```
 
-The film detail page also ranks a short list of similar films from the programme films already loaded and from the catalog answer the Finds section cached. That list adds no reader and no arrow: a generation mismatch drops the catalog half, and the page does not request the catalog route itself. A watched fact without a rating is not in the enrichment view the page reads, so the list cannot yet tell that film from an unwatched watchlist film.
+The film detail page also ranks a short list of similar films from the programme films already loaded and from the catalog answer the Finds section cached. That list adds no reader and no arrow: a generation mismatch drops the catalog half, and the page does not request the catalog route itself. `watched: true` on the enrichment view, or a stored actual rating, marks a substantive match «Пересмотр» and keeps that film out of a prediction-only suggestion. An unknown `watched` value stays a watchlist film. The page also drops a catalog candidate when that already-loaded view confirms the same film is watched or rated under its own id or a trusted alias. The catalog route remains the eligibility authority.
 
 The currently published programme generation determines which shows are available. A show is not a permanent Film property. The derived view index and prediction queue speed up views and work selection; neither owns Film identity or replaces stored fingerprints, predictions or actual ratings. Prediction freshness depends on fingerprint and taste-profile identity, not on a broadcast slot. Reviewed localization takes precedence over provisional titles, subject to the active read path.
 
