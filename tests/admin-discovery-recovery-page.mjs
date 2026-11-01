@@ -83,6 +83,9 @@ assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through th
 const css = fs.readFileSync('public/admin.css', 'utf8');
 assert.match(css, /\.obs-accept\{display:flex/);
 assert.match(css, /@media\(max-width:800px\)\{[^}]*\}?[^@]*\.recovery-controls \.admin-more\{display:block;width:100%/, 'full-width controls on a phone');
+assert.match(css, /\.obs-identity-option,\.obs-identity-accept\{[^}]*min-height:44px/);
+assert.match(css, /\.obs-identity input\[type="text"\],\.obs-identity button,\.obs-identity \.admin-more\{min-height:44px\}/);
+assert.match(css, /\.obs-identity-receipt:focus\{outline:2px solid #9bc48a/);
 
 const memory = new MemoryBucket();
 let clock = Date.parse('2026-10-31T12:00:00.000Z'), tmdbCalls = 0;
@@ -99,6 +102,7 @@ vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), workerCon
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/limbo.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-actions.js', 'AdminActions'), workerContext);
+vm.runInContext(scoped('src/domain/discovery-identity-review.js', 'DiscoveryIdentity'), workerContext);
 vm.runInContext(scoped('src/domain/discovery-recovery.js', 'DiscoveryRecovery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), workerContext);
@@ -169,7 +173,7 @@ function element(selector, parent = null) {
   };
   return node;
 }
-const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body', '#verified-open', '#verified-key', '#verified-panel', '#verified-open-hint'].map(selector => [selector, element(selector)]));
 const dynamic = new Map();
 const results = nodes.get('#limbo-results');
 document.querySelector = selector => {
@@ -310,7 +314,8 @@ const ambigPanel = document.querySelector(`[data-obs-recovery-slot="${ambig}"]`)
 await run('onLimboResult')({preventDefault() {}, target: {closest: match => match === '[data-obs-recovery]' ? openButton(ambig) : null}});
 await settle();
 assert.match(ambigPanel.innerHTML, /Идентичность неоднозначна/);
-assert.match(ambigPanel.innerHTML, /Автоматическое исправление этой проблемы пока недоступно/);
+assert.match(ambigPanel.innerHTML, /выбрать по одному названию нельзя/);
+assert.doesNotMatch(ambigPanel.innerHTML, /Автоматическое исправление этой проблемы пока недоступно/);
 assert.match(ambigPanel.innerHTML, /Недоступно — идентичность неоднозначна: нужен разбор идентичности, а не повтор\./);
 assert.doesNotMatch(panel.innerHTML, /Автоматическое исправление этой проблемы пока недоступно/);
 assert.doesNotMatch(ambigPanel.innerHTML, /data-obs-recovery-accept/);
@@ -332,4 +337,154 @@ await settle();
 assert.match(nodes.get('#limbo-context-body').innerHTML, /Нерешённые наблюдения EPG недоступны: индекса наблюдений для опубликованного поколения ещё нет/);
 assert.doesNotMatch(results.innerHTML, /data-obs-recovery=/);
 
-console.log('Admin discovery recovery page: copy for every code, fail closed, escaping, technical details, open, accept, confirm, execute, receipt, recheck, cancel, busy resolver, ineligible, close, focus passed');
+// Identity correction is a second action on the same panel: exact posts, a refused repeat that stays on the form, then an assign.
+async function seedIdentity() {
+  await seed();
+  const items = [{...candidate(TARGET, 'Тихий берег'), confirmedTmdbId: '11'}, candidate(OTHER, 'Громкий берег'), candidate(AMBIG, 'Двойник')];
+  const evidence = item => vm.runInContext('candidateEvidence(__c)', Object.assign(workerContext, {__c: item}));
+  const decisions = {
+    [TARGET]: {status: 'needs_verification', attempts: 2, evidenceKey: evidence(items[0]), lastAttemptAt: iso(-H), checkedAt: iso(-H), retryAt: null, terminalReason: null, scoring: {scorerVersion: '1', status: 'accepted', reason: 'unique', acceptedTmdbId: '11'}},
+    [OTHER]: {status: 'no_confident_match', attempts: 1, evidenceKey: evidence(items[1]), retryAt: null, terminalReason: null},
+    [AMBIG]: {status: 'ambiguous', attempts: 2, evidenceKey: evidence(items[2]), lastAttemptAt: iso(-H), checkedAt: iso(-H), retryAt: iso(D), terminalReason: null},
+  };
+  await put('epg/generations/' + RUN + '/discovery-latest.json', {programmeRunId: RUN, items});
+  await put('epg/discovery-resolution.json', decisions);
+  await put('epg/discovered-films.json', {tmdb_11: {id: 'tmdb_11', tmdbId: '11', canonicalIdentity: 'tmdb:11', title: 'Тихий берег', year: 2001}});
+  workerContext.__source = {programmeRunId: RUN, items};
+  workerContext.__decisions = decisions;
+  await vm.runInContext('ADMIN_SNAPSHOT_CACHE=null;ADMIN_LIMBO_CACHE=null;saveObservationIndex(env,__source,__decisions,async()=>true,{kind:"resolver_chunk"})', workerContext);
+}
+function identityEdit(panel, attributes, extra = {}) {
+  const target = {
+    value: extra.value ?? '',
+    checked: extra.checked === true,
+    getAttribute(name) {return Object.hasOwn(attributes, name) ? attributes[name] : null;},
+    closest(match) {
+      if (String(match).includes('data-obs-identity')) return target;
+      if (match === '[data-obs-recovery-slot]') return panel;
+      return null;
+    },
+  };
+  run('onLimboResultChange')({target});
+}
+await seedIdentity();
+vm.runInContext('ADMIN_SNAPSHOT_CACHE=null;ADMIN_LIMBO_CACHE=null', workerContext);
+await run('onLimboRefresh()');
+await settle();
+const identityItems = [...results.innerHTML.matchAll(/<article class="admin-hit limbo-item" data-limbo-item="([^"]+)">([\s\S]*?)<\/article>/g)].map(([, id, inner]) => ({id, inner, slot: /data-obs-recovery="(o\d+)"/.exec(inner)?.[1] || null}));
+const identitySlot = identityItems.find(item => item.inner.includes('<span class="admin-hit-title">Тихий берег</span>')).slot;
+const identityPanel = document.querySelector(`[data-obs-recovery-slot="${identitySlot}"]`);
+requests = [];
+await run('onLimboResult')({preventDefault() {}, target: {closest: match => match === '[data-obs-recovery]' ? openButton(identitySlot) : null}});
+await settle();
+assert.match(identityPanel.innerHTML, /Идентичность этого наблюдения/);
+assert.match(identityPanel.innerHTML, /Индекс покрывает только текущие нерешённые наблюдения с решением/);
+assert.match(identityPanel.innerHTML, /Ключ доказательства:/);
+assert.match(identityPanel.innerHTML, /Гипотеза автоматики \(не выбор\): 11/);
+assert.match(identityPanel.innerHTML, /value="11"[^>]*data-obs-identity-choice/);
+assert.match(identityPanel.innerHTML, /Я меняю идентичность только наблюдения «Тихий берег», ключ тихий берег\|2001, поколение 11111111-1111-4111-8111-111111111111/);
+assert.match(identityPanel.innerHTML, /data-obs-identity-confirm disabled/);
+assert.doesNotMatch(identityPanel.innerHTML, /<form/);
+await click(identityPanel, '[data-obs-identity-confirm]');
+await settle();
+assert.deepEqual(requests.filter(item => item.method === 'POST'), [], 'an unchecked identity form sends nothing');
+identityEdit(identityPanel, {'data-obs-identity-effect': ''}, {value: 'reject', checked: true});
+identityEdit(identityPanel, {'data-obs-identity-id': ''}, {value: '11'});
+identityEdit(identityPanel, {'data-obs-identity-basis': ''}, {value: 'не тот фильм'});
+await click(identityPanel, '[data-obs-identity-confirm]');
+await settle();
+assert.deepEqual(requests.filter(item => item.method === 'POST'), [], 'without the checkbox nothing is posted');
+identityEdit(identityPanel, {'data-obs-identity-accept': ''}, {checked: true});
+requests = [];
+await click(identityPanel, '[data-obs-identity-confirm]');
+await settle();
+assert.equal(requests.length, 1);
+const identityConfirm = requests[0];
+assert.equal(identityConfirm.method, 'POST');
+assert.equal(identityConfirm.path, '/api/admin/discovery-recovery/identity-confirm');
+assert.equal(identityConfirm.credentials, 'same-origin');
+assert.equal(identityConfirm.headers['X-IPTV-Admin-Action'], 'discovery_identity_correct');
+const identityBody = JSON.parse(identityConfirm.body);
+assert.equal(identityBody.key, TARGET);
+assert.equal(identityBody.effect, 'reject');
+assert.equal(identityBody.tmdbId, '11');
+assert.equal(identityBody.basis, 'не тот фильм');
+assert.equal(identityBody.accepted, true);
+assert.match(identityBody.idempotencyKey, /^[0-9a-f]{36}$/);
+assert.equal(document.activeElement, identityPanel.querySelector('[data-obs-identity-execute]'));
+requests = [];
+await click(identityPanel, '[data-obs-identity-execute]');
+await settle();
+assert.equal(requests.filter(item => item.method === 'POST').length, 1);
+assert.equal(requests.find(item => item.method === 'POST').path, '/api/admin/discovery-recovery/identity-correct');
+assert.equal(JSON.parse(requests.find(item => item.method === 'POST').body).confirmation.capability, 'discovery_identity_correct');
+const rejectedDecision = JSON.parse(await (await memory.get('epg/discovery-resolution.json')).text())[TARGET];
+assert.deepEqual(rejectedDecision.rejectedTmdbIds, ['11']);
+assert.equal(rejectedDecision.ownerIdentity.effect, 'reject');
+assert.notEqual(rejectedDecision.status, 'verified');
+assert.match(identityPanel.innerHTML, /Отказ записан только для этого наблюдения и этого id/);
+assert.equal(document.activeElement, identityPanel.querySelector('.obs-identity-receipt'));
+assert.equal(tmdbCalls, 0);
+identityEdit(identityPanel, {'data-obs-identity-effect': ''}, {value: 'reject', checked: true});
+identityEdit(identityPanel, {'data-obs-identity-id': ''}, {value: '11'});
+identityEdit(identityPanel, {'data-obs-identity-basis': ''}, {value: 'ещё раз'});
+identityEdit(identityPanel, {'data-obs-identity-accept': ''}, {checked: true});
+requests = [];
+await click(identityPanel, '[data-obs-identity-confirm]');
+await settle();
+assert.deepEqual(requests.filter(item => item.method === 'POST'), [], 'a repeat rejection is refused before a request');
+assert.match(identityPanel.innerHTML, /Уже так\. Новой записи нет\./);
+assert.match(identityPanel.innerHTML, /data-obs-identity-confirm/);
+identityEdit(identityPanel, {'data-obs-identity-effect': ''}, {value: 'assign', checked: true});
+identityEdit(identityPanel, {'data-obs-identity-choice': ''}, {value: '11', checked: true});
+identityEdit(identityPanel, {'data-obs-identity-basis': ''}, {value: 'это тот фильм'});
+identityEdit(identityPanel, {'data-obs-identity-accept': ''}, {checked: true});
+requests = [];
+await click(identityPanel, '[data-obs-identity-confirm]');
+await settle();
+assert.equal(requests.length, 1);
+assert.equal(JSON.parse(requests[0].body).effect, 'assign');
+assert.equal(JSON.parse(requests[0].body).tmdbId, '11');
+await click(identityPanel, '[data-obs-identity-execute]');
+await settle();
+const assignedDecision = JSON.parse(await (await memory.get('epg/discovery-resolution.json')).text())[TARGET];
+assert.equal(assignedDecision.identitySource, 'owner');
+assert.equal(assignedDecision.tmdbId, '11');
+assert.equal(assignedDecision.status, 'verified');
+assert.match(identityPanel.innerHTML, /Решение по этому наблюдению записано/);
+assert.match(identityPanel.innerHTML, /Показы каталога обновятся следующим обычным чанком/);
+assert.equal(JSON.parse(await (await memory.get('epg/discovery-resolution.json')).text())[OTHER].status, 'no_confident_match');
+assert.equal(tmdbCalls, 0, 'the page correction calls no one');
+
+const savingHtml = V.obsRecoveryPanelHtml({...okAnswer, identity: {available: true, reason: 'eligible', programmeRunId: 'run-1', coverage: {scope: 'current_verified', complete: true}, current: {status: 'verified', tmdbId: '99'}, trusted: [{tmdbId: '99'}], rejectable: ['99'], effect: {when: 'next_ordinary_chunk'}}}, {slot: 'o1', identityConfirmation: {idempotencyKey: 'k'.repeat(20), expiresAt: '2026-10-31T12:10:00.000Z'}, identityReceipt: {state: 'unstored'}, identityDurable: false, identityPlan: {before: {status: 'verified', tmdbId: '99'}, after: {status: 'needs_verification'}}, identityApplication: {shows: 'not_this_action'}});
+assert.match(savingHtml, /Сохранить квитанцию/);
+assert.match(savingHtml, /Решение уже записано\. Эта кнопка сохраняет только квитанцию/);
+assert.doesNotMatch(savingHtml, /Запись ещё не сделана/);
+assert.match(V.obsRecoveryPanelHtml({...okAnswer, identity: {available: true, reason: 'eligible', programmeRunId: 'run-1', coverage: {scope: 'current_unresolved_with_decision', complete: true}, current: {status: 'verified', tmdbId: '11'}, trusted: [], rejectable: ['11'], effect: {when: 'next_ordinary_chunk'}}}, {slot: 'o1', identityReceipt: {state: 'expired_committed', refusal: 'confirmation_expired'}}), /Срок подтверждения истёк, поэтому квитанция не сохраняется/);
+
+// A replayed succeeded receipt without `durable` is the stored receipt, not the unsaved warning.
+ctx.fetch = async (input, init = {}) => {
+  if (String(input).includes('/identity-correct')) return new Response(JSON.stringify({receipt: {state: 'succeeded'}, replayed: true}), {status: 200, headers: {'content-type': 'application/json'}});
+  return fakeFetch(input, init);
+};
+run(`obsRecovery.get(${JSON.stringify(identitySlot)}).identityConfirmation = {capability: 'discovery_identity_correct', version: 1, expiresAt: '2026-10-31T12:10:00.000Z'}`);
+run(`obsRecovery.get(${JSON.stringify(identitySlot)}).identityReceipt = null`);
+await run(`onObsIdentityExecute(${JSON.stringify(identitySlot)})`);
+await settle();
+assert.match(identityPanel.innerHTML, /Решение по этому наблюдению записано/);
+assert.doesNotMatch(identityPanel.innerHTML, /квитанция владельца не сохранилась/);
+assert.equal(identityPanel.querySelector('[data-obs-identity-execute]'), null);
+ctx.fetch = async (input, init = {}) => {
+  if (String(input).includes('/identity-correct')) return new Response(JSON.stringify({decisionReadBack: true, durable: false, receipt: null, refusal: 'in_progress', error: 'receipt_unstored'}), {status: 409, headers: {'content-type': 'application/json'}});
+  return fakeFetch(input, init);
+};
+run(`obsRecovery.get(${JSON.stringify(identitySlot)}).identityConfirmation = {capability: 'discovery_identity_correct', version: 1, expiresAt: '2026-10-31T12:10:00.000Z'}`);
+await run(`onObsIdentityExecute(${JSON.stringify(identitySlot)})`);
+await settle();
+assert.match(identityPanel.innerHTML, /Сохранить квитанцию/);
+assert.match(identityPanel.innerHTML, /Решение уже записано\. Эта кнопка сохраняет только квитанцию/);
+assert.doesNotMatch(identityPanel.innerHTML, /Запись ещё не сделана/);
+assert.ok(identityPanel.querySelector('[data-obs-identity-execute]'));
+ctx.fetch = fakeFetch;
+
+console.log('Admin discovery recovery page: copy for every code, fail closed, escaping, technical details, open, accept, confirm, execute, receipt, recheck, cancel, busy resolver, ineligible, close, focus, identity assign and reject passed');

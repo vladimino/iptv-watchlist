@@ -40,7 +40,7 @@ const candidate = (key, extra = {}) => ({key, title: key.split('|')[0], normaliz
 let shaped = DI.observationIndexRecord(candidate('Фильм|2020'), decision(), 'run-1');
 assert.deepEqual(shaped.record.shows.map(item => item.start), [1000, 2000], 'shows sorted');
 assert.equal(shaped.record.programmeRunId, 'run-1');
-assert.deepEqual(Object.keys(shaped.record.decision).sort(), ['attempts', 'checkedAt', 'evidenceKey', 'lastAttemptAt', 'reconsidered', 'retryAt', 'status', 'terminalReason']);
+assert.deepEqual(Object.keys(shaped.record.decision).sort(), ['attempts', 'checkedAt', 'evidenceKey', 'identitySource', 'lastAttemptAt', 'ownerIdentity', 'reconsidered', 'rejectedTmdbIds', 'retryAt', 'scoring', 'status', 'terminalReason', 'tmdbId']);
 assert.deepEqual(DI.observationIndexRecord(candidate('x|1', {shows: Array.from({length: 97}, (_, index) => show(index))}), decision(), 'run-1'), {omit: 'oversized'});
 assert.deepEqual(DI.observationIndexRecord(candidate('x|1', {shows: [{channelId: 'a'}]}), decision(), 'run-1'), {omit: 'malformed'});
 assert.deepEqual(DI.observationIndexRecord(candidate('x|1'), {attempts: 1}, 'run-1'), {omit: 'malformed'});
@@ -156,7 +156,9 @@ assert.equal(stored.coverage.eligible, 2);
 assert.equal(stored.counts.awaitingFirstLookup, 1, 'a current observation without a decision is counted, not indexed');
 assert.equal(stored.sources.resolutionEtag, (await bucket.head('epg/discovery-resolution.json')).etag);
 assert.equal(stored.sources.ledgerEtag, (await bucket.head(ledgerKey)).etag);
-assert.equal(log.puts.at(-1), manifestKey, 'the manifest is written last');
+const verifiedManifestKey = DI.observationVerifiedManifestKey(RUN);
+assert.equal(log.puts.at(-1), verifiedManifestKey, 'the verified manifest is written last');
+assert.ok(log.puts.indexOf(manifestKey) < log.puts.lastIndexOf(verifiedManifestKey), 'the unresolved manifest precedes the verified one');
 const indexed = [];
 for (let index = 0; index < 16; index++) {
   const object = await bucket.get(DI.observationIndexShardKey(RUN, index));
@@ -167,20 +169,31 @@ for (let index = 0; index < 16; index++) {
   indexed.push(...read.items);
 }
 assert.deepEqual(indexed.map(record => record.key).sort(), ['Двойной|2006', 'Терминальный|2001']);
+const verifiedStored = JSON.parse(await (await bucket.get(verifiedManifestKey)).text());
+assert.equal(DI.readObservationIndexManifest(verifiedStored, RUN, DI.OBSERVATION_VERIFIED_SCOPE).state, 'readable');
+assert.equal(DI.readObservationIndexManifest(verifiedStored, RUN).state, 'malformed', 'a verified manifest is not an unresolved index');
+const verifiedIndexed = [];
+for (let index = 0; index < 16; index++) {
+  const object = await bucket.get(DI.observationVerifiedShardKey(RUN, index));
+  const read = DI.readObservationIndexShard(await object.json(), verifiedStored, index);
+  assert.ok(read.ok, 'verified shard ' + index);
+  verifiedIndexed.push(...read.items);
+}
+assert.deepEqual(verifiedIndexed.map(record => record.key), ['Найден|2003']);
 for (const record of indexed) assert.equal(record.decisionHash, sha(DI.canonicalJson(decisions[record.key])), 'the digest covers the full decision');
 assert.equal(log.lists, 0);
 
 // The same content again: only the manifest is written.
 log.puts = [];
 await save();
-assert.deepEqual(log.puts, [manifestKey]);
+assert.deepEqual(log.puts, [manifestKey, verifiedManifestKey]);
 
 // One decision changes: its shard and the manifest.
 const terminalShard = DI.observationShard('Терминальный|2001');
 context.args.decisions = {...decisions, 'Терминальный|2001': {...decisions['Терминальный|2001'], checkedAt: '2026-10-30T11:00:00.000Z'}};
 log.puts = [];
 await save();
-assert.deepEqual(log.puts, [DI.observationIndexShardKey(RUN, terminalShard), manifestKey]);
+assert.deepEqual(log.puts, [DI.observationIndexShardKey(RUN, terminalShard), manifestKey, verifiedManifestKey]);
 context.args.decisions = decisions;
 
 // A shard written without its manifest (a writer stopped between the two) is torn for readers and repaired by the next write.

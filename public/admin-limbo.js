@@ -310,7 +310,7 @@ function limboItemHtml(item) {
   const observationKey = limboRecoveryObservation(item);
   if (observationKey) {
     const slot = 'o' + String(++limboRecoveryNext);
-    obsRecovery.set(slot, {key: observationKey, open: false, pin: null, seq: 0, answer: null, changed: false, accepted: false, confirmation: null, receipt: null, durable: null, index: null, busy: false, error: null});
+    obsRecovery.set(slot, {key: observationKey, open: false, pin: null, seq: 0, answer: null, changed: false, accepted: false, confirmation: null, receipt: null, durable: null, index: null, busy: false, error: null, identityEffect: '', identityTarget: '', identityBasis: '', identityAccepted: false, identityConfirmation: null, identityPlan: null, identityApplication: null, identityReceipt: null, identityIndex: null, identityReason: null, identityBusy: false});
     links.push(`<button type="button" class="admin-more limbo-recovery-open" data-obs-recovery="${slot}" aria-expanded="false" aria-controls="obs-recovery-${slot}">Разобрать наблюдение</button>`);
     recovery = `<section class="limbo-recovery" id="obs-recovery-${slot}" data-obs-recovery-slot="${slot}" aria-label="Разбор наблюдения" hidden></section>`;
   }
@@ -388,7 +388,8 @@ function obsRecoveryLoad(slot, keep = false) {
   const seq = ++entry.seq;
   if (keep !== true) {
     const held = keep === 'confirmation' && entry.confirmation && Date.parse(entry.confirmation.expiresAt) > Date.now() ? entry.confirmation : null;
-    Object.assign(entry, {accepted: false, confirmation: held, receipt: null, durable: null, index: null, error: null});
+    const identityHeld = keep === 'confirmation' && entry.identityConfirmation && Date.parse(entry.identityConfirmation.expiresAt) > Date.now() ? entry.identityConfirmation : null;
+    Object.assign(entry, {accepted: false, confirmation: held, receipt: null, durable: null, index: null, error: null, identityAccepted: false, identityConfirmation: identityHeld, identityReceipt: null, identityIndex: null, identityReason: null});
   }
   panel.setAttribute('aria-busy', 'true');
   if (!entry.answer) panel.innerHTML = '<p class="admin-state" role="status" aria-busy="true">Читаем состояние наблюдения…</p>';
@@ -491,6 +492,121 @@ function onObsRecoveryExecute(slot) {
   });
   limboLive.pending = pending;
   return pending;
+}
+
+function onObsIdentityEdit(slot, event) {
+  const entry = obsRecovery.get(slot);
+  const panel = obsPanel(slot);
+  if (!entry || !panel || entry.identityConfirmation || entry.identityBusy) return;
+  const target = event && event.target;
+  const attr = target && target.getAttribute ? name => target.getAttribute(name) : () => null;
+  if (attr('data-obs-identity-effect') !== null && target.checked) entry.identityEffect = target.value;
+  if (attr('data-obs-identity-choice') !== null && target.checked) entry.identityTarget = target.value;
+  if (attr('data-obs-identity-id') !== null) entry.identityTarget = target.value;
+  if (attr('data-obs-identity-basis') !== null) entry.identityBasis = target.value;
+  if (attr('data-obs-identity-accept') !== null) entry.identityAccepted = target.checked === true;
+  entry.identityReason = null;
+  const hint = obsIdentityBlocked(entry.answer, entry);
+  const previewText = obsIdentityPreviewText(entry.answer, entry);
+  const preview = panel.querySelector('[data-obs-identity-preview]');
+  if (preview) {
+    preview.textContent = previewText;
+    preview.hidden = !previewText;
+  }
+  const note = panel.querySelector('[data-obs-identity-hint]');
+  if (note) note.textContent = hint;
+  const confirm = panel.querySelector('[data-obs-identity-confirm]');
+  const basisText = entry.identityBasis.trim();
+  if (confirm) confirm.disabled = !entry.identityEffect || !/^[1-9]\d{0,11}$/.test(entry.identityTarget.trim()) || !basisText || basisText.length > 200 || !!hint || !entry.identityAccepted;
+}
+
+function onObsIdentityConfirm(slot) {
+  const entry = obsRecovery.get(slot);
+  if (!entry || entry.identityBusy || entry.identityConfirmation || !entry.pin) return Promise.resolve(null);
+  const hint = obsIdentityBlocked(entry.answer, entry);
+  if (hint || !entry.identityAccepted || !entry.identityEffect) return Promise.resolve(null);
+  entry.identityBusy = true;
+  entry.identityReason = null;
+  obsRender(slot);
+  const pending = confirmDiscoveryIdentity({key: entry.key, pin: entry.pin, effect: entry.identityEffect, tmdbId: entry.identityTarget.trim(), basis: entry.identityBasis.trim()}).then(result => {
+    entry.identityBusy = false;
+    if (result.ok && result.body && result.body.confirmation) {
+      entry.identityConfirmation = result.body.confirmation;
+      entry.identityPlan = result.body.plan || null;
+      entry.identityApplication = result.body.application || null;
+      entry.identityReason = null;
+      obsRender(slot, '[data-obs-identity-execute]');
+      return result;
+    }
+    entry.identityReason = result.body && typeof result.body.reason === 'string' ? result.body.reason : result.error;
+    entry.identityAccepted = false;
+    if (result.error === 'stale_pin') return obsRecoveryLoad(slot, true).then(() => result);
+    obsRender(slot, '[data-obs-identity-hint]');
+    return result;
+  });
+  limboLive.pending = pending;
+  return pending;
+}
+
+function onObsIdentityExecute(slot) {
+  const entry = obsRecovery.get(slot);
+  if (!entry || !entry.identityConfirmation || entry.identityBusy) return Promise.resolve(null);
+  entry.identityBusy = true;
+  entry.identityReason = null;
+  obsRender(slot);
+  const pending = executeDiscoveryIdentity(entry.identityConfirmation).then(result => {
+    entry.identityBusy = false;
+    const body = result.body || {};
+    const expiredCommitted = body.decisionReadBack && !body.receipt && (body.refusal === 'confirmation_expired' || result.error === 'confirmation_expired');
+    if (expiredCommitted) {
+      entry.identityReceipt = {state: 'expired_committed', refusal: 'confirmation_expired'};
+      entry.identityDurable = false;
+      entry.identityApplication = body.application || entry.identityApplication;
+      entry.identityIndex = body.index ?? null;
+      entry.identityReason = null;
+      entry.identityConfirmation = null;
+      entry.identityPlan = null;
+    } else if (body.decisionReadBack && !body.receipt) {
+      entry.identityReceipt = {state: 'unstored'};
+      entry.identityDurable = false;
+      entry.identityApplication = body.application || entry.identityApplication;
+      entry.identityIndex = body.index ?? null;
+      entry.identityReason = null;
+    } else if (body.receipt && body.receipt.state === 'succeeded' && body.durable === false) {
+      entry.identityReceipt = {state: 'unstored'};
+      entry.identityDurable = false;
+      entry.identityApplication = body.application || entry.identityApplication;
+      entry.identityIndex = body.index ?? null;
+      entry.identityReason = null;
+    } else if (body.receipt) {
+      entry.identityReceipt = body.receipt;
+      entry.identityDurable = body.receipt.state !== 'succeeded' || body.durable !== false;
+      entry.identityApplication = body.application || entry.identityApplication;
+      entry.identityIndex = body.index ?? null;
+      entry.identityReason = body.reason || null;
+      entry.identityConfirmation = null;
+      entry.identityPlan = null;
+    } else {
+      entry.identityReason = body.reason || result.error;
+      if (result.error !== 'lease_held' && result.error !== 'lease_unknown') entry.identityConfirmation = null;
+    }
+    entry.identityAccepted = false;
+    return obsRecoveryLoad(slot, true).then(() => {
+      const panel = obsPanel(slot);
+      const target = panel ? panel.querySelector('.obs-identity-receipt, [data-obs-identity-hint]') : null;
+      if (target && typeof target.focus === 'function') target.focus();
+      return result;
+    });
+  });
+  limboLive.pending = pending;
+  return pending;
+}
+
+function onObsIdentityCancel(slot) {
+  const entry = obsRecovery.get(slot);
+  if (!entry || entry.identityBusy) return;
+  Object.assign(entry, {identityAccepted: false, identityConfirmation: null, identityPlan: null, identityReason: null});
+  obsRender(slot, '[data-obs-identity-accept]');
 }
 
 function onObsRecoveryCancel(slot) {
@@ -675,6 +791,27 @@ function onLimboReset() {
   return limboRender();
 }
 
+function onVerifiedOpen() {
+  const input = document.querySelector('#verified-key');
+  const hint = document.querySelector('#verified-open-hint');
+  const panel = document.querySelector('#verified-panel');
+  const raw = String(input && input.value || '').trim();
+  if (!raw || raw.length > 200 || /[\u0000-\u001f\u007f]/.test(raw)) {
+    if (hint) hint.textContent = 'Нужен ключ наблюдения, без управляющих знаков.';
+    if (input && typeof input.focus === 'function') input.focus();
+    return Promise.resolve(null);
+  }
+  if (hint) hint.textContent = '';
+  let entry = obsRecovery.get('verified');
+  if (!entry || entry.key !== raw) {
+    entry = {key: raw, open: true, pin: null, seq: 0, answer: null, changed: false, accepted: false, confirmation: null, receipt: null, durable: null, index: null, busy: false, error: null, identityEffect: '', identityTarget: '', identityBasis: '', identityAccepted: false, identityConfirmation: null, identityPlan: null, identityApplication: null, identityReceipt: null, identityIndex: null, identityReason: null, identityBusy: false, identityDurable: null};
+    obsRecovery.set('verified', entry);
+  }
+  entry.open = true;
+  if (panel) panel.hidden = false;
+  return obsRecoveryLoad('verified');
+}
+
 function onLimboResult(event) {
   const closest = selector => event.target.closest ? event.target.closest(selector) : null;
   const open = closest('[data-limbo-recovery]');
@@ -706,6 +843,18 @@ function onLimboResult(event) {
       event.preventDefault();
       return onObsRecoveryCancel(slot);
     }
+    if (closest('[data-obs-identity-confirm]')) {
+      event.preventDefault();
+      return onObsIdentityConfirm(slot);
+    }
+    if (closest('[data-obs-identity-execute]')) {
+      event.preventDefault();
+      return onObsIdentityExecute(slot);
+    }
+    if (closest('[data-obs-identity-cancel]')) {
+      event.preventDefault();
+      return onObsIdentityCancel(slot);
+    }
     return;
   }
   if (closest('[data-limbo-recovery-recheck]')) {
@@ -720,6 +869,9 @@ function onLimboResult(event) {
 }
 
 function onLimboResultChange(event) {
+  const identity = event.target.closest ? event.target.closest('[data-obs-identity-effect],[data-obs-identity-choice],[data-obs-identity-id],[data-obs-identity-basis],[data-obs-identity-accept]') : null;
+  const identityPanel = identity && identity.closest ? identity.closest('[data-obs-recovery-slot]') : null;
+  if (identityPanel) onObsIdentityEdit(identityPanel.getAttribute('data-obs-recovery-slot'), event);
   const accept = event.target.closest ? event.target.closest('[data-obs-recovery-accept]') : null;
   const panel = accept && accept.closest ? accept.closest('[data-obs-recovery-slot]') : null;
   if (panel) onObsRecoveryAccept(panel.getAttribute('data-obs-recovery-slot'), accept.checked);
@@ -746,6 +898,13 @@ function startLimbo() {
   document.querySelector('#limbo-subsystems').addEventListener('click', onLimboChip);
   document.querySelector('#limbo-results').addEventListener('click', onLimboResult);
   document.querySelector('#limbo-results').addEventListener('change', onLimboResultChange);
+  document.querySelector('#limbo-results').addEventListener('input', onLimboResultChange);
+  document.querySelector('#verified-open').addEventListener('click', onVerifiedOpen);
+  document.querySelector('#verified-key').addEventListener('keydown', event => {if (event.key === 'Enter') {event.preventDefault(); onVerifiedOpen();}});
+  const verifiedPanel = document.querySelector('#verified-panel');
+  verifiedPanel.addEventListener('click', onLimboResult);
+  verifiedPanel.addEventListener('change', onLimboResultChange);
+  verifiedPanel.addEventListener('input', onLimboResultChange);
   document.querySelector('#limbo-refresh').addEventListener('click', onLimboRefresh);
   window.addEventListener('keydown', onLimboKey);
   window.addEventListener('popstate', onLimboHistory);

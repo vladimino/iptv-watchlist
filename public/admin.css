@@ -150,6 +150,17 @@
 .recovery-recheck{width:auto;margin:0}
 .recovery-controls .admin-more{width:auto;margin:0 8px 0 0}
 .recovery-controls .admin-more:disabled{opacity:.55;cursor:not-allowed}
+.obs-identity{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:10px;min-width:0;max-width:100%}
+.obs-identity-option,.obs-identity-accept{display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-height:44px;min-width:0;max-width:100%}
+.obs-identity input[type="text"],.obs-identity button,.obs-identity .admin-more{min-height:44px}
+.obs-identity input[type="text"]{flex:1 1 12rem;width:auto;min-width:0;max-width:100%}
+.obs-identity-preview{margin:0 0 10px}
+.obs-identity-preview[hidden]{display:none}
+.obs-identity-receipt:focus{outline:2px solid #9bc48a;outline-offset:2px}
+.obs-verified-open{display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-width:0;max-width:100%;margin:0 0 16px}
+.obs-verified-open h2,.obs-verified-open>p,.obs-verified-open section{flex:1 1 100%;min-width:0}
+.obs-verified-open input,.obs-verified-open button{min-height:44px}
+.obs-verified-open input{flex:1 1 12rem;width:auto;min-width:0;max-width:100%}
 .obs-accept{display:flex;align-items:flex-start;gap:10px}
 .obs-accept input{flex:none;width:20px;height:20px;margin:2px 0 0;accent-color:#9bc48a}
 .obs-accept label{cursor:pointer}

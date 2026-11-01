@@ -9,7 +9,7 @@
 
 It is pure and deterministic: no I/O, no clock of its own, no network. The Worker bundles it as `DiscoveryRecovery`. The [per-observation recovery read](../api/admin.md#discovery-observation-recovery-get-apiadmindiscovery-recovery) and the guarded action run it over a record of the [observation index](discovery-observation-index.md). Tests: [`tests/discovery-recovery.mjs`](../../../tests/discovery-recovery.mjs).
 
-**No retry, one reconsideration.** Nothing here looks an observation up or runs a chunk. `execute` says only whether the one guarded write of this subsystem, `discovery_reconsider@1`, may be offered: it [lifts the terminal fence](#the-reconsideration-gate) of an observation whose automatic attempts ended on unchanged evidence, so that the next ordinary resolver chunk may take it again. Decision: [ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md).
+**No retry, one reconsideration.** Nothing here looks an observation up or runs a chunk. `execute` says only whether `discovery_reconsider@1` may be offered: it [lifts the terminal fence](#the-reconsideration-gate) of an observation whose automatic attempts ended on unchanged evidence, so that the next ordinary resolver chunk may take it again. Decision: [ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md). Correcting the movie id is a separate capability, [`discovery_identity_correct@1`](../api/admin-actions.md#identity-correction-discovery_identity_correct1) ([ADR 0080](../../adr/0080-discovery-identity-correction.md)). This assessment does not become that capability. A current verified decision is not a limbo row; the owner opens that one key from the verified-observation index, and this assessment still reports `resolved`.
 
 ## Parity with the resolver
 
@@ -81,7 +81,7 @@ Errors return `{error}` and nothing else: `invalid_input` (not an object), `inva
 | `series` | `{state, reason, at}`: whether the discovery series will run another chunk, and when |
 | `retry` | `{helps, reason}`: `no`, `only_sooner`, `unlikely`, `series_level` or `unknown`. Never `yes` |
 | `next` | `{actor, at}`: `none`, `scheduled_step`, `epg_commit`, `new_epg_evidence`, `owner_investigation` or `reread`, with a time when one is known |
-| `review` | `{suggested, reason, target, available, unavailableReason}`. Review is suggested for an ambiguous or terminal identity. `available` is `false` until an identity review page exists (`identity_review_not_built`) |
+| `review` | `{suggested, reason, target, available, unavailableReason}`. Review is suggested for an ambiguous or terminal identity. `available` stays `false` with `identity_review_not_built`: the suggestion is not an executable gate. The identity form is [`discovery_identity_correct@1`](../api/admin-actions.md#identity-correction-discovery_identity_correct1), judged from the index offer, not from this field |
 | `execute` | `{available, capability: "discovery_reconsider", version: 1, reason, effect: {when, at}}`, the [reconsideration gate](#the-reconsideration-gate) |
 | `evidence` | `{completeness, missing, anomalies}`: `missing` when a required part was not supplied; `partial` when the series is unknown for a verdict that depends on it, or the decision has an unparseable retry time |
 

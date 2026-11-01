@@ -2,7 +2,7 @@
 
 **Verdict:** code and local SQLite only. **No production migration, import, activation or revert.**
 
-Captured from the AIR-314 branch after merging `origin/main` at `ec5e3ad90ae0efbe25a32100b07a7fb3fa31cf95` (published EPG, ADR 0079 Accepted, migration `0008` not applied). Production D1 was not opened. `admin/owner-reviews.json` was not read from the live bucket. The offline operator `scripts/owner-review-authority.mjs` refuses a database path that names production and was not pointed at one.
+Captured from the AIR-314 branch after merging `origin/main` at `ec5e3ad90ae0efbe25a32100b07a7fb3fa31cf95` (published EPG, ADR 0079 Accepted, migration `0008` not applied), then again at `afa648d64f5fba5a76cb882a0605a50b3f07598a` (ADR 0080 Accepted). The second merge keeps this contract and adds the discovery-identity bundle beside `PublishedEpg` and `OwnerReview`. Production D1 was not opened. `admin/owner-reviews.json` was not read from the live bucket. The offline operator `scripts/owner-review-authority.mjs` refuses a database path that names production and was not pointed at one.
 
 ## What was checked
 

@@ -21,7 +21,7 @@ assert.doesNotMatch(fixture, /\bfetch\b|BUCKET|env\.|cloudflare:|node:|\.prepare
 const build = fs.readFileSync('build.mjs', 'utf8');
 const workerBundle = build.slice(build.indexOf("fs.writeFileSync('dist/server/index.js'"));
 assert.equal(workerBundle.includes("scoped('src/domain/admin-actions.js','AdminActions')"), true, 'the Worker script carries the contract, scoped');
-assert.deepEqual([...fs.readFileSync('src/admin/discovery-recovery.js', 'utf8').matchAll(/AdminActions\.defineCapability\(\{\s*id:'([a-z_]+)'/g)].map(match => match[1]), ['discovery_reconsider'], 'the Worker registers exactly one capability');
+assert.deepEqual([...fs.readFileSync('src/admin/discovery-recovery.js', 'utf8').matchAll(/AdminActions\.defineCapability\(\{\s*id:'([a-z_]+)'/g)].map(match => match[1]), ['discovery_reconsider', 'discovery_identity_correct'], 'the discovery adapter registers reconsideration and identity correction');
 assert.doesNotMatch(fs.readFileSync('src/worker.js', 'utf8'), /defineCapability|createRegistry/, 'the Worker entry point registers no capability of its own');
 assert.equal(workerBundle.includes('actions-fixture'), false, 'the Worker script does not carry the fixture executor');
 assert.doesNotMatch(fs.readFileSync('src/worker.js', 'utf8'), /\/api\/admin\/actions|executeFixtureAction|previewAction/, 'no Worker route for actions');
