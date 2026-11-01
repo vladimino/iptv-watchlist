@@ -960,7 +960,9 @@ function findsAiring(film,now=nowMs(),scope=findsScope()){
 // catalog answer (`findsSource`). No second reader and no request. List filters, the Finds person check and channel
 // scope do not apply. A credit matches only when the id string is the same; a Letterboxd id and a TMDB id are not joined,
 // and a shared name is not a match. Unknown and not_applicable execution values are not a match.
-// A watchlist film is a rewatch when its loaded view entry has watched true or an actual rating. started is not watched.
+// A catalog candidate is eligible only when its own prediction passes findsStrong, before ranking or diversity.
+// A shared mechanic, credit or execution value does not waive that floor, and a short catalog tail is not padded.
+// A watchlist film is not held to that floor. A rewatch is watched true or an actual rating. started is not watched.
 // watched null, absent or any other value is unknown and stays «В watchlist». A stored rating still wins over watched false.
 function similarVerifiedIdentity(film){const tmdb=film?.tmdbId==null?'':String(film.tmdbId);return /^\d+$/.test(tmdb)&&film.canonicalIdentity==='tmdb:'+tmdb?'tmdb:'+tmdb:null;}
 function similarCreditIds(people){const ids=[];for(const person of people||[]){const id=typeof person?.id==='string'?person.id:'';if(id&&!ids.includes(id))ids.push(id);}return ids;}
@@ -976,7 +978,7 @@ function similarOverlap(left,right,leftPeople,rightPeople){return {mechanics:lef
 function similarTheme(overlap){return [overlap.mechanics.length,overlap.mechanics.length&&overlap.moods.length?overlap.moods.length:0,overlap.directors.length?1:0,overlap.actors.length,overlap.execution.length];}
 function similarSubstantive(overlap){return overlap.mechanics.length>0||overlap.directors.length>0||overlap.actors.length>0||overlap.execution.length>0;}
 function similarExecutionLabel(token){const id=String(token||'').split(':')[0],names={pace:'Похожий темп',plot_engine:'Похожий сюжетный двигатель',stakes:'Похожие ставки',payoff:'Похожая отдача',ending_quality:'Похожий финал'};if(names[id])return names[id];const dimension=EXECUTION_FILTERS.find(item=>item.id===id);return dimension?`Похоже: ${dimension.label}`:'Похожее исполнение';}
-// Every option is a real overlap. The first is the strongest label; later ones are used only when that signature was already shown.
+// Every option is a real overlap, strongest first. A later label is used only when every stronger tier is unavailable.
 function similarOptions(overlap,fallback){
  const options=[];
  if(overlap.mechanics.length){
@@ -991,21 +993,33 @@ function similarOptions(overlap,fallback){
  if(fallback)options.push({kind:'prediction',signature:'prediction',mechanics:[],label:'Подходит по прогнозу'});
  return options;
 }
+// Mechanic and mood first, then a person, then a plot engine. Any other execution value, and the prediction
+// label, are weaker: they never replace a stronger reason and they are not a second franchise entry.
+function similarReasonTier(option){
+ if(option.kind==='mechanic'||option.kind==='mechanic_mood')return 0;
+ if(option.kind==='director'||option.kind==='actors')return 1;
+ if(option.kind==='execution')return String(option.signature).startsWith('execution:plot_engine:')?2:3;
+ return 4;
+}
 function similarFranchiseAllows(kept,option){
  if(!kept.length)return true;
- if(option.signature==='prediction')return false;
+ if(similarReasonTier(option)>=3)return false;
  if(option.mechanics.some(id=>kept.some(item=>item.mechanics.includes(id))))return false;
  return !kept.some(item=>item.signature===option.signature);
 }
-// A signature already shown is skipped when this film has another real one. The same signature stops at two.
-// A repeated mechanic yields to a reason that does not use it, when the film actually has that reason.
+// Diversity stays inside the strongest tier this film still has. A second mechanic label is kept before a
+// director, actors or a plot engine. A generic execution value does not replace any of those, and it does not
+// rescue a film whose stronger reason is already capped. The same signature stops at two.
 function similarChoose(options,state,kept){
- const usable=options.filter(option=>(state.signatures.get(option.signature)||0)<2&&similarFranchiseAllows(kept,option));
+ const franchised=options.filter(option=>similarFranchiseAllows(kept,option));
+ if(!franchised.length)return null;
+ const grounded=franchised.some(option=>similarReasonTier(option)<=2)?franchised.filter(option=>similarReasonTier(option)<=2):franchised;
+ const usable=grounded.filter(option=>(state.signatures.get(option.signature)||0)<2);
  if(!usable.length)return null;
- const unused=usable.filter(option=>!(state.signatures.get(option.signature)||0));
- const pool=unused.length?unused:usable;
- const distinct=pool.filter(option=>option.mechanics.every(id=>!(state.mechanics.get(id)||0)));
- return (distinct.length?distinct:pool)[0];
+ const best=Math.min(...usable.map(similarReasonTier));
+ const tier=usable.filter(option=>similarReasonTier(option)===best);
+ const unused=tier.filter(option=>!(state.signatures.get(option.signature)||0));
+ return (unused.length?unused:tier)[0];
 }
 function similarSameFilm(source,candidate){if(String(source.id)===String(candidate.id))return true;const left=similarVerifiedIdentity(source),right=similarVerifiedIdentity(candidate);if(left&&right&&left===right)return true;const sourceTmdb=/^\d+$/.test(String(source.tmdbId||''))?String(source.tmdbId):'',candidateTmdb=/^\d+$/.test(String(candidate.tmdbId||''))?String(candidate.tmdbId):'';if(sourceTmdb&&right==='tmdb:'+sourceTmdb)return true;if(candidateTmdb&&left==='tmdb:'+candidateTmdb)return true;return false;}
 function similarCompare(a,b){for(let i=0;i<a.theme.length;i++){const delta=b.theme[i]-a.theme[i];if(delta)return delta;}const rating=(b.prediction?.rating??-1)-(a.prediction?.rating??-1);if(rating)return rating;const probability=(b.prediction?.probability??-1)-(a.prediction?.probability??-1);if(probability)return probability;const until=(a.until??Infinity)-(b.until??Infinity);if(until)return until;return a.key.localeCompare(b.key,'en');}
@@ -1033,6 +1047,7 @@ function buildSimilar(source,now=nowMs()){
  const consider=(film,view,sourceName)=>{
   if(!film||similarSameFilm(source,film))return;
   if(!findsShows(film,now,null).length)return;
+  if(sourceName==='catalog'&&!findsStrong(film.prediction))return;
   const overlap=similarOverlap(origin.bundle,view.bundle,{directors:people.directors,actors:people.actors},{directors:similarCreditIds(film.directors),actors:similarCreditIds(film.actors)});
   const substantive=similarSubstantive(overlap),fallback=!substantive&&!view.rewatch&&findsStrong({predictedRating:view.prediction?.rating,probability4Plus:view.prediction?.probability,confidence:view.prediction?.confidence,stale:false});
   if(view.rewatch&&!substantive)return;
