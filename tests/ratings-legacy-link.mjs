@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
-import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,migrated,QUEUE,SEPARATE,DAY,eventKeyOf,film,plain,g} from './ratings-harness.mjs';
+import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,migrated,QUEUE,SEPARATE,DAY,eventKeyOf,film,plain,g,diaryPage,diaryRow} from './ratings-harness.mjs';
 
 // ADR 0071: a rated legacy entry is linked to existing removal events of the same film id, one event-list page per
 // ratings step, then the stored rating is settled. A removal is not a viewing, and a rating is never invented.
@@ -101,8 +101,11 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
  const runEnv=baseEnv(runBucket,{...SEPARATE,LETTERBOXD_DIARY_HISTORY:undefined,REMOVAL_RATING_LOOKUP:'off'});
  const R=g(runCtx,'LetterboxdRatings');
  const runLists=()=>runBucket.log.filter(item=>item.op==='list'&&item.prefix==='events/items/').length;
+ runNet.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-29','99001')],false));
  migrated(runBucket,{films:{idle:{url:film('idle').url,state:'pending',attempts:0,enqueuedAt:at(T0),nextAttemptAt:at(T0+DAY),claim:null,refs:[{eventKey:eventKeyOf(FIRST,'idle'),sourceRunId:'run',at:FIRST,resolved:false}]}}});
  const quiet=plain(await R.start(runEnv,{trigger:'manual'}));
+ const quietDiary=plain(await R.step(runEnv,{runId:quiet.runId}));
+ assert.equal(quietDiary.step.diaryPages,1);
  const quietStep=plain(await R.step(runEnv,{runId:quiet.runId}));
  assert.equal(quietStep.reason,'finished');assert.equal(runLists(),0,'an ordinary removal step lists no events');
  const films={[FILM]:{url:film(FILM).url,state:'rated',rating:4,lastResult:'diary',attempts:2,enqueuedAt:at(T0-20*DAY),checkedAt:FIRST,claim:null,refs:[],legacy:true}};
@@ -111,6 +114,7 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
  runBucket.set(eventKeyOf(SECOND,'remove-31'),removal('remove-31',SECOND,[filmRow(FILM,'Supergirl',2026)]));
  runBucket.set(eventKeyOf(FIRST,'remove-29'),removal('remove-29',FIRST,[filmRow(FILM,'Supergirl',2026)]));
  const started=plain(await R.start(runEnv,{trigger:'manual'}));
+ assert.equal(plain(await R.step(runEnv,{runId:started.runId})).step.diaryPages,1);
  const firstStep=plain(await R.step(runEnv,{runId:started.runId}));
  assert.equal(firstStep.nextAction,'continue');assert.equal(firstStep.summary.removal.lookup.stoppedBy,'legacy_link');
  assert.equal(runLists(),1);
@@ -129,8 +133,10 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
  assert.equal(done.legacy,undefined);assert.equal(done.state,'rated');assert.equal(done.attempts,2);assert.equal(done.rating,4);
  assert.ok(done.refs.every(ref=>ref.resolved===true));
  assert.equal(runBucket.value('letterboxd/ratings/run.json').checkpoint.legacyPagesLinked,2);
- assert.equal(runNet.fetches.length,0);
+ assert.equal(runNet.memberFetches().length,0,'linking requests no member page');
+ assert.equal(runNet.fetches.filter(url=>url.includes('/films/')).length,0);
  const later=plain(await R.start(runEnv,{trigger:'manual'}));
+ assert.equal(plain(await R.step(runEnv,{runId:later.runId})).step.diaryPages,1);
  assert.equal(plain(await R.step(runEnv,{runId:later.runId})).reason,'finished');
  assert.equal(runLists(),2,'a later run does not scan events again');
 }
@@ -167,7 +173,8 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
 {
  const {clock:runClock,FakeDate:RunDate,crypto:runCrypto}=makeClock(T0),runNet=makeNetwork(),runBucket=makeBucket();
  const runCtx=loadContext({net:runNet,clock:runClock,FakeDate:RunDate,crypto:runCrypto});
- const runEnv=baseEnv(runBucket,{...SEPARATE,LETTERBOXD_DIARY_HISTORY:undefined,REMOVAL_RATING_LOOKUP:'off'});
+ const runEnv=baseEnv(runBucket,{...SEPARATE,LETTERBOXD_DIARY_HISTORY:'off',REMOVAL_RATING_LOOKUP:'off'});
+ runNet.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-29','99001')],false));
  const link=vm.runInContext('linkLegacyRemovalRefs',runCtx);
  const R=g(runCtx,'LetterboxdRatings');
  const stale={url:film('stale').url,state:'not_rated',attempts:3,enqueuedAt:at(T0),checkedAt:FIRST,claim:null,refs:[],legacy:true};
@@ -176,6 +183,7 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
  runBucket.set(eventKeyOf(SECOND,'b-new'),removal('b-new',SECOND,[filmRow('noise','Noise',2001)]));
  runBucket.set(eventKeyOf(FIRST,'b-old'),removal('b-old',FIRST,[filmRow('noise-2','Noise',2000)]));
  const started=plain(await R.start(runEnv,{trigger:'manual'}));
+ assert.equal(plain(await R.step(runEnv,{runId:started.runId})).step.diaryPages,1);
  let armed=true;
  runBucket.hooks.beforePut=async(key,value)=>{
   if(!armed||key!==QUEUE||value.legacyLink)return;
@@ -197,7 +205,8 @@ assert.equal(net.fetches.length,0,'linking requests nothing');
  assert.deepEqual(cursor.ids,[FILM]);
  assert.notEqual(cursor.cursor||null,'0');
  assert.equal(runBucket.value(QUEUE).films[FILM].legacy,true);
- assert.equal(runNet.fetches.length,0);
+ assert.equal(runNet.memberFetches().length,0,'the link requests no member page');
+ assert.equal(runNet.diaryFetches().length,1,'the run still read Diary page 1');
 }
 
 console.log('Ratings legacy link: two removals, alias, kept rating, missing event, killed page, no list without a confirmed rating, a checkpointed ratings step, isolation across a checkpoint without legacyPagesLinked, and a late cleanup that keeps a newer cursor passed');

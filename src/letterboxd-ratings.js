@@ -4,6 +4,7 @@
 // by their monotone merges, so a step that outlived its lease can add real progress and never move anything back.
 // The pipeline is permanently separate (ADR 0074). It acts once ratings_storage_migrate has migrated the queue and the
 // Diary cursor; until then start and step answer not_migrated and write nothing. The RATINGS_PIPELINE binding is ignored.
+// LETTERBOXD_DIARY_HISTORY is retired and unread (ADR 0075). A migrated run always starts in the Diary phase.
 // ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdRatings=(()=>{
@@ -56,6 +57,8 @@ const LetterboxdRatings=(()=>{
  }
  function finish(run,now){
   const at=iso(now),diaryOutcome=run.diary?.outcome??null,failed=DIARY_ERRORS.includes(diaryOutcome);
+  // A recorded diary outcome is the cause when it failed, and null when the page was read. `diary_off` is only a
+  // missing summary. The retired binding does not take that path (ADR 0075).
   return withRecent({...run,state:failed?'error':'finished',phase:'done',outcome:diaryOutcome,cause:failed?diaryOutcome:diaryOutcome?null:'diary_off',finishedAt:at,updatedAt:at,lease:{step:null,expiresAt:null}});
  }
 
@@ -71,8 +74,8 @@ const LetterboxdRatings=(()=>{
    let base=stored,reason='started';
    if(base?.state==='running'){const stale=staleness(base,now);if(!stale)return reply(null,false,'stop','busy');base=closeStale(base,stale,now);}
    if(base?.isolation){if(clearIsolation&&trigger==='manual')base={...base,isolation:null,isolationClearedAt:iso(now)};else reason='isolated';}
-   const diaryOn=LetterboxdDiary.enabled(env),at=iso(now);
-   const next=reason==='started'?{schemaVersion:RUN_SCHEMA_VERSION,runId:crypto.randomUUID(),trigger,state:'running',phase:diaryOn?'diary':'removal',lease:{step:null,expiresAt:null},
+   const at=iso(now);
+   const next=reason==='started'?{schemaVersion:RUN_SCHEMA_VERSION,runId:crypto.randomUUID(),trigger,state:'running',phase:'diary',lease:{step:null,expiresAt:null},
     startedAt:at,updatedAt:at,lastStepAt:null,finishedAt:null,closedAt:null,checkpoint:{diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0,legacyPagesLinked:0},pinned,
     outcome:null,cause:null,interruptedPhase:null,diary:null,removal:null,isolation:base?.isolation||null,...(base?.isolationClearedAt?{isolationClearedAt:base.isolationClearedAt}:{}),lastStartAt:at,recent:base?.recent||[]}:base!==stored?base:null;
    if(next&&await put(env,KEYS.run,object,next)===null)continue;
@@ -143,13 +146,14 @@ const LetterboxdRatings=(()=>{
   return out;
  }
 
- // The Diary phase: the first page once per run (ADR 0067). A run that already read it, or a gate that is off, does
- // not fetch. After the page: its history merge, its facts and the diary resolution of queued films, the cursor join,
- // then the run checkpoint. `more` is only a retry of that same page when the lease stopped the step before the request.
+ // The Diary phase: the first page once per run (ADR 0067, ADR 0075). A run that already read it does not fetch.
+ // The retired binding is not consulted. After the page: its history merge, its facts and the diary resolution of
+ // queued films, the cursor join, then the run checkpoint. `more` is only a retry of that same page when the lease
+ // stopped the step before the request. A failed, blocked or rate-limited page is recorded and is not treated as read.
  async function diaryPhase(env,run,{stepId,own,remaining,clock}){
   const cp=run.checkpoint;
   const prior=run.diary||null;
-  if((cp.diaryPagesRead||0)>=1||!LetterboxdDiary.enabled(env))return {pages:0,more:false,next:null,summary:prior};
+  if((cp.diaryPagesRead||0)>=1)return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
   let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0;
   const afterPage=async({page,rows,next,history,readAt})=>{

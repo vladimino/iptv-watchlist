@@ -2,13 +2,14 @@
 // carries a viewing id, otherwise one entry per film and day that counts its viewings (a lower bound unless one page
 // proved it), kept apart from the current actualRating. A run reads the first diary page only, same origin, no retry
 // and no challenge handling. A row is never itself the rating fact, and absence from the diary never means "not watched".
+// LETTERBOXD_DIARY_HISTORY is retired (ADR 0075): enabled is the permanent capability and does not read a binding.
 // Contract: docs/reference/integrations/letterboxd-diary-history.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdDiary=(()=>{
  const KEYS={history:'letterboxd/diary/history.json',state:'letterboxd/diary/state.json'};
  const MAX_CHANGES=10;
  const LID=/^[A-Za-z0-9_-]{1,80}$/;
- const enabled=env=>env?.LETTERBOXD_DIARY_HISTORY==='on';
+ const enabled=()=>true;
  const HEADERS={'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'};
  const pageUrl=(username,page)=>`https://letterboxd.com/${username}/diary/`+(page>1?`page/${page}/`:'');
  const attr=(tag,name)=>tag.match(new RegExp('\\s'+name+'=(["\'])(.*?)\\1','i'))?.[2]??null;

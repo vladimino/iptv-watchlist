@@ -46,7 +46,7 @@ assert.equal(records.has(QUEUE),false);
 assert.equal(fetches.length,0);
 for(const value of [undefined,'off','On',' on','true'])assert.equal(vm.runInContext('removalLookupEnabled',ctx)({REMOVAL_RATING_LOOKUP:value}),false,String(value));
 
-// 2. With the diary gate off, a removed film is rated through its own page; the films list is never requested (AIR-287);
+// 2. The EPG commit does not read Diary. A later lookup rates a removed film on its own page; the films list is never requested (AIR-287);
 // the removal event gets the rating once.
 pages.set('gone',4.5);
 const at='2026-10-29T09:00:00.000Z';

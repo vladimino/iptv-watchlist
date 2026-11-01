@@ -1,6 +1,6 @@
 # Letterboxd Diary viewing history — contract
 
-[AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0049](../../adr/0049-letterboxd-diary-viewing-history.md). The routine read is the first page only ([ADR 0067](../../adr/0067-diary-recent-window.md)). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). Gate: `LETTERBOXD_DIARY_HISTORY`, off by default ([feature flags](../feature-flags.md)).
+[AIR-51](https://trello.com/c/33d4hKJ3), [ADR 0049](../../adr/0049-letterboxd-diary-viewing-history.md). The routine read is the first page only ([ADR 0067](../../adr/0067-diary-recent-window.md)). Code: [`src/letterboxd-diary.js`](../../../src/letterboxd-diary.js). `LETTERBOXD_DIARY_HISTORY` is retired ([ADR 0075](../../adr/0075-retire-letterboxd-diary-history-switch.md), [feature flags](../feature-flags.md)): a migrated ratings run reads page 1 whatever the binding holds.
 
 The owner's public Letterboxd Diary is read into a viewing history. A row with a viewing id is its own entry; rows without one become one entry per film and day that counts its viewings, a lower bound unless one page held the whole day. Without a viewing id the per-viewing granularity is lost: two viewings of a film on one day keep only their count, their ratings in page order and how many rows were marked re-watch, not which viewing was which. The history is kept apart from the current rating. The ratings run turns what page 1 proves into watched and rating facts ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md), [ADR 0074](../../adr/0074-retire-ratings-pipeline-switch.md), [below](#rating-facts)). The EPG commit does not. Absence from the diary means nothing.
 
@@ -80,15 +80,14 @@ The owner's public Letterboxd Diary is read into a viewing history. A row with a
 
 ## In the ratings run
 
-The EPG commit does not run this stage ([ADR 0074](../../adr/0074-retire-ratings-pipeline-switch.md)). The [ratings run](letterboxd-ratings.md#separate-ratings-pipeline) reads Diary page 1 once when migration is complete, whatever the retired `RATINGS_PIPELINE` binding holds. The public films list is not requested ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md)). A step that already checkpointed that page does not fetch again. `more` retries the same page only when it was not started. After the page it joins its progress into the cursor, so a killed step loses at most the page in flight. A `recent_window` is a finished diary phase, not an error. When migration is not complete the commit publishes and does not read Diary.
+The EPG commit does not run this stage ([ADR 0074](../../adr/0074-retire-ratings-pipeline-switch.md)). The [ratings run](letterboxd-ratings.md#separate-ratings-pipeline) reads Diary page 1 once when migration is complete, whatever the retired `RATINGS_PIPELINE` and `LETTERBOXD_DIARY_HISTORY` bindings hold ([ADR 0075](../../adr/0075-retire-letterboxd-diary-history-switch.md)). The public films list is not requested ([ADR 0054](../../adr/0054-diary-first-epg-ratings.md)). A step that already checkpointed that page does not fetch again. `more` retries the same page only when it was not started. After the page it joins its progress into the cursor, so a killed step loses at most the page in flight. A `recent_window` is a finished diary phase, not an error. When migration is not complete the commit publishes and does not read Diary. `enabled` on the read API is this capability. It is not a fetch and not proof the binding is absent.
 
 - **Summary.** It is on the ratings run record, not in `sync.json`. It holds `outcome`, `stopReason`, `counts`, `resumePage`, `coverage` and `at`, plus `facts`:
   - `rated`, `unrated`, and `ambiguous` / `partial` (both stay 0: this reader does not produce those states);
   - `films`, `written`, `unchanged`, `older`, `skipped`, `conflicts`: the write outcomes;
   - `enabled`: always `true`; the former `LETTERBOXD_FACTS` switch is retired ([ADR 0055](../../adr/0055-retire-letterboxd-facts-switch.md)) and kept in the summary for its readers.
   - `historicalCoverage: incomplete` on a finished recent window.
-- **Never fatal to EPG.** The stage is not part of the commit. A blocked, rate-limited or failed Diary ends the ratings run as `error` with that cause, and keeps every stored fact.
-- **Gate off.** Nothing is read or written by the stage. The ratings run ends `finished` with cause `diary_off`.
+- **Never fatal to EPG.** The stage is not part of the commit. A blocked, rate-limited or failed Diary ends the ratings run as `error` with that cause, and keeps every stored fact. An absent or off binding does not skip the page or finish the run as `diary_off`.
 
 ## Rating facts
 
@@ -133,7 +132,9 @@ R2 is the authority for these objects. A D1 projection follows the storage-neutr
 
 ## Rollback
 
-- **Gate off:** no further reads or writes; the commit then requests nothing from Letterboxd except the removal lookup.
+Setting `LETTERBOXD_DIARY_HISTORY` to `off`, or deleting the binding, does not stop Diary page 1 on a migrated ratings run ([ADR 0075](../../adr/0075-retire-letterboxd-diary-history-switch.md)). After the binding is deleted, code from before that retirement skips Diary when the binding is absent, so that code must not be deployed until `LETTERBOXD_DIARY_HISTORY=on` is restored and read back. A code revert does not restore R2 history, the cursor, facts or the removal queue.
+
 - **Facts written from the diary:** kept. They are ordinary observations that newer ones replace.
 - **Stored history:** kept.
-- **Revert:** removes the stage, the reader and the route. The objects stay and are ignored. Deleting them is a separate owner-approved storage operation.
+- **Historical gate-off (AIR-51):** turning the binding off used to make the stage request nothing. That is not the current rollback.
+- **Deleting the objects** is a separate owner-approved storage operation. This contract does not do it.
