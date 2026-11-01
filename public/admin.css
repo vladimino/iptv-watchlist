@@ -46,6 +46,8 @@
 .admin-name-option span,.admin-name-option small{overflow-wrap:anywhere}
 .admin-name-form input[type="text"],.admin-name-form textarea{width:100%;max-width:100%;box-sizing:border-box}
 .admin-name-form button{justify-self:start}
+.admin-name-preferred{display:flex;gap:8px;align-items:flex-start;min-height:44px}
+.admin-name-preview{margin:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px}
 .admin-name-status:empty{display:none}
 .admin-name-current{margin:0}
 .admin-folded,.admin-name-more{min-width:0;margin:12px 0}
