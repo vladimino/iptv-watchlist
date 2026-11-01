@@ -168,9 +168,10 @@ function recordRatingChange(record,incoming,effective){
  async function resolveAlias(env,alias){return (await readJSON(env,FACTS_KEYS.links)).value?.[alias]||null;}
  // The effective confirmed rating for one Letterboxd id (ADR 0023, ADR 0077). The view index is not a source.
  // The winner is the greater of the stored rating and the films-list floor. Null and absence are not a rating.
- async function confirmedFilmRating(env,lid){
+ async function confirmedFilmRating(env,lid,cache){
   if(!LID.test(String(lid||'')))return null;
-  let key=await resolveAlias(env,'letterboxd:'+lid);if(!key)return null;
+  const links=cache?cache.links:(await readJSON(env,FACTS_KEYS.links)).value;
+  let key=links?.['letterboxd:'+lid]||null;if(!key)return null;
   let record=null;
   for(let hop=0;hop<2;hop++){
    record=(await readJSON(env,recordKey(key))).value;
@@ -180,7 +181,7 @@ function recordRatingChange(record,incoming,effective){
    key=next;
   }
   if(!record)return null;
-  const {value:filmsList}=await readJSON(env,FACTS_KEYS.filmsList);
+  const filmsList=cache?cache.filmsList:(await readJSON(env,FACTS_KEYS.filmsList)).value;
   const floor=(await summaryObservations('films-list',filmsList,String(lid),key)).rating||null;
   const effective=greater(record.rating||null,floor),rating=Number(effective?.value);
   return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;

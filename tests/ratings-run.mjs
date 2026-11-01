@@ -283,6 +283,87 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  eq(bucket.value(QUEUE).films.blank,blankShot);
 }
 
+// 5h. Fact probes are bounded (ADR 0077). Many due films, known and unknown, spread across continue steps. A short
+// lease probes nothing and requests nothing. A known rating is never fetched. An unknown one stays within five GETs
+// a step. A repeated reference does not reopen twice. The films-list floor is read once per step.
+{
+ const {bucket,env,R,net,ctx,clock}=setup({pages:0});
+ const Facts=g(ctx,'LetterboxdFacts'),enqueue=g(ctx,'enqueueRemovalRefs');
+ const known=8,unknown=8,oldAt=at(T0-2*DAY),ownerAt=at(T0-DAY);
+ const films={};
+ for(let i=0;i<known;i++){
+  const id='k'+i,prior=at(T0-3*DAY+i*1000);
+  films[id]={url:film(id).url,state:'rated',rating:3,attempts:1,enqueuedAt:prior,nextAttemptAt:null,lastAttemptAt:prior,lastResult:'saved',checkedAt:prior,claim:null,refs:[{eventKey:eventKeyOf(prior,'old-'+id),sourceRunId:'run-old',at:prior,resolved:true}]};
+ }
+ for(let i=0;i<unknown;i++)films['u'+i]={url:film('u'+i).url,state:'pending',attempts:0,enqueuedAt:at(T0-H+i*1000),nextAttemptAt:at(T0-H+i*1000),lastAttemptAt:null,lastResult:null,claim:null,refs:[]};
+ migrated(bucket,{films});
+ for(let i=0;i<known;i++){
+  const id='k'+i;
+  await Facts.recordFilmFacts(env,id,{watched:true,rating:3},{observedAt:oldAt,source:'letterboxd_diary',sourceRef:'diary:viewing:'+id});
+  await Facts.recordFilmFacts(env,id,{rating:4.5},{observedAt:ownerAt,source:'owner'});
+  const prior=at(T0-3*DAY+i*1000),reopen=T0-2*H+i*1000,reopenAt=at(reopen);
+  await ctx.writeEvent(env,{id:'old-'+id,type:'watchlist',at:prior,total:0,baseline:false,added:[],removed:[{id,title:id,year:1999,rating:3,ratingObservedAt:prior}]});
+  await ctx.writeEvent(env,{id:'new-'+id,type:'watchlist',at:reopenAt,total:0,baseline:false,added:[],removed:[{id,title:id,year:1999}]});
+  const ref={eventKey:eventKeyOf(reopenAt,'new-'+id),sourceRunId:'run-new',at:reopenAt};
+  await enqueue(env,[film(id)],ref,reopen);
+  if(i===0)await enqueue(env,[film(id)],ref,reopen);
+  net.members.set(id,1);
+ }
+ for(let i=0;i<unknown;i++){
+  const id='u'+i,when=T0-H+i*1000,whenAt=at(when);
+  await ctx.writeEvent(env,{id:'new-'+id,type:'watchlist',at:whenAt,total:0,baseline:false,added:[],removed:[{id,title:id,year:2001}]});
+  await enqueue(env,[film(id)],{eventKey:eventKeyOf(whenAt,'new-'+id),sourceRunId:'run-new',at:whenAt},when);
+  net.members.set(id,2);
+ }
+ assert.equal(bucket.value(QUEUE).films.k0.refs.length,2,'the same new reference is stored once');
+ assert.equal(bucket.value(QUEUE).films.k0.state,'pending');
+ net.diary.set(1,diaryPage([diaryRow('other',8,'2026-10-29','99001')],false));
+ const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ await finishDiary(R,env,runId);
+ const mark=bucket.log.length;
+ const yielded=plain(await R.step(env,{runId},{now:clock.now,clock:()=>clock.now+R.LEASE_MS-1000}));
+ assert.equal(yielded.nextAction,'continue');
+ assert.equal(yielded.step.lookups,0);
+ assert.equal(net.memberFetches().length,0);
+ assert.ok(Object.values(bucket.value(QUEUE).films).every(entry=>entry.state==='pending'),'a short lease leaves every due entry pending');
+ const yieldedOps=bucket.log.slice(mark);
+ assert.equal(yieldedOps.filter(item=>item.op==='get'&&item.key.startsWith('letterboxd/facts/films/')).length,0);
+ assert.equal(yieldedOps.filter(item=>item.op==='get'&&item.key==='letterboxd/facts/scans/films-list.json').length,0);
+ const logAt=bucket.log.length;
+ const first=plain(await R.step(env,{runId}));
+ assert.equal(first.nextAction,'continue');
+ assert.equal(first.step.lookups,0,'known ratings in this batch are not fetched');
+ const ops=bucket.log.slice(logAt);
+ assert.equal(ops.filter(item=>item.op==='get'&&item.key.startsWith('letterboxd/facts/films/')).length,5);
+ assert.equal(ops.filter(item=>item.op==='get'&&item.key==='letterboxd/facts/scans/films-list.json').length,1);
+ const afterFirst=bucket.value(QUEUE);
+ for(let i=0;i<5;i++)assert.equal(afterFirst.films['k'+i].state,'rated','k'+i);
+ for(let i=5;i<known;i++)assert.equal(afterFirst.films['k'+i].state,'pending','k'+i+' waits');
+ for(let i=0;i<unknown;i++)assert.equal(afterFirst.films['u'+i].state,'pending','u'+i+' is not fetched before it is probed');
+ const replies=await drain(R,env,runId);
+ assert.equal(replies.at(-1).reason,'finished');
+ eq(net.memberFetches().map(url=>url.split('/').at(-2)),Array.from({length:unknown},(_,i)=>'u'+i));
+ assert.ok(replies.every(reply=>(reply.step?.lookups??0)<=5));
+ const queue=bucket.value(QUEUE);
+ for(let i=0;i<known;i++){
+  const id='k'+i,reopenAt=at(T0-2*H+i*1000);
+  assert.equal(queue.films[id].state,'rated');
+  assert.equal(queue.films[id].rating,4.5);
+  assert.equal(queue.films[id].lastResult,'fact');
+  assert.equal(queue.films[id].attempts,0);
+  assert.equal(bucket.value(eventKeyOf(reopenAt,'new-'+id)).removed[0].rating,4.5);
+  assert.equal(bucket.value(eventKeyOf(at(T0-3*DAY+i*1000),'old-'+id)).removed[0].rating,3);
+ }
+ for(let i=0;i<unknown;i++)assert.equal(queue.films['u'+i].state,'rated');
+ const knownShot=plain(queue.films.k0),eventShot=plain(bucket.value(eventKeyOf(at(T0-2*H),'new-k0')));
+ net.fetches.length=0;
+ const second=plain(await R.start(env,{trigger:'manual'}));
+ await drain(R,env,second.runId);
+ assert.equal(net.memberFetches().length,0);
+ eq(bucket.value(QUEUE).films.k0,knownShot);
+ eq(bucket.value(eventKeyOf(at(T0-2*H),'new-k0')),eventShot);
+}
+
 // 5b. Settlements are bounded per step: 150 unresolved references take two steps, the lookups come after them.
 {
  const {bucket,env,R,net,ctx}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
@@ -562,4 +643,4 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(net.diaryFetches().length,2);
 }
 
-console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause, the retired binding still looks up an unrated film and skips one the Diary rated, a stored fact rates a reopened entry without a member-page GET, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');
+console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause, the retired binding still looks up an unrated film and skips one the Diary rated, a stored fact rates a reopened entry without a member-page GET, fact probes stay within five films a step and yield on a short lease, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');

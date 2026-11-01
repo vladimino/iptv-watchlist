@@ -9,6 +9,10 @@
 // bounded member-page lookup unless a stored fact already holds a confirmed rating and the current Diary page did
 // not list that film. A film the page lists without a rating is still looked up. The binding does not skip the
 // lookup. A null or absent rating is not watched. A new reference that reopens an entry does not by itself request.
+// One step probes at most five stored ratings, reads the films-list floor once, and does not request a film it has not
+// probed. A short lease leaves the rest pending and the step continues.
+// One step probes at most five stored ratings, reads the films-list floor once, and does not request a film it has not
+// probed. A short lease leaves the rest pending and the step continues.
 // ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdRatings=(()=>{
@@ -193,7 +197,8 @@ const LetterboxdRatings=(()=>{
  // claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue; the run goes on while due entries
  // remain. Each claim moves the entry's next attempt at least an hour ahead, so a run ends. A paused queue ends the
  // lookups for this run. The retired binding does not (ADR 0077). A confirmed stored rating resolves a due entry
- // first, with no claim and no member-page GET, including one a new reference just reopened. No legacy candidate means no event list.
+ // first, at most five probes, with no claim and no member-page GET, including one a new reference just reopened.
+ // A film not probed in this step is not requested. No legacy candidate means no event list.
  async function removalPhase(env,run,{own,remaining,clock}){
   const legacyLink=await linkLegacyRemovalRefs(env,{limit:LEGACY_LINK_PAGE,now:clock()});
   // The counter moves only when this step's queue write committed. A lost compare-and-swap does not count another scan's page.
@@ -205,11 +210,12 @@ const LetterboxdRatings=(()=>{
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
   const budget=STEP_LOOKUPS;
   const started=clock();
-  await resolveDueRemovalFacts(env,started,run.diary?.unratedLids||[]);
   let queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
   if(!removalQueueV2(queue)){lookup.stoppedBy='queue_not_migrated';return {settled,lookup,more};}
   if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>started){lookup.stoppedBy=queue.pausedBy||'blocked';lookup.pausedUntil=queue.pausedUntil;return {settled,lookup,more};}
-  for(const id of removalDue(queue,started,budget)){
+  const facts=await resolveDueRemovalFacts(env,started,{skip:run.diary?.unratedLids||[],limit:REMOVAL_FACT_BATCH,getBudget:budget,beforeEach:()=>remaining()>LEASE_MARGIN_MS});
+  queue=facts.queue||queue;
+  for(const id of facts.gettable){
    if(!(remaining()>LEASE_MARGIN_MS)){more=true;break;}
    const t=clock(),at=iso(t),token=crypto.randomUUID();
    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&claimRemovalEntry(q,id,t,at,token)?q:null);
