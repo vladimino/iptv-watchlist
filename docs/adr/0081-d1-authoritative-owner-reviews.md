@@ -1,4 +1,4 @@
-# ADR 0080: Owner-reviewed titles and names are D1-authoritative only after their own marker is switched
+# ADR 0081: Owner-reviewed titles and names are D1-authoritative only after their own marker is switched
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-01  
@@ -14,7 +14,7 @@ Owner-confirmed Film titles and Person names live in one R2 object, `admin/owner
 
 The admin pin is version 2 and uses that etag as `reviewsVersion`. The hourly projector reads R2 and writes `film_dimension` and `person_dimension`. Its localization upsert already refuses to replace an `authority: owner` row with a dictionary value, but the view it builds prefers a verified dictionary title, so a dimension that does not yet hold the owner value can be written as the dictionary. Catalogue SQL then shows that dimension.
 
-Production schema is v6. The metadata-cache marker is `d1`. Migration `0007` and [ADR 0078](0078-d1-authoritative-prediction-domain.md) are on `main` and are not applied. Open [PR #314](https://github.com/vladimino/iptv-watchlist/pull/314) reserves migration `0008` / ADR 0079 (published EPG). A schema version is not proof that every domain table exists. There is no transaction that covers D1 and R2 together. Applying a migration, importing the object, and switching a marker are separate approvals.
+Production schema is v6. The metadata-cache marker is `d1`. Migration `0007` and [ADR 0078](0078-d1-authoritative-prediction-domain.md) are on `main` and are not applied. Open [PR #314](https://github.com/vladimino/iptv-watchlist/pull/314) reserves migration `0008` / ADR 0079 (published EPG). Open [PR #318](https://github.com/vladimino/iptv-watchlist/pull/318) reserves ADR 0080. This record is 0081. A schema version is not proof that every domain table exists. There is no transaction that covers D1 and R2 together. Applying a migration, importing the object, and switching a marker are separate approvals.
 
 ## Decision
 

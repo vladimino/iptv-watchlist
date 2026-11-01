@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Operator entry for the owner-review marker (ADR 0080). Default is read-only status.
+// Operator entry for the owner-review marker (ADR 0081). Default is read-only status.
 // --load copies a local admin/owner-reviews.json into the rows and leaves mode r2.
 // An absent file is an empty document only when the get returns no object.
 // --activate sets mode d1 only when that file still matches the rows.

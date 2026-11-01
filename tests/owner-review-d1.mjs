@@ -1,4 +1,4 @@
-// ADR 0080. Owner reviews stay on R2 until migration 0009 is applied and the marker
+// ADR 0081. Owner reviews stay on R2 until migration 0009 is applied and the marker
 // is switched. The switch is not part of this test. No production database is opened.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
