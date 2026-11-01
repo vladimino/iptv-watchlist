@@ -17,10 +17,15 @@ function filmTitleError(result){
  for(const key of ['expected','received','field','options','maxLength','modes'])if(result[key]!==undefined)body[key]=result[key];
  return body;
 }
-function filmTitleStored(doc,storedId,requestId,version){
+function filmTitleStored(doc,storedId,requestId,version,applied){
  const slice=doc&&doc.films&&doc.films[storedId];
  const review=(slice&&slice.titleReviews||[]).find(item=>item&&item.requestId===requestId);
- return !!(review&&review.version&&review.version.after===version);
+ if(!(review&&review.version&&review.version.after===version))return false;
+ if(applied&&applied.review&&applied.review.effect==='alias_added'){
+  const value=applied.review.to&&applied.review.to.value;
+  return (slice.aliases||[]).some(alias=>alias&&alias.value===value);
+ }
+ return true;
 }
 async function filmTitleReviewRoute(request,env,url){
  if(request.method!=='POST')return adminError('method_not_allowed',405);
@@ -44,7 +49,7 @@ async function filmTitleReviewRoute(request,env,url){
   if(!film)return json({error:'not_found',reason:'missing_film',pin:adminEncodePin(snapshot.tuple)},404);
   const applied=applyTitleReview(film,{...command,filmId:command.filmId},new Date().toISOString());
   if(!applied.ok)return json(filmTitleError(applied),filmTitleStatus(applied.reason));
-  if(!applied.changed)return json({ok:true,changed:false,idempotent:!!applied.idempotent,version:applied.version,readback:true,titleReview:titleReviewState(applied.film)});
+  if(!applied.changed){const body={ok:true,changed:false,idempotent:!!applied.idempotent,version:applied.version,readback:true,titleReview:titleReviewState(applied.film)};if(applied.reason)body.reason=applied.reason;return json(body);}
   const doc=ownerReviewsNormalize(snapshot.reviews&&snapshot.reviews.body);
   if(!doc)return json({error:'storage_unavailable',reason:'overlay_invalid'},503);
   const etag=snapshot.tuple.reviewsVersion||null;
@@ -55,7 +60,7 @@ async function filmTitleReviewRoute(request,env,url){
   const back=await bucket.get(OWNER_REVIEWS_KEY);
   let stored=null;try{stored=back?await back.json():null;}catch{stored=null;}
   const normalized=ownerReviewsNormalize(stored);
-  if(!filmTitleStored(normalized,storedId,command.requestId,applied.version))return json({error:'storage_unavailable',reason:'readback_failed'},503);
+  if(!filmTitleStored(normalized,storedId,command.requestId,applied.version,applied))return json({error:'storage_unavailable',reason:'readback_failed'},503);
   return json({ok:true,changed:true,idempotent:false,version:applied.version,readback:true,titleReview:titleReviewState(applied.film)});
  }
  return json({error:'version_conflict',reason:'version_conflict'},409);

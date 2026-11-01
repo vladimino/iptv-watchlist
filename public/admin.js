@@ -143,14 +143,21 @@ function adminOutsideStatus(name) {
   return `<span class="admin-status admin-status-outside">${adminEscape(name)}: вне снимка программы</span>`;
 }
 
-function adminProvenance(provenance) {
+function adminProvenance(provenance, seen) {
   if (!provenance || typeof provenance !== 'object') return '';
-  const parts = Object.entries(provenance).filter(([, value]) => value !== undefined && value !== null).map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`);
+  const parts = [];
+  for (const [key, value] of Object.entries(provenance)) {
+    if (value === undefined || value === null) continue;
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    if (seen && seen.has(text)) continue;
+    if (seen) seen.add(text);
+    parts.push(`${key}: ${text}`);
+  }
   return parts.length ? `<span class="admin-provenance">${adminEscape(parts.join(' · '))}</span>` : '';
 }
 
-function adminSource(dimension) {
-  const parts = [dimension?.source ? adminEscape(dimension.source) : '', adminProvenance(dimension?.provenance)].filter(Boolean);
+function adminSource(dimension, seen) {
+  const parts = [dimension?.source ? adminEscape(dimension.source) : '', adminProvenance(dimension?.provenance, seen)].filter(Boolean);
   return parts.length ? parts.join(' · ') : 'не указано';
 }
 
@@ -166,7 +173,7 @@ function adminHit(item, kind, state) {
   if ((item.externalIds || []).some(entry => entry?.conflicting)) badges.push('<span class="admin-status admin-status-conflict">конфликт внешнего id</span>');
   const collision = item.collision ? '<span class="admin-collision">Одинаковое название в этой выдаче. Записи не объединяются, canonical identity не меняется.</span>' : '';
   const current = state.kind === kind && state.id === item.id ? ' aria-current="true"' : '';
-  const meta = [item.id, item.year ? String(item.year) : null, item.canonicalIdentity].filter(Boolean).join(' · ');
+  const meta = (kind === 'film' ? [item.year ? String(item.year) : null] : [item.id, item.year ? String(item.year) : null, item.canonicalIdentity]).filter(Boolean).join(' · ');
   return `<a class="admin-hit" href="${adminEscape(next)}" data-admin-kind="${adminEscape(kind)}" data-admin-id="${adminEscape(item.id)}"${current}><span class="admin-hit-title">${adminEscape(title)}</span><span class="admin-hit-meta">${adminEscape(meta)}</span>${collision}<span class="admin-badges">${badges.join('')}</span></a>`;
 }
 
@@ -178,15 +185,16 @@ function adminGroup(kind, items, next, state) {
 }
 
 function adminFacts(record, kind) {
-  const rows = [
-    ['id', record.id],
-    [kind === 'person' ? 'роль' : 'хранение', kind === 'person' ? record.roleId : record.storedId],
-    ['предпочтительное', record.preferred],
-    ['оригинал', kind === 'person' ? record.original : record.originalTitle],
-    ['название в программе', record.epgTitle],
-    ['год', record.year],
-    ['canonical identity', record.canonicalIdentity],
-  ];
+  const rows = kind === 'film'
+    ? [['год', record.year], ['название в программе', record.epgTitle]]
+    : [
+      ['id', record.id],
+      ['роль', record.roleId],
+      ['предпочтительное', record.preferred],
+      ['оригинал', record.original],
+      ['год', record.year],
+      ['canonical identity', record.canonicalIdentity],
+    ];
   return rows.filter(([, value]) => value !== undefined && value !== null && value !== '').map(([name, value]) => `<div><dt>${adminEscape(name)}</dt><dd>${adminEscape(value)}</dd></div>`).join('');
 }
 
@@ -194,15 +202,56 @@ function adminAliases(record, kind) {
   const aliases = record.aliases || [];
   const person = kind === 'person';
   if (!aliases.length) return person ? '<p class="muted">Других имён нет.</p>' : '<p class="muted">Других названий нет.</p>';
-  const items = aliases.map(alias => `<li>${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''} ${adminProvenance(alias.provenance)}</li>`).join('');
+  const items = aliases.map(alias => {
+    const body = `${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''}`;
+    // A film alias is a title the owner may pick. Its request id and provenance stay in the closed
+    // technical disclosure. A person alias keeps that provenance beside the name, as before.
+    return `<li>${body}${person ? ' ' + adminProvenance(alias.provenance) : ''}</li>`;
+  }).join('');
   const label = person ? 'Другие имена' : 'Другие названия';
   return `<details class="other-titles"><summary>${label} (${aliases.length})</summary><ul>${items}</ul></details>`;
 }
 
-function adminExternalIds(record) {
+function adminExternalIds(record, seen) {
   const ids = record.externalIds || [];
-  if (!ids.length) return '<p class="muted">Внешних id нет.</p>';
-  return `<ul>${ids.map(entry => `<li>${adminEscape(entry.scheme || 'id')} ${adminEscape(entry.value)}${entry.trusted === true ? ' · доверенный' : entry.trusted === false ? ' · не доверенный' : ''}${entry.conflicting ? ' · конфликт' : ''} ${adminProvenance(entry.provenance)}</li>`).join('')}</ul>`;
+  const items = [];
+  const shown = new Set();
+  for (const entry of ids) {
+    if (!entry) continue;
+    const value = entry.value == null ? '' : String(entry.value);
+    const scheme = entry.scheme || 'id';
+    // The same scheme and value with the same trust and conflict marks is one row. A canonical
+    // identity that contains the number is not that row: the marks live only here.
+    const key = scheme + '\0' + value + '\0' + (entry.trusted === true ? '1' : entry.trusted === false ? '0' : '') + '\0' + (entry.conflicting ? '1' : '');
+    if (seen && shown.has(key)) continue;
+    if (seen) shown.add(key);
+    items.push(`<li>${adminEscape(scheme)} ${adminEscape(value)}${entry.trusted === true ? ' · доверенный' : entry.trusted === false ? ' · не доверенный' : ''}${entry.conflicting ? ' · конфликт' : ''} ${adminProvenance(entry.provenance, seen)}</li>`);
+  }
+  if (!items.length) return '<p class="muted">Внешних id нет.</p>';
+  return `<ul>${items.join('')}</ul>`;
+}
+
+function adminFilmAliasFacts(record, seen) {
+  const aliases = record.aliases || [];
+  if (!aliases.length) return '';
+  const items = aliases.map(alias => `<li>${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''} ${adminProvenance(alias.provenance, seen)}</li>`).join('');
+  return `<h3>Происхождение вариантов</h3><ul>${items}</ul>`;
+}
+
+function adminFilmTechnical(record) {
+  const seen = new Set();
+  const rows = [];
+  const add = (name, value) => {
+    if (value === undefined || value === null || value === '') return;
+    const text = String(value);
+    if (seen.has(text)) return;
+    seen.add(text);
+    rows.push(`<div><dt>${adminEscape(name)}</dt><dd>${adminEscape(text)}</dd></div>`);
+  };
+  add('id', record.id);
+  add('хранение', record.storedId);
+  add('canonical identity', record.canonicalIdentity);
+  return `<details class="admin-technical"><summary>Технические сведения</summary><dl>${rows.join('')}</dl><h3>Внешние id</h3>${adminExternalIds(record, seen)}${adminFilmAliasFacts(record, seen)}<p>Происхождение локализации: ${adminSource(record.localization, seen)}. Происхождение идентичности: ${adminSource(record.identity, seen)}.</p></details>`;
 }
 
 function adminDetail(view) {
@@ -228,46 +277,122 @@ function adminDetail(view) {
     : '';
   const filmForm = kind === 'film' ? adminTitleForm(record) : '';
   const aliasBlock = adminAliases(record, kind);
-  const lists = `<h3>Внешние id</h3>${adminExternalIds(record)}<h3>Конфликты локализации</h3>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}`;
+  const conflictBlock = `<h3>Конфликты локализации</h3>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}`;
   const diagnostics = kind === 'person'
-    ? `<details class="admin-folded"><summary>Алиасы, внешние id и конфликты</summary>${aliasBlock}${lists}</details>`
-    : `${aliasBlock}${lists}`;
+    ? `<details class="admin-folded"><summary>Алиасы, внешние id и конфликты</summary>${aliasBlock}<h3>Внешние id</h3>${adminExternalIds(record)}${conflictBlock}</details>`
+    : `${aliasBlock}${conflictBlock}${adminFilmTechnical(record)}`;
   const filmTail = kind === 'film' ? `<h3>Другие статусы</h3><div class="admin-badges">${other}</div><p class="muted admin-outside-note">Отпечаток и прогноз хранятся вне опубликованной программы и этим чтением не читаются.</p>` : '';
+  const filmJournal = kind === 'film' ? adminTitleJournal(record) : '';
   const personForm = kind === 'person' ? adminNameForm(record) : '';
-  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div><p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${personForm}`;
+  const provenance = kind === 'film'
+    ? `<p class="admin-provenance">Происхождение локализации: ${adminEscape(record.localization?.source || record.localization?.provenance?.authority || 'не указано')}. Происхождение идентичности: ${adminEscape(record.identity?.source || 'не указано')}.</p>`
+    : `<p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>`;
+  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${filmJournal}${personForm}`;
   if (kind === 'film') adminBindTitleReview(detail);
 }
 
 // A script that happens to be Cyrillic is not a Russian title. A dictionary or owner mark on
-// provenance.source or provenance.authority is enough to offer the text. Programme, Letterboxd
-// and EPG aliases stay in the collapsed list and in the API, and they are not radio choices.
+// provenance.source or provenance.authority is enough to offer an ordinary choice. Programme,
+// Letterboxd and EPG aliases stay in the collapsed list and in the API, and they are not radio
+// choices unless they are the current localized preferred title or a confirmed previous one.
 function adminRussianMarked(provenance) {
   if (!provenance) return false;
   return provenance.source === 'dictionary' || provenance.source === 'owner' || provenance.authority === 'dictionary' || provenance.authority === 'owner';
 }
 
-function adminRussianChoices(review) {
-  const preferred = review && review.preferred && review.preferred.value;
+// preferredTitle falls back to the original when localization is missing. That fallback is not a
+// Russian choice: only a substantive localization (provisional or reviewed) is pinned first.
+function adminFilmCurrentTitle(review) {
+  const preferred = review && review.preferred;
+  if (!preferred || preferred.status === 'missing') return '';
+  const value = typeof preferred.value === 'string' ? preferred.value.trim() : '';
+  return value;
+}
+
+// A promote that landed before previousPreferred existed still names the replaced title in the
+// audit. An alias add is not that replacement. A row that did not review the preferred title is not
+// either. Nothing here rewrites the stored record.
+function adminLegacyPrevious(review) {
   const out = [];
   const seen = new Set();
-  for (const option of (review && review.options) || []) {
-    if (!option || !option.value || option.value === preferred || seen.has(option.value)) continue;
-    if (!adminRussianMarked(option.provenance)) continue;
-    seen.add(option.value);
-    out.push(option);
-    if (out.length >= 5) break;
+  for (const entry of (review && review.reviews) || []) {
+    if (!entry || !entry.from || !entry.to) continue;
+    if (entry.effect === 'alias_added') continue;
+    const from = entry.from.value;
+    const to = entry.to.value;
+    if (!from || from === to) continue;
+    if (entry.effect == null) {
+      if (entry.to.status !== 'reviewed') continue;
+    } else if (entry.effect !== 'preferred_changed') continue;
+    if (seen.has(from)) continue;
+    seen.add(from);
+    out.push(from);
   }
   return out;
+}
+
+function adminRussianChoices(review) {
+  const current = adminFilmCurrentTitle(review);
+  const pinned = [];
+  const seen = new Set();
+  const push = (value, mark) => {
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    pinned.push({value, mark});
+  };
+  if (current) push(current, 'текущее предпочтительное');
+  for (const option of (review && review.options) || []) {
+    if (option && option.provenance && option.provenance.previousPreferred === true) push(option.value, 'было предпочтительным');
+  }
+  for (const value of adminLegacyPrevious(review)) push(value, 'было предпочтительным');
+  const added = [];
+  const rest = [];
+  for (const option of (review && review.options) || []) {
+    if (!option || !option.value || seen.has(option.value) || !adminRussianMarked(option.provenance)) continue;
+    if (option.provenance.added === 'alias') added.push(option.value);
+    else rest.push(option.value);
+  }
+  const ordinary = [];
+  for (const value of [...added, ...rest]) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    ordinary.push({value, mark: ''});
+    if (ordinary.length >= 5) break;
+  }
+  return [...pinned, ...ordinary];
+}
+
+function adminTitleHistory(review) {
+  return ((review && review.reviews) || []).map(entry => {
+    const when = entry.at ? ' · ' + adminEscape(entry.at) : '';
+    const basis = entry.basis ? ' · ' + adminEscape(entry.basis) : '';
+    if (entry.effect === 'alias_added') return `<li>добавлен вариант «${adminEscape(entry.to && entry.to.value || '')}»${when}${basis}</li>`;
+    const from = entry.from && entry.from.value;
+    const to = entry.to && entry.to.value || '';
+    const change = from && from !== to ? `${adminEscape(from)} → ${adminEscape(to)}` : adminEscape(to);
+    return `<li>${change}${when}${basis}</li>`;
+  }).join('');
+}
+
+// The audit is not part of the form. An empty trail adds nothing. A trail is one closed
+// disclosure, and the card places it after every other film section.
+function adminTitleJournal(record) {
+  const review = record && record.titleReview;
+  const entries = (review && review.reviews) || [];
+  if (!entries.length) return '';
+  return `<details class="title-review-journal"><summary>Журнал (${entries.length})</summary><ul>${adminTitleHistory(review)}</ul></details>`;
 }
 
 function adminTitleForm(record) {
   const review = record.titleReview;
   if (!review || !review.version || !record.storedId) return '';
+  const current = adminFilmCurrentTitle(review);
   const choices = adminRussianChoices(review);
-  const options = choices.map(option => `<label class="title-review-option"><input type="radio" name="title-review-choice" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span></label>`).join('');
-  const picker = options ? `<fieldset><legend>Известные русские варианты</legend><div class="title-review-options">${options}</div></fieldset>` : '';
-  const history = (review.reviews || []).map(entry => `<li>${adminEscape(entry.to && entry.to.value || '')}${entry.at ? ' · ' + adminEscape(entry.at) : ''}${entry.basis ? ' · ' + adminEscape(entry.basis) : ''}</li>`).join('');
-  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Русское название</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}">${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><label class="title-review-accept"><input type="checkbox" data-title-accept> Записать это название в каталог. Это одно изменение одного фильма.</label><button type="submit" data-title-save disabled>Записать название</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form><h3>История правок</h3>${history ? `<ul>${history}</ul>` : '<p class="muted">Записей ещё нет.</p>'}</section>`;
+  const options = choices.map(option => `<label class="title-review-option"><input type="radio" name="title-review-choice" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span>${option.mark ? ` <small class="muted">${adminEscape(option.mark)}</small>` : ''}</label>`).join('');
+  const picker = options
+    ? `<fieldset><legend>Варианты</legend><div class="title-review-options">${options}</div></fieldset>`
+    : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите название.</p>';
+  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Вариант названия</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}" data-current="${adminEscape(current)}"><p class="title-review-current">Сейчас: <b>${adminEscape(current || 'нет')}</b></p>${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label class="title-review-prefer"><input type="checkbox" data-title-prefer> <span>Использовать как предпочтительное</span></label><p class="title-review-preview" data-title-preview>Добавится альтернативное название; текущее предпочтительное не изменится.</p><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><button type="submit" data-title-save>Сохранить вариант</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form></section>`;
 }
 
 // The command that was posted and whose outcome is still unknown. A refresh replaces the card and
@@ -288,72 +413,134 @@ function adminTitleFrozen(storedId, requestId) {
   return pending.command;
 }
 
+function adminTitleChosen(form) {
+  const manual = form.querySelector('[data-title-manual]');
+  const selected = form.querySelector('input[name="title-review-choice"]:checked');
+  const typed = manual ? manual.value.replace(/\s+/g, ' ').trim() : '';
+  return typed || (selected && selected.value) || '';
+}
+
+function adminTitleSync(form) {
+  if (!form) return;
+  const save = form.querySelector('[data-title-save]');
+  if (save) save.disabled = form.dataset.busy === '1';
+  const preview = form.querySelector('[data-title-preview]');
+  if (!preview) return;
+  const box = form.querySelector('[data-title-prefer]');
+  const prefer = !!(box && box.checked);
+  const next = adminTitleChosen(form);
+  const current = form.dataset.current || 'нет';
+  if (!prefer) {
+    preview.textContent = 'Добавится альтернативное название; текущее предпочтительное не изменится.';
+    return;
+  }
+  preview.textContent = 'Сейчас: ' + current + ' → Станет: ' + (next || '…') + '. Предпочтительное название изменится во всех карточках и поиске.';
+}
+
+function adminTitleRetryText(kept) {
+  const value = kept && typeof kept.value === 'string' ? kept.value : '';
+  const head = 'Неизвестно, записалось ли название. Повторите отправку: это будет та же запись, без второй правки.';
+  if (kept && kept.effect === 'add_alias') return head + ' Она только добавит вариант «' + value + '». Предпочтительное название не изменится.';
+  return head + ' Она сделает предпочтительным «' + value + '».';
+}
+
 function adminRestoreTitleAttempt(form, kept) {
   if (!form || !kept || !kept.requestId) return;
   const manual = form.querySelector('[data-title-manual]');
   const basis = form.querySelector('[name="basis"]');
-  if (manual) manual.value = kept.mode === 'manual' ? kept.value : '';
   if (basis) basis.value = kept.basis || '';
+  let shown = false;
   if (kept.mode === 'alias') {
-    for (const choice of form.querySelectorAll('input[name="title-review-choice"]')) choice.checked = choice.value === kept.value;
+    for (const choice of form.querySelectorAll('input[name="title-review-choice"]')) {
+      choice.checked = choice.value === kept.value;
+      if (choice.checked) shown = true;
+    }
+  } else {
+    for (const choice of form.querySelectorAll('input[name="title-review-choice"]')) choice.checked = false;
   }
-  const accept = form.querySelector('[data-title-accept]');
-  if (accept) accept.checked = false;
-  const save = form.querySelector('[data-title-save]');
-  if (save) save.disabled = true;
+  // A radio the refresh removed is not a cancelled command. The field shows that value, and the
+  // retry still posts the original command until the owner edits the form.
+  if (manual) manual.value = shown ? '' : (kept.value || '');
+  const prefer = form.querySelector('[data-title-prefer]');
+  // A command that omits effect is the historical promote. The checkbox shows the effect the
+  // retry will apply, including when the card was rebuilt with the box off.
+  if (prefer) prefer.checked = kept.effect !== 'add_alias';
   delete form.dataset.busy;
+  adminTitleSync(form);
   form.dataset.requestId = kept.requestId;
 }
 
-// A 503 readback_failed can follow a put that already landed. The reread decides the sentence.
-// Until the card shows the submitted title, the original command stays for one replay.
+// A 503 readback_failed can follow a put that already landed. The reread proves a promote only when
+// the audit carries this requestId, an after-token and the preferred title. An added alias is proved
+// by that audit plus the saved owner alias on the record. titleReview.options lists original, EPG
+// and dictionary texts that were never stored as this alias, so membership there is not the proof.
+// An unchanged preferred title is the ordinary result of add_alias, so it is not that proof either.
+function adminOwnerAddedAlias(alias, value) {
+  if (!alias) return false;
+  const text = typeof alias === 'string' ? alias : alias.value;
+  if (text !== value) return false;
+  const provenance = alias.provenance;
+  return !!(provenance && (provenance.authority === 'owner' || provenance.source === 'owner' || provenance.added === 'alias'));
+}
+
+function adminTitleReviewLanded(kept, view) {
+  const entity = view && view.entity;
+  const review = entity && entity.titleReview;
+  if (!kept || typeof kept.requestId !== 'string' || !kept.requestId || !review) return false;
+  const entry = (review.reviews || []).find(item => item && item.requestId === kept.requestId);
+  if (!entry || !entry.version || typeof entry.version.after !== 'string' || !entry.version.after) return false;
+  if (kept.effect === 'add_alias') {
+    if (entry.effect !== 'alias_added' || !entry.to || entry.to.value !== kept.value) return false;
+    return (entity.aliases || []).some(alias => adminOwnerAddedAlias(alias, kept.value));
+  }
+  if (entry.effect === 'alias_added') return false;
+  const preferred = entity.preferred || (review.preferred && review.preferred.value);
+  return preferred === kept.value;
+}
+
 function adminFinishUnknownTitle(kept, view) {
   const detail = document.querySelector('#admin-detail');
   const form = detail && detail.querySelector('[data-title-review]');
-  const preferred = view && view.entity && (view.entity.preferred || (view.entity.titleReview && view.entity.titleReview.preferred && view.entity.titleReview.preferred.value));
-  const landed = preferred != null && preferred === kept.value;
-  if (form && landed) {
+  const result = form && form.querySelector('[data-title-result]');
+  if (form && adminTitleReviewLanded(kept, view)) {
     adminTitleDrop();
     delete form.dataset.requestId;
-    const result = form.querySelector('[data-title-result]');
     if (result) {
-      result.textContent = 'Название записано. Карточка сверена.';
-      result.focus();
+      result.textContent = kept.effect === 'add_alias' ? 'Вариант записан. Предпочтительное название не изменилось.' : 'Название записано. Карточка сверена.';
+      if (typeof result.focus === 'function') result.focus();
     }
     return;
   }
   if (form) adminRestoreTitleAttempt(form, kept);
-  const result = form && form.querySelector('[data-title-result]');
   if (result) {
-    result.textContent = 'Неизвестно, записалось ли название. Повторите отправку: это будет та же запись, без второй правки.';
-    result.focus();
+    result.textContent = adminTitleRetryText(kept);
+    if (typeof result.focus === 'function') result.focus();
   }
 }
 
 function adminBindTitleReview(detail) {
   const form = detail.querySelector('[data-title-review]');
   if (!form) return;
-  const accept = form.querySelector('[data-title-accept]');
   const save = form.querySelector('[data-title-save]');
   const manual = form.querySelector('[data-title-manual]');
   const result = form.querySelector('[data-title-result]');
-  const sync = () => { save.disabled = !accept.checked || form.dataset.busy === '1'; };
+  const prefer = form.querySelector('[data-title-prefer]');
   const discardAttempt = () => { delete form.dataset.requestId; adminTitleDrop(); };
-  form.addEventListener('change', event => { if (event.target !== accept) discardAttempt(); sync(); });
-  form.addEventListener('input', event => { if (event.target !== accept) discardAttempt(); });
-  accept.addEventListener('change', sync);
+  form.addEventListener('change', () => { discardAttempt(); adminTitleSync(form); });
+  form.addEventListener('input', () => { discardAttempt(); adminTitleSync(form); });
+  adminTitleSync(form);
   form.addEventListener('submit', event => {
     event.preventDefault();
     if (save.disabled) return;
     const storedId = form.dataset.storedId;
     let body = adminTitleFrozen(storedId, form.dataset.requestId);
     if (!body) {
-      const typed = manual.value.trim();
+      const typed = manual.value.replace(/\s+/g, ' ').trim();
       const selected = form.querySelector('input[name="title-review-choice"]:checked');
       const value = typed || (selected ? selected.value : '');
       if (!value) { result.textContent = form.querySelector('input[name="title-review-choice"]') ? 'Выберите вариант или введите название.' : 'Введите название.'; return; }
       if (!form.dataset.requestId) form.dataset.requestId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
-      body = {filmId: form.dataset.filmId, requestId: form.dataset.requestId, mode: typed ? 'manual' : 'alias', value, expectedVersion: form.dataset.version};
+      body = {filmId: form.dataset.filmId, requestId: form.dataset.requestId, mode: typed ? 'manual' : 'alias', value, expectedVersion: form.dataset.version, effect: prefer && prefer.checked ? 'promote' : 'add_alias'};
       const basis = form.querySelector('[name="basis"]').value;
       if (basis.trim()) body.basis = basis;
       adminTitleHold(storedId, body);
@@ -361,35 +548,36 @@ function adminBindTitleReview(detail) {
     }
     form.dataset.requestId = body.requestId;
     form.dataset.busy = '1';
-    sync();
+    adminTitleSync(form);
     result.textContent = 'Записываем…';
     adminSaveFilmTitle(storedId, body).then(response => {
       form.dataset.busy = '0';
       if (response.ok) {
         adminTitleDrop();
-        accept.checked = false;
-        sync();
+        if (prefer) prefer.checked = false;
+        adminTitleSync(form);
         const payload = response.body;
-        result.textContent = payload && payload.changed === false ? 'Название уже такое. Новой записи нет.' : 'Название записано. Обновляю карточку.';
+        const duplicate = payload && payload.reason === 'duplicate_alias';
+        result.textContent = duplicate ? 'Такой вариант уже есть. Новой записи нет.' : payload && payload.changed === false ? 'Название уже такое. Новой записи нет.' : body.effect === 'add_alias' ? 'Вариант добавлен. Предпочтительное название не изменилось.' : 'Название записано. Обновляю карточку.';
         result.focus();
         onAdminRefresh();
         return;
       }
       if (!adminTitleFrozen(storedId, body.requestId)) {
-        sync();
+        adminTitleSync(form);
         result.textContent = 'Поле изменено, прошлая отправка отменена. Отправьте название ещё раз.';
         result.focus();
         return;
       }
       if (response.error === 'network') {
-        sync();
+        adminTitleSync(form);
         result.textContent = 'Нет ответа от сервера. Можно повторить: это будет та же запись, без второй правки.';
         result.focus();
         return;
       }
       if (response.status === 503 && response.error === 'readback_failed') {
-        sync();
-        const kept = {requestId: body.requestId, value: body.value, mode: body.mode, basis: body.basis || ''};
+        adminTitleSync(form);
+        const kept = JSON.parse(JSON.stringify(body));
         result.textContent = 'Неизвестно, записалось ли название. Сверяю карточку.';
         result.focus();
         Promise.resolve(onAdminRefresh()).then(view => {
@@ -398,8 +586,8 @@ function adminBindTitleReview(detail) {
         });
         return;
       }
-      accept.checked = false;
-      sync();
+      if (prefer) prefer.checked = false;
+      adminTitleSync(form);
       discardAttempt();
       const reason = response.error;
       result.textContent = reason === 'version_conflict' ? 'Карточка уже изменилась. Обновите страницу и повторите.' : reason === 'request_id_reused' ? 'Этот запрос уже записан с другим текстом. Отправьте название ещё раз.' : 'Записать не удалось' + (reason ? ': ' + reason : '') + '. Название не изменено.';

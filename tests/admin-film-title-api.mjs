@@ -318,4 +318,77 @@ seed();
   assert.ok(overlay().films.d5.aliases.some(alias => alias.value === 'Из словаря'));
 }
 
+seed();
+{
+  puts = [];
+  detail = await call('/api/admin/films/film%3Ad5');
+  const peopleBeforeAlias = JSON.stringify(overlay().people);
+  const added = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias', mode: 'manual', value: 'Мошенница', basis: 'Вариант перевода', effect: 'add_alias', expectedVersion: detail.body.item.titleReview.version});
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.equal(added.body.changed, true);
+  assert.equal(added.body.titleReview.preferred.value, DICTIONARY);
+  assert.notEqual(added.body.titleReview.preferred.authority, 'owner');
+  assert.equal(overlay().films.d5.localization, null, 'an alias-only slice does not store an owner localization');
+  assert.equal(audit()[0].effect, 'alias_added');
+  assert.equal(audit()[0].requestId, 'req-alias');
+  assert.equal(audit()[0].version.after, added.body.version);
+  assert.ok(overlay().films.d5.aliases.some(alias => alias.value === 'Мошенница' && alias.provenance.authority === 'owner' && alias.provenance.added === 'alias'));
+  assert.equal(JSON.stringify(overlay().people), peopleBeforeAlias);
+  assert.equal(puts.filter(item => item.key === OVERLAY).length, 1);
+  const putsBefore = puts.length;
+  const replay = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias', mode: 'manual', value: 'Мошенница', basis: 'Вариант перевода', effect: 'add_alias', expectedVersion: 'title-review:1:stale'});
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.idempotent, true);
+  assert.equal(replay.body.changed, false);
+  assert.equal(puts.length, putsBefore);
+  const reused = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias', mode: 'manual', value: 'Мошенница', basis: 'Вариант перевода', effect: 'promote', expectedVersion: added.body.version});
+  assert.equal(reused.status, 409);
+  assert.equal(reused.body.reason, 'request_id_reused');
+  const again = await call('/api/admin/films/film%3Ad5');
+  assert.equal(again.body.item.preferred, DICTIONARY);
+  assert.ok(again.body.item.aliases.some(alias => alias.value === 'Мошенница'));
+  assert.equal(again.body.item.localization.provenance.authority, undefined);
+  const byAlias = await call('/api/admin/films?q=' + encodeURIComponent('Мошенница'));
+  assert.equal(byAlias.body.items.length, 1);
+  assert.equal(byAlias.body.items[0].preferred, DICTIONARY);
+  const byPreferred = await call('/api/admin/films?q=' + encodeURIComponent(DICTIONARY));
+  assert.equal(byPreferred.body.items.length, 1);
+  assert.equal(byPreferred.body.items[0].preferred, DICTIONARY);
+  const programme = await call('/api/programme');
+  assert.equal(programme.body.films[0].title, DICTIONARY);
+  assert.notEqual(programme.body.films[0].titleAuthority, 'owner');
+  assert.equal(programme.body.films[0].aliases.includes('Мошенница'), true);
+  const watch = await call('/api/watchlist');
+  assert.equal(watch.body.films[0].title, DICTIONARY);
+  assert.equal(watch.body.films[0].aliases.includes('Мошенница'), true);
+  const duplicate = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias-dup', mode: 'manual', value: 'Мошенница', effect: 'add_alias', expectedVersion: again.body.item.titleReview.version});
+  assert.equal(duplicate.status, 200, JSON.stringify(duplicate.body));
+  assert.equal(duplicate.body.changed, false);
+  assert.equal(duplicate.body.reason, 'duplicate_alias');
+  assert.equal(puts.length, putsBefore, 'a duplicate alias does not put');
+  const fresh = await call('/api/admin/films/film%3Ad5');
+  const promoted = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias-promote', mode: 'alias', value: 'Мошенница', effect: 'promote', expectedVersion: fresh.body.item.titleReview.version});
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.body));
+  assert.equal(promoted.body.titleReview.preferred.value, 'Мошенница');
+  assert.equal(promoted.body.titleReview.preferred.authority, 'owner');
+  assert.ok(overlay().films.d5.aliases.some(alias => alias.value === DICTIONARY && alias.provenance.previousPreferred === true));
+  const back = await call('/api/admin/films/film%3Ad5');
+  const restored = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias-restore', mode: 'alias', value: DICTIONARY, effect: 'promote', expectedVersion: back.body.item.titleReview.version});
+  assert.equal(restored.status, 200, JSON.stringify(restored.body));
+  assert.equal(restored.body.titleReview.preferred.value, DICTIONARY);
+  assert.equal(JSON.stringify(overlay().people), peopleBeforeAlias);
+  records.get('programme.json').films[0].title = 'Republished alias';
+  records.get(programmeKey).films[0].title = 'Republished alias';
+  const republished = await call('/api/programme');
+  assert.notEqual(republished.body.films[0].title, 'Мошенница');
+  assert.equal(republished.body.films[0].aliases.includes('Мошенница'), true);
+}
+
+{
+  const doc = {contractVersion: 1, films: {d5: {filmId: 'film:d5', localization: null, aliases: [], titleReviews: [{requestId: 'req-alias', effect: 'alias_added', to: {value: 'Мошенница'}, version: {after: 'title-review:1:after'}}]}}, people: {}};
+  assert.equal(vm.runInContext('filmTitleStored(' + JSON.stringify(doc) + ', "d5", "req-alias", "title-review:1:after", {review:{effect:"alias_added", to:{value:"Мошенница"}}})', context), false);
+  doc.films.d5.aliases = [{kind: 'title', value: 'Мошенница'}];
+  assert.equal(vm.runInContext('filmTitleStored(' + JSON.stringify(doc) + ', "d5", "req-alias", "title-review:1:after", {review:{effect:"alias_added", to:{value:"Мошенница"}}})', context), true);
+}
+
 console.log('admin film title review: conditional overlay write, replay, conflict, programme and watchlist');

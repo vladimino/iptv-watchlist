@@ -266,9 +266,18 @@
 .title-review fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 12px;padding:10px 12px}
 .title-review legend{padding:0 4px}
 .title-review-options{display:flex;flex-direction:column;gap:8px}
-.title-review-option{display:flex;gap:8px;align-items:baseline}
-.title-review label,.title-review-accept{display:block;margin:10px 0}
+.title-review-option{display:flex;gap:8px;align-items:center;min-height:44px}
+.title-review label,.title-review-prefer{display:block;margin:10px 0}
+.title-review-prefer{min-height:44px;display:flex;gap:8px;align-items:center}
+.title-review-preview{margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px}
 .title-review input[type="text"],.title-review textarea{width:100%;max-width:100%;box-sizing:border-box;font:inherit}
 .title-review button{min-height:44px;margin-top:4px}
-.title-review-result:focus{outline:2px solid var(--lime);outline-offset:2px}
-@media(max-width:800px){.title-review button{width:100%}}
+.title-review-result:focus,.title-review-preview:focus{outline:2px solid var(--lime);outline-offset:2px}
+.admin-technical{min-width:0;margin:12px 0}
+.admin-technical summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.admin-technical summary:focus{outline:2px solid var(--lime);outline-offset:2px}
+.title-review-journal{margin:12px 0}
+.title-review-journal summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.title-review-journal summary:focus{outline:2px solid var(--lime);outline-offset:2px}
+.admin-technical dl,.admin-technical ul{overflow-wrap:anywhere}
+@media(max-width:800px){.title-review button,.title-review input[type="text"],.title-review textarea{width:100%}}
