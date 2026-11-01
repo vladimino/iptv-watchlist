@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Production entry for the metadata cache cutover (ADR 0073). Default is read-only.
-// --apply sends only migrations/0006_metadata_cache.sql. --load copies the live metadata.json
+// --apply sends only migrations/0006_metadata_cache.sql. The D1 token is sent only to
+// https://api.cloudflare.com/client/v4. --load copies the live metadata.json
 // into D1 and leaves mode r2. --activate flips the marker r2 to d1. Each write needs its own
 // --confirm and --target iptv. This script refuses --revert, never writes R2, and never calls
 // Time Travel restore. It does not replace scripts/metadata-cache-authority.mjs, which stays
@@ -10,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {activateMetadataCache, importMetadataCache} from '../src/metadata-cache.js';
-import {createD1Adapter, D1Error, endpointFor, renderSql} from './d1-backfill.mjs';
+import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
 
@@ -171,9 +172,20 @@ function productionTarget(env){
  if(!/^[0-9a-f]{32}$/.test(accountId)||!apiToken)throw new OperatorStop('configuration',2);
  if(accountId!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('account_mismatch',3);
  if(configuredId&&configuredId!==PRODUCTION_DATABASE_ID)throw new OperatorStop('database_id_mismatch',3);
- let endpoint;
- try{endpoint=endpointFor(env.D1_BACKFILL_ENDPOINT);}catch(error){throw normalize(error);}
- return {accountId, apiToken, endpoint, scratchDatabaseId, maxBatchStatements:BATCH_STATEMENTS, maxBatchBytes:BATCH_BYTES};
+ return {accountId, apiToken, endpoint:productionEndpoint(env), scratchDatabaseId, maxBatchStatements:BATCH_STATEMENTS, maxBatchBytes:BATCH_BYTES};
+}
+
+// This operator is production-only. An inherited endpoint must not receive the live token.
+// Tests inject fetchImpl; they do not retarget the origin.
+function productionEndpoint(env){
+ const value=String(env.D1_BACKFILL_ENDPOINT||'').trim();
+ if(!value)return DEFAULT_ENDPOINT;
+ let url;
+ try{url=new URL(value);}catch{throw new OperatorStop('endpoint_refused',3);}
+ if(url.username||url.password||url.search||url.hash)throw new OperatorStop('endpoint_refused',3);
+ const endpoint=url.origin+url.pathname.replace(/\/$/,'');
+ if(endpoint!==DEFAULT_ENDPOINT)throw new OperatorStop('endpoint_refused',3);
+ return endpoint;
 }
 
 function requireScratch(target){

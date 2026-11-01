@@ -34,7 +34,6 @@ function baseEnv(overrides={}){
   D1_BACKFILL_ACCOUNT_ID:PRODUCTION_ACCOUNT_ID,
   D1_BACKFILL_API_TOKEN:TOKEN,
   D1_BACKFILL_SCRATCH_DATABASE_ID:SCRATCH_ID,
-  D1_BACKFILL_ENDPOINT:'http://127.0.0.1',
   R2_SNAPSHOT_ACCOUNT_ID:PRODUCTION_ACCOUNT_ID,
   R2_SNAPSHOT_ACCESS_KEY_ID:'test-access',
   R2_SNAPSHOT_SECRET_ACCESS_KEY:SECRET,
@@ -172,6 +171,19 @@ assert.match(badTarget.stderr,/target_invalid/);
  const database=await runMetadataCacheProduction({argv:argv(['--target','iptv']),env:baseEnv({D1_BACKFILL_DATABASE_ID:'00000000-0000-4000-8000-000000000099'}),fetchImpl(){throw new Error('called');},now:()=>NOW});
  assert.equal(database.exit,3);
  assert.equal(database.result.reason,'database_id_mismatch');
+ let calls=0;
+ const fetchImpl=(url,init={})=>{calls++;const header=new Headers(init.headers||{}).get('authorization')||'';if(header.includes(TOKEN))throw new Error('token sent');throw new Error('called '+url);};
+ for(const endpoint of ['https://evil.example','http://127.0.0.1','http://127.0.0.1:8787','https://api.cloudflare.com','https://api.cloudflare.com/client/v4/extra','https://user:'+TOKEN+'@evil.example/client/v4']){
+  const refusedEndpoint=await runMetadataCacheProduction({argv:argv(['--target','iptv']),env:baseEnv({D1_BACKFILL_ENDPOINT:endpoint}),fetchImpl,now:()=>NOW});
+  assert.equal(refusedEndpoint.exit,3,endpoint);
+  assert.equal(refusedEndpoint.result.reason,'endpoint_refused');
+  assert.equal(refusedEndpoint.result.writes,false);
+  assert.equal(refusedEndpoint.result.writeState,'none');
+  const text=JSON.stringify(refusedEndpoint.result);
+  assert.equal(text.includes(TOKEN),false,endpoint);
+  assert.equal(text.includes('evil.example'),false,endpoint);
+ }
+ assert.equal(calls,0);
 }
 
 {
@@ -202,7 +214,12 @@ assert.match(badTarget.stderr,/target_invalid/);
  assert.equal(status.result.r2.metadata.keys,2);
  assert.equal(status.result.writers.sync,'idle');
  assert.equal(status.result.writers.projection,'idle');
+ assert.equal(status.result.writeState,'none');
  assertQuiet(status.result);
+ const canonical=await execute(['--target','iptv'],installed,{D1_BACKFILL_ENDPOINT:'https://api.cloudflare.com/client/v4/'});
+ assert.equal(canonical.exit,0,JSON.stringify(canonical.result));
+ assert.equal(canonical.result.schemaVersion,5);
+ assert.equal(installed.calls.urls.some(url=>url.includes('/d1/database/')),true);
  assert.equal(installed.calls.urls.some(url=>url.includes('time_travel/restore')),false);
  const bareD1=await install({schema:5});
  const unconfigured=await execute(['--target','iptv'],bareD1,{R2_SNAPSHOT_ACCOUNT_ID:'',R2_SNAPSHOT_ACCESS_KEY_ID:'',R2_SNAPSHOT_SECRET_ACCESS_KEY:'',R2_SNAPSHOT_BUCKET:''});
