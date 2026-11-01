@@ -6,6 +6,9 @@
   "workers_dev": true,
   "preview_urls": false,
   "keep_vars": true,
+  "vars": {
+    "PREDICTION_DB_REQUIRED": "on"
+  },
   "observability": {
     "enabled": true
   },

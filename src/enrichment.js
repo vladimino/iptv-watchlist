@@ -60,7 +60,7 @@ async function publishProfile(env,body){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.schemaVersion!==1||!Number.isInteger(body.version)||body.version<1)return json({error:'Invalid version or schemaVersion'},400);
  const issue=validateProfile(body.profile);if(issue)return json({error:issue},400);
- const stored=await env.BUCKET.get(profileKey),current=stored?await stored.json():null,currentEtag=stored?.etag||null;
+ const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openProfile(env),stored=head?null:await env.BUCKET.get(profileKey),current=head?head.value:(stored?await stored.json():null),currentEtag=head?head.object?.etag||null:stored?.etag||null;
  if(current&&body.version<=current.version)return json({error:'Version must increase',code:'version_not_increasing'},409);
  const profileHash=await contentHash(body.profile),next={version:body.version,profileHash},impact=body.changeImpact??null;
  let changedFields=profileChangedFields(null,body.profile),declarationSha256=null;
@@ -81,7 +81,12 @@ async function publishProfile(env,body){
   saved=existing;
  }
  const value={...saved,lineage:profileLineage(current,saved)};
- const moved=await env.BUCKET.put(profileKey,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});
+ let routed={handled:false};
+ try{if(head)routed=await PredictionD1.saveMutable(env,profileKey,value);}
+ catch(error){if(error?.code==='prediction_domain_cas')return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);throw error;}
+ let moved,settled=false;
+ try{moved=routed.handled?{etag:'d1'}:await env.BUCKET.put(profileKey,routed.text??JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});settled=true;}
+ finally{if(routed.token&&settled)await PredictionD1.completePredictionWrite(env,profileKey,routed.token);}
  if(moved===null)return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);
  try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}
  return json(value);
@@ -737,11 +742,11 @@ function safePredictionReason(value){
 const RUNNER_LEASE_KEY=ENRICHMENT_KEY+'runner-lease.json';
 const RUNNER_LEASE_TTL=15*60000;
 async function runnerLease(env,runId,operation='renew'){
- const object=await env.BUCKET.get(RUNNER_LEASE_KEY),old=object?await object.json():null,now=Date.now();
+ const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
  if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
  if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+RUNNER_LEASE_TTL};
- const saved=await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  if(saved===null){const current=await loadJSON(env,RUNNER_LEASE_KEY);return {status:operation==='acquire'?'already_running':'lease_lost',runId:current?.runId||null};}
  return {status:'owned',...value,...(operation==='acquire'&&old?.runId&&old.expiresAt<=now?{recoveredRunId:old.runId}:{})};
 }
@@ -876,11 +881,15 @@ async function observedPrediction(env,body,work,stage,requestId){
  return withPredictionCorrelation(response,correlation);
 }
 async function predictionWriter(env,work){
- const object=await env.BUCKET.get(PREDICTION_MUTATION_LEASE),old=object?await object.json():null;
+ const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,PREDICTION_MUTATION_LEASE),object=head?head.object:await env.BUCKET.get(PREDICTION_MUTATION_LEASE),old=head?head.value:(object?await object.json():null);
  if(old?.expiresAt>Date.now())return json({status:'busy',reason:'prediction_writer_busy',...scheduledRunFields()},409);
- const lease={id:crypto.randomUUID(),expiresAt:Date.now()+90000},saved=await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ const lease={id:crypto.randomUUID(),expiresAt:Date.now()+90000},saved=head?await PredictionD1.writeLease(env,head,lease):await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  if(saved===null)return json({status:'busy',reason:'prediction_writer_busy',...scheduledRunFields()},409);
- try{return await work();}finally{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
+ try{return await work();}finally{
+  const releaseHead=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,PREDICTION_MUTATION_LEASE);
+  if(releaseHead?.mode==='d1'){if(releaseHead.value?.id===lease.id)await PredictionD1.writeLease(env,releaseHead,{...lease,expiresAt:0});}
+  else{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
+ }
 }
 // ADR 0064: every write of the prediction queue is conditional on the etag of the object it read. A conflict re-reads the
 // queue and its inputs and rebuilds, a bounded number of times; exhaustion throws and writes nothing. A put that throws is
@@ -894,9 +903,9 @@ const putPredictionQueue=(env,object,queue)=>env.BUCKET.put(predictionQueueKey,J
 async function mutatePredictionQueue(env,apply,trigger){
  for(let attempt=0;attempt<PREDICTION_QUEUE_ATTEMPTS;attempt++){
   await predictionQueuePause(attempt);
-  const object=await env.BUCKET.get(predictionQueueKey);if(!object)return null;
-  const current=await object.json(),next=apply(cloneJSON(current));if(next==null)return current;
-  if(await putPredictionQueue(env,object,next)!==null)return next;
+  const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openQueue(env),object=head?head.object:await env.BUCKET.get(predictionQueueKey),current=head?head.queue:(object?await object.json():null);if(!current)return null;
+  const next=apply(cloneJSON(current));if(next==null)return current;
+  if((head?await PredictionD1.writeQueue(env,head,next):await putPredictionQueue(env,object,next))!==null)return next;
  }
  throw new PredictionQueueConflictError(trigger);
 }
@@ -938,18 +947,19 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrit
   await predictionQueuePause(attempt);
   // The queue is read before its inputs, so a rebuild never rests on a profile, index or programme older than the queue it
   // replaces. A caller's programme of another generation than the stored queue is replaced by the published one.
-  const object=await env.BUCKET.get(predictionQueueKey),previous=object?await object.json():null;
+  const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openQueue(env),object=head?head.object:await env.BUCKET.get(predictionQueueKey),previous=head?head.queue:(object?await object.json():null);
   const source=previous?.programmeRunId&&previous.programmeRunId!==report?.runId?await loadJSON(env,'programme.json')||report:report;
   const queue=await buildPredictionQueue(env,source,trigger,previous);if(!queue)return null;
   const next=amend?amend(queue)||queue:queue;
   if(beforeWrite)await beforeWrite();
-  if(await putPredictionQueue(env,object,next)!==null)return next;
+  if((head?await PredictionD1.writeQueue(env,head,next):await putPredictionQueue(env,object,next))!==null)return next;
  }
  throw new PredictionQueueConflictError(trigger);
 }
 async function buildPredictionQueue(env,report,trigger,previous){
  const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
- const [profile,index,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'epg/discovered-films.json')]);
+ const [profile,storedIndex,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'epg/discovered-films.json')]);
+ const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
  if(!profile||!report?.films)return null;
  const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
@@ -1312,7 +1322,7 @@ async function enrichmentComplete(env,body){
  const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
 async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,catalog,discovery,lease]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,RUNNER_LEASE_KEY)]);const films=report?allEnrichmentFilms(report,catalog):[];const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:queue?.pendingCount??null,discovery:discovery||null,queue};}
-async function enrichmentView(env){const [profile,index]=await Promise.all([loadJSON(env,profileKey),ensureInitialRatings(env)]),freshness=await predictionFreshness(env,profile);
+async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),ensureInitialRatings(env)]),index=typeof PredictionD1==='undefined'?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
  const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json')]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null,watched:item.watched===true?true:item.watched===false?false:null}];}))};}
 
