@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Operator entry for the metadata cache marker (ADR 0072). Default is read-only status.
+// Operator entry for the metadata cache marker (ADR 0073). Default is read-only status.
 // --load fills D1 from a local metadata.json and leaves mode r2. --activate sets mode d1
 // only when the import still matches that file. --revert sets mode r2 and keeps the rows.
 // Each write refuses without its own --confirm.

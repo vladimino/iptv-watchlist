@@ -1,4 +1,4 @@
-// ADR 0072. The metadata.json working set used by beginSync and metadataSync.
+// ADR 0073. The metadata.json working set used by beginSync and metadataSync.
 // Mode r2, and any database that is not schema v6 with these tables, keeps the R2 object.
 // Mode d1 reads and writes this table. A failed read does not fall back to the object.
 // This module does not import. The Worker bundle wraps it in a scope.

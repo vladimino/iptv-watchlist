@@ -49,7 +49,7 @@ const programmeKey=run=>'epg/generations/'+run+'/programme.json',catalogKey=run=
 const VIEW_INDEX=constant('ENRICHMENT_KEY')+'view-index.json',PROFILE=constant('profileKey'),QUEUE=constant('predictionQueueKey'),CONTINUATION=constant('CONTINUATION_KEY');
 const H=3600000,D=86400000,NOW=Date.now();
 const ago=ms=>new Date(NOW-ms).toISOString(),ahead=ms=>new Date(NOW+ms).toISOString();
-const HEALTH_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json',VIEW_INDEX,PROFILE,QUEUE,CONTINUATION,catalogKey(G1)];
+const HEALTH_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',VIEW_INDEX,PROFILE,QUEUE,CONTINUATION,catalogKey(G1)];
 const profile={version:1,profileHash:'p1'};
 const prediction=(extra={})=>({predictedRating:4.2,probability4Plus:.7,confidence:'high',matchSignals:['x'],mainRisk:'y',moodLabels:['мрачный'],tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1,generatedAt:ago(2*D),...extra});
 const fingerprint={fingerprintHash:'f',plotMechanics:['investigation'],moodLabels:['мрачный'],execution:{payoff:'strong',pacing:'unknown'}};
@@ -80,7 +80,7 @@ const call=async(path,init)=>{const response=await worker.fetch(new Request('htt
 const group=(body,predicate)=>body.health.groups.filter(predicate);
 const oneGroup=(body,predicate,label)=>{const found=group(body,predicate);assert.equal(found.length,1,label+': '+JSON.stringify(found.map(item=>item.key)));return found[0];};
 
-// 1. The bounded read: ten object reads in a fixed order, no list, no write, no request, and the admin pin.
+// 1. The bounded read: eleven object reads in a fixed order, no list, no write, no request, and the admin pin.
 seed();
 let r=await call('/api/admin/health');
 assert.equal(r.status,200,JSON.stringify(r.body).slice(0,400));

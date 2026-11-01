@@ -1,4 +1,4 @@
-// ADR 0072. The metadata cache becomes the beginSync/metadataSync working set only when the
+// ADR 0073. The metadata cache becomes the beginSync/metadataSync working set only when the
 // schema v6 marker is d1. Until that activation, including on schema v5, R2 stays the working set.
 // Counts below come from the fixture. A production sample is not the contract.
 import assert from 'node:assert/strict';

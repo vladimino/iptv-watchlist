@@ -1,6 +1,7 @@
 // Owner-only read API behind the existing Cloudflare Access application: GET /api/admin/*. One request reads one published
-// snapshot, the generation pointer, that generation's programme object and the two localization dictionaries (titles.json,
-// people.json), projects Film and Person records from it in memory and pages them with the pure query library (AdminQuery).
+// snapshot, the generation pointer, that generation's programme object, the two localization dictionaries (titles.json,
+// people.json) and the owner-review overlay (admin/owner-reviews.json), projects Film and Person records from it in
+// memory and pages them with the pure query library (AdminQuery).
 // Nothing here lists the bucket, falls back to the root programme object, reads a lease, the resolution ledger, the
 // discovery snapshot or an enrichment object, writes, starts work or calls another service. The contract is
 // docs/reference/api/admin.md; the read model is docs/reference/domain/admin-read-contract.md.
@@ -42,23 +43,23 @@ async function adminReadObject(bucket,key,cached){
  return {present:true,version:await adminDigest(text),uploaded,body:JSON.parse(text),reused:false};
 }
 function adminClock(value){if(typeof value!=='string'||!value)return null;const parsed=Date.parse(value);return Number.isFinite(parsed)?parsed:null;}
-function adminTuple(run,pointer,programme,titles,people){
- return {programmeRunId:run,generationEtag:pointer.version,programmeEtag:programme.version,titlesVersion:titles.present?titles.version:null,peopleVersion:people.present?people.version:null};
+function adminTuple(run,pointer,programme,titles,people,reviews){
+ return {programmeRunId:run,generationEtag:pointer.version,programmeEtag:programme.version,titlesVersion:titles.present?titles.version:null,peopleVersion:people.present?people.version:null,reviewsVersion:reviews.present?reviews.version:null};
 }
 function adminSameTuple(left,right){
- return !!left&&!!right&&left.programmeRunId===right.programmeRunId&&left.generationEtag===right.generationEtag&&left.programmeEtag===right.programmeEtag&&left.titlesVersion===right.titlesVersion&&left.peopleVersion===right.peopleVersion;
+ return !!left&&!!right&&left.programmeRunId===right.programmeRunId&&left.generationEtag===right.generationEtag&&left.programmeEtag===right.programmeEtag&&left.titlesVersion===right.titlesVersion&&left.peopleVersion===right.peopleVersion&&left.reviewsVersion===right.reviewsVersion;
 }
 function adminEncodePin(tuple){
- return ['1',tuple.programmeRunId,tuple.generationEtag,tuple.programmeEtag,tuple.titlesVersion??'',tuple.peopleVersion??''].map(part=>encodeURIComponent(part)).join('|');
+ return ['2',tuple.programmeRunId,tuple.generationEtag,tuple.programmeEtag,tuple.titlesVersion??'',tuple.peopleVersion??'',tuple.reviewsVersion??''].map(part=>encodeURIComponent(part)).join('|');
 }
 function adminDecodePin(raw){
  if(typeof raw!=='string'||!raw||raw.length>ADMIN_PIN_MAX)return null;
  const parts=raw.split('|');
- if(parts.length!==6||parts[0]!=='1')return null;
+ if(parts.length!==7||parts[0]!=='2')return null;
  let decoded;
  try{decoded=parts.map(part=>decodeURIComponent(part));}catch{return null;}
  if(!decoded[1]||!decoded[2]||!decoded[3])return null;
- return {programmeRunId:decoded[1],generationEtag:decoded[2],programmeEtag:decoded[3],titlesVersion:decoded[4]||null,peopleVersion:decoded[5]||null};
+ return {programmeRunId:decoded[1],generationEtag:decoded[2],programmeEtag:decoded[3],titlesVersion:decoded[4]||null,peopleVersion:decoded[5]||null,reviewsVersion:decoded[6]||null};
 }
 // The page cursor carries the pin it was minted under in front of the library cursor, so a cursor from another snapshot is
 // refused even when the projection happens to be identical.
@@ -87,24 +88,51 @@ function adminConflicts(list){
 // A Film record of the query library from one programme film: identity from the stored ids, localization from the owner
 // dictionary and the provisional title cache, metadata from the fields the film already carries. The dimensions this
 // snapshot cannot see (fingerprint, prediction) are left off the record instead of being reported as missing.
-function adminFilmRecord(film,titles,clock){
+// filmView only seeds the original and EPG titles. The published film's own alias list and the
+// dictionary entry's aliases are known title variants too, and the picker is built from this record.
+function adminExtraTitleAliases(film,dictionary,preferred){
+ const incoming=[];
+ const push=(value,provenance)=>{
+  if(typeof value!=='string')return;
+  const text=value.replace(/\s+/g,' ').trim();
+  if(!text||text===preferred)return;
+  incoming.push({kind:'title',value:text,provenance:provenance||{source:'programme'}});
+ };
+ for(const alias of Array.isArray(film?.aliases)?film.aliases:[]){
+  if(typeof alias==='string')push(alias,{source:'programme'});
+  else if(alias&&typeof alias.value==='string')push(alias.value,alias.provenance||{source:'programme'});
+ }
+ for(const alias of Array.isArray(dictionary?.aliases)?dictionary.aliases:[])push(alias,{source:'dictionary'});
+ return incoming;
+}
+function adminFilmRecord(film,titles,clock,reviews){
  if(!film||typeof film!=='object')return null;
  const id=film.id==null?'':String(film.id);
  if(!id)return null;
  const letterboxdId=id.startsWith('tmdb_')?null:id;
  const tmdbId=film.tmdbId==null||film.tmdbId===''?null:String(film.tmdbId);
  const original=film.original||null,titleRu=film.titleRu||null;
+ const dictionary=reviewedTitle(film)||null;
  const facts={
   letterboxdId,tmdbId,conflictingTmdbIds:null,localId:letterboxdId?'film:'+letterboxdId:null,now:clock,decision:null,
   metadata:{present:!!(film.metadataAt||film.discoveredAt||film.synopsis),metadataAt:film.metadataAt||film.discoveredAt||null,peopleVersion:film.peopleVersion??((film.directors||film.actors)?1:null),peopleNamesVersion:film.peopleNamesVersion,synopsisPresent:!!(film.synopsis||film.synopsisFetchedAt),failure:null,source:letterboxdId?'letterboxd':'tmdb'},
-  title:{original,titleRu,titleStatus:film.titleStatus||null,dictionary:reviewedTitle(film)||null,provisional:titles?.[id]||null,epgTitle:film.title&&film.title!==original&&film.title!==titleRu?film.title:null},
+  title:{original,titleRu,titleStatus:film.titleStatus||null,dictionary,provisional:titles?.[id]||null,epgTitle:film.title&&film.title!==original&&film.title!==titleRu?film.title:null},
   fingerprint:{present:false},prediction:{present:false},
  };
  const view=filmView(facts);
  if(!view)return null;
  const {fingerprint,prediction,predictionHistory,...record}=view;
- return {...record,storedId:id,preferred:view.localization?.value??null,year:Number.isFinite(film.year)?film.year:null,localizationConflicts:adminConflicts(film.titleConflicts)};
+ const preferred=view.localization?.value??null;
+ const aliases=typeof mergeAliases==='function'?mergeAliases(record.aliases,adminExtraTitleAliases(film,dictionary,preferred)):record.aliases;
+ return adminApplyOwnerFilm({...record,aliases,storedId:id,preferred,year:Number.isFinite(film.year)?film.year:null,localizationConflicts:adminConflicts(film.titleConflicts)},reviews&&reviews[id]);
 }
+function adminApplyOwnerFilm(record,entry){
+ const localization=entry&&entry.localization;
+ if(!localization||localization.status!=='reviewed'||localization.provenance?.authority!=='owner')return record;
+ const aliases=typeof mergeAliases==='function'?mergeAliases(entry.aliases||[],record.aliases||[]):(entry.aliases||record.aliases);
+ return {...record,localization,aliases,titleReviews:Array.isArray(entry.titleReviews)?entry.titleReviews:[],localizationConflicts:Array.isArray(entry.localizationConflicts)?entry.localizationConflicts:record.localizationConflicts,preferred:localization.value??null};
+}
+function adminTitleReview(film){return typeof titleReviewState==='function'?titleReviewState(film):null;}
 function adminPersonRecord(person,people,clock){
  const roleId=typeof person?.id==='string'?person.id:'';
  if(!roleId)return null;
@@ -113,10 +141,11 @@ function adminPersonRecord(person,people,clock){
  if(!view)return null;
  return {...view,preferred:view.localization?.value??null,localizationConflicts:adminConflicts(person.nameConflicts)};
 }
-function adminProjection(programme,titles,people,clock){
+function adminProjection(programme,titles,people,clock,reviews){
  const films=[],seenFilms=new Set();
+ const filmReviews=reviews&&typeof reviews.films==='object'&&!Array.isArray(reviews.films)?reviews.films:{};
  for(const film of Array.isArray(programme?.films)?programme.films:[]){
-  const record=adminFilmRecord(film,titles,clock);
+  const record=adminFilmRecord(film,titles,clock,filmReviews);
   if(!record||seenFilms.has(record.storedId))continue;
   seenFilms.add(record.storedId);films.push(record);
  }
@@ -150,16 +179,18 @@ async function adminLoadSnapshot(env,hasPin){
   }
   const titles=await adminReadObject(bucket,ADMIN_TITLES_KEY,cache?.titles||null);
   const people=await adminReadObject(bucket,ADMIN_PEOPLE_KEY,cache?.people||null);
-  const tuple=adminTuple(run,pointer,programme,titles,people);
+  const reviews=await adminReadObject(bucket,'admin/owner-reviews.json',cache?.reviews||null);
+  const tuple=adminTuple(run,pointer,programme,titles,people,reviews);
   if(cache&&adminSameTuple(cache.tuple,tuple))return cache;
   const programmeUpdatedAt=typeof programme.body.updatedAt==='string'&&programme.body.updatedAt?programme.body.updatedAt:programme.uploaded||(typeof pointer.body.publishedAt==='string'?pointer.body.publishedAt:null);
   const titlesUpdatedAt=titles.present?(typeof titles.body?.updatedAt==='string'&&titles.body.updatedAt?titles.body.updatedAt:titles.uploaded):null;
   const peopleUpdatedAt=people.present?(typeof people.body?.updatedAt==='string'&&people.body.updatedAt?people.body.updatedAt:people.uploaded):null;
   const skewReasons=adminSkew(programmeUpdatedAt,titles,titlesUpdatedAt,people,peopleUpdatedAt);
   const clockMs=adminClock(programmeUpdatedAt),clock=clockMs===null?null:new Date(clockMs).toISOString();
-  const records=adminProjection(programme.body,titles.present&&titles.body&&typeof titles.body==='object'?titles.body:{},people.present&&people.body&&typeof people.body==='object'?people.body:{},clock);
+  const reviewBody=reviews.present&&reviews.body&&typeof reviews.body==='object'?reviews.body:{};
+  const records=adminProjection(programme.body,titles.present&&titles.body&&typeof titles.body==='object'?titles.body:{},people.present&&people.body&&typeof people.body==='object'?people.body:{},clock,reviewBody);
   const snapshot={
-   tuple,pointer:{version:pointer.version,body:pointer.body},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},records,
+   tuple,pointer:{version:pointer.version,body:pointer.body},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},reviews:{version:reviews.version,body:reviews.present?reviews.body:null,present:reviews.present},records,
    info:{programmeRunId:run,programmeUpdatedAt,titlesUpdatedAt,peopleUpdatedAt,skew:skewReasons.length>0,skewReasons,films:records.films.length,people:records.people.length},
   };
   ADMIN_SNAPSHOT_CACHE=snapshot;
@@ -212,6 +243,7 @@ async function adminReadRoute(request,env,url){
  if(id!==null){
   const item=kind==='film'?AdminQuery.getFilm(films,id):AdminQuery.getPerson(people,id);
   if(!item)return json({...base,error:'not_found'},404);
+  if(kind==='film')return json({...base,kind,item:{...item,titleReview:adminTitleReview(item)}});
   return json({...base,kind,item});
  }
  let records=kind==='film'?films:people,result;

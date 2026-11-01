@@ -55,4 +55,4 @@ Not decided here: the order and mechanics of each write flip, the person merge m
 
 ## Follow-ups
 
-[AIR-275](https://trello.com/c/4x7hH0gI) phases 2–4; [AIR-201](https://trello.com/c/1uvzKiGg) and [AIR-44](https://trello.com/c/ojtZjVc9) for the person identity model. [ADR 0072](0072-metadata-cache-d1-authority.md) proposes the metadata-cache flip behind one D1 marker.
+[AIR-275](https://trello.com/c/4x7hH0gI) phases 2–4; [AIR-201](https://trello.com/c/1uvzKiGg) and [AIR-44](https://trello.com/c/ojtZjVc9) for the person identity model. [ADR 0073](0073-metadata-cache-d1-authority.md) proposes the metadata-cache flip behind one D1 marker.

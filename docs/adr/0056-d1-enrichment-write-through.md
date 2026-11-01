@@ -99,6 +99,6 @@ Rollback of `on` means unsetting the flag. The rows it wrote stay until a Time T
 
 ## Follow-ups
 
-- The write flip of each enrichment writer (phase 2 continued). [ADR 0072](0072-metadata-cache-d1-authority.md) proposes that flip for the metadata cache alone, gated by `metadata_cache_authority.mode`, and only for the metadata records the projector reads.
+- The write flip of each enrichment writer (phase 2 continued). [ADR 0073](0073-metadata-cache-d1-authority.md) proposes that flip for the metadata cache alone, gated by `metadata_cache_authority.mode`, and only for the metadata records the projector reads.
 - [AIR-44](https://trello.com/c/ojtZjVc9) person links, written as a reproducible step.
 - Credit provenance, if the approximate ownership rule ever bites.

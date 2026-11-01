@@ -11,15 +11,17 @@ import {scoped} from '../scripts/bundle-scope.mjs';
 const html = fs.readFileSync('public/admin.html', 'utf8');
 const page = fs.readFileSync('public/admin.js', 'utf8');
 const client = fs.readFileSync('src/admin/client.js', 'utf8');
+const titleClient = fs.readFileSync('src/admin/film-title-client.js', 'utf8');
 const css = fs.readFileSync('public/admin.css', 'utf8');
 const movie = fs.readFileSync('public/app.js', 'utf8');
 const movieHtml = fs.readFileSync('public/index.html', 'utf8');
 const worker = fs.readFileSync('src/worker.js', 'utf8');
 const build = fs.readFileSync('build.mjs', 'utf8');
 const healthView = fs.readFileSync('src/admin/health-view.js', 'utf8');
-const bundle = bundleAdmin([client, healthView, page]);
+const bundle = bundleAdmin([client, titleClient, healthView, page]);
 
-// Static boundary: the page is owner-only through the existing Access session, GET only, no token, no other API.
+// Static boundary: the page is owner-only through the existing Access session. The catalogue reads are GET. The one
+// write in this bundle is the confirmed film title. No token, no other API.
 assert.doesNotMatch(html, /демонстрационные|Это демонстрационные данные/i);
 assert.match(html, /ТОЛЬКО ЧТЕНИЕ/);
 for (const id of ['admin-search', 'admin-queues', 'admin-queues-note', 'admin-results', 'admin-detail', 'admin-empty', 'admin-error', 'admin-loading', 'admin-stale', 'admin-refresh', 'admin-snapshot', 'admin-snapshot-text']) assert.match(html, new RegExp(`id="${id}"`), id);
@@ -27,7 +29,12 @@ assert.ok(html.indexOf('id="admin-search"') < html.indexOf('id="admin-queues"') 
 assert.match(html, /<script src="\/admin\.js"><\/script>/);
 assert.doesNotMatch(html, /type="module"|fetch\(|\/api\/|programme\.json/);
 assert.match(client, /const ADMIN_API='\/api\/admin'/);
-assert.doesNotMatch(bundle, /admin-query|\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|programme\.json|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
+assert.match(build, /src\/admin\/film-title-client\.js/);
+assert.doesNotMatch(client, /method:\s*['"]POST/, 'the shared read client stays GET');
+assert.equal(bundle.split("method:'POST'").length - 1, 1, 'the admin bundle posts only the confirmed film title');
+assert.match(bundle, /X-IPTV-Admin-Action':'film_title_review'/);
+const bundleWithoutTitleWrite = bundle.replace("method:'POST'", 'method:read');
+assert.doesNotMatch(bundleWithoutTitleWrite, /admin-query|\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|programme\.json|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page script reaches the API only through the client');
 assert.doesNotMatch(healthView, /\bfetch\(|\/api\//, 'the health view renders answers and makes no request of its own');
 for (const id of ['admin-health', 'admin-catalog', 'admin-view-catalog', 'admin-view-health', 'admin-health-refresh', 'admin-health-stale-refresh', 'admin-health-summary', 'admin-health-sources', 'admin-health-subsystems', 'admin-health-issues', 'admin-health-empty', 'admin-health-loading', 'admin-health-error', 'admin-health-stale']) assert.match(html, new RegExp(`id="${id}"`), id);
@@ -39,7 +46,7 @@ assert.doesNotMatch(movieHtml, /id="admin-search"|admin-query/);
 assert.match(worker, /url\.pathname==='\/events'\?'\/':\/\^\\\/film\\\/\[A-Za-z0-9_-\]\{1,80\}\$\/\.test\(url\.pathname\)\?'\/':url\.pathname/);
 assert.match(worker, /\/api\/admin\//);
 assert.doesNotMatch(worker, /pathname==='\/admin'\?'\/'/);
-assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/health-view\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
+assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/film-title-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/health-view\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
 assert.match(build, /src\/domain\/admin-query\.js/);
 assert.match(css, /overflow-wrap:anywhere/);
 assert.match(css, /minmax\(0,1fr\)/);
@@ -114,6 +121,7 @@ function element(selector) {
     setAttribute(name, value) {attrs.set(selector + ':' + name, value);},
     getAttribute(name) {return attrs.get(selector + ':' + name) ?? null;},
     focus() {document.activeElement = this;},
+    querySelector() {return null;},
     closest(sel) {return sel === 'section' && selector === '#admin-results' ? nodes.get('#admin-results-section') : null;},
     insertAdjacentHTML(position, markup) {this.innerHTML += markup;},
     remove() {this.removed = true;},

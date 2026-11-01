@@ -1,4 +1,4 @@
--- Schema v6: the metadata.json working set and its authority marker (ADR 0072).
+-- Schema v6: the metadata.json working set and its authority marker (ADR 0073).
 -- Additive. Changes nothing of 0001-0005. A deploy does not apply this file.
 -- The inserted marker is mode r2. Applying this file does not start metadataSync
 -- reads or writes of these tables, and it does not change the cron.

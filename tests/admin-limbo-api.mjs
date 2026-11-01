@@ -114,7 +114,7 @@ const openStreams=()=>streams.opened.length-streams.consumed.length-streams.canc
 const resetStreams=()=>{streams.opened.length=0;streams.consumed.length=0;streams.cancelled.length=0;};
 const call=async(path,init)=>{const response=await worker.fetch(new Request('https://iptv.example'+path,init),env,{waitUntil(){throw new Error('background work on a GET');}});assert.equal(openStreams(),0,'every opened R2 body is consumed or cancelled after '+path);return {status:response.status,body:await response.json()};};
 const manifestKey=run=>DI.observationIndexManifestKey(run);
-const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json',QUEUE,INDEX,POINTER,manifestKey(G1)];
+const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',QUEUE,INDEX,POINTER,manifestKey(G1)];
 const byId=(r,id)=>r.body.items.find(item=>item.id===id);
 const q=object=>'?'+new URLSearchParams(object).toString();
 
@@ -126,11 +126,11 @@ assert.equal(r.status,200,JSON.stringify(r.body));
 assert.deepEqual(gets,SNAPSHOT_KEYS);
 assert.equal(lists,0);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);assert.deepEqual(heads,[],'no index, nothing to compare');
 assert.ok(!gets.includes('epg/discovery-resolution.json')&&!gets.includes('programme.json'));
-assert.match(r.body.pin,/^L2\|1%7C/);
+assert.match(r.body.pin,/^L2\|2%7C/);
 assert.equal(r.body.snapshot.programmeRunId,G1);
 assert.equal(r.body.snapshot.evaluatedAt,NOW);
 assert.equal(r.body.snapshot.queuePresent,true);assert.equal(r.body.snapshot.queueRefreshedAt,at(-H));assert.equal(r.body.snapshot.queueProgrammeRunId,G1);assert.equal(r.body.snapshot.indexPresent,true);
-assert.deepEqual(r.body.snapshot.sources,[POINTER,'epg/generations/<programmeRunId>/programme.json','titles.json','people.json',QUEUE,INDEX,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json']);
+assert.deepEqual(r.body.snapshot.sources,[POINTER,'epg/generations/<programmeRunId>/programme.json','titles.json','people.json','admin/owner-reviews.json',QUEUE,INDEX,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json']);
 assert.deepEqual(r.body.vocabulary.causes,['retry_eligible','stalled','backoff','pending','manual_review','stale_projection','external_archive','unknown']);
 assert.equal(r.body.limit,25);assert.equal(r.body.kind,null);assert.equal(r.body.age,null);
 assert.deepEqual(r.body.coverage.observations,{available:false,reason:'index_missing',state:'missing',programmeRunId:G1},'no index: unavailable, never none');

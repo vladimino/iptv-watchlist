@@ -50,7 +50,7 @@ The **one-chunk continuation** is executed inside the explicit step/request that
 The one Worker cron trigger runs only the [enrichment projector](../adr/0056-d1-enrichment-write-through.md), never a sync, EPG, discovery or prediction step. With `D1_ENRICHMENT_WRITE` unset it returns at once.
 
 - With `dry`, it reads the enrichment objects from R2 and the change keys from D1, and logs the diff.
-- With `on`, it also writes the changed Films and Persons to D1 under its lease, and it never writes R2. Sync clocks are included on that arrow at schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)), which is the applied production schema. While the schema v6 marker is absent or `r2`, that arrow is the Worker's only D1 write. When the marker is `d1`, the sync arrow also writes the metadata cache, and the projector reads those rows instead of `metadata.json` ([ADR 0072](../adr/0072-metadata-cache-d1-authority.md)). A deploy does not apply migration `0006` and does not switch the marker.
+- With `on`, it also writes the changed Films and Persons to D1 under its lease, and it never writes R2. Sync clocks are included on that arrow at schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)), which is the applied production schema. While the schema v6 marker is absent or `r2`, that arrow is the Worker's only D1 write. When the marker is `d1`, the sync arrow also writes the metadata cache, and the projector reads those rows instead of `metadata.json` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md)). A deploy does not apply migration `0006` and does not switch the marker.
 
 Runtime mode and configured Cloudflare Access policies must be rechecked for live-state claims.
 

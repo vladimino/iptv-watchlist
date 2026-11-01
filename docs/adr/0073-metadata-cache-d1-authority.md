@@ -1,10 +1,10 @@
-# ADR 0072: The metadata cache is owned by D1 only after its own marker is switched
+# ADR 0073: The metadata cache is owned by D1 only after its own marker is switched
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-01  
 **Recorded at:** 2026-11-01  
 **Approval source:** Owner approval to continue the metadata-cache move as a real reader and writer, recorded on [AIR-313](https://trello.com/c/jjjp0FhK). Acceptance of this record is architectural. Applying migration `0006`, importing rows, and switching the marker are separate approvals.  
-**Related work:** [AIR-313](https://trello.com/c/jjjp0FhK), [ADR 0070](0070-metadatasync-freshness-clocks.md), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0051](0051-d1-domain-r2-blobs.md)  
+**Related work:** [AIR-313](https://trello.com/c/jjjp0FhK), [ADR 0072](0072-owner-reviewed-localization-overlay.md), [ADR 0070](0070-metadatasync-freshness-clocks.md), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0051](0051-d1-domain-r2-blobs.md)
 **Supersedes:** [ADR 0070](0070-metadatasync-freshness-clocks.md) decision 6 in part, and only once this record is accepted and `metadata_cache_authority.mode` is `d1`: `beginSync` and `metadataSync` may use D1 as the working set. The four clocks and `film_sync_state` stay. [ADR 0056](0056-d1-enrichment-write-through.md) decision 1 in part, for metadata records only, in that same mode: the projector reads those records from D1 and still does not write R2. [ADR 0051](0051-d1-domain-r2-blobs.md) names this kind of per-domain flip; this record is that flip for the metadata cache alone. The rest of each record stands.  
 **Superseded by:** None
 
@@ -14,7 +14,7 @@
 
 [ADR 0070](0070-metadatasync-freshness-clocks.md) stores four clocks on `film_sync_state` for a Film row that already exists. That table cannot be the working set. A cache key with no Film row has nowhere to go, and the columns do not hold the synopsis, names, aliases, credits or the rest of the record `metadataSync` writes. A production read on 2026-10-31 found 421 keys in `metadata.json`, 396 of them matching a Film row and 25 matching none. Those counts are a sample from that read, not a contract.
 
-Reviewed titles and reviewed names already live on `film_dimension` and `person_dimension`. D1-only TMDB credits live on `film_person_credit`. Neither is a field of `metadata.json`. `tmdb` and `tmdb_tv` are different identities and both can appear on a cache record.
+Owner-confirmed titles and names live in `admin/owner-reviews.json` ([ADR 0072](0072-owner-reviewed-localization-overlay.md)). Projected reviewed values also live on `film_dimension` and `person_dimension`. D1-only TMDB credits live on `film_person_credit`. None of those is a field of `metadata.json`. `tmdb` and `tmdb_tv` are different identities and both can appear on a cache record.
 
 Production schema is v5. `D1_ENRICHMENT_WRITE=on`. The cron is `37 * * * *`. A code deploy must not start a new writer, and it must not add a Worker flag. There is no transaction that covers D1 and R2 together.
 
@@ -39,7 +39,7 @@ Not decided here: applying `0006` to production, importing the live object, sett
 ## Consequences
 
 - Until `0006` is applied, production behavior is the schema v5 projector and R2-backed `metadataSync`. After it is applied, and while the marker stays `r2`, those behaviors stay, and `/api/d1/status` reports `schemaVersion` 6 with `cacheMode` `r2` once the new tables are present. Version 5's success object does not gain those fields. Version 6 without the new tables is `schema: false`. Film and Person writes continue.
-- A cache commit does not write `film`, `film_person_credit`, `film_dimension` or `person_dimension`. Reviewed localization and D1-only credits are untouched by that commit.
+- A cache commit does not write `film`, `film_person_credit`, `film_dimension`, `person_dimension` or `admin/owner-reviews.json`. The owner-review overlay, projected reviewed localization and D1-only credits are untouched by that commit.
 - Pages that still read `metadata.json`, including the poster fallback and the started-mark lookup, read the mirror. In `d1` mode that mirror follows D1 and can lag by one failed put.
 - The backfill executor still requires schema version 4. A database at version 5 or 6 stops before a reload write.
 - `beginSync` and `metadataSync` read `schema_contract` before using `metadata.json`. If that read fails, they do not guess the marker. On schema v5 the read returns version 5 and the R2 path continues.
