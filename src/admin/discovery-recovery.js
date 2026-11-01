@@ -500,7 +500,34 @@ async function diUnstoredReceipt(env,submitted,confirmation,record){
  if(again.record?.receipt&&again.record.issued?.scopeKey===confirmation.scopeKey)return json(diReceiptBody(again.record,{replayed:true}));
  return diUnstoredBody(record);
 }
-// The decision already matches the stored after-image. Persist the receipt only. A second map put is not attempted.
+function diIssuanceBound(record,confirmation){
+ return AdminActions.bindIssuance(record?.issued,confirmation,new Date().toISOString());
+}
+// The stored command must be the effect and movie id inside the issued scope. A drifted record is not reconciled.
+function diCommandMatchesIssuance(record){
+ const issued=AdminActions.validateConfirmation(record?.issued);
+ const command=record?.command;
+ if(!issued||!command)return false;
+ const parsed=DiscoveryIdentity.parseIdentityVersion(issued.records[0]?.version);
+ return !!parsed&&parsed.effect===command.effect&&parsed.tmdbId===command.tmdbId;
+}
+// The original issuance has expired and the decision already matches. Say so. Do not store a receipt and do not put the map.
+async function diExpiredCommitted(env,stored,submitted){
+ const key=submitted.subject.id;
+ const afterHash=typeof stored.record.afterImage?.decisionHash==='string'?stored.record.afterImage.decisionHash:null;
+ let digest=null;
+ if(afterHash){
+  try{
+   const map=await env.BUCKET.get(DR_RESOLUTION_KEY);
+   const decisions=map?await map.json():null;
+   const current=decisions&&typeof decisions==='object'&&!Array.isArray(decisions)?decisions[key]:null;
+   digest=current&&typeof current==='object'&&!Array.isArray(current)?await discoveryDigest(DiscoveryIndex.canonicalJson(current)):null;
+  }catch{return drRefused('storage_unavailable',503);}
+ }
+ if(afterHash&&digest===afterHash)return json({replayed:false,reconciled:false,durable:false,decisionReadBack:true,receipt:null,state:'unknown',application:stored.record.application??null,index:stored.record.index??null,refusal:'confirmation_expired',error:'confirmation_expired',note:'The decision already matches this submission. The issued confirmation has expired, so no receipt was stored and the decision was not written again.'},409);
+ return drRefused('confirmation_expired',409,{decisionReadBack:false,note:'The issued confirmation has expired. Nothing was written.'});
+}
+// The decision already matches the stored after-image. Persist the receipt only, from the stored issuance. A second map put is not attempted.
 async function diReconcileRunning(env,stored,confirmation,submitted){
  const key=submitted.subject.id;
  const afterHash=typeof stored.record.afterImage?.decisionHash==='string'?stored.record.afterImage.decisionHash:null;
@@ -530,10 +557,17 @@ async function diExecute(request,env,url){
  const stored=object?{record:await object.json(),etag:object.etag}:{record:null,etag:null};
  if(!stored.record)return drRefused('confirmation_missing',409);
  if(stored.record.receipt){
-  if(stored.record.issued?.scopeKey!==confirmation.scopeKey)return drRefused('idempotency_conflict',409);
-  return json({replayed:true,receipt:stored.record.receipt,state:stored.record.state,application:stored.record.application??null,index:stored.record.index??null});
+  const bound=diIssuanceBound(stored.record,confirmation);
+  if(!bound.ok&&bound.refusal!=='confirmation_expired')return drRefused(bound.refusal,409);
+  return json(diReceiptBody(stored.record,{replayed:true}));
  }
- if(stored.record.state==='running')return await diReconcileRunning(env,stored,confirmation,submitted);
+ if(stored.record.state==='running'){
+  const bound=diIssuanceBound(stored.record,confirmation);
+  if(!bound.ok&&bound.refusal!=='confirmation_expired')return drRefused(bound.refusal,409);
+  if(!diCommandMatchesIssuance(stored.record))return drRefused('confirmation_mismatch',409);
+  if(!bound.ok)return await diExpiredCommitted(env,stored,submitted);
+  return await diReconcileRunning(env,stored,stored.record.issued,submitted);
+ }
  const command=stored.record.command;
  if(!command||command.effect!==parsed.effect||command.tmdbId!==parsed.tmdbId)return drRefused('confirmation_mismatch',409);
  const held=await drJson(env.BUCKET,DISCOVERY_LEASE_KEY);

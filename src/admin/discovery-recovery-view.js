@@ -337,6 +337,9 @@ function obsIdentityReceiptHtml(state) {
   if (!receipt) return '';
   const application = state.identityApplication || {};
   const shows = OBS_IDENTITY_SHOWS_COPY[application.shows] || '';
+  if (receipt.state === 'expired_committed') {
+    return '<div class="obs-identity-receipt" role="status" tabindex="-1"><p><span class="admin-status admin-status-ambiguous">Квитанция</span> Решение уже записано. Срок подтверждения истёк, поэтому квитанция не сохраняется и новое подтверждение этим ответом не выдаётся. Решение повторно не записывается.</p></div>';
+  }
   if (receipt.state === 'unstored' || (receipt.state === 'succeeded' && state.identityDurable === false)) {
     return '<div class="obs-identity-receipt" role="status" tabindex="-1"><p><span class="admin-status admin-status-ambiguous">Квитанция</span> Решение прочитано обратно, но квитанция владельца не сохранилась. Повтор этой же кнопки запишет квитанцию и не изменит решение ещё раз.</p></div>';
   }
@@ -381,7 +384,12 @@ function obsIdentityHtml(answer, state) {
     const before = plan.before ? (plan.before.status || '—') + (plan.before.tmdbId ? ' · ' + plan.before.tmdbId : '') : '—';
     const after = plan.after ? (plan.after.status || '—') + (plan.after.tmdbId ? ' · ' + plan.after.tmdbId : '') : '—';
     const shows = OBS_IDENTITY_SHOWS_COPY[state.identityApplication?.shows] || OBS_IDENTITY_SHOWS_COPY[identity.effect?.when] || '';
-    return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4>${provenance}${verifiedNow}${limit}<p class="obs-identity-preview">Сейчас: ${obsEscape(before)} → Станет: ${obsEscape(after)}. ${obsEscape(shows)}</p><p class="obs-confirmed" role="status">Подтверждение выдано для ключа «${obsEscape(key)}» в поколении ${obsEscape(run)}. Запись ещё не сделана.</p><p class="recovery-controls"><button type="button" class="admin-more" data-obs-identity-execute${state.identityBusy ? ' disabled aria-busy="true"' : ''}>Записать идентичность</button> <button type="button" class="admin-more" data-obs-identity-cancel${state.identityBusy ? ' disabled' : ''}>Отменить</button></p></section>`;
+    const savingReceipt = state.identityReceipt && (state.identityReceipt.state === 'unstored' || (state.identityReceipt.state === 'succeeded' && state.identityDurable === false));
+    const pending = savingReceipt
+      ? 'Решение уже записано. Эта кнопка сохраняет только квитанцию и не меняет решение ещё раз.'
+      : `Подтверждение выдано для ключа «${obsEscape(key)}» в поколении ${obsEscape(run)}. Запись ещё не сделана.`;
+    const executeLabel = savingReceipt ? 'Сохранить квитанцию' : 'Записать идентичность';
+    return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4>${provenance}${verifiedNow}${limit}<p class="obs-identity-preview">Сейчас: ${obsEscape(before)} → Станет: ${obsEscape(after)}. ${obsEscape(shows)}</p><p class="obs-confirmed" role="status">${pending}</p><p class="recovery-controls"><button type="button" class="admin-more" data-obs-identity-execute${state.identityBusy ? ' disabled aria-busy="true"' : ''}>${executeLabel}</button> <button type="button" class="admin-more" data-obs-identity-cancel${state.identityBusy ? ' disabled' : ''}>Отменить</button></p></section>`;
   }
   const effect = state.identityEffect === 'assign' || state.identityEffect === 'reject' ? state.identityEffect : '';
   const target = String(state.identityTarget || '');

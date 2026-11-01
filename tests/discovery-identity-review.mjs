@@ -212,6 +212,7 @@ assert.equal(again.body.identity.current.tmdbId, '11');
 assert.equal(again.body.identity.available, true);
 const replay = await post('identity-correct', {confirmation: assign.issued.body.confirmation});
 assert.equal(replay.body.replayed, true);
+assert.equal(replay.body.durable, true);
 assert.equal(replay.body.receipt.state, 'succeeded');
 
 await seed();
@@ -396,10 +397,83 @@ async function failFinalReceipt(mode) {
   assert.equal(JSON.stringify((await json(MAP))[KEY]), snapshot, 'reconciliation does not write the decision again');
   const third = await post('identity-correct', {confirmation: issued.issued.body.confirmation});
   assert.equal(third.body.replayed, true);
+  assert.equal(third.body.durable, true);
   assert.equal(third.body.receipt.state, 'succeeded');
 }
 await failFinalReceipt('throw');
 await failFinalReceipt('cas');
+
+// Receipt-only recovery accepts the stored issuance only. A rewritten confirmation writes nothing, and an expired original does not forge a receipt.
+function scopeFingerprint(text) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0;
+  return hash.toString(16).padStart(8, '0');
+}
+function canonicalScope(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonicalScope).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonicalScope(value[key])).join(',') + '}';
+  return JSON.stringify(value ?? null);
+}
+await seed();
+const boundIssue = await confirm('assign');
+let boundArmed = false;
+hooks.putNull = key => {
+  if (!boundArmed && key === MAP) {boundArmed = true; return false;}
+  return boundArmed && key.startsWith('admin/actions/discovery_identity_correct/');
+};
+const boundFirst = await post('identity-correct', {confirmation: boundIssue.issued.body.confirmation});
+hooks.putNull = null;
+assert.equal(boundFirst.body.decisionReadBack, true);
+const boundMap = JSON.stringify(await json(MAP));
+const boundKey = 'admin/actions/discovery_identity_correct/v1/' + boundIssue.issued.body.confirmation.idempotencyKey + '.json';
+const boundRecord = await json(boundKey);
+assert.equal(boundRecord.state, 'running');
+assert.equal(boundRecord.receipt, null);
+const quiet = () => log.puts.length;
+for (const edited of [
+  {...boundIssue.issued.body.confirmation, confirmedAt: '2020-01-01T00:00:00.000Z'},
+  {...boundIssue.issued.body.confirmation, expiresAt: '2099-01-01T00:00:00.000Z'},
+]) {
+  const puts = quiet();
+  const refused = await post('identity-correct', {confirmation: edited});
+  assert.equal(refused.body.refusal, 'confirmation_mismatch', JSON.stringify(refused.body));
+  assert.equal(refused.body.receipt ?? null, null);
+  assert.equal(JSON.stringify(await json(MAP)), boundMap);
+  assert.equal(quiet(), puts, 'a mismatched confirmation does not put');
+  assert.equal((await json(boundKey)).receipt, null);
+}
+const otherScope = JSON.parse(boundIssue.issued.body.confirmation.scopeKey);
+otherScope.records[0].version = otherScope.records[0].version.replace(':assign:', ':reject:');
+const otherKey = canonicalScope(otherScope);
+const otherEffect = {...boundIssue.issued.body.confirmation, scopeKey: otherKey, scopeFingerprint: scopeFingerprint(otherKey)};
+const effectPuts = quiet();
+const effectRefusal = await post('identity-correct', {confirmation: otherEffect});
+assert.equal(effectRefusal.body.refusal, 'confirmation_mismatch', JSON.stringify(effectRefusal.body));
+assert.equal(JSON.stringify(await json(MAP)), boundMap);
+assert.equal(quiet(), effectPuts);
+const drifted = await json(boundKey);
+drifted.command = {...drifted.command, effect: 'reject', tmdbId: '11'};
+await put(boundKey, drifted);
+const driftPuts = quiet();
+const driftRefusal = await post('identity-correct', {confirmation: boundIssue.issued.body.confirmation});
+assert.equal(driftRefusal.body.refusal, 'confirmation_mismatch');
+assert.equal(quiet(), driftPuts);
+await put(boundKey, boundRecord);
+const expiredStored = await json(boundKey);
+expiredStored.issued = {...expiredStored.issued, confirmedAt: '2020-01-01T00:00:00.000Z', expiresAt: '2020-01-01T00:10:00.000Z'};
+await put(boundKey, expiredStored);
+const expiredConfirmation = {...boundIssue.issued.body.confirmation, confirmedAt: expiredStored.issued.confirmedAt, expiresAt: expiredStored.issued.expiresAt};
+const expiredPuts = quiet();
+const expired = await post('identity-correct', {confirmation: expiredConfirmation});
+assert.equal(expired.status, 409);
+assert.equal(expired.body.refusal, 'confirmation_expired', JSON.stringify(expired.body));
+assert.equal(expired.body.decisionReadBack, true);
+assert.equal(expired.body.receipt, null);
+assert.equal(expired.body.durable, false);
+assert.equal(JSON.stringify(await json(MAP)), boundMap, 'an expired confirmation does not write the decision again');
+assert.equal(quiet(), expiredPuts, 'an expired confirmation stores no receipt');
+assert.equal((await json(boundKey)).state, 'running');
+assert.equal((await json(boundKey)).receipt, null);
 
 // Mode d1, and an unreadable v8 marker, write nothing even when the R2 pointer matches or lags.
 const publishedTables = ['published_epg_authority', 'published_epg_cas', 'published_epg_generation', 'published_epg_document', 'published_epg_member', 'published_epg_show', 'published_epg_stage', 'published_epg_stage_chunk', 'published_epg_stage_row'];

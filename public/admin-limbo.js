@@ -557,7 +557,16 @@ function onObsIdentityExecute(slot) {
   const pending = executeDiscoveryIdentity(entry.identityConfirmation).then(result => {
     entry.identityBusy = false;
     const body = result.body || {};
-    if (body.decisionReadBack && !body.receipt) {
+    const expiredCommitted = body.decisionReadBack && !body.receipt && (body.refusal === 'confirmation_expired' || result.error === 'confirmation_expired');
+    if (expiredCommitted) {
+      entry.identityReceipt = {state: 'expired_committed', refusal: 'confirmation_expired'};
+      entry.identityDurable = false;
+      entry.identityApplication = body.application || entry.identityApplication;
+      entry.identityIndex = body.index ?? null;
+      entry.identityReason = null;
+      entry.identityConfirmation = null;
+      entry.identityPlan = null;
+    } else if (body.decisionReadBack && !body.receipt) {
       entry.identityReceipt = {state: 'unstored'};
       entry.identityDurable = false;
       entry.identityApplication = body.application || entry.identityApplication;
@@ -571,7 +580,7 @@ function onObsIdentityExecute(slot) {
       entry.identityReason = null;
     } else if (body.receipt) {
       entry.identityReceipt = body.receipt;
-      entry.identityDurable = body.durable === true;
+      entry.identityDurable = body.receipt.state !== 'succeeded' || body.durable !== false;
       entry.identityApplication = body.application || entry.identityApplication;
       entry.identityIndex = body.index ?? null;
       entry.identityReason = body.reason || null;

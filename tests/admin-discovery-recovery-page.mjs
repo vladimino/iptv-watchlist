@@ -456,4 +456,35 @@ assert.match(identityPanel.innerHTML, /Показы каталога обнов�
 assert.equal(JSON.parse(await (await memory.get('epg/discovery-resolution.json')).text())[OTHER].status, 'no_confident_match');
 assert.equal(tmdbCalls, 0, 'the page correction calls no one');
 
+const savingHtml = V.obsRecoveryPanelHtml({...okAnswer, identity: {available: true, reason: 'eligible', programmeRunId: 'run-1', coverage: {scope: 'current_verified', complete: true}, current: {status: 'verified', tmdbId: '99'}, trusted: [{tmdbId: '99'}], rejectable: ['99'], effect: {when: 'next_ordinary_chunk'}}}, {slot: 'o1', identityConfirmation: {idempotencyKey: 'k'.repeat(20), expiresAt: '2026-10-31T12:10:00.000Z'}, identityReceipt: {state: 'unstored'}, identityDurable: false, identityPlan: {before: {status: 'verified', tmdbId: '99'}, after: {status: 'needs_verification'}}, identityApplication: {shows: 'not_this_action'}});
+assert.match(savingHtml, /Сохранить квитанцию/);
+assert.match(savingHtml, /Решение уже записано\. Эта кнопка сохраняет только квитанцию/);
+assert.doesNotMatch(savingHtml, /Запись ещё не сделана/);
+assert.match(V.obsRecoveryPanelHtml({...okAnswer, identity: {available: true, reason: 'eligible', programmeRunId: 'run-1', coverage: {scope: 'current_unresolved_with_decision', complete: true}, current: {status: 'verified', tmdbId: '11'}, trusted: [], rejectable: ['11'], effect: {when: 'next_ordinary_chunk'}}}, {slot: 'o1', identityReceipt: {state: 'expired_committed', refusal: 'confirmation_expired'}}), /Срок подтверждения истёк, поэтому квитанция не сохраняется/);
+
+// A replayed succeeded receipt without `durable` is the stored receipt, not the unsaved warning.
+ctx.fetch = async (input, init = {}) => {
+  if (String(input).includes('/identity-correct')) return new Response(JSON.stringify({receipt: {state: 'succeeded'}, replayed: true}), {status: 200, headers: {'content-type': 'application/json'}});
+  return fakeFetch(input, init);
+};
+run(`obsRecovery.get(${JSON.stringify(identitySlot)}).identityConfirmation = {capability: 'discovery_identity_correct', version: 1, expiresAt: '2026-10-31T12:10:00.000Z'}`);
+run(`obsRecovery.get(${JSON.stringify(identitySlot)}).identityReceipt = null`);
+await run(`onObsIdentityExecute(${JSON.stringify(identitySlot)})`);
+await settle();
+assert.match(identityPanel.innerHTML, /Решение по этому наблюдению записано/);
+assert.doesNotMatch(identityPanel.innerHTML, /квитанция владельца не сохранилась/);
+assert.equal(identityPanel.querySelector('[data-obs-identity-execute]'), null);
+ctx.fetch = async (input, init = {}) => {
+  if (String(input).includes('/identity-correct')) return new Response(JSON.stringify({decisionReadBack: true, durable: false, receipt: null, refusal: 'in_progress', error: 'receipt_unstored'}), {status: 409, headers: {'content-type': 'application/json'}});
+  return fakeFetch(input, init);
+};
+run(`obsRecovery.get(${JSON.stringify(identitySlot)}).identityConfirmation = {capability: 'discovery_identity_correct', version: 1, expiresAt: '2026-10-31T12:10:00.000Z'}`);
+await run(`onObsIdentityExecute(${JSON.stringify(identitySlot)})`);
+await settle();
+assert.match(identityPanel.innerHTML, /Сохранить квитанцию/);
+assert.match(identityPanel.innerHTML, /Решение уже записано\. Эта кнопка сохраняет только квитанцию/);
+assert.doesNotMatch(identityPanel.innerHTML, /Запись ещё не сделана/);
+assert.ok(identityPanel.querySelector('[data-obs-identity-execute]'));
+ctx.fetch = fakeFetch;
+
 console.log('Admin discovery recovery page: copy for every code, fail closed, escaping, technical details, open, accept, confirm, execute, receipt, recheck, cancel, busy resolver, ineligible, close, focus, identity assign and reject passed');
