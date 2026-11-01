@@ -1,9 +1,9 @@
 # ADR 0080: One owner confirmation corrects the identity of one current discovery observation
 
-**Status:** Proposed  
+**Status:** Accepted 2026-11-01  
 **Original decision date:** 2026-11-01  
 **Recorded at:** 2026-11-01  
-**Approval source:** owner GO on [AIR-65](https://trello.com/c/MKb4JMXi#comment-6ae76fceb83abfea99405ecb); this record stays Proposed until the owner decides after independent review  
+**Approval source:** [explicit owner acceptance of ADR 0080 and visual approval of the rendered Mermaid](https://trello.com/c/MKb4JMXi#comment-6ae7be5a97665a8aa4ce42cb), 2026-11-01, after [independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/318#pullrequestreview-5730536734) on HEAD `9c66d42b1e11d7458e99810a8e2c9082eaddc3df`; architecture approval only, no production identity-correction POST or other data write authorized  
 **Related work:** [AIR-65](https://trello.com/c/MKb4JMXi)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -42,6 +42,7 @@ Accepting this record approves the architecture only. It does not authorize a pr
 ## Evidence
 
 - **Original decision:** [AIR-65 owner GO](https://trello.com/c/MKb4JMXi#comment-6ae76fceb83abfea99405ecb)
+- **Owner ADR acceptance and rendered Mermaid visual approval:** [AIR-65 owner decision, 2026-11-01](https://trello.com/c/MKb4JMXi#comment-6ae7be5a97665a8aa4ce42cb); acceptance authorizes no production write
 - **Implementation:** [PR #318](https://github.com/vladimino/iptv-watchlist/pull/318)
 - **Dated verification:** not recorded; no production write is claimed
 - **Uncertainty:** production still has no `identityAuthority` marker and no published-EPG authority row. A marker other than absent or `r2`, and a published-EPG mode of `d1` or an unreadable marker for that schema, refuses the write. This record does not choose a D1 generation fence for discovery decisions.
