@@ -92,11 +92,17 @@ async function lbaOutcomes(item,record,floors,origin){
 async function lbaCompare(env,parsed,origin){
  const {env:readEnv,versions}=lbaReadOnly(env);
  const sources={};
- let programme=null;
+ let programme=null,publishedFence=null;
+ try{
+  if(typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
+   const live=await PublishedEpg.currentGeneration(env);
+   if(live)publishedFence=live.fence;
+  }
+ }catch{sources.programme={evidence:'unavailable',reason:'storage_unavailable'};}
  try{
   const snapshot=await adminLoadSnapshot(readEnv,false);
   if(snapshot.error)sources.programme={evidence:'unavailable',reason:snapshot.error};
-  else{programme=snapshot.programme.body;sources.programme={evidence:'observed',key:epgGenerationKey(snapshot.tuple.programmeRunId,'programme.json'),programmeRunId:snapshot.tuple.programmeRunId,films:Array.isArray(programme?.films)?programme.films.length:0};}
+  else{programme=snapshot.programme.body;sources.programme={evidence:'observed',key:snapshot.pointer?.authority==='d1'?'published_epg_document':epgGenerationKey(snapshot.tuple.programmeRunId,'programme.json'),programmeRunId:snapshot.tuple.programmeRunId,films:Array.isArray(programme?.films)?programme.films.length:0};}
  }catch{sources.programme={evidence:'unavailable',reason:'storage_unavailable'};}
  const [metadata,pointer,links,filmsList,watchlist,receipt,intent]=await Promise.all([LBA_METADATA_KEY,LBA_RATINGS_POINTER_KEY,LetterboxdFacts.FACTS_KEYS.links,LetterboxdFacts.FACTS_KEYS.filmsList,LetterboxdFacts.FACTS_KEYS.watchlist,lbaImportKey(origin.sha256,'receipt'),lbaImportKey(origin.sha256,'intent')].map(key=>lbaRead(readEnv,key)));
  sources.metadata={evidence:metadata.evidence,key:LBA_METADATA_KEY};
@@ -188,6 +194,11 @@ async function lbaCompare(env,parsed,origin){
  const first=new Map(fenced.map(key=>[key,versions.get(key)]));
  const again=await Promise.all(fenced.map(key=>lbaVersion(env,key)));
  const changed=fenced.filter((key,i)=>first.get(key)!==again[i]);
+ if(publishedFence){
+  let later=null;
+  try{later=await PublishedEpg.currentGeneration(env);}catch{later=null;}
+  if(!later||later.fence!==publishedFence)changed.push('published_epg_authority');
+ }
  return {
   sources,omitted:LBA_OMITTED,receipt:receiptState,matches,hypothesis,indexSummary:index.summary,items,
   recordReads:{limit,needed:toRead.length,done:recordReads},

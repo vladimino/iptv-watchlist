@@ -2,7 +2,7 @@
 
 Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron. The Worker's one cron trigger runs only the D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md)), shown last in the diagram: it reads R2, writes only D1, and stays inert while `D1_ENRICHMENT_WRITE` is unset. The Worker exposes owner-only MCP tools that perform work only when invoked. Expected task behavior: [Scheduled Task contract](../reference/scheduled-tasks.md). Sources: [scheduling ADR](../adr/0005-external-chatgpt-tasks.md), [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP contract](../reference/api/mcp.md) and [prediction operations](../runbooks/prediction-operations.md).
 
-The sequences below are **independent scheduled or externally driven flows**, not a single sequential execution. They are split for legibility; each uses the same existing Worker, Access, R2 and D1 boundaries. No scheduling or authority changes are introduced by this presentation.
+The sequences below are **independent scheduled or externally driven flows**, not a single sequential execution. They are split for legibility; each uses the same existing Worker, Access, R2 and D1 boundaries. External tasks and the cron expression do not change. The publication commit is D1 only when the published EPG marker is `d1` ([ADR 0078](../adr/0078-d1-authoritative-published-epg.md), Proposed); until that later activation it stays the R2 pointer. Discovery continuation writes stay R2. The changed label needs a separate visual approval.
 
 ### Daily EPG and hourly discovery continuation
 
@@ -23,7 +23,7 @@ sequenceDiagram
     loop Metadata, publication, and allowed discovery steps
         Daily->>MCP: epg_sync_step(runId)
         MCP->>EPG: One step or one chunk
-        EPG->>R2: Checkpoint / publish generation
+        EPG->>R2: Checkpoint. Publish the generation on R2, or in D1 when the published EPG marker is d1
         MCP-->>Daily: stage and nextAction
     end
     Note over Daily,EPG: wait / stop / conflict ends current series

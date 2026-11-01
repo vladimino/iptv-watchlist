@@ -108,6 +108,7 @@ async function adminHealthRoute(request,env,url){
   const dimensions=freshness?adminHealthDimensions(record.storedId,film,index,freshness):{};
   return {...record,programmeRunId:run,observedAt:now,...(Object.hasOwn(film,'poster')?{poster:typeof film.poster==='string'&&film.poster?film.poster:null}:{}),...dimensions};
  });
+ const d1=snapshot.pointer?.authority==='d1';
  const published={programmeRunId:run,phase:'published',publishedAt:typeof pointer?.publishedAt==='string'?pointer.publishedAt:(typeof programme?.updatedAt==='string'?programme.updatedAt:null),observedAt:now};
  const input={
   now,pin:{programmeRunId:run},coverage:{films:'complete'},published,films,
@@ -127,8 +128,8 @@ async function adminHealthRoute(request,env,url){
   pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info,
   health:{schemaVersion:result.schemaVersion,now:result.now,clock:result.clock,published:result.published,scope:{programmeRunId:result.scope.programmeRunId,coverage:result.scope.coverage,sources:result.scope.sources,subjects:{films:result.scope.subjects.films.length,observations:result.scope.subjects.observations.length}},subsystems,counts:result.counts,thresholds:result.thresholds,groups,issues:whole},
   sources:{
-   published:{key:EPG_GENERATION_KEY,evidence:'observed',observedAt:now},
-   films:{key:epgGenerationKey(run,'programme.json'),evidence:'observed',count:films.length,coverage:'complete',observedAt:now},
+   published:{key:d1?'published_epg_authority':EPG_GENERATION_KEY,evidence:'observed',observedAt:now},
+   films:{key:d1?'published_epg_document':epgGenerationKey(run,'programme.json'),evidence:'observed',count:films.length,coverage:'complete',observedAt:now},
    viewIndex:{key:ENRICHMENT_KEY+'view-index.json',evidence:index?'observed':'object_missing',present:!!index,entries:index?Object.keys(index).length:0,version:viewIndex.version,observedAt:now},
    profile:{key:profileKey,evidence:profileBody?'observed':'object_missing',present:!!profileBody,version:profileBody?.version??null,observedAt:now},
    predictionQueue:{key:predictionQueueKey,evidence:queue.present?'observed':'object_missing',present:queue.present,refreshedAt:queue.present?queue.body?.refreshedAt??null:null,observedAt:now},
@@ -137,6 +138,6 @@ async function adminHealthRoute(request,env,url){
    observations:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.observations},
    letterboxd:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.letterboxd},
   },
-  reads:[EPG_GENERATION_KEY,epgGenerationKey(run,'programme.json'),EPG_GENERATION_KEY,'titles.json','people.json','admin/owner-reviews.json',...reads],
+  reads:[...(d1?['published_epg_authority','published_epg_document']: [EPG_GENERATION_KEY,epgGenerationKey(run,'programme.json'),EPG_GENERATION_KEY]),'titles.json','people.json','admin/owner-reviews.json',...reads],
  });
 }

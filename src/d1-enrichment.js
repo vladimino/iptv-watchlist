@@ -72,12 +72,19 @@ async function d1EnrichmentWritersIdle(env,now=Date.now()){
 async function d1EnrichmentStore(env){
  const etags=new Map();
  await d1EnrichmentWritersIdle(env);
- const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
- if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
- const runId=pointer.programmeRunId;
- const [watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
-  d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
-  d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
+ const published=typeof PublishedEpg==='undefined'?null:await PublishedEpg.authoritativeSnapshot(env);
+ let runId,watchlist,programme;
+ if(published){
+  if(!published.programmeRunId||!d1EnrichmentFilmList(published.programme)||!d1EnrichmentFilmList(published.watchlist))throw new D1EnrichmentInputError('generation_unpublished','published_epg');
+  runId=published.programmeRunId;watchlist=published.watchlist;programme=published.programme;
+ }else{
+  const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
+  if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
+  runId=pointer.programmeRunId;
+ }
+ const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
+  published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
+  published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'titles.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'people.json',d1EnrichmentRecord),
@@ -86,7 +93,12 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
  ]);
+ if(!published){watchlist=watchlistObject;programme=programmeObject;}
  for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);
+ if(published){
+  const again=await PublishedEpg.authoritativeSnapshot(env);
+  if(!again||again.generation!==published.generation||again.programmeRunId!==runId)throw new D1EnrichmentInputError('input_changed','published_epg');
+ }
  await d1EnrichmentWritersIdle(env);
  const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
  return {store,programmeRunId:runId};
@@ -158,7 +170,7 @@ async function d1EnrichmentDiff(env,db,now,summary){
  // and does not project from the R2 object. A failed cache read does the same.
  const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
  summary.schemaVersion=version;
- if(version===6){
+ if(Number(version)>=6){
   try{await MetadataCache.useAuthoritativeMetadata(db,store);}
   catch(error){if(error?.code==='metadata_cache_unavailable')throw new D1EnrichmentInputError('metadata_cache_unavailable','metadata_cache');throw error;}
  }
@@ -180,7 +192,7 @@ async function d1EnrichmentDiff(env,db,now,summary){
  // Schema v4 keeps the plan above and writes nothing else. Sync clocks are written when the contract
  // is version 5 or 6 and film_sync_state exists. A version without the table does not write them.
  // The film change key is not involved, so a v4 database does not rewrite its Films because these fields exist.
- plan.syncReady=(version===5||version===6)&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
+ plan.syncReady=Number(version)>=5&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
  plan.sync=[];
  if(plan.syncReady){
   const storedSync=new Map((await db.all("SELECT id,change_key FROM projection_state WHERE projection=? AND kind='film'",[METADATA_SYNC_PROJECTION])).map(row=>[row.id,row.change_key]));
@@ -328,18 +340,18 @@ async function d1EnrichmentStatus(binding,env){
  const syncTable=present.includes('film_sync_state');
  const cacheReady=present.includes('metadata_cache')&&present.includes('metadata_cache_authority')&&present.includes('metadata_cache_cas');
  const version=(await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first())?.version??null;
- if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
+ if(tables.length!==3||!(version===4||(version===5&&syncTable)||(Number(version)>=6&&syncTable&&cacheReady)))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
  const [run,counts]=await Promise.all([
   binding.prepare('SELECT lease_until leaseUntil,started_at startedAt,finished_at finishedAt,outcome,summary_json summary FROM projection_run WHERE projection=?').bind(D1_ENRICHMENT_PROJECTION).first(),
   binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),
  ]);
  let summary=null;try{summary=run?.summary?JSON.parse(run.summary):null;}catch{}
  const status={mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
- if(version===5||version===6){
+ if(Number(version)>=5){
   const sync=await binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(METADATA_SYNC_PROJECTION).first();
   status.schemaVersion=version;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;
  }
- if(version===6){
+ if(Number(version)>=6){
   const marker=await binding.prepare('SELECT mode AS cacheMode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration FROM metadata_cache_authority WHERE id=1').bind().first();
   status.cacheMode=marker?.cacheMode??null;status.cacheGeneration=marker?.cacheGeneration??null;status.mirrorGeneration=marker?.mirrorGeneration??null;
  }

@@ -46,6 +46,8 @@ Source: `.github/workflows/ci.yml`. The former independent Cloudflare Workers Bu
    - `keep_vars: true`, so dashboard variables such as `MCP_ACCESS_TEAM_DOMAIN` and `MCP_ACCESS_AUD` survive deploys
    - `preview_urls: false`
 
+Deploying the Worker does not apply `migrations/0008_published_epg_authority.sql` and does not change `published_epg_authority.mode`. Until a separate owner GO applies that file and a later GO activates the marker, R2 remains authoritative for the published EPG generation. The cron stays `37 * * * *` and stays the enrichment projector only.
+
 A failed test/build, or a failed account-token or Worker-settings check, prevents deployment. A successful workflow confirms publication, not completion of data migration or end-to-end smoke tests. Use authorized read-only checks after deployment. For `/mcp`, use only the safe verification procedure in [docs/mcp.md](../reference/api/mcp.md). Exercising the resolver continuation in production writes `epg/*` records and calls TMDB, so it is a separately approved operation, never a deploy smoke test.
 
 ## Owner person-name confirmation

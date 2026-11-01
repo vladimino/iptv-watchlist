@@ -55,11 +55,22 @@ async function adminPostersRoute(request,env,url){
  if(params.has('cursor')){const raw=params.get('cursor');if(raw.length>ADMIN_POSTERS_CURSOR_MAX)return adminError('invalid_cursor',400);cursor=raw||null;}
  const bucket=env.BUCKET,reads=[];
  const read=async key=>{reads.push(key);return await adminPostersRead(bucket,key);};
- let pointerObject,pointer,live,copy=null,programmeRunId=null;
+ let pointerObject,pointer,live,copy=null,programmeRunId=null,authoritative=false;
  try{
-  pointerObject=await read(EPG_GENERATION_KEY);
-  pointer=pointerObject.films;
-  programmeRunId=pointer?.phase==='published'&&typeof pointer.programmeRunId==='string'&&pointer.programmeRunId?pointer.programmeRunId:null;
+  if(typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
+   const liveGeneration=await PublishedEpg.currentGeneration(env);
+   if(liveGeneration){
+    authoritative=true;
+    programmeRunId=liveGeneration.phase==='published'&&typeof liveGeneration.programmeRunId==='string'&&liveGeneration.programmeRunId?liveGeneration.programmeRunId:null;
+    pointer={programmeRunId,phase:liveGeneration.phase};
+    pointerObject={present:true,films:pointer,key:'published_epg_authority'};
+   }
+  }
+  if(!authoritative){
+   pointerObject=await read(EPG_GENERATION_KEY);
+   pointer=pointerObject.films;
+   programmeRunId=pointer?.phase==='published'&&typeof pointer.programmeRunId==='string'&&pointer.programmeRunId?pointer.programmeRunId:null;
+  }
   live=await read(ADMIN_POSTERS_LIVE_KEY);
   if(programmeRunId)copy=await read(epgGenerationKey(programmeRunId,'discovered-films.json'));
   var negativesSource=await read(CATALOG_POSTER_NEGATIVES_KEY);
