@@ -181,7 +181,7 @@ assert.equal(answer.consistency.status, 'stable');
 assert.equal(answer.status, 'partial');
 assert.deepEqual(answer.proposal.recordReads, {limit: 300, needed: 3, done: 3}, 'b2, c3 and m1 have a link alias; the others have no record yet');
 // Reads: only named keys, the archive's own receipt keys, and records behind a link alias. Nothing else is touched.
-const expectedKeys = new Set(['epg/published-generation.json', 'epg/generations/' + G1 + '/programme.json', 'titles.json', 'people.json', 'metadata.json', 'enrichment/ratings/published.json', 'enrichment/ratings/generations/gen-1.json', Facts.FACTS_KEYS.links, Facts.FACTS_KEYS.filmsList, Facts.FACTS_KEYS.watchlist, 'letterboxd/imports/' + answer.archive.sha256 + '/chunks/0.receipt.json', 'letterboxd/imports/' + answer.archive.sha256 + '/chunks/0.intent.json', Facts.recordKey('tmdb-102'), Facts.recordKey('tmdb-103'), Facts.recordKey('tmdb-114')]);
+const expectedKeys = new Set(['epg/published-generation.json', 'epg/generations/' + G1 + '/programme.json', 'titles.json', 'people.json', 'admin/owner-reviews.json', 'metadata.json', 'enrichment/ratings/published.json', 'enrichment/ratings/generations/gen-1.json', Facts.FACTS_KEYS.links, Facts.FACTS_KEYS.filmsList, Facts.FACTS_KEYS.watchlist, 'letterboxd/imports/' + answer.archive.sha256 + '/chunks/0.receipt.json', 'letterboxd/imports/' + answer.archive.sha256 + '/chunks/0.intent.json', Facts.recordKey('tmdb-102'), Facts.recordKey('tmdb-103'), Facts.recordKey('tmdb-114')]);
 assert.deepEqual(new Set(reads()), expectedKeys);
 assert.deepEqual(nonGets(), []);
 assert.ok(!reads().some(key => /view-index|discovered-films/.test(key)), 'the large objects are not read');

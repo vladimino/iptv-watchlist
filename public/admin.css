@@ -241,3 +241,13 @@
 .posters-outcomes span{color:var(--muted)}
 .posters-dynamics h3{margin:12px 0 6px;font-size:15px}
 @media(max-width:800px){.posters-layout{grid-template-columns:minmax(0,1fr)}.posters-form{flex-direction:column;align-items:stretch}}
+.title-review{margin-top:18px;max-width:100%}
+.title-review fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 12px;padding:10px 12px}
+.title-review legend{padding:0 4px}
+.title-review-options{display:flex;flex-direction:column;gap:8px}
+.title-review-option{display:flex;gap:8px;align-items:baseline}
+.title-review label,.title-review-accept{display:block;margin:10px 0}
+.title-review input[type="text"],.title-review textarea{width:100%;max-width:100%;box-sizing:border-box;font:inherit}
+.title-review button{min-height:44px;margin-top:4px}
+.title-review-result:focus{outline:2px solid var(--lime);outline-offset:2px}
+@media(max-width:800px){.title-review button{width:100%}}
