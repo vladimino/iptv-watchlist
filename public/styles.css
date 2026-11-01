@@ -57,8 +57,11 @@
 .status-run-value{display:grid;justify-items:start;min-width:0;text-align:left}
 .status-run-value strong{color:#dce8d2;font-weight:560;overflow-wrap:anywhere}
 .status-run-value small{color:var(--muted);font-size:11px;font-weight:400;margin-top:1px}
-.footer-details{margin-top:12px;min-width:0}
-.footer-details>summary{display:block;width:max-content;margin-left:auto;cursor:pointer;list-style:none;color:var(--lime);padding:3px 0}
+.footer-bar{display:grid;grid-template-columns:minmax(0,1fr) max-content;align-items:start;column-gap:16px;margin-top:12px;min-width:0}
+.footer-details{grid-column:1 / -1;grid-row:1;margin-top:0;min-width:0}
+.footer-details>summary{display:flex;align-items:center;width:max-content;max-width:calc(100% - 7.5rem);margin-left:0;min-height:44px;cursor:pointer;list-style:none;color:var(--lime);padding:3px 0}
+.footer-admin-link{grid-column:2;grid-row:1;justify-self:end;align-self:start;z-index:1;display:inline-flex;align-items:center;min-height:44px;padding:8px 2px;color:var(--lime);text-underline-offset:3px}
+.footer-admin-link:focus-visible{outline:2px solid var(--lime);outline-offset:4px}
 .footer-details>summary::-webkit-details-marker{display:none}
 .footer-details-body{display:grid;grid-template-columns:repeat(2,minmax(0,326px));justify-content:start;gap:22px 28px;max-width:680px;margin-top:12px;padding-top:16px;border-top:1px solid var(--line);text-align:left;min-width:0}
 .footer-details-body section{min-width:0}
@@ -77,7 +80,7 @@
 .demo-badge.is-critical,.demo-badge.is-error{background:#3a2420;color:#f0c2b4}
 .window-note{margin:0 0 14px;color:var(--muted);font-size:14px}
 @media(max-width:760px){.masthead{height:auto;min-height:64px;padding-top:10px;padding-bottom:10px}.snapshot,.snapshot-coverage{align-items:flex-start;text-align:left;max-width:100%}.demo-badge{max-width:46%;white-space:normal;text-align:right}}
-@media(max-width:620px){.footer-details>summary{margin-left:0}.footer-details-body{grid-template-columns:minmax(0,1fr);gap:20px;max-width:440px}}
+@media(max-width:620px){.footer-details-body{grid-template-columns:minmax(0,1fr);gap:20px;max-width:440px}}
 @media(max-width:520px){.status-row{display:block}.status-row>span,.status-row>strong{display:block;text-align:left}.status-row>strong{margin-top:1px}.status-run-value{justify-items:start;text-align:left;margin-top:1px}.footer-details-body dl>div{grid-template-columns:minmax(0,1fr);gap:1px}.footer-details-body dd{text-align:left}}
 @media(max-width:410px){.movie-card.has-score .film-head{padding-top:98px;padding-right:17px;min-height:0}}
 

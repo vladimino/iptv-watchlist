@@ -1,0 +1,57 @@
+# ADR 0076: The backfill writes one multi-statement D1 query and does not open a second database
+
+**Status:** Accepted  
+**Original decision date:** 2026-11-01  
+**Recorded at:** 2026-11-01  
+**Approval source:** [explicit owner acceptance on AIR-316, 1 November 2026](https://trello.com/c/xgeFeYIT#comment-6ae74ee540d12ba48446a13b) after independent PASS [PR #305 review](https://github.com/vladimino/iptv-watchlist/pull/305#pullrequestreview-5728640450)  
+**Related work:** [AIR-316](https://trello.com/c/xgeFeYIT); historical measurements [scratch G4, 26 October 2026](../evidence/d1-migration/air-174-scratch-g4-2026-10-26.md) and [scratch G4 at the real scale, 27 October 2026](../evidence/d1-migration/air-178-scratch-g4-real-scale-2026-10-27.md)  
+**Supersedes:** In part [ADR-0019](0019-live-d1-backfill-boundaries.md) decision 7, the requirement that batch atomicity be demonstrated on a scratch database before the first production write; and in part [ADR-0021](0021-staged-atomic-generation-import.md), the live obligation to repeat that demonstration, or the G4 harness, on a second database before a later backfill run. The staged generation design itself stays. The dated measurements stay evidence of those runs.  
+**Superseded by:** None
+
+## Context
+
+ADR-0019 required the backfill executor to prove, on a scratch database, that a multi-statement request is atomic, using a deliberately failing last statement, before the first write to `iptv`. ADR-0021 bound the staged generation chunks to the size that probe had shown and required a scratch G4 run before the generation unit could be trusted. Those runs were completed and recorded. The owner then deleted the scratch database `iptv-atomicity-scratch` on 31 October 2026 and instructed that it not be restored.
+
+The backfill unit that the scratch measurement exercised is one `POST` whose body is `{sql}`: the buffered statements joined by newlines. The REST query reference also accepts `{batch:[{sql}, …]}`. That form is what `executeRendered` already sends for the metadata-cache operator. Cloudflare's explicit transaction and rollback text describes the Worker binding `D1Database.batch()`, not the REST `{batch}` body. Whether that REST body rolls back is an open question ([workers-sdk#15904](https://github.com/cloudflare/workers-sdk/issues/15904)). The backfill executor still refused to start unless a second database id was configured, and it created a probe table there on every run. A one-shot harness, `scripts/d1-scratch-g4.mjs`, still existed only to talk to that database. Nothing else calls it. The staged-generation failure, takeover, resume, fence and rollback behaviour is already covered by `tests/generation-stage.mjs` on local SQLite.
+
+## Decision
+
+1. **One database.** `scripts/d1-backfill.mjs` names its target with `D1_BACKFILL_ACCOUNT_ID`, `D1_BACKFILL_API_TOKEN`, `D1_BACKFILL_DATABASE_ID` and `D1_BACKFILL_DATABASE_NAME` (default `iptv`). It does not read `D1_BACKFILL_SCRATCH_DATABASE_ID`. A value left in the environment is ignored. It does not create a database, and it does not create a probe table on the target.
+2. **A backfill unit keeps the measured request.** `transaction()` sends one `POST` whose body is `{sql}`: the buffered statements joined by newlines, each statement at most 100 KB, at most 1,000 statements and 1 MiB. The client does not send transaction-control statements. A larger unit is `batch_too_large` and is not split across requests. This record does not switch that unit to `{batch}`. `executeRendered` keeps the `{batch}` body for callers that already use it, including the metadata-cache operator. This record does not treat that REST body as the Worker binding's batch transaction.
+3. **An unproven write is not repeated.** A lost response, HTTP `429` or `5xx` on a write, or a success body that does not prove every statement, is `write_uncertain`. That request is not sent again. For the `{sql}` unit the measured response shape is one result object per statement, and each object must have `success: true`. For `{batch}`, each batch entry must have its own result with `success: true`. A missing, null or otherwise unproven `success` is `write_uncertain`. An entry that reports `success: false` is a statement error. The next run reconciles by reading the target back. Only reads are retried, and only within the existing bound.
+4. **The live scratch harness is retired.** `scripts/d1-scratch-g4.mjs` is not a current command. Its scenario remains a local regression of the staged path, not a Cloudflare database. The dated scratch results stay historical evidence. They are not a precondition of the next backfill. The deleted database is not recreated.
+5. **Code rollback does not recreate that database.** A revert to an executor that again requires a second database id will refuse to start. Do not create a database to satisfy the old check. Undoing a bad import is the target bookmark procedure, which does not need a second database.
+6. **Nothing here is a production write.** Accepting this record does not authorize a backfill, a migration, an import, a flag change, a Task change or any write to D1 or R2. The metadata-cache operator's own batch, compare-and-swap and `writeState` rules are unchanged.
+
+Not decided here: raising the batch caps, applying migration `0006`, or switching metadata-cache authority.
+
+## Alternatives considered
+
+- **Keep requiring the scratch database.** Rejected. The owner deleted it and said it was unnecessary. A procedure that cannot start without it is not operable.
+- **Prove atomicity by creating a probe table on production `iptv`.** Rejected. A test table does not belong on the target, and a failed probe would be a write to the database the fence is meant to protect.
+- **Point the G4 harness at `iptv`.** Rejected. That would write synthetic generations into the production database.
+- **Leave the harness in the tree but unwired.** Rejected. An executable that still demands the deleted database is a live instruction to recreate it.
+- **Move the backfill unit onto the REST `{batch}` body in the same change.** Rejected. The scratch measurement exercised `{sql}`. The REST query reference documents the `{batch}` syntax and does not state the Worker binding's rollback guarantee for it.
+
+## Consequences
+
+- A backfill run no longer depends on a second Cloudflare database or on a per-run probe.
+- The backfill unit stays the `{sql}` request the scratch measurement exercised. The local fake rolls a failing last statement of that request back. This repository does not re-measure that rollback against Cloudflare on every run, and it does not cite the Worker binding's batch text as proof of the REST `{batch}` body.
+- `report.json` carries `probe: null`. There is no `batch_not_atomic` or `scratch_identity_mismatch` stop.
+- The historical G4 timings remain the measurements of those synthetic runs. They are not a new GO for a later production generation.
+- Reverting this code without restoring an executor that can run against one database leaves the operator unable to start, and creating a database is not the fix.
+
+## Recovery and migration boundary
+
+No database is created, dropped or written by this decision. A bad import is still recovered from the target bookmark recorded before the write, under its own owner approval. A code revert does not restore rows and does not restore the deleted database. Do not create a replacement scratch database as part of rollback.
+
+## Evidence
+
+- **Original decision:** [owner Accepted, 1 November 2026](https://trello.com/c/xgeFeYIT#comment-6ae74ee540d12ba48446a13b)
+- **Implementation:** this pull request
+- **Dated verification:** the scratch runs linked above remain the record of those past executions; this change adds no new production measurement
+- **Uncertainty:** this repository does not re-measure the `{sql}` rollback at 1,000 statements on every run. The local fake models that rollback. A future Cloudflare change to that request would not be caught by a per-run probe, because that probe required a database the owner removed. The REST `{batch}` body's rollback behaviour is not decided here.
+
+## Follow-ups
+
+Owner acceptance was recorded [1 November 2026](https://trello.com/c/xgeFeYIT#comment-6ae74ee540d12ba48446a13b). No production backfill, migration, flag or database write is queued or authorized by that decision.

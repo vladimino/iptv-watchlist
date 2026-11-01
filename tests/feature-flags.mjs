@@ -135,7 +135,7 @@ assert.deepEqual([k('LETTERBOXD_FACTS').raw,k('LETTERBOXD_FACTS').redacted,k('LE
 assert.deepEqual([k('LETTERBOXD_DIARY_HISTORY').raw,k('LETTERBOXD_DIARY_HISTORY').shape,k('LETTERBOXD_DIARY_HISTORY').issue,k('LETTERBOXD_DIARY_HISTORY').effective,k('LETTERBOXD_DIARY_HISTORY').retired],[null,{type:'object'},'retired',null,true],'a non-string on the retired diary switch is redacted and inert');
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
 assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective],['bounded ','case_or_whitespace','full'],'a padded known token is shown, and it is invalid where the code does not trim');
-assert.deepEqual([k('REMOVAL_RATING_LOOKUP').raw,k('REMOVAL_RATING_LOOKUP').shape],[null,{type:'string',length:300}],'an over-long value is shape only');
+assert.deepEqual([k('REMOVAL_RATING_LOOKUP').raw,k('REMOVAL_RATING_LOOKUP').shape,k('REMOVAL_RATING_LOOKUP').issue,k('REMOVAL_RATING_LOOKUP').effective,k('REMOVAL_RATING_LOOKUP').retired],[null,{type:'string',length:300},'retired',null,true],'an over-long value on the retired lookup switch is shape only and inert');
 assert.equal(leaky.report.summary.redacted,5);
 // The code trims CANDIDATE_DISCOVERY, so a padded on is known content, valid and on.
 const padded=entry((await flags({CANDIDATE_DISCOVERY:' on '})).report,'CANDIDATE_DISCOVERY');
@@ -153,7 +153,7 @@ assert.deepEqual(unmet.report.flags.filter(item=>item.requires).map(item=>item.n
 // 5. Parity: the effective mode is what each consumer computes, for every value shape.
 const consumer={
  CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
- DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',REMOVAL_RATING_LOOKUP:"removalLookupEnabled(env)?'on':'off'",
+ DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',
 };
 const samples=[undefined,'',' ','on','inline','separate',' separate','separate ','Separate','SEPARATE',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);
@@ -167,16 +167,18 @@ for(const file of fs.readdirSync('src',{recursive:true}).filter(name=>name.endsW
  assert.doesNotMatch(source,/env\??\.LETTERBOXD_FACTS/,'src/'+file+' does not read LETTERBOXD_FACTS');
  assert.doesNotMatch(source,/env\??\.RATINGS_PIPELINE/,'src/'+file+' does not read RATINGS_PIPELINE');
  assert.doesNotMatch(source,/env\??\.LETTERBOXD_DIARY_HISTORY/,'src/'+file+' does not read LETTERBOXD_DIARY_HISTORY');
+ assert.doesNotMatch(source,/env\??\.REMOVAL_RATING_LOOKUP/,'src/'+file+' does not read REMOVAL_RATING_LOOKUP');
 }
 for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),'LETTERBOXD_FACTS');assert.equal(item.effective,null);}
 for(const value of samples){const item=entry(reportOf({RATINGS_PIPELINE:value}),'RATINGS_PIPELINE');assert.equal(item.effective,null);assert.equal(item.retired,true);}
 for(const value of samples){const item=entry(reportOf({LETTERBOXD_DIARY_HISTORY:value}),'LETTERBOXD_DIARY_HISTORY');assert.equal(item.effective,null);assert.equal(item.retired,true);assert.equal(item.valid,value===undefined);assert.equal(item.issue,value===undefined?null:'retired');}
+for(const value of samples){const item=entry(reportOf({REMOVAL_RATING_LOOKUP:value}),'REMOVAL_RATING_LOOKUP');assert.equal(item.effective,null);assert.equal(item.retired,true);assert.equal(item.valid,value===undefined);assert.equal(item.issue,value===undefined?null:'retired');}
 
 // 6. Registry parity with the maintained reference and the governance checker.
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z0-9_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['LETTERBOXD_DIARY_HISTORY','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
+const RETIRED=['REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');
