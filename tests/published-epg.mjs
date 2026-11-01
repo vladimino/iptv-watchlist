@@ -45,10 +45,18 @@ assert.deepEqual(programmeShows([{id:'film:heat'}]),[]);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-published-epg-'));
 let databases=0;
 const names=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0008_published_epg_authority'];
+const predictionTables=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent'];
+function installPrediction(db){
+ db.sql('UPDATE schema_contract SET version=7 WHERE id=1');
+ for(const name of predictionTables)db.sql('CREATE TABLE '+name+' (id INTEGER PRIMARY KEY)');
+}
 function open(stopAt=names.length,{onBatch=null}={}){
  const file=path.join(root,'epg-'+(databases++)+'.sqlite');
  const db=d1Standin(file,{onBatch});
- for(const name of names.slice(0,stopAt))db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
+ for(const name of names.slice(0,stopAt)){
+  if(name==='0008_published_epg_authority')installPrediction(db);
+  db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
+ }
  return db;
 }
 const one=(db,sql)=>Object.values(db.sql(sql)[0]||{})[0];
@@ -66,15 +74,21 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  try{v5.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));}catch{refused=true;}
  assert.equal(refused,true,'schema v5 cannot take the published EPG migration');
  assert.equal(one(v5,'SELECT version FROM schema_contract'),5);
+ assert.equal(one(v5,"SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade'"),0);
+ const v6=open(6);
+ let blocked=false;
+ try{v6.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));}catch{blocked=true;}
+ assert.equal(blocked,true,'schema v6 cannot take the published EPG migration');
+ assert.equal(one(v6,'SELECT version FROM schema_contract'),6);
+ assert.equal(one(v6,"SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade'"),0);
 }
 
 {
  const db=open();
  assert.equal((await readAuthority(db)).mode,'r2');
- assert.equal((await readAuthority(db)).version,6,'version 6 stays 6 so a prediction reader is not pushed over 7');
+ assert.equal((await readAuthority(db)).version,8,'0008 moves a prepared version 7 contract to 8');
  assert.equal(await currentGeneration({DB:db}),null);
  assert.equal((await readCache(db)).mode,'r2');
- db.sql('UPDATE schema_contract SET version=8');
  db.sql("UPDATE metadata_cache_authority SET mode='d1'");
  assert.equal((await readCache(db)).mode,'d1','a later contract version keeps the metadata marker');
  assert.equal((await readAuthority(db)).mode,'r2');
@@ -229,6 +243,10 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
 {
  await assert.rejects(readAuthority(undefined),/published_epg_unavailable/);
  await assert.rejects(currentGeneration({}),/published_epg_unavailable/);
+ const empty=d1Standin(path.join(root,'empty-'+(databases++)+'.sqlite'));
+ await assert.rejects(readAuthority(empty),/published_epg_unavailable/);
+ await assert.rejects(readAuthority({DB:empty}),/published_epg_unavailable/);
+ assert.equal((await readAuthority({DB:empty,PUBLISHED_EPG_DB_OPTIONAL:'standin'})).mode,'r2');
  assert.equal((await readAuthority({PUBLISHED_EPG_DB_OPTIONAL:'standin'})).mode,'r2');
  assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/PUBLISHED_EPG_DB_OPTIONAL/);
  assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/PUBLISHED_EPG_DB_OPTIONAL/);
@@ -277,34 +295,35 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
 
 {
  const stayed=open();
- assert.equal(one(stayed,'SELECT version FROM schema_contract'),6);
+ assert.equal(one(stayed,'SELECT version FROM schema_contract'),8);
  let lowered=false;
  try{stayed.sql('UPDATE schema_contract SET version=5');}catch{lowered=true;}
  assert.equal(lowered,true);
- assert.equal(one(stayed,'SELECT version FROM schema_contract'),6);
- const names=rows=>rows.map(row=>row.name);
- const predictionTables=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent'];
+ assert.equal(one(stayed,'SELECT version FROM schema_contract'),8);
+ const tableNames=rows=>rows.map(row=>row.name);
  const predictionContract=(version,tables)=>{
   if(version==null||Number(version)<7)return 'r2';
   if(!predictionTables.every(name=>tables.includes(name)))throw new Error('prediction_domain_unavailable');
   return 'r2';
  };
- assert.equal(predictionContract(6,names(stayed.sql("SELECT name FROM sqlite_master WHERE type='table'"))),'r2');
+ assert.equal(predictionContract(6,tableNames(open(6).sql("SELECT name FROM sqlite_master WHERE type='table'"))),'r2');
  assert.throws(()=>predictionContract(8,[]),/prediction_domain_unavailable/);
  const raised=open(6);
- raised.sql('UPDATE schema_contract SET version=7');
- for(const name of predictionTables)raised.sql('CREATE TABLE '+name+' (id INTEGER)');
+ installPrediction(raised);
  raised.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));
  assert.equal(one(raised,'SELECT version FROM schema_contract'),8);
- assert.equal(predictionContract(8,names(raised.sql("SELECT name FROM sqlite_master WHERE type='table'"))),'r2');
+ assert.equal(predictionContract(8,tableNames(raised.sql("SELECT name FROM sqlite_master WHERE type='table'"))),'r2');
  let hidden=false;
  try{raised.sql('UPDATE schema_contract SET version=7');}catch{hidden=true;}
  assert.equal(hidden,true);
  assert.equal(one(raised,'SELECT version FROM schema_contract'),8);
  const bare=open(6);
- bare.sql('UPDATE schema_contract SET version=7');
- bare.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));
+ bare.sql('UPDATE schema_contract SET version=7 WHERE id=1');
+ let bareRefused=false;
+ try{bare.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));}catch{bareRefused=true;}
+ assert.equal(bareRefused,true,'version 7 without the prediction tables creates nothing');
  assert.equal(one(bare,'SELECT version FROM schema_contract'),7);
+ assert.equal(one(bare,"SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'published_epg%'"),0);
 }
 
 {
@@ -360,6 +379,25 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  records.set('titles.json',{ok:true});
  assert.deepEqual(await vm.runInContext("loadJSON({BUCKET:env.BUCKET},'titles.json')",context),{ok:true});
  await assert.rejects(vm.runInContext("loadJSON({BUCKET:{async get(){throw new Error('programme read')}}},'programme.json')",context),/published_epg_unavailable/);
+ const httpDb=arm(open());
+ await publishGeneration({DB:httpDb},{programmeRunId:run,phase:'published',expectedProgrammeRunId:null,programme:body,watchlist:list},{now:0});
+ const httpBucket=new MemoryBucket();
+ const httpEnv={DB:httpDb,BUCKET:httpBucket};
+ assert.equal(await saveWatchlist(httpEnv,{updatedAt:'2026-11-01T13:00:00.000Z',films:[{id:'film:ronin',title:'Ronin',shows:[]}]}),true);
+ const watchlistResponse=await context.worker.fetch(new Request('http://127.0.0.1/api/watchlist'),httpEnv,{waitUntil(){}});
+ assert.equal(watchlistResponse.status,200);
+ assert.deepEqual((await watchlistResponse.json()).films.map(film=>film.id),['film:ronin']);
+ const savedPublished=context.PublishedEpg;
+ let reads=0;
+ context.PublishedEpg={...savedPublished,async readDocumentAt(...args){const document=await savedPublished.readDocumentAt(...args);if(++reads===1)httpDb.sql('UPDATE published_epg_authority SET generation=generation+1');return document;}};
+ let mixed;
+ try{mixed=await context.worker.fetch(new Request('http://127.0.0.1/api/programme'),httpEnv,{waitUntil(){}});}
+ finally{context.PublishedEpg=savedPublished;}
+ assert.equal(mixed.status,409);
+ const mixedBody=await mixed.json();
+ assert.equal(mixedBody.error,'published_epg_fence');
+ assert.equal(mixedBody.retry,true);
+ assert.equal(mixedBody.films,undefined);
  const result=await context.resolveDiscoveryBatch(env,body,1);
  assert.equal(result.stage==='programme_changed',false,JSON.stringify(result));
  assert.equal(result.checked,1);

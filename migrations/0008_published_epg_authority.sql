@@ -1,9 +1,9 @@
 -- Schema v8: the published EPG generation, its pointer, programme shows and
 -- watchlist membership (ADR 0079). Additive. It does not alter 0001-0006 and
--- does not create Film, candidate or prediction rows. 0007 is the open
--- prediction migration; this file does not add those tables. On a contract
--- below 7 the version stays put, so a reader that requires those tables from
--- version 7 keeps R2. From 7 upward the version moves to 8 and never down.
+-- does not create Film, candidate or prediction rows. The production order is
+-- 0007 then this file. The first statement refuses a contract below 7, and a
+-- version 7 that is missing any prediction-domain table, before any CREATE.
+-- When the prerequisite holds, the version becomes 8 and never goes down.
 -- A deploy does not apply this file.
 -- The inserted marker is mode r2. Applying this file does not publish a
 -- generation and does not set mode d1.
@@ -13,7 +13,25 @@
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
-WHERE NOT EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version >= 6);
+WHERE NOT EXISTS (
+ SELECT 1 FROM schema_contract
+ WHERE id = 1 AND version >= 7 AND version < 8
+ AND (
+  SELECT COUNT(*) FROM sqlite_master
+  WHERE type = 'table' AND name IN (
+   'prediction_domain_authority',
+   'prediction_domain_cas',
+   'prediction_profile',
+   'prediction_fingerprint',
+   'prediction_pointer',
+   'prediction_lineage',
+   'prediction_queue',
+   'prediction_lease',
+   'prediction_run',
+   'prediction_domain_intent'
+  )
+ ) = 10
+);
 
 CREATE TABLE published_epg_authority (
  id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -129,7 +147,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = CASE WHEN version >= 7 AND version < 8 THEN 8 ELSE version END,
-    note = 'Schema v8: published EPG authority. Below 7 the version stays put. Marker mode r2 until a separate activation.'
-WHERE id = 1 AND version >= 6
- AND (version < 7 OR EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prediction_domain_authority'));
+SET version = 8,
+    note = 'Schema v8: published EPG authority. Marker mode r2 until a separate activation.'
+WHERE id = 1 AND version >= 7 AND version < 8;

@@ -1,9 +1,10 @@
 // ADR 0079. The published programme generation, its pointer, show rows and
 // watchlist membership. The nine tables plus the marker are the authority.
-// Schema v6 keeps today's version number so a prediction reader that requires
-// its own tables from version 7 stays on R2 until that migration. Version 8
-// with a missing table or marker fails closed. A missing binding fails closed
-// unless the caller sets PUBLISHED_EPG_DB_OPTIONAL to standin. Mode d1 reads
+// 0008 runs only after the prediction contract is version 7, and it leaves
+// version 8. A missing table at version 8, a published table below version 8,
+// or a marker other than r2 or d1 fails closed. A missing binding fails closed,
+// and so does a bound database with no schema_contract, unless the caller sets
+// PUBLISHED_EPG_DB_OPTIONAL to standin. Mode d1 reads
 // and writes these tables and does not fall back to a different R2 generation.
 // This module does not import. The Worker bundle wraps it.
 // The publisher uses the Worker binding's batch. It does not send the offline
@@ -159,7 +160,7 @@ export async function readAuthority(db){
  let version;
  try{version=(await one(target,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return {mode:'r2',tables:false,version:null,ready:false};
+  if(/no such table/i.test(String(error?.message||error))&&db?.PUBLISHED_EPG_DB_OPTIONAL==='standin')return {mode:'r2',tables:false,version:null,ready:false};
   throw failed('published_epg_unavailable',error);
  }
  let names;
@@ -170,7 +171,7 @@ export async function readAuthority(db){
   if(Number(version)>=8)throw failed('published_epg_unavailable');
   return {mode:'r2',tables:false,version,ready:false};
  }
- if(!(Number(version)>=6))return {mode:'r2',tables,version,ready:false};
+ if(!(Number(version)>=8))throw failed('published_epg_unavailable');
  let row;
  try{row=await one(target,'SELECT mode, programme_run_id AS programmeRunId, generation, mirror_programme_run_id AS mirrorProgrammeRunId, mirror_etag AS mirrorEtag, watchlist_generation AS watchlistGeneration, mirror_watchlist_etag AS mirrorWatchlistEtag FROM published_epg_authority WHERE id=1');}
  catch(error){throw failed('published_epg_unavailable',error);}
@@ -519,7 +520,7 @@ export async function importPublished(env,{confirm,programme,watchlist,programme
  if(confirm!=='load')throw failed('published_epg_confirm');
  const db=database(env);
  const authority=await readAuthority(db);
- if(!(Number(authority.version)>=6)||!authority.tables)throw failed('published_epg_schema');
+ if(!(Number(authority.version)>=8)||!authority.tables)throw failed('published_epg_schema');
  if(authority.mode!=='r2')throw failed('published_epg_authoritative');
  const runId=programmeRunId==null?'':String(programmeRunId);
  if(!runId||!programme||!watchlist)throw failed('published_epg_programme');
@@ -575,7 +576,7 @@ export async function activatePublished(env,{confirm,pointerEtag,watchlistEtag,p
  if(confirm!=='activate')throw failed('published_epg_confirm');
  const db=database(env);
  const authority=await readAuthority(db);
- if(!(Number(authority.version)>=6)||!authority.tables)throw failed('published_epg_schema');
+ if(!(Number(authority.version)>=8)||!authority.tables)throw failed('published_epg_schema');
  if(authority.mode!=='r2')throw failed('published_epg_authoritative');
  if(!authority.programmeRunId||authority.mirrorProgrammeRunId!==authority.programmeRunId||!authority.mirrorEtag||!authority.mirrorWatchlistEtag)throw failed('published_epg_fence');
  const storedProgramme=await readDocument(db,authority.programmeRunId,'programme');
@@ -598,7 +599,7 @@ export async function activatePublished(env,{confirm,pointerEtag,watchlistEtag,p
 export async function revertPublished(env,{confirm}={}){
  if(confirm!=='r2')throw failed('published_epg_confirm');
  let authority=await readAuthority(env);
- if(!(Number(authority.version)>=6)||!authority.tables)throw failed('published_epg_schema');
+ if(!(Number(authority.version)>=8)||!authority.tables)throw failed('published_epg_schema');
  if(authority.mode!=='d1')throw failed('published_epg_not_authoritative');
  const repaired=await repairMirrors(env);
  if(!repaired.mirrored)throw failed('published_epg_fence');

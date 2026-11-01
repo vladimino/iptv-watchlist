@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {mkdtemp} from 'node:fs/promises';
-import {applyDecision, migrationStatements, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, publishedEpgStatements, runPublishedEpgProduction} from '../scripts/published-epg-production.mjs';
+import {applyDecision, migrationStatements, PREDICTION_TABLES, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, publishedEpgStatements, runPublishedEpgProduction} from '../scripts/published-epg-production.mjs';
 
 const TOKEN='test-token-value';
 const SECRET='test-secret-value';
@@ -17,8 +17,12 @@ assert.ok(statements.length>3);
 assert.equal(statements.some(sql=>/\bINTO\s+film\b|\bINTO\s+candidate\b|\bINTO\s+prediction_|\bCREATE\s+TABLE\s+prediction_|\bwatchlist_film\b|\bCOMMIT\b/i.test(sql)),false);
 assert.equal(statements.some(sql=>/\bBEGIN\b/i.test(sql)&&!/^CREATE TRIGGER\b/i.test(sql.trim())),false);
 assert.match(statements.join('\n'),/prediction_domain_authority/);
-assert.equal(applyDecision({schemaVersion:6,tables:Object.fromEntries(statements.length?['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'].map(name=>[name,false]):[])}),'apply');
-assert.equal(applyDecision({schemaVersion:7,tables:{published_epg_authority:false}}),'apply');
+for(const name of PREDICTION_TABLES)assert.match(statements.join('\n'),new RegExp(name));
+const absentTables=Object.fromEntries(['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'].map(name=>[name,false]));
+const readyPrediction=Object.fromEntries(PREDICTION_TABLES.map(name=>[name,true]));
+assert.equal(applyDecision({schemaVersion:6,tables:absentTables,prediction:readyPrediction}),'schema_unexpected');
+assert.equal(applyDecision({schemaVersion:7,tables:{published_epg_authority:false}}),'prediction_prerequisite');
+assert.equal(applyDecision({schemaVersion:7,tables:absentTables,prediction:readyPrediction}),'apply');
 assert.equal(applyDecision({schemaVersion:5,tables:{published_epg_authority:false}}),'schema_unexpected');
 assert.equal(applyDecision({schemaVersion:8,tables:{published_epg_authority:false}}),'partial_schema');
 assert.equal(applyDecision({schemaVersion:6,tables:{published_epg_authority:true}}),'partial_schema');
@@ -44,6 +48,9 @@ function sql(file, input, {json=false}={}){
  if(!json)return result.stdout;
  const text=result.stdout.trim();
  return text?JSON.parse(text):[];
+}
+function predict(file){
+ sql(file,'UPDATE schema_contract SET version=7 WHERE id=1;\n'+PREDICTION_TABLES.map(name=>'CREATE TABLE '+name+' (id INTEGER);').join('\n'));
 }
 function applyMigrations(file, count){
  for(const name of NAMES.slice(0,count)){
@@ -154,7 +161,7 @@ function run(args, installed, env){
 
 {
  const installed=await install(6);
- sql(installed.productionFile,"CREATE TABLE prediction_domain_authority (id INTEGER PRIMARY KEY); UPDATE schema_contract SET version=7 WHERE id=1;");
+ predict(installed.productionFile);
  const applied=await run(['--apply','--confirm','apply','--target','iptv'], installed);
  assert.equal(applied.exit,0,JSON.stringify(applied.result));
  assert.equal(applied.result.operation,'apply');
@@ -197,6 +204,11 @@ function run(args, installed, env){
  const database=path.join(root,'local.sqlite');
  sql(database,'PRAGMA user_version=0;');
  applyMigrations(database,6);
+ const blocked=spawnSync('sqlite3',['-bail',database],{input:fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'),encoding:'utf8'});
+ assert.notEqual(blocked.status,0);
+ assert.equal(sql(database,'SELECT version FROM schema_contract;',{json:true})[0].version,6);
+ assert.equal(sql(database,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade';",{json:true})[0].n,0);
+ predict(database);
  const migrated=spawnSync('sqlite3',['-bail',database],{input:fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(migrated.status,0,migrated.stderr);
  const bareOffline=spawnSync(process.execPath,[offline],{encoding:'utf8'});
@@ -233,14 +245,67 @@ function run(args, installed, env){
 {
  const installed=await install(6);
  const applied=await run(['--apply','--confirm','apply','--target','iptv'], installed);
- assert.equal(applied.exit,0,JSON.stringify(applied.result));
- assert.equal(applied.result.schemaVersion,6);
- assert.equal(applied.result.mode,'r2');
+ assert.equal(applied.exit,3);
+ assert.equal(applied.result.reason,'schema_unexpected');
+ assert.equal(installed.calls.batches.length,0);
+ assert.equal(sql(installed.productionFile,'SELECT version FROM schema_contract;',{json:true})[0].version,6);
+ assert.equal(sql(installed.productionFile,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'published_epg%';",{json:true})[0].n,0);
  const bareSeven=await install(6);
  sql(bareSeven.productionFile,'UPDATE schema_contract SET version=7 WHERE id=1;');
  const held=await run(['--apply','--confirm','apply','--target','iptv'], bareSeven);
- assert.equal(held.exit,0,JSON.stringify(held.result));
- assert.equal(held.result.schemaVersion,7);
+ assert.equal(held.exit,3);
+ assert.equal(held.result.reason,'prediction_prerequisite');
+ assert.equal(bareSeven.calls.batches.length,0);
+ assert.equal(sql(bareSeven.productionFile,'SELECT version FROM schema_contract;',{json:true})[0].version,7);
+ assert.equal(sql(bareSeven.productionFile,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'published_epg%';",{json:true})[0].n,0);
+}
+
+{
+ const installed=await install(6);
+ predict(installed.productionFile);
+ assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
+ const programme={runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat',title:'Heat',shows:[]}]};
+ const watchlist={updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat'}]};
+ installed.putObject('epg/published-generation.json',{programmeRunId:'run-a',phase:'published'});
+ installed.putObject('programme.json',programme);
+ installed.putObject('watchlist.json',watchlist);
+ assert.equal((await run(['--load','--confirm','load','--target','iptv'], installed)).exit,0);
+ let watchlistReads=0;
+ const original=installed.fetchImpl;
+ installed.fetchImpl=async(url,init)=>{
+  const response=await original(url,init);
+  if(String(url).includes('/watchlist.json')){watchlistReads++;if(watchlistReads===3)installed.putObject('watchlist.json',{updatedAt:'2026-11-01T13:00:00.000Z',films:[{id:'film:stale'}]});}
+  return response;
+ };
+ const activated=await run(['--activate','--confirm','activate','--target','iptv'], installed);
+ assert.notEqual(activated.exit,0,JSON.stringify(activated.result));
+ assert.equal(activated.result.reason,'published_epg_fence');
+ assert.equal(sql(installed.productionFile,"SELECT mode FROM published_epg_authority WHERE id=1;",{json:true})[0].mode,'r2');
+}
+
+{
+ const installed=await install(6);
+ predict(installed.productionFile);
+ assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
+ const programme={runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat',title:'Heat',shows:[]}]};
+ const watchlist={updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat'}]};
+ installed.putObject('epg/published-generation.json',{programmeRunId:'run-a',phase:'published'});
+ installed.putObject('programme.json',programme);
+ installed.putObject('watchlist.json',watchlist);
+ assert.equal((await run(['--load','--confirm','load','--target','iptv'], installed)).exit,0);
+ assert.equal((await run(['--activate','--confirm','activate','--target','iptv'], installed)).exit,0);
+ installed.putObject('watchlist.json',{updatedAt:'2026-11-01T13:00:00.000Z',films:[{id:'film:stale'}]});
+ let puts=0;
+ const original=installed.fetchImpl;
+ installed.fetchImpl=async(url,init)=>{
+  if((init?.method||'GET')==='PUT'){puts++;if(puts===2)return new Response('no',{status:500});}
+  return original(url,init);
+ };
+ const reverted=await run(['--revert','--confirm','r2','--target','iptv'], installed);
+ assert.notEqual(reverted.exit,0,JSON.stringify(reverted.result));
+ assert.equal(reverted.result.writeState,'partial');
+ assert.equal(reverted.result.writes,true);
+ assert.equal(sql(installed.productionFile,"SELECT mode FROM published_epg_authority WHERE id=1;",{json:true})[0].mode,'d1');
 }
 
 console.log('published EPG operator: apply leaves r2, load and activate are separate, revert repairs the watchlist');

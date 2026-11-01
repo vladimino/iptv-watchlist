@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Production entry for the published EPG cutover (ADR 0079). Default is read-only.
 // --apply sends only migrations/0008_published_epg_authority.sql, and only when the
-// contract version is 6 or 7 and the published EPG tables are all absent. The inserted
-// marker stays mode r2. On version 6 the version stays 6. On version 7 it becomes 8
-// only when prediction_domain_authority already exists; otherwise the version stays 7.
+// contract version is 7, every prediction-domain table is already present, and the
+// published EPG tables are all absent. The inserted marker stays mode r2 and the
+// version becomes 8. Version 6 is refused before any statement is sent.
 // --load copies the live programme and watchlist into D1 and leaves mode r2.
 // --activate flips the marker r2 to d1 only when pointer, programme and watchlist
 // still match that load. --revert --confirm r2 repairs the pointer, programme.json,
@@ -29,6 +29,7 @@ export const STATEMENT_BYTES=100*1024;
 export const BATCH_STATEMENTS=2000;
 export const BATCH_BYTES=8*1024*1024;
 const TABLES=['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'];
+export const PREDICTION_TABLES=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent'];
 const WRITER_WINDOW_MS=15*60*1000;
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 const MIGRATION_PATH=path.join(ROOT,'migrations/0008_published_epg_authority.sql');
@@ -81,9 +82,11 @@ export function publishedEpgStatements(){
 export function applyDecision(snapshot){
  const version=Number(snapshot.schemaVersion);
  const present=TABLES.filter(name=>snapshot.tables[name]);
- if(present.length===TABLES.length)return 'already_applied';
- if(present.length||version>=8)return 'partial_schema';
- if(version!==6&&version!==7)return 'schema_unexpected';
+ if(present.length&&present.length!==TABLES.length)return 'partial_schema';
+ if(present.length===TABLES.length)return version===8?'already_applied':'partial_schema';
+ if(version>=8)return 'partial_schema';
+ if(version!==7)return 'schema_unexpected';
+ if(!PREDICTION_TABLES.every(name=>snapshot.prediction?.[name]))return 'prediction_prerequisite';
  return 'apply';
 }
 
@@ -213,14 +216,15 @@ async function readSnapshot(binding){
  try{
   const versionRow=await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first();
   const version=Number(versionRow?.version);
-  const names=(await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'published_epg%'").bind().all()).results.map(row=>row.name);
+  const names=(await binding.prepare("SELECT name FROM sqlite_master WHERE type='table'").bind().all()).results.map(row=>row.name);
   const tables=Object.fromEntries(TABLES.map(name=>[name,names.includes(name)]));
+  const prediction=Object.fromEntries(PREDICTION_TABLES.map(name=>[name,names.includes(name)]));
   let marker=null;
   if(tables.published_epg_authority){
    const row=await binding.prepare('SELECT mode, programme_run_id AS programmeRunId, generation, mirror_programme_run_id AS mirrorProgrammeRunId, mirror_etag AS mirrorEtag, watchlist_generation AS watchlistGeneration, mirror_watchlist_etag AS mirrorWatchlistEtag FROM published_epg_authority WHERE id=1').bind().first();
    if(row)marker={mode:row.mode, programmeRunId:row.programmeRunId??null, generation:Number(row.generation), mirrorProgrammeRunId:row.mirrorProgrammeRunId??null, mirrorEtag:row.mirrorEtag??null, watchlistGeneration:Number(row.watchlistGeneration), mirrorWatchlistEtag:row.mirrorWatchlistEtag??null};
   }
-  return {schemaVersion:Number.isFinite(version)?version:null, tables, marker};
+  return {schemaVersion:Number.isFinite(version)?version:null, tables, prediction, marker};
  }catch(error){
   if(error instanceof OperatorStop)throw error;
   throw new OperatorStop('unknown_state',3);
@@ -318,8 +322,8 @@ function tablesPresent(snapshot){
 }
 
 function writeReport(ctx){
- const writeState=ctx.writeState==='committed'||ctx.writeState==='unknown'?ctx.writeState:'none';
- if(writeState==='committed')return {writeState, writes:true, retry:false};
+ const writeState=ctx.writeState==='committed'||ctx.writeState==='unknown'||ctx.writeState==='partial'?ctx.writeState:'none';
+ if(writeState==='committed'||writeState==='partial')return {writeState, writes:true, retry:false};
  if(writeState==='unknown')return {writeState, writes:null, retry:false};
  return {writeState, writes:false};
 }
@@ -354,11 +358,11 @@ export async function runPublishedEpgProduction({argv=process.argv, env=process.
   if(parsed.command==='apply')return {exit:0, result:await applyMigration(opened, ctx, snapshot, writers)};
   if(parsed.command==='revert')return {exit:0, result:await revertMarker(opened, credentials, client, ctx, fetchImpl)};
   const source=await readPublished(client);
-  if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=6)||!snapshot.marker)throw new OperatorStop('published_epg_schema',3);
+  if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=8)||!snapshot.marker)throw new OperatorStop('published_epg_schema',3);
   if(snapshot.marker.mode!=='r2')throw new OperatorStop('published_epg_authoritative',3);
   if(parsed.command==='load')return {exit:0, result:await loadPublished(opened.binding, source, ctx)};
   if(snapshot.marker.mirrorProgrammeRunId!==snapshot.marker.programmeRunId||source.pointer.etag!==snapshot.marker.mirrorEtag||source.watchlist.etag!==snapshot.marker.mirrorWatchlistEtag)throw new OperatorStop('published_epg_fence',3);
-  return {exit:0, result:await activateMarker(opened.binding, source, ctx, snapshot)};
+  return {exit:0, result:await activateMarker(opened, client, ctx, snapshot, source, clock)};
  }catch(error){
   return finish(normalize(error), ctx);
  }
@@ -378,9 +382,7 @@ async function applyMigration(opened, ctx, snapshot, writers){
  const statements=publishedEpgStatements();
  await opened.adapter.executeRendered(statements);
  const readback=await readSnapshot(opened.binding);
- const predictionRow=await opened.binding.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='prediction_domain_authority'").bind().first();
- const expectedVersion=Number(snapshot.schemaVersion)>=7&&predictionRow?8:Number(snapshot.schemaVersion);
- if(readback.schemaVersion!==expectedVersion||readback.marker?.mode!=='r2'||readback.marker.programmeRunId!==null||readback.marker.generation!==0||readback.marker.watchlistGeneration!==0)throw new OperatorStop('readback_mismatch',3);
+ if(readback.schemaVersion!==8||readback.marker?.mode!=='r2'||readback.marker.programmeRunId!==null||readback.marker.generation!==0||readback.marker.watchlistGeneration!==0)throw new OperatorStop('readback_mismatch',3);
  return {operation:'apply', writes:true, writeState:'committed', bookmark:ctx.bookmark, writers, schemaVersion:readback.schemaVersion, mode:readback.marker.mode, generation:readback.marker.generation, programmeRunId:readback.marker.programmeRunId};
 }
 
@@ -406,25 +408,28 @@ async function loadPublished(binding, source, ctx){
 function quoteEtag(etag){return /^".*"$/.test(etag)?etag:'"'+etag+'"';}
 function unquoteEtag(etag){return String(etag||'').trim().replace(/^"(.*)"$/,'$1');}
 const MIRROR_KEY=/^(?:programme\.json|watchlist\.json|epg\/published-generation\.json|epg\/generations\/[^/]+\/(?:programme|watchlist)\.json)$/;
-async function putMirror(credentials, fetchImpl, key, text, etag){
+async function putMirror(credentials, fetchImpl, key, text, etag, ctx){
  if(!MIRROR_KEY.test(key))throw new OperatorStop('mirror_refused',3);
  const url=new URL(credentials.endpoint);
  url.pathname='/'+rfc3986(credentials.bucket)+'/'+key.split('/').map(rfc3986).join('/');
  const payloadHash=createHash('sha256').update(text).digest('hex');
  const headers=signRequest({method:'PUT',url,headers:{'content-type':'application/json',...(etag?{'if-match':quoteEtag(etag)}:{'if-none-match':'*'})},payloadHash,credentials,now:new Date()});
+ ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';
  let response;
  try{response=await fetchImpl(url,{method:'PUT',headers,body:text,redirect:'error'});}
- catch{throw new OperatorStop('network',1);}
- if(response.status===412){await response.body?.cancel();return null;}
- if(!response.ok){await response.body?.cancel();throw new OperatorStop('mirror_failed',3);}
+ catch{ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';throw new OperatorStop('network',1);}
+ if(response.status===412){await response.body?.cancel();ctx.writeState=ctx.mirrorCommitted?'partial':'none';return null;}
+ if(!response.ok){await response.body?.cancel();ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';throw new OperatorStop('mirror_failed',3);}
  const written=unquoteEtag(response.headers.get('etag'));
  await response.body?.cancel();
- if(!written)throw new OperatorStop('mirror_failed',3);
+ if(!written){ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';throw new OperatorStop('mirror_failed',3);}
+ ctx.mirrorCommitted=(ctx.mirrorCommitted||0)+1;
+ ctx.writeState='partial';
  return written;
 }
 async function revertMarker(opened, credentials, client, ctx, fetchImpl){
  const snapshot=await readSnapshot(opened.binding);
- if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=6)||snapshot.marker?.mode!=='d1'||!snapshot.marker.programmeRunId)throw new OperatorStop('published_epg_not_authoritative',3);
+ if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=8)||snapshot.marker?.mode!=='d1'||!snapshot.marker.programmeRunId)throw new OperatorStop('published_epg_not_authoritative',3);
  const bucket={
   async get(key){
    const object=await readObject(client,key,{required:false});
@@ -435,7 +440,7 @@ async function revertMarker(opened, credentials, client, ctx, fetchImpl){
    const text=String(body);
    const match=options.onlyIf?.etagMatches||null;
    if(!match&&options.onlyIf?.etagDoesNotMatch!=='*'&&options.onlyIf)return null;
-   const written=await putMirror(credentials,fetchImpl,key,text,match);
+   const written=await putMirror(credentials,fetchImpl,key,text,match,ctx);
    return written?{etag:written}:null;
   },
  };
@@ -449,11 +454,21 @@ async function revertMarker(opened, credentials, client, ctx, fetchImpl){
  const members=await readMembers(opened.binding,after.programmeRunId,'watchlist');
  const ids=(watchlist.films||[]).map(film=>String(film.id));
  if(ids.length!==members.length||ids.some((id,index)=>id!==members[index].filmId))throw new OperatorStop('readback_mismatch',3);
+ ctx.writeState='committed';
  return {operation:'revert', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'r2', programmeRunId:after.programmeRunId, generation:after.generation};
 }
-async function activateMarker(binding, source, ctx, snapshot){
- const after=await activatePublished(binding,{confirm:'activate',pointerEtag:source.pointer.etag,watchlistEtag:source.watchlist.etag,programme:source.programmeBody,watchlist:source.watchlistBody});
- const readback=await readSnapshot(binding);
+async function activateMarker(opened, client, ctx, snapshot, source, clock){
+ const writers=await writerReport(client, opened.binding, clock);
+ assertIdle(writers);
+ const bucket={
+  async get(key){
+   const object=await readObject(client,key,{required:false});
+   if(!object)return null;
+   return {etag:object.etag,json:async()=>JSON.parse(object.text),text:async()=>object.text};
+  },
+ };
+ const after=await activatePublished({...opened.binding,BUCKET:bucket},{confirm:'activate',pointerEtag:source.pointer.etag,watchlistEtag:source.watchlist.etag});
+ const readback=await readSnapshot(opened.binding);
  if(after.mode!=='d1'||readback.marker?.mode!=='d1'||readback.marker.programmeRunId!==snapshot.marker.programmeRunId)throw new OperatorStop('readback_mismatch',3);
  return {operation:'activate', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'d1', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
 }
