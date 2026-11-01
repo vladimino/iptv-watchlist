@@ -35,7 +35,8 @@ flowchart TB
     catalogD1 -->|SELECT only| d1
     cron -->|scheduled event| projector
     store -->|reads enrichment objects| projector
-    projector -.->|on: changed Films and Persons; sync clocks only at schema v5| d1
+    projector -.->|on: Films and Persons; sync clocks at schema v5 or v6; metadata from D1 when the cache marker is d1| d1
+    sync -.->|metadata cache when the schema v6 marker is d1| d1
     classDef current fill:#edf8ef,stroke:#579266,color:#15361e
     classDef gated fill:#fff3de,stroke:#a56c2b,color:#42300e
     class store,d1 current
@@ -49,7 +50,7 @@ The **one-chunk continuation** is executed inside the explicit step/request that
 The one Worker cron trigger runs only the [enrichment projector](../adr/0056-d1-enrichment-write-through.md), never a sync, EPG, discovery or prediction step. With `D1_ENRICHMENT_WRITE` unset it returns at once.
 
 - With `dry`, it reads the enrichment objects from R2 and the change keys from D1, and logs the diff.
-- With `on`, it also writes the changed Films and Persons to D1 under its lease. That dashed arrow is the Worker's only D1 write path, and it never writes R2. Sync clocks are included on the same arrow only when the database is schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)). A deploy does not apply that migration.
+- With `on`, it also writes the changed Films and Persons to D1 under its lease, and it never writes R2. Sync clocks are included on that arrow at schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)), which is the applied production schema. While the schema v6 marker is absent or `r2`, that arrow is the Worker's only D1 write. When the marker is `d1`, the sync arrow also writes the metadata cache, and the projector reads those rows instead of `metadata.json` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md)). A deploy does not apply migration `0006` and does not switch the marker.
 
 Runtime mode and configured Cloudflare Access policies must be rechecked for live-state claims.
 

@@ -1,5 +1,5 @@
 // Schema v5 metadataSync clocks (ADR 0070). The enrichment projector writes them only when migration 0005 is present.
-// Schema v4 keeps the previous writes. metadataSync does not read the table, and a D1 failure does not write R2.
+// Schema v4 keeps the previous writes. The sync decision does not read film_sync_state.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -13,10 +13,15 @@ const worker=fs.readFileSync('src/worker.js','utf8');
 const projectorSource=fs.readFileSync('src/d1-enrichment.js','utf8');
 const begin=worker.slice(worker.indexOf('async function beginSync'),worker.indexOf('async function metadataSync'));
 const sync=worker.slice(worker.indexOf('async function metadataSync'),worker.indexOf('async function finishSync'));
-assert.match(begin,/peopleNamesVersion!==2/);
-assert.match(begin,/30\*86400000/);
+const cacheSource=fs.readFileSync('src/metadata-cache.js','utf8');
+assert.match(cacheSource,/peopleNamesVersion!==2/);
+assert.match(cacheSource,/METADATA_FRESH_MS=30\*86400000/);
+assert.match(begin,/MetadataCache\.mergeWatchlistFilm/);
+assert.match(begin,/MetadataCache\.metadataPending/);
 assert.match(sync,/peopleNamesVersion!==2/);
 assert.match(sync,/synopsisFetchedAt/);
+assert.match(sync,/MetadataCache\.loadMetadataWorkingSet/);
+assert.match(sync,/MetadataCache\.saveMetadataWorkingSet/);
 assert.doesNotMatch(begin,/film_sync_state|env\.DB|runD1EnrichmentProjection/);
 assert.doesNotMatch(sync,/film_sync_state|env\.DB|runD1EnrichmentProjection/);
 assert.doesNotMatch(worker,/film_sync_state/);
@@ -360,4 +365,4 @@ const env={DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'};
  assert.equal(one(dryDb,'SELECT COUNT(*) FROM film_sync_state'),0);
 }
 
-console.log('metadataSync clocks: v4 projector unchanged, v5 rows follow R2, 30-day strings stay distinct from the folded clock, reviewed names and titles stay, failed and leased batches do not write, tombstones clear the row, and metadataSync does not read D1');
+console.log('metadataSync clocks: v4 projector unchanged, v5 rows follow R2, 30-day strings stay distinct from the folded clock, reviewed names and titles stay, failed and leased batches do not write, tombstones clear the row, and the sync decision does not read film_sync_state');

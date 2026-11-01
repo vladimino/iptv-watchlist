@@ -6,7 +6,7 @@
 **Approval source:** Owner decisions in the AIR-275 working session on 2026-10-30: write-through instead of an immediate write flip, recorded by the coordinator on [AIR-275](https://trello.com/c/4x7hH0gI) together with the review invariants; and, after the first review of [PR #249](https://github.com/vladimino/iptv-watchlist/pull/249), a Worker cron trigger rather than an MCP tool called by the hourly Task or a run after the R2 commit. ADR 0056 was explicitly accepted by the owner in the AIR-275 PR #249 conversation on 2026-10-30; the same approval visually accepted all three Mermaid diagrams (runtime topology, persistence/migration, scheduling/orchestration) and separately authorized deployment with the Cloudflare cron registered at `37 * * * *` while `D1_ENRICHMENT_WRITE` remains off. No D1 schema migration, reload, AIR-286 replay, or `dry`/`on` activation was authorized.  
 **Related work:** [AIR-275](https://trello.com/c/4x7hH0gI), [AIR-286](https://trello.com/c/EswNQuv8), [ADR 0051](0051-d1-domain-r2-blobs.md)  
 **Supersedes:** [ADR 0051](0051-d1-domain-r2-blobs.md) in part, for the enrichment domain only: decision 2's first step, in which the writer makes D1 the truth at once and keeps the R2 JSON as a cache. For enrichment, an R2-authoritative projection into D1 from a Worker cron trigger comes first, and the write flip follows later. The rest of 0051 stands: the D1/R2 split, phase 1, the person evidence rule, the dropped shadow stages and G-gates, and the per-domain flips of the other domains.  
-**Superseded by:** None
+**Superseded by:** [ADR 0073](0073-metadata-cache-d1-authority.md) (Accepted 2026-11-01) in part, and only while the metadata cache marker is `d1`: the projector sources metadata cache records from D1, while R2 remains authoritative for the rest of the enrichment flow. All other decisions remain.
 
 ## Context
 
@@ -99,6 +99,6 @@ Rollback of `on` means unsetting the flag. The rows it wrote stay until a Time T
 
 ## Follow-ups
 
-- The write flip of each enrichment writer (phase 2 continued).
+- The write flip of each enrichment writer (phase 2 continued). [ADR 0073](0073-metadata-cache-d1-authority.md) accepts that future flip for the metadata cache alone, gated by `metadata_cache_authority.mode`; production schema `0006`, import and activation each still require separate owner authorization.
 - [AIR-44](https://trello.com/c/ojtZjVc9) person links, written as a reproducible step.
 - Credit provenance, if the approximate ownership rule ever bites.
