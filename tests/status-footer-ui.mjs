@@ -8,6 +8,11 @@ assert.equal((footer.match(/class="status-row(?: [^"]*)?"/g)||[]).length,5,'coll
 assert.match(footer,/Модель вкуса[\s\S]*Локальная база[\s\S]*Окно просмотра[\s\S]*Последний run[\s\S]*Интеграции/);
 assert.match(footer,/id="status-run-label"/);assert.match(footer,/id="status-next-run">Следующий запуск по расписанию:/);assert.match(footer,/>По расписанию</);
 assert.match(footer,/<details class="footer-details" id="status-details">/,'details are collapsed by default');
+assert.match(footer,/id="status-details-label">Показать детали</);
+const detailsBlock=footer.match(/<details class="footer-details"[\s\S]*?<\/details>/)?.[0]||'';
+assert.doesNotMatch(detailsBlock,/footer-admin-link|href="\/admin"/,'the admin link stays outside the disclosure');
+assert.match(footer,/<\/details>\s*<a class="footer-admin-link" href="\/admin">Админка<\/a>/,'Админка follows the details control and points at /admin');
+assert.ok(footer.indexOf('id="status-details-label"')<footer.indexOf('class="footer-admin-link"'),'source order is the summary, then the admin link');
 for(const heading of ['Прогнозы','EPG / TMDB','Watchlist','Интеграции','Последний запуск','Модель вкуса'])assert.match(footer,new RegExp('>'+heading+'<'));
 assert.match(footer,/id="status-integrations"/);
 assert.match(footer,/data-integration="metadata" hidden/);
@@ -30,6 +35,14 @@ assert.match(css,/\.status-run-value\{[^}]*justify-items:start[^}]*text-align:le
 const desktopSummaryRule=css.match(/\.status-summary\{([^}]*)\}/)?.[1]||'';
 assert.doesNotMatch(desktopSummaryRule,/1fr/,'desktop value column does not stretch to the footer edge');
 assert.match(css,/\.footer-details-body\{[^}]*grid-template-columns:repeat\(2,minmax\(0,326px\)\)[^}]*max-width:680px/,'expanded sections use the same bounded two-column grid');
+assert.match(css,/\.footer-bar\{[^}]*grid-template-columns:minmax\(0,1fr\) max-content/,'the footer controls share one bottom row');
+assert.match(css,/\.footer-details\{[^}]*grid-column:1 \/ -1[^}]*grid-row:1/,'open details keep the full footer width on the first row');
+const summaryRule=css.match(/\.footer-details>summary\{([^}]*)\}/)?.[1]||'';
+assert.match(summaryRule,/margin-left:0/,'the details summary sits on the left');
+assert.doesNotMatch(summaryRule,/margin-left:auto/,'the summary no longer takes the right side of the row');
+assert.match(summaryRule,/min-height:44px/,'the summary keeps a comfortable hit area');
+assert.match(css,/\.footer-admin-link\{[^}]*grid-column:2[^}]*grid-row:1[^}]*justify-self:end[^}]*min-height:44px/,'Админка stays top-right, including while details are open');
+assert.match(css,/\.footer-admin-link:focus-visible\{[^}]*outline:2px solid var\(--lime\)/,'the admin link has a visible focus ring');
 assert.match(css,/@media\(max-width:620px\)[\s\S]*\.footer-details-body\{grid-template-columns:minmax\(0,1fr\)/);
 assert.match(css,/@media\(max-width:520px\)[\s\S]*\.status-row\{display:block\}/,'narrow screens stack labels and values');
 assert.match(css,/#status-integration-list>div\{grid-template-columns:minmax\(0,1fr\)/,'integration explanations sit under their labels');
