@@ -31,6 +31,7 @@ flowchart TB
     mcpClient --> mcpAccess --> route
     sync <--> store
     prediction <--> store
+    prediction -.->|mutable prediction state when the schema v7 marker is d1; migration 0007 is not applied| d1
     discovery <--> store
     catalogD1 -->|SELECT only| d1
     cron -->|scheduled event| projector
@@ -50,7 +51,7 @@ The **one-chunk continuation** is executed inside the explicit step/request that
 The one Worker cron trigger runs only the [enrichment projector](../adr/0056-d1-enrichment-write-through.md), never a sync, EPG, discovery or prediction step. With `D1_ENRICHMENT_WRITE` unset it returns at once.
 
 - With `dry`, it reads the enrichment objects from R2 and the change keys from D1, and logs the diff.
-- With `on`, it also writes the changed Films and Persons to D1 under its lease, and it never writes R2. Sync clocks are included on that arrow at schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)), which is the applied production schema. While the schema v6 marker is absent or `r2`, that arrow is the Worker's only D1 write. When the marker is `d1`, the sync arrow also writes the metadata cache, and the projector reads those rows instead of `metadata.json` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md)). A deploy does not apply migration `0006` and does not switch the marker.
+- With `on`, it also writes the changed Films and Persons to D1 under its lease, and it never writes R2. Sync clocks are included on that arrow at schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)), which is the applied production schema. While the schema v6 marker is absent or `r2`, the sync arrow is the Worker's only D1 write besides the projector. When that marker is `d1`, the sync arrow also writes the metadata cache, and the projector reads those rows instead of `metadata.json` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md)). A deploy does not apply migration `0006` or `0007` and does not switch either marker. Migration `0007` is not applied. When it is, and `prediction_domain_authority.mode` is `d1`, the prediction handlers write that domain in D1 and keep immutable bodies in R2 ([ADR 0076](../adr/0076-d1-authoritative-prediction-domain.md)). The projector does not write it.
 
 Runtime mode and configured Cloudflare Access policies must be rechecked for live-state claims.
 

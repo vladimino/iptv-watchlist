@@ -89,7 +89,15 @@ async function adminHealthRoute(request,env,url){
  if(snapshot.error)return adminError(snapshot.error,snapshot.error==='stale_pin'?409:503);
  if(pin&&!adminSameTuple(pin,snapshot.tuple))return adminError('stale_pin',409);
  const run=snapshot.tuple.programmeRunId,bucket=env.BUCKET,reads=[];
- const read=async key=>{reads.push(key);return adminReadObject(bucket,key,null);};
+ const read=async key=>{
+  reads.push(key);
+  if(typeof PredictionD1!=='undefined'&&(key===ENRICHMENT_KEY+'view-index.json'||PredictionD1.predictionMutableKey(key))){
+   if(key===ENRICHMENT_KEY+'view-index.json'){const object=await adminReadObject(bucket,key,null);if(!object.present)return object;const body=await PredictionD1.overlayIndex(env,object.body);return {...object,body};}
+   const routed=await PredictionD1.routeRead(env,key);
+   if(routed.handled)return {present:routed.value!=null,body:routed.value,etag:null};
+  }
+  return adminReadObject(bucket,key,null);
+ };
  // Every read settles before the answer, so a failed read never leaves another one half-open in the background.
  const settled=await Promise.allSettled([read(ENRICHMENT_KEY+'view-index.json'),read(profileKey),read(predictionQueueKey),read(CONTINUATION_KEY),read(epgGenerationKey(run,'discovered-films.json'))]);
  if(settled.some(item=>item.status==='rejected'))return adminError('storage_unavailable',503);

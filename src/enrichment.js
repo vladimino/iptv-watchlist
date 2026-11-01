@@ -60,7 +60,7 @@ async function publishProfile(env,body){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.schemaVersion!==1||!Number.isInteger(body.version)||body.version<1)return json({error:'Invalid version or schemaVersion'},400);
  const issue=validateProfile(body.profile);if(issue)return json({error:issue},400);
- const stored=await env.BUCKET.get(profileKey),current=stored?await stored.json():null,currentEtag=stored?.etag||null;
+ const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openProfile(env),stored=head?null:await env.BUCKET.get(profileKey),current=head?head.value:(stored?await stored.json():null),currentEtag=head?head.object?.etag||null:stored?.etag||null;
  if(current&&body.version<=current.version)return json({error:'Version must increase',code:'version_not_increasing'},409);
  const profileHash=await contentHash(body.profile),next={version:body.version,profileHash},impact=body.changeImpact??null;
  let changedFields=profileChangedFields(null,body.profile),declarationSha256=null;
@@ -81,7 +81,10 @@ async function publishProfile(env,body){
   saved=existing;
  }
  const value={...saved,lineage:profileLineage(current,saved)};
- const moved=await env.BUCKET.put(profileKey,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});
+ let routed={handled:false};
+ try{if(head)routed=await PredictionD1.saveMutable(env,profileKey,value);}
+ catch(error){if(error?.code==='prediction_domain_cas')return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);throw error;}
+ const moved=routed.handled?{etag:'d1'}:await env.BUCKET.put(profileKey,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});
  if(moved===null)return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);
  try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}
  return json(value);
@@ -696,11 +699,11 @@ function safePredictionReason(value){
 const RUNNER_LEASE_KEY=ENRICHMENT_KEY+'runner-lease.json';
 const RUNNER_LEASE_TTL=15*60000;
 async function runnerLease(env,runId,operation='renew'){
- const object=await env.BUCKET.get(RUNNER_LEASE_KEY),old=object?await object.json():null,now=Date.now();
+ const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
  if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
  if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+RUNNER_LEASE_TTL};
- const saved=await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  if(saved===null){const current=await loadJSON(env,RUNNER_LEASE_KEY);return {status:operation==='acquire'?'already_running':'lease_lost',runId:current?.runId||null};}
  return {status:'owned',...value,...(operation==='acquire'&&old?.runId&&old.expiresAt<=now?{recoveredRunId:old.runId}:{})};
 }
@@ -835,11 +838,15 @@ async function observedPrediction(env,body,work,stage,requestId){
  return withPredictionCorrelation(response,correlation);
 }
 async function predictionWriter(env,work){
- const object=await env.BUCKET.get(PREDICTION_MUTATION_LEASE),old=object?await object.json():null;
+ const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,PREDICTION_MUTATION_LEASE),object=head?head.object:await env.BUCKET.get(PREDICTION_MUTATION_LEASE),old=head?head.value:(object?await object.json():null);
  if(old?.expiresAt>Date.now())return json({status:'busy',reason:'prediction_writer_busy',...scheduledRunFields()},409);
- const lease={id:crypto.randomUUID(),expiresAt:Date.now()+90000},saved=await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ const lease={id:crypto.randomUUID(),expiresAt:Date.now()+90000},saved=head?await PredictionD1.writeLease(env,head,lease):await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  if(saved===null)return json({status:'busy',reason:'prediction_writer_busy',...scheduledRunFields()},409);
- try{return await work();}finally{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
+ try{return await work();}finally{
+  const releaseHead=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,PREDICTION_MUTATION_LEASE);
+  if(releaseHead?.mode==='d1'){if(releaseHead.value?.id===lease.id)await PredictionD1.writeLease(env,releaseHead,{...lease,expiresAt:0});}
+  else{const current=await env.BUCKET.get(PREDICTION_MUTATION_LEASE);if(current&&(await current.json()).id===lease.id)await env.BUCKET.put(PREDICTION_MUTATION_LEASE,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:current.etag}});}
+ }
 }
 // ADR 0064: every write of the prediction queue is conditional on the etag of the object it read. A conflict re-reads the
 // queue and its inputs and rebuilds, a bounded number of times; exhaustion throws and writes nothing. A put that throws is
@@ -853,9 +860,9 @@ const putPredictionQueue=(env,object,queue)=>env.BUCKET.put(predictionQueueKey,J
 async function mutatePredictionQueue(env,apply,trigger){
  for(let attempt=0;attempt<PREDICTION_QUEUE_ATTEMPTS;attempt++){
   await predictionQueuePause(attempt);
-  const object=await env.BUCKET.get(predictionQueueKey);if(!object)return null;
-  const current=await object.json(),next=apply(cloneJSON(current));if(next==null)return current;
-  if(await putPredictionQueue(env,object,next)!==null)return next;
+  const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openQueue(env),object=head?head.object:await env.BUCKET.get(predictionQueueKey),current=head?head.queue:(object?await object.json():null);if(!current)return null;
+  const next=apply(cloneJSON(current));if(next==null)return current;
+  if((head?await PredictionD1.writeQueue(env,head,next):await putPredictionQueue(env,object,next))!==null)return next;
  }
  throw new PredictionQueueConflictError(trigger);
 }
@@ -897,18 +904,19 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrit
   await predictionQueuePause(attempt);
   // The queue is read before its inputs, so a rebuild never rests on a profile, index or programme older than the queue it
   // replaces. A caller's programme of another generation than the stored queue is replaced by the published one.
-  const object=await env.BUCKET.get(predictionQueueKey),previous=object?await object.json():null;
+  const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openQueue(env),object=head?head.object:await env.BUCKET.get(predictionQueueKey),previous=head?head.queue:(object?await object.json():null);
   const source=previous?.programmeRunId&&previous.programmeRunId!==report?.runId?await loadJSON(env,'programme.json')||report:report;
   const queue=await buildPredictionQueue(env,source,trigger,previous);if(!queue)return null;
   const next=amend?amend(queue)||queue:queue;
   if(beforeWrite)await beforeWrite();
-  if(await putPredictionQueue(env,object,next)!==null)return next;
+  if((head?await PredictionD1.writeQueue(env,head,next):await putPredictionQueue(env,object,next))!==null)return next;
  }
  throw new PredictionQueueConflictError(trigger);
 }
 async function buildPredictionQueue(env,report,trigger,previous){
  const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
- const [profile,index,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'epg/discovered-films.json')]);
+ const [profile,storedIndex,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'epg/discovered-films.json')]);
+ const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex);
  if(!profile||!report?.films)return null;
  const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
  // The selective profile rule decides; the strict outcome is counted for every film beside it.

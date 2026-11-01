@@ -61,7 +61,8 @@ sequenceDiagram
     actor Hourly as Hourly Task (hourly)
     participant MCP as Worker MCP
     participant Runner as Prediction runner
-    participant R2 as Authoritative R2
+    participant R2 as R2 objects
+    participant D1 as D1 prediction marker
     Hourly->>MCP: Runner, schema, profile, queue preflight
     Hourly->>MCP: prediction_start(scheduled) once
     MCP->>Runner: Acquire owned run / check lease
@@ -73,13 +74,20 @@ sequenceDiagram
         alt Full preflight passes
             Hourly->>MCP: prediction_submit
             MCP->>Runner: Revalidate and persist
-            Runner->>R2: Store outcome
+            alt Prediction marker is not d1
+                Runner->>R2: Store the mutable outcome
+            else Schema v7 marker is d1
+                Runner->>R2: Verify the immutable body
+                Runner->>D1: Commit the pointer, queue and run
+            end
         else Validation unavailable or invalid
             Note over Hourly,Runner: Correct / revalidate or fail closed
         end
     end
     Hourly->>MCP: prediction_complete on allowed owned stop
 ```
+
+Migration `0007` is not applied, so the live branch is the R2 store. The `d1` branch is the contract once that migration is applied and the marker is switched ([ADR 0076](../adr/0076-d1-authoritative-prediction-domain.md)). The task, its prompt and its schedule do not change.
 
 ### Read-only Scheduled Task drift monitor
 
@@ -117,19 +125,19 @@ sequenceDiagram
     opt D1_ENRICHMENT_WRITE is dry or on
         Worker->>R2: Read published enrichment records
         Worker->>D1: Read projection change keys
-        opt Schema v6 and the metadata cache marker is d1
+        opt Schema v6 or v7 and the metadata cache marker is d1
             Worker->>D1: Read metadata cache records
         end
     end
     opt Flag on and source inputs complete
         Worker->>D1: Atomically write changed Films and Persons with keys
-        opt Schema v5 or v6 with film_sync_state present
+        opt Schema v5, v6 or v7 with film_sync_state present
             Worker->>D1: Write metadata sync clocks with checkpoint
         end
     end
 ```
 
-The cron expression is `37 * * * *`. When `D1_ENRICHMENT_WRITE` is unset, the trigger performs no R2 reads or D1 writes. With `dry`, it reads the source and change keys but never writes. With `on`, the projector writes changed Films and Persons in existing fenced batches. At schema v5, `film_sync_state` uses that same writer: sync clocks for an already-changing Film share its batch, while a clock-only change uses its own fenced batch. That schema is applied. At schema v6, the same clocks are written, and when the metadata cache marker is `d1` the metadata records come from D1. The projector still does not write R2 or the cache. A code deploy does not apply migration `0006`. Production has applied it and the marker is `d1` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md), [cutover](../evidence/d1-migration/air-313-metadata-cache-cutover-2026-11-01.md)).
+The cron expression is `37 * * * *`. When `D1_ENRICHMENT_WRITE` is unset, the trigger performs no R2 reads or D1 writes. With `dry`, it reads the source and change keys but never writes. With `on`, the projector writes changed Films and Persons in existing fenced batches. At schema v5, `film_sync_state` uses that same writer: sync clocks for an already-changing Film share its batch, while a clock-only change uses its own fenced batch. That schema is applied. At schema v6, the same clocks are written, and when the metadata cache marker is `d1` the metadata records come from D1. Schema v7 keeps those clocks and that cache read, and the projector still does not write the prediction domain. A missing prediction table or marker on version 7 fails the run before a write. The projector still does not write R2 or the cache. A code deploy does not apply migration `0006` or `0007`. Production has applied `0006` and that marker is `d1` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md), [cutover](../evidence/d1-migration/air-313-metadata-cache-cutover-2026-11-01.md)). Production has not applied `0007` ([ADR 0076](../adr/0076-d1-authoritative-prediction-domain.md)).
 
 The drift monitor is a read-only automation in the same registry. Its expected recurrence, after the owner-approved registry change recorded on 2026-10-31, is daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, enabled. It reads the live entries of the daily EPG task, the hourly task and the Ratings Task, then `epg_status` and read-only `ratings_sync_status` through the same Access-protected MCP, and only notifies the owner. It cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. The Ratings Task's own run is drawn in the next diagram. The daily commit does not read Diary. `RATINGS_PIPELINE` is retired ([ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md), Accepted 2026-11-01): an incomplete migration fails closed, and a migrated one stays on the separate pipeline whatever the leftover binding holds. This page does not edit the monitor or any task.
 

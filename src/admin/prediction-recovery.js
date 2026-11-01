@@ -47,6 +47,7 @@ async function adminPredictionRecoveryRoute(request,env,url){
  try{
   snapshot=await loadPredictionDiagnosticSnapshot(readEnv,filmId);
   [lease,run]=await Promise.all([recoveryRead(readEnv,RUNNER_LEASE_KEY),recoveryRead(readEnv,RECOVERY_LATEST_RUN_KEY)]);
+  if(typeof PredictionD1!=='undefined'){const authority=await PredictionD1.readPredictionAuthority(readEnv.DB);versions.set('prediction-domain',authority.version+':'+authority.mode+':'+authority.generation+':'+authority.queueGeneration+':'+authority.profileGeneration);}
  }catch{return adminError('storage_unavailable',503);}
  const current=await recoveryPin(versions);
  if(pin&&pin!==current)return adminError('stale_pin',409);
