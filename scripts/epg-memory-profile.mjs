@@ -84,7 +84,7 @@ vm.runInContext(fs.readFileSync('dist/server/index.js','utf8').replace('export c
 async function one(index){
  const runId='profile-run-'+index;let {report,objects,watch}=buildStore(runId);
  if(FULL)epgBody=epgXml(watch,Number(value('--programmes','40000')));
- const env={LETTERBOXD_USERNAME:'owner',EPG_XML_URL:'https://epg.invalid/guide.xml',BUCKET:bucketFor(objects),LETTERBOXD_DIARY_HISTORY:'on',LETTERBOXD_FACTS:'on',DISCOVERY_LEDGER_MODE:'frozen'};
+ const env={LETTERBOXD_USERNAME:'owner',EPG_XML_URL:'https://epg.invalid/guide.xml',BUCKET:bucketFor(objects),PUBLISHED_EPG_DB_OPTIONAL:'standin',LETTERBOXD_DIARY_HISTORY:'on',LETTERBOXD_FACTS:'on',DISCOVERY_LEDGER_MODE:'frozen'};
  objects=null;
  const run={runId,stage:'epg',startedAt:new Date().toISOString(),watchlist:watch,pending:[],ratingPending:['letterboxd-diary'],...(FULL?{}:{events:[{id:runId+'-watchlist',type:'watchlist',at:report.updatedAt,total:watch.length,baseline:false,added:[],removed:[]},{id:runId+'-epg',type:'epg',at:report.updatedAt,films:watch.length,archive:0,future:0,broadcasts:0}]}),watchlistObservedAt:report.updatedAt};
  report=null;

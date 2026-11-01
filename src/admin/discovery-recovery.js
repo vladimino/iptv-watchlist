@@ -112,11 +112,20 @@ async function readScopedObservationIndex(bucket,run,generation,scope,manifestKe
  const freshness=DiscoveryIndex.observationIndexFreshness(manifest,{programmeRunId:run,resolutionEtag:resolution?.etag??null,ledgerEtag:ledger?.etag??null});
  return {...base,manifest,manifestEtag,records,state:freshness.state,reasons:freshness.reasons,resolutionEtag:resolution?.etag??null};
 }
-// The unresolved index, and, for one key that is not in it, the verified index of the same generation. A list read
-// does not open the verified index. A keyed read never parses the ledger or the resolution map.
+// The unresolved index, and, for one key that is not in it, the verified index of the same generation. When published
+// EPG is open on D1, that generation comes from PublishedEpg.currentGeneration; otherwise it is the R2 pointer. A list
+// read does not open the verified index. A keyed read never parses the ledger or the resolution map.
 async function discoveryIndexRead(bucket,options={}){
- const pointer=await bucket.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- const run=generation?.phase==='published'&&typeof generation.programmeRunId==='string'&&generation.programmeRunId?generation.programmeRunId:null;
+ let run=null,generation=null,authoritative=false;
+ if(options.env&&typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
+  const live=await PublishedEpg.currentGeneration(options.env);
+  if(live){authoritative=true;generation=live;run=live.phase==='published'&&typeof live.programmeRunId==='string'&&live.programmeRunId?live.programmeRunId:null;}
+ }
+ if(!authoritative){
+  const pointer=await bucket.get(EPG_GENERATION_KEY);
+  generation=pointer?await pointer.json():null;
+  run=generation?.phase==='published'&&typeof generation.programmeRunId==='string'&&generation.programmeRunId?generation.programmeRunId:null;
+ }
  const base={programmeRunId:run,manifest:null,manifestEtag:null,records:[],reasons:[],generation:generation&&typeof generation==='object'?generation:null,indexScope:DiscoveryIndex.OBSERVATION_INDEX_SCOPE};
  if(!run)return {...base,state:'unavailable',reasons:['no_published_generation']};
  const unresolved=await readScopedObservationIndex(bucket,run,generation&&typeof generation==='object'?generation:null,DiscoveryIndex.OBSERVATION_INDEX_SCOPE,DiscoveryIndex.observationIndexManifestKey,DiscoveryIndex.observationIndexShardKey,options);
@@ -135,7 +144,7 @@ function drIndexView(index){
 // One observation judged now, from the index and the small coordination objects. `ownLeaseId` is the lease the executor
 // holds: it is not another writer.
 async function drObserve(bucket,versions,key,nowMs,ownLeaseId=null,env=null){
- const index=await discoveryIndexRead(bucket,{key});
+ const index=await discoveryIndexRead(bucket,{key,env});
  const record=index.records.find(item=>item.key===key)||null;
  const [continuation,status,lease]=await Promise.all([drJson(bucket,DR_CONTINUATION_KEY),drJson(bucket,DR_STATUS_KEY),drJson(bucket,DISCOVERY_LEASE_KEY)]);
  const leaseValue=lease.status==='unavailable'?undefined:ownLeaseId&&lease.value?.id===ownLeaseId?null:lease.value;
@@ -306,7 +315,7 @@ async function drExecute(request,env,url){
  };
  try{
   const {bucket,versions}=drReadOnly(env.BUCKET);
-  const observed=await drObserve(bucket,versions,key,Date.now(),lease.id);
+  const observed=await drObserve(bucket,versions,key,Date.now(),lease.id,env);
   const fresh={pin:observed.pin,now:observed.now,records:observed.record?[{id:key,version:observed.record.decisionHash}]:[],issues:observed.assessment&&!observed.assessment.error?[DiscoveryRecovery.reconsiderIssue(observed.assessment)]:[]};
   const check=AdminActions.checkSubmission(DR_REGISTRY,confirmation,fresh,{principal,issued:stored.record.issued});
   if(!check.ok)return await finish({startedAt},[{id:key,outcome:'not_attempted'}],{refusal:check.refusal});

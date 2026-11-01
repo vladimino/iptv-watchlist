@@ -250,14 +250,24 @@ function touchCanonicalFilm(film,candidate,programmeRunId){
  const hotEnteredAt=candidateIsHot(candidate)&&!filmIsHot(film)?new Date().toISOString():film.hotEnteredAt;
  return {...film,hotEnteredAt,canonicalIdentity:'tmdb:'+film.tmdbId,aliases:[...new Set([...(film.aliases||[]),candidate.title,...(candidate.rawTitles||[])].filter(Boolean))],shows,showsProgrammeRunId:explicit&&programmeRunId?programmeRunId:film.showsProgrammeRunId||null,epgLastAiring:Math.max(film.epgLastAiring||0,candidate.lastAiring||0)};
 }
-async function publishedGenerationMatches(env,seenRunId){
+async function publishedPointer(env){
+ if(typeof PublishedEpg!=='undefined'){
+  const gate=await PublishedEpg.readAuthority(env);
+  if(gate.cutover==='held')throw new Error('published_epg_fence');
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live)return {authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,etag:live.fence};
+ }
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null};
+}
+async function publishedGenerationMatches(env,seenRunId){
+ const generation=await publishedPointer(env);
  return !(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId);
 }
 async function saveDiscoveredFilms(env,films,seenRunId,fence=null){
  if(typeof env.beforeCatalogWrite==='function'){const hook=env.beforeCatalogWrite;env.beforeCatalogWrite=null;await hook();}
  if(!await publishedGenerationMatches(env,seenRunId))return false;
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const generation=await publishedPointer(env);
  if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'discovered-films.json'),films);}
  if(fence)await fence();await saveJSON(env,'epg/discovered-films.json',films);return true;
 }
@@ -302,7 +312,7 @@ const CATALOG_POSTER_TERMINAL=new Set(['hydrated','already_present','no_poster_o
 // The guard runs immediately before every write attempt, including after a lost compare-and-swap: the published generation must
 // still be the one the call started from, and the resolver lease must still be ours (renewed). A failed guard stops all writes.
 async function catalogPosterGuard(env,programmeRunId,lease){
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const generation=await publishedPointer(env);
  const current=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
  if(current!==programmeRunId)return 'generation_changed';
  if(!await renewDiscoveryLease(env,lease))return 'lease_lost';
@@ -428,7 +438,7 @@ async function catalogPosterHydration(env,body={}){
   recheckIds=[];
   for(const id of body.recheck){if(typeof id!=='string'||!CATALOG_POSTER_TMDB_ID.test(id)||recheckIds.includes(id))return json({error:'Invalid recheck'},400);recheckIds.push(id);}
  }
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const generation=await publishedPointer(env);
  const programmeRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
  // The caller's scope fence: a call bound to one published generation is refused, before any catalog read, lease, TMDB
  // request or write, once another generation (or none) is published.
@@ -447,7 +457,7 @@ async function catalogPosterHydration(env,body={}){
  if(!lease)return json({dryRun:false,enabled:true,error:'Resolver is writing the catalog',...summary},409);
  try{
   if(expected){
-   const again=await env.BUCKET.get(EPG_GENERATION_KEY),latest=again?await again.json():null;
+   const latest=await publishedPointer(env);
    const current=latest?.phase==='published'&&latest.programmeRunId?latest.programmeRunId:null;
    if(current!==expected)return fenced(current);
   }
@@ -543,12 +553,22 @@ async function attachWatchlistShowing(env,seenRunId,filmId,candidate,fence=null)
  next.title=current.title;
  if(!Object.hasOwn(current,'canonicalIdentity'))delete next.canonicalIdentity;
  report.films[index]=next;
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- if(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId)return false;
- if(generation?.phase==='published'&&generation.programmeRunId===seenRunId){
-  if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
-  const again=await env.BUCKET.get(EPG_GENERATION_KEY),current=again?await again.json():null;
-  if(current?.programmeRunId!==seenRunId||pointer?.etag&&again?.etag!==pointer.etag)return false;
+ const pointer=await publishedPointer(env);
+ if(pointer?.phase==='published'&&seenRunId&&pointer.programmeRunId!==seenRunId)return false;
+ if(pointer?.phase==='published'&&pointer.programmeRunId===seenRunId){
+  if(fence)await fence();
+  if(pointer.authority==='d1'){
+   const expectedGeneration=Number(String(pointer.etag||'').split(':')[1]);
+   const patched=await PublishedEpg.patchProgramme(env,seenRunId,report,{expectedGeneration});
+   if(!patched)return false;
+   const again=await publishedPointer(env);
+   if(again?.programmeRunId!==seenRunId||!PublishedEpg.advancedFence(pointer.etag,again?.etag))return false;
+   await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+   return true;
+  }
+  await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+  const again=await publishedPointer(env);
+  if(again?.programmeRunId!==seenRunId||pointer.etag&&again.etag!==pointer.etag)return false;
   return true;
  }
  if(fence)await fence();await saveJSON(env,'programme.json',report);return true;
@@ -678,7 +698,7 @@ async function writeObservationIndex(env,run,shards,fence,fields,layout){
 async function saveObservationIndex(env,source,decisions,fence,writer){
  const run=source.programmeRunId||null;
  try{
-  const pointer=run?await env.BUCKET.get(EPG_GENERATION_KEY):null,generation=pointer?await pointer.json():null;
+  const generation=run?await publishedPointer(env):null;
   if(!run||generation?.phase!=='published'||generation.programmeRunId!==run)return {written:false,reason:'generation_not_published'};
   const now=Date.now(),unresolved=[],verified=[];let awaitingFirstLookup=0;
   for(const candidate of source.items){
