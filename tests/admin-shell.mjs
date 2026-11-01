@@ -196,7 +196,7 @@ const window = {
   },
 };
 const ctx = vm.createContext({
-  URL, URLSearchParams, document, window, history: window.history, fetch: fakeFetch,
+  URL, URLSearchParams, document, window, history: window.history, fetch: fakeFetch, crypto: webcrypto,
   Array, Object, String, Number, Boolean, Math, JSON, Map, Set, Error, Promise, Date, Intl, RegExp,
   setTimeout, clearTimeout, AbortController, console,
 });
@@ -458,4 +458,63 @@ assert.equal(url().searchParams.get('q'), null);
 assert.equal(searchNode.value, '');
 assert.equal(document.activeElement, searchNode);
 assert.ok(requests.every(request => request.method === 'GET'));
+
+// 11. An unknown save keeps the requestId; a confirmed refusal starts a new one. Editing the form drops it.
+assert.ok((listeners.get('#admin-detail') || []).some(item => item.type === 'input'));
+assert.ok((listeners.get('#admin-detail') || []).some(item => item.type === 'change'));
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:0,error:'network'})`), true);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'commit_unverified'})`), true);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:500,error:'http_500'})`), true);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:412,error:'version_conflict'})`), false);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:409,error:'request_id_reused'})`), false);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'review_unconditional'})`), false);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'storage_unavailable'})`), false);
+window.location.href = 'http://127.0.0.1/admin?kind=person&id=person:actor/mira-sol';
+await run('onAdminRefresh()');
+await settle();
+await run(`(async () => {
+  globalThis.__namePosts = [];
+  globalThis.__namePost = adminPost;
+  const status = {textContent:'', focus(){this.focused=true;}};
+  const button = {disabled:false};
+  const form = {id:'admin-name-form', dataset:{}, querySelector(sel){
+    if(sel==='#admin-name-status')return status;
+    if(sel==='button[type="submit"]')return button;
+    if(sel==='#admin-name-manual')return {value:'Актёр Клавиатура'};
+    if(sel==='#admin-name-basis')return {value:''};
+    if(sel==='input[name="person-name-alias"]:checked')return null;
+    return null;
+  }, querySelectorAll(){return [];}};
+  globalThis.__nameForm = form;
+  globalThis.__nameStatus = status;
+  globalThis.__nameButton = button;
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:0, error:'network', body:null}; };
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:503, error:'commit_unverified', body:{error:'commit_unverified'}}; };
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+})()`);
+const namePosts = run('__namePosts');
+assert.equal(namePosts.length, 3);
+assert.equal(namePosts[0].requestId, namePosts[1].requestId);
+assert.equal(namePosts[1].requestId, namePosts[2].requestId);
+assert.equal(run('__nameForm.dataset.requestId'), namePosts[0].requestId);
+assert.equal(run('__nameStatus.textContent'), 'Нет подтверждения, что имя записано. Можно повторить: это будет та же запись, без второй правки.');
+assert.equal(run('__nameButton.disabled'), false);
+await run(`(async () => {
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:412, error:'version_conflict', body:{error:'version_conflict'}}; };
+  await onAdminNameSubmit({target:__nameForm, preventDefault(){}});
+})()`);
+assert.equal(run('__nameForm.dataset.requestId'), undefined);
+assert.match(run('__nameStatus.textContent'), /Имя уже изменилось/);
+await run(`(async () => {
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:0, error:'network', body:null}; };
+  await onAdminNameSubmit({target:__nameForm, preventDefault(){}});
+  onAdminNameEdit({target:{closest(sel){return sel==='#admin-name-form'?__nameForm:null;}}});
+})()`);
+const afterEdit = run('__namePosts');
+assert.equal(afterEdit.length, 5);
+assert.notEqual(afterEdit[4].requestId, afterEdit[0].requestId);
+assert.equal(run('__nameForm.dataset.requestId'), undefined, 'editing the form drops the pending request');
+await run('adminPost = __namePost');
 console.log('Admin shell: live snapshot, URL state, history, pagination, empty, error, stale-pin and health view states passed');

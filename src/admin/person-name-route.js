@@ -6,7 +6,7 @@ const ADMIN_PERSON_NAME_MAX=8000;
 const ADMIN_REVIEW_STATUS={
  missing_person:404,person_mismatch:400,missing_request_id:400,identity_change_forbidden:400,invalid_mode:400,invalid_name:400,invalid_basis:400,invalid_roles:400,
  rejected_identity:409,version_conflict:412,unknown_alias:400,unknown_role:400,unrelated_role:400,rejected_role:409,role_version_conflict:412,request_id_reused:409,
- review_incomplete:409,review_store_unreadable:409,storage_conflict:409,review_unconditional:503,
+ review_incomplete:409,review_store_unreadable:409,storage_conflict:409,review_unconditional:503,commit_unverified:503,
 };
 function adminPersonNameId(pathname){
  const prefix='/api/admin/people/',suffix='/name-review';
@@ -37,6 +37,25 @@ async function adminPersonNamePut(env,snapshot,result){
  if(!saved)return {ok:false,reason:'storage_conflict'};
  ADMIN_SNAPSHOT_CACHE=null;
  return {ok:true};
+}
+// A non-null put is not confirmation. The next read has to show the primary audit entry for this
+// requestId and every committed record at its after-token. Anything else is an unknown outcome:
+// the object may already hold the write, so the answer is not success and not a definite refusal.
+function adminPersonNameVerified(snapshot,result){
+ if(!snapshot||snapshot.error||!result?.review?.requestId)return false;
+ if(!ownerReviewsReadable(snapshot.reviewCache?.body))return false;
+ const subjects=snapshot.records.personSubjects||{};
+ const person=subjects[result.person.id];
+ if(!person)return false;
+ const review=(person.nameReviews||[]).find(item=>item&&item.requestId===result.review.requestId&&item.linkedFrom==null);
+ if(!review)return false;
+ const roster=Object.values(subjects).filter(item=>item.id!==person.id);
+ if(!personNameReviewCompletion(review,person,roster).complete)return false;
+ for(const item of result.commit||[]){
+  const record=item.id===person.id?person:subjects[item.id];
+  if(!record||personNameVersion(record)!==item.version?.after)return false;
+ }
+ return true;
 }
 async function adminPersonNameRoute(request,env,url){
  const personId=adminPersonNameId(url.pathname);
@@ -73,10 +92,13 @@ async function adminPersonNameRoute(request,env,url){
   if(!result.changed)return json(adminPersonNameAnswer(snapshot,person.id,result));
   const saved=await adminPersonNamePut(env,snapshot,result);
   if(saved.ok){
-   let fresh;
+   let fresh=null;
    try{fresh=await adminLoadSnapshot(env,false);}catch{fresh=null;}
-   const shown=fresh&&!fresh.error?fresh:snapshot;
-   return json(adminPersonNameAnswer(shown,result.person.id,result));
+   if(!adminPersonNameVerified(fresh,result)){
+    ADMIN_SNAPSHOT_CACHE=null;
+    return adminReviewFailure({reason:'commit_unverified'});
+   }
+   return json(adminPersonNameAnswer(fresh,result.person.id,result));
   }
   if(saved.reason!=='storage_conflict'||attempt===2)return adminReviewFailure(saved);
   ADMIN_SNAPSHOT_CACHE=null;

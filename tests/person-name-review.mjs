@@ -289,6 +289,9 @@ assert.equal(refreshed.localizationConflicts[0].reason,'owner_kept');
 assert.equal(refreshed.aliases.some(alias=>alias.value==='Крис Пратт 2'),true,'the held value is kept as an alias');
 assert.equal(personNameState(refreshed).heldConflicts,1);
 assert.notEqual(personNameVersion(refreshed),second.version,'a held value is a version change');
+const heldAgain=reconcilePersonName(refreshed,{status:'provisional',value:'Крис Пратт 2',source:'wikidata',provenance:{source:'wikidata'}},LATER+60000);
+assert.equal(heldAgain,refreshed,'the same held value is not appended on the next read');
+assert.equal(heldAgain.localizationConflicts.length,1);
 const dictionaryLater=reconcilePersonName(corrected,{status:'reviewed',authority:'dictionary',value:'Словарный Прэтт',source:'dictionary',provenance:{sources:['https://example.org']}},LATER);
 assert.equal(dictionaryLater.localization,corrected.localization,'a later dictionary value does not replace the owner');
 assert.equal(dictionaryLater.localizationConflicts[0].reason,'owner_kept');
@@ -308,6 +311,23 @@ const automatic=reconcilePersonName(director,{status:'provisional',value:'Кри
 assert.equal(automatic.localization.status,'provisional');
 assert.equal(automatic.localization.value,'Крис Прэтт (кэш)');
 assert.equal(reconcilePersonName(dictionary,{status:'provisional',value:'Автомат',source:'wikidata'},LATER).localizationConflicts[0].reason,'untrusted_review');
+// An owner rename of a dictionary name stores that dictionary value once, and the audit after-token is the reconstructed record.
+const dictionaryCommand={personId:dictionary.id,requestId:'req-delia',mode:'manual',value:'Делия Енеа',expectedVersion:personNameVersion(dictionary)};
+const dictionaryReview=applyPersonNameReview(dictionary,dictionaryCommand,LATER,[dictionary]);
+assert.equal(dictionaryReview.ok,true);
+assert.equal(dictionaryReview.person.localization.value,'Делия Енеа');
+assert.equal(dictionaryReview.person.localizationConflicts.length,1);
+assert.equal(dictionaryReview.person.localizationConflicts[0].reason,'owner_kept');
+assert.equal(dictionaryReview.person.localizationConflicts[0].value,'Делия Энеа');
+assert.equal(dictionaryReview.version,personNameVersion(dictionaryReview.person));
+const dictionaryLive={status:dictionary.localization.status,value:dictionary.localization.value,source:dictionary.localization.source,authority:dictionary.localization.provenance?.authority||null,provenance:dictionary.localization.provenance};
+const dictionaryRead=reconcilePersonName(dictionaryReview.person,dictionaryLive,LATER+60000);
+assert.equal(dictionaryRead,dictionaryReview.person,'a later read of the same dictionary value adds no conflict');
+assert.equal(personNameReviewCompletion(dictionaryReview.review,dictionaryRead,[]).complete,true,'the stored after-token matches the reconstructed record');
+const dictionarySecond=applyPersonNameReview(dictionaryRead,{...dictionaryCommand,requestId:'req-delia-2',value:'Делия Енея',expectedVersion:dictionaryReview.version},LATER+120000,[dictionaryRead]);
+assert.equal(dictionarySecond.ok,true);
+assert.equal(dictionarySecond.changed,true);
+assert.equal(dictionarySecond.person.localizationConflicts.filter(item=>item.reason==='owner_kept'&&item.value==='Делия Энеа').length,1,'a second edit keeps the one held dictionary value');
 assert.equal(reconcilePersonName(null,{value:'x'},LATER),null);
 
 // Validation failures, each without any change.

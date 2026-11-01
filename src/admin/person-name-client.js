@@ -10,3 +10,11 @@ async function adminPost(path,body,options={}){
  if(!response.ok)return {ok:false,status:response.status,error:payload&&typeof payload.error==='string'?payload.error:'http_'+response.status,body:payload};
  return {ok:true,status:response.status,error:null,body:payload};
 }
+// A missing response, or a response that cannot prove the put, keeps the same requestId. A definite
+// refusal (the server named a command or storage error and did not leave the outcome unknown) does not.
+function adminNameCommitUnknown(result){
+ if(!result||result.ok)return false;
+ if(result.error==='network'||result.error==='aborted'||result.error==='commit_unverified')return true;
+ if(!result.status)return true;
+ return result.status>=500&&result.error!=='review_unconditional'&&result.error!=='programme_unavailable'&&result.error!=='storage_unavailable';
+}

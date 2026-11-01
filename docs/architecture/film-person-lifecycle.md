@@ -56,7 +56,7 @@ flowchart LR
 
 ## Owner name confirmation
 
-**Proposed for visual review.** The store is the accepted [ADR 0072](../adr/0072-owner-reviewed-localization-overlay.md). This diagram is not that acceptance and is not visually approved. It is not the identity diagram above. The owner confirms one Russian name on a Person card. One POST writes the `people` map of one R2 object and copies `films`. Programme, watchlist and admin reads overlay that name. A dictionary or automatic name is held and is not applied. The identity GET does not read the object, and a saved role link does not replace a role id.
+**Proposed for visual review.** The store is the accepted [ADR 0072](../adr/0072-owner-reviewed-localization-overlay.md). This diagram is not that acceptance and is not visually approved. It is not the identity diagram above. The owner confirms one Russian name on a Person card. One POST writes the `people` map of one R2 object and copies `films`, then reads that object back before it reports success. Programme, watchlist and admin reads overlay that name. A dictionary or automatic name is held once and is not applied. The identity GET does not read the object, and a saved role link does not replace a role id.
 
 ```mermaid
 flowchart LR

@@ -21,9 +21,22 @@ const worker=context.worker;
 const resetCache=()=>vm.runInContext('ADMIN_SNAPSHOT_CACHE=null',context);
 
 const records=new Map(),etags=new Map();
-let revision=0,puts=[];
+let revision=0,puts=[],fault=null;
 const bucket={
  async get(key){
+  if(key==='admin/owner-reviews.json'&&fault&&puts.length>fault.after){
+   const kind=fault.kind;fault=null;
+   if(kind==='throw')throw new Error('readback failed');
+   if(kind==='corrupt')return {etag:'corrupt',uploaded:new Date('2026-10-31T10:00:00.000Z'),json:async()=>({contractVersion:99}),text:async()=>'{"contractVersion":99}'};
+   if(kind==='stale')return null;
+   if(kind==='mismatch'){
+    const body=structuredClone(records.get(key));
+    const role=body.people['person:director/mira-sol'];
+    role.localization={...role.localization,value:'Чужое имя'};
+    role.nameReviews=[];
+    return {etag:etags.get(key),uploaded:new Date('2026-10-31T10:00:00.000Z'),json:async()=>body,text:async()=>JSON.stringify(body)};
+   }
+  }
   if(!records.has(key))return null;
   const etag=etags.get(key);
   return {etag,uploaded:new Date('2026-10-31T10:00:00.000Z'),json:async()=>structuredClone(records.get(key)),text:async()=>JSON.stringify(records.get(key))};
@@ -145,10 +158,27 @@ resetCache();
 const deliaDetail=await call('/api/admin/people/person:actor/delia-enea');
 const renamed=await post({personId:'person:actor/delia-enea',requestId:'req-delia',mode:'manual',value:'Делия Енеа',expectedVersion:deliaDetail.body.item.nameReview.version});
 assert.equal(renamed.status,200,JSON.stringify(renamed.body));
-assert.ok(renamed.body.nameReview.heldConflicts>=1,'the dictionary value is held, not applied over the owner');
+assert.equal(renamed.body.nameReview.heldConflicts,1,'the dictionary value is held once, not applied over the owner');
+assert.equal(renamed.body.nameReview.version,renamed.body.version,'the answer token is the token just read back');
 assert.equal(renamed.body.nameReview.preferred.value,'Делия Енеа');
 assert.equal(renamed.body.nameReview.preferred.authority,'owner');
 assert.equal(records.get('admin/owner-reviews.json').films['kept-film'].filmId,'film:kept','a person write copies the film map');
+const deliaCommand={personId:'person:actor/delia-enea',requestId:'req-delia',mode:'manual',value:'Делия Енеа',expectedVersion:deliaDetail.body.item.nameReview.version};
+const deliaPuts=puts.length;
+const deliaReplay=await post(deliaCommand);
+assert.equal(deliaReplay.status,200,JSON.stringify(deliaReplay.body));
+assert.equal(deliaReplay.body.idempotent,true,'the same request reconciles after the dictionary hold');
+assert.equal(puts.length,deliaPuts,'the replay does not write');
+const deliaRead=await call('/api/admin/people/person:actor/delia-enea');
+const deliaReadAgain=await call('/api/admin/people/person:actor/delia-enea');
+assert.equal(deliaRead.body.item.nameReview.heldConflicts,1);
+assert.equal(deliaReadAgain.body.item.nameReview.heldConflicts,1,'a repeated read does not grow conflicts');
+assert.equal(deliaRead.body.item.localizationConflicts.length,deliaReadAgain.body.item.localizationConflicts.length);
+assert.equal(records.get('admin/owner-reviews.json').people['person:actor/delia-enea'].localizationConflicts.length,1);
+const deliaSecond=await post({personId:'person:actor/delia-enea',requestId:'req-delia-2',mode:'manual',value:'Делия Енея',expectedVersion:deliaReadAgain.body.item.nameReview.version});
+assert.equal(deliaSecond.status,200,JSON.stringify(deliaSecond.body));
+assert.equal(deliaSecond.body.changed,true,'a second edit still writes');
+assert.equal(records.get('admin/owner-reviews.json').people['person:actor/delia-enea'].localizationConflicts.filter(item=>item.reason==='owner_kept'&&item.value==='Делия Энеа').length,1);
 const deliaQueue=await call('/api/admin/people?queue=localization-conflict');
 assert.ok(deliaQueue.body.items.some(item=>item.id==='person:actor/delia-enea'));
 
@@ -162,4 +192,26 @@ assert.equal(puts.length,before,'a diverged role set is not overwritten');
 assert.equal(records.get('admin/owner-reviews.json').people['person:director/mira-sol'].localization.value,'Чужое');
 assert.equal(records.get('admin/owner-reviews.json').films['kept-film'].filmId,'film:kept','a refused write leaves the film map untouched');
 
-console.log('Person name editor: confirm, replay, conflict, role link, programme overlay and held dictionary passed');
+async function expectUnverified(kind){
+ seed();
+ const opened=await call('/api/admin/people/person:actor/mira-sol');
+ const openedDirector=await call('/api/admin/people/person:director/mira-sol');
+ const body={personId:'person:actor/mira-sol',requestId:'req-readback-'+kind,mode:'manual',value:'Мира Соль',expectedVersion:opened.body.item.nameReview.version,roles:[{id:'person:director/mira-sol',expectedVersion:openedDirector.body.item.nameReview.version}]};
+ fault={kind,after:puts.length};
+ const saved=await post(body);
+ assert.equal(fault,null,kind+' readback consumed the fault');
+ assert.equal(saved.status,503,kind+' '+JSON.stringify(saved.body));
+ assert.equal(saved.body.error,'commit_unverified');
+ assert.notEqual(saved.body.ok,true,kind+' is not a confirmed save');
+ assert.equal(saved.body.nameReview,undefined);
+ const storedPeople=records.get('admin/owner-reviews.json').people;
+ assert.equal(storedPeople['person:actor/mira-sol'].localization.value,'Мира Соль',kind+' still committed the primary name');
+ assert.equal(storedPeople['person:director/mira-sol'].localization.value,'Мира Соль',kind+' still committed the linked role');
+ const retry=await post(body);
+ assert.equal(retry.status,200,kind+' retry '+JSON.stringify(retry.body));
+ assert.equal(retry.body.idempotent,true,kind+' retry reconciles the committed request');
+ assert.equal(puts.length,1,kind+' retry does not write again');
+}
+for(const kind of ['throw','corrupt','stale','mismatch'])await expectUnverified(kind);
+
+console.log('Person name editor: confirm, replay, conflict, role link, programme overlay, held dictionary and readback passed');

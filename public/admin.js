@@ -57,6 +57,7 @@ const ERROR_TEXT = {
   review_unconditional: 'Сохранённое имя нельзя перезаписать без версии объекта.',
   body_too_large: 'Запрос слишком большой.',
   review_store_unreadable: 'Хранилище имён записано в неожиданном виде. Сохранение остановлено.',
+  commit_unverified: 'Нет подтверждения, что имя записано. Можно повторить: это будет та же запись, без второй правки.',
 };
 const SKEW_TEXT = {
   titles_newer: 'словарь названий новее программы',
@@ -337,17 +338,27 @@ function adminNameForm(record) {
   const options = (review.options || []).map((option, index) => `<label class="admin-name-option"><input type="radio" name="person-name-alias" value="${adminEscape(option.value)}"${index === 0 ? ' checked' : ''}> <span>${adminEscape(option.value)}</span> <small class="muted">${adminEscape(option.origin || '')}${option.preferred ? ' · текущее' : ''}</small></label>`).join('');
   const collisions = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}"${item.linked ? ' checked' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
   const audit = (review.reviews || []).map(entry => `<li>${adminEscape(entry.at || '')} · ${adminEscape(entry.mode || '')} · ${adminEscape(entry.from?.value || '—')} → ${adminEscape(entry.to?.value || '')}${entry.linkedFrom ? ' · из ' + adminEscape(entry.linkedFrom) : ''}</li>`).join('');
-  return `<form id="admin-name-form" class="admin-name-form"><h3>Русское имя</h3><p class="muted">Выберите вариант или введите имя. Сохранение меняет это имя во всех показах и не объединяет id. Связь ролей ниже — часть того же сохранения.</p><fieldset><legend>Варианты</legend><div class="admin-name-options">${options || '<p class="muted">Вариантов нет. Введите имя.</p>'}</div></fieldset><label>Своё имя<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${collisions ? `<fieldset><legend>Тот же человек в другой роли</legend><div class="admin-name-options">${collisions}</div></fieldset>` : ''}${audit ? `<h3>Журнал</h3><ul>${audit}</ul>` : ''}<p id="admin-name-status" class="admin-name-status" role="status"></p><button type="submit">Сохранить имя</button></form>`;
+  return `<form id="admin-name-form" class="admin-name-form"><h3>Русское имя</h3><p class="muted">Выберите вариант или введите имя. Сохранение меняет это имя во всех показах и не объединяет id. Связь ролей ниже — часть того же сохранения.</p><fieldset><legend>Варианты</legend><div class="admin-name-options">${options || '<p class="muted">Вариантов нет. Введите имя.</p>'}</div></fieldset><label>Своё имя<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${collisions ? `<fieldset><legend>Тот же человек в другой роли</legend><div class="admin-name-options">${collisions}</div></fieldset>` : ''}${audit ? `<h3>Журнал</h3><ul>${audit}</ul>` : ''}<p id="admin-name-status" class="admin-name-status" role="status" tabindex="-1"></p><button type="submit">Сохранить имя</button></form>`;
 }
 
-function adminNameCommand(form, record) {
+function adminNameRequestId() {
+  return globalThis.crypto && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'person-name-' + Date.now();
+}
+
+function adminNameCommand(form, record, requestId) {
   const manual = form.querySelector('#admin-name-manual').value.replace(/\s+/g, ' ').trim();
   const selected = form.querySelector('input[name="person-name-alias"]:checked');
   const basis = form.querySelector('#admin-name-basis').value.trim();
   if (!manual && !selected) return {error: 'Выберите вариант или введите имя.'};
   const roles = [...form.querySelectorAll('input[name="person-name-role"]:checked')].map(input => ({id: input.value, expectedVersion: input.getAttribute('data-version')}));
-  const requestId = globalThis.crypto && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'person-name-' + Date.now();
   return {command: {personId: record.id, requestId, mode: manual ? 'manual' : 'alias', value: manual || selected.value, expectedVersion: record.nameReview.version, ...(basis ? {basis} : {}), ...(roles.length ? {roles} : {})}};
+}
+
+function onAdminNameEdit(event) {
+  const target = event.target;
+  const form = target && target.id === 'admin-name-form' ? target : target && target.closest ? target.closest('#admin-name-form') : null;
+  if (!form || !form.dataset) return;
+  delete form.dataset.requestId;
 }
 
 async function onAdminNameSubmit(event) {
@@ -358,12 +369,21 @@ async function onAdminNameSubmit(event) {
   const button = form.querySelector('button[type="submit"]');
   const entity = adminLive.entity;
   if (!entity || !entity.nameReview) return;
-  const built = adminNameCommand(form, entity);
+  const requestId = form.dataset.requestId || adminNameRequestId();
+  const built = adminNameCommand(form, entity, requestId);
   if (built.error) {status.textContent = built.error; return;}
+  form.dataset.requestId = requestId;
   button.disabled = true;
   status.textContent = 'Сохраняем…';
   const result = await adminPost('/people/'+encodeURIComponent(entity.id)+'/name-review', built.command);
-  if (!result.ok) {button.disabled = false; status.textContent = adminErrorText(result.error); return;}
+  button.disabled = false;
+  if (!result.ok) {
+    if (!adminNameCommitUnknown(result)) delete form.dataset.requestId;
+    status.textContent = adminNameCommitUnknown(result) ? ERROR_TEXT.commit_unverified : adminErrorText(result.error);
+    if (typeof status.focus === 'function') status.focus();
+    return;
+  }
+  delete form.dataset.requestId;
   adminLive.pin = null;
   await adminRender();
 }
@@ -647,6 +667,8 @@ function startAdmin() {
   document.querySelector('#admin-search').addEventListener('input', onAdminSearch);
   document.querySelector('#admin-results').addEventListener('click', onAdminResult);
   document.querySelector('#admin-detail').addEventListener('submit', onAdminNameSubmit);
+  document.querySelector('#admin-detail').addEventListener('input', onAdminNameEdit);
+  document.querySelector('#admin-detail').addEventListener('change', onAdminNameEdit);
   document.querySelector('#admin-queues').addEventListener('click', onAdminQueue);
   document.querySelector('#admin-refresh').addEventListener('click', onAdminRefresh);
   document.querySelector('.admin-views').addEventListener('click', onAdminView);
