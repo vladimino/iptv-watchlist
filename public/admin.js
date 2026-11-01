@@ -174,8 +174,9 @@ function adminFacts(record, kind) {
 
 function adminAliases(record) {
   const aliases = record.aliases || [];
-  if (!aliases.length) return '<p class="muted">Алиасов нет.</p>';
-  return `<ul>${aliases.map(alias => `<li>${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''} ${adminProvenance(alias.provenance)}</li>`).join('')}</ul>`;
+  if (!aliases.length) return '<p class="muted">Других названий нет.</p>';
+  const items = aliases.map(alias => `<li>${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''} ${adminProvenance(alias.provenance)}</li>`).join('');
+  return `<details class="other-titles"><summary>Другие названия (${aliases.length})</summary><ul>${items}</ul></details>`;
 }
 
 function adminExternalIds(record) {
@@ -199,21 +200,43 @@ function adminDetail(view) {
   const record = view.entity;
   const kind = view.kind === 'person' ? 'person' : 'film';
   const title = record.preferred || record.original || record.originalTitle || record.id;
+  const original = kind === 'film' ? record.originalTitle : record.original;
+  const originalLine = original ? `<p class="admin-original">Оригинал: ${adminEscape(original)}</p>` : '';
   const conflicts = (record.localizationConflicts || []).map(conflict => `<li>${adminEscape(conflict.value || '')}${conflict.reason ? ' · ' + adminEscape(conflict.reason) : ''}${conflict.source ? ' · ' + adminEscape(conflict.source) : ''}</li>`).join('');
   const other = kind === 'film'
     ? adminStatus('метаданные', record.metadata?.status) + (record.metadata?.nextAction && record.metadata.nextAction !== 'none' ? `<span class="admin-status admin-status-plain">следующий шаг: ${adminEscape(record.metadata.nextAction)}</span>` : '') + adminOutsideStatus('отпечаток') + adminOutsideStatus('прогноз')
     : '';
-  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2><div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div><p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p><h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl><h3>Алиасы и происхождение</h3>${adminAliases(record)}<h3>Внешние id</h3>${adminExternalIds(record)}<h3>Конфликты локализации</h3>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}${kind === 'film' ? `<h3>Другие статусы</h3><div class="admin-badges">${other}</div><p class="muted admin-outside-note">Отпечаток и прогноз хранятся вне опубликованной программы и этим чтением не читаются.</p>${adminTitleForm(record)}` : ''}`;
+  const form = kind === 'film' ? adminTitleForm(record) : '';
+  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${originalLine}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div><p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>${form}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${adminAliases(record)}<h3>Внешние id</h3>${adminExternalIds(record)}<h3>Конфликты локализации</h3>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}${kind === 'film' ? `<h3>Другие статусы</h3><div class="admin-badges">${other}</div><p class="muted admin-outside-note">Отпечаток и прогноз хранятся вне опубликованной программы и этим чтением не читаются.</p>` : ''}`;
   adminBindTitleReview(detail);
+}
+
+// A script that happens to be Cyrillic is not a Russian title. Only a dictionary alias or an
+// earlier owner title is marked well enough to offer. Programme, Letterboxd and EPG aliases stay
+// in the collapsed list and in the API, and they are not radio choices.
+function adminRussianChoices(review) {
+  const preferred = review && review.preferred && review.preferred.value;
+  const out = [];
+  const seen = new Set();
+  for (const option of (review && review.options) || []) {
+    if (!option || !option.value || option.value === preferred || seen.has(option.value)) continue;
+    const source = option.provenance && (option.provenance.authority === 'owner' ? 'owner' : option.provenance.source);
+    if (source !== 'dictionary' && source !== 'owner') continue;
+    seen.add(option.value);
+    out.push(option);
+    if (out.length >= 5) break;
+  }
+  return out;
 }
 
 function adminTitleForm(record) {
   const review = record.titleReview;
   if (!review || !review.version || !record.storedId) return '';
-  const options = (review.options || []).map((option, index) => `<label class="title-review-option"><input type="radio" name="title-review-choice" value="${adminEscape(option.value)}"${index === 0 ? ' checked' : ''}> <span>${adminEscape(option.value)}</span> <small>${adminEscape(option.origin || '')}</small></label>`).join('');
+  const choices = adminRussianChoices(review);
+  const options = choices.map(option => `<label class="title-review-option"><input type="radio" name="title-review-choice" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span></label>`).join('');
+  const picker = options ? `<fieldset><legend>Известные русские варианты</legend><div class="title-review-options">${options}</div></fieldset>` : '';
   const history = (review.reviews || []).map(entry => `<li>${adminEscape(entry.to && entry.to.value || '')}${entry.at ? ' · ' + adminEscape(entry.at) : ''}${entry.basis ? ' · ' + adminEscape(entry.basis) : ''}</li>`).join('');
-  const preferred = review.preferred || {};
-  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Русское название</h3><p>Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b>. Статус: ${adminEscape(preferred.status || 'нет')}. Источник: ${adminEscape(preferred.authority || preferred.source || 'нет')}.</p><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}"><fieldset><legend>Выбрать из известных</legend><div class="title-review-options">${options || '<p class="muted">Нет вариантов.</p>'}</div></fieldset><label>Или своё название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><label class="title-review-accept"><input type="checkbox" data-title-accept> Записать это название в каталог. Это одно изменение одного фильма.</label><button type="submit" data-title-save disabled>Записать название</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form><h3>История правок</h3>${history ? `<ul>${history}</ul>` : '<p class="muted">Записей ещё нет.</p>'}</section>`;
+  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Русское название</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}">${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><label class="title-review-accept"><input type="checkbox" data-title-accept> Записать это название в каталог. Это одно изменение одного фильма.</label><button type="submit" data-title-save disabled>Записать название</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form><h3>История правок</h3>${history ? `<ul>${history}</ul>` : '<p class="muted">Записей ещё нет.</p>'}</section>`;
 }
 
 function adminRestoreTitleAttempt(form, kept) {
@@ -274,7 +297,7 @@ function adminBindTitleReview(detail) {
     const typed = manual.value.trim();
     const selected = form.querySelector('input[name="title-review-choice"]:checked');
     const value = typed || (selected ? selected.value : '');
-    if (!value) { result.textContent = 'Выберите вариант или введите название.'; return; }
+    if (!value) { result.textContent = form.querySelector('input[name="title-review-choice"]') ? 'Выберите вариант или введите название.' : 'Введите название.'; return; }
     if (!form.dataset.requestId) form.dataset.requestId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
     const body = {filmId: form.dataset.filmId, requestId: form.dataset.requestId, mode: typed ? 'manual' : 'alias', value, expectedVersion: form.dataset.version};
     const basis = form.querySelector('[name="basis"]').value;

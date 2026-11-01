@@ -168,4 +168,51 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   assert.match(parts.result.textContent, /Название не изменено/);
 }
 
+{
+  const programme = Array.from({length: 40}, (_, index) => ({value: `Tytul ${index} 영화`, origin: 'alias', provenance: {source: 'programme'}}));
+  const record = {
+    storedId: 'd5',
+    preferred: 'Аферистка',
+    originalTitle: 'I Care a Lot',
+    aliases: [
+      ...programme.map(option => ({kind: 'title', value: option.value, provenance: option.provenance})),
+      {kind: 'title', value: 'Мошенница', provenance: {source: 'dictionary'}},
+    ],
+    titleReview: {
+      version: 'title-review:1:abc',
+      filmId: 'film:d5',
+      preferred: {value: 'Аферистка', status: 'reviewed', source: 'dictionary'},
+      options: [
+        {value: 'Аферистка', origin: 'preferred', provenance: {source: 'dictionary'}},
+        {value: 'Кино', origin: 'alias', provenance: {source: 'programme'}},
+        ...programme,
+        {value: 'Мошенница', origin: 'alias', provenance: {source: 'dictionary'}},
+        {value: 'Своё старое', origin: 'alias', provenance: {source: 'letterboxd', authority: 'owner'}},
+      ],
+      reviews: [{to: {value: 'Аферистка'}, at: '2026-01-01T00:00:00.000Z', basis: 'прокат'}],
+    },
+  };
+  const html = context.adminTitleForm(record);
+  const radios = html.match(/type="radio"/g) || [];
+  assert.equal(radios.length, 2, 'only the dictionary alias and the earlier owner title');
+  assert.equal(html.includes('Tytul'), false);
+  assert.equal(html.includes('Кино'), false, 'Cyrillic programme text is not a Russian choice');
+  assert.match(html, /Мошенница/);
+  assert.match(html, /Своё старое/);
+  const capped = context.adminTitleForm({...record, titleReview: {...record.titleReview, options: Array.from({length: 6}, (_, index) => ({value: `Словарь ${index}`, origin: 'alias', provenance: {source: 'dictionary'}}))}});
+  assert.equal((capped.match(/type="radio"/g) || []).length, 5);
+  assert.equal(capped.includes('Словарь 5'), false);
+  assert.match(html, /data-title-manual/);
+  assert.match(html, /Записать название/);
+  assert.match(html, /прокат/);
+  assert.doesNotMatch(html, /Выбрать из известных/);
+  const aliases = context.adminAliases(record);
+  assert.match(aliases, /<summary>Другие названия \(41\)<\/summary>/);
+  assert.match(aliases, /Tytul 0/);
+  assert.match(aliases, /Мошенница/);
+  assert.equal(aliases.includes('type="radio"'), false);
+  assert.equal(aliases.includes('<details'), true);
+  assert.equal(aliases.includes(' open'), false);
+}
+
 console.log('admin film title page: unknown readback keeps the request, a matching reread says stored');
