@@ -17,7 +17,7 @@ A deploy does not activate anything. Each step below that changes production nee
 
 ## Observation after a commit (read-only)
 
-Since [ADR 0073](../adr/0073-retire-ratings-pipeline-switch.md) the EPG commit does not write these fields. They are on the ratings run record. See [Separate ratings pipeline](#separate-ratings-pipeline).
+Since [ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md) the EPG commit does not write these fields. They are on the ratings run record. See [Separate ratings pipeline](#separate-ratings-pipeline).
 
 - **`sync.json` `diaryHistory`** (in the sync status):
   - `outcome` and `stopReason`;
@@ -33,7 +33,7 @@ Since [ADR 0073](../adr/0073-retire-ratings-pipeline-switch.md) the EPG commit d
 
 ## Separate ratings pipeline
 
-[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md), [ADR 0073](../adr/0073-retire-ratings-pipeline-switch.md); contract: [separate ratings pipeline](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline); tools: [MCP reference](../reference/api/mcp.md#ratings-tools). The Worker does not read `RATINGS_PIPELINE`. When migration is `complete`, the EPG commit only enqueues removal references and the Ratings Task is the ratings writer. When migration is `none`, `partial` or `regressed`, the commit publishes and fails closed: no Diary, no lookup, no enqueue, and start and step answer `not_migrated`. Setting the binding to `inline` or deleting it does not put Diary back inside the commit.
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md), [ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md); contract: [separate ratings pipeline](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline); tools: [MCP reference](../reference/api/mcp.md#ratings-tools). The Worker does not read `RATINGS_PIPELINE`. When migration is `complete`, the EPG commit only enqueues removal references and the Ratings Task is the ratings writer. When migration is `none`, `partial` or `regressed`, the commit publishes and fails closed: no Diary, no lookup, no enqueue, and start and step answer `not_migrated`. Setting the binding to `inline` or deleting it does not put Diary back inside the commit.
 
 ### Reading the status (read-only)
 
@@ -89,7 +89,7 @@ This is not a storage migration and it is not a reason to repeat the cutover abo
 ### Rollback
 
 1. Disable the Ratings Task, if enabled. That stops the scheduled run. It does not put Diary back inside the EPG commit.
-2. Do not set `RATINGS_PIPELINE=inline` and do not delete the binding as a rollback. The Worker ignores the binding. After the leftover binding is deleted, code from before ADR 0073 must not be deployed until `RATINGS_PIPELINE=separate` is restored and read back: that older code treats a missing binding as `inline`.
+2. Do not set `RATINGS_PIPELINE=inline` and do not delete the binding as a rollback. The Worker ignores the binding. After the leftover binding is deleted, code from before ADR 0074 must not be deployed until `RATINGS_PIPELINE=separate` is restored and read back: that older code treats a missing binding as `inline`.
 3. Once migrated (cutover step 3), a code revert is **not** a rollback of R2. Earlier code prunes the version 2 queue without its references and writes the cursor back as version 1. Undoing it needs a separate owner decision on the stored objects. A run left `running` stays until a later start closes it.
 
 ## Rollback

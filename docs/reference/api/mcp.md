@@ -104,7 +104,7 @@ Every string field is drawn from a closed vocabulary: stages and states (`idle`,
 
 ### Ratings tools
 
-The separate Letterboxd ratings pipeline ([ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md), [ADR 0073](../../adr/0073-retire-ratings-pipeline-switch.md), [contract](../integrations/letterboxd-ratings.md#separate-ratings-pipeline)) has four tools under the same [authorization](#authorization). They ignore the retired `RATINGS_PIPELINE` binding. They act once `ratings_storage_migrate` has completed: otherwise start and step answer `not_migrated` and write nothing, and the EPG commit does not read Diary. The HTTP routes are owner-only behind the Worker's Cloudflare Access like the other `/api/` routes; a body is a JSON object with only the listed fields, and anything else is `400` before any read. No tool accepts a URL, R2 key, page or limit.
+The separate Letterboxd ratings pipeline ([ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md), [ADR 0074](../../adr/0074-retire-ratings-pipeline-switch.md), [contract](../integrations/letterboxd-ratings.md#separate-ratings-pipeline)) has four tools under the same [authorization](#authorization). They ignore the retired `RATINGS_PIPELINE` binding. They act once `ratings_storage_migrate` has completed: otherwise start and step answer `not_migrated` and write nothing, and the EPG commit does not read Diary. The HTTP routes are owner-only behind the Worker's Cloudflare Access like the other `/api/` routes; a body is a JSON object with only the listed fields, and anything else is `400` before any read. No tool accepts a URL, R2 key, page or limit.
 
 | Tool | Writes | What it calls |
 | --- | --- | --- |

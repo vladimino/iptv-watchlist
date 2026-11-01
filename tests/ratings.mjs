@@ -17,7 +17,7 @@ ctx.fetch=async()=>({ok:true,status:200,text:async()=>listing});
 const run={runId:'published',stage:'epg',watchlist:report.films,pending:[],ratingPending:['public-films-list'],events:[]};ctx.run=run;ctx.report=report;ctx.env=env;
 const fetched=[];ctx.fetch=async url=>{fetched.push(String(url));return {ok:true,status:200,text:async()=>listing};};
 const completed=await vm.runInContext('completeWithRatings(env,run,report)',ctx);assert.equal(records.get('sync.json').stage,'complete');
-// ADR 0073: the EPG commit requests nothing from Letterboxd and opens no ratings attempt.
+// ADR 0074: the EPG commit requests nothing from Letterboxd and opens no ratings attempt.
 assert.equal(fetched.length,0,'no films-list request');assert.equal(completed.personalRatings,undefined);
 assert.equal(completed.ratingsPipeline,'blocked');
 assert.equal(records.get('sync.json').ratingAttempt,undefined);assert.equal(records.get('sync.json').ratingPending,undefined);assert.deepEqual(records.get('programme.json'),report);

@@ -29,7 +29,7 @@ const report={runId:'run-markers',updatedAt:'2026-10-29T10:00:00.000Z',watchlist
 const run=()=>({runId:'run-markers',stage:'epg',events:[],ratingPending:['letterboxd-diary'],watchlist:report.films,pending:[]});
 const markers=lines=>lines.map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(entry=>entry?.event==='epg_phase');
 
-// 1. The post-commit tail publishes and does not read Diary (ADR 0073). Markers stay compact and carry no titles.
+// 1. The post-commit tail publishes and does not read Diary (ADR 0074). Markers stay compact and carry no titles.
 const a=harness();a.site.set(`https://letterboxd.com/${USER}/diary/`,page1);a.records.set('programme.json',report);
 const outA=await a.ctx.completeWithRatings({...env(),BUCKET:{get:k=>a.records.has(k)?Promise.resolve({etag:'x',json:async()=>structuredClone(a.records.get(k))}):Promise.resolve(null),put:async(k,v)=>{a.records.set(k,JSON.parse(v));return {etag:'y'};},list:async()=>({objects:[],truncated:false})}},run(),report);
 assert.equal(outA.ratingsPipeline,'blocked');

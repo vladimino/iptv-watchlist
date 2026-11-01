@@ -114,4 +114,4 @@ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'}
  assert.equal(bucket.writes().length,0,'dry_run over MCP writes nothing');
 }
 
-console.log('Ratings API (ADR 0060, ADR 0069, ADR 0073): HTTP not_migrated for every binding while unmigrated, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');
+console.log('Ratings API (ADR 0060, ADR 0069, ADR 0074): HTTP not_migrated for every binding while unmigrated, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');

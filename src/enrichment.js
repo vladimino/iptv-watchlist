@@ -1017,7 +1017,7 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  const ratingsSource=(()=>{
   const entry=(state,code,success,failure,extra={})=>({...integrationEntry('letterboxd_ratings','source',state,code,success,failure),...extra,manualRefreshEnabled:!!enabled,retiredRefresh});
   const pendingSince=integrationTime(sync?.updatedAt);
-  // Under the permanent separate pipeline (ADR 0073) the ratings run record decides once migration is complete.
+  // Under the permanent separate pipeline (ADR 0074) the ratings run record decides once migration is complete.
   // An incomplete migration is fail-closed: the EPG commit's old rating fields do not stand in for a Diary read.
   if(ratingsBlocked)return entry('degraded','ratings_migration_blocked',null,null,{pipeline:'blocked',migration:ratingsBlocked.migration});
   if(ratingsRun)return ratingsRun.state==='ok'?entry(fresh(ratingsRun.lastSuccessAt),freshCode(ratingsRun.lastSuccessAt),ratingsRun.lastSuccessAt,ratingsRun.lastFailureAt,{pipeline:'separate'}):entry(ratingsRun.state,ratingsRun.code,ratingsRun.lastSuccessAt,ratingsRun.lastFailureAt,{pipeline:'separate'});

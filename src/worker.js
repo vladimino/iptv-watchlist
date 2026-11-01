@@ -255,7 +255,7 @@ async function updatePublishedFiles(env,files){
 const saveJSON=(env,key,value)=>env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});
 function confirmedHalfStar(value){const rating=Number(value);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;}
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}
-const eventFilm=(film,titles=new Map())=>({id:String(film.id),title:reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year});
+const eventFilm=(film,titles=new Map())=>({id:String(film.id),title:(film.titleAuthority==='owner'&&(film.titleRu||film.title))||reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year});
 function eventRemovedFilm(film,titles=new Map()){const rating=removalRating(film);return {...eventFilm(film,titles),...(rating||{})};}
 const eventTitles=report=>new Map((report?.films||[]).map(f=>[String(f.id),f.title]));
 function removalEventKey(event){return 'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';}
@@ -454,22 +454,30 @@ async function publishGenerationWithLedger(env,runId,discovery,meta,files){
  if(old)return publishEpgGeneration(env,runId,{...files,'discovery-latest.json':{...meta,items:mergeDiscoveryCandidates(old.items,discovery,{replaceShows:true,programmeRunId:runId})}});
  return publishEpgGeneration(env,runId,files,{latest:discovery,meta,mode});
 }
-// ADR 0073: the ratings pipeline is permanently separate. It acts once ratings_storage_migrate has migrated the
+// ADR 0074: the ratings pipeline is permanently separate. It acts once ratings_storage_migrate has migrated the
 // queue and the Diary cursor. The EPG commit then hands the films its watchlist diff removed to the queue as
 // references to the removal event, durably and before it publishes, and does no ratings work: no Diary read, no fact
 // write, no lookup. The RATINGS_PIPELINE binding is ignored. While migration is none, partial or regressed the commit
-// still publishes and fails closed: it does not read Diary, look up films, enqueue or run the migration. A hand-over
-// left in sync.json (`removalRefs`, or a version 1 `removalLookups`) stays there until migration is complete, then the
-// next step on the run and the next sync start flush it before sync.json is replaced.
+// still publishes and fails closed: it does not read Diary, look up films, enqueue or run the migration. It does record
+// `removalRefs` for the removal event it writes. A later blocked commit keeps every earlier reference and appends its
+// own, so watchlist advancement cannot drop them. Once migration is complete, the next step on the run and the next
+// sync start flush that list before sync.json is replaced. A version 1 `removalLookups` hand-over is flushed the same way.
 async function ratingsGate(env){
  if(typeof LetterboxdRatings==='undefined')return {active:false,migration:'none'};
  const state=await LetterboxdRatings.migrationState(env);
  return {active:state.migration==='complete',migration:state.migration};
 }
 function removalHandoverRef(run){const event=(run?.events||[]).find(item=>item?.type==='watchlist');return event?.id&&Number.isFinite(Date.parse(event.at))?{eventKey:removalEventKey(event),sourceRunId:run.runId,at:event.at}:null;}
+// One saved hand-over is `{ref, films}`. Consecutive blocked commits store a list of those, one entry per removal event.
+function removalRefItems(value){
+ if(Array.isArray(value))return value.filter(item=>Array.isArray(item?.films)&&item.films.length&&item.ref);
+ if(Array.isArray(value?.films)&&value.films.length&&value.ref)return [value];
+ return [];
+}
+function storedRemovalRefs(items){const list=items.filter(item=>item?.films?.length&&item.ref);return list.length===1?list[0]:list.length?list:undefined;}
 async function flushRemovalHandover(env,run){
- if(!run?.removalRefs&&!run?.removalLookups)return false;
- const items=[...(run.removalRefs?.films?.length?[{films:run.removalRefs.films,ref:run.removalRefs.ref}]:[]),...LetterboxdRatings.syncHandover(run)];
+ const items=[...removalRefItems(run.removalRefs),...(typeof LetterboxdRatings==='undefined'?[]:LetterboxdRatings.syncHandover(run))];
+ if(!items.length)return false;
  for(const item of items)await enqueueRemovalRefs(env,item.films,item.ref);
  delete run.removalRefs;delete run.removalLookups;return true;
 }
@@ -502,8 +510,8 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
  run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
 }
-// ADR 0073: the EPG commit never reads Diary and never looks up films. Migrated storage enqueues removal references.
-// Any other migration state publishes the programme and leaves a blocked marker; it does not enqueue or migrate.
+// ADR 0074: the EPG commit never reads Diary and never looks up films. Migrated storage enqueues removal references.
+// Any other migration state publishes the programme, keeps the removal references on the sync run and does not enqueue.
 async function completeWithRatings(env,run,report){
  const gate=await ratingsGate(env);
  if(gate.active){
@@ -556,7 +564,7 @@ async function epgSync(env,run){
  const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
  const gate=await ratingsGate(env);
- if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};if(gate.active){const films=removedFilms();if(films.length)run.removalRefs={ref:removalHandoverRef(run),films};}await saveJSON(env,'sync.json',run);}
+ if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};const films=removedFilms(),ref=films.length?removalHandoverRef(run):null;const prior=removalRefItems(run.removalRefs).filter(item=>!ref||item.ref.eventKey!==ref.eventKey);const next=ref?[...prior,{ref,films}]:prior;if(next.length)run.removalRefs=storedRemovalRefs(next);else delete run.removalRefs;await saveJSON(env,'sync.json',run);}
  if(gate.active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report}));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
@@ -582,6 +590,7 @@ async fetch(request,env,execution){
   if(url.pathname.startsWith('/api/admin/letterboxd-archive/'))return await adminLetterboxdArchiveRoute(request,env,url);
   if(url.pathname==='/api/admin/discovery-recovery')return await adminDiscoveryRecoveryRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/discovery-recovery/'))return await adminDiscoveryReconsiderRoute(request,env,url);
+  if(request.method==='POST'&&url.pathname.startsWith('/api/admin/films/')&&url.pathname.endsWith('/title-review'))return await filmTitleReviewRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/'))return await adminReadRoute(request,env,url);
   if(url.pathname.startsWith('/api/letterboxd/baseline/'))return await LetterboxdFacts.handleBaselineRequest(request,env,url.pathname);
   if(url.pathname==='/api/letterboxd/diary'&&request.method==='GET'){const filmId=url.searchParams.get('filmId');if(filmId!=null&&!/^[A-Za-z0-9_-]{1,80}$/.test(filmId))return json({error:'Invalid filmId'},400);return json(await LetterboxdDiary.readHistory(env,{filmId}));}
@@ -591,8 +600,8 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
-  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles));}
-  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};return json(presentLocalized(data,titles));}
+  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const reviews=await loadJSON(env,'admin/owner-reviews.json');return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews));}
+  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};const reviews=await loadJSON(env,'admin/owner-reviews.json');return json(presentLocalized(data,titles,reviews));}
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   if(url.pathname==='/api/catalog/watched')return await catalogWatchedRoute(request,env,url);
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));

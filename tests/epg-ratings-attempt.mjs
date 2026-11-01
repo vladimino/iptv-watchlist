@@ -41,7 +41,7 @@ const lbFetches=()=>fetches.filter(url=>url.includes('letterboxd.com'));
 const step=async runId=>{const trace={caller:'http',diagnostic:{}};try{await ctx.syncStep(env,'/api/sync/epg',{runId},trace);}catch{}return trace;};
 const snapshot=()=>JSON.stringify([...records.entries()].filter(([key])=>key.startsWith('events/')||key==='programme.json').sort());
 
-// 1. The commit publishes without a Diary read and without opening a ratings attempt (ADR 0073). A page that would
+// 1. The commit publishes without a Diary read and without opening a ratings attempt (ADR 0074). A page that would
 // answer, and a page that would be blocked, are both unrequested.
 diaryHtml=()=>'<html><head><title>Diary</title></head><table>'+diaryRow('w1',8,'2026-10-28')+'</table></html>';
 records.set('programme.json',report('run-ok'));
@@ -110,4 +110,4 @@ for(const state of ['finished','error']){
 }
 assert.equal(lbFetches().length,0);
 
-console.log('EPG ratings attempt (AIR-270, ADR 0073): the commit requests nothing and writes no rating attempt; a leftover ratingPending is kept while fresh and closed as unknown once stale with its phase, no films-list repeat, no new generation or events, idempotent steps, legacy runs closed, finished attempts untouched passed');
+console.log('EPG ratings attempt (AIR-270, ADR 0074): the commit requests nothing and writes no rating attempt; a leftover ratingPending is kept while fresh and closed as unknown once stale with its phase, no films-list repeat, no new generation or events, idempotent steps, legacy runs closed, finished attempts untouched passed');

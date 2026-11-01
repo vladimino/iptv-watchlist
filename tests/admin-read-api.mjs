@@ -63,7 +63,7 @@ function programmeOf(run){
   {id:'q2',tmdbId:'900002',title:'Тихая гавань',original:'Quiet Harbor',titleRu:'Тихая гавань',titleStatus:'provisional',year:2018,metadataAt:iso(-40),synopsis:'s',peopleVersion:1,directors:[],actors:[noName],shows:[]},
   {id:'b3',title:'Blank Reel',original:'Blank Reel',year:2024,directors:[],actors:[],shows:[]},
   {id:'c4',tmdbId:'900004',title:'Мой конфликт',original:'Conflict',titleRu:'Мой конфликт',titleStatus:'verified',titleConflicts:[{value:'Конфликт',source:'dictionary',reason:'owner_kept',authority:'owner'}],metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]},
-  {id:'d5',tmdbId:'555',title:'Dict Film',original:'Dict Film',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]},
+  {id:'d5',tmdbId:'555',title:'Dict Film',original:'Dict Film',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[],aliases:['Прокатное имя']},
   {id:'e6',tmdbId:'666',title:'Другое название',original:'Orig Title',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]},
  ];
  for(let index=0;index<30;index++)films.push({id:'p'+String(index).padStart(2,'0'),tmdbId:String(7000+index),title:'Маяк '+index,original:'Beacon '+index,titleRu:'Маяк '+index,titleStatus:'verified',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]});
@@ -76,11 +76,12 @@ function seed({run=G1}={}){
  records.set('programme.json',{runId:'root-must-not-be-read',films:[]});etags.set('programme.json','root');
  records.set('titles.json',{q2:{tmdbId:'900002',title:'Тихая гавань',status:'provisional',sources:['https://www.wikidata.org/wiki/Q2']}});etags.set('titles.json','titles-1');uploaded.set('titles.json',new Date(AT));
  records.set('people.json',{'actor/mira-sol':{name:'Мира Соль',original:'Mira Sol'}});etags.set('people.json','people-1');uploaded.set('people.json',new Date(AT));
+ records.set('admin/owner-reviews.json',{contractVersion:1,films:{},people:{}});etags.set('admin/owner-reviews.json','reviews-0');uploaded.set('admin/owner-reviews.json',new Date(AT));
 }
 const openStreams=()=>streams.opened.length-streams.consumed.length-streams.cancelled.length;
 const resetStreams=()=>{streams.opened.length=0;streams.consumed.length=0;streams.cancelled.length=0;};
 const call=async(path,init)=>{const response=await worker.fetch(new Request('https://iptv.example'+path,init),env,{waitUntil(){throw new Error('background work on a GET');}});assert.equal(openStreams(),0,'every opened R2 body is consumed or cancelled after '+path+': '+JSON.stringify(streams));return {status:response.status,body:await response.json()};};
-const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json'];
+const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json'];
 
 // 1. Overview: five reads in the contract order, no list, no write, no request; counts and available queues.
 seed();
@@ -122,6 +123,10 @@ for(const key of ['fingerprint','prediction','predictionHistory','shows','synops
 r=await call('/api/admin/films?q=1137844');assert.equal(r.body.items[0].rank,0,'external id rank');
 r=await call('/api/admin/films?q=словарный');
 assert.equal(r.body.items[0].id,'film:d5');assert.equal(r.body.items[0].localization.status,'reviewed');assert.equal(r.body.items[0].preferred,'Словарный фильм');
+r=await call('/api/admin/films?q='+encodeURIComponent('прокатное'));
+assert.equal(r.body.items[0].storedId,'d5');
+assert.ok(r.body.items[0].aliases.some(alias=>alias.value==='Прокатное имя'&&alias.provenance.source==='programme'));
+assert.ok(r.body.items[0].aliases.some(alias=>alias.value==='Из словаря'&&alias.provenance.source==='dictionary'));
 r=await call('/api/admin/films?q=другое');
 assert.equal(r.body.items[0].id,'film:e6');assert.equal(r.body.items[0].epgTitle,'Другое название');
 assert.ok(r.body.items[0].aliases.some(alias=>alias.value==='Другое название'&&alias.provenance.source==='epg'));
@@ -223,7 +228,7 @@ r=await call('/api/admin/films?q=beacon&limit=5&pin='+encodeURIComponent(r.body.
 seed();records.delete('titles.json');records.delete('people.json');
 r=await call('/api/admin/films?q=sol');assert.equal(r.status,200);assert.deepEqual(r.body.snapshot.skewReasons,['dictionary_missing']);assert.equal(r.body.snapshot.titlesUpdatedAt,null);
 r=await call('/api/admin/people?q=sol');assert.equal(r.body.items[0].localization.status,'missing','no dictionary, no cache name');
-assert.ok(r.body.pin.endsWith('||'),'absent dictionaries carry empty versions in the pin');
+const absent=r.body.pin.split('|').map(decodeURIComponent);assert.equal(absent[4],'');assert.equal(absent[5],'','absent dictionaries carry empty versions in the pin');
 r=await call('/api/admin/people?q=sol&pin='+encodeURIComponent(r.body.pin));assert.equal(r.status,200);
 seed();records.set('titles.json',{updatedAt:iso(-1),q2:records.get('titles.json').q2});
 r=await call('/api/admin/overview');assert.equal(r.body.snapshot.titlesUpdatedAt,iso(-1),'a document clock wins over the upload time');
@@ -254,7 +259,7 @@ records.set(programmeKey(G2),{...programmeOf(G2),updatedAt:iso(1)});etags.set(pr
 pointerSequence=[{body:{phase:'published',programmeRunId:G1},etag:'ptr-'+G1},{body:{phase:'published',programmeRunId:G2},etag:'ptr-'+G2}];
 r=await call('/api/admin/films?q=beacon&limit=5');
 assert.equal(r.status,200,JSON.stringify(r.body)+' '+JSON.stringify(gets));assert.equal(r.body.snapshot.programmeRunId,G2);
-assert.deepEqual(gets,[POINTER,programmeKey(G1),POINTER,POINTER,programmeKey(G2),POINTER,'titles.json','people.json']);
+assert.deepEqual(gets,[POINTER,programmeKey(G1),POINTER,POINTER,programmeKey(G2),POINTER,'titles.json','people.json','admin/owner-reviews.json']);
 seed();records.set(programmeKey(G2),{...programmeOf(G2),updatedAt:iso(1)});etags.set(programmeKey(G2),'prog-'+G2);
 pointerSequence=[{body:{phase:'published',programmeRunId:G1},etag:'a'},{body:{phase:'published',programmeRunId:G2},etag:'b'},{body:{phase:'published',programmeRunId:G1},etag:'c'},{body:{phase:'published',programmeRunId:G2},etag:'d'}];
 r=await call('/api/admin/films?q=beacon&limit=5');assert.equal(r.status,503);assert.equal(r.body.error,'programme_unavailable');
@@ -269,25 +274,25 @@ r=await call('/api/admin/overview');assert.equal(r.status,200,'a rewritten point
 // 11. Warm isolate: the same tuple re-reads the five versions, parses only the pointers and cancels the three unread bodies;
 // one changed dictionary re-parses that object only. No body is ever left open.
 seed();
-r=await call('/api/admin/overview');assert.equal(parses,5);
+r=await call('/api/admin/overview');assert.equal(parses,6);
 assert.deepEqual(streams.consumed,SNAPSHOT_KEYS,'a cold read consumes every body');assert.deepEqual(streams.cancelled,[]);
 gets=[];parses=0;resetStreams();
 r=await call('/api/admin/films?q=beacon&limit=5');
 assert.deepEqual(gets,SNAPSHOT_KEYS);assert.equal(parses,2,'only the two small pointer reads are parsed for a held tuple');
 assert.deepEqual(streams.consumed,[POINTER,POINTER],'the pointer bodies are read');
-assert.deepEqual(streams.cancelled,[programmeKey(G1),'titles.json','people.json'],'the reused bodies are cancelled, not left open');
+assert.deepEqual(streams.cancelled,[programmeKey(G1),'titles.json','people.json','admin/owner-reviews.json'],'the reused bodies are cancelled, not left open');
 etags.set('titles.json','titles-3');records.set('titles.json',{...records.get('titles.json'),H11k:{tmdbId:'1137844',title:'Мэйдэй (кэш)',status:'provisional'}});
 gets=[];parses=0;resetStreams();
 r=await call('/api/admin/films?q=mayday');
 assert.deepEqual(gets,SNAPSHOT_KEYS);assert.equal(parses,3,'the two pointer reads and the changed dictionary; the programme body is reused');
 assert.deepEqual(streams.consumed,[POINTER,POINTER,'titles.json'],'the bumped dictionary is read');
-assert.deepEqual(streams.cancelled,[programmeKey(G1),'people.json'],'the two unchanged bodies are cancelled');
+assert.deepEqual(streams.cancelled,[programmeKey(G1),'people.json','admin/owner-reviews.json'],'the unchanged bodies are cancelled');
 assert.equal(r.body.items[0].localization.status,'reviewed','the reviewed title still wins over a cached one');
 gets=[];parses=0;resetStreams();
 r=await call('/api/admin/films?q=mayday');
-assert.deepEqual(streams.cancelled,[programmeKey(G1),'titles.json','people.json'],'the replaced projection is held under the new tuple');
+assert.deepEqual(streams.cancelled,[programmeKey(G1),'titles.json','people.json','admin/owner-reviews.json'],'the replaced projection is held under the new tuple');
 resetCache();gets=[];parses=0;resetStreams();
-r=await call('/api/admin/films?q=mayday');assert.equal(parses,5,'a fresh isolate parses every object');assert.deepEqual(streams.cancelled,[]);
+r=await call('/api/admin/films?q=mayday');assert.equal(parses,6,'a fresh isolate parses every object');assert.deepEqual(streams.cancelled,[]);
 const scanned=fs.readFileSync('src/admin/read.js','utf8');
 assert.match(scanned,/await adminDiscardBody\(object\);return \{present:true,version:etag,uploaded,body:cached\.body,reused:true\}/,'a cache hit cancels the fresh body before reusing the parse');
 

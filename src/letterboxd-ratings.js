@@ -2,7 +2,7 @@
 // with a leased, checkpointed run record, driven by ratings_sync_start / ratings_sync_step. Only the run record is owned
 // (compare-and-swap while `lease.step` is the step's own id); the Diary cursor, history, facts, queue and events change
 // by their monotone merges, so a step that outlived its lease can add real progress and never move anything back.
-// The pipeline is permanently separate (ADR 0073). It acts once ratings_storage_migrate has migrated the queue and the
+// The pipeline is permanently separate (ADR 0074). It acts once ratings_storage_migrate has migrated the queue and the
 // Diary cursor; until then start and step answer not_migrated and write nothing. The RATINGS_PIPELINE binding is ignored.
 // ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
@@ -255,11 +255,12 @@ const LetterboxdRatings=(()=>{
  // A version 1 hand-over still in sync.json (`removalLookups`): films the saved watchlist event removed get that event
  // as their reference; any other film becomes a legacy entry.
  function syncHandover(sync){
-  const films=(Array.isArray(sync?.removalLookups)?sync.removalLookups:[]).map(removalLookupFilm).filter(Boolean);if(!films.length)return [];
+  const stored=(Array.isArray(sync?.removalRefs)?sync.removalRefs:sync?.removalRefs?.films?.length&&sync.removalRefs.ref?[sync.removalRefs]:[]).map(item=>({films:(item.films||[]).map(removalLookupFilm).filter(Boolean),ref:item.ref})).filter(item=>item.films.length&&item.ref);
+  const films=(Array.isArray(sync?.removalLookups)?sync.removalLookups:[]).map(removalLookupFilm).filter(Boolean);if(!films.length)return stored;
   const event=(sync.events||[]).find(item=>item?.type==='watchlist'&&Array.isArray(item.removed));
   const removed=new Set((event?.removed||[]).map(film=>String(film.id)));
   const ref=event&&Number.isFinite(Date.parse(event.at))&&event.id?{eventKey:removalEventKey(event),sourceRunId:sync.runId,at:event.at}:null;
-  return [{films:films.filter(film=>ref&&removed.has(film.id)),ref},{films:films.filter(film=>!(ref&&removed.has(film.id))),ref:null}].filter(item=>item.films.length);
+  return [...stored,{films:films.filter(film=>ref&&removed.has(film.id)),ref},{films:films.filter(film=>!(ref&&removed.has(film.id))),ref:null}].filter(item=>item.films.length);
  }
 
  // ratings_sync_status: reads only, never closes a stale run.

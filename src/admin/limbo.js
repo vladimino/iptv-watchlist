@@ -8,7 +8,7 @@
 // generation, unresolved observations are reported as unavailable, never as none.
 // The contract is docs/reference/api/admin.md; the model is docs/reference/domain/data-health.md.
 const LIMBO_QUEUE_KEY=ENRICHMENT_KEY+'prediction-queue.json',LIMBO_INDEX_KEY=ENRICHMENT_KEY+'view-index.json';
-const LIMBO_SOURCES=['epg/published-generation.json','epg/generations/<programmeRunId>/programme.json','titles.json','people.json',LIMBO_QUEUE_KEY,LIMBO_INDEX_KEY,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json'];
+const LIMBO_SOURCES=['epg/published-generation.json','epg/generations/<programmeRunId>/programme.json','titles.json','people.json','admin/owner-reviews.json',LIMBO_QUEUE_KEY,LIMBO_INDEX_KEY,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json'];
 let ADMIN_LIMBO_CACHE=null;
 
 function limboEncodePin(tuple){return ['L2',adminEncodePin(tuple),tuple.queueVersion??'',tuple.indexVersion??'',tuple.observationsVersion??''].map(part=>encodeURIComponent(part)).join('|');}

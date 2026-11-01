@@ -137,6 +137,6 @@ async function adminHealthRoute(request,env,url){
    observations:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.observations},
    letterboxd:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.letterboxd},
   },
-  reads:[EPG_GENERATION_KEY,epgGenerationKey(run,'programme.json'),EPG_GENERATION_KEY,'titles.json','people.json',...reads],
+  reads:[EPG_GENERATION_KEY,epgGenerationKey(run,'programme.json'),EPG_GENERATION_KEY,'titles.json','people.json','admin/owner-reviews.json',...reads],
  });
 }

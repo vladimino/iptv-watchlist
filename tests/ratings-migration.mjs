@@ -60,6 +60,23 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  assert.equal(bucket.value('sync.json').removalLookups.length,2,'the migration does not rewrite sync.json');
 }
 
+// 2b. removalRefs kept across blocked commits are copied into the queue by the migration and are not left behind.
+{
+ const {bucket,env,R}=setup();
+ const eventAt=at(T0-H),secondAt=at(T0-2*H);
+ const firstRef={eventKey:eventKeyOf(eventAt,'run-8-watchlist'),sourceRunId:'run-8',at:eventAt};
+ const secondRef={eventKey:eventKeyOf(secondAt,'run-9-watchlist'),sourceRunId:'run-9',at:secondAt};
+ bucket.set('sync.json',{runId:'run-9',stage:'complete',removalRefs:[{ref:firstRef,films:[film('c')]},{ref:secondRef,films:[film('d')]}]});
+ bucket.set(QUEUE,{schemaVersion:1,films:{}});bucket.set(CURSOR,V1_CURSOR);
+ const dry=plain(await R.migrate(env,{mode:'dry_run'}));
+ eq(dry.queue.handover,{films:2,withEvent:2});
+ await R.migrate(env,{mode:'apply'});
+ const q=bucket.value(QUEUE);
+ eq(q.films.c.refs,[{...firstRef,resolved:false}]);
+ eq(q.films.d.refs,[{...secondRef,resolved:false}]);
+ assert.equal(bucket.value('sync.json').removalRefs.length,2,'the migration does not rewrite sync.json');
+}
+
 // 3. Kill points. a) The cursor write fails after the queue converted: partial, and the separate pipeline stays inert
 // until a second apply completes it. b) The isolate dies between the queue write and its witness: the next apply
 // records the witness and goes on.

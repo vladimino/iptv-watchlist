@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
 
-// ADR 0073: the EPG commit never reads Diary. Unmigrated storage fails closed for every binding value. After the
+// ADR 0074: the EPG commit never reads Diary. Unmigrated storage fails closed for every binding value. After the
 // migration the commit only enqueues removal references, durably and before it publishes, whatever the retired
 // RATINGS_PIPELINE binding holds, and requests nothing from Letterboxd for ratings.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
@@ -36,7 +36,7 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
 {
  const baselines=[];
  for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'},{RATINGS_PIPELINE:'separate'}]){
-  const {snapshot,replies,net,bucket}=await lifecycle({extra});
+  const {snapshot,replies,net,bucket,runId}=await lifecycle({extra});
   const label=JSON.stringify(extra);
   assert.equal(replies.at(-1).body.stage,'complete',label);
   eq([replies.at(-1).body.ratingsPipeline,replies.at(-1).body.ratingsMigration],['blocked','none'],label);
@@ -44,10 +44,44 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
   assert.equal(snapshot[QUEUE],undefined,label+': no queue write');
   assert.equal(snapshot[CURSOR],undefined,label+': the cursor is untouched');
   const sync=bucket.value('sync.json');
-  eq([sync.ratingsPipeline,sync.ratingsMigration,sync.ratingPending,sync.removalRefs,sync.removalLookups,sync.diaryHistory],[ 'blocked','none',undefined,undefined,undefined,undefined],label);
-  baselines.push(JSON.stringify({keys:Object.keys(snapshot),ratings:replies.at(-1).body.ratingsPipeline,diary:net.diaryFetches()}));
+  eq([sync.ratingsPipeline,sync.ratingsMigration,sync.ratingPending,sync.removalLookups,sync.diaryHistory],[ 'blocked','none',undefined,undefined,undefined],label);
+  eq(sync.removalRefs.films.map(item=>item.id).sort(),['film2','film3'],label+': the removal event is kept as a hand-over');
+  assert.equal(sync.removalRefs.ref.sourceRunId,runId,label);
+  assert.ok(bucket.value(sync.removalRefs.ref.eventKey),label+': the removal event is written');
+  baselines.push(JSON.stringify({keys:Object.keys(snapshot),ratings:replies.at(-1).body.ratingsPipeline,films:sync.removalRefs.films.map(item=>item.id).sort(),diary:net.diaryFetches()}));
  }
  assert.equal(new Set(baselines).size,1,'every binding value fails closed the same way');
+}
+
+// 1b. Consecutive blocked commits keep every removal reference. Advancing the watchlist does not drop the earlier
+// event, nothing is written to the queue, and the next start after migration enqueues both events.
+{
+ const first=await lifecycle({});
+ const earlier=first.bucket.value('sync.json').removalRefs;
+ eq(earlier.films.map(item=>item.id).sort(),['film2','film3']);
+ assert.equal(first.bucket.value(QUEUE),null,'a blocked commit does not enqueue');
+ first.net.watchlist='<span class="js-watchlist-count">0</span>';
+ const start=await first.post('/api/sync/start',{});
+ assert.notEqual(start.body.runId,first.runId);
+ let body=start.body;
+ for(let i=0;i<4&&body.stage!=='complete';i++){const step=await first.post(body.stage==='metadata'?'/api/sync/metadata':'/api/sync/epg',{runId:start.body.runId});body=step.body;}
+ assert.equal(body.stage,'complete');
+ assert.equal(body.ratingsPipeline,'blocked');
+ const sync=first.bucket.value('sync.json');
+ const refs=sync.removalRefs;
+ assert.equal(Array.isArray(refs),true,'the second blocked generation appends instead of replacing');
+ eq(refs.map(item=>item.films.map(film=>film.id).sort().join('+')).sort(),['film1','film2+film3']);
+ for(const item of refs)assert.ok(first.bucket.value(item.ref.eventKey),item.ref.eventKey);
+ assert.ok(!first.bucket.value('watchlist.json').films.some(film=>film.id==='film2'||film.id==='film1'));
+ assert.equal(first.bucket.value(QUEUE),null);
+ eq(first.net.diaryFetches(),[]);
+ migrated(first.bucket);
+ const next=await first.post('/api/sync/start',{});
+ assert.ok(next.body.runId&&next.body.runId!==start.body.runId);
+ const queue=first.bucket.value(QUEUE);
+ eq(Object.keys(queue.films).sort(),['film1','film2','film3']);
+ for(const item of refs)for(const film of item.films)assert.ok(queue.films[film.id].refs.some(ref=>ref.eventKey===item.ref.eventKey&&ref.sourceRunId===item.ref.sourceRunId),film.id);
+ assert.equal(first.bucket.value('sync.json').removalRefs,undefined,'the start flushed the hand-over before replacing sync.json');
 }
 
 // 2. Active `separate`: the commit enqueues one reference per removed film to the run's removal event, before it
@@ -123,4 +157,4 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
  eq([footer.state,footer.code],['healthy','ok']);
 }
 
-console.log('Ratings at the EPG commit (ADR 0060, ADR 0073): unmigrated storage fails closed for every binding; migrated storage enqueues references before the publish without Diary or member requests for an absent, inline, invalid or separate binding, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');
+console.log('Ratings at the EPG commit (ADR 0060, ADR 0074): unmigrated storage fails closed for every binding; migrated storage enqueues references before the publish without Diary or member requests for an absent, inline, invalid or separate binding, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');

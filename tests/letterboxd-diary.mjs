@@ -245,7 +245,7 @@ assert.ok(body.film.entries.every(e=>e.aliases.every(alias=>typeof alias.firstOb
 assert.equal((await ctx.worker.fetch(new Request('https://site.example/api/letterboxd/diary?filmId=../x'),env)).status,400);
 assert.deepEqual(writes,[],'the read writes nothing');
 
-// 13. The EPG commit does not read Diary (ADR 0073), including when the page would be blocked. Facts of a diary page
+// 13. The EPG commit does not read Diary (ADR 0074), including when the page would be blocked. Facts of a diary page
 // are written by the ratings run; the page-1 read above already covers that reader.
 records.clear();etags.clear();requests.length=0;publish(fifty);records.set('programme.json',report('r-on'));
 const completed=await ctx.completeWithRatings(env,run('r-on'),report('r-on'));
@@ -261,4 +261,4 @@ assert.equal(blocked.ratingsPipeline,'blocked');
 assert.equal(requests.length,0,'a blocked diary page is not requested by the commit');
 assert.equal(records.get('sync.json').ratingAttempt,undefined);
 
-console.log('Letterboxd diary history (AIR-304, ADR 0073): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, gate off untouched, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API, and an EPG commit that does not read Diary passed');
+console.log('Letterboxd diary history (AIR-304, ADR 0074): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, gate off untouched, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API, and an EPG commit that does not read Diary passed');

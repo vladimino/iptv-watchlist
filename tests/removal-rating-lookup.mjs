@@ -197,7 +197,7 @@ assert.equal(vm.runInContext('removalLookupFilm',ctx)({id:'x',url:'https://lette
 const source=fs.readFileSync('src/worker.js','utf8');
 assert.match(source,/removed\.has\(String\(film\.id\)\)\)\.map\(removalLookupFilm\)/,'the hand-over is built from the removed ids of this run');
 
-// 11. A hand-over left on a completed run is not looked up by the next step while migration is not complete (ADR 0073).
+// 11. A hand-over left on a completed run is not looked up by the next step while migration is not complete (ADR 0074).
 // The direct lookup above still rates a film, and a killed lookup still leaves the claim.
 records.delete(QUEUE);fetches.length=0;pages.set('crash',3.5);
 const crashEvent={id:'run-2-watchlist',type:'watchlist',at,total:0,baseline:false,added:[],removed:[{id:'lb-crash',title:'Crash',year:2018}]};
@@ -220,4 +220,4 @@ try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-2'},{caller:'http',diagno
 assert.equal(memberPages().length,0,'a further step still requests nothing');
 assert.deepEqual(plain(records.get('sync.json').removalLookups),[film('crash')]);
 
-console.log('Removal rating lookup (AIR-268, ADR 0073): gate off untouched, per-film rating with no films list, diary-proved removals skip the lookup and a blocked diary falls back (AIR-287), one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, the commit leaves a hand-over and does not look up passed');
+console.log('Removal rating lookup (AIR-268, ADR 0074): gate off untouched, per-film rating with no films list, diary-proved removals skip the lookup and a blocked diary falls back (AIR-287), one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, the commit leaves a hand-over and does not look up passed');

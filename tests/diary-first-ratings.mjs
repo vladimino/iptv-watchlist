@@ -35,7 +35,7 @@ const view=()=>records.get('enrichment/view-index.json')||{};
 const report=runId=>({runId,updatedAt:new Date().toISOString(),watchlistCount:0,films:[],stats:{}});
 const R=vm.runInContext('LetterboxdRatings',ctx);
 const RUN_KEY='letterboxd/ratings/run.json',QUEUE_KEY='enrichment/removal-rating-lookups.json',WITNESS_KEY='letterboxd/ratings/migration.json';
-// Diary facts now land in the ratings run (ADR 0073). The assertions below still read them as diaryHistory.
+// Diary facts now land in the ratings run (ADR 0074). The assertions below still read them as diaryHistory.
 function ensureMigrated(){
  if(records.get(QUEUE_KEY)?.schemaVersion!==2)records.set(QUEUE_KEY,{schemaVersion:2,films:{},droppedRefs:0,migratedAt:'2026-10-01T00:00:00.000Z'});
  const cursor=records.get(D.KEYS.state);
