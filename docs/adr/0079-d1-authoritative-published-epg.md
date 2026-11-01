@@ -1,9 +1,9 @@
 # ADR 0079: D1 owns the published EPG generation only after its own marker is switched
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-01  
 **Recorded at:** 2026-11-01  
-**Approval source:** not an owner acceptance. This record is proposed with the AIR-319 implementation. Accepting it is a later owner decision and authorizes no production write.  
+**Approval source:** [Explicit owner acceptance of ADR 0079 and visual approval of all three changed Mermaid diagrams on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44), after independent [technical PASS on PR #314](https://github.com/vladimino/iptv-watchlist/pull/314#pullrequestreview-5730366344) at HEAD `0a5f88c7a20131b31e43968473133dc74055eb6f` and [successful PR CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41351842228). Architecture and rendered diagrams only; no production migration, import, marker flip, R2/D1 write or other operation is authorized.  
 **Related work:** [AIR-319](https://trello.com/c/pQL8NUTC), [ADR 0008](0008-atomic-epg-publication.md), [ADR 0021](0021-staged-atomic-generation-import.md), [ADR 0073](0073-metadata-cache-d1-authority.md), [ADR 0051](0051-d1-domain-r2-blobs.md)  
 **Supersedes:** [ADR 0008](0008-atomic-epg-publication.md) in part, and only while `published_epg_authority.mode` is `d1` and `cutover` is `open`: the coherent snapshot is the D1 generation, and `epg/published-generation.json` is its compatibility mirror. The coherent-snapshot rule stands. [ADR 0073](0073-metadata-cache-d1-authority.md) decisions 3 and 5 in part: a contract version of 6 or later, with the cache tables present, follows the metadata marker. The accepted decision text of both records stays.  
 **Superseded by:** None
@@ -36,7 +36,7 @@ Not decided here, and not authorized by proposing or accepting this record: appl
 
 Two writers are refused by the claim and by the pointer compare-and-swap. A reader pinned to an old run keeps that run's document. A large show title that blows one statement fails before the pointer moves. The enrichment projector, once the marker is `d1`, ignores a stale R2 pointer and uses the D1 run; the catalog copy of that run is still required and a missing copy fails closed. Metadata sync keeps working at version 8 only because the version check is no longer exact. Code that still assumes version 6 and only version 6 would treat this schema as "not the cache" and would read `metadata.json` again.
 
-The rendered Mermaid in the EPG, persistence and scheduling architecture pages changes. Those diagrams need a separate visual approval. This record does not grant it.
+The rendered Mermaid in the EPG, persistence and scheduling architecture pages was [explicitly visually approved by the owner on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44) at reviewed HEAD `0a5f88c7a20131b31e43968473133dc74055eb6f`. This approval applies only to the diagrams and architecture, not production activation.
 
 ## Recovery and migration boundary
 
@@ -46,7 +46,7 @@ A code rollback while the marker is `r2` leaves readers on R2, whether or not `0
 
 ## Evidence
 
-- **Original decision:** [AIR-319](https://trello.com/c/pQL8NUTC). Not yet an owner acceptance.
+- **Owner acceptance and visual approval:** [AIR-319 owner decision, 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44), following [PR #314 independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/314#pullrequestreview-5730366344).
 - **Implementation:** the pull request that introduces this record.
 - **Dated verification:** not recorded. This delivery did not apply `0008`, did not import a programme, did not set the marker to `d1`, and did not revert it.
 - **Prior measurements used, not repeated:** [generation unit size, 26 October 2026](../evidence/d1-migration/generation-unit-size-2026-10-26.md) (synthetic, local; one statement per show does not fit) and the metadata-cache marker cutover pattern in [ADR 0073](0073-metadata-cache-d1-authority.md). The local tests in [the AIR-319 note](../evidence/d1-migration/air-319-published-epg-authority-2026-11-01.md) cover the marker, the fence, the lease, resume, empty shows, withhold, ordering, a killed commit, a failed mirror and a production revert that repairs a stale watchlist. They are SQLite stand-ins and a fake HTTP API. They are not a production D1 timing or atomicity measurement, and they do not treat the backfill `{sql}` body as the Worker batch.
@@ -54,4 +54,4 @@ A code rollback while the marker is `r2` leaves readers on R2, whether or not `0
 
 ## Follow-ups
 
-Accept or decline this record, and visually approve or reject the changed Mermaid, are owner gates. Schema apply, import and activation are later action-specific GOs. Discovery decisions become D1-authoritative only on AIR-320, after an accepted production cutover of this domain; until then they stay R2. That card is not this one. Canonical credits and reviewed names stay on their own cards.
+ADR acceptance and the three diagram visual gates are complete. Schema apply, import and activation remain later action-specific owner GOs. Discovery decisions become D1-authoritative only on AIR-320, after an accepted production cutover of this domain; until then they stay R2. That card is not this one. Canonical credits and reviewed names stay on their own cards.

@@ -2,7 +2,7 @@
 
 **Scope:** local SQLite stand-in and a fake HTTP API. No production D1 write, no production R2 write, no migration apply, no import, no marker activation.
 
-**Code:** branch `cursor/air-319-d1-published-epg`. ADR [0079](../../adr/0079-d1-authoritative-published-epg.md) is Proposed.
+**Code:** branch `cursor/air-319-d1-published-epg`. ADR [0079](../../adr/0079-d1-authoritative-published-epg.md) was [Accepted by the owner on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44), together with rendered visual approval of the three changed Mermaid diagrams. No production operation was authorized.
 
 ## What was run
 
