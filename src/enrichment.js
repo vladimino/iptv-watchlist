@@ -193,13 +193,13 @@ async function refreshPersonalRating(env,film){
  const facts=await LetterboxdFacts.recordFilmFacts(env,id,{watched:true,rating},{observedAt:requestedAt,source:'letterboxd_film_page',sourceRef:sourceUrl});if(facts.conflict)return {filmId:id,status:'identity_conflict'};const saved=facts.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces');if(saved&&facts.record.rating?.value===rating)await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:requestedAt});await enrichRecentRemovalRatings(env,{[id]:rating},requestedAt);return {filmId:id,status:saved?'saved':'unchanged',rating};
 }
 // AIR-268: films removed from the watchlist are looked up one by one on their own member page, so a removal event gets
-// its rating without the 31-page films list. Gated by REMOVAL_RATING_LOOKUP (off by default). The queue is bounded,
-// each attempt is recorded before its request (a killed request cannot loop), a 403 or 429 stops the batch, and a
-// film is retried on later EPG commits at most REMOVAL_LOOKUP_MAX_ATTEMPTS times. No rating found never means watched.
+// its rating without the 31-page films list. REMOVAL_RATING_LOOKUP is retired and unread (ADR 0077): this lookup is
+// the permanent bounded fallback. The queue is bounded, each attempt is recorded before its request (a killed request
+// cannot loop), a 403 or 429 stops the batch, and a film is retried at most REMOVAL_LOOKUP_MAX_ATTEMPTS times.
+// No rating found never means watched.
 const REMOVAL_LOOKUP_KEY=ENRICHMENT_KEY+'removal-rating-lookups.json';
-const REMOVAL_LOOKUP_BATCH=5,REMOVAL_LOOKUP_MAX_ATTEMPTS=3,REMOVAL_LOOKUP_CAP=100,REMOVAL_LOOKUP_KEEP_MS=14*86400000;
+const REMOVAL_LOOKUP_BATCH=5,REMOVAL_FACT_BATCH=5,REMOVAL_LOOKUP_MAX_ATTEMPTS=3,REMOVAL_LOOKUP_CAP=100,REMOVAL_LOOKUP_KEEP_MS=14*86400000;
 const REMOVAL_LOOKUP_RETRY_MS={claimed:3600000,failed:3600000,blocked:6*3600000,rate_limited:6*3600000,not_rated:24*3600000};
-const removalLookupEnabled=env=>env?.REMOVAL_RATING_LOOKUP==='on';
 const removalLookupFilm=film=>{const id=String(film?.id??''),url=String(film?.url||'');return /^[a-zA-Z0-9_-]{1,80}$/.test(id)&&/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/.test(url)?{id,url}:null;};
 // Queue schema version 2 (ADR 0060 decision 3): `films[id]` stays the unit of lookup; `refs` lists every removal event
 // that removed the film, `{eventKey, sourceRunId, at, resolved}`. Every mutation below is applied inside the
@@ -276,6 +276,46 @@ function resolveRemovalByDiary(queue,id,rating,at){
  queue.films[id]={...entry,state:'rated',rating,lastResult:'diary',checkedAt:at,nextAttemptAt:null,claim:null,lastError:null};
  return true;
 }
+// A confirmed stored rating resolves a pending entry without a request (ADR 0077). A reopened entry is pending and
+// still carries its previous rating; the fact wins. Null and absence do not resolve it and do not mean watched.
+function resolveRemovalByFact(queue,id,rating,at){
+ const entry=queue.films[id],confirmed=confirmedHalfStar(rating);
+ if(!removalQueueV2(queue)||!entry||entry.state!=='pending'||confirmed==null)return false;
+ queue.films[id]={...entry,state:'rated',rating:confirmed,lastResult:'fact',checkedAt:at,nextAttemptAt:null,claim:null,lastError:null};
+ return true;
+}
+// Due pending entries whose fact store already holds a confirmed rating, before any member-page GET. At most `limit`
+// films are probed (REMOVAL_FACT_BATCH). The alias index and the films-list floor are read once; each probe then reads
+// that film's record. `skip` is the films the current Diary page listed without a rating: they are eligible for a GET
+// without a probe. `gettable` is the only set a caller may request. Anything not visited stays pending. `beforeEach`
+// stops the step when the ratings lease is inside its margin; the direct helper does not pass one and uses this cap alone.
+async function resolveDueRemovalFacts(env,now=Date.now(),options={}){
+ const skip=options.skip||[],limit=options.limit??REMOVAL_FACT_BATCH,getBudget=options.getBudget??REMOVAL_LOOKUP_BATCH,beforeEach=options.beforeEach||(()=>true);
+ const at=new Date(now).toISOString(),held=new Set(skip);
+ let queue=await loadJSON(env,REMOVAL_LOOKUP_KEY);
+ if(!queue)return {queue,gettable:[],more:false};
+ if(!removalQueueV2(queue)){const due=removalDue(queue,now,getBudget+1);return {queue,gettable:due.slice(0,getBudget),more:due.length>getBudget};}
+ const due=removalDue(queue,now,Object.keys(queue.films).length),gettable=[];
+ let probes=0,index=0,yielded=false,cache=null;
+ for(;index<due.length;index++){
+  if(!beforeEach()){yielded=true;break;}
+  const id=due[index];
+  if(held.has(id)){if(gettable.length>=getBudget){yielded=true;break;}gettable.push(id);continue;}
+  if(probes>=limit){yielded=true;break;}
+  if(!cache)cache={links:(await loadJSON(env,LetterboxdFacts.FACTS_KEYS.links))||{},filmsList:await loadJSON(env,LetterboxdFacts.FACTS_KEYS.filmsList)};
+  if(!beforeEach()){yielded=true;break;}
+  probes++;
+  const rating=await LetterboxdFacts.confirmedFilmRating(env,id,cache);
+  if(rating!=null){
+   if(!beforeEach()){yielded=true;break;}
+   let resolved=false;
+   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{resolved=resolveRemovalByFact(q,id,rating,at);return resolved?q:null;});
+   if(resolved){if(!beforeEach()){yielded=true;break;}await settleRemovalRefs(env,{ids:[id],now});}
+  }else if(gettable.length>=getBudget){yielded=true;break;}
+  else gettable.push(id);
+ }
+ return {queue:await loadJSON(env,REMOVAL_LOOKUP_KEY),gettable,more:yielded||index<due.length};
+}
 // Version 2 retention: an entry with an unresolved reference is never deleted, by age or by the cap. A pending entry
 // still expires after 14 days (no more requests). Only entries whose references are all resolved (legacy entries
 // included) follow the version 1 rules below.
@@ -313,8 +353,8 @@ function removalLookupOutcome(entry,result,error,at){
 const removalDue=(queue,now,limit)=>Object.entries(queue.films).filter(([,entry])=>entry.state==='pending'&&entry.attempts<REMOVAL_LOOKUP_MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)
  .sort(([,a],[,b])=>Date.parse(a.enqueuedAt)-Date.parse(b.enqueuedAt)).slice(0,limit).map(([id])=>id);
 const REMOVAL_QUEUE_EMPTY={schemaVersion:1,films:{}};
-// The durable enqueue of the EPG commit under the separate pipeline (ADR 0060 decision 3): references only, no request,
-// whatever REMOVAL_RATING_LOOKUP holds. Idempotent: a replay of the same event adds nothing.
+// The durable enqueue of the EPG commit under the separate pipeline (ADR 0060 decision 3): references only, no request.
+// The retired binding is not read (ADR 0077). Idempotent: a replay of the same event adds nothing.
 async function enqueueRemovalRefs(env,incoming,ref,now=Date.now()){
  const at=new Date(now).toISOString(),films=(Array.isArray(incoming)?incoming:[]).map(removalLookupFilm).filter(Boolean);
  let schemaVersion=null;
@@ -440,7 +480,6 @@ async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBe
 }
 // `ref` names the removal event of this hand-over; a version 1 queue ignores it, a version 2 queue stores it.
 async function lookupRemovalRatings(env,incoming=[],now=Date.now(),ref=null){
- if(!removalLookupEnabled(env))return null;
  const at=new Date(now).toISOString(),summary={checked:0,rated:0,notRated:0,failed:0,stoppedBy:null,pending:0,expired:0,queued:0};
  try{
   const films=(Array.isArray(incoming)?incoming:[]).map(removalLookupFilm).filter(Boolean);
@@ -448,9 +487,11 @@ async function lookupRemovalRatings(env,incoming=[],now=Date.now(),ref=null){
    const changed=applyRemovalEnqueue(q,films,ref,at);
    return pruneRemovalQueue(q,now)||changed?q:null;
   });
-  // A 403 or 429 is about the source, not the film: the whole queue waits until the backoff ends.
+  // A 403 or 429 is about the source, not the film: the whole queue waits until the backoff ends. No fact probe and no GET.
   if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>now){summary.stoppedBy=queue.pausedBy||'blocked';summary.pausedUntil=queue.pausedUntil;}
-  const due=summary.stoppedBy?[]:removalDue(queue,now,REMOVAL_LOOKUP_BATCH);
+  const facts=summary.stoppedBy?{gettable:[]}:await resolveDueRemovalFacts(env,now,{limit:REMOVAL_FACT_BATCH,getBudget:REMOVAL_LOOKUP_BATCH});
+  if(facts.queue)queue=facts.queue;
+  const due=summary.stoppedBy?[]:facts.gettable;
   for(const id of due){
    // Claim first: a request killed mid-lookup leaves a counted attempt and a later retry time, never a free retry.
    let token=null;

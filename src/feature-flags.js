@@ -10,7 +10,8 @@ const FEATURE_FLAGS=[
  onOff('CANDIDATE_DISCOVERY',env=>candidateDiscoveryMode(env),{trims:true}),
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
- onOff('REMOVAL_RATING_LOOKUP',env=>removalLookupEnabled(env)?'on':'off'),
+ // Retired: a migrated ratings run's per-film removal lookup does not read this binding (ADR 0077).
+ {name:'REMOVAL_RATING_LOOKUP',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  // Retired: Diary page 1 on a migrated ratings run does not read this binding (ADR 0075).
  {name:'LETTERBOXD_DIARY_HISTORY',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'D1_ENRICHMENT_WRITE',modes:['off','dry','on'],default:'off',tokens:['off','dry','on'],effective:env=>d1EnrichmentMode(env),note:'AIR-275 phase 2: dry logs the D1 diff without writing; on writes changed Films and Persons from a cron trigger'},

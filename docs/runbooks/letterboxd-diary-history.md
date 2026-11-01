@@ -12,6 +12,18 @@ This code change does not delete the Cloudflare binding. `keep_vars: true` leave
 2. After the binding is deleted, code from before ADR 0075 must not be deployed until `LETTERBOXD_DIARY_HISTORY=on` is restored and read back. That older code skips Diary when the binding is absent.
 3. A code revert does not roll back R2 history, the Diary cursor, facts or the removal queue.
 
+### Per-film removal lookup
+
+The bounded member-page lookup is permanent on a migrated ratings run ([ADR 0077](../adr/0077-retire-removal-rating-lookup-switch.md)). A confirmed rating already stored for a film the current Diary page did not list is not requested, including when a new removal reference reopens the queue entry. A film that page lists without a rating is still looked up. A null or absent rating is not watched. The Worker does not read `REMOVAL_RATING_LOOKUP`. Setting the binding to `off`, emptying it or deleting it does not stop the lookup. `removal.lookupEnabled: true` on `ratings_sync_status` means the capability is on. It does not prove a fetch happened and it does not prove the binding is absent. `feature_flags` does: while the binding exists, `state: set` and `issue: retired`; after the later owner deletion, `state: absent`, `retired: true`, `valid: true`. `effective` is null either way.
+
+This code change does not delete the Cloudflare binding. `keep_vars: true` leaves it. The production binding was `on` at the 2026-11-01 AIR-272 preflight. Deleting only that binding is a later owner step, after this code is deployed, both post-merge jobs succeed, and a read-only check accepts it. Do not substitute that deletion with `off` or an empty value. `lookupEnabled: true` after the deletion still does not prove a member-page GET. A later routine Ratings Task is the observation. If no film is eligible, `lookup.checked: 0` does not prove a GET, and this runbook does not authorize creating a removal to force one.
+
+#### Rollback of this retirement
+
+1. Disabling or deleting the binding does not stop the lookup.
+2. After the binding is deleted, code from before ADR 0077 must not be deployed until `REMOVAL_RATING_LOOKUP=on` is restored and read back. That older code skips the lookup when the binding is absent.
+3. A code revert does not roll back R2 rating facts, the queue or removal events. After the deletion the lookup cannot be turned off by a flag. An emergency stop is a separately approved code revert or Task action. The 403/429 pause and the request budgets stay.
+
 A deploy does not start a ratings run. Each production change still needs its own owner approval.
 
 ## Historical activation (AIR-51)
