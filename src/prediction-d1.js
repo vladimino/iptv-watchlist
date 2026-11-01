@@ -95,13 +95,16 @@ export function predictionMutableKey(key){
 }
 function leaseName(kind){return kind==='writer'?'writer':'runner';}
 
-function idleAuthority(version,bindingPresent){
- return {mode:'r2',tables:false,version,ready:false,binding:bindingPresent,generation:0,queueGeneration:0,profileGeneration:0,writes:null};
+function idleAuthority(version,bindingPresent,domain='absent'){
+ return {mode:'r2',tables:false,domain,version,ready:false,binding:bindingPresent,generation:0,queueGeneration:0,profileGeneration:0,writes:null};
 }
 export async function readPredictionAuthority(db,env){
  // A local caller that omits the binding and does not set PREDICTION_DB_REQUIRED stays on the objects.
- // The deployed Worker sets that variable, so a missing binding fails closed and does not read R2.
- // A binding that does not answer, or a version of 7 or newer with a partial domain, fails closed.
+ // The deployed Worker sets that variable. A missing binding, or a bound database with no schema
+ // contract, then fails closed and does not read R2. A binding that does not answer fails closed.
+ // Version 7 or newer with some but not all of these tables fails closed. None of the tables means
+ // this domain is not installed: a later migration may have advanced the contract, and prediction
+ // stays on the objects. Readiness is the tables and the marker, not the version number alone.
  if(db==null){
   if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
   return idleAuthority(null,false);
@@ -109,22 +112,32 @@ export async function readPredictionAuthority(db,env){
  let version;
  try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return idleAuthority(null,true);
+  if(/no such table/i.test(String(error?.message||error))){
+   if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
+   return idleAuthority(null,true);
+  }
   throw failed('prediction_domain_unavailable',error);
  }
- if(version==null||Number(version)<PREDICTION_CONTRACT)return idleAuthority(version,true);
+ if(version==null){
+  if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
+  return idleAuthority(null,true);
+ }
+ if(Number(version)<PREDICTION_CONTRACT)return idleAuthority(version,true);
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
  catch(error){throw failed('prediction_domain_unavailable',error);}
- if(!TABLES.every(name=>names.includes(name)))throw failed('prediction_domain_unavailable');
+ const present=TABLES.filter(name=>names.includes(name)).length;
+ if(present===0)return idleAuthority(Number(version),true);
+ if(present!==TABLES.length)throw failed('prediction_domain_unavailable');
  let row;
  try{row=await one(db,'SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1');}
  catch(error){throw failed('prediction_domain_unavailable',error);}
  if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held'))throw failed('prediction_domain_unavailable');
- return {mode:row.mode,tables:true,version:Number(version),ready:row.mode==='d1',binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration),writes:row.writes};
+ return {mode:row.mode,tables:true,domain:'ready',version:Number(version),ready:row.mode==='d1',binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration),writes:row.writes};
 }
 
-export async function reservePredictionWrite(env,key,generation){
+export async function reservePredictionWrite(env,key,generation,bodyText){
+ if(typeof bodyText!=='string')throw failed('prediction_domain_unavailable');
  const authority=await readPredictionAuthority(env?.DB,env);
  if(!authority.tables||authority.mode!=='r2')throw failed('prediction_domain_not_ready');
  if(authority.generation!==generation)throw failed('prediction_domain_cas');
@@ -133,7 +146,7 @@ export async function reservePredictionWrite(env,key,generation){
  await fenced(env.DB,[
   ['UPDATE prediction_domain_authority SET generation=? WHERE id=1 AND mode=\'r2\' AND writes=\'open\' AND generation=?',[next,generation]],
   [FENCE_SQL,[]],
-  ['INSERT INTO prediction_domain_intent (key, token, generation) VALUES (?,?,?)',[key,token,next]],
+  ['INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)',[key,token,next,await sha256(bodyText)]],
  ]);
  return {token,generation:next};
 }
@@ -163,7 +176,12 @@ async function verified(bucket,key,hash){
 }
 
 function featuresOf(value){
- return {fingerprintHash:value?.fingerprintHash??null,fingerprintSchemaVersion:value?.fingerprintSchemaVersion??null,fingerprintPromptVersion:value?.fingerprintPromptVersion??1,invalidatedAt:value?.invalidatedAt||null,generatedAt:value?.generatedAt||null,produced:value?.produced||null,previous:value?.previous??null,plotMechanics:Array.isArray(value?.plotMechanics)?value.plotMechanics:[],moodLabels:Array.isArray(value?.moodLabels)?value.moodLabels:[],execution:value?.execution&&typeof value.execution==='object'?value.execution:{}};
+ const features={fingerprintHash:value?.fingerprintHash??null,fingerprintSchemaVersion:value?.fingerprintSchemaVersion??null,fingerprintPromptVersion:value?.fingerprintPromptVersion??1,invalidatedAt:value?.invalidatedAt||null,generatedAt:value?.generatedAt||null,produced:value?.produced||null,previous:value?.previous??null,plotMechanics:Array.isArray(value?.plotMechanics)?value.plotMechanics:[],moodLabels:Array.isArray(value?.moodLabels)?value.moodLabels:[],execution:value?.execution&&typeof value.execution==='object'?value.execution:{}};
+ if(value?.fields!==undefined){
+  if(!Array.isArray(value.fields)||value.fields.some(field=>typeof field!=='string'))throw failed('prediction_domain_unavailable');
+  features.fields=value.fields.slice();
+ }
+ return features;
 }
 function displayOf(value){
  if(!value||typeof value!=='object')return {};
@@ -209,7 +227,8 @@ async function loadFingerprint(env,filmId){
  const body=await verified(env.BUCKET,row.r2Key,row.contentSha256);
  if(body.fingerprintHash!==row.fingerprintHash)throw failed('prediction_domain_body_mismatch');
  let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
- return {...body,generatedAt:row.generatedAt,invalidatedAt:row.invalidatedAt,fingerprintPromptVersion:row.promptVersion,fingerprintSchemaVersion:row.schemaVersion,produced:features.produced||null,previous:features.previous??null};
+ const fields=Array.isArray(features.fields)?features.fields:undefined;
+ return {...body,generatedAt:row.generatedAt,invalidatedAt:row.invalidatedAt,fingerprintPromptVersion:row.promptVersion,fingerprintSchemaVersion:row.schemaVersion,produced:features.produced||null,previous:features.previous??null,...(fields?{fields}:{})};
 }
 async function loadPredictionRecord(env,row){
  const body=await verified(env.BUCKET,row.r2Key,row.contentSha256);
@@ -377,7 +396,7 @@ export async function saveMutable(env,key,value){
  const kind=predictionMutableKey(key);
  if(!kind)return {handled:false};
  const authority=await readPredictionAuthority(env?.DB,env);
- if(authority.tables&&authority.mode==='r2'){const reserved=await reservePredictionWrite(env,key,authority.generation);return {handled:false,claimed:true,token:reserved.token};}
+ if(authority.tables&&authority.mode==='r2'){const text=JSON.stringify(value);const reserved=await reservePredictionWrite(env,key,authority.generation,text);return {handled:false,claimed:true,token:reserved.token,text};}
  if(authority.mode!=='d1')return {handled:false};
  if(kind==='fingerprint')await saveFingerprint(env,filmIdFrom(key,'fingerprint'),value,authority);
  else if(kind==='predictions')await savePredictions(env,filmIdFrom(key,'predictions'),value,authority);
@@ -394,26 +413,28 @@ export async function openQueue(env){
  const authority=await readPredictionAuthority(env?.DB,env);
  if(authority.mode==='d1')return {mode:'d1',version:authority.version,generation:authority.generation,queueGeneration:authority.queueGeneration,queue:await loadQueue(env.DB),object:null};
  const object=await env.BUCKET.get(QUEUE_KEY);
- return {mode:'r2',version:authority.version,generation:authority.generation,object,queue:object?await object.json():null};
+ return {mode:'r2',tables:authority.tables,version:authority.version,generation:authority.generation,object,queue:object?await object.json():null};
 }
 export async function writeQueue(env,head,queue){
  if(head.mode==='d1'){
   try{await saveQueueDocument(env,queue,head);return {etag:'d1'};}
   catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
+ const text=JSON.stringify(queue);
  let token=null;
- if(Number(head.version)>=PREDICTION_CONTRACT){
-  try{token=(await reservePredictionWrite(env,QUEUE_KEY,head.generation)).token;}catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
+ if(head.tables){
+  try{token=(await reservePredictionWrite(env,QUEUE_KEY,head.generation,text)).token;}catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
- try{return await env.BUCKET.put(QUEUE_KEY,JSON.stringify(queue),{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});}
- finally{if(token)await completePredictionWrite(env,QUEUE_KEY,token);}
+ let settled=false;
+ try{const saved=await env.BUCKET.put(QUEUE_KEY,text,{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});settled=true;return saved;}
+ finally{if(token&&settled)await completePredictionWrite(env,QUEUE_KEY,token);}
 }
 export async function openLease(env,key){
  const name=key===WRITER_KEY?'writer':'runner';
  const authority=await readPredictionAuthority(env?.DB,env);
  if(authority.mode==='d1'){const lease=await loadLease(env.DB,name);return {mode:'d1',version:authority.version,generation:authority.generation,name,token:lease?.token??null,value:lease?.value??null,object:null};}
  const object=await env.BUCKET.get(key);
- return {mode:'r2',version:authority.version,generation:authority.generation,name,object,value:object?await object.json():null,token:null};
+ return {mode:'r2',tables:authority.tables,version:authority.version,generation:authority.generation,name,object,value:object?await object.json():null,token:null};
 }
 export async function writeLease(env,head,value){
  if(head.mode==='d1'){
@@ -421,12 +442,14 @@ export async function writeLease(env,head,value){
   catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
  const key=head.name==='writer'?WRITER_KEY:RUNNER_KEY;
+ const text=JSON.stringify(value);
  let token=null;
- if(Number(head.version)>=PREDICTION_CONTRACT){
-  try{token=(await reservePredictionWrite(env,key,head.generation)).token;}catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
+ if(head.tables){
+  try{token=(await reservePredictionWrite(env,key,head.generation,text)).token;}catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
- try{return await env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});}
- finally{if(token)await completePredictionWrite(env,key,token);}
+ let settled=false;
+ try{const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});settled=true;return saved;}
+ finally{if(token&&settled)await completePredictionWrite(env,key,token);}
 }
 export async function openProfile(env){
  const authority=await readPredictionAuthority(env?.DB,env);
@@ -691,6 +714,53 @@ export async function releasePredictionWriters(db){
  if(now.writes!=='open')throw failed('prediction_domain_cas');
  return now;
 }
+export async function reconcilePredictionIntents(db,bucket){
+ const authority=await readPredictionAuthority(db);
+ if(!authority.tables||authority.mode!=='r2')throw failed('prediction_domain_not_ready');
+ const rows=await many(db,'SELECT key, token, body_sha256 AS bodySha256 FROM prediction_domain_intent ORDER BY key');
+ let committed=0;
+ const pending=[];
+ try{
+  for(const row of rows){
+   const text=await objectText(bucket,row.key);
+   const digest=text==null?null:await sha256(text);
+   if(digest!==row.bodySha256){pending.push(row.key);continue;}
+   await fenced(db,[
+    ['DELETE FROM prediction_domain_intent WHERE key=? AND token=?',[row.key,row.token]],
+    [FENCE_SQL,[]],
+   ]);
+   committed++;
+  }
+  if(pending.length){
+   const error=failed('prediction_domain_busy');
+   error.committedUnits=committed;
+   throw error;
+  }
+  return {cleared:committed,mode:authority.mode,writes:authority.writes};
+ }catch(error){
+  if(error&&error.committedUnits==null)error.committedUnits=committed;
+  throw error;
+ }
+}
+const MIRROR_LIST_LIMIT=5000;
+async function listedKeys(bucket,prefix){
+ if(typeof bucket.list!=='function')throw failed('prediction_domain_parity');
+ const keys=[];
+ let cursor;
+ do{
+  const page=await bucket.list({prefix,limit:100,...(cursor?{cursor}:{})});
+  for(const object of page?.objects||[])keys.push(object.key);
+  if(keys.length>MIRROR_LIST_LIMIT)throw failed('prediction_domain_budget');
+  if(page?.truncated&&!(page.cursor||page.nextCursor))throw failed('prediction_domain_parity');
+  cursor=page?.truncated?page.cursor||page.nextCursor:null;
+ }while(cursor);
+ return keys;
+}
+async function deleteChecked(bucket,key){
+ if(typeof bucket.delete!=='function')throw failed('prediction_domain_parity');
+ try{await bucket.delete(key);}catch(error){throw failed('prediction_domain_parity',error);}
+ if(await bucket.get(key))throw failed('prediction_domain_parity');
+}
 async function putChecked(bucket,key,value){
  const text=JSON.stringify(value);
  await bucket.put(key,text,{httpMetadata:{contentType:'application/json'}});
@@ -699,30 +769,45 @@ async function putChecked(bucket,key,value){
 }
 async function repairMirrors(db,bucket){
  const env={DB:db,BUCKET:bucket};
+ const keep=new Set();
  for(const row of await many(db,'SELECT film_id AS filmId FROM prediction_fingerprint ORDER BY film_id')){
   const value=await loadFingerprint(env,row.filmId);
   if(!value)throw failed('prediction_domain_parity');
-  await putChecked(bucket,'enrichment/films/'+encodeURIComponent(row.filmId)+'/fingerprint.json',value);
+  const key='enrichment/films/'+encodeURIComponent(row.filmId)+'/fingerprint.json';
+  await putChecked(bucket,key,value);
+  keep.add(key);
  }
- for(const row of await many(db,'SELECT film_id AS filmId FROM prediction_pointer ORDER BY film_id')){
-  const value=await loadPredictions(env,row.filmId);
-  if(!value?.current)throw failed('prediction_domain_parity');
-  await putChecked(bucket,'enrichment/films/'+encodeURIComponent(row.filmId)+'/predictions.json',value);
+ const predictionIds=new Set();
+ for(const row of await many(db,'SELECT film_id AS filmId FROM prediction_pointer ORDER BY film_id'))predictionIds.add(row.filmId);
+ for(const row of await many(db,'SELECT DISTINCT film_id AS filmId FROM prediction_lineage ORDER BY film_id'))predictionIds.add(row.filmId);
+ for(const filmId of [...predictionIds].sort()){
+  const value=await loadPredictions(env,filmId);
+  if(!value)throw failed('prediction_domain_parity');
+  const key='enrichment/films/'+encodeURIComponent(filmId)+'/predictions.json';
+  await putChecked(bucket,key,value);
+  keep.add(key);
  }
  const queue=await loadQueue(db);
- if(queue)await putChecked(bucket,QUEUE_KEY,queue);
+ if(queue){await putChecked(bucket,QUEUE_KEY,queue);keep.add(QUEUE_KEY);}
  const profile=await loadProfile(env);
- if(profile)await putChecked(bucket,PROFILE_KEY,profile);
+ if(profile){await putChecked(bucket,PROFILE_KEY,profile);keep.add(PROFILE_KEY);}
  for(const row of await many(db,'SELECT run_id AS runId FROM prediction_run ORDER BY run_id')){
   const value=await loadRun(db,row.runId);
   if(!value)throw failed('prediction_domain_parity');
-  await putChecked(bucket,'enrichment/runs/'+row.runId+'.json',value);
+  const key='enrichment/runs/'+row.runId+'.json';
+  await putChecked(bucket,key,value);
+  keep.add(key);
  }
  const latest=await loadLatest(db);
- if(latest)await putChecked(bucket,LATEST_KEY,latest);
+ if(latest){await putChecked(bucket,LATEST_KEY,latest);keep.add(LATEST_KEY);}
  for(const [name,key] of [['runner',RUNNER_KEY],['writer',WRITER_KEY]]){
   const lease=await loadLease(db,name);
   await putChecked(bucket,key,lease?.value??{expiresAt:0});
+  keep.add(key);
+ }
+ for(const key of await listedKeys(bucket,'enrichment/')){
+  if(!predictionMutableKey(key)||keep.has(key))continue;
+  await deleteChecked(bucket,key);
  }
 }
 export async function revertPredictionDomain(db,bucket,expected){

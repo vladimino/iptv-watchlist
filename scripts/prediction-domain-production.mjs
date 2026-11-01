@@ -4,8 +4,11 @@
 // objects in bounded batches while the runner and writer leases are idle, and leaves mode r2.
 // A generation that moves during the copy is read again (catch-up), not a permanent block.
 // --activate sets mode d1 only when that fence, the leases and the parity read-back still agree.
-// --revert repairs the mutable mirrors from D1 and sets mode r2 only after that read-back.
-// A repair that cannot verify an immutable body leaves mode d1. Each write needs its own
+// --revert repairs the mutable mirrors from D1, deletes a mutable mirror the
+// rows no longer have, and sets mode r2 only after that read-back.
+// A repair that cannot verify an immutable body, or cannot prove an absent
+// mirror is gone, leaves mode d1. --reconcile clears an intent only when the
+// object bytes match the hash stored before the put. Each write needs its own
 // --confirm and --target iptv. This script does not replace scripts/prediction-domain-authority.mjs.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,7 +16,7 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createD1Adapter, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {createS3Store, readInstallCredentials} from './discovery-ledger-install.mjs';
 import {migrationStatements, OperatorStop, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, PRODUCTION_DATABASE_NAME, STATEMENT_BYTES} from './metadata-cache-production.mjs';
-import {activatePredictionDomain, importPredictionDomain, predictionParity, readPredictionAuthority, releasePredictionWriters, revertPredictionDomain} from '../src/prediction-d1.js';
+import {activatePredictionDomain, importPredictionDomain, predictionMutableKey, predictionParity, readPredictionAuthority, reconcilePredictionIntents, releasePredictionWriters, revertPredictionDomain} from '../src/prediction-d1.js';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
@@ -27,6 +30,7 @@ const RUNNER_KEY='enrichment/runner-lease.json';
 const WRITER_KEY='enrichment/writer-lease.json';
 const LATEST_KEY='enrichment/latest-run.json';
 const ATTEMPTS=5;
+const REQUIRED={PREDICTION_DB_REQUIRED:'on'};
 
 export function parsePredictionArgs(argv){
  const args=argv.slice(2);
@@ -37,7 +41,7 @@ export function parsePredictionArgs(argv){
   if(next===undefined||next.startsWith('--'))throw new OperatorStop('usage',2);
   return next;
  };
- const commands=['--apply','--load','--activate','--revert','--release'].filter(name=>args.includes(name));
+ const commands=['--apply','--load','--activate','--revert','--release','--reconcile'].filter(name=>args.includes(name));
  if(commands.length>1)throw new OperatorStop('usage',2);
  const known=new Set([...commands,'--target','--confirm']);
  for(let index=0;index<args.length;index++){
@@ -58,6 +62,7 @@ export function parsePredictionArgs(argv){
  if(command==='activate'&&confirm!=='activate')throw new OperatorStop('confirm',2);
  if(command==='revert'&&confirm!=='r2')throw new OperatorStop('confirm',2);
  if(command==='release'&&confirm!=='release')throw new OperatorStop('confirm',2);
+ if(command==='reconcile'&&confirm!=='reconcile')throw new OperatorStop('confirm',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
  return {command,confirm};
 }
@@ -156,26 +161,26 @@ async function tablesOf(binding){
 function present(tables){return TABLES.every(name=>tables[name]);}
 
 async function applyMigration(binding){
- const authority=await readPredictionAuthority(binding);
+ const authority=await readPredictionAuthority(binding,REQUIRED);
  if(authority.tables)throw new OperatorStop('already_applied',3);
- if(Number(authority.version)!==6)throw new OperatorStop('schema_unexpected',3);
+ if(!(Number(authority.version)>=6))throw new OperatorStop('schema_unexpected',3);
  const statements=migrationStatements(fs.readFileSync(MIGRATION_PATH,'utf8'));
  if(!statements.length||statements.some(sql=>/\bINSERT\s+INTO\s+film\b/i.test(sql)))throw new OperatorStop('migration_refused',3);
  await binding.batch(statements.map(sql=>binding.prepare(sql).bind()));
- const readback=await readPredictionAuthority(binding);
- if(!readback.tables||readback.version!==7||readback.mode!=='r2'||readback.writes!=='open'||readback.generation!==0||readback.queueGeneration!==0||readback.profileGeneration!==0)throw new OperatorStop('readback_mismatch',3);
+ const readback=await readPredictionAuthority(binding,REQUIRED);
+ if(!readback.tables||Number(readback.version)<7||readback.mode!=='r2'||readback.writes!=='open'||readback.generation!==0||readback.queueGeneration!==0||readback.profileGeneration!==0)throw new OperatorStop('readback_mismatch',3);
  return {operation:'apply',writes:true,writeState:'committed',schemaVersion:readback.version,mode:readback.mode,generation:readback.generation};
 }
 
 async function loadDomain(binding,store,now){
  for(let attempt=1;attempt<=ATTEMPTS;attempt++){
-  const before=await readPredictionAuthority(binding);
+  const before=await readPredictionAuthority(binding,REQUIRED);
   if(!before.tables||before.mode!=='r2')throw new OperatorStop('prediction_domain_not_ready',3);
   const snapshot=await readPredictionSnapshot(store);
   if(leasesBusy(snapshot,now))throw new OperatorStop('prediction_domain_busy',3);
   try{
    const imported=await importPredictionDomain(binding,store,snapshot,{fence:before,leases:snapshot.leases,now,afterHold:()=>readPredictionSnapshot(store)});
-   const after=await readPredictionAuthority(binding);
+   const after=await readPredictionAuthority(binding,REQUIRED);
    if(after.generation!==before.generation||after.queueGeneration!==before.queueGeneration||after.profileGeneration!==before.profileGeneration){
     if(attempt<ATTEMPTS)continue;
     throw new OperatorStop('prediction_domain_fence',3);
@@ -194,18 +199,18 @@ async function loadDomain(binding,store,now){
 }
 
 async function activateDomain(binding,store,now){
- const before=await readPredictionAuthority(binding);
+ const before=await readPredictionAuthority(binding,REQUIRED);
  if(!before.tables||before.mode!=='r2')throw new OperatorStop('prediction_domain_not_ready',3);
  const snapshot=await readPredictionSnapshot(store);
  if(leasesBusy(snapshot,now))throw new OperatorStop('prediction_domain_busy',3);
  await activatePredictionDomain(binding,before,{leases:snapshot.leases,now,afterHold:()=>readPredictionSnapshot(store)});
- const after=await readPredictionAuthority(binding);
+ const after=await readPredictionAuthority(binding,REQUIRED);
  if(after.mode!=='d1'||after.generation!==before.generation)throw new OperatorStop('readback_mismatch',3);
  return {operation:'activate',writes:true,writeState:'committed',mode:'d1',generation:after.generation,queueGeneration:after.queueGeneration,profileGeneration:after.profileGeneration};
 }
 
 async function revertDomain(binding,store){
- const before=await readPredictionAuthority(binding);
+ const before=await readPredictionAuthority(binding,REQUIRED);
  if(before.mode!=='d1')throw new OperatorStop('prediction_domain_not_ready',3);
  const after=await revertPredictionDomain(binding,store,before);
  if(after.mode!=='r2')throw new OperatorStop('readback_mismatch',3);
@@ -216,6 +221,10 @@ async function releaseDomain(binding){
  const after=await releasePredictionWriters(binding);
  if(after.mode!=='r2'||after.writes!=='open')throw new OperatorStop('readback_mismatch',3);
  return {operation:'release',writes:true,writeState:'committed',mode:'r2',writesGate:after.writes,generation:after.generation};
+}
+async function reconcileDomain(binding,store){
+ const after=await reconcilePredictionIntents(binding,store);
+ return {operation:'reconcile',writes:after.cleared>0,writeState:after.cleared>0?'committed':'none',mode:'r2',cleared:after.cleared,writesGate:after.writes};
 }
 function productionTarget(env){
  const accountId=String(env.D1_BACKFILL_ACCOUNT_ID||'').trim();
@@ -247,8 +256,9 @@ function writeStore(env,fetchImpl,keys){
  try{credentials=readInstallCredentials(env);}catch{throw new OperatorStop('writer_missing',3);}
  if((credentials.accountId||env.R2_SNAPSHOT_ACCOUNT_ID)!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('bucket_identity',3);
  const allowed=keys||new Set();
- const store=createS3Store({credentials,fetchImpl,allowedWrites:allowed});
- return {async get(key){return store.get(key);},async put(key,body){allowed.add(key);const head=await store.head(key);return store.put(key,body,{onlyIf:head?{etagMatches:head.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async list(){const page=await store.list({prefix:'enrichment/'});return {objects:page.objects,truncated:false};},async keys(prefix){const page=await store.list({prefix});return page.objects.map(item=>item.key).filter(key=>!prefix||key.startsWith(prefix));}};
+ const allowedDeletes=new Set();
+ const store=createS3Store({credentials,fetchImpl,allowedWrites:allowed,allowedDeletes});
+ return {async get(key){return store.get(key);},async put(key,body){allowed.add(key);const head=await store.head(key);return store.put(key,body,{onlyIf:head?{etagMatches:head.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async delete(key){if(!predictionMutableKey(key))throw new OperatorStop('r2_write_refused',3);allowedDeletes.add(key);await store.delete(key);},async list(){const page=await store.list({prefix:'enrichment/'});return {objects:page.objects,truncated:false};},async keys(prefix){const page=await store.list({prefix});return page.objects.map(item=>item.key).filter(key=>!prefix||key.startsWith(prefix));}};
 }
 
 export async function runPredictionDomainProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),binding=null,store=null}={}){
@@ -266,13 +276,14 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
   }
   if(!bucket&&parsed.command!=='apply'&&parsed.command!=='status'&&parsed.command!=='release')bucket=parsed.command==='revert'?writeStore(env,fetchImpl):readStore(env,fetchImpl);
   if(parsed.command==='status'){
-   const authority=await readPredictionAuthority(db);
+   const authority=await readPredictionAuthority(db,REQUIRED);
    const tables=await tablesOf(db);
    return {exit:0,result:{configured:true,writes:false,writeState:'none',schemaVersion:authority.version,mode:authority.mode,binding:authority.binding,tables:present(tables),generation:authority.generation,queueGeneration:authority.queueGeneration,profileGeneration:authority.profileGeneration}};
   }
   if(parsed.command==='apply')return {exit:0,result:await applyMigration(db)};
   if(parsed.command==='release')return {exit:0,result:await releaseDomain(db)};
   if(!bucket)throw new OperatorStop('source_missing',3);
+  if(parsed.command==='reconcile')return {exit:0,result:await reconcileDomain(db,bucket)};
   if(parsed.command==='load')return {exit:0,result:await loadDomain(db,bucket,clock)};
   if(parsed.command==='activate')return {exit:0,result:await activateDomain(db,bucket,clock)};
   return {exit:0,result:await revertDomain(db,bucket)};

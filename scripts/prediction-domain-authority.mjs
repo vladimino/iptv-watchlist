@@ -61,6 +61,8 @@ function bucket(){
  return {
   async get(key){const text=objects.get(key);return text==null?null:{text:async()=>text,json:async()=>JSON.parse(text)};},
   async put(key,body){objects.set(key,typeof body==='string'?body:JSON.stringify(body));return {etag:'local'};},
+  async delete(key){objects.delete(key);},
+  async list(){return {objects:[...objects.keys()].sort().map(key=>({key})),truncated:false};},
  };
 }
 const expected={generation:status.generation,queueGeneration:status.queueGeneration,profileGeneration:status.profileGeneration};

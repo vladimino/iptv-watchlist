@@ -259,8 +259,10 @@ const saveJSON=async(env,key,value)=>{
  if(typeof PredictionD1!=='undefined'){
   const routed=await PredictionD1.saveMutable(env,key,value);
   if(routed?.handled)return {etag:'d1'};
-  try{return await env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});}
-  finally{if(routed?.token)await PredictionD1.completePredictionWrite(env,key,routed.token);}
+  const text=routed?.text??JSON.stringify(value);
+  let settled=false;
+  try{const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});settled=true;return saved;}
+  finally{if(routed?.token&&settled)await PredictionD1.completePredictionWrite(env,key,routed.token);}
  }
  return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});
 };

@@ -11,8 +11,19 @@
 -- and run checkpoints. prediction_domain_cas is the batch fence, not a switch.
 -- writes is open during ordinary r2 saves and held while a load or activation
 -- has detained writers. prediction_domain_intent is one in-flight r2 put.
+-- body_sha256 is the exact object text that put was about to write. A put
+-- that throws leaves the intent. Only a settled put, or a reconcile that
+-- reads those same bytes, deletes it.
+-- schema_contract.version only moves forward. A later migration may already
+-- have set a higher version without these tables. This file still creates
+-- them and does not lower that version. A database below version 6 fails
+-- the guard insert and creates nothing.
 -- The schema v1 tables prediction_current, prediction_history, fingerprint_payload
 -- and profile_version are the offline import. They are not this marker.
+
+INSERT INTO schema_contract (id, version, note)
+SELECT 1, 0, 'refused'
+WHERE NOT EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version >= 6);
 
 CREATE TABLE prediction_domain_authority (
  id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -86,7 +97,8 @@ CREATE TABLE prediction_queue (
 CREATE TABLE prediction_domain_intent (
  key TEXT PRIMARY KEY,
  token TEXT NOT NULL,
- generation INTEGER NOT NULL
+ generation INTEGER NOT NULL,
+ body_sha256 TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE prediction_lease (
@@ -107,4 +119,7 @@ CREATE UNIQUE INDEX prediction_run_latest ON prediction_run(latest) WHERE latest
 INSERT INTO prediction_domain_authority (id, mode, generation, queue_generation, profile_generation, writes) VALUES (1, 'r2', 0, 0, 0, 'open');
 INSERT INTO prediction_domain_cas (id, ok) VALUES (1, 1);
 
-UPDATE schema_contract SET version = 7, note = 'Schema v7: prediction authority. Marker mode r2 until a separate activation.' WHERE id = 1;
+UPDATE schema_contract
+SET version = CASE WHEN version < 7 THEN 7 ELSE version END,
+    note = 'Schema v7: prediction authority. Marker mode r2 until a separate activation. A higher contract version is left in place.'
+WHERE id = 1 AND version >= 6;
