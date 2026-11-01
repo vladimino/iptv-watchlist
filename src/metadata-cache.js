@@ -1,7 +1,8 @@
 // ADR 0073. The metadata.json working set used by beginSync and metadataSync.
-// Schema v5 keeps the R2 object and does not write these tables. Schema v6 with a missing
-// table or marker fails closed. Mode d1 reads and writes this table and does not fall back
-// to the object. This module does not import. The Worker bundle wraps it in a scope.
+// Schema v5 keeps the R2 object and does not write these tables. Schema v6 or later with a missing
+// table or marker fails closed. A later contract version does not by itself drop d1 mode while
+// the cache tables and a valid marker row are present. Mode d1 reads and writes this table and
+// does not fall back to the object. This module does not import. The Worker bundle wraps it in a scope.
 
 export const METADATA_FRESH_MS=30*86400000;
 const MIRROR_KEY='metadata.json';
@@ -55,7 +56,7 @@ export async function readAuthority(db){
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('metadata_cache','metadata_cache_authority','metadata_cache_cas')")).map(row=>row.name);}
  catch(error){throw failed('metadata_cache_unavailable',error);}
  const tables=names.includes('metadata_cache')&&names.includes('metadata_cache_authority')&&names.includes('metadata_cache_cas');
- if(version!==6)return {mode:'r2',tables,version,ready:false};
+ if(!(Number(version)>=6))return {mode:'r2',tables,version,ready:false};
  if(!tables)throw failed('metadata_cache_unavailable');
  let row;
  try{row=await one(db,'SELECT mode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag FROM metadata_cache_authority WHERE id=1');}
@@ -198,7 +199,7 @@ export async function commitMetadataCache(db,bucket,records,authority){
 export async function saveMetadataWorkingSet(env,records,working){
  if(working?.mode==='d1')return commitMetadataCache(env.DB,env.BUCKET,records,{...working.authority,complete:working.complete!==false,mode:'d1'});
  const authority=await readAuthority(env?.DB);
- if(authority.version===6){
+ if(Number(authority.version)>=6){
   if(authority.mode!=='r2')throw failed('metadata_cache_not_authoritative');
   const next=(authority.cacheGeneration??0)+1;
   await fenced(env.DB,[
@@ -236,7 +237,7 @@ async function prove(db,records){
 export async function importMetadataCache(db,bucket,{confirm}={}){
  if(confirm!=='load')throw failed('metadata_cache_confirm');
  const authority=await readAuthority(db);
- if(authority.version!==6||!authority.tables)throw failed('metadata_cache_schema');
+ if(!(Number(authority.version)>=6)||!authority.tables)throw failed('metadata_cache_schema');
  if(authority.mode==='d1')throw failed('metadata_cache_authoritative');
  const {records,etag}=await fencedMirror(bucket);
  const keys=Object.keys(records);
@@ -256,7 +257,7 @@ export async function importMetadataCache(db,bucket,{confirm}={}){
 export async function activateMetadataCache(db,bucket,{confirm}={}){
  if(confirm!=='activate')throw failed('metadata_cache_confirm');
  const authority=await readAuthority(db);
- if(authority.version!==6||!authority.tables)throw failed('metadata_cache_schema');
+ if(!(Number(authority.version)>=6)||!authority.tables)throw failed('metadata_cache_schema');
  if(authority.mode!=='r2')throw failed('metadata_cache_authoritative');
  if(authority.cacheGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_fence');
  const {records,etag}=await fencedMirror(bucket);
@@ -277,7 +278,7 @@ export async function revertMetadataCache(db,bucket,{confirm}={}){
  if(confirm!=='r2')throw failed('metadata_cache_confirm');
  if(!bucket||typeof bucket.get!=='function')throw failed('metadata_cache_mirror_missing');
  let authority=await readAuthority(db);
- if(authority.version!==6||!authority.tables)throw failed('metadata_cache_schema');
+ if(!(Number(authority.version)>=6)||!authority.tables)throw failed('metadata_cache_schema');
  if(authority.mode!=='d1')throw failed('metadata_cache_not_authoritative');
  if(authority.cacheGeneration!==authority.mirrorGeneration){
   let repaired;

@@ -86,11 +86,27 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
  ]);
+ let ownerGate=null,ownerMirror=null,ownerDocument=null;
+ if(typeof OwnerReview!=='undefined'){
+  ownerGate=await OwnerReview.readAuthority(env.DB);
+  if(ownerGate.failClosed)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
+  if(!ownerGate.legacy&&ownerGate.mode==='r2')ownerMirror=await d1EnrichmentRead(env,etags,'admin/owner-reviews.json',value=>!!value&&typeof value==='object'&&!Array.isArray(value)&&value.contractVersion===1&&plainOwner(value),false);
+ }
  for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);
  await d1EnrichmentWritersIdle(env);
+ if(ownerGate&&!ownerGate.legacy){
+  ownerDocument=ownerMirror;
+  if(ownerGate.mode==='d1'){
+   ownerDocument=await OwnerReview.readDocument(env.DB);
+   if(!ownerDocument)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
+  }
+  if(ownerDocument){OwnerReview.stampLocalized(programme,ownerDocument);OwnerReview.stampLocalized(watchlist,ownerDocument);}
+ }
  const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
+ if(ownerDocument)store.ownerReviews=ownerDocument;
  return {store,programmeRunId:runId};
 }
+function plainOwner(value){return !!value.films&&typeof value.films==='object'&&!Array.isArray(value.films)&&!!value.people&&typeof value.people==='object'&&!Array.isArray(value.people);}
 
 // The plan of one run: every Person and Film whose change key differs from the stored one, and every stored entity the view
 // no longer has. Persons come first so a Film's credits find their people. A held Film (a TMDB retirement under owner review,
@@ -160,6 +176,9 @@ async function d1EnrichmentDiff(env,db,now,summary){
  // The projector does not write that domain. A partial set of those tables fails the run before a write.
  // None of the tables means a later migration advanced the contract without this domain. Prediction stays
  // on the objects, and the run does not fail for that absence.
+ // Owner reviews are a separate marker. Before their tables exist the view is unchanged.
+ // Once they exist, a reviewed owner localization replaces a dictionary value on the view
+ // and a d1 read does not use the R2 mirror.
  const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
  summary.schemaVersion=version;
  if(Number(version)>=6){
@@ -180,6 +199,7 @@ async function d1EnrichmentDiff(env,db,now,summary){
   }
  }
  const view=LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),retirements=view.tmdbRetirements||null;
+ if(store.ownerReviews&&typeof OwnerReview!=='undefined')OwnerReview.applyViewOverlay(view,store.ownerReviews);
  if(retirements){
   summary.tmdbRetirements={valid:retirements.valid,applied:retirements.applied.length,held:retirements.held.slice(0,20),reasons:retirements.reasons.slice(0,20)};
   if(!retirements.valid)throw new D1EnrichmentInputError('input_invalid',TMDB_RETIREMENTS_KEY);
@@ -341,6 +361,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
 // A later additive version without those tables stays true: another migration may have advanced the contract.
 // Version 4 stays true when the sync table is absent. Version 5 stays true when the cache tables are absent.
 // Version 6 stays true when the prediction-domain tables are absent.
+// ownerReviewMode is reported only when the three owner-review tables exist; version 9 is not that proof by itself.
 async function d1EnrichmentStatus(binding,env){
  const mode=d1EnrichmentMode(env);
  const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas','prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent')").bind().all()).results||[]).map(row=>row.name);
@@ -365,6 +386,11 @@ async function d1EnrichmentStatus(binding,env){
  if(Number(version)>=6){
   const marker=await binding.prepare('SELECT mode AS cacheMode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration FROM metadata_cache_authority WHERE id=1').bind().first();
   status.cacheMode=marker?.cacheMode??null;status.cacheGeneration=marker?.cacheGeneration??null;status.mirrorGeneration=marker?.mirrorGeneration??null;
+  const ownerNames=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('owner_review_entry','owner_review_authority','owner_review_cas')").bind().all()).results||[]).map(row=>row.name);
+  if(ownerNames.length===3){
+   const owner=await binding.prepare('SELECT mode AS ownerReviewMode, generation AS ownerReviewGeneration FROM owner_review_authority WHERE id=1').bind().first();
+   status.ownerReviewMode=owner?.ownerReviewMode??null;status.ownerReviewGeneration=owner?.ownerReviewGeneration??null;
+  }
  }
  if(Number(version)>=7&&predictionReady){
   const marker=await binding.prepare('SELECT mode AS predictionMode, generation AS predictionGeneration, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes AS predictionWrites FROM prediction_domain_authority WHERE id=1').bind().first();

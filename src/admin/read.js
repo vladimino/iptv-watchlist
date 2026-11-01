@@ -237,7 +237,9 @@ async function adminLoadSnapshot(env,hasPin){
   }
   const titles=await adminReadObject(bucket,ADMIN_TITLES_KEY,cache?.titles||null);
   const people=await adminReadObject(bucket,ADMIN_PEOPLE_KEY,cache?.people||null);
-  const reviews=await adminReadObject(bucket,'admin/owner-reviews.json',cache?.reviews||null);
+  let reviews=null;
+  if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.loadSnapshotReviews==='function')reviews=await OwnerReview.loadSnapshotReviews(env,cache?.reviews||null);
+  if(!reviews)reviews=await adminReadObject(bucket,'admin/owner-reviews.json',cache?.reviews||null);
   const tuple=adminTuple(run,pointer,programme,titles,people,reviews);
   if(cache&&adminSameTuple(cache.tuple,tuple))return cache;
   const programmeUpdatedAt=typeof programme.body.updatedAt==='string'&&programme.body.updatedAt?programme.body.updatedAt:programme.uploaded||(typeof pointer.body.publishedAt==='string'?pointer.body.publishedAt:null);

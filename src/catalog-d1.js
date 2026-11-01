@@ -234,7 +234,7 @@ async function d1PersonIdentity(db,id){
  limitations.push('neighborhood_bounded');
  return d1IdentityBody(id,await d1SameKeyProjection(db,[...seed].sort()),limitations,true);
 }
-async function catalogD1Route(request,env,url){
+async function catalogD1Dispatch(request,env,url){
  if(request.method!=='GET')return json({error:'Method not allowed'},405);
  if(!env.DB)return json({error:'D1 is not bound to this Worker'},503);
  const path=url.pathname.slice('/api/d1/'.length),params=url.searchParams;
@@ -248,4 +248,9 @@ async function catalogD1Route(request,env,url){
  match=path.match(/^films\/([^/]{1,200})$/);
  if(match){const film=await d1Film(env.DB,'film:'+decodeURIComponent(match[1]));return film?json(film):json({error:'Film not found'},404);}
  return json({error:'Not found'},404);
+}
+async function catalogD1Route(request,env,url){
+ const response=await catalogD1Dispatch(request,env,url);
+ if(typeof OwnerReview==='undefined'||typeof OwnerReview.overlayCatalogResponse!=='function')return response;
+ return OwnerReview.overlayCatalogResponse(env,response);
 }

@@ -34,6 +34,14 @@ async function adminPersonNamePut(env,snapshot,result){
  if(current!=null&&!ownerReviewsReadable(current))return {ok:false,reason:'review_store_unreadable'};
  if(current!=null&&!snapshot.reviewEtag)return {ok:false,reason:'review_unconditional'};
  const next=ownerReviewsWithPeople(current,[result.person,...(result.people||[])]);
+ if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.commit==='function'){
+  const committed=await OwnerReview.commit(env,{expectedRevision:snapshot.reviewEtag||null,document:next});
+  if(committed){
+   if(!committed.ok)return {ok:false,reason:committed.reason==='version_conflict'?'storage_conflict':committed.reason};
+   ADMIN_SNAPSHOT_CACHE=null;
+   return {ok:true};
+  }
+ }
  const onlyIf=snapshot.reviewEtag?{etagMatches:snapshot.reviewEtag}:{etagDoesNotMatch:'*'};
  const saved=await env.BUCKET.put(ADMIN_OWNER_REVIEWS_KEY,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf});
  if(!saved)return {ok:false,reason:'storage_conflict'};
@@ -93,6 +101,7 @@ async function adminPersonNameRoute(request,env,url){
   }
   if(!result.changed)return json(adminPersonNameAnswer(snapshot,person.id,result));
   const saved=await adminPersonNamePut(env,snapshot,result);
+  if(!saved.ok&&(saved.reason==='commit_unknown'||saved.reason==='readback_failed'||saved.reason==='writes_held'||saved.reason==='owner_review_unavailable'||saved.reason==='overlay_invalid'))return json({error:'storage_unavailable',reason:saved.reason},503);
   if(saved.ok){
    let fresh=null;
    try{fresh=await adminLoadSnapshot(env,false);}catch{fresh=null;}

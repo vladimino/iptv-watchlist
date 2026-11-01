@@ -13,6 +13,10 @@ const loadJSON=async(env,key)=>{
  if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
  return value;
 };
+async function publishedOwnerReviews(env){
+ if(typeof OwnerReview==='undefined'||typeof OwnerReview.loadForRead!=='function')return {ok:true,body:await loadJSON(env,'admin/owner-reviews.json')};
+ return OwnerReview.loadForRead(env);
+}
 async function pinEpg(env){
  if(env.epgPin?.programmeRunId)return env;
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(!pointer)return env;
@@ -614,8 +618,8 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
-  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const reviews=await loadJSON(env,'admin/owner-reviews.json');return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews));}
-  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};const reviews=await loadJSON(env,'admin/owner-reviews.json');return json(presentLocalized(data,titles,reviews));}
+  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const reviews=await publishedOwnerReviews(env);if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body));}
+  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};const reviews=await publishedOwnerReviews(env);if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return json(presentLocalized(data,titles,reviews.body));}
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   if(url.pathname==='/api/catalog/watched')return await catalogWatchedRoute(request,env,url);
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
