@@ -69,13 +69,13 @@ function buildForm() {
   radio.checked = true;
   const manual = field('input', {'data-title-manual': '', name: 'manual'});
   const basis = field('textarea', {name: 'basis'});
-  const accept = field('input', {'data-title-accept': '', type: 'checkbox'});
+  const prefer = field('input', {'data-title-prefer': '', type: 'checkbox'});
   const save = field('button', {'data-title-save': ''});
-  save.disabled = true;
   const result = field('p', {'data-title-result': ''});
-  for (const child of [radio, manual, basis, accept, save, result]) form.append(child);
+  const preview = field('p', {'data-title-preview': ''});
+  for (const child of [radio, manual, basis, prefer, preview, save, result]) form.append(child);
   detail.children = [form];
-  return {form, manual, basis, accept, save, result, radio};
+  return {form, manual, basis, prefer, save, result, radio};
 }
 
 const document = {
@@ -116,11 +116,11 @@ function refreshWithoutChoice() {
   };
 }
 
-async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
+async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   parts.manual.value = manual;
   parts.basis.value = basis;
-  parts.accept.checked = accept;
-  parts.save.disabled = !accept;
+  parts.prefer.checked = prefer;
+  parts.save.disabled = false;
   const event = {preventDefault() { this.defaultPrevented = true; }, defaultPrevented: false};
   for (const fn of parts.form.listeners.get('submit')) fn(event);
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -147,13 +147,9 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   assert.equal(form.dataset.requestId, 'req-fixed');
   assert.equal(form.querySelector('[data-title-manual]').value, 'Хозяйское название');
   assert.equal(form.querySelector('[name="basis"]').value, 'карточка');
-  assert.equal(form.querySelector('[data-title-accept]').checked, false);
-  const accept = form.querySelector('[data-title-accept]');
-  accept.checked = true;
-  for (const fn of form.listeners.get('input')) fn({target: accept});
-  for (const fn of form.listeners.get('change')) fn({target: accept});
-  assert.equal(form.dataset.requestId, 'req-fixed', 'the confirmation checkbox does not discard the frozen command');
-  assert.equal(form.querySelector('[data-title-save]').disabled, false);
+  assert.equal(form.querySelector('[data-title-prefer]').checked, false, 'an add_alias retry stays unchecked');
+  assert.equal(form.dataset.requestId, 'req-fixed');
+  assert.equal(saved[0].body.effect, 'add_alias');
   context.nextResponse = {ok: true, status: 200, error: null, body: {ok: true, changed: false, idempotent: true}};
   const replay = {preventDefault() {}, defaultPrevented: false};
   for (const fn of form.listeners.get('submit')) fn(replay);
@@ -171,10 +167,10 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   context.editOnSave = null;
   formAfterRefresh = null;
   context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {error: 'storage_unavailable', reason: 'readback_failed'}};
-  refreshView = {mode: 'ready', entity: {preferred: 'Хозяйское название'}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Хозяйское название', titleReview: {reviews: [{requestId: 'req-fixed', effect: 'preferred_changed', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:landed'}}]}}};
   const parts = buildForm();
   context.adminBindTitleReview(detail);
-  await submit(parts, {manual: 'Хозяйское название'});
+  await submit(parts, {manual: 'Хозяйское название', prefer: true});
   const form = detail.querySelector('[data-title-review]');
   const result = form.querySelector('[data-title-result]');
   assert.equal(result.textContent, 'Название записано. Карточка сверена.');
@@ -199,7 +195,6 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   for (const fn of form.listeners.get('input')) fn({target: manual});
   assert.equal(form.dataset.requestId, undefined);
   assert.equal(context.adminTitleFrozen('d5', 'req-fixed'), null);
-  form.querySelector('[data-title-accept]').checked = true;
   form.querySelector('[data-title-save]').disabled = false;
   context.nextResponse = {ok: true, status: 200, error: null, body: {ok: true, changed: true}};
   const replay = {preventDefault() {}, defaultPrevented: false};
@@ -292,7 +287,8 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   };
   const html = context.adminTitleForm(record);
   const radios = html.match(/type="radio"/g) || [];
-  assert.equal(radios.length, 4, 'dictionary or owner on source or authority; programme text stays out');
+  assert.equal(radios.length, 5, 'current preferred plus dictionary or owner; programme text stays out');
+  assert.match(html, /Аферистка<\/span> <small class="muted">текущее предпочтительное<\/small>/);
   assert.equal(html.includes('Tytul'), false);
   assert.equal(html.includes('Кино'), false, 'Cyrillic programme text is not a Russian choice');
   assert.match(html, /Мошенница/);
@@ -300,10 +296,13 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   assert.match(html, /Без источника/);
   assert.match(html, /Чужой источник/);
   const capped = context.adminTitleForm({...record, titleReview: {...record.titleReview, options: Array.from({length: 6}, (_, index) => ({value: `Словарь ${index}`, origin: 'alias', provenance: {source: 'dictionary'}}))}});
-  assert.equal((capped.match(/type="radio"/g) || []).length, 5);
+  assert.equal((capped.match(/type="radio"/g) || []).length, 6, 'the current preferred stays outside the five ordinary choices');
   assert.equal(capped.includes('Словарь 5'), false);
   assert.match(html, /data-title-manual/);
-  assert.match(html, /Записать название/);
+  assert.match(html, /Сохранить вариант/);
+  assert.match(html, /Использовать как предпочтительное/);
+  assert.doesNotMatch(html, /data-title-prefer[^>]*checked/);
+  assert.match(html, /Добавится альтернативное название/);
   assert.match(html, /прокат/);
   assert.doesNotMatch(html, /Выбрать из известных/);
   const aliases = context.adminAliases(record);
@@ -322,7 +321,7 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   context.adminDetail({mode: 'ready', kind: 'film', id: 'd5', entity: record});
   const filmCard = detail.innerHTML;
   assert.match(filmCard, /data-title-review/);
-  assert.match(filmCard, /Записать название/);
+  assert.match(filmCard, /Сохранить вариант/);
   assert.match(filmCard, /<summary>Другие названия \(41\)<\/summary>/);
   assert.doesNotMatch(filmCard, /id="admin-name-form"/);
   assert.ok(filmCard.indexOf('Оригинал:') < filmCard.indexOf('data-title-review') && filmCard.indexOf('data-title-review') < filmCard.indexOf('<h3>Сводка</h3>'));
@@ -347,7 +346,117 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   assert.match(personCard, /admin-folded/);
   assert.match(personCard, /<summary>Другие имена \(1\)<\/summary>/);
   assert.doesNotMatch(personCard, /data-title-review/);
-  assert.doesNotMatch(personCard, /Записать название/);
+  assert.doesNotMatch(personCard, /Сохранить вариант названия|Записать название/);
+  assert.match(personCard, /Сохранить вариант/);
+}
+
+{
+  saved = []; refreshes = 0;
+  formAfterRefresh = null;
+  context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {reason: 'readback_failed'}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Хозяйское название'}};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название', prefer: true});
+  const form = detail.querySelector('[data-title-review]');
+  assert.match(form.querySelector('[data-title-result]').textContent, /Неизвестно, записалось ли название/);
+  assert.doesNotMatch(form.querySelector('[data-title-result]').textContent, /Карточка сверена/);
+  assert.equal(form.dataset.requestId, 'req-fixed', 'a matching preferred title without the audit is not success');
+  const box = form.querySelector('[data-title-prefer]');
+  assert.equal(box.checked, true, 'a promote retry shows the same effect');
+  box.checked = false;
+  for (const fn of form.listeners.get('change')) fn({target: box});
+  assert.equal(form.dataset.requestId, undefined, 'changing the effect drops the frozen command');
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed'), null);
+}
+
+{
+  saved = []; refreshes = 0;
+  formAfterRefresh = null;
+  context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {reason: 'readback_failed'}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм', aliases: [{value: 'Хозяйское название'}], titleReview: {options: [{value: 'Хозяйское название'}], reviews: [{requestId: 'req-fixed', effect: 'alias_added', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:alias'}}]}}};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название'});
+  const form = detail.querySelector('[data-title-review]');
+  assert.equal(form.querySelector('[data-title-result]').textContent, 'Вариант записан. Предпочтительное название не изменилось.');
+  assert.equal(form.dataset.requestId, undefined);
+}
+
+{
+  const heterogeneous = Array.from({length: 37}, (_, index) => ({value: `Alias ${index}`, origin: 'alias', provenance: {source: index % 2 ? 'programme' : 'wikidata'}}));
+  const before = {
+    storedId: 'care', preferred: 'Аферистка', originalTitle: 'I Care a Lot',
+    aliases: heterogeneous.map(option => ({kind: 'title', value: option.value, provenance: option.provenance})),
+    titleReview: {
+      version: 'title-review:1:care', filmId: 'film:care',
+      preferred: {value: 'Аферистка', status: 'provisional', source: 'wikidata'},
+      options: [{value: 'Аферистка', origin: 'preferred', provenance: {source: 'wikidata'}}, ...heterogeneous, {value: 'I Care a Lot', origin: 'original', provenance: {source: 'letterboxd'}}],
+      reviews: [],
+    },
+  };
+  const initial = context.adminTitleForm(before);
+  const initialRadios = [...initial.matchAll(/name="title-review-choice" value="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(initialRadios, ['Аферистка']);
+  assert.doesNotMatch(initial, /Мошенница/);
+  assert.doesNotMatch(initial, /name="title-review-choice" value="I Care a Lot"/);
+  assert.doesNotMatch(initial, /name="title-review-choice" value="Alias 0"/);
+  const added = context.adminTitleForm({
+    ...before,
+    aliases: [...before.aliases, {kind: 'title', value: 'Мошенница', provenance: {source: 'owner', authority: 'owner', added: 'alias'}}],
+    titleReview: {
+      ...before.titleReview,
+      options: [...before.titleReview.options, {value: 'Мошенница', origin: 'alias', provenance: {source: 'owner', authority: 'owner', added: 'alias'}}],
+      reviews: [{effect: 'alias_added', at: '2026-11-01T11:00:00.000Z', to: {value: 'Мошенница'}, from: {value: 'Аферистка'}}],
+    },
+  });
+  const addedRadios = [...added.matchAll(/name="title-review-choice" value="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(addedRadios, ['Аферистка', 'Мошенница']);
+  assert.match(added, /добавлен вариант «Мошенница»/);
+  assert.doesNotMatch(added, /Аферистка → Мошенница/);
+  const legacy = context.adminTitleForm({
+    storedId: 'care', preferred: 'Мошенница', originalTitle: 'I Care a Lot',
+    aliases: [{value: 'Аферистка', provenance: {source: 'programme'}}, {value: 'Кино', provenance: {source: 'programme'}}],
+    titleReview: {
+      version: 'title-review:1:legacy', filmId: 'film:care',
+      preferred: {value: 'Мошенница', status: 'reviewed', source: 'owner', authority: 'owner'},
+      options: [
+        {value: 'Мошенница', origin: 'preferred', provenance: {source: 'owner', authority: 'owner'}},
+        {value: 'Аферистка', origin: 'alias', provenance: {source: 'programme'}},
+        {value: 'Кино', origin: 'alias', provenance: {source: 'programme'}},
+        {value: 'I Care a Lot', origin: 'original', provenance: {source: 'letterboxd'}},
+      ],
+      reviews: [{from: {value: 'Аферистка', status: 'provisional'}, to: {value: 'Мошенница', status: 'reviewed'}}],
+    },
+  });
+  const legacyRadios = [...legacy.matchAll(/name="title-review-choice" value="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(legacyRadios, ['Мошенница', 'Аферистка']);
+  assert.match(legacy, /Аферистка<\/span> <small class="muted">было предпочтительным<\/small>/);
+  assert.doesNotMatch(legacy, /name="title-review-choice" value="Кино"/);
+  assert.doesNotMatch(legacy, /name="title-review-choice" value="I Care a Lot"/);
+  const latin = context.adminTitleForm({
+    storedId: 'care', originalTitle: 'I Care a Lot',
+    titleReview: {version: 'title-review:1:latin', filmId: 'film:care', preferred: {value: 'I Care a Lot', status: 'missing'}, options: [{value: 'I Care a Lot', origin: 'original', provenance: {source: 'letterboxd'}}], reviews: []},
+  });
+  assert.doesNotMatch(latin, /type="radio"/);
+  assert.match(latin, /Сейчас: <b>нет<\/b>/);
+  const pinned = context.adminTitleForm({
+    storedId: 'care',
+    titleReview: {
+      version: 'title-review:1:pin', filmId: 'film:care',
+      preferred: {value: 'Аферистка', status: 'provisional', source: 'wikidata'},
+      options: [
+        {value: 'Аферистка', origin: 'preferred', provenance: {source: 'wikidata'}},
+        {value: 'Старое', origin: 'alias', provenance: {source: 'programme', previousPreferred: true, historicalSource: 'programme'}},
+        ...Array.from({length: 6}, (_, index) => ({value: `Словарь ${index}`, origin: 'alias', provenance: {source: 'dictionary'}})),
+      ],
+      reviews: [],
+    },
+  });
+  const pinnedRadios = [...pinned.matchAll(/name="title-review-choice" value="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(pinnedRadios, ['Аферистка', 'Старое', 'Словарь 0', 'Словарь 1', 'Словарь 2', 'Словарь 3', 'Словарь 4']);
+  assert.match(pinned, /текущее предпочтительное/);
+  assert.match(pinned, /было предпочтительным/);
 }
 
 console.log('admin film title page: unknown readback keeps the request, a matching reread says stored');

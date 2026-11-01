@@ -23,7 +23,7 @@ A Film projection can already expose:
 | --- | --- | --- |
 | `id` (`film:…`), `canonicalIdentity` (`tmdb:<id>` or null) | Derived from Letterboxd id, trusted TMDB id, or a conflict id | Storage id (`lid`, `tmdb_<id>`) is separate; the reader keeps it as `storedId` on the lifecycle body |
 | `externalIds[]` | `scheme`, `value`, `trusted`, `conflicting`, `provenance` | A trusted TMDB id is set only when identity is `resolved` and there is a single id |
-| `aliases[]` | `kind: title`, `value`, `provenance.source` (`letterboxd`, `epg`, and later merges). The admin reader also merges the published film's alias strings (`programme`) and the dictionary entry's `aliases` (`dictionary`) | Alias text is not a reviewed title |
+| `aliases[]` | `kind: title`, `value`, `provenance.source` (`letterboxd`, `epg`, and later merges). The admin reader also merges the published film's alias strings (`programme`), the dictionary entry's `aliases` (`dictionary`) and, when the owner overlay has title aliases without an owner-reviewed localization, those stored aliases. Owner and `previousPreferred` provenance wins when the same text is already on the record | Alias text is not a reviewed title |
 | `originalTitle`, `epgTitle` | Facts already on the record | |
 | `localization` | `status` `missing` / `provisional` / `reviewed`, `value`, dimension envelope | The envelope is not the full title dictionary |
 | `localizationConflicts[]` | Held automatic overwrites | |
@@ -137,7 +137,7 @@ The bounded design is:
 | Ledger-wide candidate queues and a publish-time admin index | Not implemented; a separate card, never a GET. The limbo inventory reports unresolved observations as unavailable until that index exists |
 | D1 `readFilm` / `readPerson` as the admin source | No. Only after the D1 cutover that makes those tables authoritative |
 | Reviewed-name write ([AIR-54](https://trello.com/c/yKtj1ahy)) | Live as [`POST /api/admin/people/<id>/name-review`](../api/admin.md#person-name-confirmation-post-apiadminpeopleidname-review). `effect: add_alias` stores one alias and does not replace the preferred name. `effect: promote`, and a command that omits `effect`, review the preferred name. Either way the route writes the `people` map of `admin/owner-reviews.json` and copies `films`. The catalogue GET stays a read |
-| Reviewed-title write ([AIR-53](https://trello.com/c/gkuy1awG)) | Not this route. The shared object reserves `films`; that card writes it |
+| Reviewed-title write ([AIR-53](https://trello.com/c/gkuy1awG)) | Live as [`POST /api/admin/films/<storedId>/title-review`](../api/admin.md#film-title-review-post-apiadminfilmsstoredidtitle-review). `effect: add_alias` stores one alias and does not replace the preferred title. `effect: promote`, and a command that omits `effect`, review the preferred title. Either way the route writes one `films` entry of `admin/owner-reviews.json` and copies `people`. The catalogue GET stays a read |
 
 ## AIR-123 query contract
 

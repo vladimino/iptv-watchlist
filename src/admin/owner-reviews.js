@@ -22,9 +22,11 @@ function ownerReviewsWithFilm(doc,storedId,slice){
  return {contractVersion:1,films:{...doc.films,[storedId]:slice},people:doc.people};
 }
 function ownerFilmSlice(film){
+ const localization=film.localization;
+ const owner=localization?.status==='reviewed'&&localization?.provenance?.authority==='owner'?localization:null;
  return {
   filmId:film.id,
-  localization:film.localization,
+  localization:owner,
   aliases:(film.aliases||[]).filter(alias=>alias&&alias.value&&(alias.kind||'title')==='title'),
   titleReviews:film.titleReviews||[],
   localizationConflicts:film.localizationConflicts||[],
