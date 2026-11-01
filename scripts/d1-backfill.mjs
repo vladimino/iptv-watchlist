@@ -134,6 +134,9 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
   // Rendered statements, one HTTP batch. Each statement is its own batch entry so a semicolon inside a
   // string is not a statement boundary. Callers of this path are not the backfill unit. A write is not retried.
   executeRendered(statements){return sendBatch(statements);},
+  // Already rendered statements as one {sql} request, the measured backfill unit. The caller rendered
+  // the literals, so this path does not scan the text for placeholders. A write is not retried.
+  executeSql(statements){return sendSql(statements);},
  };
  function batchEntry(sql){
   const text=String(sql).trim().replace(/;+$/,'')+';';
@@ -147,6 +150,19 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
   if(batch.length>target.maxBatchStatements||bytes>target.maxBatchBytes)throw new D1Error('batch_too_large','A unit needs '+batch.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
   stats.batches++;stats.statements+=batch.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,batch.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
   proveWrite(await request('POST',base+'/query',{batch},{write:true}),batch.length);
+ }
+ async function sendSql(statements){
+  const rendered=statements.map(sql=>{
+   const text=String(sql).trim().replace(/;+$/,'')+';';
+   if(Buffer.byteLength(text,'utf8')>100*1024)throw new D1Error('batch_too_large','A statement exceeds D1\'s 100 KB statement limit; it is not split');
+   return text;
+  });
+  if(!rendered.length)return;
+  const text=rendered.join('\n'),bytes=Buffer.byteLength(text,'utf8');
+  const maxStatements=target.maxBatchStatements??DEFAULT_MAX_BATCH_STATEMENTS,maxBytes=target.maxBatchBytes??DEFAULT_MAX_BATCH_BYTES;
+  if(rendered.length>maxStatements||bytes>maxBytes)throw new D1Error('batch_too_large','A unit needs '+rendered.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
+  stats.batches++;stats.statements+=rendered.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,rendered.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
+  proveWrite(await request('POST',base+'/query',{sql:text},{write:true}),rendered.length);
  }
 }
 

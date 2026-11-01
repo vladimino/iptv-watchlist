@@ -334,17 +334,17 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
 // The read-only status of the projector for /api/d1/status. schema is true for the whole of migration 0004 (its three tables
 // and schema_contract version 4), for migration 0005 (those tables, film_sync_state and version 5), for migration 0006
 // (those plus metadata_cache, metadata_cache_authority, metadata_cache_cas and version 6), and for version 7 or newer
-// (those plus the prediction-domain tables). A partial schema is false. A later additive version stays true only
+// (those plus the ten prediction-domain tables, including `prediction_domain_intent`). A partial schema is false. A later additive version stays true only
 // while the prediction tables and the earlier tables are all present.
 // Version 4 stays true when the sync table is absent. Version 5 stays true when the cache tables are absent.
 // Version 6 stays true when the prediction-domain tables are absent.
 async function d1EnrichmentStatus(binding,env){
  const mode=d1EnrichmentMode(env);
- const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas','prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run')").bind().all()).results||[]).map(row=>row.name);
+ const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas','prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent')").bind().all()).results||[]).map(row=>row.name);
  const tables=present.filter(name=>name==='projection_state'||name==='projection_run'||name==='projection_fence').sort();
  const syncTable=present.includes('film_sync_state');
  const cacheReady=present.includes('metadata_cache')&&present.includes('metadata_cache_authority')&&present.includes('metadata_cache_cas');
- const predictionNames=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run'];
+ const predictionNames=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent'];
  const predictionReady=predictionNames.every(name=>present.includes(name));
  const version=(await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first())?.version??null;
  if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)||(Number(version)>=7&&syncTable&&cacheReady&&predictionReady)))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
@@ -363,8 +363,8 @@ async function d1EnrichmentStatus(binding,env){
   status.cacheMode=marker?.cacheMode??null;status.cacheGeneration=marker?.cacheGeneration??null;status.mirrorGeneration=marker?.mirrorGeneration??null;
  }
  if(Number(version)>=7){
-  const marker=await binding.prepare('SELECT mode AS predictionMode, generation AS predictionGeneration, queue_generation AS queueGeneration, profile_generation AS profileGeneration FROM prediction_domain_authority WHERE id=1').bind().first();
-  status.predictionMode=marker?.predictionMode??null;status.predictionGeneration=marker?.predictionGeneration??null;status.queueGeneration=marker?.queueGeneration??null;status.profileGeneration=marker?.profileGeneration??null;
+  const marker=await binding.prepare('SELECT mode AS predictionMode, generation AS predictionGeneration, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes AS predictionWrites FROM prediction_domain_authority WHERE id=1').bind().first();
+  status.predictionMode=marker?.predictionMode??null;status.predictionGeneration=marker?.predictionGeneration??null;status.queueGeneration=marker?.queueGeneration??null;status.profileGeneration=marker?.profileGeneration??null;status.predictionWrites=marker?.predictionWrites??null;
  }
  return status;
 }

@@ -7,8 +7,10 @@
 -- it does not insert a film row. An off-watchlist id and a redirect id stay
 -- as stored.
 -- Immutable fingerprint bodies, prediction version objects and profile version
--- objects stay in R2. These tables hold pointers, the queue document, leases
+-- objects stay in R2. These tables hold pointers, queue chunks, leases
 -- and run checkpoints. prediction_domain_cas is the batch fence, not a switch.
+-- writes is open during ordinary r2 saves and held while a load or activation
+-- has detained writers. prediction_domain_intent is one in-flight r2 put.
 -- The schema v1 tables prediction_current, prediction_history, fingerprint_payload
 -- and profile_version are the offline import. They are not this marker.
 
@@ -17,7 +19,8 @@ CREATE TABLE prediction_domain_authority (
  mode TEXT NOT NULL CHECK (mode IN ('r2', 'd1')),
  generation INTEGER NOT NULL,
  queue_generation INTEGER NOT NULL,
- profile_generation INTEGER NOT NULL
+ profile_generation INTEGER NOT NULL,
+ writes TEXT NOT NULL CHECK (writes IN ('open', 'held'))
 ) STRICT;
 
 CREATE TABLE prediction_domain_cas (
@@ -75,8 +78,14 @@ CREATE TABLE prediction_lineage (
 ) STRICT;
 
 CREATE TABLE prediction_queue (
- id INTEGER PRIMARY KEY CHECK (id = 1),
- document_json TEXT NOT NULL,
+ seq INTEGER PRIMARY KEY CHECK (seq >= 0),
+ chunk_text TEXT NOT NULL,
+ generation INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE prediction_domain_intent (
+ key TEXT PRIMARY KEY,
+ token TEXT NOT NULL,
  generation INTEGER NOT NULL
 ) STRICT;
 
@@ -95,7 +104,7 @@ CREATE TABLE prediction_run (
 ) STRICT;
 CREATE UNIQUE INDEX prediction_run_latest ON prediction_run(latest) WHERE latest = 1;
 
-INSERT INTO prediction_domain_authority (id, mode, generation, queue_generation, profile_generation) VALUES (1, 'r2', 0, 0, 0);
+INSERT INTO prediction_domain_authority (id, mode, generation, queue_generation, profile_generation, writes) VALUES (1, 'r2', 0, 0, 0, 'open');
 INSERT INTO prediction_domain_cas (id, ok) VALUES (1, 1);
 
 UPDATE schema_contract SET version = 7, note = 'Schema v7: prediction authority. Marker mode r2 until a separate activation.' WHERE id = 1;

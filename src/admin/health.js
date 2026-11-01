@@ -92,7 +92,7 @@ async function adminHealthRoute(request,env,url){
  const read=async key=>{
   reads.push(key);
   if(typeof PredictionD1!=='undefined'&&(key===ENRICHMENT_KEY+'view-index.json'||PredictionD1.predictionMutableKey(key))){
-   if(key===ENRICHMENT_KEY+'view-index.json'){const object=await adminReadObject(bucket,key,null);if(!object.present)return object;const body=await PredictionD1.overlayIndex(env,object.body);return {...object,body};}
+   if(key===ENRICHMENT_KEY+'view-index.json'){const object=await adminReadObject(bucket,key,null);if(!object.present)return object;const body=await PredictionD1.overlayIndex(env,object.body,canonicalMoodFacet);return {...object,body};}
    const routed=await PredictionD1.routeRead(env,key);
    if(routed.handled)return {present:routed.value!=null,body:routed.value,etag:null};
   }

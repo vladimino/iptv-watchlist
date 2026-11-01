@@ -10,7 +10,7 @@ const loadJSON=async(env,key)=>{
  }
  if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key);if(routed.handled)return routed.value;}
  const o=await env.BUCKET.get(key);let value=o?await o.json():null;
- if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value);
+ if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
  return value;
 };
 async function pinEpg(env){
@@ -255,7 +255,15 @@ async function updatePublishedFiles(env,files){
  for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);
  return generation.programmeRunId;
 }
-const saveJSON=async(env,key,value)=>{if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.saveMutable(env,key,value);if(routed?.handled)return {etag:'d1'};}return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});};
+const saveJSON=async(env,key,value)=>{
+ if(typeof PredictionD1!=='undefined'){
+  const routed=await PredictionD1.saveMutable(env,key,value);
+  if(routed?.handled)return {etag:'d1'};
+  try{return await env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});}
+  finally{if(routed?.token)await PredictionD1.completePredictionWrite(env,key,routed.token);}
+ }
+ return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});
+};
 function confirmedHalfStar(value){const rating=Number(value);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;}
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}
 const eventFilm=(film,titles=new Map())=>({id:String(film.id),title:(film.titleAuthority==='owner'&&(film.titleRu||film.title))||reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year});
