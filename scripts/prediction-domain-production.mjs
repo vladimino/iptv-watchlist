@@ -8,6 +8,9 @@
 // do not count toward a budget. More than 5000 fingerprint or prediction
 // pointers refuses before a read of those films. A missing fingerprint body
 // refuses inside the import, before the hold.
+// --materialize-fingerprints writes a missing immutable fingerprint body
+// create-only when the pointer reconstructs to that hash. An existing body
+// that disagrees refuses before any put. It does not touch D1.
 // A generation that moves during the copy is read again (catch-up), not a permanent block.
 // --activate sets mode d1 only when that fence, the leases and the parity read-back still agree.
 // --revert repairs the mutable mirrors from D1, deletes a mutable mirror the
@@ -24,7 +27,7 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createD1Adapter, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {createS3Store, readInstallCredentials} from './discovery-ledger-install.mjs';
 import {migrationStatements, OperatorStop, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, PRODUCTION_DATABASE_NAME, STATEMENT_BYTES} from './metadata-cache-production.mjs';
-import {PREDICTION_INDEX_LIMIT, activatePredictionDomain, importPredictionDomain, predictionMutableKey, predictionParity, readPredictionAuthority, reconcilePredictionIntents, releasePredictionWriters, revertPredictionDomain} from '../src/prediction-d1.js';
+import {PREDICTION_INDEX_LIMIT, activatePredictionDomain, fingerprintKey, fingerprintPointerAgrees, importPredictionDomain, predictionMutableKey, predictionParity, readPredictionAuthority, reconcilePredictionIntents, releasePredictionWriters, revertPredictionDomain, sameCanonical} from '../src/prediction-d1.js';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
@@ -49,7 +52,7 @@ export function parsePredictionArgs(argv){
   if(next===undefined||next.startsWith('--'))throw new OperatorStop('usage',2);
   return next;
  };
- const commands=['--apply','--load','--activate','--revert','--release','--reconcile'].filter(name=>args.includes(name));
+ const commands=['--apply','--load','--activate','--revert','--release','--reconcile','--materialize-fingerprints'].filter(name=>args.includes(name));
  if(commands.length>1)throw new OperatorStop('usage',2);
  const known=new Set([...commands,'--target','--confirm','--producers-drained']);
  for(let index=0;index<args.length;index++){
@@ -75,6 +78,7 @@ export function parsePredictionArgs(argv){
  if(command==='revert'&&confirm!=='r2')throw new OperatorStop('confirm',2);
  if(command==='release'&&confirm!=='release')throw new OperatorStop('confirm',2);
  if(command==='reconcile'&&confirm!=='reconcile')throw new OperatorStop('confirm',2);
+ if(command==='materialize-fingerprints'&&confirm!=='materialize')throw new OperatorStop('confirm',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
  return {command,confirm,producersDrained};
 }
@@ -243,6 +247,39 @@ async function revertDomain(binding,store){
  return {operation:'revert',writes:true,writeState:'committed',mode:'r2',generation:after.generation};
 }
 
+async function materializeFingerprintBodies(store){
+ const snapshot=await readPredictionSnapshot(store);
+ const planned=[];
+ for(const item of snapshot.fingerprints){
+  const body=await fingerprintPointerAgrees(item.record);
+  if(!body)throw new OperatorStop('prediction_domain_body_mismatch',3);
+  const key=fingerprintKey(item.filmId,item.record.fingerprintHash);
+  const existing=await objectJson(store,key);
+  if(existing==null)planned.push({key,text:JSON.stringify(body)});
+  else if(!await sameCanonical(existing,body))throw new OperatorStop('prediction_domain_body_mismatch',3);
+ }
+ let created=0;
+ try{
+  for(const item of planned){
+   const put=typeof store.putIfAbsent==='function'?store.putIfAbsent(item.key,item.text):store.put(item.key,item.text,{onlyIf:{etagDoesNotMatch:'*'}});
+   const result=await put;
+   if(result==null){
+    const again=await objectJson(store,item.key);
+    if(!again||!await sameCanonical(again,JSON.parse(item.text))){
+     const error=new OperatorStop('prediction_domain_body_mismatch',3);
+     error.committedUnits=created;
+     throw error;
+    }
+    continue;
+   }
+   created++;
+  }
+ }catch(error){
+  if(error&&error.committedUnits==null)error.committedUnits=created;
+  throw error;
+ }
+ return {operation:'materialize-fingerprints',writes:created>0,writeState:created>0?'committed':'none',created,unchanged:snapshot.fingerprints.length-planned.length,planned:planned.length};
+}
 async function releaseDomain(binding){
  const after=await releasePredictionWriters(binding);
  if(after.mode!=='r2'||after.writes!=='open')throw new OperatorStop('readback_mismatch',3);
@@ -295,7 +332,7 @@ function writeStore(env,fetchImpl,keys){
  const allowed=keys||new Set();
  const allowedDeletes=new Set();
  const store=createS3Store({credentials,fetchImpl,allowedWrites:allowed,allowedDeletes});
- return {async get(key){return store.get(key);},async put(key,body){allowed.add(key);const head=await store.head(key);return store.put(key,body,{onlyIf:head?{etagMatches:head.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async delete(key){if(!predictionMutableKey(key))throw new OperatorStop('r2_write_refused',3);allowedDeletes.add(key);await store.delete(key);},async list(){const page=await store.list({prefix:'enrichment/'});return {objects:page.objects,truncated:false};},async keys(prefix){const page=await store.list({prefix});return page.objects.map(item=>item.key).filter(key=>!prefix||key.startsWith(prefix));}};
+ return {async get(key){return store.get(key);},async put(key,body){allowed.add(key);const head=await store.head(key);return store.put(key,body,{onlyIf:head?{etagMatches:head.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async putIfAbsent(key,body){allowed.add(key);const head=await store.head(key);if(head)return null;return store.put(key,body,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});},async delete(key){if(!predictionMutableKey(key))throw new OperatorStop('r2_write_refused',3);allowedDeletes.add(key);await store.delete(key);},async list(){const page=await store.list({prefix:'enrichment/'});return {objects:page.objects,truncated:false};},async keys(prefix){const page=await store.list({prefix});return page.objects.map(item=>item.key).filter(key=>!prefix||key.startsWith(prefix));}};
 }
 
 export async function runPredictionDomainProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),binding=null,store=null}={}){
@@ -311,7 +348,8 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
    db=createPredictionBinding(adapter);
   }
-  if(!bucket&&parsed.command!=='apply'&&parsed.command!=='status'&&parsed.command!=='release')bucket=parsed.command==='revert'?writeStore(env,fetchImpl):readStore(env,fetchImpl);
+  if(!bucket&&parsed.command==='materialize-fingerprints')bucket=writeStore(env,fetchImpl);
+  if(!bucket&&parsed.command!=='apply'&&parsed.command!=='status'&&parsed.command!=='release'&&parsed.command!=='materialize-fingerprints')bucket=parsed.command==='revert'?writeStore(env,fetchImpl):readStore(env,fetchImpl);
   if(parsed.command==='status'){
    const authority=await readPredictionAuthority(db,REQUIRED);
    const tables=await tablesOf(db);
@@ -323,6 +361,10 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
    return {exit:0,result:await applyMigration(db)};
   }
   if(parsed.command==='release')return {exit:0,result:await releaseDomain(db)};
+  if(parsed.command==='materialize-fingerprints'){
+   if(!bucket)throw new OperatorStop('source_missing',3);
+   return {exit:0,result:await materializeFingerprintBodies(bucket)};
+  }
   if(!bucket)throw new OperatorStop('source_missing',3);
   if(parsed.command==='reconcile')return {exit:0,result:await reconcileDomain(db,bucket)};
   if(parsed.command==='load')return {exit:0,result:await loadDomain(db,bucket,clock)};
