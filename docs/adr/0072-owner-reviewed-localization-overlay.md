@@ -1,9 +1,9 @@
 # ADR 0072: Owner-reviewed Film titles and Person names live in one R2 overlay
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-10-31  
 **Recorded at:** 2026-10-31  
-**Approval source:** not documented  
+**Approval source:** [Owner's explicit acceptance of ADR 0072, 2026-11-01](https://trello.com/c/gkuy1awG#comment-6ae6edbab032e4a44465a021), after [independent PASS review of PR #295 HEAD f3e42cd](https://github.com/vladimino/iptv-watchlist/pull/295#pullrequestreview-5726985061)  
 **Related work:** [AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy), [film title review](../reference/domain/film-title-review.md), [person name review](../reference/domain/person-name-review.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -24,7 +24,7 @@ AIR-53 and AIR-54 need one shared object so the two writers do not invent two fo
 6. **What this object is not.** It is not `programme.json`, `titles.json`, `people.json`, `epg/published-generation.json`, a generation object, or a D1 row. Identity fields are refused. There is no merge, split, bulk edit, refresh or sync on this route. GET does not write it. Deploying the Worker does not create it. The first confirmed POST creates it.
 7. **Admin pin.** The catalogue pin is version `2` and includes the overlay etag (empty when the object is absent). A pin from version `1` does not parse. A changed overlay etag is a stale pin. The limbo pin wraps that catalogue pin.
 
-Not decided here: accepting this record, the Person route and its UI (AIR-54), any production confirmation of a real title, and any change to Cloudflare Access.
+Not decided here: the Person route and its UI (AIR-54), any production confirmation of a real title, and any change to Cloudflare Access. Acceptance of this ADR authorizes the architecture, not a production data write.
 
 ## Alternatives considered
 
@@ -52,4 +52,4 @@ Creating the route does not write R2. The object appears only when the owner con
 
 ## Follow-ups
 
-AIR-54 implements the `people` map on this object and does not add a second ADR for the same store. Owner acceptance of this record is separate from merge of the Film route.
+AIR-54 implements the `people` map on this object and does not add a second ADR for the same store. The owner accepted this decision on 2026-11-01; merge/deployment and any production confirmation are tracked separately.
