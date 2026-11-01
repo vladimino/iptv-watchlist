@@ -7,7 +7,7 @@ flowchart TD
     source["Configured EPG XML source"]
     parse["Authorized sync: parse broadcasts and match shows"]
     staging["Write complete EPG generation:<br/>programme, discovery snapshot, catalog"]
-    pointer[("R2: epg/published-generation.json")]
+    pointer[("Published generation pointer:<br/>R2 epg/published-generation.json until the marker is d1;<br/>D1 published_epg_authority after a later activation")]
     readers["Programme / film page / availability readers"]
     window["Availability projection:<br/>past 72h, future 24h for hot"]
     previous["Prior published generation remains readable"]
@@ -28,4 +28,4 @@ After the pointer switch the commit opens the discovery series of the new genera
 
 Availability calculations use a 72-hour lookback for hot showings and a 24-hour future planning window; the last known airing supports a 72-hour availability horizon. These domain computations are not equivalent to ingesting a new EPG. Late resolver activity must respect the pinned generation before writing programme or decisions.
 
-**Current/future boundary:** this diagram describes the authoritative R2 publication lifecycle. The local D1 generation schema is a future migration path, not the active reader/writer. See [D1 ADR](../adr/0001-d1-schema-v1.md) and [migration plan](../adr/0017-staged-d1-migration.md).
+**Current/future boundary:** production still publishes through R2. [ADR 0079](../adr/0079-d1-authoritative-published-epg.md) (Accepted) makes D1 the published generation only after migration `0008` is applied and a later activation sets `published_epg_authority.mode` to `d1`. Until that activation the pointer node is the R2 object. After it, the same node is the D1 row, and `epg/published-generation.json` is the compatibility mirror, not a fallback to another generation. Discovery decisions stay R2. The v1 D1 tables that reference `film(id)` are not this publisher. See [D1 schema](../reference/data/d1-schema.md). The changed diagram was [visually approved by the owner on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44); no production migration or activation was authorized.

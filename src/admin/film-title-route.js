@@ -65,6 +65,7 @@ async function filmTitleReviewRoute(request,env,url){
   const next=ownerReviewsWithFilm(doc,storedId,ownerFilmSlice(applied.film));
   const persisted=await filmTitlePersist(env,snapshot,next);
   if(!persisted.ok){
+   if(persisted.reason==='owner_review_too_large')return json({error:'owner_review_too_large',reason:'owner_review_too_large',recovery:'The stored history was not changed. The document exceeds one storage batch.'},413);
    if(persisted.reason==='commit_unknown'||persisted.reason==='readback_failed'||persisted.reason==='writes_held'||persisted.reason==='owner_review_unavailable'||persisted.reason==='overlay_invalid')return json({error:'storage_unavailable',reason:persisted.reason},503);
    continue;
   }

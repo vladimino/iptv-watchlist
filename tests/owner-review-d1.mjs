@@ -5,14 +5,17 @@ import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {activateOwnerReviews,applyViewOverlay,commit,importOwnerReviews,loadForRead,overlayCatalogBody,OWNER_REVIEWS_KEY,readAuthority,readDocument,revertOwnerReviews,stampLocalized} from '../src/owner-review-d1.js';
+import {pathToFileURL} from 'node:url';
+import {activateOwnerReviews,applyViewOverlay,commit,importOwnerReviews,loadForRead,loadSnapshotReviews,overlayCatalogBody,OWNER_REVIEW_MAX_STATEMENT_BYTES,OWNER_REVIEW_MAX_STATEMENTS,OWNER_REVIEWS_KEY,readAuthority,readDocument,readFenced,revertOwnerReviews,stampLocalized} from '../src/owner-review-d1.js';
+import {publishGeneration} from '../src/published-epg.js';
 import {readAuthority as readCacheAuthority} from '../src/metadata-cache.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-owner-review-'));
 let databases=0;
-const names=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0009_owner_review_authority'];
+const base=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache'];
+const names=[...base,'0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority'];
 const migrated=(list=names)=>{
  const file=path.join(root,'review-'+(databases++)+'.sqlite');
  const db=d1Standin(file);
@@ -25,46 +28,58 @@ const filmSlice=(value,extra={})=>({filmId:'film:heat',localization:ownerLoc(val
 const personSlice=(value)=>({localization:ownerLoc(value),aliases:[],nameReviews:[{requestId:'req-p',version:{before:'name-review:1:a',after:'name-review:1:b'}}],localizationConflicts:[],roleLinks:[{id:'person:director/ada',roleId:'director/ada'}]});
 
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/owner-review-d1\.js','OwnerReview'\)/);
-assert.match(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8'),/CASE WHEN version < 9 THEN 9 ELSE version END/);
+assert.match(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8'),/version >= 8 AND version < 9/);
+assert.match(fs.readFileSync('src/admin/film-title-route.js','utf8'),/owner_review_too_large[\s\S]{0,240},413\)/);
+assert.match(fs.readFileSync('src/admin/person-name-route.js','utf8'),/owner_review_too_large[\s\S]{0,240},413\)/);
 assert.doesNotMatch(fs.readFileSync('src/admin/film-title-route.js','utf8'),/programme\.json|titles\.json|people\.json|published-generation|\.prepare\(|D1/);
-assert.equal((await readAuthority(null)).legacy,true);
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/OWNER_REVIEW_DB_OPTIONAL/);
+assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/OWNER_REVIEW_DB_OPTIONAL/);
+assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/OWNER_REVIEW_DB_OPTIONAL:'standin'/);
+assert.equal((await readAuthority(null)).failClosed,true);
+assert.equal((await readAuthority({OWNER_REVIEW_DB_OPTIONAL:'standin'})).legacy,true);
+
+const sql0009=fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8');
+function refuses(list){
+ const db=migrated(list);
+ let refused=false;
+ try{db.sql(sql0009);}catch{refused=true;}
+ assert.equal(refused,true);
+ assert.equal(one(db,"SELECT COUNT(*) FROM sqlite_master WHERE name='owner_review_authority'"),0);
+ return db;
+}
 
 {
  const db=migrated();
  assert.equal(one(db,'SELECT version FROM schema_contract'),9);
  assert.equal(one(db,"SELECT mode FROM owner_review_authority"),'r2');
- assert.equal(one(db,"SELECT COUNT(*) FROM sqlite_master WHERE name='prediction_domain_authority'"),0);
- assert.equal(one(db,"SELECT COUNT(*) FROM sqlite_master WHERE name='published_epg_authority'"),0);
+ assert.equal(one(db,"SELECT mode FROM prediction_domain_authority"),'r2');
+ assert.equal(one(db,"SELECT mode FROM published_epg_authority"),'r2');
  assert.equal((await readAuthority(db)).mode,'r2');
  assert.equal((await readCacheAuthority(db)).mode,'r2');
  db.sql("UPDATE metadata_cache_authority SET mode='d1'");
  assert.equal((await readCacheAuthority(db)).mode,'d1','schema v9 still honours the metadata-cache marker');
- const higher=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache']);
- higher.sql("UPDATE schema_contract SET version=8, note='later'");
- higher.sql(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8').replace(/;\s*$/,''));
- assert.equal(one(higher,'SELECT version FROM schema_contract'),9);
- const ahead=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache']);
- ahead.sql("UPDATE schema_contract SET version=10, note='kept'");
- ahead.sql(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8').replace(/;\s*$/,''));
- assert.equal(one(ahead,'SELECT version FROM schema_contract'),10);
- assert.equal(one(ahead,'SELECT note FROM schema_contract'),'kept');
  assert.throws(()=>db.sql('UPDATE schema_contract SET version=7'),/schema_contract_downgrade/);
- db.sql("UPDATE schema_contract SET version = CASE WHEN version < 7 THEN 7 ELSE version END");
- assert.equal(one(db,'SELECT version FROM schema_contract'),9);
- db.sql("UPDATE schema_contract SET version = CASE WHEN version >= 7 AND version < 8 THEN 8 ELSE version END");
- assert.equal(one(db,'SELECT version FROM schema_contract'),9);
- const v6=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache']);
+ const v6=refuses(base);
+ assert.equal(one(v6,'SELECT version FROM schema_contract'),6);
  assert.equal((await readAuthority(v6)).legacy,true);
- const base=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache'];
- const forward=migrated([...base,'0007_prediction_authority','0009_owner_review_authority']);
- assert.equal(one(forward,'SELECT version FROM schema_contract'),9);
- assert.equal(one(forward,"SELECT mode FROM prediction_domain_authority"),'r2');
- assert.equal(one(forward,"SELECT mode FROM owner_review_authority"),'r2');
- const reverse=migrated([...base,'0009_owner_review_authority','0007_prediction_authority']);
- assert.equal(one(reverse,'SELECT version FROM schema_contract'),9);
- assert.equal(one(reverse,"SELECT mode FROM prediction_domain_authority"),'r2');
- assert.equal(one(reverse,"SELECT mode FROM owner_review_authority"),'r2');
- assert.match(one(reverse,'SELECT note FROM schema_contract'),/Schema v7/);
+ const v7=refuses([...base,'0007_prediction_authority']);
+ assert.equal(one(v7,'SELECT version FROM schema_contract'),7);
+ const partial=migrated([...base,'0007_prediction_authority','0008_published_epg_authority']);
+ partial.sql('DROP TABLE published_epg_show');
+ let partialRefused=false;
+ try{partial.sql(sql0009);}catch{partialRefused=true;}
+ assert.equal(partialRefused,true,'a partial version 8 creates no owner-review table');
+ assert.equal(one(partial,'SELECT version FROM schema_contract'),8);
+ assert.equal(one(partial,"SELECT COUNT(*) FROM sqlite_master WHERE name='owner_review_authority'"),0);
+ const empty=d1Standin(path.join(root,'empty-'+(databases++)+'.sqlite'));
+ assert.equal((await readAuthority(empty)).failClosed,true);
+ assert.equal((await readAuthority({DB:empty,OWNER_REVIEW_DB_OPTIONAL:'standin'})).legacy,true);
+ const missingRow=migrated(base);
+ missingRow.sql('DELETE FROM schema_contract');
+ assert.equal((await readAuthority(missingRow)).failClosed,true);
+ const numbered=migrated(base);
+ numbered.sql('UPDATE schema_contract SET version=9');
+ assert.equal((await readAuthority(numbered)).failClosed,true,'version 9 without the owner-review tables does not fall back to R2');
 }
 
 {
@@ -216,4 +231,185 @@ assert.equal((await readAuthority(null)).legacy,true);
  assert.match(refused.stderr,/production/);
 }
 
-console.log('owner review D1 authority: marker, lossless import, shared generation, overlay');
+function manyFilms(count,value){
+ const films={};
+ for(let index=0;index<count;index++)films['k'+index]=filmSlice(value);
+ return {contractVersion:1,films,people:{}};
+}
+function fenceDb(db,{onFence,always=false}={}){
+ let pending=true;
+ return {
+  prepare(sql){
+   const prepared=db.prepare(sql);
+   return {
+    bind(...params){
+     const statement=prepared.bind(...params);
+     return {
+      async first(){
+       const row=await statement.first();
+       if(pending&&onFence&&sql.startsWith('SELECT mode, generation, writes FROM owner_review_authority')){
+        if(!always)pending=false;
+        onFence();
+       }
+       return row;
+      },
+      all:()=>statement.all(),
+      run:()=>statement.run(),
+     };
+    },
+   };
+  },
+  batch:statements=>db.batch(statements),
+  sql:text=>db.sql(text),
+ };
+}
+async function activated(){
+ const db=migrated();
+ const bucket=new MemoryBucket();
+ const document={contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{'person:director/ada':personSlice('Ада')}};
+ bucket.put(OWNER_REVIEWS_KEY,JSON.stringify(document));
+ await importOwnerReviews(db,bucket,{confirm:'load'});
+ await activateOwnerReviews(db,bucket,{confirm:'activate'});
+ return {db,bucket,document};
+}
+
+{
+ const {db,bucket}=await activated();
+ const generation=one(db,'SELECT generation FROM owner_review_authority');
+ const saved=await commit({DB:db,BUCKET:bucket},{expectedRevision:'d1:'+generation,document:manyFilms(OWNER_REVIEW_MAX_STATEMENTS,'Много')});
+ assert.equal(saved.ok,false);
+ assert.equal(saved.reason,'owner_review_too_large');
+ assert.equal(one(db,'SELECT generation FROM owner_review_authority'),generation);
+ assert.equal(one(db,'SELECT COUNT(*) FROM owner_review_entry'),2);
+ assert.equal((await readDocument(db)).films.heat.localization.value,'Хозяин');
+ const wide=await commit({DB:db,BUCKET:bucket},{expectedRevision:'d1:'+generation,document:{contractVersion:1,films:{heat:filmSlice('Жирный',{note:'x'.repeat(OWNER_REVIEW_MAX_STATEMENT_BYTES)})},people:{}}});
+ assert.equal(wide.reason,'owner_review_too_large');
+ assert.equal((await readDocument(db)).films.heat.localization.value,'Хозяин');
+ const fresh=migrated();
+ const source=new MemoryBucket();
+ source.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{}}));
+ await importOwnerReviews(fresh,source,{confirm:'load'});
+ const huge=new MemoryBucket();
+ huge.put(OWNER_REVIEWS_KEY,JSON.stringify(manyFilms(OWNER_REVIEW_MAX_STATEMENTS,'Много')));
+ await assert.rejects(importOwnerReviews(fresh,huge,{confirm:'load'}),/owner_review_too_large/);
+ assert.equal(one(fresh,'SELECT COUNT(*) FROM owner_review_entry'),1);
+ assert.equal((await readDocument(fresh)).films.heat.localization.value,'Хозяин');
+}
+
+{
+ const {db,bucket}=await activated();
+ const raced=fenceDb(db,{onFence(){
+  const next=JSON.stringify(filmSlice('После')).replaceAll("'","''");
+  db.sql('UPDATE owner_review_authority SET generation=generation+1');
+  db.sql('UPDATE owner_review_entry SET generation=generation+1');
+  db.sql("UPDATE owner_review_entry SET payload_json='"+next+"' WHERE kind='film' AND source_key='heat'");
+ }});
+ const snap=await readFenced({DB:raced});
+ assert.equal(snap.ok,true);
+ assert.equal(snap.generation,2);
+ assert.equal(snap.body.films.heat.localization.value,'После');
+ assert.equal(snap.body.films.heat.localization.value==='Хозяин',false);
+ const loaded=await loadForRead({DB:raced,BUCKET:bucket});
+ assert.equal(loaded.ok,true);
+ assert.equal(loaded.revision,'d1:2');
+ assert.equal(loaded.body.films.heat.localization.value,'После');
+ const shaky=fenceDb(db,{always:true,onFence(){db.sql('UPDATE owner_review_authority SET generation=generation+1');}});
+ const lost=await loadForRead({DB:shaky,BUCKET:bucket});
+ assert.equal(lost.ok,false);
+ assert.equal(lost.body,null);
+ await assert.rejects(loadSnapshotReviews({DB:shaky}),/owner_review_unavailable/);
+}
+
+{
+ const built=spawnSync(process.execPath,['build.mjs'],{encoding:'utf8'});
+ assert.equal(built.status,0,built.stderr);
+ const worker=(await import(pathToFileURL(path.resolve('dist/server/index.js')).href)).default;
+ const programme={runId:'run-owner',updatedAt:'2026-11-01T12:00:00.000Z',watchlistCount:1,films:[{id:'heat',title:'Словарь',titleRu:'Словарь',original:'Heat',directors:[{id:'director/ada',name:'Словарь',original:'Ada'}],shows:[]}]};
+ const watchlist={updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'heat',title:'Словарь',directors:[{id:'director/ada',name:'Словарь',original:'Ada'}]}]};
+ const ctx={waitUntil(){}};
+ async function scene(epgMode,reviewMode){
+  const db=migrated();
+  const bucket=new MemoryBucket();
+  const puts=[];
+  const tracked={
+   async get(key){return bucket.get(key);},
+   async head(key){return bucket.head(key);},
+   async put(key,body,options){puts.push(key);return bucket.put(key,body,options);},
+  };
+  if(epgMode==='d1'){
+   db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+   await publishGeneration({DB:db},{programmeRunId:'run-owner',phase:'published',expectedProgrammeRunId:null,programme,watchlist},{now:0});
+  }else{
+   bucket.put('epg/published-generation.json',JSON.stringify({programmeRunId:'run-owner',phase:'published'}));
+   bucket.put('epg/generations/run-owner/programme.json',JSON.stringify(programme));
+   bucket.put('watchlist.json',JSON.stringify(watchlist));
+  }
+  const document={contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{'person:director/ada':personSlice('Ада')}};
+  bucket.put(OWNER_REVIEWS_KEY,JSON.stringify(document));
+  if(reviewMode==='d1'){
+   await importOwnerReviews(db,bucket,{confirm:'load'});
+   await activateOwnerReviews(db,bucket,{confirm:'activate'});
+   bucket.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{heat:filmSlice('Зеркало')},people:{}}));
+  }
+  return {db,bucket,tracked,puts};
+ }
+ for(const epgMode of ['r2','d1'])for(const reviewMode of ['r2','d1']){
+  const {db,tracked,puts}=await scene(epgMode,reviewMode);
+  const env={DB:db,BUCKET:tracked};
+  const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
+  const body=await response.json();
+  assert.equal(response.status,200,epgMode+'/'+reviewMode+' '+JSON.stringify(body));
+  assert.equal(body.runId,'run-owner');
+  assert.equal(body.films.length,1);
+  assert.equal(body.films[0].title,'Хозяин');
+  assert.equal(body.films[0].titleAuthority,'owner');
+  assert.equal(body.films[0].directors[0].name,'Ада');
+  assert.equal(JSON.stringify(body).includes('Зеркало'),false);
+  const admin=await worker.fetch(new Request('http://127.0.0.1/api/admin/films/film%3Aheat'),env,ctx);
+  const item=await admin.json();
+  assert.equal(admin.status,200,epgMode+'/'+reviewMode+' admin '+JSON.stringify(item));
+  assert.equal(item.item.preferred,'Хозяин');
+  assert.equal(puts.includes(OWNER_REVIEWS_KEY),false,epgMode+'/'+reviewMode);
+ }
+ for(const epgMode of ['r2','d1']){
+  const {db,bucket,tracked,puts}=await scene(epgMode,'d1');
+  db.sql('DROP TABLE owner_review_entry');
+  const env={DB:db,BUCKET:tracked};
+  const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
+  const body=await response.json();
+  assert.equal(response.status,503);
+  assert.equal(body.reason,'owner_review_unavailable');
+  assert.equal(body.films,undefined);
+  assert.equal(JSON.stringify(body).includes('Зеркало'),false);
+  const admin=await worker.fetch(new Request('http://127.0.0.1/api/admin/films/film%3Aheat'),env,ctx);
+  const item=await admin.json();
+  assert.equal(admin.status,503,JSON.stringify(item));
+  assert.equal(item.reason,'owner_review_unavailable');
+  assert.equal(puts.includes(OWNER_REVIEWS_KEY),false);
+  assert.equal(bucket.objects.get(OWNER_REVIEWS_KEY).text.includes('Зеркало'),true);
+ }
+ const raced=await scene('r2','d1');
+ const before=one(raced.db,'SELECT generation FROM owner_review_authority');
+ const wrapped=fenceDb(raced.db,{onFence(){
+  const next=JSON.stringify(filmSlice('После')).replaceAll("'","''");
+  raced.db.sql('UPDATE owner_review_authority SET generation=generation+1');
+  raced.db.sql('UPDATE owner_review_entry SET generation=generation+1');
+  raced.db.sql("UPDATE owner_review_entry SET payload_json='"+next+"' WHERE kind='film' AND source_key='heat'");
+ }});
+ const env={DB:wrapped,BUCKET:raced.tracked};
+ const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
+ const body=await response.json();
+ assert.equal(response.status,200,JSON.stringify(body));
+ assert.equal(body.films[0].title,'После');
+ const after=one(raced.db,'SELECT generation FROM owner_review_authority');
+ assert.equal(after,before+1);
+ const admin=await worker.fetch(new Request('http://127.0.0.1/api/admin/films/film%3Aheat'),env,ctx);
+ const item=await admin.json();
+ assert.equal(admin.status,200,JSON.stringify(item));
+ assert.equal(item.item.preferred,'После');
+ const pin=item.pin.split('|').map(decodeURIComponent);
+ assert.equal(pin.at(-1),'d1:'+after);
+ assert.equal(raced.puts.includes(OWNER_REVIEWS_KEY),false);
+}
+
+console.log('owner review D1 authority: marker, fence, budget, built overlay');

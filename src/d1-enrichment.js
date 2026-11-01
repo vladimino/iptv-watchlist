@@ -72,12 +72,19 @@ async function d1EnrichmentWritersIdle(env,now=Date.now()){
 async function d1EnrichmentStore(env){
  const etags=new Map();
  await d1EnrichmentWritersIdle(env);
- const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
- if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
- const runId=pointer.programmeRunId;
- const [watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
-  d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
-  d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
+ const published=typeof PublishedEpg==='undefined'?null:await PublishedEpg.authoritativeSnapshot(env);
+ let runId,watchlist,programme;
+ if(published){
+  if(!published.programmeRunId||!d1EnrichmentFilmList(published.programme)||!d1EnrichmentFilmList(published.watchlist))throw new D1EnrichmentInputError('generation_unpublished','published_epg');
+  runId=published.programmeRunId;watchlist=published.watchlist;programme=published.programme;
+ }else{
+  const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
+  if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
+  runId=pointer.programmeRunId;
+ }
+ const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
+  published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
+  published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'titles.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'people.json',d1EnrichmentRecord),
@@ -86,19 +93,25 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
  ]);
+ if(!published){watchlist=watchlistObject;programme=programmeObject;}
  let ownerGate=null,ownerMirror=null,ownerDocument=null;
  if(typeof OwnerReview!=='undefined'){
-  ownerGate=await OwnerReview.readAuthority(env.DB);
+  ownerGate=await OwnerReview.readAuthority(env);
   if(ownerGate.failClosed)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
   if(!ownerGate.legacy&&ownerGate.mode==='r2')ownerMirror=await d1EnrichmentRead(env,etags,'admin/owner-reviews.json',value=>!!value&&typeof value==='object'&&!Array.isArray(value)&&value.contractVersion===1&&plainOwner(value),false);
  }
  for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);
+ if(published){
+  const again=await PublishedEpg.authoritativeSnapshot(env);
+  if(!again||again.generation!==published.generation||again.programmeRunId!==runId)throw new D1EnrichmentInputError('input_changed','published_epg');
+ }
  await d1EnrichmentWritersIdle(env);
  if(ownerGate&&!ownerGate.legacy){
   ownerDocument=ownerMirror;
   if(ownerGate.mode==='d1'){
-   ownerDocument=await OwnerReview.readDocument(env.DB);
-   if(!ownerDocument)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
+   const snap=await OwnerReview.readFenced(env);
+   if(!snap.ok||snap.mode!=='d1'||snap.generation!==ownerGate.generation)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
+   ownerDocument=snap.body;
   }
   if(ownerDocument){OwnerReview.stampLocalized(programme,ownerDocument);OwnerReview.stampLocalized(watchlist,ownerDocument);}
  }

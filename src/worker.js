@@ -2,6 +2,33 @@ const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:
 function addGroup(left,right,displayed){const group={compared:(left?.compared||0)+(right?.compared||0),mismatched:(left?.mismatched||0)+(right?.mismatched||0)};if(displayed)group.displayed=(left?.displayed||0)+(right?.displayed||0);return group;}
 function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count?.films)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,films:addGroup(prior?.films,count.films,true),people:addGroup(prior?.people,count.people,true),cache:addGroup(prior?.cache,count.cache,false)}};}
 const loadJSON=async(env,key)=>{
+ const publishedKey=key===EPG_GENERATION_KEY||key==='programme.json'||key==='watchlist.json'||key==='epg/discovery-latest.json'||key==='epg/discovered-films.json';
+ if(publishedKey&&typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live){
+   if(key===EPG_GENERATION_KEY)return live.programmeRunId?{programmeRunId:live.programmeRunId,phase:'published'}:null;
+   const run=env.epgPin?.authority==='d1'&&env.epgPin.programmeRunId?env.epgPin.programmeRunId:live.programmeRunId;
+   if(key==='programme.json'||key==='watchlist.json'){
+    if(!run)return null;
+    const generation=env.epgPin?.authority==='d1'?env.epgPin.generation:live.generation;
+    await PublishedEpg.repairMirrors(env).catch(()=>{});
+    const document=await PublishedEpg.readDocumentAt(env,run,key==='watchlist.json'?'watchlist':'programme',generation);
+    if(key==='programme.json'&&!document){const error=new Error('published_epg_unavailable');error.code='published_epg_unavailable';throw error;}
+    return document;
+   }
+   const stagedName=key==='epg/discovery-latest.json'?'discovery-latest.json':key==='epg/discovered-films.json'?'discovered-films.json':null;
+   if(stagedName){
+    if(!run)return null;
+    const copy=await env.BUCKET.get(epgGenerationKey(run,stagedName));
+    if(copy)return copy.json();
+    if(run!==live.programmeRunId)return null;
+    const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),body=pointer?await pointer.json():null;
+    if(body?.phase!=='published'||body.programmeRunId!==run)return null;
+    const shared=await env.BUCKET.get(key);
+    return shared?shared.json():null;
+   }
+  }
+ }
  const staged=key==='programme.json'?'programme.json':key==='epg/discovery-latest.json'?'discovery-latest.json':key==='epg/discovered-films.json'?'discovered-films.json':null;
  if(staged){
   const pinned=env.epgPin?.programmeRunId;
@@ -17,8 +44,25 @@ async function publishedOwnerReviews(env){
  if(typeof OwnerReview==='undefined'||typeof OwnerReview.loadForRead!=='function')return {ok:true,body:await loadJSON(env,'admin/owner-reviews.json')};
  return OwnerReview.loadForRead(env);
 }
+async function epgPublication(env){
+ if(typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live){
+   if(live.programmeRunId)await PublishedEpg.repairMirrors(env).catch(()=>{});
+   const again=await PublishedEpg.currentGeneration(env);
+   const current=again||live;
+   return {authority:'d1',programmeRunId:current.programmeRunId,phase:current.phase,etag:current.fence,fence:current.fence,generation:current.generation};
+  }
+ }
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
+}
 async function pinEpg(env){
- if(env.epgPin?.programmeRunId)return env;
+ if(env.epgPin?.programmeRunId||env.epgPin?.authority==='d1')return env;
+ if(typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live)return {...env,epgPin:{authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,fence:live.fence,generation:live.generation}};
+ }
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(!pointer)return env;
  const generation=await pointer.json();
  return generation?.phase==='published'&&generation.programmeRunId?{...env,epgPin:{programmeRunId:generation.programmeRunId}}:env;
@@ -221,8 +265,8 @@ async function catalogWatchedRoute(request,env,url){
  let body;try{body=JSON.parse(text);}catch{return json({error:'Invalid JSON'},400);}
  const keys=body&&typeof body==='object'&&!Array.isArray(body)?Object.keys(body).sort():[];
  if(keys.join()!=='tmdbId,watched'||typeof body.tmdbId!=='string'||!FINDS_WATCHED_TMDB.test(body.tmdbId)||typeof body.watched!=='boolean')return json({error:'Expected exactly tmdbId (digits) and watched (boolean)',code:'invalid_request'},400);
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- const runId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
+ const publication=await epgPublication(env);
+ const runId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  const object=runId?await env.BUCKET.get(epgGenerationKey(runId,'discovered-films.json')):null,catalog=object?await object.json():null;
  const film=Object.values(catalog||{}).find(item=>item&&String(item.tmdbId)===body.tmdbId&&item.canonicalIdentity==='tmdb:'+body.tmdbId);
  if(!film)return json({error:'Film is not a verified record of the published catalog',code:'film_not_in_catalog'},409);
@@ -236,12 +280,16 @@ async function catalogWatchedRoute(request,env,url){
 }
 async function catalogAvailableRoute(env){
  const now=Date.now();
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- const pinnedRunId=generation?.phase==='published'&&generation.programmeRunId?generation.programmeRunId:null;
+ const publication=await epgPublication(env);
+ const pinnedRunId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
  // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
- const generationCopy=async name=>{const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;};
- const [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'watchlist.json'),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
+ const generationCopy=async name=>{
+  if(publication.authority==='d1'&&name==='programme.json')return pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'programme',publication.generation):null;
+  const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;
+ };
+ const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json');
+ const [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
@@ -251,13 +299,13 @@ async function catalogAvailableRoute(env){
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- if(!generation?.programmeRunId||generation.phase!=='published'){for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);return null;}
- for(const [name,value] of Object.entries(files))await saveJSON(env,epgGenerationKey(generation.programmeRunId,name),value);
- const again=await env.BUCKET.get(EPG_GENERATION_KEY),current=again?await again.json():null;
- if(current?.programmeRunId!==generation.programmeRunId||pointer.etag&&again?.etag!==pointer.etag)throw new Error('EPG generation changed during publish');
+ const publication=await epgPublication(env);
+ if(!publication.programmeRunId||publication.phase!=='published'){for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);return null;}
+ for(const [name,value] of Object.entries(files))await saveJSON(env,epgGenerationKey(publication.programmeRunId,name),value);
+ const again=await epgPublication(env);
+ if(again.programmeRunId!==publication.programmeRunId||publication.etag&&again.etag!==publication.etag)throw new Error('EPG generation changed during publish');
  for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);
- return generation.programmeRunId;
+ return publication.programmeRunId;
 }
 const saveJSON=async(env,key,value)=>{
  if(typeof PredictionD1!=='undefined'){
@@ -358,7 +406,7 @@ async function metadataSync(env,run){
  await saveJSON(env,'people.json',people);
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
-async function finishSync(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)});
+async function finishSync(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};const saved=typeof PublishedEpg==='undefined'?null:await PublishedEpg.saveWatchlist(env,next);if(saved===false)throw new Error('published_epg_fence');if(!saved)await saveJSON(env,'watchlist.json',next);}
  // A complete watchlist is one observation of every listed film (ADR-0024).
  if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
@@ -394,6 +442,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  if(effective==='full')return {items:mergeDiscoveryCandidates(previous?.items,latest,{replaceShows:true,programmeRunId:runId}),ledger:{}};
  const fence=async()=>{
   if(!await renewDiscoveryLease(env,lease))throw new Error('Discovery archive fence lost: lease');
+  if(typeof PublishedEpg!=='undefined'){const gate=await PublishedEpg.readAuthority(env);if(gate.cutover==='held')throw new Error('Discovery archive fence lost: published generation changed');const live=await PublishedEpg.currentGeneration(env);if(live){if(live.fence!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}return;}}
   const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if((pointer?.etag??null)!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');
   if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}
  };
@@ -443,7 +492,29 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
 }
 // `ledger` (AIR-220): `{latest, meta, mode}` lets the generation's discovery ledger be planned under this lease, fenced on the
 // published pointer read here; without it `files` already carry the ledger (full mode, unchanged).
-async function publishEpgGeneration(env,runId,files,ledger=null){
+async function publishD1Generation(env,runId,files,ledger,watchlist,publication){
+ const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
+ try{
+  const next={...files};
+  if(ledger){
+   const planned=await planDiscoveryLedger(env,{runId,latest:ledger.latest,mode:ledger.mode,lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null});
+   next['discovery-latest.json']={...ledger.meta,items:planned.items,...planned.ledger};
+  }
+  if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
+  for(const [name,value] of Object.entries(next))await saveJSON(env,epgGenerationKey(runId,name),value);
+  const live=await PublishedEpg.currentGeneration(env);
+  if(!live||live.fence!==publication.fence)throw new Error('EPG generation changed during publish');
+  const programme=next['programme.json'];
+  const list=watchlist||{updatedAt:programme?.updatedAt||null,films:[]};
+  const result=await PublishedEpg.publishGeneration(env,{programmeRunId:runId,phase:'published',publishedAt:programme?.updatedAt||null,expectedProgrammeRunId:publication.programmeRunId,programme,watchlist:list});
+  let mirrored=false;
+  try{mirrored=await PublishedEpg.writeMirrors(env,{programmeRunId:runId,programme,watchlist:list,phase:'published'});}catch{mirrored=false;}
+  try{await copyEpgGeneration(env,runId);}catch{}
+  return {...result,authoritative:true,mirrored};
+ }finally{await releaseDiscoveryLease(env,lease);}
+}
+async function publishEpgGeneration(env,runId,files,ledger=null,watchlist=null){
+ if(typeof PublishedEpg!=='undefined'){const gate=await PublishedEpg.readAuthority(env);if(gate.cutover==='held')throw new Error('published_epg_fence');const publication=await PublishedEpg.currentGeneration(env);if(publication)return publishD1Generation(env,runId,files,ledger,watchlist,publication);}
  const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
  try{
   const next={...files};
@@ -466,10 +537,10 @@ async function publishEpgGeneration(env,runId,files,ledger=null){
 }
 // The commit's publication with its discovery ledger. In `full` mode without an archive this is the unchanged single growing
 // ledger; otherwise (AIR-220, ADR 0034) the ledger is planned under the publish lease.
-async function publishGenerationWithLedger(env,runId,discovery,meta,files){
+async function publishGenerationWithLedger(env,runId,discovery,meta,files,watchlist=null){
  const mode=discoveryLedgerMode(env),old=mode==='full'&&!await env.BUCKET.get(LEDGER_ARCHIVE_POINTER)?await loadJSON(env,'epg/discovery-latest.json'):null;
- if(old)return publishEpgGeneration(env,runId,{...files,'discovery-latest.json':{...meta,items:mergeDiscoveryCandidates(old.items,discovery,{replaceShows:true,programmeRunId:runId})}});
- return publishEpgGeneration(env,runId,files,{latest:discovery,meta,mode});
+ if(old)return publishEpgGeneration(env,runId,{...files,'discovery-latest.json':{...meta,items:mergeDiscoveryCandidates(old.items,discovery,{replaceShows:true,programmeRunId:runId})}},null,watchlist);
+ return publishEpgGeneration(env,runId,files,{latest:discovery,meta,mode},watchlist);
 }
 // ADR 0074: the ratings pipeline is permanently separate. It acts once ratings_storage_migrate has migrated the
 // queue and the Diary cursor. The EPG commit then hands the films its watchlist diff removed to the queue as
@@ -583,9 +654,9 @@ async function epgSync(env,run){
  const gate=await ratingsGate(env);
  if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};const films=removedFilms(),ref=films.length?removalHandoverRef(run):null;const prior=removalRefItems(run.removalRefs).filter(item=>!ref||item.ref.eventKey!==ref.eventKey);const next=ref?[...prior,{ref,films}]:prior;if(next.length)run.removalRefs=storedRemovalRefs(next);else delete run.removalRefs;await saveJSON(env,'sync.json',run);}
  if(gate.active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
- try{await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report}));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
+ let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report},nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
- await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
+ if(!published?.authoritative||!published.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
 export default {
 // AIR-275 phase 2 (ADR 0056): the cron trigger runs only the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
@@ -618,8 +689,31 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
-  if(url.pathname==='/api/programme'&&request.method==='GET'){const data=await loadJSON(env,'programme.json');if(!data)return json({error:'Первое обновление ещё выполняется'},503);const watchlist=await loadJSON(env,'watchlist.json');const titles=await loadJSON(env,'titles.json')||{};const reviews=await publishedOwnerReviews(env);if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body));}
-  if(url.pathname==='/api/watchlist'&&request.method==='GET'){let data=await loadJSON(env,'watchlist.json');const report=await loadJSON(env,'programme.json');if(report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};if(!data)return json({films:[]});const titles=await loadJSON(env,'titles.json')||{};const reviews=await publishedOwnerReviews(env);if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return json(presentLocalized(data,titles,reviews.body));}
+  if(url.pathname==='/api/programme'&&request.method==='GET'){
+   try{
+    const pinned=await pinEpg(env);
+    const data=await loadJSON(pinned,'programme.json');
+    if(!data)return json({error:'Первое обновление ещё выполняется'},503);
+    const watchlist=await loadJSON(pinned,'watchlist.json');
+    const titles=await loadJSON(pinned,'titles.json')||{};
+    const reviews=await publishedOwnerReviews(pinned);
+    if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
+    return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body));
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
+  }
+  if(url.pathname==='/api/watchlist'&&request.method==='GET'){
+   try{
+    const pinned=await pinEpg(env);
+    let data=await loadJSON(pinned,'watchlist.json');
+    const report=await loadJSON(pinned,'programme.json');
+    if(pinned.epgPin?.authority!=='d1'&&report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};
+    if(!data)return json({films:[]});
+    const titles=await loadJSON(pinned,'titles.json')||{};
+    const reviews=await publishedOwnerReviews(pinned);
+    if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
+    return json(presentLocalized(data,titles,reviews.body));
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
+  }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   if(url.pathname==='/api/catalog/watched')return await catalogWatchedRoute(request,env,url);
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));

@@ -47,8 +47,15 @@ async function drPin(versions){
 // and the manifest body cancelled, when the manifest etag has not changed. The resolution map and the generation ledger
 // are compared by `head` only.
 async function discoveryIndexRead(bucket,options={}){
- const pointer=await bucket.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- const run=generation?.phase==='published'&&typeof generation.programmeRunId==='string'&&generation.programmeRunId?generation.programmeRunId:null;
+ let run=null,authoritative=false;
+ if(options.env&&typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
+  const live=await PublishedEpg.currentGeneration(options.env);
+  if(live){authoritative=true;run=live.phase==='published'&&typeof live.programmeRunId==='string'&&live.programmeRunId?live.programmeRunId:null;}
+ }
+ if(!authoritative){
+  const pointer=await bucket.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+  run=generation?.phase==='published'&&typeof generation.programmeRunId==='string'&&generation.programmeRunId?generation.programmeRunId:null;
+ }
  const base={programmeRunId:run,manifest:null,manifestEtag:null,records:[],reasons:[]};
  if(!run)return {...base,state:'unavailable',reasons:['no_published_generation']};
  const object=await bucket.get(DiscoveryIndex.observationIndexManifestKey(run));
@@ -80,8 +87,8 @@ function drIndexView(index){
 
 // One observation judged now, from the index and the small coordination objects. `ownLeaseId` is the lease the executor
 // holds: it is not another writer.
-async function drObserve(bucket,versions,key,nowMs,ownLeaseId=null){
- const index=await discoveryIndexRead(bucket,{key});
+async function drObserve(bucket,versions,key,nowMs,ownLeaseId=null,env=null){
+ const index=await discoveryIndexRead(bucket,{key,env});
  const record=index.records.find(item=>item.key===key)||null;
  const [continuation,status,lease]=await Promise.all([drJson(bucket,DR_CONTINUATION_KEY),drJson(bucket,DR_STATUS_KEY),drJson(bucket,DISCOVERY_LEASE_KEY)]);
  const leaseValue=lease.status==='unavailable'?undefined:ownLeaseId&&lease.value?.id===ownLeaseId?null:lease.value;
@@ -125,7 +132,7 @@ async function adminDiscoveryRecoveryRoute(request,env,url){
  if(url.searchParams.has('pin')){pin=url.searchParams.get('pin');if(!DR_PIN.test(pin))return adminError('invalid_pin',400);}
  const {bucket,versions}=drReadOnly(env.BUCKET);
  let observed;
- try{observed=await drObserve(bucket,versions,key,Date.now());}
+ try{observed=await drObserve(bucket,versions,key,Date.now(),null,env);}
  catch{return adminError('storage_unavailable',503);}
  if(pin&&pin!==observed.pin)return json({error:'stale_pin',pin:observed.pin},409);
  return json({
@@ -177,7 +184,7 @@ async function drConfirm(request,env,url){
  if(!key||typeof body.pin!=='string'||!DR_PIN.test(body.pin)||typeof body.idempotencyKey!=='string'||!DR_IDEMPOTENCY.test(body.idempotencyKey))return drRefused('invalid_request',400);
  if(body.accepted!==true)return drRefused('confirmation_missing',400);
  const {bucket,versions}=drReadOnly(env.BUCKET);
- const observed=await drObserve(bucket,versions,key,Date.now());
+ const observed=await drObserve(bucket,versions,key,Date.now(),null,env);
  if(observed.pin!==body.pin)return drRefused('stale_pin',409,{pin:observed.pin});
  if(observed.preview.status!=='eligible')return drRefused('not_eligible',409,{pin:observed.pin,reason:observed.assessment?.execute?.reason??observed.preview.reason});
  const issued=AdminActions.confirmAction(observed.preview,{now:observed.now,idempotencyKey:body.idempotencyKey,accepted:true});
@@ -249,7 +256,7 @@ async function drExecute(request,env,url){
  };
  try{
   const {bucket,versions}=drReadOnly(env.BUCKET);
-  const observed=await drObserve(bucket,versions,key,Date.now(),lease.id);
+  const observed=await drObserve(bucket,versions,key,Date.now(),lease.id,env);
   const fresh={pin:observed.pin,now:observed.now,records:observed.record?[{id:key,version:observed.record.decisionHash}]:[],issues:observed.assessment&&!observed.assessment.error?[DiscoveryRecovery.reconsiderIssue(observed.assessment)]:[]};
   const check=AdminActions.checkSubmission(DR_REGISTRY,confirmation,fresh,{principal,issued:stored.record.issued});
   if(!check.ok)return await finish({startedAt},[{id:key,outcome:'not_attempted'}],{refusal:check.refusal});

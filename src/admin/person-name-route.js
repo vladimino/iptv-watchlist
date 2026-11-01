@@ -101,6 +101,7 @@ async function adminPersonNameRoute(request,env,url){
   }
   if(!result.changed)return json(adminPersonNameAnswer(snapshot,person.id,result));
   const saved=await adminPersonNamePut(env,snapshot,result);
+  if(!saved.ok&&saved.reason==='owner_review_too_large')return json({error:'owner_review_too_large',reason:'owner_review_too_large',recovery:'The stored history was not changed. The document exceeds one storage batch.'},413);
   if(!saved.ok&&(saved.reason==='commit_unknown'||saved.reason==='readback_failed'||saved.reason==='writes_held'||saved.reason==='owner_review_unavailable'||saved.reason==='overlay_invalid'))return json({error:'storage_unavailable',reason:saved.reason},503);
   if(saved.ok){
    let fresh=null;

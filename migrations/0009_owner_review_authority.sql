@@ -1,11 +1,9 @@
 -- Schema v9: owner-reviewed Film titles and Person names (ADR 0081).
--- Additive. It does not alter 0001-0006 and it does not create prediction or
--- published-EPG tables. 0007 is on main and is not applied. 0008 is an open
--- change. This file does not add those tables and it does not treat version 9
--- as proof they exist.
--- schema_contract.version only moves forward. A later migration may already
--- have set a higher version. This file does not lower it. A database below
--- version 6 fails the guard and creates nothing.
+-- Production order is 0007, then 0008, then this file. The first statement
+-- refuses a contract that is not a complete version 8: the ten prediction
+-- tables, the nine published-EPG tables, and both authority rows. A refusal
+-- creates nothing. The version becomes 9 and never goes down.
+-- 0009 before 0008, and 0007 after 0009, are not supported production paths.
 -- A deploy does not apply this file. The inserted marker is mode r2.
 -- Applying this file does not copy admin/owner-reviews.json and does not set mode d1.
 -- source_key is the programme stored id (film) or the role-specific person id.
@@ -17,7 +15,36 @@
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
-WHERE NOT EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version >= 6);
+WHERE NOT EXISTS (
+ SELECT 1 FROM schema_contract
+ WHERE id = 1 AND version >= 8 AND version < 9
+ AND (
+  SELECT COUNT(*) FROM sqlite_master
+  WHERE type = 'table' AND name IN (
+   'prediction_domain_authority',
+   'prediction_domain_cas',
+   'prediction_profile',
+   'prediction_fingerprint',
+   'prediction_pointer',
+   'prediction_lineage',
+   'prediction_queue',
+   'prediction_lease',
+   'prediction_run',
+   'prediction_domain_intent',
+   'published_epg_authority',
+   'published_epg_cas',
+   'published_epg_generation',
+   'published_epg_document',
+   'published_epg_member',
+   'published_epg_show',
+   'published_epg_stage',
+   'published_epg_stage_chunk',
+   'published_epg_stage_row'
+  )
+ ) = 19
+ AND EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1)
+ AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id = 1)
+);
 
 CREATE TABLE owner_review_authority (
  id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -58,6 +85,6 @@ VALUES (1, 'r2', 0, 0, NULL, 'open');
 INSERT INTO owner_review_cas (id, ok) VALUES (1, 1);
 
 UPDATE schema_contract
-SET version = CASE WHEN version < 9 THEN 9 ELSE version END,
-    note = CASE WHEN version < 9 THEN 'Schema v9: owner-review authority. Marker mode r2 until a separate activation. A higher contract version is left in place. Version 9 does not imply prediction or published-EPG tables.' ELSE note END
-WHERE id = 1 AND version >= 6;
+SET version = 9,
+    note = 'Schema v9: owner-review authority. Marker mode r2 until a separate activation. Version 9 follows a complete version 8 and does not by itself prove those earlier tables are still present.'
+WHERE id = 1 AND version >= 8 AND version < 9;

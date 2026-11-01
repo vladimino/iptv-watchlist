@@ -220,20 +220,50 @@ function adminProjection(programme,titles,people,clock,reviews){
  persons.sort((left,right)=>left.roleId.localeCompare(right.roleId,'en'));
  return {films,people:persons,personSubjects};
 }
+// While the published EPG marker is d1, the pointer and the programme body come from D1.
+// A missing document or a failed read does not fall through to another R2 generation.
+// Dictionaries and the review overlay stay R2. PublishedEpg is absent in tests that load this file alone.
+async function adminD1Programme(env){
+ if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.currentGeneration!=='function')return null;
+ const live=await PublishedEpg.currentGeneration(env);
+ if(!live)return null;
+ if(live.programmeRunId&&typeof PublishedEpg.repairMirrors==='function')await PublishedEpg.repairMirrors(env).catch(()=>{});
+ const run=typeof live.programmeRunId==='string'&&ADMIN_RUN_ID.test(live.programmeRunId)?live.programmeRunId:null;
+ if(!run)return {error:'programme_unavailable'};
+ const body=await PublishedEpg.readDocument(env,run,'programme');
+ if(!body||body.runId!==run)return {error:'programme_unavailable'};
+ const again=await PublishedEpg.currentGeneration(env);
+ if(!again||again.fence!==live.fence||again.programmeRunId!==run)return {moved:true};
+ const programmeVersion=await adminDigest(JSON.stringify(body));
+ const uploaded=typeof body.updatedAt==='string'&&body.updatedAt?body.updatedAt:null;
+ return {
+  run,
+  pointer:{present:true,version:live.fence,etag:live.fence,uploaded,authority:'d1',body:{programmeRunId:run,phase:'published'}},
+  programme:{present:true,version:programmeVersion,etag:programmeVersion,uploaded,body},
+ };
+}
 // The snapshot read in the order the contract fixes: pointer, generation programme, pointer again, dictionaries. One retry
 // when the pointer moved between the two reads; a second move is a failure, not a page of mixed generations.
 async function adminLoadSnapshot(env,hasPin){
  const bucket=env.BUCKET,cache=ADMIN_SNAPSHOT_CACHE;
  for(let attempt=1;attempt<=2;attempt++){
-  const pointer=await adminReadObject(bucket,EPG_GENERATION_KEY,null);
-  const run=pointer.present&&pointer.body?.phase==='published'&&typeof pointer.body.programmeRunId==='string'&&ADMIN_RUN_ID.test(pointer.body.programmeRunId)?pointer.body.programmeRunId:null;
-  if(!run)return {error:'programme_unavailable'};
-  const programme=await adminReadObject(bucket,epgGenerationKey(run,'programme.json'),cache&&cache.tuple.programmeRunId===run?cache.programme:null);
-  if(!programme.present||programme.body?.runId!==run)return {error:'programme_unavailable'};
-  const again=await adminReadObject(bucket,EPG_GENERATION_KEY,null);
-  if(!again.present||again.version!==pointer.version||again.body?.programmeRunId!==run){
-   if(attempt===1)continue;
-   return {error:hasPin?'stale_pin':'programme_unavailable'};
+  const d1=await adminD1Programme(env);
+  let pointer,run,programme;
+  if(d1){
+   if(d1.error)return {error:d1.error};
+   if(d1.moved){if(attempt===1)continue;return {error:hasPin?'stale_pin':'programme_unavailable'};}
+   pointer=d1.pointer;run=d1.run;programme=d1.programme;
+  }else{
+   pointer=await adminReadObject(bucket,EPG_GENERATION_KEY,null);
+   run=pointer.present&&pointer.body?.phase==='published'&&typeof pointer.body.programmeRunId==='string'&&ADMIN_RUN_ID.test(pointer.body.programmeRunId)?pointer.body.programmeRunId:null;
+   if(!run)return {error:'programme_unavailable'};
+   programme=await adminReadObject(bucket,epgGenerationKey(run,'programme.json'),cache&&cache.tuple.programmeRunId===run?cache.programme:null);
+   if(!programme.present||programme.body?.runId!==run)return {error:'programme_unavailable'};
+   const again=await adminReadObject(bucket,EPG_GENERATION_KEY,null);
+   if(!again.present||again.version!==pointer.version||again.body?.programmeRunId!==run){
+    if(attempt===1)continue;
+    return {error:hasPin?'stale_pin':'programme_unavailable'};
+   }
   }
   const titles=await adminReadObject(bucket,ADMIN_TITLES_KEY,cache?.titles||null);
   const people=await adminReadObject(bucket,ADMIN_PEOPLE_KEY,cache?.people||null);
@@ -250,7 +280,7 @@ async function adminLoadSnapshot(env,hasPin){
   const reviewBody=reviews.present&&reviews.body&&typeof reviews.body==='object'&&!Array.isArray(reviews.body)?reviews.body:{};
   const records=adminProjection(programme.body,titles.present&&titles.body&&typeof titles.body==='object'?titles.body:{},people.present&&people.body&&typeof people.body==='object'?people.body:{},clock,reviewBody);
   const snapshot={
-   tuple,reviewEtag:reviews.etag||null,reviewCache:reviews.present?{version:reviews.version,body:reviews.body}:null,pointer:{version:pointer.version,body:pointer.body},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},reviews:{version:reviews.version,body:reviews.present?reviews.body:null,present:reviews.present},records,
+   tuple,reviewEtag:reviews.etag||null,reviewCache:reviews.present?{version:reviews.version,body:reviews.body}:null,pointer:{version:pointer.version,body:pointer.body,...(pointer.authority?{authority:pointer.authority}:{})},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},reviews:{version:reviews.version,body:reviews.present?reviews.body:null,present:reviews.present},records,
    info:{programmeRunId:run,programmeUpdatedAt,titlesUpdatedAt,peopleUpdatedAt,skew:skewReasons.length>0,skewReasons,films:records.films.length,people:records.people.length},
   };
   ADMIN_SNAPSHOT_CACHE=snapshot;
@@ -290,7 +320,7 @@ async function adminReadRoute(request,env,url){
  }
  let snapshot;
  try{snapshot=await adminLoadSnapshot(env,pin!==null);}
- catch{return adminError('storage_unavailable',503);}
+ catch(error){if(error?.code==='owner_review_unavailable')return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return adminError('storage_unavailable',503);}
  if(snapshot.error)return adminError(snapshot.error,snapshot.error==='stale_pin'?409:503);
  if(pin&&!adminSameTuple(pin,snapshot.tuple))return adminError('stale_pin',409);
  const base={pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info};

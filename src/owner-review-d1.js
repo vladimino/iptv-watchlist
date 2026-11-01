@@ -1,17 +1,46 @@
 // ADR 0081. Owner-reviewed Film titles and Person names.
-// Schema before these tables keeps the R2 object and does not query them.
+// A confirmed contract below version 9, with these tables absent, keeps the R2
+// object. A missing binding, a missing schema_contract, or a missing version
+// row fails closed unless the caller sets OWNER_REVIEW_DB_OPTIONAL to standin.
 // Once the tables exist, mode r2 still stores the object and fences generation
 // before the put. Mode d1 reads and writes the rows and does not fall back to
-// the object. A missing binding is not this marker. This module does not import.
-// The Worker bundle wraps it in a scope.
+// the object. A d1 read takes the marker, the rows and the marker again. One
+// disagreement retries once; a second fails closed. A later consistent
+// generation is the one the response reports.
+// One commit is one batch, and a document above that budget is refused before
+// any row is deleted. This module does not import. The Worker bundle wraps it.
 
 export const OWNER_REVIEWS_KEY='admin/owner-reviews.json';
+export const OWNER_REVIEW_MAX_STATEMENTS=950;
+export const OWNER_REVIEW_MAX_BATCH_BYTES=1000000;
+export const OWNER_REVIEW_MAX_STATEMENT_BYTES=90000;
 const FENCE_SQL='UPDATE owner_review_cas SET ok=changes() WHERE id=1';
 const JSON_PUT={httpMetadata:{contentType:'application/json'}};
 const D1_BOUND_PARAMETERS=100;
+const ENTRY_SQL='SELECT kind, source_key, payload_json, identity_link, identity_state, generation FROM owner_review_entry ORDER BY kind, source_key';
 
 function failed(code,cause){const error=new Error(code);error.code=code;if(cause)error.cause=cause;return error;}
 function binding(db){return typeof db?.prepare==='function';}
+function database(source){return source&&typeof source.prepare==='function'?source:source?.DB;}
+function standin(source){return source?.OWNER_REVIEW_DB_OPTIONAL==='standin';}
+function legacyResult(version){return {legacy:true,mode:'r2',tables:false,version:version??null,failClosed:false};}
+function closedResult(version){return {legacy:false,mode:null,tables:false,version:version??null,failClosed:true};}
+function bytesOf(sql,params){
+ let size=new TextEncoder().encode(sql).length;
+ for(const value of params)size+=value==null?4:new TextEncoder().encode(String(value)).length+2;
+ return size;
+}
+function overBudget(statements){
+ if(statements.length>OWNER_REVIEW_MAX_STATEMENTS)return true;
+ let bytes=0;
+ for(const [sql,params] of statements){
+  const size=bytesOf(sql,params);
+  if(size>OWNER_REVIEW_MAX_STATEMENT_BYTES)return true;
+  bytes+=size;
+  if(bytes>OWNER_REVIEW_MAX_BATCH_BYTES)return true;
+ }
+ return false;
+}
 async function one(db,sql,params=[]){
  if(binding(db))return (await db.prepare(sql).bind(...params).first())??null;
  return (await db.get(sql,params))??null;
@@ -48,21 +77,22 @@ function payload(record){return JSON.stringify(record===undefined?null:record);}
 function revisionOf(generation){return 'd1:'+generation;}
 export function ownerReviewRevision(generation){return revisionOf(generation);}
 
-export async function readAuthority(db){
- if(!binding(db))return {legacy:true,mode:'r2',tables:false,version:null,failClosed:false};
+export async function readAuthority(source){
+ const db=database(source);
+ if(!binding(db))return standin(source)?legacyResult(null):closedResult(null);
  let version;
  try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return {legacy:true,mode:'r2',tables:false,version:null,failClosed:false};
-  return {legacy:false,mode:null,tables:false,version:null,failClosed:true};
+  if(/no such table/i.test(String(error?.message||error))&&standin(source))return legacyResult(null);
+  return closedResult(null);
  }
+ const numeric=Number(version);
+ if(version==null||!Number.isFinite(numeric))return standin(source)?legacyResult(null):closedResult(version);
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('owner_review_entry','owner_review_authority','owner_review_cas')")).map(row=>row.name);}
- catch{return {legacy:false,mode:null,tables:false,version,failClosed:true};}
+ catch{return closedResult(numeric);}
  const tables=names.includes('owner_review_entry')&&names.includes('owner_review_authority')&&names.includes('owner_review_cas');
- if(!tables)return Number(version)>=9
-  ?{legacy:false,mode:null,tables:false,version,failClosed:true}
-  :{legacy:true,mode:'r2',tables:false,version,failClosed:false};
+ if(!tables)return numeric>=9?closedResult(numeric):legacyResult(numeric);
  let row;
  try{row=await one(db,'SELECT mode, generation, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag, writes FROM owner_review_authority WHERE id=1');}
  catch{return {legacy:false,mode:null,tables:true,version,failClosed:true};}
@@ -83,6 +113,38 @@ export async function readDocument(db){
   else return null;
  }
  return {contractVersion:1,films,people};
+}
+function documentFrom(rows,generation){
+ const films={},people={};
+ for(const row of rows){
+  if(Number(row.generation)!==generation)return null;
+  let parsed;
+  try{parsed=JSON.parse(row.payload_json);}catch{return null;}
+  if(row.kind==='film')films[row.source_key]=parsed;
+  else if(row.kind==='person')people[row.source_key]=parsed;
+  else return null;
+ }
+ return {contractVersion:1,films,people};
+}
+export async function readFenced(source){
+ const db=database(source);
+ if(!binding(db))return {ok:false};
+ for(let attempt=0;attempt<2;attempt++){
+  let before,rows,after;
+  try{
+   before=await one(db,'SELECT mode, generation, writes FROM owner_review_authority WHERE id=1');
+   rows=await many(db,ENTRY_SQL);
+   after=await one(db,'SELECT mode, generation, writes FROM owner_review_authority WHERE id=1');
+  }catch{return {ok:false};}
+  if(!before||!after||!rows)continue;
+  if(before.mode!==after.mode||Number(before.generation)!==Number(after.generation)||before.writes!==after.writes)continue;
+  const generation=Number(before.generation);
+  const body=documentFrom(rows,generation);
+  if(!body)continue;
+  const links=rows.map(row=>({kind:row.kind,sourceKey:row.source_key,identityLink:row.identity_link??null,identityState:row.identity_state}));
+  return {ok:true,mode:before.mode,generation,writes:before.writes,body,links};
+ }
+ return {ok:false};
 }
 
 async function classify(db,kind,sourceKey){
@@ -165,12 +227,14 @@ export async function commit(env,{expectedRevision=null,document}={}){
  if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
  if(gate.mode==='d1'){
   if(expectedRevision!==revisionOf(gate.generation))return {ok:false,reason:'version_conflict'};
+  if(entriesOf(next).length+3>OWNER_REVIEW_MAX_STATEMENTS)return {ok:false,reason:'owner_review_too_large'};
   const generation=gate.generation+1;
   const statements=[
    ['UPDATE owner_review_authority SET generation=? WHERE id=1 AND mode=\'d1\' AND writes=\'open\' AND generation=?',[generation,gate.generation]],
    [FENCE_SQL,[]],
    ...await replaceStatements(db,next,generation),
   ];
+  if(overBudget(statements))return {ok:false,reason:'owner_review_too_large'};
   try{await fenced(db,statements);}catch(error){return {ok:false,reason:error.code==='owner_review_cas'?'version_conflict':'commit_unknown'};}
   const after=await readAuthority(db);
   if(after.generation!==generation||after.mode!=='d1')return {ok:false,reason:'commit_unknown'};
@@ -193,26 +257,26 @@ export async function commit(env,{expectedRevision=null,document}={}){
 }
 
 export async function readBack(env){
- const gate=await readAuthority(env?.DB);
+ const gate=await readAuthority(env);
  if(gate.legacy||gate.mode==='r2')return null;
  if(gate.failClosed||gate.mode!=='d1')return {unavailable:true};
- const body=await readDocument(env.DB);
- if(!body)return {unavailable:true};
- return {body};
+ const snap=await readFenced(env);
+ if(!snap.ok||snap.mode!=='d1')return {unavailable:true};
+ return {body:snap.body};
 }
 
 export async function loadSnapshotReviews(env){
- const gate=await readAuthority(env?.DB);
+ const gate=await readAuthority(env);
  if(gate.legacy||gate.mode==='r2')return null;
  if(gate.failClosed||gate.mode!=='d1')throw failed('owner_review_unavailable');
- const body=await readDocument(env.DB);
- if(!body)throw failed('owner_review_unavailable');
- const version=revisionOf(gate.generation);
- return {present:true,version,etag:version,uploaded:null,body,reused:false};
+ const snap=await readFenced(env);
+ if(!snap.ok||snap.mode!=='d1')throw failed('owner_review_unavailable');
+ const version=revisionOf(snap.generation);
+ return {present:true,version,etag:version,uploaded:null,body:snap.body,reused:false};
 }
 
 export async function loadForRead(env){
- const gate=await readAuthority(env?.DB);
+ const gate=await readAuthority(env);
  if(gate.failClosed)return {ok:false,unavailable:true,body:null};
  if(gate.legacy||gate.mode==='r2'){
   let object;
@@ -221,9 +285,9 @@ export async function loadForRead(env){
   try{return {ok:true,unavailable:false,body:await object.json(),mode:gate.mode||'r2'};}
   catch{return {ok:false,unavailable:true,body:null};}
  }
- const body=await readDocument(env.DB);
- if(!body)return {ok:false,unavailable:true,body:null};
- return {ok:true,unavailable:false,body,mode:'d1',revision:revisionOf(gate.generation)};
+ const snap=await readFenced(env);
+ if(!snap.ok||snap.mode!=='d1')return {ok:false,unavailable:true,body:null};
+ return {ok:true,unavailable:false,body:snap.body,mode:'d1',revision:revisionOf(snap.generation)};
 }
 
 function ownerText(entry){
@@ -280,7 +344,7 @@ export async function readLinks(db){
 }
 
 export async function overlayCatalogResponse(env,response){
- const gate=await readAuthority(env?.DB);
+ const gate=await readAuthority(env);
  if(gate.legacy)return response;
  if(gate.failClosed)return jsonUnavailable();
  if(!response||response.status!==200)return response;
@@ -288,9 +352,9 @@ export async function overlayCatalogResponse(env,response){
  try{body=await response.json();}catch{return response;}
  let document,links=[];
  if(gate.mode==='d1'){
-  document=await readDocument(env.DB);
-  links=await readLinks(env.DB);
-  if(!document||!links)return jsonUnavailable();
+  const snap=await readFenced(env);
+  if(!snap.ok||snap.mode!=='d1')return jsonUnavailable();
+  document=snap.body;links=snap.links;
  }else{
   const loaded=await loadForRead(env);
   if(!loaded.ok)return jsonUnavailable();
@@ -397,6 +461,7 @@ export async function importOwnerReviews(db,bucket,{confirm}={}){
   const again=await bucket.head(OWNER_REVIEWS_KEY);
   if((again?.etag??null)!==(object.etag??null))throw failed('owner_review_fence');
  }
+ if(entriesOf(document).length+5>OWNER_REVIEW_MAX_STATEMENTS)throw failed('owner_review_too_large');
  const generation=gate.generation+1;
  const statements=[
   ['UPDATE owner_review_authority SET writes=\'held\' WHERE id=1 AND mode=\'r2\' AND writes=\'open\' AND generation=?',[gate.generation]],
@@ -405,6 +470,7 @@ export async function importOwnerReviews(db,bucket,{confirm}={}){
   ['UPDATE owner_review_authority SET generation=?, mirror_generation=?, mirror_etag=?, writes=\'open\' WHERE id=1 AND mode=\'r2\' AND writes=\'held\' AND generation=?',[generation,generation,object?.etag??null,gate.generation]],
   [FENCE_SQL,[]],
  ];
+ if(overBudget(statements))throw failed('owner_review_too_large');
  await fenced(db,statements);
  const after=await readAuthority(db);
  if(after.mode!=='r2'||after.generation!==generation||after.writes!=='open')throw failed('owner_review_cas');

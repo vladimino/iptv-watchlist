@@ -23,7 +23,10 @@ const reviewKey=(fs.readFileSync('src/admin/owner-reviews.js','utf8').match(/OWN
 assert.equal(reviewKey,'admin/owner-reviews.json');
 const workerSource=fs.readFileSync('src/worker.js','utf8');
 assert.equal((workerSource.match(/admin\/owner-reviews\.json/g)||[]).length,1,'the overlay key lives in one helper; the EPG commit does not name it');
-assert.deepEqual(workerSource.split('\n').filter(line=>line.includes('publishedOwnerReviews')).map(line=>line.includes("pathname==='/api/programme'")?'programme':line.includes("pathname==='/api/watchlist'")?'watchlist':'helper'),['helper','programme','watchlist'],'programme and watchlist reads pass the overlay');
+const programmeHandler=workerSource.slice(workerSource.indexOf("pathname==='/api/programme'"),workerSource.indexOf("pathname==='/api/watchlist'"));
+const watchlistHandler=workerSource.slice(workerSource.indexOf("pathname==='/api/watchlist'"),workerSource.indexOf("pathname==='/api/catalog/available'"));
+assert.match(programmeHandler,/publishedOwnerReviews/);
+assert.match(watchlistHandler,/publishedOwnerReviews/);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,Math,String});
 vm.runInContext(domain+'\n'+review+'\n'+titleReview+'\nglobalThis.api={personView,applyAutomaticLocalization,applyReviewedLocalization,transition,NAME_REVIEW_CONTRACT_VERSION,NAME_REVIEW_MODES,personNameVersion,personNameOptions,personNameCollisions,personNameState,personNameProjection,validatePersonNameReview,applyPersonNameReview,personNameReviewCompletion,reconcilePersonName};',ctx);

@@ -188,7 +188,23 @@ function displayOf(value){
  const {r2Key:_key,contentSha256:_sha,replacedAt:_at,...body}=value;
  return body;
 }
-function fingerprintKey(filmId,hash){return 'enrichment/films/'+encodeURIComponent(filmId)+'/fingerprints/'+hash+'.json';}
+export function fingerprintKey(filmId,hash){return 'enrichment/films/'+encodeURIComponent(filmId)+'/fingerprints/'+hash+'.json';}
+const FINGERPRINT_PROVENANCE=new Set(['generatedAt','invalidatedAt','fingerprintPromptVersion','produced','fields','previous']);
+export function fingerprintBodyFromPointer(record){
+ if(!record||typeof record!=='object'||typeof record.fingerprintHash!=='string'||!record.fingerprintHash)return null;
+ const body={};
+ for(const [key,value] of Object.entries(record))if(!FINGERPRINT_PROVENANCE.has(key))body[key]=value;
+ return body.fingerprintHash===record.fingerprintHash?body:null;
+}
+export async function fingerprintContentHash(value){return sha256(value);}
+export async function fingerprintPointerAgrees(record){
+ const body=fingerprintBodyFromPointer(record);
+ if(!body)return null;
+ const {fingerprintHash:_hash,...hashed}=body;
+ if(await sha256(hashed)!==record.fingerprintHash)return null;
+ return body;
+}
+export async function sameCanonical(left,right){return await sha256(left)===await sha256(right);}
 function profileKey(version){return 'enrichment/profile/versions/'+version+'.json';}
 
 function queuePieces(text){
@@ -597,6 +613,16 @@ function expectedParity(snapshot){
  const profile=snapshot?.profile?snapshot.profile.version+'\n'+snapshot.profile.profileHash:null;
  return {fingerprints,pointers,lineage,queue:snapshot?.queue==null?null:JSON.stringify(snapshot.queue),profile,latestRunId:snapshot?.latestRunId??null,runs:(snapshot?.runs||[]).length,leases:0};
 }
+async function assertFingerprintBodies(bucket,snapshot){
+ const items=snapshot?.fingerprints;
+ if(!Array.isArray(items))return;
+ for(const item of items){
+  const hash=item?.record?.fingerprintHash;
+  if(typeof hash!=='string'||!hash)throw failed('prediction_domain_body_missing');
+  const stored=await readBody(bucket,fingerprintKey(item.filmId,hash));
+  if(stored.fingerprintHash!==hash)throw failed('prediction_domain_body_mismatch');
+ }
+}
 function parityAgrees(live,expected){
  const normalized=value=>({...value,fingerprints:[...value.fingerprints].sort(),pointers:[...value.pointers].sort()});
  return JSON.stringify(normalized(live))===JSON.stringify(normalized(expected));
@@ -608,6 +634,8 @@ export async function importPredictionDomain(db,bucket,snapshot,options={}){
  if(!sameFence(authority,fence))throw failed('prediction_domain_cas');
  const now=options.now??Date.now();
  if(leasesBusy(options.leases??snapshot?.leases,now))throw failed('prediction_domain_busy');
+ // A missing immutable fingerprint body must not hold writers or copy a prefix of the rows.
+ await assertFingerprintBodies(bucket,snapshot);
  let committed=0;
  let source=snapshot;
  try{

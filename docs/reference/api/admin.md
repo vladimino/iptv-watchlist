@@ -20,6 +20,8 @@ Exactly these objects, in this order, on every request. There is no `BUCKET.list
 
 Each object's version is its R2 etag; when the object exists and the etag is empty, the version is the SHA-256 of the loaded bytes. A missing etag is never "unchanged". `updatedAt` is not a match key.
 
+While `published_epg_authority.mode` is `d1` ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md)), steps 1 and 3 are one read of that D1 pointer and step 2 is `published_epg_document` for the same run. The generation etag in the pin is the D1 fence token, and the programme etag is the SHA-256 of the D1 document. The root `programme.json` is still not read. A failed D1 read is `503`, not a fallthrough to another R2 generation. Dictionaries and `admin/owner-reviews.json` stay R2. The poster and discovery-index reads use the same D1 run and still load their R2 generation copies. This is not the production path until `0008` is applied and a later activation sets the marker. The table above remains the path while the marker is `r2` or the migration is absent.
+
 A failure of R2 itself (an exception from the binding) is 503 `storage_unavailable`. No retry reaches a writer and nothing is repaired.
 
 ### Warm isolate

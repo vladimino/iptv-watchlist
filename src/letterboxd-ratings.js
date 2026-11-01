@@ -73,7 +73,12 @@ const LetterboxdRatings=(()=>{
   const reply=(runId,created,nextAction,reason,extra={})=>({runId,created,nextAction,reason,...extra});
   const state=await migrationState(env);
   if(state.migration!=='complete')return reply(null,false,'stop','not_migrated',{migration:state.migration});
-  const pointer=(await read(env,EPG_GENERATION_KEY)).value;
+  let pointer=null;
+  if(typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
+   const live=await PublishedEpg.currentGeneration(env);
+   if(live)pointer={phase:live.phase,programmeRunId:live.programmeRunId};
+  }
+  if(!pointer)pointer=(await read(env,EPG_GENERATION_KEY)).value;
   const pinned={programmeRunId:pointer?.phase==='published'&&pointer.programmeRunId?pointer.programmeRunId:null,removalPending:Object.values(state.queue?.films||{}).filter(entry=>entry.state==='pending').length};
   for(let attempt=0;attempt<5;attempt++){
    const {object,value:stored}=await read(env,KEYS.run);
