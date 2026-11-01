@@ -267,7 +267,9 @@ async function adminLoadSnapshot(env,hasPin){
   }
   const titles=await adminReadObject(bucket,ADMIN_TITLES_KEY,cache?.titles||null);
   const people=await adminReadObject(bucket,ADMIN_PEOPLE_KEY,cache?.people||null);
-  const reviews=await adminReadObject(bucket,'admin/owner-reviews.json',cache?.reviews||null);
+  let reviews=null;
+  if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.loadSnapshotReviews==='function')reviews=await OwnerReview.loadSnapshotReviews(env,cache?.reviews||null);
+  if(!reviews)reviews=await adminReadObject(bucket,'admin/owner-reviews.json',cache?.reviews||null);
   const tuple=adminTuple(run,pointer,programme,titles,people,reviews);
   if(cache&&adminSameTuple(cache.tuple,tuple))return cache;
   const programmeUpdatedAt=typeof programme.body.updatedAt==='string'&&programme.body.updatedAt?programme.body.updatedAt:programme.uploaded||(typeof pointer.body.publishedAt==='string'?pointer.body.publishedAt:null);
@@ -318,7 +320,7 @@ async function adminReadRoute(request,env,url){
  }
  let snapshot;
  try{snapshot=await adminLoadSnapshot(env,pin!==null);}
- catch{return adminError('storage_unavailable',503);}
+ catch(error){if(error?.code==='owner_review_unavailable')return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return adminError('storage_unavailable',503);}
  if(snapshot.error)return adminError(snapshot.error,snapshot.error==='stale_pin'?409:503);
  if(pin&&!adminSameTuple(pin,snapshot.tuple))return adminError('stale_pin',409);
  const base={pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info};

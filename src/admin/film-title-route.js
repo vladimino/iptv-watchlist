@@ -27,6 +27,16 @@ function filmTitleStored(doc,storedId,requestId,version,applied){
  }
  return true;
 }
+async function filmTitlePersist(env,snapshot,next){
+ if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.commit==='function'){
+  const committed=await OwnerReview.commit(env,{expectedRevision:snapshot.tuple.reviewsVersion||null,document:next});
+  if(committed)return committed;
+ }
+ const etag=snapshot.tuple.reviewsVersion||null;
+ const saved=await env.BUCKET.put(OWNER_REVIEWS_KEY,JSON.stringify(next),{onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
+ if(saved===null)return {ok:false,reason:'version_conflict',legacy:true};
+ return {ok:true,legacy:true};
+}
 async function filmTitleReviewRoute(request,env,url){
  if(request.method!=='POST')return adminError('method_not_allowed',405);
  if(!filmTitlePrincipal(request,url))return json({error:'forbidden',reason:'forbidden'},403);
@@ -52,14 +62,29 @@ async function filmTitleReviewRoute(request,env,url){
   if(!applied.changed){const body={ok:true,changed:false,idempotent:!!applied.idempotent,version:applied.version,readback:true,titleReview:titleReviewState(applied.film)};if(applied.reason)body.reason=applied.reason;return json(body);}
   const doc=ownerReviewsNormalize(snapshot.reviews&&snapshot.reviews.body);
   if(!doc)return json({error:'storage_unavailable',reason:'overlay_invalid'},503);
-  const etag=snapshot.tuple.reviewsVersion||null;
   const next=ownerReviewsWithFilm(doc,storedId,ownerFilmSlice(applied.film));
-  const saved=await bucket.put(OWNER_REVIEWS_KEY,JSON.stringify(next),{onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
-  if(saved===null)continue;
+  const persisted=await filmTitlePersist(env,snapshot,next);
+  if(!persisted.ok){
+   if(persisted.reason==='owner_review_too_large')return json({error:'owner_review_too_large',reason:'owner_review_too_large',recovery:'The stored history was not changed. The document exceeds one storage batch.'},413);
+   if(persisted.reason==='commit_unknown'||persisted.reason==='readback_failed'||persisted.reason==='writes_held'||persisted.reason==='owner_review_unavailable'||persisted.reason==='overlay_invalid')return json({error:'storage_unavailable',reason:persisted.reason},503);
+   continue;
+  }
   ADMIN_SNAPSHOT_CACHE=null;
-  const back=await bucket.get(OWNER_REVIEWS_KEY);
-  let stored=null;try{stored=back?await back.json():null;}catch{stored=null;}
-  const normalized=ownerReviewsNormalize(stored);
+  let normalized;
+  if(persisted.legacy){
+   const back=await bucket.get(OWNER_REVIEWS_KEY);
+   let stored=null;try{stored=back?await back.json():null;}catch{stored=null;}
+   normalized=ownerReviewsNormalize(stored);
+  }else{
+   const read=typeof OwnerReview==='undefined'?null:await OwnerReview.readBack(env);
+   if(read?.unavailable)return json({error:'storage_unavailable',reason:'readback_failed'},503);
+   if(read?.body)normalized=ownerReviewsNormalize(read.body);
+   else{
+    const back=await bucket.get(OWNER_REVIEWS_KEY);
+    let stored=null;try{stored=back?await back.json():null;}catch{stored=null;}
+    normalized=ownerReviewsNormalize(stored);
+   }
+  }
   if(!filmTitleStored(normalized,storedId,command.requestId,applied.version,applied))return json({error:'storage_unavailable',reason:'readback_failed'},503);
   return json({ok:true,changed:true,idempotent:false,version:applied.version,readback:true,titleReview:titleReviewState(applied.film)});
  }

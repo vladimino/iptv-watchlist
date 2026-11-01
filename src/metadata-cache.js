@@ -1,7 +1,8 @@
 // ADR 0073. The metadata.json working set used by beginSync and metadataSync.
-// Schema v5 keeps the R2 object and does not write these tables. Schema v6 with a missing
-// table or marker fails closed. Mode d1 reads and writes this table and does not fall back
-// to the object. This module does not import. The Worker bundle wraps it in a scope.
+// Schema v5 keeps the R2 object and does not write these tables. Schema v6 or later with a missing
+// table or marker fails closed. A later contract version does not by itself drop d1 mode while
+// the cache tables and a valid marker row are present. Mode d1 reads and writes this table and
+// does not fall back to the object. This module does not import. The Worker bundle wraps it in a scope.
 
 export const METADATA_FRESH_MS=30*86400000;
 const MIRROR_KEY='metadata.json';
