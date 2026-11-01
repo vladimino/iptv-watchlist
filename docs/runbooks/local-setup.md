@@ -1,6 +1,6 @@
 # Local setup
 
-`npm run dev` builds the Worker when `src/`, `public/`, `data/`, or `build.mjs` is newer than `dist/server/index.js`, then serves it at `http://127.0.0.1:8787` with a local R2 bucket. Nothing is written to Cloudflare. `npm run dev -- --watch` rebuilds those sources while the server is running.
+`npm run dev` builds the Worker when `src/`, `public/`, `data/`, or `build.mjs` is newer than `dist/server/index.js`, then serves it at `http://127.0.0.1:8787` with a local R2 bucket. Nothing is written to Cloudflare. `npm run dev -- --watch` rebuilds those sources while the server is running. That process has no D1 binding. Its generated config sets `PUBLISHED_EPG_DB_OPTIONAL` to `standin`, so the local programme stays on those R2 objects. The committed `wrangler.jsonc` does not set that variable: a production Worker without `DB` fails closed.
 
 ## Dummy site
 

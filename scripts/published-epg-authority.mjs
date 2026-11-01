@@ -2,7 +2,7 @@
 // Offline operator for the published EPG marker (ADR 0079). Default is read-only status.
 // --load copies local programme.json and watchlist.json into D1 and leaves mode r2.
 // --activate sets mode d1 only when the stored mirror etag is still that pointer file.
-// --revert sets mode r2 only when the pointer and programme.json match D1, and it keeps the rows.
+// --revert repairs the pointer, programme.json, watchlist.json and their generation copies, then sets mode r2. It keeps the rows.
 // Each write refuses without its own --confirm. This process never selects production D1 and never calls the network.
 import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
@@ -54,11 +54,23 @@ function etagOf(text){let hash=2166136261;for(let i=0;i<text.length;i++)hash=Mat
 function readFile(file){return fs.readFileSync(file,'utf8');}
 function bucket(){
  const files=new Map([['epg/published-generation.json',pointerPath],['programme.json',programmePath],['watchlist.json',watchlistPath]]);
- const read=key=>{const file=files.get(key);if(!file||!fs.existsSync(file))return null;return readFile(file);};
+ const extra=new Map();
+ const read=key=>{
+  if(extra.has(key))return extra.get(key);
+  const file=files.get(key);
+  if(!file||!fs.existsSync(file))return null;
+  return readFile(file);
+ };
  return {
   async get(key){const text=read(key);return text==null?null:{etag:etagOf(text),json:async()=>JSON.parse(text),text:async()=>text};},
   async head(key){const text=read(key);return text==null?null:{etag:etagOf(text)};},
-  async put(key,body){const file=files.get(key);if(!file)return null;fs.writeFileSync(file,String(body));return {etag:etagOf(String(body))};},
+  async put(key,body){
+   const text=String(body);
+   const file=files.get(key);
+   if(file){fs.writeFileSync(file,text);return {etag:etagOf(text)};}
+   if(/^epg\/generations\/[^/]+\/(?:programme|watchlist)\.json$/.test(key)){extra.set(key,text);return {etag:etagOf(text)};}
+   return null;
+  },
  };
 }
 const status=await readAuthority(db);

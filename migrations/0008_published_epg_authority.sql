@@ -1,8 +1,10 @@
 -- Schema v8: the published EPG generation, its pointer, programme shows and
 -- watchlist membership (ADR 0079). Additive. It does not alter 0001-0006 and
 -- does not create Film, candidate or prediction rows. 0007 is the open
--- prediction migration; this file does not add those tables and does not
--- lower schema_contract.version. A deploy does not apply this file.
+-- prediction migration; this file does not add those tables. On a contract
+-- below 7 the version stays put, so a reader that requires those tables from
+-- version 7 keeps R2. From 7 upward the version moves to 8 and never down.
+-- A deploy does not apply this file.
 -- The inserted marker is mode r2. Applying this file does not publish a
 -- generation and does not set mode d1.
 -- film_id is the id carried by the published document. It is not a foreign
@@ -118,7 +120,16 @@ INSERT INTO published_epg_authority (id, mode, programme_run_id, generation, mir
 VALUES (1, 'r2', NULL, 0, NULL, NULL, 0, NULL);
 INSERT INTO published_epg_cas (id, ok) VALUES (1, 1);
 
+CREATE TRIGGER schema_contract_no_downgrade
+BEFORE UPDATE OF version ON schema_contract
+FOR EACH ROW
+WHEN NEW.id = 1 AND NEW.version < OLD.version
+BEGIN
+ SELECT RAISE(ABORT, 'schema_contract_downgrade');
+END;
+
 UPDATE schema_contract
-SET version = CASE WHEN version < 8 THEN 8 ELSE version END,
-    note = 'Schema v8: published EPG authority. Marker mode r2 until a separate activation.'
-WHERE id = 1 AND version >= 6;
+SET version = CASE WHEN version >= 7 AND version < 8 THEN 8 ELSE version END,
+    note = 'Schema v8: published EPG authority. Below 7 the version stays put. Marker mode r2 until a separate activation.'
+WHERE id = 1 AND version >= 6
+ AND (version < 7 OR EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prediction_domain_authority'));

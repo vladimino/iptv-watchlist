@@ -1,8 +1,11 @@
 // ADR 0079. The published programme generation, its pointer, show rows and
-// watchlist membership. Schema v6 and v7, and a missing binding, keep the R2
-// objects. Schema v8 with a missing table or marker fails closed. Mode d1
-// reads and writes these tables and does not fall back to a different R2
-// generation. This module does not import. The Worker bundle wraps it.
+// watchlist membership. The nine tables plus the marker are the authority.
+// Schema v6 keeps today's version number so a prediction reader that requires
+// its own tables from version 7 stays on R2 until that migration. Version 8
+// with a missing table or marker fails closed. A missing binding fails closed
+// unless the caller sets PUBLISHED_EPG_DB_OPTIONAL to standin. Mode d1 reads
+// and writes these tables and does not fall back to a different R2 generation.
+// This module does not import. The Worker bundle wraps it.
 // The publisher uses the Worker binding's batch. It does not send the offline
 // REST body, and it does not write Film, candidate or prediction rows.
 
@@ -140,9 +143,19 @@ function pack(stageId,rows,statementCap,byteCap){
  return chunks;
 }
 
+export function advancedFence(before,after){
+ const left=/^d1:(\d+):(.*)$/.exec(String(before??''));
+ const right=/^d1:(\d+):(.*)$/.exec(String(after??''));
+ if(!left||!right||left[2]!==right[2])return false;
+ return Number(right[1])===Number(left[1])+1;
+}
+
 export async function readAuthority(db){
  const target=database(db);
- if(!target)return {mode:'r2',tables:false,version:null,ready:false};
+ if(!target){
+  if(db?.PUBLISHED_EPG_DB_OPTIONAL==='standin')return {mode:'r2',tables:false,version:null,ready:false};
+  throw failed('published_epg_unavailable');
+ }
  let version;
  try{version=(await one(target,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
@@ -153,8 +166,11 @@ export async function readAuthority(db){
  try{names=(await many(target,"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'published_epg%'")).map(row=>row.name);}
  catch(error){throw failed('published_epg_unavailable',error);}
  const tables=TABLES.every(name=>names.includes(name));
- if(!(Number(version)>=8))return {mode:'r2',tables,version,ready:false};
- if(!tables)throw failed('published_epg_unavailable');
+ if(!tables){
+  if(Number(version)>=8)throw failed('published_epg_unavailable');
+  return {mode:'r2',tables:false,version,ready:false};
+ }
+ if(!(Number(version)>=6))return {mode:'r2',tables,version,ready:false};
  let row;
  try{row=await one(target,'SELECT mode, programme_run_id AS programmeRunId, generation, mirror_programme_run_id AS mirrorProgrammeRunId, mirror_etag AS mirrorEtag, watchlist_generation AS watchlistGeneration, mirror_watchlist_etag AS mirrorWatchlistEtag FROM published_epg_authority WHERE id=1');}
  catch(error){throw failed('published_epg_unavailable',error);}
@@ -180,6 +196,14 @@ export async function readDocument(env,programmeRunId,kind){
  for(let index=0;index<rows.length;index++){if(Number(rows[index].ordinal)!==index)throw failed('published_epg_unavailable');text+=rows[index].payload_json;}
  try{return JSON.parse(text);}
  catch{throw failed('published_epg_unavailable');}
+}
+export async function readDocumentAt(env,programmeRunId,kind,generation){
+ const opened=await currentGeneration(env);
+ if(!opened||opened.programmeRunId!==programmeRunId||opened.generation!==generation)throw failed('published_epg_fence');
+ const document=await readDocument(env,programmeRunId,kind);
+ const closed=await currentGeneration(env);
+ if(!closed||closed.generation!==generation||closed.programmeRunId!==programmeRunId)throw failed('published_epg_fence');
+ return document;
 }
 export async function readShows(env,programmeRunId){
  const rows=await many(database(env),'SELECT film_id, channel_id, channel, start_ms, end_ms, epg_title, basis, match_reason FROM published_epg_show WHERE programme_run_id=? ORDER BY film_id, start_ms, channel_id',[programmeRunId]);
@@ -240,21 +264,30 @@ function copyStatements(target,stageId){
   ['INSERT INTO published_epg_show (programme_run_id,film_id,channel_id,start_ms,end_ms,channel,epg_title,basis,match_reason) SELECT ?,film_id,channel_id,start_ms,end_ms,channel,epg_title,basis,match_reason FROM published_epg_stage_row WHERE programme_run_id=? AND kind=\'show\'',[target,stageId]],
  ];
 }
-async function commitPublish(db,stage,claim,authority,expected,now){
+function claimStillHeld(stage,claim,now,ttl){
  const stamp=new Date(now).toISOString();
+ return ['UPDATE published_epg_stage SET claim_expires_at=?, updated_at=? WHERE programme_run_id=? AND owner_token=? AND claim_nonce=? AND claim_generation=? AND state=\'validated\' AND claim_expires_at>?',[now+ttl,stamp,stage.id,stage.owner,claim.nonce,claim.generation,now]];
+}
+async function commitPublish(db,stage,claim,authority,expected,now,ttl){
+ const stamp=new Date(now).toISOString();
+ const generation=stage.expectedGeneration??authority.generation;
  const move=stage.phase==='published'
-  ?['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1 WHERE id=1 AND mode=\'d1\' AND generation=? AND programme_run_id IS ?',[stage.target,authority.generation,expected]]
-  :['UPDATE published_epg_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND generation=?',[authority.generation]];
+  ?['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1 WHERE id=1 AND mode=\'d1\' AND generation=? AND programme_run_id IS ?',[stage.target,generation,expected]]
+  :['UPDATE published_epg_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND generation=?',[generation]];
  await fenced(db,[
+  claimStillHeld(stage,claim,now,ttl),
+  [FENCE_SQL,[]],
   move,
   [FENCE_SQL,[]],
   ['INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES (?,?,?,?,?)',[stage.target,stage.phase,stage.publishedAt,stage.sha,stamp]],
   ...copyStatements(stage.target,stage.id),
-  ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND claim_nonce=? AND state=\'validated\'',[stamp,stage.id,claim.nonce]],
+  ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND owner_token=? AND claim_nonce=? AND claim_generation=? AND state=\'validated\'',[stamp,stage.id,stage.owner,claim.nonce,claim.generation]],
+  [FENCE_SQL,[]],
  ]);
 }
-async function commitReplace(db,stage,claim,authority,kind,now){
+async function commitReplace(db,stage,claim,authority,kind,now,ttl){
  const stamp=new Date(now).toISOString();
+ const generation=stage.expectedGeneration??authority.generation;
  const clears=kind==='watchlist'
   ?[
    ['DELETE FROM published_epg_document WHERE programme_run_id=? AND kind=\'watchlist\'',[stage.target]],
@@ -266,12 +299,15 @@ async function commitReplace(db,stage,claim,authority,kind,now){
    ['DELETE FROM published_epg_show WHERE programme_run_id=?',[stage.target]],
   ];
  await fenced(db,[
-  ['UPDATE published_epg_authority SET generation=generation+1, watchlist_generation=CASE WHEN ?=\'watchlist\' THEN watchlist_generation+1 ELSE watchlist_generation END WHERE id=1 AND mode=\'d1\' AND generation=? AND programme_run_id=?',[kind,authority.generation,stage.target]],
+  claimStillHeld(stage,claim,now,ttl),
+  [FENCE_SQL,[]],
+  ['UPDATE published_epg_authority SET generation=generation+1, watchlist_generation=CASE WHEN ?=\'watchlist\' THEN watchlist_generation+1 ELSE watchlist_generation END WHERE id=1 AND mode=\'d1\' AND generation=? AND programme_run_id=?',[kind,generation,stage.target]],
   [FENCE_SQL,[]],
   ...clears,
   ...copyStatements(stage.target,stage.id),
   ['UPDATE published_epg_generation SET payload_sha256=? WHERE programme_run_id=?',[stage.sha,stage.target]],
-  ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND claim_nonce=? AND state=\'validated\'',[stamp,stage.id,claim.nonce]],
+  ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND owner_token=? AND claim_nonce=? AND claim_generation=? AND state=\'validated\'',[stamp,stage.id,stage.owner,claim.nonce,claim.generation]],
+  [FENCE_SQL,[]],
  ]);
 }
 async function stageCommit(db,spec,options){
@@ -281,24 +317,27 @@ async function stageCommit(db,spec,options){
  const owner=options.owner||crypto.randomUUID();
  const authority=await readAuthority(db);
  if(authority.mode!=='d1'||!authority.tables)throw failed('published_epg_not_authoritative');
+ if(spec.expectedGeneration!=null&&authority.generation!==spec.expectedGeneration)throw failed('published_epg_fence');
  const rows=[
   ...spec.logical.members.map(member=>({kind:'member',memberKind:member.kind,ordinal:member.ordinal,filmId:member.filmId})),
   ...spec.logical.shows.map(show=>({kind:'show',...show})),
   ...spec.logical.documents,
  ];
  const chunks=pack(spec.stageId,rows,options.chunkStatements||CHUNK_STATEMENTS,options.chunkBytes||CHUNK_BYTES);
- const stage={id:spec.stageId,target:spec.target,phase:spec.phase,sha:spec.sha,publishedAt:spec.publishedAt??null,chunks:chunks.length,members:spec.logical.members.length,shows:spec.logical.shows.length,documents:spec.logical.documents.length,owner};
+ const stage={id:spec.stageId,target:spec.target,phase:spec.phase,sha:spec.sha,publishedAt:spec.publishedAt??null,chunks:chunks.length,members:spec.logical.members.length,shows:spec.logical.shows.length,documents:spec.logical.documents.length,owner,expectedGeneration:spec.expectedGeneration??null};
  const claim=await ensureClaim(db,stage,now,ttl,owner);
  if(!claim.done){
   for(let index=0;index<chunks.length;index++)await writeChunk(db,{...stage,owner},chunks[index],index,claim,now,ttl);
   await validate(db,{...stage,owner},claim,now,ttl);
+  if(typeof options.afterValidate==='function')await options.afterValidate({db,stage:{...stage,owner},claim,now});
   try{
-   if(spec.replace)await commitReplace(db,{...stage,owner},claim,authority,spec.replace,now);
-   else await commitPublish(db,{...stage,owner},claim,authority,spec.expected,now);
+   if(spec.replace)await commitReplace(db,{...stage,owner},claim,authority,spec.replace,now,ttl);
+   else await commitPublish(db,{...stage,owner},claim,authority,spec.expected,now,ttl);
   }catch(error){
    if(error?.code==='published_epg_fence'){
     const committed=await one(db,'SELECT 1 AS ok FROM published_epg_generation WHERE programme_run_id=?',[spec.replace?spec.stageId:stage.target]);
-    if(!committed)await db.batch([
+    const held=await one(db,'SELECT owner_token AS owner, claim_nonce AS nonce FROM published_epg_stage WHERE programme_run_id=?',[stage.id]);
+    if(!committed&&held&&held.owner===owner&&held.nonce===claim.nonce)await db.batch([
      db.prepare('DELETE FROM published_epg_stage_row WHERE programme_run_id=?').bind(stage.id),
      db.prepare('DELETE FROM published_epg_stage_chunk WHERE programme_run_id=?').bind(stage.id),
      db.prepare('DELETE FROM published_epg_stage WHERE programme_run_id=?').bind(stage.id),
@@ -341,10 +380,12 @@ async function replacePart(env,target,kind,programme,watchlist,options){
  const current=await currentGeneration(env);
  if(!current)return null;
  if(!current.programmeRunId||current.programmeRunId!==target)return false;
+ const expectedGeneration=Number.isInteger(options.expectedGeneration)?options.expectedGeneration:current.generation;
+ if(current.generation!==expectedGeneration)return false;
  const storedProgramme=kind==='programme'?programme:await readDocument(env,target,'programme');
  const storedWatchlist=kind==='watchlist'?watchlist:await readDocument(env,target,'watchlist');
  if(!storedProgramme||!storedWatchlist)throw failed('published_epg_unavailable');
- const stageId=target+'#'+kind+'#'+current.generation;
+ const stageId=target+'#'+kind+'#'+expectedGeneration;
  const programmeText=JSON.stringify(storedProgramme);
  const watchlistText=JSON.stringify(storedWatchlist);
  const generation=await one(db,'SELECT phase FROM published_epg_generation WHERE programme_run_id=?',[target]);
@@ -353,13 +394,20 @@ async function replacePart(env,target,kind,programme,watchlist,options){
  const logical=logicalRows(storedProgramme,storedWatchlist,programmeText,watchlistText);
  if(kind==='watchlist'){logical.members=logical.members.filter(member=>member.kind==='watchlist');logical.shows=[];logical.documents=logical.documents.filter(row=>row.docKind==='watchlist');}
  else{logical.members=logical.members.filter(member=>member.kind==='programme');logical.documents=logical.documents.filter(row=>row.docKind==='programme');}
- await stageCommit(db,{stageId,target,phase:generation.phase,sha,publishedAt:null,replace:kind,logical},{...options,owner:options.owner||crypto.randomUUID()});
+ try{
+  await stageCommit(db,{stageId,target,phase:generation.phase,sha,publishedAt:null,replace:kind,expectedGeneration,logical},{...options,owner:options.owner||crypto.randomUUID()});
+ }catch(error){
+  if(error?.code==='published_epg_fence'||error?.code==='published_epg_lease')return false;
+  throw error;
+ }
+ const after=await currentGeneration(env);
+ if(!after||after.generation!==expectedGeneration+1||after.programmeRunId!==target)return false;
  const body=kind==='watchlist'?storedWatchlist:storedProgramme;
  const key=kind==='watchlist'?WATCHLIST_KEY:PROGRAMME_KEY;
- if(env.BUCKET&&typeof env.BUCKET.put==='function'){
+ if(env.BUCKET&&typeof env.BUCKET.put==='function'&&typeof env.BUCKET.get==='function'){
   try{
-   await putObject(env.BUCKET,key,body);
-   await putObject(env.BUCKET,generationObjectKey(target,key),body);
+   await putStable(env.BUCKET,key,body);
+   await putStable(env.BUCKET,generationObjectKey(target,key),body);
   }catch{/* The D1 commit stands. A later read repairs the mirror. */}
  }
  return true;
@@ -377,50 +425,75 @@ export async function saveWatchlist(env,watchlist,options={}){
 }
 
 const JSON_PUT={httpMetadata:{contentType:'application/json'}};
-async function putObject(bucket,key,value,onlyIf){
- const saved=await bucket.put(key,JSON.stringify(value),{...JSON_PUT,...(onlyIf?{onlyIf}:{})});
+async function objectText(object){
+ if(!object)return null;
+ if(typeof object.text==='function')return object.text();
+ return JSON.stringify(await object.json());
+}
+async function putStable(bucket,key,value){
+ const text=JSON.stringify(value);
+ const current=await bucket.get(key);
+ if(current){
+  if(await objectText(current)===text)return current.etag??null;
+  if(!current.etag)return null;
+  const saved=await bucket.put(key,text,{...JSON_PUT,onlyIf:{etagMatches:current.etag}});
+  return saved?.etag??null;
+ }
+ const saved=await bucket.put(key,text,{...JSON_PUT,onlyIf:{etagDoesNotMatch:'*'}});
  return saved?.etag??null;
+}
+async function mirrorObject(bucket,key,value){
+ const object=await bucket.get(key);
+ if(!object)return {match:false,etag:null};
+ const text=await objectText(object);
+ return {match:text===JSON.stringify(value),etag:object.etag??null};
 }
 export async function writeMirrors(env,input){
  const db=database(env);
  const authority=await readAuthority(db);
  if(authority.mode!=='d1'||authority.programmeRunId!==input.programmeRunId)return false;
  const bucket=env.BUCKET;
- if(!bucket||typeof bucket.put!=='function')return false;
+ if(!bucket||typeof bucket.put!=='function'||typeof bucket.get!=='function')return false;
  try{
- await putObject(bucket,generationObjectKey(input.programmeRunId,'programme.json'),input.programme);
- await putObject(bucket,PROGRAMME_KEY,input.programme);
- let watchlistEtag=null;
- if(input.watchlist)watchlistEtag=await putObject(bucket,WATCHLIST_KEY,input.watchlist);
- let pointerEtag=authority.mirrorEtag;
- if(input.phase!=='withheld'){
-  const body={programmeRunId:input.programmeRunId,phase:'published'};
-  pointerEtag=authority.mirrorEtag?await putObject(bucket,POINTER_KEY,body,{etagMatches:authority.mirrorEtag}):null;
-  if(!pointerEtag){
-   const current=await bucket.get(POINTER_KEY);
-   const parsed=current?await current.json():null;
-   if(parsed?.programmeRunId===input.programmeRunId&&parsed.phase==='published')pointerEtag=current.etag;
-   else pointerEtag=current?await putObject(bucket,POINTER_KEY,body,{etagMatches:current.etag}):await putObject(bucket,POINTER_KEY,body,{etagDoesNotMatch:'*'});
+  const programmeCopy=await putStable(bucket,generationObjectKey(input.programmeRunId,'programme.json'),input.programme);
+  const rootProgramme=await putStable(bucket,PROGRAMME_KEY,input.programme);
+  if(!programmeCopy||!rootProgramme)return false;
+  let watchlistEtag=null;
+  if(input.watchlist){
+   watchlistEtag=await putStable(bucket,WATCHLIST_KEY,input.watchlist);
+   const watchlistCopy=await putStable(bucket,generationObjectKey(input.programmeRunId,'watchlist.json'),input.watchlist);
+   if(!watchlistEtag||!watchlistCopy)return false;
   }
- }
- if(!pointerEtag)return false;
- await db.prepare('UPDATE published_epg_authority SET mirror_programme_run_id=?, mirror_etag=?, mirror_watchlist_etag=COALESCE(?, mirror_watchlist_etag) WHERE id=1 AND mode=\'d1\' AND programme_run_id=?').bind(input.programmeRunId,pointerEtag,watchlistEtag,input.programmeRunId).run();
- const after=await readAuthority(db);
- return after.mirrorProgrammeRunId===input.programmeRunId&&after.mirrorEtag===pointerEtag;
+  let pointerEtag=authority.mirrorEtag;
+  if(input.phase!=='withheld'){
+   pointerEtag=await putStable(bucket,POINTER_KEY,{programmeRunId:input.programmeRunId,phase:'published'});
+  }
+  if(!pointerEtag)return false;
+  await fenced(db,[
+   ['UPDATE published_epg_authority SET mirror_programme_run_id=?, mirror_etag=?, mirror_watchlist_etag=COALESCE(?, mirror_watchlist_etag) WHERE id=1 AND mode=\'d1\' AND programme_run_id=? AND generation=?',[input.programmeRunId,pointerEtag,watchlistEtag,input.programmeRunId,authority.generation]],
+   [FENCE_SQL,[]],
+  ]);
+  const after=await readAuthority(db);
+  return after.mirrorProgrammeRunId===input.programmeRunId&&after.mirrorEtag===pointerEtag&&(watchlistEtag==null||after.mirrorWatchlistEtag===watchlistEtag);
  }catch{return false;}
 }
 export async function repairMirrors(env){
  const current=await currentGeneration(env);
  if(!current?.programmeRunId)return current?{mirrored:false,authority:current}:{mirrored:false};
- if(current.mirrorProgrammeRunId===current.programmeRunId&&current.mirrorEtag){
-  const pointer=await env.BUCKET.get(POINTER_KEY);
-  const body=pointer?await pointer.json():null;
-  if(body?.programmeRunId===current.programmeRunId&&pointer?.etag===current.mirrorEtag)return {mirrored:true,authority:current};
- }
+ const bucket=env?.BUCKET;
+ if(!bucket||typeof bucket.get!=='function')return {mirrored:false,authority:current};
  const programme=await readDocument(env,current.programmeRunId,'programme');
  const watchlist=await readDocument(env,current.programmeRunId,'watchlist');
  if(!programme||!watchlist)return {mirrored:false,authority:current};
- const mirrored=await writeMirrors(env,{programmeRunId:current.programmeRunId,programme,watchlist,phase:'published'});
+ const run=current.programmeRunId;
+ const pointer=await mirrorObject(bucket,POINTER_KEY,{programmeRunId:run,phase:'published'});
+ const programmeMirror=await mirrorObject(bucket,PROGRAMME_KEY,programme);
+ const watchlistMirror=await mirrorObject(bucket,WATCHLIST_KEY,watchlist);
+ const programmeCopy=await mirrorObject(bucket,generationObjectKey(run,'programme.json'),programme);
+ const watchlistCopy=await mirrorObject(bucket,generationObjectKey(run,'watchlist.json'),watchlist);
+ const aligned=pointer.match&&pointer.etag===current.mirrorEtag&&programmeMirror.match&&watchlistMirror.match&&watchlistMirror.etag===current.mirrorWatchlistEtag&&programmeCopy.match&&watchlistCopy.match;
+ if(aligned)return {mirrored:true,authority:current};
+ const mirrored=await writeMirrors(env,{programmeRunId:run,programme,watchlist,phase:'published'});
  return {mirrored,authority:await readAuthority(env)};
 }
 
@@ -446,7 +519,7 @@ export async function importPublished(env,{confirm,programme,watchlist,programme
  if(confirm!=='load')throw failed('published_epg_confirm');
  const db=database(env);
  const authority=await readAuthority(db);
- if(!(authority.version>=8)||!authority.tables)throw failed('published_epg_schema');
+ if(!(Number(authority.version)>=6)||!authority.tables)throw failed('published_epg_schema');
  if(authority.mode!=='r2')throw failed('published_epg_authoritative');
  const runId=programmeRunId==null?'':String(programmeRunId);
  if(!runId||!programme||!watchlist)throw failed('published_epg_programme');
@@ -464,12 +537,16 @@ export async function importPublished(env,{confirm,programme,watchlist,programme
  if(!claim.done){
   for(let index=0;index<chunks.length;index++)await writeChunk(db,{...stage,owner},chunks[index],index,claim,now,CLAIM_TTL_MS);
   await validate(db,{...stage,owner},claim,now,CLAIM_TTL_MS);
+  const stamp=new Date(now).toISOString();
   await fenced(db,[
+   claimStillHeld({...stage,owner},claim,now,CLAIM_TTL_MS),
+   [FENCE_SQL,[]],
    ['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, mirror_programme_run_id=?, mirror_etag=?, watchlist_generation=watchlist_generation+1, mirror_watchlist_etag=? WHERE id=1 AND mode=\'r2\' AND generation=?',[runId,runId,pointerEtag??null,watchlistEtag??null,authority.generation]],
    [FENCE_SQL,[]],
-   ['INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES (?,?,?,?,?)',[runId,'published',stage.publishedAt,sha,new Date(now).toISOString()]],
+   ['INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES (?,?,?,?,?)',[runId,'published',stage.publishedAt,sha,stamp]],
    ...copyStatements(runId,runId),
-   ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND claim_nonce=? AND state=\'validated\'',[new Date(now).toISOString(),runId,claim.nonce]],
+   ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND owner_token=? AND claim_nonce=? AND claim_generation=? AND state=\'validated\'',[stamp,runId,owner,claim.nonce,claim.generation]],
+   [FENCE_SQL,[]],
   ]);
  }
  const stored=await readDocument(db,runId,'programme');
@@ -479,18 +556,39 @@ export async function importPublished(env,{confirm,programme,watchlist,programme
  if(after.mode!=='r2'||after.programmeRunId!==runId)throw failed('published_epg_loss');
  return after;
 }
-export async function activatePublished(env,{confirm,pointerEtag}={}){
+function sameMembership(films,members){
+ const ids=(Array.isArray(films)?films:[]).map(film=>String(film?.id??''));
+ return ids.length===members.length&&ids.every((id,index)=>id===members[index].filmId);
+}
+async function activationSnapshot(env,fallback){
+ if(env.BUCKET&&typeof env.BUCKET.get==='function'){
+  const pointer=await objectJson(env.BUCKET,POINTER_KEY);
+  const programme=await objectJson(env.BUCKET,PROGRAMME_KEY);
+  const watchlist=await objectJson(env.BUCKET,WATCHLIST_KEY);
+  if(pointer.value?.phase!=='published'||typeof pointer.value.programmeRunId!=='string')throw failed('published_epg_fence');
+  return {programmeRunId:pointer.value.programmeRunId,pointerEtag:pointer.etag,watchlistEtag:watchlist.etag,programme:programme.value,watchlist:watchlist.value};
+ }
+ if(!fallback?.programme||!fallback?.watchlist||!fallback.pointerEtag||!fallback.watchlistEtag)throw failed('published_epg_fence');
+ return {programmeRunId:fallback.programmeRunId,pointerEtag:fallback.pointerEtag,watchlistEtag:fallback.watchlistEtag,programme:fallback.programme,watchlist:fallback.watchlist};
+}
+export async function activatePublished(env,{confirm,pointerEtag,watchlistEtag,programme,watchlist}={}){
  if(confirm!=='activate')throw failed('published_epg_confirm');
  const db=database(env);
  const authority=await readAuthority(db);
- if(!(authority.version>=8)||!authority.tables)throw failed('published_epg_schema');
+ if(!(Number(authority.version)>=6)||!authority.tables)throw failed('published_epg_schema');
  if(authority.mode!=='r2')throw failed('published_epg_authoritative');
- if(!authority.programmeRunId||authority.mirrorProgrammeRunId!==authority.programmeRunId||authority.mirrorEtag!==pointerEtag)throw failed('published_epg_fence');
- const programme=await readDocument(db,authority.programmeRunId,'programme');
- const watchlist=await readDocument(db,authority.programmeRunId,'watchlist');
- if(!programme||!watchlist)throw failed('published_epg_loss');
+ if(!authority.programmeRunId||authority.mirrorProgrammeRunId!==authority.programmeRunId||!authority.mirrorEtag||!authority.mirrorWatchlistEtag)throw failed('published_epg_fence');
+ const storedProgramme=await readDocument(db,authority.programmeRunId,'programme');
+ const storedWatchlist=await readDocument(db,authority.programmeRunId,'watchlist');
+ if(!storedProgramme||!storedWatchlist)throw failed('published_epg_loss');
+ const live=await activationSnapshot(env,{programmeRunId:authority.programmeRunId,pointerEtag,watchlistEtag,programme,watchlist});
+ if(live.programmeRunId!==authority.programmeRunId||live.pointerEtag!==authority.mirrorEtag||live.pointerEtag!==pointerEtag||live.watchlistEtag!==authority.mirrorWatchlistEtag)throw failed('published_epg_fence');
+ if(JSON.stringify(live.programme)!==JSON.stringify(storedProgramme)||JSON.stringify(live.watchlist)!==JSON.stringify(storedWatchlist))throw failed('published_epg_fence');
+ const programmeMembers=await readMembers(db,authority.programmeRunId,'programme');
+ const watchMembers=await readMembers(db,authority.programmeRunId,'watchlist');
+ if(!sameMembership(live.programme?.films,programmeMembers)||!sameMembership(live.watchlist?.films,watchMembers))throw failed('published_epg_fence');
  await fenced(db,[
-  ['UPDATE published_epg_authority SET mode=\'d1\' WHERE id=1 AND mode=\'r2\' AND programme_run_id=? AND mirror_programme_run_id=? AND mirror_etag=? AND generation=?',[authority.programmeRunId,authority.mirrorProgrammeRunId,authority.mirrorEtag,authority.generation]],
+  ['UPDATE published_epg_authority SET mode=\'d1\' WHERE id=1 AND mode=\'r2\' AND programme_run_id=? AND mirror_programme_run_id=? AND mirror_etag=? AND mirror_watchlist_etag=? AND generation=?',[authority.programmeRunId,authority.mirrorProgrammeRunId,authority.mirrorEtag,authority.mirrorWatchlistEtag,authority.generation]],
   [FENCE_SQL,[]],
  ]);
  const after=await readAuthority(db);
@@ -500,21 +598,24 @@ export async function activatePublished(env,{confirm,pointerEtag}={}){
 export async function revertPublished(env,{confirm}={}){
  if(confirm!=='r2')throw failed('published_epg_confirm');
  let authority=await readAuthority(env);
- if(!(authority.version>=8)||!authority.tables)throw failed('published_epg_schema');
+ if(!(Number(authority.version)>=6)||!authority.tables)throw failed('published_epg_schema');
  if(authority.mode!=='d1')throw failed('published_epg_not_authoritative');
- if(authority.mirrorProgrammeRunId!==authority.programmeRunId||!authority.mirrorEtag){
-  const repaired=await repairMirrors(env);
-  authority=repaired.authority||await readAuthority(env);
-  if(!repaired.mirrored)throw failed('published_epg_fence');
- }
- const pointer=await env.BUCKET.get(POINTER_KEY);
- const body=pointer?await pointer.json():null;
- if(body?.programmeRunId!==authority.programmeRunId||pointer?.etag!==authority.mirrorEtag)throw failed('published_epg_fence');
+ const repaired=await repairMirrors(env);
+ if(!repaired.mirrored)throw failed('published_epg_fence');
+ authority=await readAuthority(env);
+ const pointer=await objectJson(env.BUCKET,POINTER_KEY);
+ const programmeMirror=await objectJson(env.BUCKET,PROGRAMME_KEY);
+ const watchlistMirror=await objectJson(env.BUCKET,WATCHLIST_KEY);
  const programme=await readDocument(env,authority.programmeRunId,'programme');
- const mirror=await objectJson(env.BUCKET,PROGRAMME_KEY);
- if(JSON.stringify(mirror.value)!==JSON.stringify(programme))throw failed('published_epg_fence');
+ const watchlist=await readDocument(env,authority.programmeRunId,'watchlist');
+ if(pointer.value?.programmeRunId!==authority.programmeRunId||pointer.etag!==authority.mirrorEtag)throw failed('published_epg_fence');
+ if(!watchlist||watchlistMirror.etag!==authority.mirrorWatchlistEtag)throw failed('published_epg_fence');
+ if(JSON.stringify(programmeMirror.value)!==JSON.stringify(programme)||JSON.stringify(watchlistMirror.value)!==JSON.stringify(watchlist))throw failed('published_epg_fence');
+ const programmeMembers=await readMembers(env,authority.programmeRunId,'programme');
+ const watchMembers=await readMembers(env,authority.programmeRunId,'watchlist');
+ if(!sameMembership(programme?.films,programmeMembers)||!sameMembership(watchlist?.films,watchMembers))throw failed('published_epg_fence');
  await fenced(database(env),[
-  ['UPDATE published_epg_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND programme_run_id=? AND mirror_programme_run_id=? AND mirror_etag=? AND generation=?',[authority.programmeRunId,authority.mirrorProgrammeRunId,authority.mirrorEtag,authority.generation]],
+  ['UPDATE published_epg_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND programme_run_id=? AND mirror_programme_run_id=? AND mirror_etag=? AND mirror_watchlist_etag=? AND generation=?',[authority.programmeRunId,authority.mirrorProgrammeRunId,authority.mirrorEtag,authority.mirrorWatchlistEtag,authority.generation]],
   [FENCE_SQL,[]],
  ]);
  const after=await readAuthority(env);

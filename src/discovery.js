@@ -538,8 +538,17 @@ async function attachWatchlistShowing(env,seenRunId,filmId,candidate,fence=null)
  const pointer=await publishedPointer(env);
  if(pointer?.phase==='published'&&seenRunId&&pointer.programmeRunId!==seenRunId)return false;
  if(pointer?.phase==='published'&&pointer.programmeRunId===seenRunId){
-  if(pointer.authority==='d1'){const patched=await PublishedEpg.patchProgramme(env,seenRunId,report);if(!patched)return false;}
-  if(fence)await fence();await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+  if(fence)await fence();
+  if(pointer.authority==='d1'){
+   const expectedGeneration=Number(String(pointer.etag||'').split(':')[1]);
+   const patched=await PublishedEpg.patchProgramme(env,seenRunId,report,{expectedGeneration});
+   if(!patched)return false;
+   const again=await publishedPointer(env);
+   if(again?.programmeRunId!==seenRunId||!PublishedEpg.advancedFence(pointer.etag,again?.etag))return false;
+   await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+   return true;
+  }
+  await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
   const again=await publishedPointer(env);
   if(again?.programmeRunId!==seenRunId||pointer.etag&&again.etag!==pointer.etag)return false;
   return true;

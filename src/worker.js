@@ -2,14 +2,17 @@ const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:
 function addGroup(left,right,displayed){const group={compared:(left?.compared||0)+(right?.compared||0),mismatched:(left?.mismatched||0)+(right?.mismatched||0)};if(displayed)group.displayed=(left?.displayed||0)+(right?.displayed||0);return group;}
 function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count?.films)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,films:addGroup(prior?.films,count.films,true),people:addGroup(prior?.people,count.people,true),cache:addGroup(prior?.cache,count.cache,false)}};}
 const loadJSON=async(env,key)=>{
- if(typeof PublishedEpg!=='undefined'){
+ const publishedKey=key===EPG_GENERATION_KEY||key==='programme.json'||key==='watchlist.json'||key==='epg/discovery-latest.json'||key==='epg/discovered-films.json';
+ if(publishedKey&&typeof PublishedEpg!=='undefined'){
   const live=await PublishedEpg.currentGeneration(env);
   if(live){
    if(key===EPG_GENERATION_KEY)return live.programmeRunId?{programmeRunId:live.programmeRunId,phase:'published'}:null;
    const run=env.epgPin?.authority==='d1'&&env.epgPin.programmeRunId?env.epgPin.programmeRunId:live.programmeRunId;
    if(key==='programme.json'||key==='watchlist.json'){
     if(!run)return null;
-    const document=await PublishedEpg.readDocument(env,run,key==='watchlist.json'?'watchlist':'programme');
+    const generation=env.epgPin?.authority==='d1'?env.epgPin.generation:live.generation;
+    await PublishedEpg.repairMirrors(env).catch(()=>{});
+    const document=await PublishedEpg.readDocumentAt(env,run,key==='watchlist.json'?'watchlist':'programme',generation);
     if(key==='programme.json'&&!document){const error=new Error('published_epg_unavailable');error.code='published_epg_unavailable';throw error;}
     return document;
    }
@@ -37,7 +40,12 @@ const loadJSON=async(env,key)=>{
 async function epgPublication(env){
  if(typeof PublishedEpg!=='undefined'){
   const live=await PublishedEpg.currentGeneration(env);
-  if(live)return {authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,etag:live.fence,fence:live.fence};
+  if(live){
+   if(live.programmeRunId)await PublishedEpg.repairMirrors(env).catch(()=>{});
+   const again=await PublishedEpg.currentGeneration(env);
+   const current=again||live;
+   return {authority:'d1',programmeRunId:current.programmeRunId,phase:current.phase,etag:current.fence,fence:current.fence,generation:current.generation};
+  }
  }
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
@@ -270,10 +278,10 @@ async function catalogAvailableRoute(env){
  // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
  // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
  const generationCopy=async name=>{
-  if(publication.authority==='d1'&&name==='programme.json')return pinnedRunId?PublishedEpg.readDocument(env,pinnedRunId,'programme'):null;
+  if(publication.authority==='d1'&&name==='programme.json')return pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'programme',publication.generation):null;
   const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;
  };
- const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocument(env,pinnedRunId,'watchlist'):loadJSON(env,'watchlist.json');
+ const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json');
  const [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);

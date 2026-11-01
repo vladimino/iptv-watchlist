@@ -14,7 +14,9 @@ const offline=path.resolve('scripts/published-epg-authority.mjs');
 const statements=publishedEpgStatements();
 assert.deepEqual(statements,migrationStatements(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8')));
 assert.ok(statements.length>3);
-assert.equal(statements.some(sql=>/\bINTO\s+film\b|\bINTO\s+candidate\b|\bprediction_|\bwatchlist_film\b|\bBEGIN\b|\bCOMMIT\b/i.test(sql)),false);
+assert.equal(statements.some(sql=>/\bINTO\s+film\b|\bINTO\s+candidate\b|\bINTO\s+prediction_|\bCREATE\s+TABLE\s+prediction_|\bwatchlist_film\b|\bCOMMIT\b/i.test(sql)),false);
+assert.equal(statements.some(sql=>/\bBEGIN\b/i.test(sql)&&!/^CREATE TRIGGER\b/i.test(sql.trim())),false);
+assert.match(statements.join('\n'),/prediction_domain_authority/);
 assert.equal(applyDecision({schemaVersion:6,tables:Object.fromEntries(statements.length?['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'].map(name=>[name,false]):[])}),'apply');
 assert.equal(applyDecision({schemaVersion:7,tables:{published_epg_authority:false}}),'apply');
 assert.equal(applyDecision({schemaVersion:5,tables:{published_epg_authority:false}}),'schema_unexpected');
@@ -27,7 +29,7 @@ assert.equal(bare.status,0,bare.stderr);
 assert.deepEqual(JSON.parse(bare.stdout),{configured:false,writes:false,writeState:'none'});
 const revert=spawnSync(process.execPath,[script,'--revert','--target','iptv'],{encoding:'utf8'});
 assert.equal(revert.status,2);
-assert.match(revert.stderr,/refuse: revert_refused/);
+assert.match(revert.stderr,/confirm/);
 const missingConfirm=spawnSync(process.execPath,[script,'--apply','--target','iptv'],{encoding:'utf8'});
 assert.equal(missingConfirm.status,2);
 assert.match(missingConfirm.stderr,/confirm/);
@@ -105,13 +107,23 @@ async function install(schema){
   if(!target.pathname.startsWith('/iptv/'))return new Response('no',{status:404});
   const key=decodeURIComponent(target.pathname.slice('/iptv/'.length));
   const object=objects.get(key);
+  if((init.method||'GET')==='PUT'){
+   const header=new Headers(init.headers||{});
+   const match=header.get('if-match');
+   if(object&&match&&match.replace(/^"|"$/g,'')!==object.etag)return new Response(null,{status:412});
+   if(!object&&header.get('if-none-match')!=='*')return new Response(null,{status:412});
+   const text=String(init.body??'');
+   const etag='etag-'+key+'-'+Buffer.byteLength(text);
+   objects.set(key,{text,etag});
+   return new Response(null,{status:200,headers:{etag:'"'+etag+'"','content-length':'0'}});
+  }
   if(!object)return new Response(null,{status:404});
   const headers={'etag':'"'+object.etag+'"','content-length':String(Buffer.byteLength(object.text)),'content-type':'application/json'};
   if((init.method||'GET')==='HEAD')return new Response(null,{status:200,headers});
   if((init.method||'GET')==='GET')return new Response(object.text,{status:200,headers});
   return new Response('no',{status:403});
  }
- return {productionFile, putObject, fetchImpl, calls};
+ return {productionFile, putObject, fetchImpl, calls, objects};
 }
 function argv(args){return ['node','published-epg-production.mjs',...args];}
 function run(args, installed, env){
@@ -142,7 +154,7 @@ function run(args, installed, env){
 
 {
  const installed=await install(6);
- sql(installed.productionFile,"UPDATE schema_contract SET version=7 WHERE id=1;");
+ sql(installed.productionFile,"CREATE TABLE prediction_domain_authority (id INTEGER PRIMARY KEY); UPDATE schema_contract SET version=7 WHERE id=1;");
  const applied=await run(['--apply','--confirm','apply','--target','iptv'], installed);
  assert.equal(applied.exit,0,JSON.stringify(applied.result));
  assert.equal(applied.result.operation,'apply');
@@ -151,7 +163,7 @@ function run(args, installed, env){
  assert.equal(applied.result.programmeRunId,null);
  assert.equal(applied.result.schemaVersion,8);
  assert.equal(installed.calls.batches.length,1);
- assert.equal(installed.calls.batches[0].some(sql=>/INTO film|INTO candidate|prediction_|watchlist_film/i.test(sql)),false);
+ assert.equal(installed.calls.batches[0].some(sql=>/INTO film|INTO candidate|INTO prediction_|CREATE TABLE prediction_|watchlist_film/i.test(sql)),false);
  const again=await run(['--apply','--confirm','apply','--target','iptv'], installed);
  assert.equal(again.exit,3);
  assert.equal(again.result.reason,'already_applied');
@@ -172,6 +184,12 @@ function run(args, installed, env){
  const row=sql(installed.productionFile,"SELECT mode, programme_run_id FROM published_epg_authority WHERE id=1;",{json:true})[0];
  assert.equal(row.mode,'d1');
  assert.equal(row.programme_run_id,'run-a');
+ installed.putObject('watchlist.json',{updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:stale'}]});
+ const reverted=await run(['--revert','--confirm','r2','--target','iptv'], installed);
+ assert.equal(reverted.exit,0,JSON.stringify(reverted.result));
+ assert.equal(reverted.result.mode,'r2');
+ assert.equal(JSON.parse(installed.objects.get('watchlist.json').text).films[0].id,'film:heat');
+ assert.equal(sql(installed.productionFile,"SELECT mode FROM published_epg_authority WHERE id=1;",{json:true})[0].mode,'r2');
 }
 
 {
@@ -212,4 +230,17 @@ function run(args, installed, env){
  assert.equal(sql(database,'SELECT COUNT(*) AS n FROM film;',{json:true})[0].n,0);
 }
 
-console.log('published EPG operator: apply leaves r2, load and activate are separate, revert stays offline');
+{
+ const installed=await install(6);
+ const applied=await run(['--apply','--confirm','apply','--target','iptv'], installed);
+ assert.equal(applied.exit,0,JSON.stringify(applied.result));
+ assert.equal(applied.result.schemaVersion,6);
+ assert.equal(applied.result.mode,'r2');
+ const bareSeven=await install(6);
+ sql(bareSeven.productionFile,'UPDATE schema_contract SET version=7 WHERE id=1;');
+ const held=await run(['--apply','--confirm','apply','--target','iptv'], bareSeven);
+ assert.equal(held.exit,0,JSON.stringify(held.result));
+ assert.equal(held.result.schemaVersion,7);
+}
+
+console.log('published EPG operator: apply leaves r2, load and activate are separate, revert repairs the watchlist');

@@ -227,6 +227,7 @@ async function adminD1Programme(env){
  if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.currentGeneration!=='function')return null;
  const live=await PublishedEpg.currentGeneration(env);
  if(!live)return null;
+ if(live.programmeRunId&&typeof PublishedEpg.repairMirrors==='function')await PublishedEpg.repairMirrors(env).catch(()=>{});
  const run=typeof live.programmeRunId==='string'&&ADMIN_RUN_ID.test(live.programmeRunId)?live.programmeRunId:null;
  if(!run)return {error:'programme_unavailable'};
  const body=await PublishedEpg.readDocument(env,run,'programme');
