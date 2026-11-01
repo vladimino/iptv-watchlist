@@ -573,6 +573,63 @@ assert.equal(linkPosts[0].value, 'Мира Соль');
 assert.deepEqual(linkPosts[0].roles, [{id:'person:director/mira-sol', expectedVersion:'role-v'}]);
 assert.equal(run('__linkProved'), 'Имя записано. Карточка сверена.');
 assert.equal(run('__linkProvedRequest'), undefined);
+
+// 13. A refresh with new version tokens must not rewrite the pending command, even if the alias radio is gone.
+await run(`(async () => {
+  adminNameDrop();
+  const status = {textContent:'', focus(){}};
+  const manual = {value:''};
+  const basis = {value:'заметка'};
+  const radios = [{value:'Старое имя', checked:true}];
+  let roleVersion = 'name-review:1:role-old';
+  const roles = [{value:'person:director/mira-sol', checked:true, getAttribute(name){return name==='data-version'?roleVersion:null;}}];
+  const form = {id:'admin-name-form', dataset:{}, querySelector(sel){
+    if(sel==='#admin-name-status')return status;
+    if(sel==='#admin-name-manual')return manual;
+    if(sel==='#admin-name-basis')return basis;
+    if(sel==='input[name="person-name-alias"]:checked')return radios.find(item=>item.checked)||null;
+    if(sel==='button[type="submit"]')return {disabled:false};
+    return null;
+  }, querySelectorAll(sel){
+    if(sel==='input[name="person-name-alias"]')return radios;
+    if(sel==='input[name="person-name-role"]')return roles;
+    if(sel==='input[name="person-name-role"]:checked')return roles.filter(item=>item.checked);
+    return [];
+  }};
+  const detailNode = document.querySelector('#admin-detail');
+  detailNode.querySelector = sel => sel==='#admin-name-form'?form:null;
+  adminLive.entity = {id:'person:actor/mira-sol', preferred:'Старое имя', nameReview:{version:'name-review:1:old', preferred:{value:'Старое имя'}, reviews:[], roleLinks:[]}};
+  const posts = [];
+  const previousPost = adminPost;
+  const previousRefresh = onAdminRefresh;
+  adminPost = async (path, body) => { posts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:503, error:'readback_failed', body:{error:'storage_unavailable', reason:'readback_failed'}}; };
+  onAdminRefresh = async () => {
+    adminLive.entity = {id:'person:actor/mira-sol', preferred:'Старое имя', nameReview:{version:'name-review:1:new', preferred:{value:'Старое имя'}, reviews:[], roleLinks:[]}};
+    roleVersion = 'name-review:1:role-new';
+    radios.splice(0, radios.length);
+    roles[0].checked = false;
+    return {mode:'ready', kind:'person', id:'person:actor/mira-sol', entity:adminLive.entity};
+  };
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  globalThis.__frozenPosts = posts;
+  globalThis.__frozenStatus = status.textContent;
+  adminPost = previousPost;
+  onAdminRefresh = previousRefresh;
+  adminNameDrop();
+  detailNode.querySelector = () => null;
+})()`);
+const frozenPosts = run('__frozenPosts');
+assert.equal(frozenPosts.length, 2);
+assert.deepEqual(frozenPosts[1], frozenPosts[0]);
+assert.equal(frozenPosts[0].mode, 'alias');
+assert.equal(frozenPosts[0].value, 'Старое имя');
+assert.equal(frozenPosts[0].expectedVersion, 'name-review:1:old');
+assert.equal(frozenPosts[0].basis, 'заметка');
+assert.deepEqual(frozenPosts[0].roles, [{id:'person:director/mira-sol', expectedVersion:'name-review:1:role-old'}]);
+assert.equal(frozenPosts[0].requestId, frozenPosts[1].requestId);
+assert.match(run('__frozenStatus'), /Повторите отправку/);
+assert.doesNotMatch(run('__frozenStatus'), /Имя записано/);
 const wall = run(`(() => {
   const foreign = Array.from({length:32}, (_, index) => ({value:'Alias '+index, origin:'alias', provenance:index % 2 ? {source:'tmdb'} : {source:'letterboxd'}, preferred:false}));
   foreign.push({value:'Кириллица без языка', origin:'alias', provenance:{source:'wikidata'}, preferred:false});

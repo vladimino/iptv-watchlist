@@ -367,6 +367,24 @@ function adminNameRequestId() {
   return globalThis.crypto && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'person-name-' + Date.now();
 }
 
+// The command that was posted and whose outcome is still unknown. A refresh may replace the card
+// and its version tokens; the retry posts this object, not a command rebuilt from the new card.
+var adminNamePending = null;
+
+function adminNameHold(personId, command) {
+  adminNamePending = {personId, command: JSON.parse(JSON.stringify(command))};
+}
+
+function adminNameDrop() {
+  adminNamePending = null;
+}
+
+function adminNameFrozen(personId, requestId) {
+  const pending = adminNamePending;
+  if (!pending || pending.personId !== personId || !requestId || pending.command.requestId !== requestId) return null;
+  return pending.command;
+}
+
 function adminNameCommand(form, record, requestId) {
   const manual = form.querySelector('#admin-name-manual').value.replace(/\s+/g, ' ').trim();
   const selected = form.querySelector('input[name="person-name-alias"]:checked');
@@ -409,6 +427,7 @@ function adminFinishUnknownName(kept, view) {
   const form = detail && detail.querySelector('#admin-name-form');
   const result = form && form.querySelector('#admin-name-status');
   if (form && adminNameReviewLanded(kept, view)) {
+    adminNameDrop();
     delete form.dataset.requestId;
     if (result) {
       result.textContent = 'Имя записано. Карточка сверена.';
@@ -428,6 +447,7 @@ function onAdminNameEdit(event) {
   const form = target && target.id === 'admin-name-form' ? target : target && target.closest ? target.closest('#admin-name-form') : null;
   if (!form || !form.dataset) return;
   delete form.dataset.requestId;
+  adminNameDrop();
 }
 
 async function onAdminNameSubmit(event) {
@@ -438,36 +458,55 @@ async function onAdminNameSubmit(event) {
   const button = form.querySelector('button[type="submit"]');
   const entity = adminLive.entity;
   if (!entity || !entity.nameReview) return;
-  const requestId = form.dataset.requestId || adminNameRequestId();
-  const built = adminNameCommand(form, entity, requestId);
-  if (built.error) {status.textContent = built.error; return;}
-  form.dataset.requestId = requestId;
+  const frozen = adminNameFrozen(entity.id, form.dataset.requestId);
+  let command = frozen;
+  if (!command) {
+    const requestId = form.dataset.requestId || adminNameRequestId();
+    const built = adminNameCommand(form, entity, requestId);
+    if (built.error) {status.textContent = built.error; return;}
+    command = built.command;
+    adminNameHold(entity.id, command);
+  }
+  form.dataset.requestId = command.requestId;
   button.disabled = true;
   status.textContent = 'Сохраняем…';
-  const result = await adminPost('/people/'+encodeURIComponent(entity.id)+'/name-review', built.command);
+  const result = await adminPost('/people/'+encodeURIComponent(command.personId)+'/name-review', command);
   button.disabled = false;
+  if (result.ok) {
+    adminNameDrop();
+    delete form.dataset.requestId;
+    adminLive.pin = null;
+    await adminRender();
+    return;
+  }
+  const stillPending = adminNameFrozen(entity.id, command.requestId);
+  if (!stillPending) {
+    status.textContent = 'Поле изменено, прошлая отправка отменена. Отправьте имя ещё раз.';
+    if (typeof status.focus === 'function') status.focus();
+    return;
+  }
   if (result.error === 'network') {
     status.textContent = 'Нет ответа от сервера. Можно повторить: это будет та же запись, без второй правки.';
     if (typeof status.focus === 'function') status.focus();
     return;
   }
   if (result.status === 503 && result.error === 'readback_failed') {
-    const kept = {requestId, value: built.command.value, mode: built.command.mode, basis: built.command.basis || '', roles: built.command.roles || []};
+    const kept = {requestId: command.requestId, value: command.value, mode: command.mode, basis: command.basis || '', roles: command.roles || []};
     status.textContent = 'Неизвестно, записалось ли имя. Сверяю карточку.';
     if (typeof status.focus === 'function') status.focus();
     const view = await onAdminRefresh();
+    if (!adminNameFrozen(entity.id, command.requestId)) return;
     adminFinishUnknownName(kept, view);
     return;
   }
   if (!result.ok) {
-    if (!adminNameCommitUnknown(result)) delete form.dataset.requestId;
+    if (!adminNameCommitUnknown(result)) {
+      delete form.dataset.requestId;
+      adminNameDrop();
+    }
     status.textContent = adminNameCommitUnknown(result) ? ERROR_TEXT.readback_failed : adminErrorText(result.error);
     if (typeof status.focus === 'function') status.focus();
-    return;
   }
-  delete form.dataset.requestId;
-  adminLive.pin = null;
-  await adminRender();
 }
 
 function adminRenderQueues(state) {
