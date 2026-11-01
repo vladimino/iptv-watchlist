@@ -39,7 +39,7 @@ export function readInstallCredentials(env=process.env){
 
 // An R2-binding-like store over the S3 API: get, head, put with onlyIf, list with prefix. Writes exist only when
 // `allowedWrites` names the key; everything else is refused before a request is built.
-export function createS3Store({credentials,fetchImpl=fetch,allowedWrites=null,now=()=>new Date(),retries=4,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
+export function createS3Store({credentials,fetchImpl=fetch,allowedWrites=null,allowedDeletes=null,now=()=>new Date(),retries=4,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
  const calls={list:0,head:0,get:0,put:0,refusedWrites:0},writes=[];
  async function send(method,key,query,headers={},body=null){
   const url=new URL(credentials.endpoint);
@@ -49,9 +49,10 @@ export function createS3Store({credentials,fetchImpl=fetch,allowedWrites=null,no
   for(let attempt=0;;attempt++){
    const signed=signRequest({method,url,headers:{'Accept-Encoding':'identity',...headers},payloadHash,credentials,now:now()});
    let response;
+   const once=method==='PUT'||method==='DELETE';
    try{response=await fetchImpl(url,{method,headers:signed,body:body??undefined,redirect:'error',cache:'no-store',signal:AbortSignal.timeout(600000)});}
-   catch{if(attempt<retries&&method!=='PUT'){await sleep(100*2**attempt);continue;}throw new InstallError('Request failed'+(method==='PUT'?' during a write; the outcome is unknown, re-run the dry-run before any retry':' after retries'));}
-   if(TRANSIENT.has(response.status)&&attempt<retries&&method!=='PUT'){await response.body?.cancel();await sleep(100*2**attempt);continue;}
+   catch{if(attempt<retries&&!once){await sleep(100*2**attempt);continue;}throw new InstallError('Request failed'+(once?' during a write; the outcome is unknown, re-run the dry-run before any retry':' after retries'));}
+   if(TRANSIENT.has(response.status)&&attempt<retries&&!once){await response.body?.cancel();await sleep(100*2**attempt);continue;}
    if(response.status===412){await response.body?.cancel();return null;}
    if(response.status===404&&key!=null&&method!=='PUT'){await response.body?.cancel();return null;}
    if(response.status===401||response.status===403){await response.body?.cancel();throw new InstallError('Credential was refused by the bucket ('+method+')',3);}
@@ -82,7 +83,12 @@ export function createS3Store({credentials,fetchImpl=fetch,allowedWrites=null,no
    do{calls.list++;const response=await send('GET',null,{'list-type':'2','max-keys':'1000',...(prefix?{prefix}:{}),...(cursor?{'continuation-token':cursor}:{})});const page=parseListing(await response.text());objects.push(...page.objects);cursor=page.truncated?page.nextCursor:null;}while(cursor);
    return {objects:objects.map(o=>({key:o.key,size:o.size,etag:o.etag})),truncated:false};
   },
-  async delete(){throw new InstallError('Delete refused: the installer never deletes',3);}
+  async delete(key){
+   if(!allowedDeletes||!allowedDeletes.has(key)){calls.refusedWrites++;throw new InstallError('Delete refused: the installer never deletes',3);}
+   calls.delete=(calls.delete||0)+1;
+   const response=await send('DELETE',key);
+   if(response)await response.body?.cancel();
+  }
  };
 }
 
