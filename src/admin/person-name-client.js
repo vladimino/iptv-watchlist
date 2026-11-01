@@ -1,0 +1,22 @@
+// The one POST of the catalogue page. It is not part of the shared GET client, so the limbo, poster and recovery
+// bundles do not carry this write. The action header is the same token the route requires.
+async function adminPost(path,body,options={}){
+ const fetchImpl=options.fetch||globalThis.fetch;
+ let response;
+ try{response=await fetchImpl(ADMIN_API+path,{method:'POST',headers:{Accept:'application/json','Content-Type':'application/json','X-IPTV-Admin-Action':'person_name_review'},credentials:'same-origin',body:JSON.stringify(body),...(options.signal?{signal:options.signal}:{})});}
+ catch(error){return {ok:false,status:0,error:error&&error.name==='AbortError'?'aborted':'network',body:null};}
+ let payload=null;
+ try{payload=await response.json();}catch{payload=null;}
+ const reason=payload&&(typeof payload.reason==='string'?payload.reason:typeof payload.error==='string'?payload.error:null);
+ if(!response.ok)return {ok:false,status:response.status,error:reason||('http_'+response.status),body:payload};
+ return {ok:true,status:response.status,error:null,body:payload};
+}
+// A missing response, or a response that cannot prove the put, keeps the same requestId. A definite
+// refusal (the server named a command or storage error and did not leave the outcome unknown) does not.
+// readback_failed is the shared reason inside 503 storage_unavailable: the put may already have landed.
+function adminNameCommitUnknown(result){
+ if(!result||result.ok)return false;
+ if(result.error==='network'||result.error==='aborted'||result.error==='readback_failed')return true;
+ if(!result.status)return true;
+ return result.status>=500&&result.error!=='review_unconditional'&&result.error!=='programme_unavailable'&&result.error!=='storage_unavailable';
+}

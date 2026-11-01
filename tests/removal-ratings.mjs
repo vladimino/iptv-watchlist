@@ -48,8 +48,9 @@ const run={runId:'run-1',stage:'epg',events:[structuredClone(event)],ratingPendi
 ctx.run=run;ctx.report=report;
 const completed=await ctx.completeWithRatings(env,run,report);
 assert.equal(completed.stage,'complete');
-assert.equal(fetches.filter(url=>url.includes('/films/')).length,0,'no films-list request');
-assert.equal(fetches.filter(url=>url.includes('/diary/')).length,1,'one diary page, the last one');
+assert.equal(completed.ratingsPipeline,'blocked');
+assert.equal(fetches.filter(url=>url.includes('letterboxd.com')).length,0,'the commit requests nothing');
+await ctx.enrichKnownRemovalEvent(env,run,{gone:4.5},'2026-10-23T10:05:00.000Z');
 const stored=records.get([...records.keys()].find(key=>key.endsWith('run-1-watchlist.json')));
 const gone=stored.removed.find(film=>film.id==='gone'),missing=stored.removed.find(film=>film.id==='missing');
 assert.equal(gone.rating,4.5);
@@ -84,8 +85,9 @@ const blockedRun={runId:'run-2',stage:'epg',events:[blocked],ratingPending:['let
 ctx.blockedRun=blockedRun;ctx.blockedReport={...report,runId:'run-2'};
 const failed=await ctx.completeWithRatings(env,blockedRun,ctx.blockedReport);
 assert.equal(failed.stage,'complete');
-assert.match(failed.personalRatingError,/Letterboxd diary blocked: http_403_page_1/);
-assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause],['error','blocked']);
+assert.equal(failed.ratingsPipeline,'blocked');
+assert.equal(fetches.filter(url=>url.includes('/diary/')).length,0,'the commit does not read a blocked diary');
+assert.equal(records.get('sync.json').ratingAttempt,undefined);
 const blockedStored=records.get([...records.keys()].find(key=>key.endsWith('run-2-watchlist.json')));
 assert.equal(blockedStored.removed[0].rating,undefined);
 assert.equal([...records.keys()].filter(key=>key.endsWith('run-2-watchlist.json')).length,1);
@@ -113,9 +115,8 @@ const decorateRun={runId:'run-5',stage:'epg',events:[decorate],ratingPending:['l
 ctx.decorateRun=decorateRun;ctx.decorateReport={...report,runId:'run-5'};
 const decorated=await ctx.completeWithRatings(env,decorateRun,ctx.decorateReport);
 assert.equal(decorated.stage,'complete');
-assert.equal(decorated.personalRatingError,undefined);
-assert.equal(fetches.slice(beforeDecorate).filter(url=>url.includes('/films/')).length,0);
-assert.equal(fetches.slice(beforeDecorate).filter(url=>url.includes('/diary/')).length,1);
+assert.equal(decorated.ratingsPipeline,'blocked');
+assert.equal(fetches.slice(beforeDecorate).filter(url=>url.includes('letterboxd.com')).length,0);
 const undecorated=records.get([...records.keys()].find(key=>key.endsWith('run-5-watchlist.json')));
 assert.equal(undecorated.removed[0].rating,undefined);
 assert.equal([...records.keys()].filter(key=>key.endsWith('run-5-watchlist.json')).length,1);

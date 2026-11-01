@@ -1,7 +1,7 @@
-// Browser client of the owner-only read API behind the same Cloudflare Access session as the page. It sends GET requests
-// to /api/admin/* with the snapshot pin it holds, assembles one page view from the overview, the two searches and the
-// detail read, and reports the pin and error states of each answer. It stores nothing and sends no credential: the
-// browser session is the only authorization.
+// Browser client of the owner-only admin API behind the same Cloudflare Access session as the page. It sends GET
+// requests to /api/admin/* with the snapshot pin it holds, assembles one page view from the overview, the two searches
+// and the detail read, and reports the pin and error states of each answer. It stores nothing and sends no
+// credential: the browser session is the only authorization. The Person name confirmation posts from its own client.
 const ADMIN_API='/api/admin';
 const ADMIN_PAGE_LIMIT=25;
 const ADMIN_FILM_QUEUE_CODES=['localization-missing','localization-provisional','localization-conflict','identity-unresolved','identity-ambiguous','identity-rejected','metadata-missing','metadata-stale','metadata-failed','external-id-conflict'];

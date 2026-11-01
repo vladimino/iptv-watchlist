@@ -1,13 +1,9 @@
-import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
 
-// ADR 0060 decisions 2, 3 and 10 at the EPG commit, with the Diary read of ADR 0067. Under `inline` (and `separate`
-// before the migration) the routine sync writes the current page-1 Diary reader. The golden snapshot is this code
-// (`node tests/ratings-epg.mjs --golden .`). It is not a byte copy of the multi-page reader. Under active `separate`
-// the commit only enqueues removal references, durably and before it publishes, and requests nothing from Letterboxd
-// for ratings.
-const GOLDEN='tests/fixtures/ratings-inline-parity.json';
+// ADR 0074: the EPG commit never reads Diary. Unmigrated storage fails closed for every binding value. After the
+// migration the commit only enqueues removal references, durably and before it publishes, whatever the retired
+// RATINGS_PIPELINE binding holds, and requests nothing from Letterboxd for ratings.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
 const WATCHLIST='<span class="js-watchlist-count">1</span><div data-component-class="LazyPoster" data-item-name="Heat (1995)" data-item-link="/film/heat-1995/" data-postered-identifier="{&quot;lid&quot;:&quot;film1&quot;}"></div>';
@@ -35,29 +31,58 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
  return {bucket,net,ctx,env,replies,snapshot:bucket.snapshot(),post,runId};
 }
 
-if(process.argv[2]==='--golden'){
- const {snapshot,replies,net}=await lifecycle({root:process.argv[3]});
- fs.mkdirSync('tests/fixtures',{recursive:true});
- fs.writeFileSync(GOLDEN,JSON.stringify({about:'Inline EPG sync with the Diary recent window (ADR 0067): one Diary page, R2 objects after the run, step replies and requests. Synthetic fixture data only. Not a byte copy of the multi-page reader.',snapshot,replies,fetches:net.fetches},null,1)+'\n');
- console.log('golden written');process.exit(0);
+// 1. Unmigrated storage fails closed for an absent binding, an explicit `inline`, a malformed value and `separate`.
+// The commit publishes and requests nothing for ratings. It does not enqueue onto a version 1 queue or read Diary.
+{
+ const baselines=[];
+ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'},{RATINGS_PIPELINE:'separate'}]){
+  const {snapshot,replies,net,bucket,runId}=await lifecycle({extra});
+  const label=JSON.stringify(extra);
+  assert.equal(replies.at(-1).body.stage,'complete',label);
+  eq([replies.at(-1).body.ratingsPipeline,replies.at(-1).body.ratingsMigration],['blocked','none'],label);
+  eq([net.diaryFetches(),net.memberFetches()],[[],[]],label+': no Diary page, no member page');
+  assert.equal(snapshot[QUEUE],undefined,label+': no queue write');
+  assert.equal(snapshot[CURSOR],undefined,label+': the cursor is untouched');
+  const sync=bucket.value('sync.json');
+  eq([sync.ratingsPipeline,sync.ratingsMigration,sync.ratingPending,sync.removalLookups,sync.diaryHistory],[ 'blocked','none',undefined,undefined,undefined],label);
+  eq(sync.removalRefs.films.map(item=>item.id).sort(),['film2','film3'],label+': the removal event is kept as a hand-over');
+  assert.equal(sync.removalRefs.ref.sourceRunId,runId,label);
+  assert.ok(bucket.value(sync.removalRefs.ref.eventKey),label+': the removal event is written');
+  baselines.push(JSON.stringify({keys:Object.keys(snapshot),ratings:replies.at(-1).body.ratingsPipeline,films:sync.removalRefs.films.map(item=>item.id).sort(),diary:net.diaryFetches()}));
+ }
+ assert.equal(new Set(baselines).size,1,'every binding value fails closed the same way');
 }
-const golden=JSON.parse(fs.readFileSync(GOLDEN,'utf8'));
 
-// 1. Inline parity: the default, an explicit `inline`, a malformed value, and `separate` before the migration.
-for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'},{RATINGS_PIPELINE:'separate'}]){
- const {snapshot,replies,net}=await lifecycle({extra});
- const label=JSON.stringify(extra);
- eq(Object.keys(snapshot),Object.keys(golden.snapshot),label+': the same objects');
- for(const key of Object.keys(golden.snapshot))assert.equal(JSON.stringify(snapshot[key]),JSON.stringify(golden.snapshot[key]),label+': '+key+' byte for byte');
- eq(replies,golden.replies,label+': the same replies');
- eq(net.fetches,golden.fetches,label+': the same requests');
+// 1b. Consecutive blocked commits keep every removal reference. Advancing the watchlist does not drop the earlier
+// event, nothing is written to the queue, and the next start after migration enqueues both events.
+{
+ const first=await lifecycle({});
+ const earlier=first.bucket.value('sync.json').removalRefs;
+ eq(earlier.films.map(item=>item.id).sort(),['film2','film3']);
+ assert.equal(first.bucket.value(QUEUE),null,'a blocked commit does not enqueue');
+ first.net.watchlist='<span class="js-watchlist-count">0</span>';
+ const start=await first.post('/api/sync/start',{});
+ assert.notEqual(start.body.runId,first.runId);
+ let body=start.body;
+ for(let i=0;i<4&&body.stage!=='complete';i++){const step=await first.post(body.stage==='metadata'?'/api/sync/metadata':'/api/sync/epg',{runId:start.body.runId});body=step.body;}
+ assert.equal(body.stage,'complete');
+ assert.equal(body.ratingsPipeline,'blocked');
+ const sync=first.bucket.value('sync.json');
+ const refs=sync.removalRefs;
+ assert.equal(Array.isArray(refs),true,'the second blocked generation appends instead of replacing');
+ eq(refs.map(item=>item.films.map(film=>film.id).sort().join('+')).sort(),['film1','film2+film3']);
+ for(const item of refs)assert.ok(first.bucket.value(item.ref.eventKey),item.ref.eventKey);
+ assert.ok(!first.bucket.value('watchlist.json').films.some(film=>film.id==='film2'||film.id==='film1'));
+ assert.equal(first.bucket.value(QUEUE),null);
+ eq(first.net.diaryFetches(),[]);
+ migrated(first.bucket);
+ const next=await first.post('/api/sync/start',{});
+ assert.ok(next.body.runId&&next.body.runId!==start.body.runId);
+ const queue=first.bucket.value(QUEUE);
+ eq(Object.keys(queue.films).sort(),['film1','film2','film3']);
+ for(const item of refs)for(const film of item.films)assert.ok(queue.films[film.id].refs.some(ref=>ref.eventKey===item.ref.eventKey&&ref.sourceRunId===item.ref.sourceRunId),film.id);
+ assert.equal(first.bucket.value('sync.json').removalRefs,undefined,'the start flushed the hand-over before replacing sync.json');
 }
-assert.ok(golden.snapshot[QUEUE]&&golden.snapshot[CURSOR],'the golden run exercised the queue and the Diary cursor');
-assert.equal(golden.snapshot[QUEUE].schemaVersion,1);
-assert.equal(golden.fetches.filter(url=>url.includes('/diary/')).length,1,'the inline commit fetches Diary page 1 only');
-assert.equal(golden.snapshot[CURSOR].lastOutcome,'recent_window');
-assert.equal(golden.snapshot[CURSOR].coverage.window,'recent');
-assert.equal(golden.snapshot[CURSOR].coverage.reachedEnd,false);
 
 // 2. Active `separate`: the commit enqueues one reference per removed film to the run's removal event, before it
 // publishes, requests nothing for ratings, leaves no ratings marker and no hand-over in sync.json.
@@ -77,6 +102,19 @@ assert.equal(golden.snapshot[CURSOR].coverage.reachedEnd,false);
  assert.equal(bucket.value(CURSOR).lastAttemptAt,undefined,'the cursor is untouched');
  assert.ok(!bucket.records.has('letterboxd/diary/history.json'),'no Diary history');
  assert.ok(![...bucket.records.keys()].some(item=>item.startsWith('letterboxd/facts/records/')&&JSON.stringify(bucket.value(item)).includes('letterboxd_diary')),'no Diary facts');
+}
+
+// 2b. Migrated storage enqueues the same way when the retired binding is absent, `inline` or invalid.
+{
+ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'nope'}]){
+  const {bucket,net,replies}=await lifecycle({extra,prepare:({bucket})=>migrated(bucket)});
+  const label=JSON.stringify(extra);
+  assert.equal(replies.at(-1).body.stage,'complete',label);
+  assert.equal(replies.at(-1).body.ratingsPipeline,'separate',label);
+  eq([net.diaryFetches(),net.memberFetches()],[[],[]],label+': no Diary page, no member page');
+  eq(Object.keys(bucket.value(QUEUE).films).sort(),['film2','film3'],label);
+  assert.equal(bucket.value('sync.json').ratingPending,undefined,label);
+ }
 }
 
 // 3. A kill after the enqueue and before sync.json drops the hand-over: the retry enqueues again, idempotently; a sync
@@ -119,4 +157,4 @@ assert.equal(golden.snapshot[CURSOR].coverage.reachedEnd,false);
  eq([footer.state,footer.code],['healthy','ok']);
 }
 
-console.log('Ratings at the EPG commit (ADR 0060, ADR 0067): inline, explicit inline, malformed and unmigrated separate reproduce the page-1 golden byte for byte; active separate enqueues references before the publish without Diary or member requests, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');
+console.log('Ratings at the EPG commit (ADR 0060, ADR 0074): unmigrated storage fails closed for every binding; migrated storage enqueues references before the publish without Diary or member requests for an absent, inline, invalid or separate binding, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');

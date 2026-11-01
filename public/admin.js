@@ -41,7 +41,23 @@ const ERROR_TEXT = {
   queue_unavailable: 'Эта очередь не читается из опубликованной программы: состояние отпечатков и прогнозов хранится отдельно.',
   stale_cursor: 'Страница устарела. Откройте запрос заново.',
   not_found: 'Запись не найдена в опубликованной программе.',
-  method_not_allowed: 'Страница делает только GET-запросы.',
+  method_not_allowed: 'Этот запрос не поддерживается.',
+  missing_person: 'Этого человека нет в опубликованной программе.',
+  version_conflict: 'Имя уже изменилось. Обновите карточку и повторите.',
+  role_version_conflict: 'Связанная роль изменилась. Обновите карточку и повторите.',
+  request_id_reused: 'Этот запрос уже записан с другим содержимым.',
+  unknown_alias: 'Этого варианта нет у записи.',
+  unrelated_role: 'Эту роль нельзя связать: проверка не считает её тем же человеком.',
+  invalid_name: 'Имя не подходит: нужна одна строка от 1 до 200 символов без управляющих знаков.',
+  invalid_basis: 'Пояснение длиннее 500 символов.',
+  review_incomplete: 'Связанные роли не сошлись с записью. Ничего не перезаписано.',
+  storage_conflict: 'Запись одновременно изменилась. Обновите карточку и повторите.',
+  origin_not_allowed: 'Запрос отклонён.',
+  action_not_allowed: 'Запрос отклонён: нет подтверждения действия.',
+  review_unconditional: 'Сохранённое имя нельзя перезаписать без версии объекта.',
+  body_too_large: 'Запрос слишком большой.',
+  review_store_unreadable: 'Хранилище имён записано в неожиданном виде. Сохранение остановлено.',
+  readback_failed: 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.',
 };
 const SKEW_TEXT = {
   titles_newer: 'словарь названий новее программы',
@@ -208,9 +224,16 @@ function adminDetail(view) {
   const other = kind === 'film'
     ? adminStatus('метаданные', record.metadata?.status) + (record.metadata?.nextAction && record.metadata.nextAction !== 'none' ? `<span class="admin-status admin-status-plain">следующий шаг: ${adminEscape(record.metadata.nextAction)}</span>` : '') + adminOutsideStatus('отпечаток') + adminOutsideStatus('прогноз')
     : '';
-  const form = kind === 'film' ? adminTitleForm(record) : '';
-  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${originalLine}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div><p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>${form}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${adminAliases(record, kind)}<h3>Внешние id</h3>${adminExternalIds(record)}<h3>Конфликты локализации</h3>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}${kind === 'film' ? `<h3>Другие статусы</h3><div class="admin-badges">${other}</div><p class="muted admin-outside-note">Отпечаток и прогноз хранятся вне опубликованной программы и этим чтением не читаются.</p>` : ''}`;
-  adminBindTitleReview(detail);
+  const filmForm = kind === 'film' ? adminTitleForm(record) : '';
+  const aliasBlock = adminAliases(record, kind);
+  const lists = `<h3>Внешние id</h3>${adminExternalIds(record)}<h3>Конфликты локализации</h3>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}`;
+  const diagnostics = kind === 'person'
+    ? `<details class="admin-folded"><summary>Алиасы, внешние id и конфликты</summary>${aliasBlock}${lists}</details>`
+    : `${aliasBlock}${lists}`;
+  const filmTail = kind === 'film' ? `<h3>Другие статусы</h3><div class="admin-badges">${other}</div><p class="muted admin-outside-note">Отпечаток и прогноз хранятся вне опубликованной программы и этим чтением не читаются.</p>` : '';
+  const personForm = kind === 'person' ? adminNameForm(record) : '';
+  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div><p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${personForm}`;
+  if (kind === 'film') adminBindTitleReview(detail);
 }
 
 // A script that happens to be Cyrillic is not a Russian title. A dictionary or owner mark on
@@ -383,6 +406,182 @@ function adminBindTitleReview(detail) {
   });
 }
 
+
+// A radio is a Russian choice only when the record says so: owner or dictionary authority/source,
+// or an explicit language "ru". Script is not a language. The full option list stays on the record.
+function adminNameRussian(option, review) {
+  const provenance = option && option.provenance;
+  if (provenance && typeof provenance === 'object') {
+    if (provenance.authority === 'owner' || provenance.authority === 'dictionary') return true;
+    if (provenance.source === 'owner' || provenance.source === 'dictionary') return true;
+    if (provenance.language === 'ru') return true;
+  }
+  const preferred = option && option.preferred && review && review.preferred;
+  if (!preferred) return false;
+  return preferred.source === 'dictionary' || preferred.source === 'owner' || preferred.authority === 'dictionary' || preferred.authority === 'owner';
+}
+
+function adminNameForm(record) {
+  const review = record.nameReview;
+  if (!review || !review.version) return '';
+  const russian = (review.options || []).filter(option => adminNameRussian(option, review));
+  const checked = Math.max(0, russian.findIndex(option => option.preferred));
+  const options = russian.map((option, index) => `<label class="admin-name-option"><input type="radio" name="person-name-alias" value="${adminEscape(option.value)}"${index === checked ? ' checked' : ''}> <span>${adminEscape(option.value)}</span> <small class="muted">${adminEscape(option.origin || '')}${option.preferred ? ' · текущее' : ''}</small></label>`).join('');
+  const folded = (review.options || []).map(option => `<li>${adminEscape(option.value)} · ${adminEscape(option.origin || '')} ${adminProvenance(option.provenance)}</li>`).join('');
+  const collisions = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}"${item.linked ? ' checked' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
+  const roleList = collisions ? `<fieldset><legend>Тот же человек в другой роли</legend><div class="admin-name-options">${collisions}</div></fieldset>` : '';
+  const roleBlock = (review.collisions || []).length > 4 ? `<details class="admin-name-more"><summary>Тот же человек в другой роли (${review.collisions.length})</summary>${roleList}</details>` : roleList;
+  const audit = (review.reviews || []).map(entry => `<li>${adminEscape(entry.at || '')} · ${adminEscape(entry.mode || '')} · ${adminEscape(entry.from?.value || '—')} → ${adminEscape(entry.to?.value || '')}${entry.linkedFrom ? ' · из ' + adminEscape(entry.linkedFrom) : ''}</li>`).join('');
+  const preferred = review.preferred || {};
+  return `<form id="admin-name-form" class="admin-name-form"><h3>Русское имя</h3><p class="admin-name-current">Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b></p><p class="admin-name-current">Оригинал: <b>${adminEscape(review.original || record.original || 'нет')}</b></p><p class="muted">Введите имя или выберите подтверждённый русский вариант. Сохранение меняет это имя во всех показах и не объединяет id.</p>${options ? `<fieldset><legend>Подтверждённые русские варианты</legend><div class="admin-name-options">${options}</div></fieldset>` : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите имя.</p>'}<label>Своё имя<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${roleBlock}<details class="admin-name-more"><summary>Остальные варианты и происхождение</summary>${folded ? `<ul>${folded}</ul>` : '<p class="muted">Других вариантов нет.</p>'}</details>${audit ? `<details class="admin-name-more"><summary>Журнал</summary><ul>${audit}</ul></details>` : ''}<p id="admin-name-status" class="admin-name-status" role="status" tabindex="-1"></p><button type="submit">Сохранить имя</button></form>`;
+}
+
+function adminNameRequestId() {
+  return globalThis.crypto && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'person-name-' + Date.now();
+}
+
+// The command that was posted and whose outcome is still unknown. A refresh may replace the card
+// and its version tokens; the retry posts this object, not a command rebuilt from the new card.
+var adminNamePending = null;
+
+function adminNameHold(personId, command) {
+  adminNamePending = {personId, command: JSON.parse(JSON.stringify(command))};
+}
+
+function adminNameDrop() {
+  adminNamePending = null;
+}
+
+function adminNameFrozen(personId, requestId) {
+  const pending = adminNamePending;
+  if (!pending || pending.personId !== personId || !requestId || pending.command.requestId !== requestId) return null;
+  return pending.command;
+}
+
+function adminNameCommand(form, record, requestId) {
+  const manual = form.querySelector('#admin-name-manual').value.replace(/\s+/g, ' ').trim();
+  const selected = form.querySelector('input[name="person-name-alias"]:checked');
+  const basis = form.querySelector('#admin-name-basis').value.trim();
+  if (!manual && !selected) return {error: 'Выберите вариант или введите имя.'};
+  const roles = [...form.querySelectorAll('input[name="person-name-role"]:checked')].map(input => ({id: input.value, expectedVersion: input.getAttribute('data-version')}));
+  return {command: {personId: record.id, requestId, mode: manual ? 'manual' : 'alias', value: manual || selected.value, expectedVersion: record.nameReview.version, ...(basis ? {basis} : {}), ...(roles.length ? {roles} : {})}};
+}
+
+function adminRestoreNameAttempt(form, kept) {
+  if (!form || !kept || !kept.requestId) return;
+  const manual = form.querySelector('#admin-name-manual');
+  const basis = form.querySelector('#admin-name-basis');
+  if (manual) manual.value = kept.mode === 'manual' ? kept.value : '';
+  if (basis) basis.value = kept.basis || '';
+  if (kept.mode === 'alias') {
+    for (const choice of form.querySelectorAll('input[name="person-name-alias"]')) choice.checked = choice.value === kept.value;
+  }
+  const wanted = new Set((kept.roles || []).map(role => role.id));
+  for (const box of form.querySelectorAll('input[name="person-name-role"]')) box.checked = wanted.has(box.value);
+  form.dataset.requestId = kept.requestId;
+}
+
+// A 503 readback_failed can follow a put that already landed. The reread proves it only when the
+// primary audit carries this requestId and every requested role id is linked. The preferred text
+// is not that proof: a link-only command can leave the name unchanged on a card that never stored
+// the link. Anything short of that proof keeps the same command.
+function adminNameReviewLanded(kept, view) {
+  const review = view && view.entity && view.entity.nameReview;
+  if (!kept || typeof kept.requestId !== 'string' || !kept.requestId || !review) return false;
+  const entry = (review.reviews || []).find(item => item && item.requestId === kept.requestId && item.linkedFrom == null);
+  if (!entry) return false;
+  const linked = new Set((review.roleLinks || []).map(link => link && link.id).filter(id => typeof id === 'string'));
+  const wanted = Array.isArray(kept.roles) ? kept.roles.map(role => role && role.id).filter(id => typeof id === 'string') : [];
+  return wanted.every(id => linked.has(id));
+}
+
+function adminFinishUnknownName(kept, view) {
+  const detail = document.querySelector('#admin-detail');
+  const form = detail && detail.querySelector('#admin-name-form');
+  const result = form && form.querySelector('#admin-name-status');
+  if (form && adminNameReviewLanded(kept, view)) {
+    adminNameDrop();
+    delete form.dataset.requestId;
+    if (result) {
+      result.textContent = 'Имя записано. Карточка сверена.';
+      if (typeof result.focus === 'function') result.focus();
+    }
+    return;
+  }
+  if (form) adminRestoreNameAttempt(form, kept);
+  if (result) {
+    result.textContent = 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.';
+    if (typeof result.focus === 'function') result.focus();
+  }
+}
+
+function onAdminNameEdit(event) {
+  const target = event.target;
+  const form = target && target.id === 'admin-name-form' ? target : target && target.closest ? target.closest('#admin-name-form') : null;
+  if (!form || !form.dataset) return;
+  delete form.dataset.requestId;
+  adminNameDrop();
+}
+
+async function onAdminNameSubmit(event) {
+  const form = event.target && event.target.id === 'admin-name-form' ? event.target : null;
+  if (!form) return;
+  event.preventDefault();
+  const status = form.querySelector('#admin-name-status');
+  const button = form.querySelector('button[type="submit"]');
+  const entity = adminLive.entity;
+  if (!entity || !entity.nameReview) return;
+  const frozen = adminNameFrozen(entity.id, form.dataset.requestId);
+  let command = frozen;
+  if (!command) {
+    const requestId = form.dataset.requestId || adminNameRequestId();
+    const built = adminNameCommand(form, entity, requestId);
+    if (built.error) {status.textContent = built.error; return;}
+    command = built.command;
+    adminNameHold(entity.id, command);
+  }
+  form.dataset.requestId = command.requestId;
+  button.disabled = true;
+  status.textContent = 'Сохраняем…';
+  const result = await adminPost('/people/'+encodeURIComponent(command.personId)+'/name-review', command);
+  button.disabled = false;
+  if (result.ok) {
+    adminNameDrop();
+    delete form.dataset.requestId;
+    adminLive.pin = null;
+    await adminRender();
+    return;
+  }
+  const stillPending = adminNameFrozen(entity.id, command.requestId);
+  if (!stillPending) {
+    status.textContent = 'Поле изменено, прошлая отправка отменена. Отправьте имя ещё раз.';
+    if (typeof status.focus === 'function') status.focus();
+    return;
+  }
+  if (result.error === 'network') {
+    status.textContent = 'Нет ответа от сервера. Можно повторить: это будет та же запись, без второй правки.';
+    if (typeof status.focus === 'function') status.focus();
+    return;
+  }
+  if (result.status === 503 && result.error === 'readback_failed') {
+    const kept = {requestId: command.requestId, value: command.value, mode: command.mode, basis: command.basis || '', roles: command.roles || []};
+    status.textContent = 'Неизвестно, записалось ли имя. Сверяю карточку.';
+    if (typeof status.focus === 'function') status.focus();
+    const view = await onAdminRefresh();
+    if (!adminNameFrozen(entity.id, command.requestId)) return;
+    adminFinishUnknownName(kept, view);
+    return;
+  }
+  if (!result.ok) {
+    if (!adminNameCommitUnknown(result)) {
+      delete form.dataset.requestId;
+      adminNameDrop();
+    }
+    status.textContent = adminNameCommitUnknown(result) ? ERROR_TEXT.readback_failed : adminErrorText(result.error);
+    if (typeof status.focus === 'function') status.focus();
+  }
+}
+
 function adminRenderQueues(state) {
   const queues = document.querySelector('#admin-queues');
   queues.innerHTML = (adminLive.queues || []).map(item => {
@@ -396,6 +595,7 @@ function adminRenderQueues(state) {
 }
 
 function adminShow(view, state) {
+  adminLive.entity = view.entity || null;
   const loading = document.querySelector('#admin-loading');
   const error = document.querySelector('#admin-error');
   const stale = document.querySelector('#admin-stale');
@@ -635,6 +835,7 @@ function onAdminQueue(event) {
 
 function onAdminKey(event) {
   if (event.key !== 'Escape') return;
+  if (event.target && event.target.closest && (event.target.closest('#admin-name-form') || event.target.closest('[data-title-review]'))) return;
   const state = adminState();
   if (state.view === 'health' || !state.q) return;
   event.preventDefault();
@@ -659,6 +860,9 @@ function startAdmin() {
   });
   document.querySelector('#admin-search').addEventListener('input', onAdminSearch);
   document.querySelector('#admin-results').addEventListener('click', onAdminResult);
+  document.querySelector('#admin-detail').addEventListener('submit', onAdminNameSubmit);
+  document.querySelector('#admin-detail').addEventListener('input', onAdminNameEdit);
+  document.querySelector('#admin-detail').addEventListener('change', onAdminNameEdit);
   document.querySelector('#admin-queues').addEventListener('click', onAdminQueue);
   document.querySelector('#admin-refresh').addEventListener('click', onAdminRefresh);
   document.querySelector('.admin-views').addEventListener('click', onAdminView);

@@ -15,18 +15,17 @@ function setup({pages=12,extra={}}={}){
 const at=ms=>new Date(ms).toISOString();
 async function drain(R,env,runId,limit=20){const replies=[];for(let i=0;i<limit;i++){const reply=plain(await R.step(env,{runId}));replies.push(reply);if(reply.nextAction!=='continue')break;}return replies;}
 
-// 1. Inline (the default) and an unmigrated separate switch: start and step write nothing; the status reads.
+// 1. An absent, inline, invalid or separate binding on unmigrated storage: start and step answer not_migrated and
+// write nothing. The status reads pipeline blocked and switch separate. The binding is not consulted.
 {
  const {bucket,env,R,net}=setup();
- const inline={...env,RATINGS_PIPELINE:undefined};
- eq(await R.start(inline,{trigger:'manual'}),{runId:null,created:false,nextAction:'stop',reason:'disabled'});
- assert.equal((await R.step(inline,{runId:'x'})).reason,'disabled');
- const pending=plain(await R.start(env,{trigger:'manual'}));
- assert.equal(pending.reason,'not_migrated');assert.equal(pending.migration,'none');
- assert.equal((await R.step(env,{runId:'x'})).reason,'not_migrated');
- const status=plain(await R.status(env));
- assert.equal(status.pipeline,'separate_pending_migration');assert.equal(status.switch,'separate');assert.equal(status.sideEffects,'none');
- assert.equal(plain(await R.status(inline)).pipeline,'inline');
+ for(const sample of [env,{...env,RATINGS_PIPELINE:undefined},{...env,RATINGS_PIPELINE:'inline'},{...env,RATINGS_PIPELINE:'Separate'}]){
+  const pending=plain(await R.start(sample,{trigger:'manual'}));
+  assert.equal(pending.reason,'not_migrated');assert.equal(pending.migration,'none');
+  assert.equal((await R.step(sample,{runId:'x'})).reason,'not_migrated');
+  const status=plain(await R.status(sample));
+  assert.equal(status.pipeline,'blocked');assert.equal(status.switch,'separate');assert.equal(status.sideEffects,'none');
+ }
  assert.equal(bucket.writes().length,0,'nothing written');assert.equal(net.fetches.length,0,'nothing requested');
 }
 

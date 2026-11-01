@@ -41,46 +41,20 @@ const lbFetches=()=>fetches.filter(url=>url.includes('letterboxd.com'));
 const step=async runId=>{const trace={caller:'http',diagnostic:{}};try{await ctx.syncStep(env,'/api/sync/epg',{runId},trace);}catch{}return trace;};
 const snapshot=()=>JSON.stringify([...records.entries()].filter(([key])=>key.startsWith('events/')||key==='programme.json').sort());
 
-// 1. A successful diary read (AIR-287): each phase is saved before it starts, the diary is read in phase diary, the
-// films list is never requested, the attempt finishes.
+// 1. The commit publishes without a Diary read and without opening a ratings attempt (ADR 0074). A page that would
+// answer, and a page that would be blocked, are both unrequested.
 diaryHtml=()=>'<html><head><title>Diary</title></head><table>'+diaryRow('w1',8,'2026-10-28')+'</table></html>';
 records.set('programme.json',report('run-ok'));
 await ctx.completeWithRatings(env,newRun('run-ok'),report('run-ok'));
-assert.equal(phaseAtDiary,'diary','the phase is durable before the diary is requested');
-assert.deepEqual(phases(),['post_commit','diary']);
-assert.equal(lbFetches().filter(url=>url.includes('/films/')).length,0,'no films-list request');
-assert.deepEqual([sync().ratingAttempt.state,sync().ratingAttempt.source],['finished','letterboxd_diary']);
+assert.equal(lbFetches().length,0,'no Letterboxd request');
+assert.equal(sync().ratingAttempt,undefined);
 assert.equal(sync().ratingPending,undefined);
-assert.ok(sync().ratingObservedAt);
-assert.equal(typeof sync().ratingAttempt.id,'string');
-
-// 2. A 403 on the diary: the attempt ends as `error` with cause `blocked`; the error stays interpretable, one request only.
-logs.length=0;fetches.length=0;
-diaryHtml=null;
+assert.equal(sync().ratingsPipeline,'blocked');
+logs.length=0;fetches.length=0;diaryHtml=null;
 await ctx.completeWithRatings(env,newRun('run-403'),report('run-403'));
-assert.deepEqual([sync().ratingAttempt.state,sync().ratingAttempt.cause,sync().ratingAttempt.phase],['error','blocked','diary']);
-assert.match(sync().ratingError,/Letterboxd diary blocked: http_403_page_1/);
-assert.ok(sync().ratingAttempt.finishedAt);
-assert.deepEqual(phases(),['post_commit','diary']);
-assert.equal(lbFetches().length,1,'one diary request, no retry');
-const status=await ctx.syncStatus(env);
-assert.equal(status.ratingAttempt.state,'error');
-
-// 2b. Killed during the diary stage: the attempt is still `started` in phase diary, so the next stale step closes it as
-// unknown and requests nothing from Letterboxd.
-logs.length=0;fetches.length=0;records.set('programme.json',report('run-kill-diary'));
-diaryHtml=()=>{stopped=true;return '<html><head><title>Diary</title></head><table>'+diaryRow('w1',8,'2026-10-28')+'</table></html>';};
-const realSave=bucket.put;let stopped=false;
-bucket.put=async function(key,value,options){if(stopped)throw new Error('isolate gone');return realSave.call(this,key,value,options);};
-try{await ctx.completeWithRatings(env,newRun('run-kill-diary'),report('run-kill-diary'));}catch{}
-bucket.put=realSave;
-assert.deepEqual([sync().ratingAttempt.state,sync().ratingAttempt.phase],['started','diary']);
-clock+=STALE+1;fetches.length=0;diaryHtml=null;
-await step('run-kill-diary');
-assert.deepEqual([sync().ratingAttempt.state,sync().ratingAttempt.interruptedPhase],['unknown','diary']);
-assert.equal(sync().ratingPending,undefined);
-assert.match(sync().ratingError,/interrupted during diary; no outcome recorded/);
-assert.equal(lbFetches().length,0,'closing never retries Letterboxd');
+assert.equal(lbFetches().length,0,'a blocked diary page is not requested');
+assert.equal(sync().ratingAttempt,undefined);
+assert.equal((await ctx.syncStatus(env)).ratingAttempt,undefined);
 
 // 3. Killed after the commit, before the films list: finishSync saved `stage: complete` with the attempt in post_commit.
 logs.length=0;fetches.length=0;records.set('programme.json',report('run-kill'));
@@ -136,4 +110,4 @@ for(const state of ['finished','error']){
 }
 assert.equal(lbFetches().length,0);
 
-console.log('EPG ratings attempt (AIR-270): durable phases before work, finished and blocked outcomes, killed attempt kept while fresh and closed as unknown once stale with its phase, no films-list repeat, no new generation or events, idempotent steps, legacy runs closed, finished attempts untouched passed');
+console.log('EPG ratings attempt (AIR-270, ADR 0074): the commit requests nothing and writes no rating attempt; a leftover ratingPending is kept while fresh and closed as unknown once stale with its phase, no films-list repeat, no new generation or events, idempotent steps, legacy runs closed, finished attempts untouched passed');

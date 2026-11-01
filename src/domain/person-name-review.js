@@ -1,8 +1,8 @@
 // Reviewed preferred RU name for one Person, AIR-126.
 // Pure validation and transition rules for the owner's manual name review. It is loaded beside
 // film-person.js and reuses its guards (applyReviewedLocalization, applyAutomaticLocalization,
-// mergeAliases, stamp). No HTTP and no storage access here, and this file is not in the Worker
-// bundle: a separately approved writer (AIR-54) persists what these functions return.
+// mergeAliases, stamp). No HTTP and no storage access here. The Worker loads it so the owner
+// route can persist what these functions return; the functions themselves still perform no write.
 // A Person id is role-specific (person:actor/<slug>, person:director/<slug>, …). This contract never
 // mints, merges or replaces an id: the same human under another role stays another record, and the
 // owner links such records explicitly through `roles`, which records the link on both sides.
@@ -243,12 +243,14 @@ function applyPersonNameReview(person,command,at,people=[]){
    moved=roleApplied.next;roleReview=roleApplied.review;
   }
   moved={...moved,roleLinks:nameReviewAddLink(moved.roleLinks,{id:person.id,roleId:person.roleId??null,reason:NAME_REVIEW_LINK_REASON,requestId:command.requestId,at:stampedAt})};
+  moved=nameReviewHoldPrior(moved,record.localization,at);
   const after=personNameVersion(moved);
   if(roleReview){roleReview.version.after=after;reviews.push(roleReview);}
   review.records.push({id:record.id,version:{before:item.version,after}});
   nextPeople.push(moved);
   next={...next,roleLinks:nameReviewAddLink(next.roleLinks,{id:record.id,roleId:record.roleId??null,reason:NAME_REVIEW_LINK_REASON,requestId:command.requestId,at:stampedAt})};
  }
+ next=nameReviewHoldPrior(next,person.localization,at);
  review.version.after=personNameVersion(next);
  const commit=[{id:next.id,version:{before:checked.version,after:review.version.after}},...review.records.map(item=>({id:item.id,version:{...item.version}}))];
  return {ok:true,idempotent:false,changed:true,person:next,people:nextPeople,review,reviews,version:review.version.after,commit};
@@ -266,16 +268,30 @@ function personNameReviewCompletion(review,person,people=[]){
  for(const item of review.records||[])records.push({id:item.id,state:state(Array.isArray(people)?people.find(record=>record?.id===item.id):null,item.version)});
  return {complete:records.every(item=>item.state==='applied'),records};
 }
+// The value a later read will still present (the dictionary or an automatic cache name) is held
+// before `version.after` is stamped. The owner's own previous name stays an alias and is not a
+// second conflict. Without this, the next read appends `owner_kept` and the stored after-token
+// no longer matches the reconstructed record, so a retry looks incomplete.
+function nameReviewHoldPrior(next,prior,at){
+ if(!next?.localization||next.localization.provenance?.authority!==NAME_REVIEW_AUTHORITY)return next;
+ if(!prior?.value||prior.value===next.localization.value)return next;
+ if(prior.provenance?.authority===NAME_REVIEW_AUTHORITY||prior.source==='owner')return next;
+ return reconcilePersonName(next,{status:prior.status,value:prior.value,source:prior.source||null,authority:prior.provenance?.authority||null,provenance:prior.provenance||null},at);
+}
 // Reviewed precedence for later inputs. The owner's reviewed name is kept against any later value,
 // automatic or dictionary: the incoming value is held in localizationConflicts with reason
-// `owner_kept` (the vocabulary src/sources.js already uses) and kept as an alias. A record the
-// owner has not reviewed follows the lifecycle contract: a reviewed dictionary value promotes or
-// replaces, an automatic value stays provisional and cannot touch a reviewed name.
+// `owner_kept` (the vocabulary src/sources.js already uses) and kept as an alias. The same value
+// and source are not appended again: a read may reconcile the record it just loaded, and a second
+// `owner_kept` would move the token away from the audit's `after`. A record the owner has not
+// reviewed follows the lifecycle contract: a reviewed dictionary value promotes or replaces, an
+// automatic value stays provisional and cannot touch a reviewed name.
 function reconcilePersonName(person,incoming,at){
  if(!person?.localization)return person;
  const current=person.localization;
  if(current.status==='reviewed'&&current.provenance?.authority===NAME_REVIEW_AUTHORITY){
   if(!incoming?.value||incoming.value===current.value)return person;
+  const source=incoming.source||null;
+  if((person.localizationConflicts||[]).some(item=>item&&item.reason==='owner_kept'&&item.value===incoming.value&&(item.source||null)===source))return person;
   return holdLocalization(person,incoming,at,'name','owner_kept');
  }
  if(incoming?.status==='reviewed'&&(incoming.authority==='dictionary'||incoming.authority===NAME_REVIEW_AUTHORITY))return applyReviewedLocalization(person,incoming,at,'name');

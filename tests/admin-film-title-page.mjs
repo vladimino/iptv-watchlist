@@ -319,6 +319,35 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   assert.match(context.adminAliases({aliases: []}, 'person'), /Других имён нет/);
   assert.match(context.adminAliases({aliases: []}, 'film'), /Других названий нет/);
   assert.match(context.adminAliases({aliases: []}), /Других названий нет/);
+  context.adminDetail({mode: 'ready', kind: 'film', id: 'd5', entity: record});
+  const filmCard = detail.innerHTML;
+  assert.match(filmCard, /data-title-review/);
+  assert.match(filmCard, /Записать название/);
+  assert.match(filmCard, /<summary>Другие названия \(41\)<\/summary>/);
+  assert.doesNotMatch(filmCard, /id="admin-name-form"/);
+  assert.ok(filmCard.indexOf('Оригинал:') < filmCard.indexOf('data-title-review') && filmCard.indexOf('data-title-review') < filmCard.indexOf('<h3>Сводка</h3>'));
+  context.adminDetail({
+    mode: 'ready', kind: 'person', id: 'person:actor/lot',
+    entity: {
+      id: 'person:actor/lot', preferred: 'Актриса', original: 'Actor',
+      aliases: [{value: 'A. Lot', provenance: {source: 'letterboxd'}}],
+      nameReview: {
+        version: 'name-review:1:lot', original: 'Actor',
+        preferred: {value: 'Актриса', status: 'provisional', source: 'wikidata'},
+        options: [{value: 'Актриса', origin: 'preferred', provenance: {source: 'wikidata'}, preferred: true}],
+        collisions: [{id: 'person:director/lot', original: 'Actor', reason: 'same_original', version: 'name-review:1:role', linked: false}],
+        reviews: [], roleLinks: [],
+      },
+    },
+  });
+  const personCard = detail.innerHTML;
+  assert.match(personCard, /id="admin-name-form"/);
+  assert.match(personCard, /Сохранить имя/);
+  assert.match(personCard, /name="person-name-role"/);
+  assert.match(personCard, /admin-folded/);
+  assert.match(personCard, /<summary>Другие имена \(1\)<\/summary>/);
+  assert.doesNotMatch(personCard, /data-title-review/);
+  assert.doesNotMatch(personCard, /Записать название/);
 }
 
 console.log('admin film title page: unknown readback keeps the request, a matching reread says stored');

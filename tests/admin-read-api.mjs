@@ -45,6 +45,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
 for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
 vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);
+vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js','utf8'),context);
 vm.runInContext(source,context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker;
@@ -228,7 +229,7 @@ r=await call('/api/admin/films?q=beacon&limit=5&pin='+encodeURIComponent(r.body.
 seed();records.delete('titles.json');records.delete('people.json');
 r=await call('/api/admin/films?q=sol');assert.equal(r.status,200);assert.deepEqual(r.body.snapshot.skewReasons,['dictionary_missing']);assert.equal(r.body.snapshot.titlesUpdatedAt,null);
 r=await call('/api/admin/people?q=sol');assert.equal(r.body.items[0].localization.status,'missing','no dictionary, no cache name');
-const absent=r.body.pin.split('|').map(decodeURIComponent);assert.equal(absent[4],'');assert.equal(absent[5],'','absent dictionaries carry empty versions in the pin');
+const absent=r.body.pin.split('|').map(decodeURIComponent);assert.equal(absent[4],'');assert.equal(absent[5],'','absent dictionaries carry empty versions in the pin');assert.equal(absent[6],'reviews-0','the review object is still present');
 r=await call('/api/admin/people?q=sol&pin='+encodeURIComponent(r.body.pin));assert.equal(r.status,200);
 seed();records.set('titles.json',{updatedAt:iso(-1),q2:records.get('titles.json').q2});
 r=await call('/api/admin/overview');assert.equal(r.body.snapshot.titlesUpdatedAt,iso(-1),'a document clock wins over the upload time');
@@ -294,7 +295,7 @@ assert.deepEqual(streams.cancelled,[programmeKey(G1),'titles.json','people.json'
 resetCache();gets=[];parses=0;resetStreams();
 r=await call('/api/admin/films?q=mayday');assert.equal(parses,6,'a fresh isolate parses every object');assert.deepEqual(streams.cancelled,[]);
 const scanned=fs.readFileSync('src/admin/read.js','utf8');
-assert.match(scanned,/await adminDiscardBody\(object\);return \{present:true,version:etag,uploaded,body:cached\.body,reused:true\}/,'a cache hit cancels the fresh body before reusing the parse');
+assert.match(scanned,/await adminDiscardBody\(object\);return \{present:true,version:etag,etag,uploaded,body:cached\.body,reused:true\}/,'a cache hit cancels the fresh body before reusing the parse');
 
 // 12. Empty etags: the version is a hash of the bytes, stable across reads.
 seed();for(const key of records.keys())etags.set(key,'');

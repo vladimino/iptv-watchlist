@@ -18,7 +18,8 @@ const movieHtml = fs.readFileSync('public/index.html', 'utf8');
 const worker = fs.readFileSync('src/worker.js', 'utf8');
 const build = fs.readFileSync('build.mjs', 'utf8');
 const healthView = fs.readFileSync('src/admin/health-view.js', 'utf8');
-const bundle = bundleAdmin([client, titleClient, healthView, page]);
+const nameClient = fs.readFileSync('src/admin/person-name-client.js', 'utf8');
+const bundle = bundleAdmin([client, titleClient, nameClient, healthView, page]);
 
 // Static boundary: the page is owner-only through the existing Access session. The catalogue reads are GET. The one
 // write in this bundle is the confirmed film title. No token, no other API.
@@ -30,11 +31,14 @@ assert.match(html, /<script src="\/admin\.js"><\/script>/);
 assert.doesNotMatch(html, /type="module"|fetch\(|\/api\/|programme\.json/);
 assert.match(client, /const ADMIN_API='\/api\/admin'/);
 assert.match(build, /src\/admin\/film-title-client\.js/);
+assert.match(build, /src\/admin\/person-name-client\.js/);
 assert.doesNotMatch(client, /method:\s*['"]POST/, 'the shared read client stays GET');
-assert.equal(bundle.split("method:'POST'").length - 1, 1, 'the admin bundle posts only the confirmed film title');
+assert.equal((bundle.match(/method:\s*'POST'/g) || []).length, 2, 'the catalogue bundle posts the film title and the person name');
 assert.match(bundle, /X-IPTV-Admin-Action':'film_title_review'/);
-const bundleWithoutTitleWrite = bundle.replace("method:'POST'", 'method:read');
-assert.doesNotMatch(bundleWithoutTitleWrite, /admin-query|\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|programme\.json|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
+assert.match(bundle, /\/name-review/);
+assert.match(bundle, /X-IPTV-Admin-Action':'person_name_review'/);
+const bundleWithoutWrites = bundle.replaceAll("method:'POST'", 'method:read');
+assert.doesNotMatch(bundleWithoutWrites, /admin-query|\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|programme\.json|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page script reaches the API only through the client');
 assert.doesNotMatch(healthView, /\bfetch\(|\/api\//, 'the health view renders answers and makes no request of its own');
 for (const id of ['admin-health', 'admin-catalog', 'admin-view-catalog', 'admin-view-health', 'admin-health-refresh', 'admin-health-stale-refresh', 'admin-health-summary', 'admin-health-sources', 'admin-health-subsystems', 'admin-health-issues', 'admin-health-empty', 'admin-health-loading', 'admin-health-error', 'admin-health-stale']) assert.match(html, new RegExp(`id="${id}"`), id);
@@ -46,7 +50,7 @@ assert.doesNotMatch(movieHtml, /id="admin-search"|admin-query/);
 assert.match(worker, /url\.pathname==='\/events'\?'\/':\/\^\\\/film\\\/\[A-Za-z0-9_-\]\{1,80\}\$\/\.test\(url\.pathname\)\?'\/':url\.pathname/);
 assert.match(worker, /\/api\/admin\//);
 assert.doesNotMatch(worker, /pathname==='\/admin'\?'\/'/);
-assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/film-title-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/health-view\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
+assert.match(build, /bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/film-title-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/person-name-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/health-view\.js','utf8'\),fs\.readFileSync\('public\/admin\.js','utf8'\)\]\)/);
 assert.match(build, /src\/domain\/admin-query\.js/);
 assert.match(css, /overflow-wrap:anywhere/);
 assert.match(css, /minmax\(0,1fr\)/);
@@ -71,7 +75,9 @@ const workerContext = vm.createContext({Response, Request, Headers, URL, URLSear
   PERSON_NAME_DICTIONARY: [{id: 'director/lea-nord', original: 'Lea Nord', name: 'Лея Норд', aliases: ['Л. Норд'], status: 'verified', verification_basis: 'user_supplied', source_url: null}],
   fetch: async () => {throw new Error('the Worker makes no outbound request for the admin page');}});
 for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/ratings-seed.js', 'src/discovery.js', 'src/letterboxd-facts.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
+vm.runInContext(fs.readFileSync('src/domain/person-name-review.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
+vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/health.js', 'utf8'), workerContext);
@@ -190,7 +196,7 @@ const window = {
   },
 };
 const ctx = vm.createContext({
-  URL, URLSearchParams, document, window, history: window.history, fetch: fakeFetch,
+  URL, URLSearchParams, document, window, history: window.history, fetch: fakeFetch, crypto: webcrypto,
   Array, Object, String, Number, Boolean, Math, JSON, Map, Set, Error, Promise, Date, Intl, RegExp,
   setTimeout, clearTimeout, AbortController, console,
 });
@@ -206,6 +212,11 @@ assert.match(detail.innerHTML, /Мира Соль/);
 assert.match(detail.innerHTML, /Mira Sol/);
 assert.match(detail.innerHTML, /letterboxd/);
 assert.match(detail.innerHTML, /wikidata/, 'provenance of the cached name');
+assert.match(detail.innerHTML, /Сохранить имя/);
+assert.match(detail.innerHTML, /id="admin-name-form"/);
+assert.match(detail.innerHTML, /admin-folded/, 'person aliases stay in a collapsed section');
+assert.match(detail.innerHTML, /Нет варианта с подтверждённым русским происхождением/);
+assert.doesNotMatch(detail.innerHTML, /name="person-name-alias"/, 'a cached name without Russian provenance is not a radio');
 assert.equal(detail.hidden, false);
 assert.match(nodes.get('#admin-snapshot-text').textContent, /Поколение 11111111, программа от 29\.10\.2026/);
 assert.match(nodes.get('#admin-snapshot-text').textContent, /фильмов: 35, людей: 3/);
@@ -259,6 +270,7 @@ assert.equal(url().searchParams.get('q'), 'одинаковый');
 assert.match(detail.innerHTML, /tmdb:900201/);
 assert.match(detail.innerHTML, /Same Dawn East/);
 assert.match(detail.innerHTML, /вне снимка программы/, 'fingerprint and prediction are shown as outside this read');
+assert.doesNotMatch(detail.innerHTML, /Сохранить имя/, 'a film card has no person-name confirmation');
 assert.equal(document.activeElement, nodes.get('#admin-detail-title'));
 window.history.back();
 await settle();
@@ -449,4 +461,214 @@ assert.equal(url().searchParams.get('q'), null);
 assert.equal(searchNode.value, '');
 assert.equal(document.activeElement, searchNode);
 assert.ok(requests.every(request => request.method === 'GET'));
+
+// 11. An unknown save keeps the requestId; a confirmed refusal starts a new one. Editing the form drops it.
+assert.ok((listeners.get('#admin-detail') || []).some(item => item.type === 'input'));
+assert.ok((listeners.get('#admin-detail') || []).some(item => item.type === 'change'));
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:0,error:'network'})`), true);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'readback_failed'})`), true);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:500,error:'http_500'})`), true);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:412,error:'version_conflict'})`), false);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:409,error:'request_id_reused'})`), false);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'review_unconditional'})`), false);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'storage_unavailable'})`), false);
+window.location.href = 'http://127.0.0.1/admin?kind=person&id=person:actor/mira-sol';
+await run('onAdminRefresh()');
+await settle();
+await run(`(async () => {
+  globalThis.__namePosts = [];
+  globalThis.__namePost = adminPost;
+  const status = {textContent:'', focus(){this.focused=true;}};
+  const button = {disabled:false};
+  const form = {id:'admin-name-form', dataset:{}, querySelector(sel){
+    if(sel==='#admin-name-status')return status;
+    if(sel==='button[type="submit"]')return button;
+    if(sel==='#admin-name-manual')return {value:'Актёр Клавиатура'};
+    if(sel==='#admin-name-basis')return {value:''};
+    if(sel==='input[name="person-name-alias"]:checked')return null;
+    return null;
+  }, querySelectorAll(){return [];}};
+  globalThis.__nameForm = form;
+  globalThis.__nameStatus = status;
+  globalThis.__nameButton = button;
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:0, error:'network', body:null}; };
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:503, error:'readback_failed', body:{error:'storage_unavailable', reason:'readback_failed'}}; };
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+})()`);
+const namePosts = run('__namePosts');
+assert.equal(namePosts.length, 3);
+assert.equal(namePosts[0].requestId, namePosts[1].requestId);
+assert.equal(namePosts[1].requestId, namePosts[2].requestId);
+assert.equal(run('__nameForm.dataset.requestId'), namePosts[0].requestId);
+assert.equal(run('__nameStatus.textContent'), 'Неизвестно, записалось ли имя. Сверяю карточку.');
+assert.equal(run('__nameButton.disabled'), false);
+await run(`(async () => {
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:412, error:'version_conflict', body:{error:'version_conflict'}}; };
+  await onAdminNameSubmit({target:__nameForm, preventDefault(){}});
+})()`);
+assert.equal(run('__nameForm.dataset.requestId'), undefined);
+assert.match(run('__nameStatus.textContent'), /Имя уже изменилось/);
+await run(`(async () => {
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:0, error:'network', body:null}; };
+  await onAdminNameSubmit({target:__nameForm, preventDefault(){}});
+  onAdminNameEdit({target:{closest(sel){return sel==='#admin-name-form'?__nameForm:null;}}});
+})()`);
+const afterEdit = run('__namePosts');
+assert.equal(afterEdit.length, 5);
+assert.notEqual(afterEdit[4].requestId, afterEdit[0].requestId);
+assert.equal(run('__nameForm.dataset.requestId'), undefined, 'editing the form drops the pending request');
+await run('adminPost = __namePost');
+
+// 12. A matching preferred name is not proof of a link-only save. Radios are provenance, not script.
+await run(`(async () => {
+  const status = {textContent:'', focus(){this.focused=true;}};
+  const manual = {value:''};
+  const basis = {value:''};
+  const radios = [{value:'Мира Соль', checked:false}];
+  const roles = [{value:'person:director/mira-sol', checked:false, getAttribute(name){return name==='data-version'?'role-v':null;}}];
+  const form = {id:'admin-name-form', dataset:{}, querySelector(sel){
+    if(sel==='#admin-name-status')return status;
+    if(sel==='#admin-name-manual')return manual;
+    if(sel==='#admin-name-basis')return basis;
+    if(sel==='input[name="person-name-alias"]:checked')return radios.find(item=>item.checked)||null;
+    if(sel==='button[type="submit"]')return {disabled:false};
+    return null;
+  }, querySelectorAll(sel){
+    if(sel==='input[name="person-name-alias"]')return radios;
+    if(sel==='input[name="person-name-role"]')return roles;
+    if(sel==='input[name="person-name-role"]:checked')return roles.filter(item=>item.checked);
+    return [];
+  }};
+  const detailNode = document.querySelector('#admin-detail');
+  detailNode.querySelector = sel => sel==='#admin-name-form'?form:null;
+  adminLive.entity = {id:'person:actor/mira-sol', nameReview:{version:'name-review:1:stale'}};
+  const preferred = 'Мира Соль';
+  const kept = {requestId:'req-link-only', value:preferred, mode:'alias', basis:'', roles:[{id:'person:director/mira-sol', expectedVersion:'role-v'}]};
+  const stale = {entity:{preferred, nameReview:{preferred:{value:preferred}, reviews:[], roleLinks:[], version:'name-review:1:stale'}}};
+  adminFinishUnknownName(kept, stale);
+  globalThis.__linkStatus = status.textContent;
+  globalThis.__linkRequest = form.dataset.requestId;
+  globalThis.__linkChecked = roles[0].checked;
+  const previous = adminPost;
+  globalThis.__linkPosts = [];
+  adminPost = async (path, body) => { globalThis.__linkPosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:0, error:'network', body:null}; };
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  adminPost = previous;
+  const proved = {entity:{preferred, nameReview:{preferred:{value:preferred}, reviews:[{requestId:'req-link-only', linkedFrom:null, roles:['person:director/mira-sol']}], roleLinks:[{id:'person:director/mira-sol'}], version:'name-review:1:new'}}};
+  adminFinishUnknownName(kept, proved);
+  globalThis.__linkProved = status.textContent;
+  globalThis.__linkProvedRequest = form.dataset.requestId;
+  detailNode.querySelector = () => null;
+})()`);
+assert.equal(run('__linkStatus'), 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.');
+assert.doesNotMatch(run('__linkStatus'), /Имя записано/);
+assert.equal(run('__linkRequest'), 'req-link-only');
+assert.equal(run('__linkChecked'), true);
+const linkPosts = run('__linkPosts');
+assert.equal(linkPosts.length, 1);
+assert.equal(linkPosts[0].requestId, 'req-link-only');
+assert.equal(linkPosts[0].value, 'Мира Соль');
+assert.deepEqual(linkPosts[0].roles, [{id:'person:director/mira-sol', expectedVersion:'role-v'}]);
+assert.equal(run('__linkProved'), 'Имя записано. Карточка сверена.');
+assert.equal(run('__linkProvedRequest'), undefined);
+
+// 13. A refresh with new version tokens must not rewrite the pending command, even if the alias radio is gone.
+await run(`(async () => {
+  adminNameDrop();
+  const status = {textContent:'', focus(){}};
+  const manual = {value:''};
+  const basis = {value:'заметка'};
+  const radios = [{value:'Старое имя', checked:true}];
+  let roleVersion = 'name-review:1:role-old';
+  const roles = [{value:'person:director/mira-sol', checked:true, getAttribute(name){return name==='data-version'?roleVersion:null;}}];
+  const form = {id:'admin-name-form', dataset:{}, querySelector(sel){
+    if(sel==='#admin-name-status')return status;
+    if(sel==='#admin-name-manual')return manual;
+    if(sel==='#admin-name-basis')return basis;
+    if(sel==='input[name="person-name-alias"]:checked')return radios.find(item=>item.checked)||null;
+    if(sel==='button[type="submit"]')return {disabled:false};
+    return null;
+  }, querySelectorAll(sel){
+    if(sel==='input[name="person-name-alias"]')return radios;
+    if(sel==='input[name="person-name-role"]')return roles;
+    if(sel==='input[name="person-name-role"]:checked')return roles.filter(item=>item.checked);
+    return [];
+  }};
+  const detailNode = document.querySelector('#admin-detail');
+  detailNode.querySelector = sel => sel==='#admin-name-form'?form:null;
+  adminLive.entity = {id:'person:actor/mira-sol', preferred:'Старое имя', nameReview:{version:'name-review:1:old', preferred:{value:'Старое имя'}, reviews:[], roleLinks:[]}};
+  const posts = [];
+  const previousPost = adminPost;
+  const previousRefresh = onAdminRefresh;
+  adminPost = async (path, body) => { posts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:503, error:'readback_failed', body:{error:'storage_unavailable', reason:'readback_failed'}}; };
+  onAdminRefresh = async () => {
+    adminLive.entity = {id:'person:actor/mira-sol', preferred:'Старое имя', nameReview:{version:'name-review:1:new', preferred:{value:'Старое имя'}, reviews:[], roleLinks:[]}};
+    roleVersion = 'name-review:1:role-new';
+    radios.splice(0, radios.length);
+    roles[0].checked = false;
+    return {mode:'ready', kind:'person', id:'person:actor/mira-sol', entity:adminLive.entity};
+  };
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  await onAdminNameSubmit({target:form, preventDefault(){}});
+  globalThis.__frozenPosts = posts;
+  globalThis.__frozenStatus = status.textContent;
+  adminPost = previousPost;
+  onAdminRefresh = previousRefresh;
+  adminNameDrop();
+  detailNode.querySelector = () => null;
+})()`);
+const frozenPosts = run('__frozenPosts');
+assert.equal(frozenPosts.length, 2);
+assert.deepEqual(frozenPosts[1], frozenPosts[0]);
+assert.equal(frozenPosts[0].mode, 'alias');
+assert.equal(frozenPosts[0].value, 'Старое имя');
+assert.equal(frozenPosts[0].expectedVersion, 'name-review:1:old');
+assert.equal(frozenPosts[0].basis, 'заметка');
+assert.deepEqual(frozenPosts[0].roles, [{id:'person:director/mira-sol', expectedVersion:'name-review:1:role-old'}]);
+assert.equal(frozenPosts[0].requestId, frozenPosts[1].requestId);
+assert.match(run('__frozenStatus'), /Повторите отправку/);
+assert.doesNotMatch(run('__frozenStatus'), /Имя записано/);
+const wall = run(`(() => {
+  const foreign = Array.from({length:32}, (_, index) => ({value:'Alias '+index, origin:'alias', provenance:index % 2 ? {source:'tmdb'} : {source:'letterboxd'}, preferred:false}));
+  foreign.push({value:'Кириллица без языка', origin:'alias', provenance:{source:'wikidata'}, preferred:false});
+  foreign.push({value:'Имя Словаря', origin:'preferred', provenance:{value:'Имя Словаря'}, preferred:true});
+  foreign.push({value:'Словарь Алиас', origin:'alias', provenance:{source:'dictionary'}, preferred:false});
+  foreign.push({value:'Имя Владельца', origin:'alias', provenance:{authority:'owner', source:'owner'}, preferred:false});
+  return adminNameForm({id:'person:actor/wall', original:'Wall Person', preferred:'Имя Словаря', nameReview:{version:'name-review:1:wall', original:'Wall Person', preferred:{value:'Имя Словаря', status:'reviewed', source:'dictionary', authority:'dictionary'}, options:foreign, collisions:[{id:'person:director/wall', original:'Wall Person', reason:'same_original', version:'v2', linked:false}], reviews:[], roleLinks:[]}});
+})()`);
+const wallRadios = [...wall.matchAll(/name="person-name-alias" value="([^"]+)"/g)].map(match => match[1]);
+assert.deepEqual(wallRadios.slice().sort(), ['Имя Владельца', 'Имя Словаря', 'Словарь Алиас']);
+assert.match(wall, /<details class="admin-name-more">/);
+assert.match(wall, /Alias 31/);
+assert.match(wall, /Кириллица без языка/);
+assert.doesNotMatch(wall, /name="person-name-alias" value="Кириллица без языка"/);
+assert.doesNotMatch(wall, /name="person-name-alias" value="Alias 0"/);
+assert.match(wall, /Оригинал: <b>Wall Person<\/b>/);
+assert.match(wall, /id="admin-name-manual"/);
+assert.match(wall, /Сохранить имя/);
+assert.match(wall, /name="person-name-role"/);
+const bare = run(`adminNameForm({id:'person:actor/bare', original:'Bare', nameReview:{version:'v', original:'Bare', preferred:{value:'Голое', status:'provisional', source:'wikidata', authority:null}, options:[{value:'Голое', origin:'preferred', provenance:{value:'Голое'}, preferred:true},{value:'Bare', origin:'original', provenance:{source:'letterboxd'}}], collisions:[], reviews:[]}})`);
+assert.doesNotMatch(bare, /person-name-alias/);
+assert.match(bare, /Нет варианта с подтверждённым русским происхождением/);
+assert.match(bare, /Сейчас: <b>Голое<\/b>/);
+run(`adminDetail({mode:'ready', id:'north', kind:'film', entity:{id:'film:north', storedId:'north', preferred:'Северный мост', originalTitle:'North Bridge', aliases:[{value:'North Bridge', kind:'title', provenance:{source:'letterboxd'}}], titleReview:{version:'title-review:1:north', filmId:'film:north', preferred:{value:'Северный мост', status:'reviewed', source:'dictionary'}, options:[{value:'Северный мост', origin:'preferred', provenance:{source:'dictionary'}},{value:'Мост на севере', origin:'alias', provenance:{source:'dictionary'}},{value:'North Bridge', origin:'alias', provenance:{source:'letterboxd'}}], reviews:[]}, localization:{status:'reviewed', source:'dictionary'}, identity:{status:'resolved'}, externalIds:[], localizationConflicts:[]}})`);
+assert.match(detail.innerHTML, /data-title-review/);
+assert.match(detail.innerHTML, /Записать название/);
+assert.match(detail.innerHTML, /<summary>Другие названия \(1\)<\/summary>/);
+assert.match(detail.innerHTML, /Мост на севере/);
+assert.doesNotMatch(detail.innerHTML, /name="title-review-choice" value="North Bridge"/);
+assert.doesNotMatch(detail.innerHTML, /admin-folded/);
+assert.doesNotMatch(detail.innerHTML, /admin-name-form/);
+assert.ok(detail.innerHTML.indexOf('Оригинал:') < detail.innerHTML.indexOf('data-title-review') && detail.innerHTML.indexOf('data-title-review') < detail.innerHTML.indexOf('<h3>Сводка</h3>'));
+run(`adminDetail({mode:'ready', id:'person:actor/mira-sol', kind:'person', entity:{id:'person:actor/mira-sol', preferred:'Мира Соль', original:'Mira Sol', aliases:[{value:'M. Sol', provenance:{source:'letterboxd'}}], localization:{status:'provisional', source:'wikidata'}, identity:{status:'resolved'}, externalIds:[], localizationConflicts:[], nameReview:{version:'name-review:1:mira', original:'Mira Sol', preferred:{value:'Мира Соль', status:'provisional', source:'wikidata'}, options:[{value:'Мира Соль', origin:'preferred', provenance:{source:'wikidata'}, preferred:true}], collisions:[{id:'person:director/mira-sol', original:'Mira Sol', reason:'same_original', version:'name-review:1:role', linked:false}], reviews:[], roleLinks:[]}}})`);
+assert.match(detail.innerHTML, /id="admin-name-form"/);
+assert.match(detail.innerHTML, /Сохранить имя/);
+assert.match(detail.innerHTML, /name="person-name-role"/);
+assert.match(detail.innerHTML, /admin-folded/);
+assert.match(detail.innerHTML, /<summary>Другие имена \(1\)<\/summary>/);
+assert.doesNotMatch(detail.innerHTML, /data-title-review/);
+assert.doesNotMatch(detail.innerHTML, /Записать название/);
+assert.ok((listeners.get('#admin-detail') || []).some(item => item.type === 'submit' && item.fn === run('onAdminNameSubmit')));
 console.log('Admin shell: live snapshot, URL state, history, pagination, empty, error, stale-pin and health view states passed');

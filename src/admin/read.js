@@ -37,10 +37,10 @@ async function adminReadObject(bucket,key,cached){
  if(!object)return {present:false,version:null,uploaded:null,body:null,reused:false};
  const uploaded=adminUploaded(object);
  const etag=typeof object.etag==='string'&&object.etag?object.etag:null;
- if(etag&&cached&&cached.version===etag){await adminDiscardBody(object);return {present:true,version:etag,uploaded,body:cached.body,reused:true};}
- if(etag)return {present:true,version:etag,uploaded,body:await object.json(),reused:false};
+ if(etag&&cached&&cached.version===etag){await adminDiscardBody(object);return {present:true,version:etag,etag,uploaded,body:cached.body,reused:true};}
+ if(etag)return {present:true,version:etag,etag,uploaded,body:await object.json(),reused:false};
  const text=typeof object.text==='function'?await object.text():JSON.stringify(await object.json());
- return {present:true,version:await adminDigest(text),uploaded,body:JSON.parse(text),reused:false};
+ return {present:true,version:await adminDigest(text),etag:null,uploaded,body:JSON.parse(text),reused:false};
 }
 function adminClock(value){if(typeof value!=='string'||!value)return null;const parsed=Date.parse(value);return Number.isFinite(parsed)?parsed:null;}
 function adminTuple(run,pointer,programme,titles,people,reviews){
@@ -133,13 +133,30 @@ function adminApplyOwnerFilm(record,entry){
  return {...record,localization,aliases,titleReviews:Array.isArray(entry.titleReviews)?entry.titleReviews:[],localizationConflicts:Array.isArray(entry.localizationConflicts)?entry.localizationConflicts:record.localizationConflicts,preferred:localization.value??null};
 }
 function adminTitleReview(film){return typeof titleReviewState==='function'?titleReviewState(film):null;}
-function adminPersonRecord(person,people,clock){
+function adminPersonSubject(view,stored,clock){
+ if(!view)return null;
+ if(!stored?.localization)return {...view,preferred:view.localization?.value??null,nameReviews:Array.isArray(view.nameReviews)?view.nameReviews:[],roleLinks:Array.isArray(view.roleLinks)?view.roleLinks:[]};
+ let subject={...view,localization:stored.localization,aliases:typeof mergeAliases==='function'?mergeAliases(view.aliases||[],stored.aliases||[]):(stored.aliases||view.aliases),localizationConflicts:Array.isArray(stored.localizationConflicts)?stored.localizationConflicts.slice():[],nameReviews:Array.isArray(stored.nameReviews)?stored.nameReviews.slice():[],roleLinks:Array.isArray(stored.roleLinks)?stored.roleLinks.slice():[]};
+ const live=view.localization;
+ if(live?.value&&subject.localization?.value!==live.value&&typeof reconcilePersonName==='function')subject=reconcilePersonName(subject,{status:live.status,value:live.value,source:live.source||null,authority:live.provenance?.authority||null,provenance:live.provenance||null},clock);
+ return {...subject,preferred:subject.localization?.value??null};
+}
+function adminPersonRecord(person,people,clock,reviews){
  const roleId=typeof person?.id==='string'?person.id:'';
  if(!roleId)return null;
  const cache=people?.[roleId]&&typeof people[roleId]==='object'?people[roleId]:null;
  const view=personView({roleId,original:person.original||cache?.original||null,dictionary:REVIEWED_PEOPLE[roleId]||null,cacheName:cache?.name||null,now:clock});
- if(!view)return null;
- return {...view,preferred:view.localization?.value??null,localizationConflicts:adminConflicts(person.nameConflicts)};
+ const stored=reviews?.[view?.id]||null;
+ const subject=adminPersonSubject(view,stored,clock);
+ if(!subject)return null;
+ const {nameReviews,roleLinks,...record}=subject;
+ const conflicts=adminMergeConflicts(adminConflicts(person.nameConflicts),adminConflicts(subject.localizationConflicts));
+ return {record:{...record,localizationConflicts:conflicts},subject};
+}
+function adminMergeConflicts(left,right){
+ const out=[];
+ for(const item of [...left,...right])if(item&&!out.some(have=>have.value===item.value&&have.reason===item.reason&&have.source===item.source))out.push(item);
+ return out;
 }
 function adminProjection(programme,titles,people,clock,reviews){
  const films=[],seenFilms=new Set();
@@ -150,17 +167,18 @@ function adminProjection(programme,titles,people,clock,reviews){
   seenFilms.add(record.storedId);films.push(record);
  }
  films.sort((left,right)=>left.storedId.localeCompare(right.storedId,'en'));
- const persons=[],seenPeople=new Set();
+ const persons=[],personSubjects={},seenPeople=new Set();
+ const personReviews=reviews&&typeof reviews.people==='object'&&!Array.isArray(reviews.people)?reviews.people:{};
  const embedded=[...(programme?.people?.directors||[]),...(programme?.people?.actors||[]),...(Array.isArray(programme?.films)?programme.films:[]).flatMap(film=>[...(film?.directors||[]),...(film?.actors||[])])];
  for(const person of embedded){
   const roleId=typeof person?.id==='string'?person.id:'';
   if(!roleId||seenPeople.has(roleId))continue;
-  const record=adminPersonRecord(person,people,clock);
-  if(!record)continue;
-  seenPeople.add(roleId);persons.push(record);
+  const built=adminPersonRecord(person,people,clock,personReviews);
+  if(!built)continue;
+  seenPeople.add(roleId);persons.push(built.record);personSubjects[built.subject.id]=built.subject;
  }
  persons.sort((left,right)=>left.roleId.localeCompare(right.roleId,'en'));
- return {films,people:persons};
+ return {films,people:persons,personSubjects};
 }
 // The snapshot read in the order the contract fixes: pointer, generation programme, pointer again, dictionaries. One retry
 // when the pointer moved between the two reads; a second move is a failure, not a page of mixed generations.
@@ -187,10 +205,10 @@ async function adminLoadSnapshot(env,hasPin){
   const peopleUpdatedAt=people.present?(typeof people.body?.updatedAt==='string'&&people.body.updatedAt?people.body.updatedAt:people.uploaded):null;
   const skewReasons=adminSkew(programmeUpdatedAt,titles,titlesUpdatedAt,people,peopleUpdatedAt);
   const clockMs=adminClock(programmeUpdatedAt),clock=clockMs===null?null:new Date(clockMs).toISOString();
-  const reviewBody=reviews.present&&reviews.body&&typeof reviews.body==='object'?reviews.body:{};
+  const reviewBody=reviews.present&&reviews.body&&typeof reviews.body==='object'&&!Array.isArray(reviews.body)?reviews.body:{};
   const records=adminProjection(programme.body,titles.present&&titles.body&&typeof titles.body==='object'?titles.body:{},people.present&&people.body&&typeof people.body==='object'?people.body:{},clock,reviewBody);
   const snapshot={
-   tuple,pointer:{version:pointer.version,body:pointer.body},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},reviews:{version:reviews.version,body:reviews.present?reviews.body:null,present:reviews.present},records,
+   tuple,reviewEtag:reviews.etag||null,reviewCache:reviews.present?{version:reviews.version,body:reviews.body}:null,pointer:{version:pointer.version,body:pointer.body},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},reviews:{version:reviews.version,body:reviews.present?reviews.body:null,present:reviews.present},records,
    info:{programmeRunId:run,programmeUpdatedAt,titlesUpdatedAt,peopleUpdatedAt,skew:skewReasons.length>0,skewReasons,films:records.films.length,people:records.people.length},
   };
   ADMIN_SNAPSHOT_CACHE=snapshot;
@@ -244,6 +262,11 @@ async function adminReadRoute(request,env,url){
   const item=kind==='film'?AdminQuery.getFilm(films,id):AdminQuery.getPerson(people,id);
   if(!item)return json({...base,error:'not_found'},404);
   if(kind==='film')return json({...base,kind,item:{...item,titleReview:adminTitleReview(item)}});
+  if(kind==='person'&&typeof personNameState==='function'){
+   const subjects=snapshot.records.personSubjects||{};
+   const subject=subjects[item.id]||item;
+   return json({...base,kind,item:{...item,nameReview:personNameState(subject,Object.values(subjects))}});
+  }
   return json({...base,kind,item});
  }
  let records=kind==='film'?films:people,result;
