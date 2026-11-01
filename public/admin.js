@@ -202,7 +202,12 @@ function adminAliases(record, kind) {
   const aliases = record.aliases || [];
   const person = kind === 'person';
   if (!aliases.length) return person ? '<p class="muted">Других имён нет.</p>' : '<p class="muted">Других названий нет.</p>';
-  const items = aliases.map(alias => `<li>${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''} ${adminProvenance(alias.provenance)}</li>`).join('');
+  const items = aliases.map(alias => {
+    const body = `${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''}`;
+    // A film alias is a title the owner may pick. Its request id and provenance stay in the closed
+    // technical disclosure. A person alias keeps that provenance beside the name, as before.
+    return `<li>${body}${person ? ' ' + adminProvenance(alias.provenance) : ''}</li>`;
+  }).join('');
   const label = person ? 'Другие имена' : 'Другие названия';
   return `<details class="other-titles"><summary>${label} (${aliases.length})</summary><ul>${items}</ul></details>`;
 }
@@ -210,15 +215,27 @@ function adminAliases(record, kind) {
 function adminExternalIds(record, seen) {
   const ids = record.externalIds || [];
   const items = [];
+  const shown = new Set();
   for (const entry of ids) {
     if (!entry) continue;
     const value = entry.value == null ? '' : String(entry.value);
-    if (seen && value && seen.has(value)) continue;
-    if (seen && value) seen.add(value);
-    items.push(`<li>${adminEscape(entry.scheme || 'id')} ${adminEscape(value)}${entry.trusted === true ? ' · доверенный' : entry.trusted === false ? ' · не доверенный' : ''}${entry.conflicting ? ' · конфликт' : ''} ${adminProvenance(entry.provenance)}</li>`);
+    const scheme = entry.scheme || 'id';
+    // The same scheme and value with the same trust and conflict marks is one row. A canonical
+    // identity that contains the number is not that row: the marks live only here.
+    const key = scheme + '\0' + value + '\0' + (entry.trusted === true ? '1' : entry.trusted === false ? '0' : '') + '\0' + (entry.conflicting ? '1' : '');
+    if (seen && shown.has(key)) continue;
+    if (seen) shown.add(key);
+    items.push(`<li>${adminEscape(scheme)} ${adminEscape(value)}${entry.trusted === true ? ' · доверенный' : entry.trusted === false ? ' · не доверенный' : ''}${entry.conflicting ? ' · конфликт' : ''} ${adminProvenance(entry.provenance, seen)}</li>`);
   }
   if (!items.length) return '<p class="muted">Внешних id нет.</p>';
   return `<ul>${items.join('')}</ul>`;
+}
+
+function adminFilmAliasFacts(record, seen) {
+  const aliases = record.aliases || [];
+  if (!aliases.length) return '';
+  const items = aliases.map(alias => `<li>${adminEscape(alias.value ?? alias)}${alias.kind ? ' · ' + adminEscape(alias.kind) : ''} ${adminProvenance(alias.provenance, seen)}</li>`).join('');
+  return `<h3>Происхождение вариантов</h3><ul>${items}</ul>`;
 }
 
 function adminFilmTechnical(record) {
@@ -234,8 +251,7 @@ function adminFilmTechnical(record) {
   add('id', record.id);
   add('хранение', record.storedId);
   add('canonical identity', record.canonicalIdentity);
-  if (typeof record.canonicalIdentity === 'string' && record.canonicalIdentity.startsWith('tmdb:')) seen.add(record.canonicalIdentity.slice('tmdb:'.length));
-  return `<details class="admin-technical"><summary>Технические сведения</summary><dl>${rows.join('')}</dl><h3>Внешние id</h3>${adminExternalIds(record, seen)}<p>Происхождение локализации: ${adminSource(record.localization, seen)}. Происхождение идентичности: ${adminSource(record.identity, seen)}.</p></details>`;
+  return `<details class="admin-technical"><summary>Технические сведения</summary><dl>${rows.join('')}</dl><h3>Внешние id</h3>${adminExternalIds(record, seen)}${adminFilmAliasFacts(record, seen)}<p>Происхождение локализации: ${adminSource(record.localization, seen)}. Происхождение идентичности: ${adminSource(record.identity, seen)}.</p></details>`;
 }
 
 function adminDetail(view) {
@@ -445,9 +461,19 @@ function adminRestoreTitleAttempt(form, kept) {
   form.dataset.requestId = kept.requestId;
 }
 
-// A 503 readback_failed can follow a put that already landed. The reread proves it only when the
-// audit carries this requestId and an after-token. An added alias also has to be on the record.
-// An unchanged preferred title is the ordinary result of add_alias, so it is not that proof.
+// A 503 readback_failed can follow a put that already landed. The reread proves a promote only when
+// the audit carries this requestId, an after-token and the preferred title. An added alias is proved
+// by that audit plus the saved owner alias on the record. titleReview.options lists original, EPG
+// and dictionary texts that were never stored as this alias, so membership there is not the proof.
+// An unchanged preferred title is the ordinary result of add_alias, so it is not that proof either.
+function adminOwnerAddedAlias(alias, value) {
+  if (!alias) return false;
+  const text = typeof alias === 'string' ? alias : alias.value;
+  if (text !== value) return false;
+  const provenance = alias.provenance;
+  return !!(provenance && (provenance.authority === 'owner' || provenance.source === 'owner' || provenance.added === 'alias'));
+}
+
 function adminTitleReviewLanded(kept, view) {
   const entity = view && view.entity;
   const review = entity && entity.titleReview;
@@ -455,11 +481,8 @@ function adminTitleReviewLanded(kept, view) {
   const entry = (review.reviews || []).find(item => item && item.requestId === kept.requestId);
   if (!entry || !entry.version || typeof entry.version.after !== 'string' || !entry.version.after) return false;
   if (kept.effect === 'add_alias') {
-    if (entry.effect !== 'alias_added') return false;
-    const aliases = entity.aliases || [];
-    const inAliases = aliases.some(alias => (alias && (alias.value || alias)) === kept.value);
-    const inOptions = (review.options || []).some(option => option && option.value === kept.value);
-    return inAliases || inOptions;
+    if (entry.effect !== 'alias_added' || !entry.to || entry.to.value !== kept.value) return false;
+    return (entity.aliases || []).some(alias => adminOwnerAddedAlias(alias, kept.value));
   }
   if (entry.effect === 'alias_added') return false;
   const preferred = entity.preferred || (review.preferred && review.preferred.value);

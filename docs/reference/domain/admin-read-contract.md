@@ -192,7 +192,7 @@ The fixture is synthetic. Do not paste a production watchlist, a private snapsho
 - two Films that collide on the folded preferred title;
 - an adapter-level error state the page can open without a failed request, for example a fixture flag `?error=unavailable`.
 
-The page shows search, an entity summary (id, preferred title or name, identity status, localization status, external ids, alias provenance), the quality queues, and deep links of the form `/admin?q=&kind=film&id=&queue=`. Empty, loading, and error states are visible. Loading is local only: the fixture returns on the same turn, or the page may show the loading state in a test harness. There is no background refresh.
+The page shows search, an entity summary (id, preferred title or name, identity status, localization status, external ids, alias provenance), the quality queues, and deep links of the form `/admin?q=&kind=film&id=&queue=`. That summary describes the old fixture. The live film card keeps alias request ids, and each external id's scheme and trusted or conflicting mark, inside the closed technical disclosure in [the route contract](../api/admin.md#the-page). Empty, loading, and error states are visible. Loading is local only: the fixture returns on the same turn, or the page may show the loading state in a test harness. There is no background refresh.
 
 The adapter always calls AIR-123 with an explicit `limit`. With no page-size control it passes 25. It never omits `limit`. A test that calls the adapter's library wrapper with `limit` omitted or `limit: 0` shows the `invalid_limit` error state and does not render a result page. A test that loads the page with no size selected asserts the library call received `limit: 25`.
 

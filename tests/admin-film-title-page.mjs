@@ -314,7 +314,30 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   assert.equal(aliases.includes(' open'), false);
   const person = context.adminAliases({aliases: [{value: 'Л. Норд', provenance: {source: 'dictionary'}}]}, 'person');
   assert.match(person, /<summary>Другие имена \(1\)<\/summary>/);
+  assert.match(person, /source: dictionary/, 'a person alias still shows its provenance');
   assert.equal(person.includes('Другие названия'), false);
+  const titled = context.adminAliases({aliases: [{value: 'Аферистка', kind: 'title', provenance: {source: 'owner', authority: 'owner', requestId: 'req-secret', added: 'alias'}}]}, 'film');
+  assert.match(titled, /Аферистка/);
+  assert.doesNotMatch(titled, /req-secret/, 'a film alias request id stays out of the title list');
+  assert.doesNotMatch(titled, /admin-provenance/);
+  const trusted = context.adminFilmTechnical({
+    id: 'film:care', storedId: 'care', canonicalIdentity: 'tmdb:601666',
+    externalIds: [{scheme: 'tmdb', value: '601666', trusted: true, conflicting: false}],
+    aliases: [{value: 'Аферистка', kind: 'title', provenance: {source: 'owner', authority: 'owner', requestId: 'req-secret', added: 'alias'}}],
+  });
+  assert.match(trusted, /tmdb:601666/);
+  assert.match(trusted, /tmdb 601666 · доверенный/);
+  assert.match(trusted, /req-secret/);
+  assert.doesNotMatch(trusted, /Внешних id нет/);
+  const conflicting = context.adminFilmTechnical({
+    id: 'film:care', storedId: 'care', canonicalIdentity: 'tmdb:601666',
+    externalIds: [{scheme: 'tmdb', value: '601666', trusted: false, conflicting: true}, {scheme: 'tmdb', value: '601666', trusted: false, conflicting: true}],
+  });
+  assert.match(conflicting, /tmdb:601666/);
+  assert.equal((conflicting.match(/tmdb 601666/g) || []).length, 1, 'an exact duplicate external row is one row');
+  assert.match(conflicting, /не доверенный/);
+  assert.match(conflicting, /конфликт/);
+  assert.doesNotMatch(conflicting, /Внешних id нет/);
   assert.match(context.adminAliases({aliases: []}, 'person'), /Других имён нет/);
   assert.match(context.adminAliases({aliases: []}, 'film'), /Других названий нет/);
   assert.match(context.adminAliases({aliases: []}), /Других названий нет/);
@@ -374,13 +397,51 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   saved = []; refreshes = 0;
   formAfterRefresh = null;
   context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {reason: 'readback_failed'}};
-  refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм', aliases: [{value: 'Хозяйское название'}], titleReview: {options: [{value: 'Хозяйское название'}], reviews: [{requestId: 'req-fixed', effect: 'alias_added', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:alias'}}]}}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм', aliases: [{value: 'Хозяйское название', provenance: {source: 'owner', authority: 'owner', added: 'alias'}}], titleReview: {reviews: [{requestId: 'req-fixed', effect: 'alias_added', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:alias'}}]}}};
   const parts = buildForm();
   context.adminBindTitleReview(detail);
   await submit(parts, {manual: 'Хозяйское название'});
   const form = detail.querySelector('[data-title-review]');
   assert.equal(form.querySelector('[data-title-result]').textContent, 'Вариант записан. Предпочтительное название не изменилось.');
   assert.equal(form.dataset.requestId, undefined);
+}
+
+{
+  saved = []; refreshes = 0;
+  formAfterRefresh = null;
+  context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {reason: 'readback_failed'}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм', aliases: [], titleReview: {options: [{value: 'Хозяйское название', origin: 'epg'}], reviews: [{requestId: 'req-fixed', effect: 'alias_added', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:alias'}}]}}};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название', basis: 'карточка'});
+  const form = detail.querySelector('[data-title-review]');
+  assert.match(form.querySelector('[data-title-result]').textContent, /Неизвестно, записалось ли название/);
+  assert.doesNotMatch(form.querySelector('[data-title-result]').textContent, /Вариант записан/);
+  assert.equal(form.dataset.requestId, 'req-fixed', 'an EPG option is not a stored alias');
+  context.nextResponse = {ok: true, status: 200, error: null, body: {ok: true, changed: false, idempotent: true}};
+  const replay = {preventDefault() {}, defaultPrevented: false};
+  for (const fn of form.listeners.get('submit')) fn(replay);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(saved.length, 2);
+  assert.deepEqual(saved[1].body, saved[0].body);
+  assert.equal(saved[1].body.effect, 'add_alias');
+  assert.equal(saved[1].body.expectedVersion, 'title-review:1:abc');
+  assert.equal(saved[1].body.requestId, 'req-fixed');
+}
+
+{
+  saved = []; refreshes = 0;
+  formAfterRefresh = null;
+  context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {reason: 'readback_failed'}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм', aliases: [{value: 'Хозяйское название', provenance: {source: 'epg'}}], titleReview: {reviews: [{requestId: 'req-fixed', effect: 'alias_added', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:alias'}}]}}};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название'});
+  const form = detail.querySelector('[data-title-review]');
+  assert.match(form.querySelector('[data-title-result]').textContent, /Неизвестно, записалось ли название/);
+  assert.equal(form.dataset.requestId, 'req-fixed', 'a programme alias of the same text is not the owner alias');
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed').effect, 'add_alias');
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed').expectedVersion, 'title-review:1:abc');
 }
 
 {
