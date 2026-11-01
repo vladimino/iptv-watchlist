@@ -126,16 +126,35 @@ async function publishMirror(db,bucket,records,authority){
  return {mirrored:next.mirrorGeneration===generation&&next.mirrorEtag===saved.etag,etag:saved.etag,authority:next};
 }
 
+// Records and the compare-and-swap token come from one generation. A repair that loses
+// the race reads that newer generation again. It does not return the older records
+// with the newer token.
+async function readStableCache(db){
+ for(let attempt=0;attempt<3;attempt++){
+  const before=await readAuthority(db);
+  if(before.mode!=='d1')throw failed('metadata_cache_not_authoritative');
+  const records=await readAllRecords(db);
+  const after=await readAuthority(db);
+  if(after.mode==='d1'&&after.cacheGeneration===before.cacheGeneration)return {records,authority:after};
+ }
+ throw failed('metadata_cache_fence');
+}
 export async function loadMetadataWorkingSet(env){
  const authority=await readAuthority(env?.DB);
  if(authority.mode!=='d1')return {mode:'r2',records:await readMirror(env),complete:true,authority};
- const records=await readAllRecords(env.DB);
- let current=authority;
- if(authority.cacheGeneration!==authority.mirrorGeneration){
-  try{const repaired=await publishMirror(env.DB,env.BUCKET,records,authority);if(repaired.authority)current=repaired.authority;}
-  catch{/* the decision still uses the rows above */}
+ let snapshot=await readStableCache(env.DB);
+ for(let attempt=0;attempt<3;attempt++){
+  if(snapshot.authority.cacheGeneration===snapshot.authority.mirrorGeneration)break;
+  let repaired;
+  try{repaired=await publishMirror(env.DB,env.BUCKET,snapshot.records,snapshot.authority);}
+  catch{break;}
+  if(!repaired.superseded&&repaired.authority&&repaired.authority.cacheGeneration===snapshot.authority.cacheGeneration){
+   snapshot={records:snapshot.records,authority:repaired.authority};
+   break;
+  }
+  snapshot=await readStableCache(env.DB);
  }
- return {mode:'d1',records,complete:true,authority:current};
+ return {mode:'d1',records:snapshot.records,complete:true,authority:snapshot.authority};
 }
 
 async function fenced(db,statements){
@@ -171,7 +190,7 @@ export async function commitMetadataCache(db,bucket,records,authority){
  const committed=await readAuthority(db);
  if(committed.cacheGeneration!==next)throw failed('metadata_cache_cas');
  let mirrored=false,current=committed;
- try{const published=await publishMirror(db,bucket,records,committed);mirrored=published.mirrored;if(published.authority)current=published.authority;}
+ try{const published=await publishMirror(db,bucket,records,committed);mirrored=published.mirrored;if(published.authority&&published.authority.cacheGeneration===next)current=published.authority;}
  catch{mirrored=false;}
  return {mode:'d1',cacheGeneration:next,mirrored,authority:current};
 }

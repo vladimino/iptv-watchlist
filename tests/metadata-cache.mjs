@@ -499,4 +499,66 @@ function limitBinds(db,limit=100){
  assert.equal(one(v5,'SELECT COUNT(*) FROM film'),0,'a partial v6 run writes no Film');
 }
 
+function pauseAuthoritySelect(db,nth){
+ const prepare=db.prepare.bind(db);
+ let seen=0,open,go;
+ const ready=new Promise(resolve=>{open=resolve;});
+ const gate=new Promise(resolve=>{go=resolve;});
+ db.prepare=sql=>{
+  const statement=prepare(sql);
+  return {bind(...params){
+   const bound=statement.bind(...params);
+   return {
+    text:bound.text,
+    async first(){
+     if(/FROM metadata_cache_authority\b/.test(sql)){
+      seen++;
+      if(seen===nth){open();await gate;}
+     }
+     return bound.first();
+    },
+    all:()=>bound.all(),
+    run:()=>bound.run(),
+   };
+  }};
+ };
+ return {ready,release(){go();},seen:()=>seen};
+}
+
+// 13. A read repair that loses the race does not return older records with the newer generation.
+{
+ const db=migrated();
+ const body={heat:record('heat'),orphan:record('orphan')};
+ const bucket=mirrorOf(body);
+ await importMetadataCache(db,bucket,{confirm:'load'});
+ await activateMetadataCache(db,bucket,{confirm:'activate'});
+ const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ const real=bucket.put.bind(bucket);
+ const down={on:true};
+ bucket.put=async(key,value,options)=>{if(down.on&&key==='metadata.json')throw new Error('mirror down');return real(key,value,options);};
+ const laggedBody={...working.records,heat:{...working.records.heat,synopsis:'g2'}};
+ const lagged=await commitMetadataCache(db,bucket,laggedBody,{...working.authority,complete:true,mode:'d1'});
+ assert.equal(lagged.mirrored,false);
+ down.on=false;
+ bucket.put=real;
+ const pause=pauseAuthoritySelect(db,4);
+ const loading=loadMetadataWorkingSet({DB:db,BUCKET:bucket});
+ await Promise.race([pause.ready,new Promise((_,reject)=>setTimeout(()=>reject(new Error('authority select '+pause.seen()+' did not reach the repair read')),1000))]);
+ const g3Body={...laggedBody,heat:{...laggedBody.heat,synopsis:'g3-distinct',stamp:'g3'}};
+ const g3=await commitMetadataCache(db,bucket,g3Body,{...lagged.authority,complete:true,mode:'d1'});
+ assert.equal(g3.mirrored,true);
+ assert.equal(payload(db,'heat').stamp,'g3');
+ pause.release();
+ const loaded=await loading;
+ const live=await readAuthority(db);
+ if(loaded.records.heat.synopsis!=='g3-distinct')assert.notEqual(loaded.authority.cacheGeneration,live.cacheGeneration);
+ else assert.equal(loaded.authority.cacheGeneration,live.cacheGeneration);
+ let rejected=false;
+ try{await commitMetadataCache(db,bucket,loaded.records,{...loaded.authority,complete:true,mode:'d1'});}
+ catch(error){rejected=true;assert.equal(error.code,'metadata_cache_cas');}
+ assert.equal(rejected||loaded.records.heat.synopsis==='g3-distinct',true);
+ assert.equal(payload(db,'heat').synopsis,'g3-distinct');
+ assert.equal(payload(db,'heat').stamp,'g3');
+}
+
 console.log('metadata cache: r2 until the marker is d1, full records including orphans, fenced commit, mirror repair, no phantom Film');
