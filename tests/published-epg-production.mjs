@@ -4,6 +4,7 @@ import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {pathToFileURL} from 'node:url';
 import {mkdtemp} from 'node:fs/promises';
 import {d1Standin} from './d1-standin.mjs';
 import {currentGeneration, repairMirrors, writeMirrors} from '../src/published-epg.js';
@@ -39,6 +40,15 @@ assert.match(revert.stderr,/confirm/);
  const missingDrain=spawnSync(process.execPath,[script,'--activate','--confirm','activate','--target','iptv'],{encoding:'utf8'});
 assert.equal(missingDrain.status,2);
 assert.match(missingDrain.stderr,/producers_not_drained/);
+const missingSealDrain=spawnSync(process.execPath,[script,'--seal-hold','--confirm','seal-hold','--target','iptv'],{encoding:'utf8'});
+assert.equal(missingSealDrain.status,2);
+assert.match(missingSealDrain.stderr,/producers_not_drained/);
+const missingRelease=spawnSync(process.execPath,[script,'--release-hold','--target','iptv'],{encoding:'utf8'});
+assert.equal(missingRelease.status,2);
+assert.match(missingRelease.stderr,/confirm/);
+const drainedRelease=spawnSync(process.execPath,[script,'--release-hold','--confirm','release-hold','--producers-drained','--target','iptv'],{encoding:'utf8'});
+assert.equal(drainedRelease.status,2);
+assert.match(drainedRelease.stderr,/usage/);
 const missingConfirm=spawnSync(process.execPath,[script,'--apply','--target','iptv'],{encoding:'utf8'});
 assert.equal(missingConfirm.status,2);
 assert.match(missingConfirm.stderr,/confirm/);
@@ -353,7 +363,7 @@ function run(args, installed, env){
   if((init?.method||'GET')==='PUT')puts++;
   const body=String(init?.body||'');
   const response=await original(url,init);
-  if((init?.method||'GET')==='POST'&&body.includes("cutover='held'")){
+  if((init?.method||'GET')==='POST'&&body.includes("mode='d1', cutover='held'")){
    installed.putObject('watchlist.json',{updatedAt:'2026-11-01T13:00:00.000Z',films:[{id:'film:raced'}]});
    const db=d1Standin(installed.productionFile);
    exposed=await currentGeneration({DB:db});
@@ -382,6 +392,61 @@ function run(args, installed, env){
  assert.equal(racedRow.mode,'r2');
  assert.equal(racedRow.cutover,'open');
  assert.equal(JSON.parse(installed.objects.get('watchlist.json').text).films[0].id,'film:raced');
+}
+
+{
+ const built=spawnSync(process.execPath,['build.mjs'],{encoding:'utf8'});
+ assert.equal(built.status,0,built.stderr);
+ const worker=(await import(pathToFileURL(path.resolve('dist/server/index.js')).href)).default;
+ const installed=await install(6);
+ const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ assert.equal(chain.status,0,chain.stderr);
+ assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
+ const programme={runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',watchlistCount:1,films:[{id:'film:heat',title:'Heat',shows:[]}]};
+ const watchlist={updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat'}]};
+ installed.putObject('epg/published-generation.json',{programmeRunId:'run-a',phase:'published'});
+ installed.putObject('programme.json',programme);
+ installed.putObject('watchlist.json',watchlist);
+ assert.equal((await run(['--load','--confirm','load','--target','iptv'], installed)).exit,0);
+ const original=installed.fetchImpl;
+ let puts=0;
+ let routePuts=0;
+ const served=[];
+ installed.fetchImpl=async(url,init)=>{
+  if((init?.method||'GET')==='PUT')puts++;
+  const body=String(init?.body||'');
+  const response=await original(url,init);
+  if((init?.method||'GET')==='POST'&&body.includes("mode='d1', cutover='held'")){
+   installed.putObject('programme.json',{runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',watchlistCount:1,films:[{id:'film:live',title:'Live',shows:[]}]});
+   installed.putObject('watchlist.json',{updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:raced'}]});
+   const db=d1Standin(installed.productionFile);
+   const bucket={
+    async get(key){
+     const object=installed.objects.get(key);
+     if(!object)return null;
+     return {etag:object.etag,json:async()=>JSON.parse(object.text),text:async()=>object.text};
+    },
+    async put(){routePuts++;return {etag:'clobber'};},
+   };
+   for(const pathname of ['/api/programme','/api/watchlist']){
+    const http=await worker.fetch(new Request('http://127.0.0.1'+pathname),{DB:db,BUCKET:bucket},{waitUntil(){}});
+    const payload=await http.json();
+    assert.equal(http.status,200,pathname+' '+JSON.stringify(payload));
+    served.push([pathname,payload.films?.[0]?.id??null]);
+   }
+  }
+  return response;
+ };
+ const raced=await run(['--activate','--confirm','activate','--producers-drained','--target','iptv'], installed);
+ assert.equal(raced.result.reason,'cutover_race');
+ assert.deepEqual(served,[['/api/programme','film:live'],['/api/watchlist','film:raced']]);
+ assert.equal(routePuts,0);
+ assert.equal(puts,0);
+ assert.equal(JSON.parse(installed.objects.get('programme.json').text).films[0].id,'film:live');
+ assert.equal(JSON.parse(installed.objects.get('watchlist.json').text).films[0].id,'film:raced');
+ const row=sql(installed.productionFile,"SELECT mode, cutover FROM published_epg_authority WHERE id=1;",{json:true})[0];
+ assert.equal(row.mode,'r2');
+ assert.equal(row.cutover,'open');
 }
 
 {
@@ -416,6 +481,134 @@ function run(args, installed, env){
  assert.ok(refused.result.writeState==='committed'||refused.result.writeState==='unknown');
  assert.equal(refused.result.readback.marker.mode,'d1');
  assert.equal(refused.result.readback.marker.cutover,'held');
+ assert.equal(puts,0);
+ assert.equal(JSON.parse(installed.objects.get('watchlist.json').text).films[0].id,'film:heat');
+ const keys=new Set(installed.objects.keys());
+ const watchText=installed.objects.get('watchlist.json').text;
+ let recoveredPuts=0;
+ installed.fetchImpl=async(url,init)=>{
+  if((init?.method||'GET')==='PUT')recoveredPuts++;
+  return original(url,init);
+ };
+ const again=await run(['--activate','--confirm','activate','--producers-drained','--target','iptv'], installed);
+ assert.equal(again.result.reason,'published_epg_authoritative');
+ assert.equal(again.result.writes,false);
+ const reverted=await run(['--revert','--confirm','r2','--target','iptv'], installed, canonicalEnv());
+ assert.equal(reverted.result.reason,'published_epg_not_authoritative');
+ assert.equal(reverted.result.writes,false);
+ const urls=installed.calls.urls.length;
+ const released=await run(['--release-hold','--confirm','release-hold','--target','iptv'], installed);
+ assert.equal(released.exit,0,JSON.stringify(released.result));
+ assert.equal(released.result.operation,'release-hold');
+ assert.equal(released.result.mode,'r2');
+ assert.equal(released.result.cutover,'open');
+ assert.equal(released.result.writes,true);
+ const releaseUrls=installed.calls.urls.slice(urls);
+ assert.equal(releaseUrls.some(item=>/programme\.json|watchlist\.json|published-generation/.test(item)),false);
+ assert.equal(recoveredPuts,0);
+ assert.equal(installed.objects.get('watchlist.json').text,watchText);
+ assert.deepEqual(new Set(installed.objects.keys()),keys);
+ assert.equal(sql(installed.productionFile,"SELECT mode, cutover FROM published_epg_authority WHERE id=1;",{json:true})[0].cutover,'open');
+}
+
+async function holdAfterRefusal(installed){
+ const programme={runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat',title:'Heat',shows:[]}]};
+ const watchlist={updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat'}]};
+ installed.putObject('epg/published-generation.json',{programmeRunId:'run-a',phase:'published'});
+ installed.putObject('programme.json',programme);
+ installed.putObject('watchlist.json',watchlist);
+ assert.equal((await run(['--load','--confirm','load','--target','iptv'], installed)).exit,0);
+ const original=installed.fetchImpl;
+ let held=false;
+ installed.fetchImpl=async(url,init)=>{
+  const body=String(init?.body||'');
+  if((init?.method||'GET')==='POST'&&body.includes("cutover='held'")){
+   const response=await original(url,init);
+   held=true;
+   return response;
+  }
+  if(held&&!String(url).includes('/d1/database/'))return new Response('no',{status:403});
+  return original(url,init);
+ };
+ const refused=await run(['--activate','--confirm','activate','--producers-drained','--target','iptv'], installed);
+ assert.equal(refused.result.reason,'authorization');
+ assert.equal(refused.result.readback.marker.cutover,'held');
+ installed.fetchImpl=original;
+ return original;
+}
+
+{
+ const installed=await install(6);
+ const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ assert.equal(chain.status,0,chain.stderr);
+ assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
+ await holdAfterRefusal(installed);
+ let puts=0;
+ const original=installed.fetchImpl;
+ installed.fetchImpl=async(url,init)=>{
+  if((init?.method||'GET')==='PUT')puts++;
+  return original(url,init);
+ };
+ const keys=new Set(installed.objects.keys());
+ const sealed=await run(['--seal-hold','--confirm','seal-hold','--producers-drained','--target','iptv'], installed);
+ assert.equal(sealed.exit,0,JSON.stringify(sealed.result));
+ assert.equal(sealed.result.mode,'d1');
+ assert.equal(sealed.result.cutover,'open');
+ assert.equal(puts,0);
+ assert.deepEqual(new Set(installed.objects.keys()),keys);
+ assert.equal(JSON.parse(installed.objects.get('watchlist.json').text).films[0].id,'film:heat');
+}
+
+{
+ const installed=await install(6);
+ const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ assert.equal(chain.status,0,chain.stderr);
+ assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
+ await holdAfterRefusal(installed);
+ installed.putObject('watchlist.json',{updatedAt:'2026-11-01T13:00:00.000Z',films:[{id:'film:raced'}]});
+ let puts=0;
+ const original=installed.fetchImpl;
+ installed.fetchImpl=async(url,init)=>{
+  if((init?.method||'GET')==='PUT')puts++;
+  return original(url,init);
+ };
+ const batches=installed.calls.batches.length;
+ const refused=await run(['--seal-hold','--confirm','seal-hold','--producers-drained','--target','iptv'], installed);
+ assert.equal(refused.result.reason,'cutover_mismatch');
+ assert.equal(refused.result.writes,false);
+ assert.equal(installed.calls.batches.length,batches);
+ assert.equal(puts,0);
+ assert.equal(JSON.parse(installed.objects.get('watchlist.json').text).films[0].id,'film:raced');
+ const row=sql(installed.productionFile,"SELECT mode, cutover FROM published_epg_authority WHERE id=1;",{json:true})[0];
+ assert.equal(row.mode,'d1');
+ assert.equal(row.cutover,'held');
+}
+
+{
+ const installed=await install(6);
+ const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ assert.equal(chain.status,0,chain.stderr);
+ assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
+ const original=await holdAfterRefusal(installed);
+ let releasePosts=0;
+ let puts=0;
+ installed.fetchImpl=async(url,init)=>{
+  if((init?.method||'GET')==='PUT')puts++;
+  const body=String(init?.body||'');
+  if((init?.method||'GET')==='POST'&&body.includes("mode='r2'")&&body.includes("cutover='open'")){
+   releasePosts++;
+   return new Response('no',{status:500});
+  }
+  return original(url,init);
+ };
+ const lost=await run(['--release-hold','--confirm','release-hold','--target','iptv'], installed);
+ assert.equal(lost.result.reason,'write_uncertain');
+ assert.equal(lost.result.writeState,'unknown');
+ assert.equal(lost.result.writes,null);
+ assert.equal(lost.result.retry,false);
+ assert.equal(lost.result.readback.marker.mode,'d1');
+ assert.equal(lost.result.readback.marker.cutover,'held');
+ assert.equal(releasePosts,1);
  assert.equal(puts,0);
  assert.equal(JSON.parse(installed.objects.get('watchlist.json').text).films[0].id,'film:heat');
 }

@@ -13,7 +13,12 @@
 // that drain. While cutover is held the marker is not a visible d1: a public
 // read stays on R2 and does not repair mirrors. The command then re-reads R2.
 // A match opens the cutover. A changed watchlist returns mode to r2 and does
-// not write R2. A failed re-read leaves the hold and reports the D1 write. --revert --confirm r2 repairs the pointer, programme.json,
+// not write R2. A failed re-read leaves the hold and reports the D1 write.
+// That held marker is not retried by --activate, --load or --revert.
+// --release-hold --confirm release-hold returns it to mode r2 without reading
+// or writing a mirror. --seal-hold --confirm seal-hold --producers-drained
+// opens it only after a fresh idle check and a full R2 parity check. Neither
+// recovery repeats an uncertain D1 write. --revert --confirm r2 repairs the pointer, programme.json,
 // watchlist.json and the generation copies from D1 and flips the marker back to r2.
 // Revert writes only to https://<production-account>.r2.cloudflarestorage.com and
 // refuses R2_SNAPSHOT_ENDPOINT before any request. Each write needs its own --confirm and --target
@@ -140,7 +145,7 @@ function parseArgs(argv){
   if(next===undefined||next.startsWith('--'))throw new OperatorStop('usage',2);
   return next;
  };
- const commands=['--apply','--load','--activate','--revert'].filter(name=>args.includes(name));
+ const commands=['--apply','--load','--activate','--revert','--release-hold','--seal-hold'].filter(name=>args.includes(name));
  if(commands.length>1)throw new OperatorStop('usage',2);
  for(let index=0;index<args.length;index++){
   const arg=args[index];
@@ -152,8 +157,8 @@ function parseArgs(argv){
  const producersDrained=args.includes('--producers-drained');
  const target=args.includes('--target')?value('--target'):undefined;
  const confirm=args.includes('--confirm')?value('--confirm'):undefined;
- if(producersDrained&&command!=='activate')throw new OperatorStop('usage',2);
- if(command==='activate'&&!producersDrained)throw new OperatorStop('producers_not_drained',2);
+ if(producersDrained&&command!=='activate'&&command!=='seal-hold')throw new OperatorStop('usage',2);
+ if((command==='activate'||command==='seal-hold')&&!producersDrained)throw new OperatorStop('producers_not_drained',2);
  if(target===undefined){
   if(command!=='status')throw new OperatorStop('target_required',2);
   return {report:{configured:false,writes:false,writeState:'none'}};
@@ -163,6 +168,8 @@ function parseArgs(argv){
  if(command==='load'&&confirm!=='load')throw new OperatorStop('confirm',2);
  if(command==='activate'&&confirm!=='activate')throw new OperatorStop('confirm',2);
  if(command==='revert'&&confirm!=='r2')throw new OperatorStop('confirm',2);
+ if(command==='release-hold'&&confirm!=='release-hold')throw new OperatorStop('confirm',2);
+ if(command==='seal-hold'&&confirm!=='seal-hold')throw new OperatorStop('confirm',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
  return {command, confirm, producersDrained};
 }
@@ -376,6 +383,8 @@ export async function runPublishedEpgProduction({argv=process.argv, env=process.
   assertIdle(writers);
   if(parsed.command==='apply')return {exit:0, result:await applyMigration(opened, ctx, snapshot, writers)};
   if(parsed.command==='revert')return {exit:0, result:await revertMarker(opened, credentials, client, ctx, fetchImpl)};
+  if(parsed.command==='release-hold')return {exit:0, result:await releaseHold(opened, client, ctx, snapshot, clock)};
+  if(parsed.command==='seal-hold')return {exit:0, result:await sealHold(opened, client, ctx, snapshot, clock)};
   const source=await readPublished(client);
   if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=8)||!snapshot.marker)throw new OperatorStop('published_epg_schema',3);
   if(snapshot.marker.mode!=='r2')throw new OperatorStop('published_epg_authoritative',3);
@@ -516,6 +525,42 @@ async function releaseHeld(opened){
  await releasePublished(opened.binding);
  const again=await readSnapshot(opened.binding);
  if(again.marker?.mode!=='r2'||again.marker?.cutover!=='open')throw new OperatorStop('cutover_race',3);
+}
+function heldMarker(snapshot){
+ const marker=snapshot.marker;
+ if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=8)||!marker)throw new OperatorStop('published_epg_schema',3);
+ if(marker.mode!=='d1'||marker.cutover!=='held'||!marker.programmeRunId||!Number.isFinite(marker.generation))throw new OperatorStop('published_epg_not_held',3);
+ return marker;
+}
+function sameDocument(left,right){return JSON.stringify(left)===JSON.stringify(right);}
+function sameMembership(films,members){
+ const ids=(Array.isArray(films)?films:[]).map(film=>String(film?.id??''));
+ return ids.length===members.length&&ids.every((id,index)=>id===members[index].filmId);
+}
+async function releaseHold(opened, client, ctx, snapshot, clock){
+ const writers=await writerReport(client, opened.binding, clock);
+ assertIdle(writers);
+ const marker=heldMarker(snapshot);
+ await releasePublished(opened.binding);
+ const readback=await readSnapshot(opened.binding);
+ if(readback.marker?.mode!=='r2'||readback.marker?.cutover!=='open'||readback.marker.programmeRunId!==marker.programmeRunId||readback.marker.generation!==marker.generation)throw new OperatorStop('readback_mismatch',3);
+ return {operation:'release-hold', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'r2', cutover:'open', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
+}
+async function sealHold(opened, client, ctx, snapshot, clock){
+ const writers=await writerReport(client, opened.binding, clock);
+ assertIdle(writers);
+ const marker=heldMarker(snapshot);
+ const fresh=await readPublished(client);
+ const programme=await readDocument(opened.binding,marker.programmeRunId,'programme');
+ const watchlist=await readDocument(opened.binding,marker.programmeRunId,'watchlist');
+ const programmeMembers=await readMembers(opened.binding,marker.programmeRunId,'programme');
+ const watchMembers=await readMembers(opened.binding,marker.programmeRunId,'watchlist');
+ const matched=fresh.pointer.etag===marker.mirrorEtag&&fresh.watchlist.etag===marker.mirrorWatchlistEtag&&fresh.pointerBody.programmeRunId===marker.programmeRunId&&sameDocument(fresh.programmeBody,programme)&&sameDocument(fresh.watchlistBody,watchlist)&&sameMembership(fresh.programmeBody?.films,programmeMembers)&&sameMembership(fresh.watchlistBody?.films,watchMembers);
+ if(!matched)throw new OperatorStop('cutover_mismatch',3);
+ const sealed=await sealPublished(opened.binding,{programmeRunId:marker.programmeRunId,generation:marker.generation});
+ const readback=await readSnapshot(opened.binding);
+ if(sealed.mode!=='d1'||sealed.cutover!=='open'||readback.marker?.mode!=='d1'||readback.marker?.cutover!=='open'||readback.marker.programmeRunId!==marker.programmeRunId||readback.marker.generation!==marker.generation)throw new OperatorStop('readback_mismatch',3);
+ return {operation:'seal-hold', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'d1', cutover:'open', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
 }
 
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
