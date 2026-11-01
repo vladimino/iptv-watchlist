@@ -2,7 +2,7 @@
 
 **Role:** maintained contract for the owner admin shell: the read model, the queue rules and the design constraints behind the pure query library, the `/admin` page and the live read API `GET /api/admin/*` ([route contract](../api/admin.md)). It records what the source can answer and what the admin page must not invent; the stages that built it were [AIR-123](https://trello.com/c/uatDiouD), [AIR-52](https://trello.com/c/siWtiRcm) and [AIR-124](https://trello.com/c/Xotv4r2f). The read paths were checked against source on GitHub `main` `8596d2f` (24 October 2026). Authority and access statements follow [ADR 0002](../../adr/0002-cloudflare-worker-r2-authority.md) and [ADR 0004](../../adr/0004-mcp-access-boundary.md), recorded in `d4c50e3`. This audit did **not** call production, list R2, or open a GET that can write.
 
-Related work: [AIR-122](https://trello.com/c/MouyDTjX), [AIR-69](https://trello.com/c/FlcWZX7W), [Film/Person contract](film-person.md), [D1 schema](../data/d1-schema.md). Upstream admin cards [AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy), and [AIR-65](https://trello.com/c/MKb4JMXi) stay writers and are out of this read contract.
+Related work: [AIR-122](https://trello.com/c/MouyDTjX), [AIR-69](https://trello.com/c/FlcWZX7W), [Film/Person contract](film-person.md), [D1 schema](../data/d1-schema.md). The person-name confirmation is the separate POST in the [route contract](../api/admin.md#person-name-confirmation-post-apiadminpeopleidname-review). [AIR-53](https://trello.com/c/gkuy1awG) and [AIR-65](https://trello.com/c/MKb4JMXi) stay writers outside this read model.
 
 ## Access
 
@@ -121,7 +121,7 @@ The bounded design is:
 
 1. The pure library (`src/domain/admin-query.js`) searches and classifies arrays the caller already holds. No I/O.
 2. The `/admin` page holds no data of its own: it reads the live route with the owner's browser session and shows what the route returns.
-3. The live route loads one immutable snapshot: the published-generation pointer, `epg/generations/<programmeRunId>/programme.json`, `titles.json`, and `people.json`. It projects that snapshot and runs the library functions in memory. A later page is served only when every version in the pin still matches. A warm isolate keeps that projection, keyed by the full version tuple, and drops it when any version changes. It does not list the bucket, and a matching `programmeRunId` is not proof that the dictionaries are unchanged.
+3. The live route loads one immutable snapshot: the published-generation pointer, `epg/generations/<programmeRunId>/programme.json`, `titles.json`, `people.json`, and `admin/owner-reviews.json`. It projects that snapshot and runs the library functions in memory. A later page is served only when every version in the pin still matches, including the review object's etag. A warm isolate keeps that projection, keyed by the full version tuple, and drops it when any version changes. It does not list the bucket, and a matching `programmeRunId` is not proof that the dictionaries or the review object are unchanged.
 4. Quality rows that exist only on the discovery ledger (an unresolved observation with no programme film) need a **generation-scoped index object written at EPG publish**, not a GET. That writer is a separate change and is not part of the live route.
 
 ## What is live and what is not
@@ -130,13 +130,14 @@ The bounded design is:
 | --- | --- |
 | Pure query library | Storage-neutral functions and deterministic tests; bundled into the Worker as the `AdminQuery` namespace (`scoped`) and no longer into the page |
 | `/admin` page | Live client over `GET /api/admin/*` with the owner's Access session; search and queue state in the URL, pin and cursors in memory ([route contract](../api/admin.md)) |
-| Programme-snapshot search and queues | Live, read-only, over the pinned published generation and the two dictionaries |
+| Programme-snapshot search and queues | Live, read-only, over the pinned published generation, the two dictionaries and `admin/owner-reviews.json` |
 | Fingerprint and prediction queues | Not served by the route (`queue_unavailable`): that state is under `enrichment/`, which the snapshot read does not load. A later card decides whether a bounded read of the view index or a publish-time index serves them |
 | Point read of one prediction via MCP `prediction_film_diagnostics` | Prediction diagnosis only. Not a catalog search |
 | Limbo inventory of stuck and waiting films | Live, read-only: `GET /api/admin/limbo` reads the snapshot plus the prediction queue and the view index and evaluates the [data health model](data-health.md#limbo-inventory) ([route contract](../api/admin.md#limbo-inventory)). Films only |
 | Ledger-wide candidate queues and a publish-time admin index | Not implemented; a separate card, never a GET. The limbo inventory reports unresolved observations as unavailable until that index exists |
 | D1 `readFilm` / `readPerson` as the admin source | No. Only after the D1 cutover that makes those tables authoritative |
-| Reviewed-title and reviewed-name writes ([AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy)) | No. The route has no `POST`; those cards stay behind the storage gate |
+| Reviewed-name write ([AIR-54](https://trello.com/c/yKtj1ahy)) | Live as [`POST /api/admin/people/<id>/name-review`](../api/admin.md#person-name-confirmation-post-apiadminpeopleidname-review). It writes the `people` map of `admin/owner-reviews.json` and copies `films`. The catalogue GET stays a read |
+| Reviewed-title write ([AIR-53](https://trello.com/c/gkuy1awG)) | Not this route. The shared object reserves `films`; that card writes it |
 
 ## AIR-123 query contract
 
