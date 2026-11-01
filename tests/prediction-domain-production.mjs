@@ -167,6 +167,42 @@ await put(missingBucket,'enrichment/films/solo/fingerprint.json',record);
 await put(missingBucket,'enrichment/films/solo/fingerprints/print-2.json',body);
 const imported=await run(['--load','--confirm','load','--target','iptv'],missing,missingBucket);
 assert.equal(imported.exit,0,JSON.stringify(imported.result));
+const gap=migrated('0007_prediction_authority');
+const gapBucket=new MemoryBucket();
+await put(gapBucket,'enrichment/films/solo/fingerprint.json',record);
+for(let index=0;index<5001;index++)await put(gapBucket,'enrichment/films/solo/noise/'+index+'.json',{index});
+const gapped=await run(['--load','--confirm','load','--target','iptv'],gap,gapBucket);
+assert.equal(gapped.exit,3);
+assert.equal(gapped.result.reason,'prediction_domain_body_missing');
+assert.equal(gapped.result.writes,false);
+assert.equal(gapped.result.writeState,'none');
+assert.equal(one(gap,"SELECT writes FROM prediction_domain_authority"),'open');
+assert.equal(one(gap,'SELECT COUNT(*) FROM prediction_fingerprint'),0);
+const keptRecord={filmId:'kept',fingerprintHash:'h-kept',plotMechanics:[],moodLabels:[],execution:{},generatedAt:'2026-11-01T01:00:00.000Z',fingerprintSchemaVersion:1,fingerprintPromptVersion:1};
+const crowded={
+ async get(key){
+  if(key==='enrichment/films/kept/fingerprint.json'||key==='enrichment/films/kept/fingerprints/h-kept.json')return {json:async()=>keptRecord};
+  return null;
+ },
+ async list(){
+  const objects=[{key:'enrichment/films/kept/fingerprint.json'}];
+  for(let index=0;index<5001;index++)objects.push({key:'enrichment/other/'+index+'.json'});
+  return {objects,truncated:false};
+ },
+};
+const crowdedDb=migrated('0007_prediction_authority');
+const crowdedLoad=await run(['--load','--confirm','load','--target','iptv'],crowdedDb,crowded);
+assert.equal(crowdedLoad.exit,0,JSON.stringify(crowdedLoad.result));
+assert.equal(one(crowdedDb,'SELECT COUNT(*) FROM prediction_fingerprint'),1);
+const overFilms={
+ async get(){return null;},
+ async list(){return {objects:Array.from({length:5001},(_,index)=>({key:'enrichment/films/f'+index+'/fingerprint.json'})),truncated:false};},
+};
+const over=await run(['--load','--confirm','load','--target','iptv'],migrated('0007_prediction_authority'),overFilms);
+assert.equal(over.exit,3);
+assert.equal(over.result.reason,'prediction_domain_budget');
+assert.equal(over.result.writes,false);
+assert.equal(over.result.writeState,'none');
 const activated=await run(['--activate','--confirm','activate','--target','iptv'],missing,missingBucket);
 assert.equal(activated.exit,0,JSON.stringify(activated.result));
 assert.equal(activated.result.mode,'d1');
