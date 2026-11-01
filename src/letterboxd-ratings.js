@@ -5,6 +5,8 @@
 // The pipeline is permanently separate (ADR 0074). It acts once ratings_storage_migrate has migrated the queue and the
 // Diary cursor; until then start and step answer not_migrated and write nothing. The RATINGS_PIPELINE binding is ignored.
 // LETTERBOXD_DIARY_HISTORY is retired and unread (ADR 0075). A migrated run always starts in the Diary phase.
+// REMOVAL_RATING_LOOKUP is retired and unread (ADR 0077). A film the Diary did not rate stays eligible for the
+// bounded member-page lookup. The binding does not skip that lookup.
 // ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdRatings=(()=>{
@@ -186,8 +188,8 @@ const LetterboxdRatings=(()=>{
  // finished also continues, and retention does not run until it has: an unmatched legacy entry is still `refs: []` and
  // the version 1 rules would otherwise delete it. Then the retention rules, then at most five lookups per step with the
  // claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue; the run goes on while due entries
- // remain. Each claim moves the entry's next attempt at least an hour ahead, so a run ends. A paused queue or
- // REMOVAL_RATING_LOOKUP off ends the lookups for this run. No legacy candidate means no event list.
+ // remain. Each claim moves the entry's next attempt at least an hour ahead, so a run ends. A paused queue ends the
+ // lookups for this run. The retired binding does not (ADR 0077). No legacy candidate means no event list.
  async function removalPhase(env,run,{own,remaining,clock}){
   const legacyLink=await linkLegacyRemovalRefs(env,{limit:LEGACY_LINK_PAGE,now:clock()});
   // The counter moves only when this step's queue write committed. A lost compare-and-swap does not count another scan's page.
@@ -197,7 +199,6 @@ const LetterboxdRatings=(()=>{
   let more=false;
   if(settled.left>0||legacyLink.more){lookup.stoppedBy=settled.left>0?'settling':'legacy_link';return {settled,lookup,more:true};}
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
-  if(!removalLookupEnabled(env)){lookup.stoppedBy='lookup_off';return {settled,lookup,more};}
   const budget=STEP_LOOKUPS;
   let queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
   if(!removalQueueV2(queue)){lookup.stoppedBy='queue_not_migrated';return {settled,lookup,more};}
@@ -284,7 +285,7 @@ const LetterboxdRatings=(()=>{
   return {contractVersion:CONTRACT_VERSION,switch:'separate',pipeline:pipelineOf(state.migration,run),migration:state.migration,...(state.regressed.length?{regressedObjects:state.regressed}:{}),
    run:presentRun(run,now),
    diary:{enabled:LetterboxdDiary.enabled(env),migrated:state.cursorV2,lastOutcome:cursor?.lastOutcome??null,stopReason:cursor?.stopReason??null,coverage:cursor?.coverage||null,historicalCoverage:cursor?.coverage?.window==='recent'?'incomplete':'unknown',overflowSuspected:cursor?.counts?.overflowSuspected===true,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null,lastSuccessAt:cursor?.lastSuccessAt??null},
-   removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:removalLookupEnabled(env),entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
+   removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:true,entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
     refIssues:Object.fromEntries(REMOVAL_REF_ISSUES.map(issue=>[issue,entries.reduce((n,entry)=>n+(entry.refs||[]).filter(ref=>ref.resolved!==true&&ref.issue===issue).length,0)])),
     legacy:entries.filter(entry=>entry.legacy===true).length,expired:entries.filter(entry=>entry.state==='expired').length,droppedRefs:queue?.droppedRefs||0,pausedUntil:queue?.pausedUntil&&Date.parse(queue.pausedUntil)>now?queue.pausedUntil:null},
    freshness:freshnessOf(run),readAt:iso(now),sideEffects:'none'};

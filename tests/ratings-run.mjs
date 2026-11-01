@@ -175,12 +175,52 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  await drain(R,env,again.runId);
  assert.equal(net.memberFetches().length,0,'a paused queue is not requested');
  assert.equal(bucket.value(RUN).removal.lookup.stoppedBy,'blocked');
- // With REMOVAL_RATING_LOOKUP off the run only settles: no request at all.
- const off={...env,REMOVAL_RATING_LOOKUP:undefined};
- const third=plain(await R.start(off,{trigger:'manual'}));
- await drain(R,off,third.runId);
- assert.equal(bucket.value(RUN).removal.lookup.stoppedBy,'lookup_off');
- assert.equal(net.memberFetches().length,0);
+ // A paused queue stays paused for an absent, off, empty, garbage or on binding. There is no lookup_off stop.
+ for(const value of [undefined,'off','','garbage','on']){
+  const next={...env};
+  if(value===undefined)delete next.REMOVAL_RATING_LOOKUP;else next.REMOVAL_RATING_LOOKUP=value;
+  const third=plain(await R.start(next,{trigger:'manual'}));
+  await drain(R,next,third.runId);
+  assert.equal(bucket.value(RUN).removal.lookup.stoppedBy,'blocked',String(value));
+  assert.equal(net.memberFetches().length,0,'a paused queue is not requested');
+ }
+}
+
+// 5f. The retired binding does not choose the lookup. A film the Diary rated is not requested. A film it did not
+// rate is. Absent, on, off, empty and garbage take that same path. lookupEnabled stays the capability.
+{
+ for(const value of [undefined,'on','off','','garbage']){
+  const {bucket,env,R,net}=setup({pages:0,extra:value===undefined?{}:{REMOVAL_RATING_LOOKUP:value}});
+  if(value===undefined)delete env.REMOVAL_RATING_LOOKUP;
+  const films={
+   proved:{url:film('proved').url,state:'pending',attempts:0,enqueuedAt:at(T0-H),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[]},
+   missing:{url:film('missing').url,state:'pending',attempts:0,enqueuedAt:at(T0-H),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[]},
+  };
+  migrated(bucket,{films});
+  net.diary.set(1,diaryPage([diaryRow('proved',8,'2026-10-29','99001')],false));
+  net.members.set('missing',3);
+  const {runId}=plain(await R.start(env,{trigger:'manual'}));
+  await finishDiary(R,env,runId);
+  const reply=plain(await R.step(env,{runId}));
+  assert.equal(reply.reason,'finished',String(value));
+  eq(net.memberFetches().map(url=>url.split('/').at(-2)),['missing'],String(value));
+  const queue=bucket.value(QUEUE);
+  eq([queue.films.proved.state,queue.films.proved.lastResult,queue.films.missing.state],[ 'rated','diary','rated'],String(value));
+  assert.equal((await R.status(env)).removal.lookupEnabled,true,String(value));
+ }
+}
+{
+ const {bucket,env,R,net}=setup({pages:0,extra:{REMOVAL_RATING_LOOKUP:'off'}});
+ const films={due:{url:film('due').url,state:'pending',attempts:0,enqueuedAt:at(T0-H),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[]}};
+ migrated(bucket,{films});
+ net.diary.set(1,403);net.members.set('due',4);
+ const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ const replies=await drain(R,env,runId);
+ assert.equal(replies[0].phase,'removal');
+ assert.equal(replies.at(-1).state,'error');
+ assert.equal(bucket.value(RUN).cause,'blocked');
+ eq(net.memberFetches().map(url=>url.split('/').at(-2)),['due']);
+ assert.equal(bucket.value(QUEUE).films.due.state,'rated');
 }
 
 // 5b. Settlements are bounded per step: 150 unresolved references take two steps, the lookups come after them.
@@ -462,4 +502,4 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(net.diaryFetches().length,2);
 }
 
-console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause and lookup off, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');
+console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause, the retired binding still looks up an unrated film and skips one the Diary rated, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');

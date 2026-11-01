@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 
-// AIR-268: bounded per-film rating lookup for films removed from the watchlist, behind REMOVAL_RATING_LOOKUP.
+// AIR-268 / ADR 0077: bounded per-film rating lookup. REMOVAL_RATING_LOOKUP is retired and does not gate it.
 const records=new Map(),etags=new Map(),fetches=[];let revision=0;
 const QUEUE='enrichment/removal-rating-lookups.json';
 const bucket={
@@ -40,11 +40,16 @@ const queue=()=>records.get(QUEUE);
 const plain=value=>JSON.parse(JSON.stringify(value));
 const T0=Date.parse('2026-10-29T10:00:00.000Z'),H=3600000;
 
-// 1. Gate off: nothing is queued, read or fetched, and the EPG completion is unchanged.
-assert.equal(await ctx.lookupRemovalRatings(off,[film('gone')],T0),null);
-assert.equal(records.has(QUEUE),false);
-assert.equal(fetches.length,0);
-for(const value of [undefined,'off','On',' on','true'])assert.equal(vm.runInContext('removalLookupEnabled',ctx)({REMOVAL_RATING_LOOKUP:value}),false,String(value));
+// 1. The retired binding does not stop the lookup. Absent, off, on, empty and garbage all rate the same film.
+pages.set('gated',3);
+for(const value of [undefined,'off','on','','garbage']){
+ records.clear();etags.clear();fetches.length=0;revision=0;
+ const binding=value===undefined?{}:{REMOVAL_RATING_LOOKUP:value};
+ const summary=await ctx.lookupRemovalRatings({...off,...binding},[film('gated')],T0);
+ assert.equal(summary.rated,1,String(value));
+ assert.equal(memberPages().length,1,String(value));
+}
+records.clear();etags.clear();fetches.length=0;revision=0;pages.delete('gated');
 
 // 2. The EPG commit does not read Diary. A later lookup rates a removed film on its own page; the films list is never requested (AIR-287);
 // the removal event gets the rating once.
@@ -220,4 +225,4 @@ try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-2'},{caller:'http',diagno
 assert.equal(memberPages().length,0,'a further step still requests nothing');
 assert.deepEqual(plain(records.get('sync.json').removalLookups),[film('crash')]);
 
-console.log('Removal rating lookup (AIR-268, ADR 0074): gate off untouched, per-film rating with no films list, diary-proved removals skip the lookup and a blocked diary falls back (AIR-287), one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, the commit leaves a hand-over and does not look up passed');
+console.log('Removal rating lookup (AIR-268, ADR 0074, ADR 0077): the retired binding still looks the film up, per-film rating with no films list, diary-proved removals skip the lookup and a blocked diary falls back (AIR-287), one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, the commit leaves a hand-over and does not look up passed');
