@@ -33,7 +33,7 @@ const RUN_ID = 'cf3ba3ac-f962-4475-b9cd-3de1b07bd1eb';
 
 export function loadProduction(){
  const live = vm.createContext({});
- for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(file,'utf8'),live);
+ for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','scripts/air-86-variant-generator.js'])vm.runInContext(fs.readFileSync(file,'utf8'),live);
  return live;
 }
 function invoke(live,name,args){

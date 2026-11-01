@@ -60,91 +60,8 @@ function ledgerCounts(source,decisions,now=Date.now()){
  const unique=Number.isInteger(archive?.uniqueArchivedItems)?archive.uniqueArchivedItems:0;
  return {...counts,ledgerTotal:counts.ledgerTotal+unique,archive:{ledgerMode:source.ledgerMode,activeItems:counts.ledgerTotal,uniqueArchivedItems:unique,manifestId:archive?.manifestId??null,segments:archive?.segments??0,items:archive?.items??0,bytes:archive?.bytes??0}};
 }
-// CANDIDATE_DISCOVERY: only the exact string 'on' (after trimming) enables the bounded variant searches; anything else is off.
-function candidateDiscoveryMode(env){const value=typeof env?.CANDIDATE_DISCOVERY==='string'?env.CANDIDATE_DISCOVERY.trim():'';return value==='on'?'on':'off';}
-function candidateReleaseYear(value){if(value==null||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null;}
-const CANDIDATE_VARIANT_CAP=4,CANDIDATE_VARIANT_CHUNK_CAP=8;
-const CANDIDATE_NUMBER_WORDS={1:'один',2:'два',3:'три',4:'четыре',5:'пять',6:'шесть',7:'семь',8:'восемь',9:'девять',10:'десять',11:'одиннадцать',12:'двенадцать'};
-function candidateSpellToken(text){
- const token=String(text||'').trim();
- if(!token||/[\s-]/u.test(token)||[...token].length>8)return null;
- if(/э/i.test(token))return token.replace(/э/g,'е').replace(/Э/g,'Е');
- if(/е/i.test(token))return token.replace(/е/g,'э').replace(/Е/g,'Э');
- return null;
-}
-function candidateSearchVariants(candidate){
- const title=String(candidate?.title||'').trim(),year=candidateReleaseYear(candidate?.year),out=[],seen=new Set();
- const push=(query,yearValue,reason)=>{const text=String(query||'').replace(/\s+/g,' ').trim();if(norm(text).length<3)return;const key=norm(text)+'|'+(yearValue??'');if(seen.has(key))return;seen.add(key);out.push({query:text,year:yearValue,reason});};
- const stem=title.match(/^(.*\p{L}.*)\s+([12])$/u),stemText=stem&&norm(stem[1]).length>=3?stem[1].trim():null;
- if(stemText)push(stemText,year,'part_suffix');
- const spelled=candidateSpellToken(title);if(spelled)push(spelled,year,'spelling_e');
- const stemSpelled=stemText?candidateSpellToken(stemText):null;if(stemSpelled)push(stemSpelled,year,'spelling_e');
- const lead=title.match(/^(\d{1,2})\s+(\p{L}.*)$/u);
- if(lead&&/\p{Script=Cyrillic}/u.test(lead[2])&&CANDIDATE_NUMBER_WORDS[Number(lead[1])])push(CANDIDATE_NUMBER_WORDS[Number(lead[1])]+' '+lead[2],year,'numeral');
- if(year!=null){push(title,year-1,'year_before');push(title,year+1,'year_after');}
- return out;
-}
-function variantHit(candidate,movie,variant){
- const release=Number(String(movie?.release_date||'').slice(0,4));
- if(candidate?.year&&release&&Math.abs(release-Number(candidate.year))>1)return false;
- const titles=[movie?.title,movie?.original_title].map(norm).filter(Boolean),wanted=[norm(variant?.query),candidate?.normalizedTitle].filter(Boolean);
- if(titles.some(title=>wanted.includes(title)))return true;
- const observed=candidate?.normalizedTitle||'';
- return !!observed&&titles.some(title=>title.startsWith(observed+' ')||observed.startsWith(title+' '));
-}
-function variantAliasRank(candidate,movies){
- const observed=new Set(norm(candidate?.normalizedTitle||candidate?.title||'').split(' ').filter(Boolean)),durations=[...(candidate?.durations||[]),candidate?.duration].filter(value=>Number.isFinite(value)),year=candidateReleaseYear(candidate?.year);
- return movies.filter(movie=>movie?.id!=null).map(movie=>{
-  const release=candidateReleaseYear(String(movie.release_date||'').slice(0,4));
-  if(year!=null&&release!=null&&Math.abs(release-year)>1)return null;
-  const runtime=Number(movie.runtime),runtimeDistance=Number.isFinite(runtime)&&durations.length?Math.min(...durations.map(value=>Math.abs(runtime-value))):1000;
-  const shared=norm((movie.title||'')+' '+(movie.original_title||'')).split(' ').filter(Boolean).filter(token=>observed.has(token)).length;
-  return {movie,yearDistance:year!=null&&release!=null?Math.abs(release-year):1,runtimeDistance,shared};
- }).filter(Boolean).sort((a,b)=>a.yearDistance-b.yearDistance||a.runtimeDistance-b.runtimeDistance||b.shared-a.shared||String(a.movie.id).localeCompare(String(b.movie.id)));
-}
-function emptyVariantStats(){return {calls:0,errors:0,throttled:0,skipped:0,halted:false};}
-function variantDiagnostic(stats){return {variantCalls:stats.calls,variantErrors:stats.errors,variantThrottled:stats.throttled,variantSkipped:stats.skipped};}
-function noteVariantFailure(stats,error){stats.calls++;if(error?.retryAt||String(error?.message||'').includes('429')){stats.throttled++;stats.halted=true;return;}stats.errors++;}
-function variantBlocked(stats,deadline){return stats.halted||stats.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline;}
-async function collectVariantProposals(env,candidate,deadline,stats,resumeFrom){
- const proposed=[],hits=[],pool=new Map(),planned=candidateSearchVariants(candidate).slice(0,CANDIDATE_VARIANT_CAP),language=/[іїєґ]/i.test(candidate.title)?'uk-UA':'ru-RU';
- const start=Math.max(0,Math.min(planned.length,Number(resumeFrom?.offset)||0)),savedAliases=[...(resumeFrom?.pendingAliasIds||[])].map(String).filter(Boolean).slice(0,3);
- let resume=null;
- const unfinished=from=>Math.max(0,planned.length-from);
- if(stats.halted){stats.skipped+=unfinished(start)+savedAliases.length;return {proposed,hits,resume:null};}
- const takeAlias=async ids=>{
-  const pending=[];
-  for(const id of ids){
-   if(proposed.some(item=>item.tmdbId===id))continue;
-   if(stats.halted)return null;
-   if(variantBlocked(stats,deadline)){stats.skipped++;pending.push(id);continue;}
-   let movie=null;try{movie=await tmdbRequest(env,'movie/'+id+'?language=ru-RU&append_to_response=translations,alternative_titles');}catch(e){noteVariantFailure(stats,e);if(stats.halted)return null;continue;}
-   stats.calls++;
-   const aliases=[...(movie?.alternative_titles?.titles||[]).map(item=>item?.title),...(movie?.translations?.translations||[]).map(item=>item?.data?.title)].filter(Boolean),matched=aliases.find(title=>norm(title)===candidate.normalizedTitle);
-   if(matched)proposed.push({tmdbId:String(movie.id),query:candidate.title,year:candidateReleaseYear(candidate.year),reason:'tmdb_alias',matchedTitle:matched});
-  }
-  return stats.halted?null:pending.length?{offset:planned.length,pendingAliasIds:pending}:null;
- };
- if(savedAliases.length){const alias=await takeAlias(savedAliases);if(stats.halted||alias)return {proposed,hits,resume:alias};}
- for(let index=start;index<planned.length;index++){
-  if(stats.halted){resume=null;break;}
-  if(variantBlocked(stats,deadline)){stats.skipped+=unfinished(index);resume={offset:index,pendingAliasIds:variantAliasRank(candidate,[...pool.values()]).slice(0,3).map(row=>String(row.movie.id)).filter(id=>!proposed.some(item=>item.tmdbId===id))};break;}
-  const variant=planned[index];
-  let search=null;try{search=await tmdbRequest(env,'search/movie?'+new URLSearchParams({query:variant.query,language,include_adult:'false',...(variant.year!=null?{year:String(variant.year)}:{})}));}catch(e){noteVariantFailure(stats,e);if(stats.halted){stats.skipped+=unfinished(index+1);resume=null;break;}continue;}
-  stats.calls++;
-  for(const movie of search?.results||[]){
-   if(!variantHit(candidate,movie,variant)){if(movie?.id!=null&&!pool.has(String(movie.id)))pool.set(String(movie.id),movie);continue;}
-   const exact=['part_suffix','spelling_e','numeral'].includes(variant.reason)?[movie.title,movie.original_title].find(title=>title&&norm(title)===norm(variant.query)):null;
-   const claim=exact?{reason:variant.reason,query:variant.query,matched:exact}:null,id=String(movie.id),prior=hits.find(hit=>hit.tmdbId===id);
-   if(prior){if(claim){const claims=prior.structuralClaims||[];if(!claims.some(item=>item.reason===claim.reason&&norm(item.matched)===norm(claim.matched)))prior.structuralClaims=[...claims,claim];}for(const title of [movie.title,movie.original_title])if(title&&title!==prior.title&&title!==prior.original&&!(prior.extraTitles||[]).includes(title))prior.extraTitles=[...(prior.extraTitles||[]),title];continue;}
-   proposed.push({tmdbId:id,query:variant.query,year:variant.year,reason:variant.reason,matchedTitle:movie.title||movie.original_title||''});
-   const hit=searchHitCandidate(movie);if(claim)hit.structuralClaims=[claim];hits.push(hit);
-  }
-  if(hits.some(hit=>norm(hit.title)===candidate.normalizedTitle||norm(hit.original)===candidate.normalizedTitle))break;
- }
- if(!resume&&!stats.halted){const ranked=variantAliasRank(candidate,[...pool.values()]).slice(0,3).map(row=>String(row.movie.id)).filter(id=>!proposed.some(item=>item.tmdbId===id));resume=await takeAlias(ranked);}
- return {proposed,hits,resume:stats.halted?null:resume};
-}
+// The public status still reports the retired variant-search counters. They stay zero: the Worker does not plan those searches.
+const VARIANT_DIAGNOSTIC={variantCalls:0,variantErrors:0,variantThrottled:0,variantSkipped:0};
 const DISCOVERY_SCORE_PREVIEW_KEY='epg/discovery-score-preview.json';
 function filmScorerCandidate(film){return {tmdbId:String(film.tmdbId),title:film.title||'',original:film.original||'',aliases:film.aliases||[],year:film.year??null,runtime:film.runtime??null,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId};}
 function knownScorerCandidates(aliasIndex,candidate){return [...(aliasIndex.get(candidate.normalizedTitle)?.values()||[])].filter(film=>film?.tmdbId).map(filmScorerCandidate);}
@@ -563,7 +480,7 @@ async function resolveDiscoveryBatch(env,report,limit=24){
  try{return await resolveDiscoveryChunk(env,report,limit,lease);}finally{await releaseDiscoveryLease(env,lease);}
 }
 // `checkpoint`, when given, is called with the chunk's summary immediately after the hop-marked final status is
-// saved and before any trailing write (score preview, variant plan), so that the continuation checkpoint is the
+// saved and before any trailing write (score preview), so that the continuation checkpoint is the
 // very next durable write after the status; see advanceDiscovery.
 async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
@@ -585,7 +502,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  await fence();await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
  const preview={},now=Date.now(),pending=source.items.filter(c=>resolutionActionability(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
  pending.sort((a,b)=>hotRank.get(b)-hotRank.get(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
- let checked=0,added=0,tmdbCalls=0,error=null,retryAt=null,variantMeter=emptyVariantStats();
+ let checked=0,added=0,tmdbCalls=0,error=null,retryAt=null;
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
  for(const candidate of pending.slice(0,limit)){
   if(Date.now()>deadline||tmdbCalls>=16)break;
@@ -595,15 +512,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
    let score=scoreFilmResolution({observation,candidates});
    let searched=!score.considered.some(row=>row.title.quality===1);
    if(searched)candidates=[...candidates,...await scoredSearchCandidates(query,candidate)],score=scoreFilmResolution({observation,candidates});
-   let proposed=[],variantHeld=false;
-   if(candidateDiscoveryMode(env)==='on'&&!score.considered.some(row=>row.title.quality===1)){
-    if(!variantMeter.halted&&(variantMeter.calls>=CANDIDATE_VARIANT_CHUNK_CAP||Date.now()+12000>deadline)){variantMeter.skipped+=Math.min(CANDIDATE_VARIANT_CAP,candidateSearchVariants(candidate).length);variantHeld=true;}
-    else if(!variantMeter.halted){
-     const found=await collectVariantProposals(env,candidate,deadline,variantMeter);
-     if(!variantMeter.halted&&found.resume)variantHeld=true;
-     else if(!variantMeter.halted){proposed=found.proposed;if(found.hits.length)candidates=[...candidates,...found.hits],score=scoreFilmResolution({observation,candidates}),searched=true;}
-    }
-   }
+   const proposed=[];
    let gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now);
    let movie=null;
    if(gate.outcome==='needs_verification'&&score.status==='accepted'&&score.acceptedTmdbId){
@@ -611,8 +520,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
     gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:detailCompetitors(aliasIndex,candidate,score.acceptedTmdbId,structuralCompetitorForms(score))});
    }
    preview[candidate.key]=scorePreview(candidate,score,gate,proposed);
-   if(variantHeld){/* The optional search did not finish, so this observation stays on the normal queue. */}
-   else if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now);
+   if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now);
    else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now);
    else if(gate.outcome==='detail_verified'){
     const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
@@ -628,12 +536,12 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  }
  const currentReport=await loadJSON(env,'programme.json');
  if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
-  const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,programmeChanged:true,...variantDiagnostic(variantMeter)};
+  const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,programmeChanged:true,...VARIANT_DIAGNOSTIC};
   const changedOutcome={...changed,stage:'programme_changed',currentProgrammeRunId:currentReport.runId};
   await fence();await saveJSON(env,'epg/discovery-status.json',changed);if(checkpoint)await checkpoint(changedOutcome);await saveScorePreview(env,source,preview,fence);return changedOutcome;
  }
  try{await refreshPredictionQueue(env,currentReport||report,'resolver_checkpoint',{beforeWrite:fence});}catch(e){if(e?.name==='LeaseLostError')throw e;error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
- const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,...variantDiagnostic(variantMeter)};
+ const persistedDecisions=error?await loadJSON(env,'epg/discovery-resolution.json')||{}:decisions,ready=source.items.filter(c=>resolutionActionability(c,persistedDecisions[c.key],Date.now())),summary={schemaVersion:2,stage:error?'partial':ready.length?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:ready.length,hotRemaining:ready.filter(c=>candidateIsHot(c)).length,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,...VARIANT_DIAGNOSTIC};
  await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);await saveScorePreview(env,source,preview,fence);await saveObservationIndex(env,source,persistedDecisions,fence,{kind:'resolver_chunk',hopId});return summary;
 }
 async function discoveryDigest(text){const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));return Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('');}
@@ -778,7 +686,7 @@ function interruptedStep(item,now){
 // that follows is best effort and its result is kept in `recorded.entered`.
 async function openContinuationStep(env,step,persist){observeContinuation(step);if(persist)step.recorded.entered=await recordContinuationDiagnostic(env,step);return step;}
 // The step's discovery hop has stored its checkpoint. The entry records that before the hop's trailing writes (score
-// preview, variant plan, lease release, response), so an invocation that ends after this point is known to have
+// preview, lease release, response), so an invocation that ends after this point is known to have
 // committed its chunk although no response reached the caller. Best effort, never throws.
 async function markContinuationCheckpoint(env,step,persist,committed){
  try{
@@ -857,7 +765,7 @@ async function saveOwnedContinuation(env,hopId,record){
 // (a thrown handler normally leaves an `error` record) between the status write and the checkpoint write,
 // which is the very next write; a failure of the checkpoint write itself leaves the same picture, so the
 // cause of any one orphan is an inference, not a proven fact. The lease release, the score preview, the
-// variant plan, the diagnostics ring and the response all come after the checkpoint, so an end during them
+// diagnostics ring and the response all come after the checkpoint, so an end during them
 // leaves a settled record, not an orphan. Whether the hop's chunk finished is read from
 // the persisted discovery status, and only when that status names the same hop (`hopId`), the same
 // programme generation and a start after the record was opened: the status object is shared, so a
@@ -1019,7 +927,7 @@ async function advanceDiscovery(env,body={}){
  const opened=await replaceContinuation(env,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId,...(interruptions?{interruptions}:{})},fresh.etag);
  if(!opened){await releaseDiscoveryLease(env,acquired);trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false,write:'other_hop'};return busyOutcome(after,trace);}
  // The hop's checkpoint is the first durable write after its hop-marked status: the chunk calls `checkpoint`
- // right after saving that status, before the score preview, the variant plan, the lease release and the
+ // right after saving that status, before the score preview, the lease release and the
  // diagnostics ring. An invocation that ends during those trailing writes, or whose response is lost on the way
  // to the client, therefore leaves a settled record rather than an orphan; the orphan settle remains the repair
  // for an end between the status write and the checkpoint write. A failure after the checkpoint is a trailing

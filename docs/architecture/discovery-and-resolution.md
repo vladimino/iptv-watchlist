@@ -1,6 +1,6 @@
 # Discovery, scored resolution and verification gate
 
-The discovery ledger tracks **observations**, not canonical Film records. A high score is only a hypothesis until independent movie-detail verification and the current-generation fence pass. Sources: [scored resolution reference](../reference/domain/scored-resolution.md), [candidate variants](../reference/domain/candidate-discovery.md), [observation ADR](../adr/0007-persistent-discovery-evidence.md), [detail gate ADR](../adr/0010-scored-detail-verification.md), [scorer](../../src/domain/scored-resolution.js) and [gate](../../src/domain/resolution-acceptance.js).
+The discovery ledger tracks **observations**, not canonical Film records. A high score is only a hypothesis until independent movie-detail verification and the current-generation fence pass. Sources: [scored resolution reference](../reference/domain/scored-resolution.md), [candidate discovery](../reference/domain/candidate-discovery.md) (the optional variant search is retired), [observation ADR](../adr/0007-persistent-discovery-evidence.md), [detail gate ADR](../adr/0010-scored-detail-verification.md), [scorer](../../src/domain/scored-resolution.js) and [gate](../../src/domain/resolution-acceptance.js).
 
 ```mermaid
 flowchart TD
@@ -8,7 +8,6 @@ flowchart TD
     ledger[("Persistent candidate ledger<br/>and resolution decisions in R2")]
     eligible{"Current, eligible, non-terminal,<br/>retry allowed?"}
     search["Existing TMDB evidence / bounded search"]
-    variants["Optional candidate variants<br/>separately gated"]
     scorer["Scorer: title, year,<br/>uniqueness, runtime"]
     score{"Accepted score and margin?"}
     detail["Fetch TMDB movie detail:<br/>id, titles, year, runtime"]
@@ -26,7 +25,6 @@ flowchart TD
     epg --> ledger --> eligible
     eligible -->|no| unresolved
     eligible -->|yes| search --> scorer
-    variants -.->|only when enabled and compatible| scorer
     scorer --> score
     score -->|no| unresolved
     score -->|yes| detail --> gate
@@ -52,7 +50,7 @@ Before an observation reaches the ledger, and again before each resolver chunk, 
 
 The scorer combines duplicate rows by **TMDB ID** before calculating uniqueness; multiple distinct editions with compatible titles and years remain competitors. `accepted`, `trusted: true`, an alias or another observation's verified decision is insufficient to write a Film. The detail gate checks the exact accepted ID, compatible title/year/runtime, competing editions, and the same pinned programme generation. A rejected, ambiguous or stale result must not be silently promoted.
 
-The scored gate is the only resolver: the former `SCORED_RESOLUTION` rollout variable is retired from code ([ADR 0036](../adr/0036-scored-resolution-only.md)), and rolling the resolver back is a code revert, not a setting. `CANDIDATE_DISCOVERY` is an **independent optional runtime flag** (`on` only) for bounded title/year variants. The dated [AIR-68 cutover](https://trello.com/c/qbLDc6Ql) enabled scored resolution but did not approve optional variants. A historical rollout result does not establish today's flag setting. Each explicit discovery step processes a bounded chunk; no recursive public self-fetch or unbounded TMDB work is implied. See [one-chunk ADR](../adr/0006-one-chunk-discovery.md).
+The scored gate is the only resolver: the former `SCORED_RESOLUTION` rollout variable is retired from code ([ADR 0036](../adr/0036-scored-resolution-only.md)), and rolling the resolver back is a code revert, not a setting. The resolver does not plan title, year, spelling or numeral variant searches. `CANDIDATE_DISCOVERY` is retired and is not read ([ADR 0082](../adr/0082-retire-candidate-discovery.md), Proposed). The dated [AIR-68 cutover](https://trello.com/c/qbLDc6Ql) enabled scored resolution and did not approve optional variants; those experiments stay historical. A chunk's status still carries `variantCalls`, `variantErrors`, `variantThrottled` and `variantSkipped`, each 0. Each explicit discovery step processes a bounded chunk; no recursive public self-fetch or unbounded TMDB work is implied. See [one-chunk ADR](../adr/0006-one-chunk-discovery.md).
 
 The catalogue upsert above is the only writer that creates or re-identifies catalogue records. The owner-triggered [poster hydration](../reference/api/catalog.md#poster-hydration) ([ADR 0020](../adr/0020-owner-triggered-catalog-poster-hydration.md), [ADR 0048](../adr/0048-permanent-catalog-poster-maintenance-route.md), [ADR 0063](../adr/0063-catalog-poster-negative-index.md)) is a second writer outside this flow, a permanent owner-only maintenance route with no switch of its own: it fills only the `poster` field of already verified records from TMDB detail by the same id, under the same resolver lease, and never creates a record, a decision or an identity. Its two catalogue writes are separate compare-and-swaps, not one atomic step; a stop between them is reported and completed by the next call. The same call then records a terminal TMDB refusal (`no_poster_on_tmdb` for 90 days, `tmdb_id_mismatch` for a different valid numeric id until the verified id changes) in one index keyed by the numeric TMDB id. A 200 body with no valid movie id stays retryable and is not stored. The ordinary queue skips those entries. An explicit recheck of one named id is a separate owner-confirmed call and is the only way past a remembered answer before its date. An unreadable index stops the call before the lease and before TMDB. It runs only on an owner-approved call, never on a schedule.
 

@@ -5,9 +5,7 @@
 // the readout cannot disagree with what the code does.
 const FEATURE_FLAG_REGISTRY_VERSION=1;
 const FEATURE_FLAG_RAW_MAX=200;
-const onOff=(name,effective,extra={})=>({name,modes:['off','on'],default:'off',tokens:['off','on'],effective,...extra});
 const FEATURE_FLAGS=[
- onOff('CANDIDATE_DISCOVERY',env=>candidateDiscoveryMode(env),{trims:true}),
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
  // Retired: a migrated ratings run's per-film removal lookup does not read this binding (ADR 0077).
@@ -48,7 +46,6 @@ function featureFlagIssue(flag,value){
   return null;
  }
  if(flag.tokens.includes(value))return null;
- if(flag.trims&&flag.tokens.includes(value.trim()))return null;
  return flag.tokens.includes(value.trim().toLowerCase())?'case_or_whitespace':'unrecognized';
 }
 // One read of the allowlisted bindings. No storage, no fetch, no write. env is read by name only.
