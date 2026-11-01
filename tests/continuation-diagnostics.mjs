@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 // AIR-151: read-only diagnostics of the MCP/HTTP EPG continuation boundary. Every step leaves one
 // bounded entry in epg/resolver-continuation-diagnostics.json and one structured log line, so that
@@ -44,6 +45,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
   return new Response('unexpected',{status:599});
  }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
+vm.runInContext(scoped('src/metadata-cache.js','MetadataCache'),context);
 for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 const worker=context.worker,entrypoint=vm.runInContext('DiscoveryContinuation',context),profileKey=vm.runInContext('profileKey',context),continuationUrl=vm.runInContext('DISCOVERY_CONTINUATION_URL',context);
 const execution={waitUntil(){},exports:{DiscoveryContinuation:{async fetch(){return Response.json({ok:true});}}}};

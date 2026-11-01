@@ -1,6 +1,6 @@
 # Persistence authority and staged migration
 
-**Production today:** R2 bucket `iptv` is authoritative. The D1 database `iptv` carries schema v4 and a backfilled copy of the R2 domain (Films, Persons, credits, candidates, decisions, predictions and fingerprint pointers). The Worker is bound to it and pages read it only through the read-only [D1 catalog views](../reference/api/d1-catalog.md). The [enrichment projector](../adr/0056-d1-enrichment-write-through.md) is deployed and enabled in production (`D1_ENRICHMENT_WRITE=on`); it keeps D1's Films, Persons, credits and metadata following authoritative R2. The flag's absent/off default shown in the diagram is a deployment safeguard, not the current production setting. See [D1 contract](../reference/data/d1-schema.md), [ADR-0001](../adr/0001-d1-schema-v1.md), [migration ADR](../adr/0017-staged-d1-migration.md) and [offline evidence](../evidence/d1-migration/air-73-offline-run.md).
+**Production today:** R2 bucket `iptv` is authoritative. The D1 database `iptv` carries schema v5 and a backfilled copy of the R2 domain (Films, Persons, credits, candidates, decisions, predictions and fingerprint pointers). Migration `0005` is applied. The metadata cache marker of schema v6 is not: `metadata.json` remains the working set of `beginSync` and `metadataSync`. The Worker is bound to it and pages read it only through the read-only [D1 catalog views](../reference/api/d1-catalog.md). The [enrichment projector](../adr/0056-d1-enrichment-write-through.md) is deployed and enabled in production (`D1_ENRICHMENT_WRITE=on`); it keeps D1's Films, Persons, credits and metadata following authoritative R2. The flag's absent/off default shown in the diagram is a deployment safeguard, not the current production setting. See [D1 contract](../reference/data/d1-schema.md), [ADR-0001](../adr/0001-d1-schema-v1.md), [migration ADR](../adr/0017-staged-d1-migration.md) and [offline evidence](../evidence/d1-migration/air-73-offline-run.md).
 
 ```mermaid
 flowchart TD
@@ -22,7 +22,8 @@ flowchart TD
     archive --> importer --> local
     local -.-> gate
     r2 -->|one-off export| snapshot --> reload -->|one-off load, no live flow| d1
-    r2 -->|reads enrichment objects| projector -.->|on: changed Films and Persons; sync clocks only at schema v5| d1
+    r2 -->|reads enrichment objects| projector -.->|on: Films and Persons; sync clocks at schema v5; metadata from D1 when the cache marker is d1| d1
+    worker -.->|metadata cache only when the schema v6 marker is d1| d1
     gate -.-> flipWrite -.->|future: Worker writes D1| d1
     flipWrite --> flipRead --> retire
     classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
@@ -48,7 +49,7 @@ The catalog poster negative index `epg/catalog-poster-negatives.json` ([ADR 0063
 
 The immutable fingerprint body and generation record ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md) section 2) that the current `fingerprint.json` names are mapped through it and add no row; older generations stay in R2 as unreferenced history. This is also a ledger rule inside the offline import and changes no node or arrow above.
 
-The dashed projector arrow writes Films and Persons when `D1_ENRICHMENT_WRITE=on`. Sync clocks (`film_sync_state`) ride that same arrow only after migration `0005` sets schema version 5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)). Until that migration, the arrow is the schema v4 projector. The cron and the flag do not change, and `metadataSync` does not read the rows. This does not add a node.
+The dashed projector arrow writes Films and Persons when `D1_ENRICHMENT_WRITE=on`. Sync clocks (`film_sync_state`) ride that same arrow at schema v5 ([ADR 0070](../adr/0070-metadatasync-freshness-clocks.md)). Production is schema v5, so that write is the current cron. The cron and the flag do not change. The second dashed arrow is the metadata cache ([ADR 0072](../adr/0072-metadata-cache-d1-authority.md)). It is unused while `metadata_cache_authority.mode` is absent or `r2`. When that mode is `d1`, `beginSync` and `metadataSync` read and write the cache in D1, and the projector takes metadata records from that cache instead of from `metadata.json`. Schema v6 is not applied. This does not add a node.
 
 The D1 data came through a one-off path, not a live flow: a fenced read-only snapshot of R2, a local build by the backfill executor, and one load through the D1 Import API ([runbook](../runbooks/d1-backfill.md)). Between reloads, the active enrichment projector keeps D1 following R2: R2 stays the truth, and D1 Films, Persons, credits and metadata may trail it by up to an hour. Other domains (candidates, decisions, predictions, ratings) follow R2 only through a reload until their own step. A reload seeds the projector's change keys and replays the D1-only steps ([runbook](../runbooks/d1-backfill.md#reload-with-the-enrichment-projector-air-275-phase-2)). The projector's enrichment objects include the optional owner-approved `identity/tmdb-retirements.json` ([ADR 0057](../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md)): when it exists, the projection applies it and D1 follows the corrected identity like any other R2 change; the snapshot loader, the offline import and the seed read it the same way. This changes no node or arrow above.
 

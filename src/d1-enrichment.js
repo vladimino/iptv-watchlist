@@ -152,6 +152,15 @@ async function d1EnrichmentDiff(env,db,now,summary){
  const {store,programmeRunId}=await d1EnrichmentStore(env);
  summary.programmeRunId=programmeRunId;
  summary.loadMs=Date.now()-started;
+ // Schema v6 is the only version that can name a D1 metadata cache. v4 and v5 keep the R2 object
+ // and do not query the cache tables. Mode d1 replaces that object before the view is built.
+ // A failed cache read stops the run before any write.
+ const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
+ summary.schemaVersion=version;
+ if(version===6){
+  try{await MetadataCache.useAuthoritativeMetadata(db,store);}
+  catch(error){if(error?.code==='metadata_cache_unavailable')throw new D1EnrichmentInputError('metadata_cache_unavailable','metadata_cache');throw error;}
+ }
  const view=LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),retirements=view.tmdbRetirements||null;
  if(retirements){
   summary.tmdbRetirements={valid:retirements.valid,applied:retirements.applied.length,held:retirements.held.slice(0,20),reasons:retirements.reasons.slice(0,20)};
@@ -167,13 +176,10 @@ async function d1EnrichmentDiff(env,db,now,summary){
  const members=(await db.all('SELECT film_id FROM watchlist_film')).map(row=>row.film_id);
  plan.membership={members:members.length,removed:members.filter(id=>!listed.has(id)&&!held.has(id)).length};
  Object.assign(summary,{members:plan.membership.members,membershipRemoved:plan.membership.removed,films:inputs.films.length,people:inputs.people.length,stored:stored.size,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
- // Schema v4 keeps the plan above and writes nothing else. Sync clocks are written only when migration 0005 has set
- // version 5 and created film_sync_state. A deploy does not apply that migration, and a version without the table
- // (or a table without the version) does not write the clocks. The film change key is not involved, so a v4 database
- // does not rewrite its Films because these fields exist in the input.
- const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
- summary.schemaVersion=version;
- plan.syncReady=version===5&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
+ // Schema v4 keeps the plan above and writes nothing else. Sync clocks are written when the contract
+ // is version 5 or 6 and film_sync_state exists. A version without the table does not write them.
+ // The film change key is not involved, so a v4 database does not rewrite its Films because these fields exist.
+ plan.syncReady=(version===5||version===6)&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
  plan.sync=[];
  if(plan.syncReady){
   const storedSync=new Map((await db.all("SELECT id,change_key FROM projection_state WHERE projection=? AND kind='film'",[METADATA_SYNC_PROJECTION])).map(row=>[row.id,row.change_key]));
@@ -311,25 +317,30 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
 }
 
 // The read-only status of the projector for /api/d1/status. schema is true for the whole of migration 0004 (its three tables
-// and schema_contract version 4) and for the whole of migration 0005 (those tables, film_sync_state and version 5).
-// A partial schema is reported as false with the projection tables that are present. Version 4 stays true when the
-// sync table is absent, so a deploy ahead of migration 0005 does not report the live projector as down.
+// and schema_contract version 4), for migration 0005 (those tables, film_sync_state and version 5), and for migration 0006
+// (those plus metadata_cache, metadata_cache_authority, metadata_cache_cas and version 6). A partial schema is false.
+// Version 4 stays true when the sync table is absent. Version 5 stays true when the cache tables are absent.
 async function d1EnrichmentStatus(binding,env){
  const mode=d1EnrichmentMode(env);
- const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state')").bind().all()).results||[]).map(row=>row.name);
- const tables=present.filter(name=>name!=='film_sync_state').sort();
+ const present=((await binding.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas')").bind().all()).results||[]).map(row=>row.name);
+ const tables=present.filter(name=>name==='projection_state'||name==='projection_run'||name==='projection_fence').sort();
  const syncTable=present.includes('film_sync_state');
+ const cacheReady=present.includes('metadata_cache')&&present.includes('metadata_cache_authority')&&present.includes('metadata_cache_cas');
  const version=(await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first())?.version??null;
- if(tables.length!==3||!(version===4||(version===5&&syncTable)))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
+ if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
  const [run,counts]=await Promise.all([
   binding.prepare('SELECT lease_until leaseUntil,started_at startedAt,finished_at finishedAt,outcome,summary_json summary FROM projection_run WHERE projection=?').bind(D1_ENRICHMENT_PROJECTION).first(),
   binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),
  ]);
  let summary=null;try{summary=run?.summary?JSON.parse(run.summary):null;}catch{}
  const status={mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
- if(version===5){
+ if(version===5||version===6){
   const sync=await binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(METADATA_SYNC_PROJECTION).first();
-  status.schemaVersion=5;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;
+  status.schemaVersion=version;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;
+ }
+ if(version===6){
+  const marker=await binding.prepare('SELECT mode AS cacheMode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration FROM metadata_cache_authority WHERE id=1').bind().first();
+  status.cacheMode=marker?.cacheMode??null;status.cacheGeneration=marker?.cacheGeneration??null;status.mirrorGeneration=marker?.mirrorGeneration??null;
  }
  return status;
 }
