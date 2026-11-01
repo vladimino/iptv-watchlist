@@ -1,9 +1,9 @@
 # ADR 0076: The backfill writes one multi-statement D1 query and does not open a second database
 
-**Status:** Proposed  
-**Original decision date:** not yet accepted  
+**Status:** Accepted  
+**Original decision date:** 2026-11-01  
 **Recorded at:** 2026-11-01  
-**Approval source:** pending owner decision  
+**Approval source:** [explicit owner acceptance on AIR-316, 1 November 2026](https://trello.com/c/xgeFeYIT#comment-6ae74ee540d12ba48446a13b) after independent PASS [PR #305 review](https://github.com/vladimino/iptv-watchlist/pull/305#pullrequestreview-5728640450)  
 **Related work:** [AIR-316](https://trello.com/c/xgeFeYIT); historical measurements [scratch G4, 26 October 2026](../evidence/d1-migration/air-174-scratch-g4-2026-10-26.md) and [scratch G4 at the real scale, 27 October 2026](../evidence/d1-migration/air-178-scratch-g4-real-scale-2026-10-27.md)  
 **Supersedes:** In part [ADR-0019](0019-live-d1-backfill-boundaries.md) decision 7, the requirement that batch atomicity be demonstrated on a scratch database before the first production write; and in part [ADR-0021](0021-staged-atomic-generation-import.md), the live obligation to repeat that demonstration, or the G4 harness, on a second database before a later backfill run. The staged generation design itself stays. The dated measurements stay evidence of those runs.  
 **Superseded by:** None
@@ -47,11 +47,11 @@ No database is created, dropped or written by this decision. A bad import is sti
 
 ## Evidence
 
-- **Original decision:** pending owner acceptance of this record
+- **Original decision:** [owner Accepted, 1 November 2026](https://trello.com/c/xgeFeYIT#comment-6ae74ee540d12ba48446a13b)
 - **Implementation:** this pull request
 - **Dated verification:** the scratch runs linked above remain the record of those past executions; this change adds no new production measurement
 - **Uncertainty:** this repository does not re-measure the `{sql}` rollback at 1,000 statements on every run. The local fake models that rollback. A future Cloudflare change to that request would not be caught by a per-run probe, because that probe required a database the owner removed. The REST `{batch}` body's rollback behaviour is not decided here.
 
 ## Follow-ups
 
-Owner acceptance or decline of this record before merge. No production backfill is queued by that acceptance.
+Owner acceptance was recorded [1 November 2026](https://trello.com/c/xgeFeYIT#comment-6ae74ee540d12ba48446a13b). No production backfill, migration, flag or database write is queued or authorized by that decision.
