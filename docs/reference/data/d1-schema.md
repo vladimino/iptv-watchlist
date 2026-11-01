@@ -200,7 +200,7 @@ A key with no Film row is stored and does not create a Film. A cache commit does
 
 ## Owner reviews
 
-[ADR 0081](../../adr/0081-d1-authoritative-owner-reviews.md) (Proposed): migration `0009` adds three tables. A deploy does not apply it. Production `iptv` does not have these tables. The inserted marker is `mode` `r2`, generation 0, `writes` `open`. Applying the file does not copy `admin/owner-reviews.json` and does not set `d1`. The file runs only after `0007` and `0008`. The first statement refuses version 6, version 7, and a version 8 that is missing any prediction-domain table, any published-EPG table, or either authority row, and it creates nothing in that case. When the prerequisite holds, the contract version becomes 9. Readers still require the three owner-review tables. Version 9 is not, by itself, proof that those tables are still present.
+[ADR 0081](../../adr/0081-d1-authoritative-owner-reviews.md) (Accepted): migration `0009` adds three tables. A deploy does not apply it. Production `iptv` does not have these tables. The inserted marker is `mode` `r2`, generation 0, `writes` `open`. Applying the file does not copy `admin/owner-reviews.json` and does not set `d1`. The file runs only after `0007` and `0008`. The first statement refuses version 6, version 7, and a version 8 that is missing any prediction-domain table, any published-EPG table, or either authority row, and it creates nothing in that case. When the prerequisite holds, the contract version becomes 9. Readers still require the three owner-review tables. Version 9 is not, by itself, proof that those tables are still present.
 
 | Table | Holds |
 | --- | --- |

@@ -20,3 +20,9 @@ Captured from the AIR-314 branch after merging `origin/main` at `ec5e3ad90ae0efb
 ## Not checked
 
 Live row counts and a production apply. `0007` and `0008` are on `main` and were checked only on local SQLite, and only in the order `0007`, then `0008`, then `0009`. Production apply stays a separate owner approval.
+
+## Independent review and architectural approval (2 November 2026)
+
+The [independent technical PASS on PR #319 at HEAD `b4aeec266b6421bf799ce503508a4b610a818248`](https://github.com/vladimino/iptv-watchlist/pull/319#pullrequestreview-5730733380) followed reconciliation of ADR 0079 and ADR 0080 and the [exact-head Test and build success](https://github.com/vladimino/iptv-watchlist/actions/runs/41360616890). The owner explicitly [accepted ADR 0081 and visually approved both newly changed Mermaid diagrams](https://trello.com/c/RBxi5Pcf#comment-6ae7c9c667f360d012b09f40) on 2026-11-02: the owner-review dashed arrow in `docs/architecture/persistence-and-migration.md` and the separate marker flowchart in `docs/architecture/film-person-lifecycle.md`. The existing name-confirmation and published-EPG figures were unchanged.
+
+This architecture and visual approval is not production permission. No `0007`/`0008`/`0009` apply, live import, authority activation/revert, R2/D1 data write, Access, Task, flag or sync action was approved or executed. The owner-review R2 store remains authoritative until a separately approved cutover.

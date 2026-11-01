@@ -73,7 +73,7 @@ flowchart LR
 
 ## Owner-review marker
 
-**Visual review: proposed.** This diagram is not part of the 2026-11-01 approval of the name-confirmation figure above. The form, the button **Сохранить вариант**, the checkbox and the «текущее предпочтительное» radio do not change. [ADR 0081](../adr/0081-d1-authoritative-owner-reviews.md) (Proposed) chooses the store after that same POST. While `owner_review_authority` is absent, or its `mode` is `r2`, the write is still the R2 object in the approved figure. When `mode` is `d1`, both maps commit as rows at one generation and the R2 object is a mirror written afterwards. A lagging mirror is not a fallback. Migration `0009` is not applied, so the `d1` branch is not live.
+**Visual review: approved 2026-11-02** ([owner decision](https://trello.com/c/RBxi5Pcf#comment-6ae7c9c667f360d012b09f40)). This is separate from the 2026-11-01 approval of the name-confirmation figure above. The form, the button **Сохранить вариант**, the checkbox and the «текущее предпочтительное» radio do not change. [ADR 0081](../adr/0081-d1-authoritative-owner-reviews.md) (Accepted) chooses the store after that same POST. While `owner_review_authority` is absent, or its `mode` is `r2`, the write is still the R2 object in the approved figure. When `mode` is `d1`, both maps commit as rows at one generation and the R2 object is a mirror written afterwards. A lagging mirror is not a fallback. Migration `0009` is not applied, so the `d1` branch is not live.
 
 ```mermaid
 flowchart LR
