@@ -37,30 +37,30 @@ The integration footer does not use this document for current ratings health; th
 
 Each phase is saved before its work starts and logged as `{"event":"epg_ratings_phase","runId",…,"phase"}`, so Workers Observability shows the last phase before an `exceededMemory` or time-limit end of the request.
 
-**Recovery.** A later `/api/sync/epg` step on the completed run, before the discovery continuation, closes an attempt that is still `started` and whose last phase is older than five minutes (or, for a run written before this marker, `ratingPending` on a run updated more than five minutes ago): `state: unknown`, `cause: interrupted`, `interruptedPhase`, `ratingError` "Ratings step interrupted during <phase>; no outcome recorded" and `ratingPending` removed. It never reads the diary again, writes no programme, generation or event, and leaves a finished or failed attempt alone; further steps change nothing. The next EPG commit reads the diary as usual; its history and facts writes are idempotent. An interruption is reported as a failure, never as a success.
+**Recovery.** A later `/api/sync/epg` step on the completed run, before the discovery continuation, closes an attempt that is still `started` and whose last phase is older than five minutes (or, for a run written before this marker, `ratingPending` on a run updated more than five minutes ago): `state: unknown`, `cause: interrupted`, `interruptedPhase`, `ratingError` "Ratings step interrupted during <phase>; no outcome recorded" and `ratingPending` removed. It never reads the diary again, writes no programme, generation or event, and leaves a finished or failed attempt alone; further steps change nothing. The EPG commit does not read Diary ([ADR 0073](../../adr/0073-retire-ratings-pipeline-switch.md)). A later ratings run reads page 1; its history and facts writes are idempotent. An interruption is reported as a failure, never as a success.
 
 ## Removed films
 
-With `REMOVAL_RATING_LOOKUP=on` ([ADR 0043](../../adr/0043-removal-rating-lookup-queue.md), [AIR-268](https://trello.com/c/7ePpEYev)) a removal event no longer waits for a complete films list. When the EPG commit builds the watchlist diff, it hands the removed films with their Letterboxd film URL to `lookupRemovalRatings`. Since ADR 0054 it runs after the diary stage, and only for removed films the diary gave no rating. Those the diary rated get that rating on the removal event, and their ids are listed in `sync.json` `removalDiaryResolved`. A blocked diary leaves every removed film to the lookup:
+With `REMOVAL_RATING_LOOKUP=on` ([ADR 0043](../../adr/0043-removal-rating-lookup-queue.md), [AIR-268](https://trello.com/c/7ePpEYev)) a removal event no longer waits for a complete films list. After the storage migration the ratings run calls `lookupRemovalRatings` for removed films the Diary did not rate. The EPG commit does not ([ADR 0073](../../adr/0073-retire-ratings-pipeline-switch.md)): it only enqueues references when migration is complete. Films the Diary rated get that rating on the removal event during the ratings run. A blocked Diary leaves those films to the lookup:
 
-- **Queue.** `enrichment/removal-rating-lookups.json` keeps one entry per film id: `url`, `state` (`pending`, `rated`, `not_rated`, `not_found`, `conflict`, `gave_up`), `attempts`, `enqueuedAt`, `nextAttemptAt`, `lastAttemptAt`, `lastResult`, `lastError`, and `rating` once found. A film already in the queue is not added again. A pending film is not dropped by the cap: after 14 days it becomes `expired` (no more requests). An `expired` entry is deleted 28 days after `enqueuedAt`, other finished entries after 14 days, and at most 100 non-pending entries, `expired` ones included, are kept; the cap never removes a pending film. A film removed again while its entry is still stored gains no new entry, so the second removal event is not queued. Every write is a compare-and-swap. These are the version 1 rules; after the storage migration the queue follows [version 2](#removal-queue-version-2), keyed by removal event, under either pipeline.
+- **Queue.** `enrichment/removal-rating-lookups.json` keeps one entry per film id: `url`, `state` (`pending`, `rated`, `not_rated`, `not_found`, `conflict`, `gave_up`), `attempts`, `enqueuedAt`, `nextAttemptAt`, `lastAttemptAt`, `lastResult`, `lastError`, and `rating` once found. A film already in the queue is not added again. A pending film is not dropped by the cap: after 14 days it becomes `expired` (no more requests). An `expired` entry is deleted 28 days after `enqueuedAt`, other finished entries after 14 days, and at most 100 non-pending entries, `expired` ones included, are kept; the cap never removes a pending film. A film removed again while its entry is still stored gains no new entry, so the second removal event is not queued. Every write is a compare-and-swap. These are the version 1 rules; after the storage migration the queue follows [version 2](#removal-queue-version-2), keyed by removal event, and the ratings run is the only writer.
 - **Bounded requests.** One call requests the member page `/<user>/film/<slug>/` of at most five due films, oldest first; the others stay pending for the next call. The attempt is recorded before the request, so a request killed mid-lookup counts the attempt and retries no sooner than an hour later. A film gets at most three attempts in all.
 - **Outcomes.** A rating found goes through the existing per-film path (fact record, `actual.json`, view index, removal event with `ratingObservedAt`); the first confirmed rating on an event is never replaced. A page without the owner's rating is retried after 24 hours and becomes final `not_rated` after the third attempt; it never marks the film watched. A 404 is final `not_found`.
 - **Upstream blocks.** A 403 or 429 stops the batch at once, no request is repeated, and the whole queue waits six hours (`pausedUntil`, `pausedBy`) because the block is about the source, not the film. A network or 5xx error retries that film after an hour.
-- **Independence.** The lookup never throws into the commit: an error is reported in the summary and the EPG result is unchanged. Its summary is stored as `sync.json` `removalRatingLookup` (`checked`, `rated`, `notRated`, `failed`, `stoppedBy`, `pausedUntil`, `pending`, `queued`, `at`, `error`). A film left pending is retried on the next EPG commit.
-- **Recovery.** The hand-over (`run.removalLookups`) is saved in `sync.json` with the commit's events and cleared only once the queue holds it. If the request is killed after `finishSync` and before the queue write, the next `/api/sync/epg` step on the completed run replays it once (`resumeRemovalLookups`) before the discovery continuation; further steps find no hand-over and request nothing.
+- **Independence.** The lookup runs inside the ratings step, not the EPG commit. An error stays on that step. A film left pending is retried on a later ratings step. A summary stored on an older `sync.json` as `removalRatingLookup` is not written by the commit.
+- **Recovery.** A hand-over left on `sync.json` (`removalRefs` or `removalLookups`) stays there while migration is not complete. Once migration is complete, the next `/api/sync/epg` step on that run, or the next `beginSync`, enqueues it and requests nothing from Letterboxd. There is no lookup replay on the commit.
 
 ## Separate ratings pipeline
 
-[ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md). Code: [`src/letterboxd-ratings.js`](../../../src/letterboxd-ratings.js); switch `RATINGS_PIPELINE` ([feature flags](../feature-flags.md)); tools and routes in the [MCP reference](../api/mcp.md#ratings-tools); operation in the [runbook](../../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
+[ADR 0060](../../adr/0060-independent-letterboxd-ratings-pipeline.md) and [ADR 0073](../../adr/0073-retire-ratings-pipeline-switch.md). Code: [`src/letterboxd-ratings.js`](../../../src/letterboxd-ratings.js). `RATINGS_PIPELINE` is retired and unread ([feature flags](../feature-flags.md)). Tools and routes: [MCP reference](../api/mcp.md#ratings-tools). Operation: [runbook](../../runbooks/letterboxd-diary-history.md#separate-ratings-pipeline).
 
-**When it acts.** Only while `RATINGS_PIPELINE` is exactly `separate` and the [storage migration](#storage-migration-and-witness) is `complete`. Otherwise:
+**When it acts.** When the [storage migration](#storage-migration-and-witness) is `complete`, for every value of the retired binding, including absence. Otherwise:
 
-- the EPG commit runs the Diary stage and the removal lookup as described above;
-- `ratings_sync_start` and `ratings_sync_step` answer `disabled` (switch `inline`) or `not_migrated` and write nothing;
-- `ratings_sync_status` still reads.
+- the EPG commit publishes and fails closed: no Diary read, no member-page lookup, no enqueue, no automatic migration; `sync.json` and the reply carry `ratingsPipeline: blocked` and `ratingsMigration`;
+- `ratings_sync_start` and `ratings_sync_step` answer `not_migrated` and write nothing;
+- `ratings_sync_status` still reads, with `switch: separate` and `pipeline: blocked`.
 
-Under `inline` with unmigrated objects the commit writes the same bytes, replies and Letterboxd requests as before the pipeline existed.
+`switch: separate` is the permanent mode. It does not prove the binding is absent. `feature_flags` does.
 
 ### The EPG commit under the separate pipeline
 
@@ -91,13 +91,13 @@ One record holds the running or the last run, written only by compare-and-swap.
 - **Start** (`trigger`, optional `clearIsolation`). Answers `started` with a new `runId`, or one of:
   - `busy`: a run is active; its id is not handed out;
   - `isolated`, with `isolation`;
-  - `disabled`, `not_migrated`.
+  - `not_migrated` (with `migration`) when storage is not migrated. There is no `disabled` answer.
 
   Neither `scheduled` nor `manual` is refused for following the previous start ([ADR 0069](../../adr/0069-no-scheduled-ratings-start-gap.md)). A stale `running` record is first closed as `unknown`. A start makes no Letterboxd request.
 - **Step** (`runId`). Takes the lease by compare-and-swap, does one bounded piece of work, writes the record only while its lease holds, then releases it. Answers:
   - `continue` / `more_work`;
   - `wait` / `busy` while another step's lease is live, not before `nextCatchUpAt`;
-  - `stop` with `finished`, `error`, `unknown` (a stale run closed by this call), `run_mismatch`, `not_running`, `lease_lost`, `disabled` or `not_migrated`.
+  - `stop` with `finished`, `error`, `unknown` (a stale run closed by this call), `run_mismatch`, `not_running`, `lease_lost` or `not_migrated`.
 - **Diary phase.** One GET of `https://letterboxd.com/<user>/diary/` per run ([ADR 0067](../../adr/0067-diary-recent-window.md)). A checkpoint with `diaryPagesRead >= 1`, or the diary gate off, does not fetch. No request is started once less than 45 seconds of the lease remain (`step_budget`); the step answers `continue` so the same run retries that page. After the page: the history merge, that page's facts, the queue entries the Diary rated (`rated`, `lastResult: diary`), the cursor join, then the checkpoint. A successful page is `recent_window` / `recent_window_only` and does not fetch another page. A blocked, rate-limited or failed Diary ends the run `error`; stored facts and history stay. `resumePage` is not a URL.
 - **Removal phase.**
   1. While a legacy entry is `rated` with a confirmed half-star and its event scan is not done, list one page of `events/items/` (20 keys) and attach a reference for each stored watchlist event that removed that exact film id ([ADR 0071](../../adr/0071-legacy-removal-event-link.md)). The cursor is `legacyLink` on the queue. The entry is not reopened and no Letterboxd request is made. A step with nothing left to link does not list. A late step deletes an obsolete cursor only when the queue still has the ids and cursor that step read and those ids are still not candidates; it does not erase a newer scan, and the checkpoint counts a page only for a queue write that step committed. While the scan is unfinished the step answers `continue` (`stoppedBy: legacy_link`, unless settle still has a backlog). Retention does not run until the scan is done.
@@ -120,7 +120,7 @@ The same object, `enrichment/removal-rating-lookups.json`, with `schemaVersion: 
 - **Claims.** A claim stores a random token; only the outcome carrying it is accepted, and only while the entry is still pending. A reopened entry has no claim, so a late outcome of the earlier lookup is refused (its attempt counted).
 - **Retention.** An entry with an unresolved reference is never deleted, by age or by the cap. A pending entry still becomes `expired` after 14 days. Entries whose references are all resolved, legacy ones included, follow the version 1 rules. Those rules wait while a rated legacy scan is unfinished, so an unmatched `refs: []` entry is not deleted between pages.
 - **Writers.** Every write is the read-apply-compare-and-swap of the queue and branches on the version read in that attempt, so a writer that started on version 1 follows version 2 once the migration lands.
-- **Under `inline`.** The commit's lookup stores the commit's removal event as the reference. With `REMOVAL_RATING_LOOKUP` off the commit queues nothing, as in version 1.
+- **EPG commit.** When migration is complete the commit stores the removal event as the reference and does not look the film up. When it is not, the commit does not enqueue. With `REMOVAL_RATING_LOOKUP` off the ratings run requests no member page.
 
 ### Storage migration and witness
 
@@ -134,11 +134,11 @@ The same object, `enrichment/removal-rating-lookups.json`, with `schemaVersion: 
   4. Records that (`cursor.migratedAt`).
 
   An object already converted is `already`. A failed queue leaves the cursor untouched, so the answer is `partial` or `none`, and a repeated `apply` continues.
-- **`migration`** is derived on every read: `none`, `partial`, `complete`, or `regressed` when the witness records an object that is found back at version 1 (`regressedObjects`). A regressed pipeline is not `complete`, so `separate` acts as `inline` again.
+- **`migration`** is derived on every read: `none`, `partial`, `complete`, or `regressed` when the witness records an object that is found back at version 1 (`regressedObjects`). Anything other than `complete` is fail-closed: the commit does not read Diary, and start and step answer `not_migrated`. It does not fall back to an inline Diary stage.
 
 ### Footer under the separate pipeline
 
-With the pipeline active, the `letterboxd_ratings` source of the integration footer comes from the run record, with `pipeline: separate`:
+When migration is complete, the `letterboxd_ratings` source of the integration footer comes from the run record, with `pipeline: separate`:
 
 - `ok`, with freshness from the last finished run;
 - `running`;
@@ -146,14 +146,14 @@ With the pipeline active, the `letterboxd_ratings` source of the integration foo
 - `degraded` or `failed` for a Diary that ended `blocked`, `rate_limited` or `failed`;
 - `unknown` (`no_data`) before the first run.
 
-`lastSuccessAt` and `lastFailureAt` come from the run and the ten recent runs.
+`lastSuccessAt` and `lastFailureAt` come from the run and the ten recent runs. When migration is not complete the source is `degraded` / `ratings_migration_blocked` with `pipeline: blocked`, and old `sync.json` rating fields are not used.
+
+## Rollback
+
+**Separate pipeline.** The retired binding cannot put Diary back inside the EPG commit. Disabling the Ratings Task stops the scheduled run; it does not change the commit. Setting the binding to `inline`, or deleting it, does not restore a Diary stage on the commit. After `ratings_storage_migrate apply`, a code revert to a version without these rules is not a rollback: that code ignores the references, so its pruning can delete entries with unresolved ones, and it writes the cursor back as version 1 (`migration: regressed`). Code from before ADR 0073 treats a missing `RATINGS_PIPELINE` binding as `inline`. After the leftover binding is deleted, that code must not be deployed until `RATINGS_PIPELINE=separate` is restored and read back. Undoing the migration needs a separate owner decision on the stored objects.
+
+**Retired refresh.** Reverting the code restores the AIR-64 route behind `RATINGS_REFRESH`, which is unset in production (read 2026-10-29 05:16 UTC). Bringing the refresh back for real is a new decision under a new ADR, not a flag change. Deleting `enrichment/ratings/` is a separate owner-approved storage operation; the view index keeps the ratings already projected.
 
 ## Kept objects
 
 The retirement deletes nothing. `enrichment/ratings/status.json`, `published.json`, `pending.json`, `lease.json` and `generations/<id>.json` stay in R2 as written. The view index keeps every `actualRating` already projected from a generation. A leftover `pending.json` is no longer finished by anyone; `status` reports its id as `pendingGenerationId` and the view index is unaffected by it.
-
-## Rollback
-
-**Separate pipeline.** Disable any Ratings Task, then set `RATINGS_PIPELINE=inline` (or remove it): the next commit runs the Diary stage and the lookups again, under the migrated queue and cursor rules, so nothing is lost. After `ratings_storage_migrate apply`, a code revert to a version without these rules is not a rollback: that code ignores the references, so its pruning can delete entries with unresolved ones, and it writes the cursor back as version 1 (`migration: regressed`). Undoing the migration needs a separate owner decision on the stored objects.
-
-**Retired refresh.** Reverting the code restores the AIR-64 route behind `RATINGS_REFRESH`, which is unset in production (read 2026-10-29 05:16 UTC). Bringing the refresh back for real is a new decision under a new ADR, not a flag change. Deleting `enrichment/ratings/` is a separate owner-approved storage operation; the view index keeps the ratings already projected.

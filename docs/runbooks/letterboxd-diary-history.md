@@ -17,6 +17,8 @@ A deploy does not activate anything. Each step below that changes production nee
 
 ## Observation after a commit (read-only)
 
+Since [ADR 0073](../adr/0073-retire-ratings-pipeline-switch.md) the EPG commit does not write these fields. They are on the ratings run record. See [Separate ratings pipeline](#separate-ratings-pipeline).
+
 - **`sync.json` `diaryHistory`** (in the sync status):
   - `outcome` and `stopReason`;
   - `counts`: `pages` is 0 or 1, plus rows, added, unchanged, updated, conflicts, unresolved, undated, and `overflowSuspected` when the page was full, new, and linked onward;
@@ -31,20 +33,22 @@ A deploy does not activate anything. Each step below that changes production nee
 
 ## Separate ratings pipeline
 
-[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md); contract: [separate ratings pipeline](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline); tools: [MCP reference](../reference/api/mcp.md#ratings-tools). The code is deployed inactive: with `RATINGS_PIPELINE` unset or `inline` and the storage unmigrated, the EPG commit runs ratings as above, and no Scheduled Task calls a ratings tool.
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md), [ADR 0073](../adr/0073-retire-ratings-pipeline-switch.md); contract: [separate ratings pipeline](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline); tools: [MCP reference](../reference/api/mcp.md#ratings-tools). The Worker does not read `RATINGS_PIPELINE`. When migration is `complete`, the EPG commit only enqueues removal references and the Ratings Task is the ratings writer. When migration is `none`, `partial` or `regressed`, the commit publishes and fails closed: no Diary, no lookup, no enqueue, and start and step answer `not_migrated`. Setting the binding to `inline` or deleting it does not put Diary back inside the commit.
 
 ### Reading the status (read-only)
 
 `ratings_sync_status` (or `GET /api/letterboxd/ratings/status`) writes nothing, not even a recovery.
 
-- **`switch`, `pipeline`, `migration`.** Before the cutover: `inline`, `inline`, `none`. `separate_pending_migration` means the switch is set but the migration is not complete, so the commit still runs ratings. `migration: regressed` (with `regressedObjects`) is a defect: stop and report it.
+- **`switch`, `pipeline`, `migration`.** `switch` is always `separate`. That string is the permanent mode; it does not prove the binding is absent. `feature_flags` does. `pipeline` is `blocked` until migration is `complete`, then `idle`, `running` or `isolated`. There is no `separate_pending_migration` and no `disabled` answer. `migration: regressed` (with `regressedObjects`) is a defect: stop and report it. The commit does not read Diary in that state.
 - **`run`.** `state`, `phase`, `checkpoint` (`diaryPagesRead`, `diaryNextPage`, `removalChecked`, `legacyPagesLinked`), `outcome`/`cause`, `lease.live` and `stale`. A run with `stale` set is not closed by the read; the next start or step closes it `unknown`. Never repeat a step that ended without a response. `legacyPagesLinked` counts event-list pages saved while linking a rated legacy entry; it is not a request to list events by hand.
 - **`removal`.** Queue version, entries, pending, unresolved references, legacy, expired, `droppedRefs`, `pausedUntil`, and `refIssues`: unresolved references by issue. A growing `event_missing` count means removal events that were never written; record it, nothing retries them by hand. **`diary`**: cursor coverage, `historicalCoverage` (`incomplete` when `coverage.window` is `recent`, otherwise `unknown`), `overflowSuspected`, resume page (not a request), last outcome and `lastSuccessAt`. A finished recent window is `recent_window`, not a complete diary.
 - **`freshness`.** The last finished and the last successful run.
 
-### Cutover (owner)
+### Cutover (owner) — historical AIR-295 sequence
 
-A sequence of owner actions. Each step is approved separately and checked before the next one.
+The steps below are the sequence that was followed on 2026-10-31. They are not a current instruction and not a rollback. Do not set `RATINGS_PIPELINE=inline` or remove the binding to restore Diary on the commit. Current behaviour is [above](#separate-ratings-pipeline).
+
+A sequence of owner actions. Each step was approved separately and checked before the next one.
 
 **Gate before the first separate writer (step 4).** The offline profile measures the Diary step's heap at 27.5 MB above the Node baseline with 5,000 history entries and 99.3 MB with 20,000, because every page reads and rewrites the single `letterboxd/diary/history.json` ([evidence](../evidence/letterboxd/air-294-separate-ratings-pipeline-offline-2026-10-31.md)). That does not prove a step fits the 128 MB Worker. Before `RATINGS_PIPELINE=separate`, record the size of `history.json` via a read-only storage check (the step 2 pre-apply backup may include this measurement), and either verify a maximal Diary step in a Workers-like runtime (workerd) at that size with headroom, or decide a history guard or sharding (a design change: new ADR). Never test this against production without owner permission.
 
@@ -84,9 +88,9 @@ This is not a storage migration and it is not a reason to repeat the cutover abo
 
 ### Rollback
 
-1. Disable the Ratings Task, if enabled.
-2. Set `RATINGS_PIPELINE=inline`, or remove it, and read it back. The next commit runs the Diary stage and lookups again under the migrated queue and cursor rules, so nothing is lost. A run left `running` stays until a later start closes it.
-3. Once migrated (cutover step 3), a code revert is **not** a rollback. Earlier code prunes the version 2 queue without its references and writes the cursor back as version 1. Undoing it needs a separate owner decision on the stored objects.
+1. Disable the Ratings Task, if enabled. That stops the scheduled run. It does not put Diary back inside the EPG commit.
+2. Do not set `RATINGS_PIPELINE=inline` and do not delete the binding as a rollback. The Worker ignores the binding. After the leftover binding is deleted, code from before ADR 0073 must not be deployed until `RATINGS_PIPELINE=separate` is restored and read back: that older code treats a missing binding as `inline`.
+3. Once migrated (cutover step 3), a code revert is **not** a rollback of R2. Earlier code prunes the version 2 queue without its references and writes the cursor back as version 1. Undoing it needs a separate owner decision on the stored objects. A run left `running` stays until a later start closes it.
 
 ## Rollback
 

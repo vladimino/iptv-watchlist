@@ -13,42 +13,23 @@ sequenceDiagram
     Owner->>Sync: Authorized EPG/watchlist sync
     Sync->>LB: Fetch watchlist
     LB-->>Sync: Complete watchlist
-    Sync->>R2: Commit EPG generation, watchlist and its events
-    opt LETTERBOXD_DIARY_HISTORY=on
-        Sync->>LB: Diary page 1 only
-        alt Page read
-            LB-->>Sync: Diary rows (lid, watched date, rating at entry)
-            Sync->>R2: Viewing history entries for the page
-            Sync->>R2: Watched and proved rating facts, view index
-        else 403, 429 or unrecognized page
-            LB-->>Sync: Challenge or error
-            Sync->>R2: Run state blocked or failed, facts kept
-        end
-        Sync->>R2: Diary run state, removal events with proved ratings
+    alt Migration complete
+        Sync->>R2: Removal references, then the EPG generation, watchlist and events
+        Note over Sync,LB: No Diary read and no member-page lookup on this commit
+    else Migration none, partial or regressed
+        Sync->>R2: EPG generation, watchlist and events, ratings marked blocked
+        Note over Sync,R2: Fail closed: no Diary, no lookup, no enqueue, no migration
     end
-    opt REMOVAL_RATING_LOOKUP=on and removed films without a diary rating
-        Sync->>R2: Queue those films, record the attempt
-        Sync->>LB: Member page of each due film, at most 5
-        alt Rating found
-            LB-->>Sync: Owner's rating
-            Sync->>R2: Rating fact, view index, removal event
-        else 403 or 429
-            LB-->>Sync: Challenge or rate limit
-            Sync->>R2: Pause the whole queue for 6 hours
-        end
-    end
-    Note over Sync,LB: The public films list is not requested
+    Note over Sync,LB: Diary page 1 and member lookups belong to the ratings run
     Note over Sync,R2: A ratings failure is not an EPG failure
     Owner->>Retired: POST /api/enrichment/ratings/refresh
     Retired-->>Owner: 410 Gone, whatever RATINGS_REFRESH holds
     Note over Retired,R2: No Letterboxd request, no R2 read or write
 ```
 
-The ratings after a commit are **Diary-first** ([ADR 0054](../adr/0054-diary-first-epg-ratings.md)). The first optional block is the **Diary viewing history** of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), off by default, and it reads the first diary page only ([ADR 0067](../adr/0067-diary-recent-window.md)). After that page's history commit, every film on it becomes a watched fact, and a rating fact where the page shows a rating: the first visible rated row of the film's latest day on that page, observed at that watched date, so a newer observation from any source wins ([contract](../reference/integrations/letterboxd-diary-history.md#rating-facts)). The read does not claim the rest of the diary. More than 50 new viewings between runs can miss this page; an archive import is a separate path and is not started here.
+The EPG commit does not read Diary and does not look up films ([ADR 0073](../adr/0073-retire-ratings-pipeline-switch.md), Proposed). When the ratings storage migration is complete it enqueues the removed films as references to their removal event and publishes. When migration is `none`, `partial` or `regressed` it still publishes and records `ratingsPipeline: blocked`. It does not enqueue, and it does not run the migration. `RATINGS_PIPELINE` is ignored.
 
-The second optional block is the **removal lookup** of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md), off by default. It now runs after the diary, and only for films the watchlist diff removed that the diary gave no rating. They are looked up on their own member pages through a bounded queue in `enrichment/removal-rating-lookups.json`, and it never fails the commit ([contract](../reference/integrations/letterboxd-ratings.md#removed-films)). The 31-page public films list is no longer scanned after a commit.
-
-The diagram shows the default `RATINGS_PIPELINE=inline`. With `separate` after the owner-approved storage migration, both blocks leave the commit: it only adds the removed films to the queue as references to their removal event, and a separate leased ratings run reads the Diary and makes the lookups ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline-production-inline-remains-the-worker-default), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)). A rated legacy entry, which names no event, is linked to existing removal events of the same film id by that ratings run, one page of `events/items/` per removal step ([ADR 0071](../adr/0071-legacy-removal-event-link.md), Accepted 2026-10-31). The EPG commit does not list those events for the repair.
+Diary page 1 and the member-page lookups run on the separate ratings run ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)). The Diary phase is the viewing history of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), off unless `LETTERBOXD_DIARY_HISTORY=on`, and it reads the first diary page only ([ADR 0067](../adr/0067-diary-recent-window.md)). Every film on that page becomes a watched fact, and a rating fact where the page shows a rating. The removal lookup of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) runs on that same run, only while `REMOVAL_RATING_LOOKUP=on`, for films the Diary did not rate. A rated legacy entry is linked to existing removal events of the same film id by that run, one page of `events/items/` per removal step ([ADR 0071](../adr/0071-legacy-removal-event-link.md), Accepted 2026-10-31). The EPG commit does not list those events. The 31-page public films list is not scanned.
 
 The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
 

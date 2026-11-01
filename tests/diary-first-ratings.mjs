@@ -21,7 +21,7 @@ const respond=(status,html)=>({ok:status===200,status,headers:new Headers(),text
 const ctx=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console:{...console,log:()=>{}},setTimeout:fn=>fn(),
  fetch:async url=>{url=String(url);requests.push(url);const page=site.get(url);if(typeof page==='function')return page();if(page!=null)return respond(200,page);return respond(404,'');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/letterboxd-ratings.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const D=vm.runInContext('LetterboxdDiary',ctx);
 const env={LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket,LETTERBOXD_DIARY_HISTORY:'on'};
 const plain=value=>JSON.parse(JSON.stringify(value));
@@ -33,8 +33,26 @@ const day=n=>new Date(Date.UTC(2026,9,29)-n*86400000).toISOString().slice(0,10);
 const record=lid=>records.get(`letterboxd/facts/films/lb-${lid}.json`);
 const view=()=>records.get('enrichment/view-index.json')||{};
 const report=runId=>({runId,updatedAt:new Date().toISOString(),watchlistCount:0,films:[],stats:{}});
-const run=runId=>({runId,stage:'epg',events:[],ratingPending:['letterboxd-diary'],watchlist:[],pending:[]});
-const commit=async runId=>{records.set('programme.json',report(runId));return ctx.completeWithRatings(env,run(runId),report(runId));};
+const R=vm.runInContext('LetterboxdRatings',ctx);
+const RUN_KEY='letterboxd/ratings/run.json',QUEUE_KEY='enrichment/removal-rating-lookups.json',WITNESS_KEY='letterboxd/ratings/migration.json';
+// Diary facts now land in the ratings run (ADR 0073). The assertions below still read them as diaryHistory.
+function ensureMigrated(){
+ if(records.get(QUEUE_KEY)?.schemaVersion!==2)records.set(QUEUE_KEY,{schemaVersion:2,films:{},droppedRefs:0,migratedAt:'2026-10-01T00:00:00.000Z'});
+ const cursor=records.get(D.KEYS.state);
+ if(!cursor||cursor.schemaVersion!==2||!cursor.writer)records.set(D.KEYS.state,{...(cursor||{}),schemaVersion:2,coverage:cursor?.coverage||{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:cursor?.resumePage??null,writer:cursor?.writer||{runId:'ratings-storage-migrate',step:'migrate'}});
+ if(!records.get(WITNESS_KEY)?.queue?.migratedAt||!records.get(WITNESS_KEY)?.cursor?.migratedAt)records.set(WITNESS_KEY,{schemaVersion:1,queue:{migratedAt:'2026-10-01T00:00:00.000Z'},cursor:{migratedAt:'2026-10-01T00:00:00.000Z'}});
+}
+const commit=async(runId,environment=env)=>{
+ ensureMigrated();
+ const started=await R.start(environment,{trigger:'manual'});
+ if(started.reason!=='started')throw new Error('ratings start '+started.reason+' '+(started.migration||''));
+ let reply;do{reply=await R.step(environment,{runId:started.runId});}while(reply.nextAction==='continue');
+ const stored=records.get(RUN_KEY);
+ const diaryHistory=stored?.diary||null;
+ const ratingAttempt=stored?.state==='finished'?{state:'finished',source:'letterboxd_diary'}:stored?.state==='error'?{state:'error',cause:stored.cause,phase:stored.interruptedPhase||'diary'}:null;
+ records.set('sync.json',{diaryHistory,ratingAttempt,ratingPending:undefined});
+ return {stage:stored?.state==='finished'||stored?.state==='error'?'complete':stored?.state,run:stored};
+};
 
 // The rule, on the page just read, in display order (ADR 0067). The stored history is not the evidence.
 // Latest watched date on that page; the first row of that day that shows a rating. An open edge, a next link,
@@ -135,7 +153,7 @@ assert.deepEqual(requests,[url(1)],'page 1 is read again');assert.equal(record('
 for(const stale of [undefined,'off','On',{token:'x'}]){
  records.clear();etags.clear();writes.length=0;publish(sixty.slice(0,10));
  const staleEnv=stale===undefined?env:{...env,LETTERBOXD_FACTS:stale};
- records.set('programme.json',report('r9'));await ctx.completeWithRatings(staleEnv,run('r9'),report('r9'));
+ await commit('r9',staleEnv);
  assert.equal(writes.some(key=>key.startsWith('letterboxd/facts/films/')),true,'facts written, binding '+JSON.stringify(stale));
  assert.equal(records.get('sync.json').diaryHistory.facts.enabled,true,JSON.stringify(stale));
 }
@@ -172,10 +190,11 @@ await commit('prior');
 assert.equal(record('Gone').rating.value,4,'rated at the time it was the latest');
 publish([{lid:'Gone',date:'2026-10-30'},{lid:'Old',date:day(1),stars:6},{lid:'Gone',date:day(30),stars:8},{lid:'Tail',date:day(40)}]);
 requests.length=0;
-const removalRun={...run('rm'),removalLookups:[{id:'Gone',url:'https://letterboxd.com/film/gone/'}],events:[{id:'rm-watchlist',type:'watchlist',at:new Date().toISOString(),total:0,added:[],removed:[{id:'Gone',title:'Gone',year:2001}]}]};
-records.set('programme.json',report('rm'));await ctx.completeWithRatings(lookupEnv,removalRun,report('rm'));
+const queuedAt=new Date().toISOString();
+records.set(QUEUE_KEY,{schemaVersion:2,films:{Gone:{url:'https://letterboxd.com/film/gone/',state:'pending',attempts:0,enqueuedAt:queuedAt,nextAttemptAt:queuedAt,lastAttemptAt:null,lastResult:null,refs:[],legacy:false}},droppedRefs:0,migratedAt:queuedAt});
+await commit('rm',lookupEnv);
 assert.ok(requests.some(u=>u.includes(`/${USER}/film/gone/`)),'the lookup still runs');
-assert.equal(records.get('sync.json').removalDiaryResolved,undefined);
+assert.equal(records.get(RUN_KEY).diary.removalResolved||0,0,'an unrated newer diary entry is not diary proof');
 assert.equal(record('Gone').rating.value,4,'the stored rating stays');
 
 // 10. Worst case for one commit: one full page of films never seen (50 facts records), bounded R2 operations.

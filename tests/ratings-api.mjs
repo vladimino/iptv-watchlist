@@ -31,13 +31,14 @@ function setup(extra={}){
 }
 const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/start',STEP='/api/letterboxd/ratings/step',MIGRATE='/api/letterboxd/ratings/migrate';
 
-// 1. HTTP under the default inline switch: the status reads; start and step answer disabled and write nothing.
-{
- const {bucket,http,net}=setup();
+// 1. HTTP with the binding absent, inline, invalid or separate, and storage unmigrated: the status reads switch
+// separate and pipeline blocked; start and step answer not_migrated and write nothing.
+for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'},{RATINGS_PIPELINE:'separate'}]){
+ const {bucket,http,net}=setup(extra);
  const status=await http(STATUS,'GET');
- assert.equal(status.status,200);eq([status.body.switch,status.body.pipeline,status.body.migration,status.body.sideEffects],['inline','inline','none','none']);
- eq((await http(START,'POST',{trigger:'manual'})).body,{runId:null,created:false,nextAction:'stop',reason:'disabled'});
- assert.equal((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-000000000001'})).body.reason,'disabled');
+ assert.equal(status.status,200);eq([status.body.switch,status.body.pipeline,status.body.migration,status.body.sideEffects],['separate','blocked','none','none'],JSON.stringify(extra));
+ eq((await http(START,'POST',{trigger:'manual'})).body,{runId:null,created:false,nextAction:'stop',reason:'not_migrated',migration:'none'});
+ assert.equal((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-000000000001'})).body.reason,'not_migrated');
  assert.equal(bucket.writes().length,0);assert.equal(net.fetches.length,0);
 }
 
@@ -113,4 +114,4 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
  assert.equal(bucket.writes().length,0,'dry_run over MCP writes nothing');
 }
 
-console.log('Ratings API (ADR 0060, ADR 0069): HTTP disabled under inline, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');
+console.log('Ratings API (ADR 0060, ADR 0069, ADR 0073): HTTP not_migrated for every binding while unmigrated, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');

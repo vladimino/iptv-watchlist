@@ -78,7 +78,8 @@ await ctx.completeWithRatings(off,run('r-off'),report('r-off'));
 assert.equal(requests.length,0,'no Letterboxd request');
 assert.equal(records.has(D.KEYS.history),false);assert.equal(records.has(D.KEYS.state),false);
 assert.equal(records.get('sync.json').diaryHistory,undefined);
-assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause],['finished','diary_off']);
+assert.equal(records.get('sync.json').ratingAttempt,undefined,'the commit opens no ratings attempt');
+assert.equal(records.get('sync.json').ratingsPipeline,'blocked');
 
 // 3. First run: page 1 only, however many pages the diary has and however new they are. No facts are written here.
 records.clear();etags.clear();requests.length=0;writes.length=0;
@@ -244,23 +245,20 @@ assert.ok(body.film.entries.every(e=>e.aliases.every(alias=>typeof alias.firstOb
 assert.equal((await ctx.worker.fetch(new Request('https://site.example/api/letterboxd/diary?filmId=../x'),env)).status,400);
 assert.deepEqual(writes,[],'the read writes nothing');
 
-// 13. In the EPG commit: the stage reads the diary once, always writes its facts (LETTERBOXD_FACTS is retired, ADR 0055)
-// and never fails the commit.
+// 13. The EPG commit does not read Diary (ADR 0073), including when the page would be blocked. Facts of a diary page
+// are written by the ratings run; the page-1 read above already covers that reader.
 records.clear();etags.clear();requests.length=0;publish(fifty);records.set('programme.json',report('r-on'));
 const completed=await ctx.completeWithRatings(env,run('r-on'),report('r-on'));
 assert.equal(completed.stage,'complete');
-assert.deepEqual(requests.map(r=>r.url),[url(1)],'one diary page and nothing else');
-const sync=records.get('sync.json');
-assert.deepEqual([sync.diaryHistory.outcome,sync.diaryHistory.stopReason,sync.diaryHistory.counts.added,sync.diaryHistory.facts.rated,sync.diaryHistory.facts.enabled],['recent_window','recent_window_only',50,50,true]);
-assert.deepEqual([sync.ratingAttempt.state,sync.ratingAttempt.phase,sync.ratingAttempt.source,sync.ratingPending,sync.ratingError],['finished','diary','letterboxd_diary',undefined,undefined]);
-assert.equal(writes.some(key=>key.includes('facts/films/')),true,'the diary facts are written without any facts switch');
-// A blocked diary: the commit completes, nothing else is requested, the attempt is an error with its cause.
+assert.equal(completed.ratingsPipeline,'blocked');
+assert.deepEqual(requests,[], 'the commit requests nothing');
+assert.equal(records.get('sync.json').diaryHistory,undefined);
+assert.equal(records.get('sync.json').ratingAttempt,undefined);
 records.clear();etags.clear();requests.length=0;site.clear();site.set(url(1),()=>respond(403,'<title>Just a moment...</title>'));records.set('programme.json',report('r-block'));
 const blocked=await ctx.completeWithRatings(env,run('r-block'),report('r-block'));
 assert.equal(blocked.stage,'complete');
-assert.equal(requests.length,1,'one diary request in the whole commit');
-assert.equal(records.get('sync.json').diaryHistory.outcome,'blocked');
-assert.deepEqual([records.get('sync.json').ratingAttempt.state,records.get('sync.json').ratingAttempt.cause],['error','blocked']);
-assert.match(records.get('sync.json').ratingError,/Letterboxd diary blocked/);
+assert.equal(blocked.ratingsPipeline,'blocked');
+assert.equal(requests.length,0,'a blocked diary page is not requested by the commit');
+assert.equal(records.get('sync.json').ratingAttempt,undefined);
 
-console.log('Letterboxd diary history (AIR-304): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, gate off untouched, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API, one diary read per commit passed');
+console.log('Letterboxd diary history (AIR-304, ADR 0073): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, gate off untouched, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API, and an EPG commit that does not read Diary passed');

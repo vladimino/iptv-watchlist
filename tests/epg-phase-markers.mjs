@@ -29,21 +29,16 @@ const report={runId:'run-markers',updatedAt:'2026-10-29T10:00:00.000Z',watchlist
 const run=()=>({runId:'run-markers',stage:'epg',events:[],ratingPending:['letterboxd-diary'],watchlist:report.films,pending:[]});
 const markers=lines=>lines.map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(entry=>entry?.event==='epg_phase');
 
-// 1. Order and edges of the post-commit tail with one diary page.
+// 1. The post-commit tail publishes and does not read Diary (ADR 0073). Markers stay compact and carry no titles.
 const a=harness();a.site.set(`https://letterboxd.com/${USER}/diary/`,page1);a.records.set('programme.json',report);
 const outA=await a.ctx.completeWithRatings({...env(),BUCKET:{get:k=>a.records.has(k)?Promise.resolve({etag:'x',json:async()=>structuredClone(a.records.get(k))}):Promise.resolve(null),put:async(k,v)=>{a.records.set(k,JSON.parse(v));return {etag:'y'};},list:async()=>({objects:[],truncated:false})}},run(),report);
+assert.equal(outA.ratingsPipeline,'blocked');
+assert.equal(a.requests.some(url=>url.includes('/diary/')),false,'the commit does not fetch Diary');
 const seq=markers(a.lines).map(m=>m.phase+':'+m.edge);
-assert.deepEqual(seq,['finish_sync:enter','queue_refresh:enter','queue_refresh:exit','finish_sync:exit',
- 'diary_state_load:enter','diary_state_load:exit','diary_page_fetch:enter','diary_page_fetch:exit','diary_page_parse:enter','diary_page_parse:exit',
- 'diary_history_merge:enter','diary_history_merge:exit','diary_facts_apply:enter','diary_facts_result:exit','diary_facts_apply:exit','diary_state_save:enter','diary_state_save:exit','removal:enter','removal:exit']);
+assert.deepEqual(seq,['finish_sync:enter','queue_refresh:enter','queue_refresh:exit','finish_sync:exit']);
 const all=markers(a.lines);
 assert.ok(all.every(m=>m.runId==='run-markers'&&typeof m.at==='string'));
-assert.deepEqual([all.find(m=>m.phase==='diary_page_fetch'&&m.edge==='exit').status,all.find(m=>m.phase==='diary_page_fetch'&&m.edge==='exit').bytes],[200,page1.length]);
-assert.equal(all.find(m=>m.phase==='diary_page_parse'&&m.edge==='exit').rows,20);
-assert.equal(all.find(m=>m.phase==='diary_history_merge'&&m.edge==='exit').entries,20);
-assert.ok(all.filter(m=>m.phase.startsWith('diary_')).every(m=>typeof m.attemptId==='string'&&(m.phase==='diary_facts_result'||typeof m.sinceDiaryMs==='number')));
-assert.ok(all.filter(m=>m.edge==='exit'&&['finish_sync','queue_refresh','removal'].includes(m.phase)).every(m=>typeof m.elapsedMs==='number'));
-// No titles, film ids, slugs, HTML or payload in any marker line.
+assert.ok(all.filter(m=>m.edge==='exit').every(m=>typeof m.elapsedMs==='number'));
 const text=a.lines.filter(line=>line.includes('"epg_phase"')).join('\n');
 for(const secret of ['Secret','secret','Lid0','WatchLid','<tr','diary-entry-row','letterboxd.com'])assert.equal(text.includes(secret),false,secret);
 assert.ok(text.length<6000,'compact: '+text.length);
@@ -56,14 +51,13 @@ const plainRun=async(trace)=>{const h=harness();h.site.set(`https://letterboxd.c
 const quiet=await plainRun(null),noisy=await plainRun(()=>{throw new Error('trace broke');});
 assert.deepEqual(noisy,quiet);
 
-// 3. A blocked page: the fetch exit carries the status, the state is still saved; the attempt ends as before.
+// 3. A page that would answer 403 is not requested by the commit, and no ratings attempt is opened.
 const b=harness();b.site.set(`https://letterboxd.com/${USER}/diary/`,()=>({ok:false,status:403,headers:new Headers(),text:async()=>'<title>Just a moment...</title>'}));b.records.set('programme.json',report);
 await b.ctx.completeWithRatings({...env(),BUCKET:{get:k=>b.records.has(k)?Promise.resolve({etag:'x',json:async()=>structuredClone(b.records.get(k))}):Promise.resolve(null),put:async(k,v)=>{b.records.set(k,JSON.parse(v));return {etag:'y'};},list:async()=>({objects:[],truncated:false})}},run(),report);
-const bm=markers(b.lines);
-assert.equal(bm.find(m=>m.phase==='diary_page_fetch'&&m.edge==='exit').status,403);
-assert.ok(bm.some(m=>m.phase==='diary_state_save'&&m.edge==='exit'&&m.outcome==='blocked'));
-assert.equal(bm.some(m=>m.phase==='diary_page_parse'),false);
-assert.deepEqual([b.records.get('sync.json').ratingAttempt.state,b.records.get('sync.json').ratingAttempt.cause],['error','blocked']);
+assert.equal(b.requests.some(url=>url.includes('/diary/')),false);
+assert.equal(markers(b.lines).some(m=>m.phase.startsWith('diary_')),false);
+assert.equal(b.records.get('sync.json').ratingAttempt,undefined);
+assert.equal(b.records.get('sync.json').ratingsPipeline,'blocked');
 
 // 4. An error inside a traced phase logs `error` and rethrows unchanged.
 const c=harness();
@@ -82,4 +76,4 @@ const e=harness();e.ctx.console.log=()=>{throw new Error('log sink down');};
 assert.equal(await e.ctx.tracedPhase('run-y','finish_sync',async()=>42),42);
 await assert.rejects(e.ctx.tracedPhase('run-y','finish_sync',async()=>{throw new Error('real');}),/real/);
 
-console.log('EPG phase markers (AIR-263): ordered enter/exit markers for finish sync, queue refresh, every diary sub-phase and removal, counts and sizes only (no titles, ids, slugs or HTML), a throwing trace changes nothing, blocked page and error edges, EPG source failure logged as error, throwing logger ignored passed');
+console.log('EPG phase markers (AIR-263): ordered enter/exit markers for finish sync and queue refresh on the commit, counts and sizes only (no titles, ids, slugs or HTML), a throwing trace changes nothing, blocked page and error edges, EPG source failure logged as error, throwing logger ignored passed');

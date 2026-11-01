@@ -71,7 +71,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  bucket.hooks.beforePut=null;
  eq([first.queue.result,first.cursor.result,first.migration],['migrated','failed','partial']);
  eq(bucket.value(WITNESS),{schemaVersion:1,queue:{migratedAt:at(T0)}});
- assert.equal(plain(await R.status(env)).pipeline,'separate_pending_migration');
+ assert.equal(plain(await R.status(env)).pipeline,'blocked');
  assert.equal(plain(await R.start(env,{trigger:'manual'})).reason,'not_migrated');
  assert.equal(await R.separateActive(env),false);
  const second=plain(await R.migrate(env,{mode:'apply'}));
@@ -91,7 +91,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
 }
 
 // 4. An object found back at version 1 after the witness recorded it (a writer of older code) is `regressed`: the status
-// reports it without writing, the separate pipeline stays inert and the EPG commit acts as inline.
+// reports it without writing, and start stays not_migrated. The EPG commit fails closed; it does not fall back to inline.
 {
  const {bucket,env,R,net}=setup();
  bucket.set(QUEUE,{schemaVersion:1,films:{}});bucket.set(CURSOR,V1_CURSOR);
@@ -99,7 +99,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  bucket.set(QUEUE,{schemaVersion:1,films:{x:V1_ENTRY}});
  const writes=bucket.writes().length;
  const status=plain(await R.status(env));
- eq([status.migration,status.regressedObjects,status.pipeline],['regressed',['queue'],'separate_pending_migration']);
+ eq([status.migration,status.regressedObjects,status.pipeline],['regressed',['queue'],'blocked']);
  assert.equal(bucket.writes().length,writes,'the status writes nothing');assert.equal(net.fetches.length,0);
  eq(plain(await R.start(env,{trigger:'manual'})),{runId:null,created:false,nextAction:'stop',reason:'not_migrated',migration:'regressed'});
  assert.equal(await R.separateActive(env),false);

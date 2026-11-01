@@ -57,7 +57,12 @@ records.set('programme.json',report);
 const run={runId:'run-1',stage:'epg',events:[structuredClone(event)],ratingPending:['letterboxd-diary'],watchlist:report.films,pending:[],removalLookups:[film('gone')]};
 const completed=await ctx.completeWithRatings(env,run,report);
 assert.equal(completed.stage,'complete');
-assert.equal(completed.personalRatingError,undefined);
+assert.equal(completed.ratingsPipeline,'blocked');
+assert.equal(fetches.filter(url=>url.includes('letterboxd.com')).length,0,'the commit requests nothing');
+assert.deepEqual(plain(records.get('sync.json').removalLookups),[film('gone')],'an unmigrated commit leaves the hand-over');
+const ref=vm.runInContext('removalHandoverRef',ctx)(run);
+const looked=await ctx.lookupRemovalRatings(env,[film('gone')],Date.parse(at),ref);
+assert.equal(looked.rated,1);
 assert.equal(fetches.filter(url=>url.includes('/films/')).length,0,'no films-list request');
 assert.ok(fetches.some(url=>url.includes('/demo-user/film/gone/')),'the removed film is looked up on its own page');
 const stored=records.get([...records.keys()].find(key=>key.endsWith('run-1-watchlist.json')));
@@ -67,10 +72,9 @@ assert.equal(records.get('enrichment/view-index.json')['lb-gone'].actualRating,4
 assert.equal(queue().films['lb-gone'].state,'rated');
 assert.equal(queue().films['lb-gone'].attempts,1);
 const sync=records.get('sync.json');
-assert.equal(sync.removalLookups,undefined,'the hand-over list is cleared once queued');
-assert.deepEqual([sync.removalRatingLookup.checked,sync.removalRatingLookup.rated,sync.removalRatingLookup.pending],[1,1,0]);
+assert.deepEqual(plain(sync.removalLookups),[film('gone')],'the commit does not clear the hand-over');
 assert.equal(sync.ratingError,undefined);
-assert.deepEqual([sync.ratingAttempt.state,sync.ratingAttempt.cause],['finished','diary_off']);
+assert.equal(sync.ratingAttempt,undefined);
 
 // 2b. Diary first (AIR-287): a removed film whose rating the diary proves is not looked up; one the diary does not cover
 // is. A blocked diary leaves every removed film to the bounded lookup.
@@ -82,15 +86,10 @@ for(const [label,html,expectLookup] of [['proved','<html><head><title>Diary</tit
  const dRun={runId:'run-d-'+label,stage:'epg',events:[structuredClone(ev)],ratingPending:['letterboxd-diary'],watchlist:[],pending:[],removalLookups:[film('dproved'),film('dmissing')]};
  const done=await ctx.completeWithRatings(diaryEnv,dRun,{runId:'run-d-'+label,updatedAt:at,watchlistCount:0,films:[],stats:{}});
  assert.equal(done.stage,'complete');
- assert.equal(fetches.filter(url=>url.includes('/films/')).length,0,label+': no films list');
- assert.equal(fetches.some(url=>url.includes('/demo-user/film/dproved/')),expectLookup,label+': the proved film is looked up only without the diary');
- assert.ok(fetches.some(url=>url.includes('/demo-user/film/dmissing/')),label+': a film the diary does not cover is looked up');
- assert.ok(memberPages().length<=5,'at most five per-film requests');
- const evStored=records.get([...records.keys()].find(key=>key.endsWith('run-d-'+label+'-watchlist.json')));
- assert.equal(evStored.removed.find(f=>f.id==='lb-dproved').rating,expectLookup?2.5:4,label+': the removal event rating');
- const dSync=records.get('sync.json');
- assert.deepEqual(plain(dSync.removalDiaryResolved||[]),expectLookup?[]:['lb-dproved']);
- if(!expectLookup)assert.equal(dSync.ratingAttempt.state,'finished');else assert.deepEqual([dSync.ratingAttempt.state,dSync.ratingAttempt.cause],['error','blocked']);
+ assert.equal(done.ratingsPipeline,'blocked');
+ assert.equal(fetches.filter(url=>url.includes('letterboxd.com')).length,0,label+': the commit does not read Diary or look up films');
+ assert.deepEqual(plain(records.get('sync.json').removalLookups).map(film=>film.id).sort(),['lb-dmissing','lb-dproved']);
+ assert.equal(records.get('sync.json').removalDiaryResolved,undefined);
 }
 diaryPage=null;records.set(QUEUE,savedQueue);etags.set(QUEUE,String(++revision));records.set('sync.json',savedSync);
 
@@ -198,8 +197,8 @@ assert.equal(vm.runInContext('removalLookupFilm',ctx)({id:'x',url:'https://lette
 const source=fs.readFileSync('src/worker.js','utf8');
 assert.match(source,/removed\.has\(String\(film\.id\)\)\)\.map\(removalLookupFilm\)/,'the hand-over is built from the removed ids of this run');
 
-// 11. Killed between the EPG commit and the queue write: finishSync saved `stage: complete` with the hand-over, then the
-// isolate died. The next existing sync step on the completed run replays the hand-over once, then goes on as before.
+// 11. A hand-over left on a completed run is not looked up by the next step while migration is not complete (ADR 0073).
+// The direct lookup above still rates a film, and a killed lookup still leaves the claim.
 records.delete(QUEUE);fetches.length=0;pages.set('crash',3.5);
 const crashEvent={id:'run-2-watchlist',type:'watchlist',at,total:0,baseline:false,added:[],removed:[{id:'lb-crash',title:'Crash',year:2018}]};
 const crashReport={runId:'run-2',updatedAt:at,watchlistCount:0,films:[],stats:{}};
@@ -208,32 +207,17 @@ await ctx.finishSync(env,crashRun,crashReport);
 let saved=records.get('sync.json');
 assert.equal(saved.stage,'complete');
 assert.deepEqual(plain(saved.removalLookups),[film('crash')],'the hand-over survives in sync.json');
-assert.equal(records.has(QUEUE),false,'killed before the queue write');
+assert.equal(records.has(QUEUE),false,'nothing was queued');
 const step={caller:'http',diagnostic:{}};
 try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-2'},step);}catch{}
 assert.equal(step.branch,'continuation');
-assert.equal(queue().films['lb-crash'].state,'rated','the next step replayed the hand-over');
+assert.equal(records.has(QUEUE),false,'the continuation does not look up or enqueue');
 saved=records.get('sync.json');
-assert.equal(saved.removalLookups,undefined);
-assert.equal(saved.removalRatingLookup.rated,1);
-const crashStored=records.get([...records.keys()].find(key=>key.endsWith('run-2-watchlist.json')));
-assert.equal(crashStored.removed[0].rating,3.5);
-// Idempotent: a further step on the same completed run finds no hand-over and requests nothing.
+assert.deepEqual(plain(saved.removalLookups),[film('crash')]);
+assert.equal(memberPages().length,0);
 fetches.length=0;
 try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-2'},{caller:'http',diagnostic:{}});}catch{}
-assert.equal(memberPages().length,0);
-assert.equal(records.get('sync.json').removalRatingLookup.rated,1);
-// Killed again after the queue write but before the outcome: the claim stops a free retry, the hand-over is cleared.
-records.delete(QUEUE);pages.set('crash2',2);
-const run3={...structuredClone(records.get('sync.json')),runId:'run-3',removalLookups:[film('crash2')]};records.set('sync.json',run3);
-bucket.killOutcome=true;
-try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-3'},{caller:'http',diagnostic:{}});}catch{}
-bucket.killOutcome=false;
-assert.equal(queue().films['lb-crash2'].lastResult,'claimed');
-assert.ok(records.get('sync.json').removalLookups,'an error keeps the hand-over for the next step');
-fetches.length=0;
-try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-3'},{caller:'http',diagnostic:{}});}catch{}
-assert.equal(memberPages().length,0,'the claimed film waits for its retry time');
-assert.equal(records.get('sync.json').removalLookups,undefined,'queued, so the hand-over is cleared');
+assert.equal(memberPages().length,0,'a further step still requests nothing');
+assert.deepEqual(plain(records.get('sync.json').removalLookups),[film('crash')]);
 
-console.log('Removal rating lookup (AIR-268): gate off untouched, per-film rating with no films list, diary-proved removals skip the lookup and a blocked diary falls back (AIR-287), one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, crash between commit and queue replayed by the next step passed');
+console.log('Removal rating lookup (AIR-268, ADR 0073): gate off untouched, per-film rating with no films list, diary-proved removals skip the lookup and a blocked diary falls back (AIR-287), one event, duplicates, mixed outcomes, final not-rated, 403/429 stop, killed request resumes without a loop, bounded fan-out, pruning, the commit leaves a hand-over and does not look up passed');

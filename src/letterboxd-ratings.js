@@ -2,8 +2,9 @@
 // with a leased, checkpointed run record, driven by ratings_sync_start / ratings_sync_step. Only the run record is owned
 // (compare-and-swap while `lease.step` is the step's own id); the Diary cursor, history, facts, queue and events change
 // by their monotone merges, so a step that outlived its lease can add real progress and never move anything back.
-// Everything here acts only when RATINGS_PIPELINE is `separate` and ratings_storage_migrate has migrated the queue and the
-// Diary cursor; ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
+// The pipeline is permanently separate (ADR 0073). It acts once ratings_storage_migrate has migrated the queue and the
+// Diary cursor; until then start and step answer not_migrated and write nothing. The RATINGS_PIPELINE binding is ignored.
+// ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdRatings=(()=>{
  const KEYS={run:'letterboxd/ratings/run.json',migration:'letterboxd/ratings/migration.json'};
@@ -28,8 +29,8 @@ const LetterboxdRatings=(()=>{
   const migration=regressed.length?'regressed':queueV2&&cursorV2?'complete':queueV2||cursorV2?'partial':'none';
   return {migration,regressed,queueV2,cursorV2,queue:queue.value,cursor:cursor.value,witness:w};
  }
- const pipelineOf=(env,migration,run)=>ratingsPipelineSwitch(env)!=='separate'?'inline':migration!=='complete'?'separate_pending_migration':run?.isolation?'isolated':run?.state==='running'?'running':'idle';
- async function separateActive(env){return ratingsPipelineSwitch(env)==='separate'&&(await migrationState(env)).migration==='complete';}
+ const pipelineOf=(migration,run)=>migration!=='complete'?'blocked':run?.isolation?'isolated':run?.state==='running'?'running':'idle';
+ async function separateActive(env){return (await migrationState(env)).migration==='complete';}
 
  const leaseLive=(run,now)=>!!run?.lease?.step&&Date.parse(run.lease.expiresAt)>now;
  // A running record is stale when an active step's lease has expired (`interrupted`) or no step has begun or ended for
@@ -61,7 +62,6 @@ const LetterboxdRatings=(()=>{
  // ratings_sync_start. `busy` never hands out the running id; a stale record is closed first.
  async function start(env,{trigger,clearIsolation=false}={},now=Date.now()){
   const reply=(runId,created,nextAction,reason,extra={})=>({runId,created,nextAction,reason,...extra});
-  if(ratingsPipelineSwitch(env)!=='separate')return reply(null,false,'stop','disabled');
   const state=await migrationState(env);
   if(state.migration!=='complete')return reply(null,false,'stop','not_migrated',{migration:state.migration});
   const pointer=(await read(env,EPG_GENERATION_KEY)).value;
@@ -86,7 +86,6 @@ const LetterboxdRatings=(()=>{
  // drive it); `now` is the time the step begins.
  async function step(env,{runId}={},{now=Date.now(),clock=()=>Date.now()}={}){
   const reply=(run,nextAction,reason,extra={})=>({runId:run?.runId??null,state:run?.state??null,phase:run?.phase??null,nextAction,reason,nextCatchUpAt:null,step:null,summary:null,...extra});
-  if(ratingsPipelineSwitch(env)!=='separate')return reply(null,'stop','disabled');
   const migration=(await migrationState(env)).migration;
   if(migration!=='complete')return reply(null,'stop','not_migrated',{migration});
   const stepId=crypto.randomUUID();
@@ -171,7 +170,7 @@ const LetterboxdRatings=(()=>{
   if(leaseLost)throw new LeaseLost();
   const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next;
   const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,historicalCoverage:'incomplete',counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts,overflowSuspected:diary.counts.overflowSuspected?1:0}),
-   facts:addCounts(prior?.facts,facts),removalResolved:(prior?.removalResolved||0)+resolved,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
+   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
@@ -277,7 +276,7 @@ const LetterboxdRatings=(()=>{
  async function status(env,now=Date.now()){
   const [state,{value:run}]=await Promise.all([migrationState(env),read(env,KEYS.run)]);
   const queue=state.queue,entries=Object.values(queue?.films||{}),cursor=state.cursor;
-  return {contractVersion:CONTRACT_VERSION,switch:ratingsPipelineSwitch(env),pipeline:pipelineOf(env,state.migration,run),migration:state.migration,...(state.regressed.length?{regressedObjects:state.regressed}:{}),
+  return {contractVersion:CONTRACT_VERSION,switch:'separate',pipeline:pipelineOf(state.migration,run),migration:state.migration,...(state.regressed.length?{regressedObjects:state.regressed}:{}),
    run:presentRun(run,now),
    diary:{enabled:LetterboxdDiary.enabled(env),migrated:state.cursorV2,lastOutcome:cursor?.lastOutcome??null,stopReason:cursor?.stopReason??null,coverage:cursor?.coverage||null,historicalCoverage:cursor?.coverage?.window==='recent'?'incomplete':'unknown',overflowSuspected:cursor?.counts?.overflowSuspected===true,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null,lastSuccessAt:cursor?.lastSuccessAt??null},
    removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:removalLookupEnabled(env),entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
