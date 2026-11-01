@@ -56,6 +56,7 @@ vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);
 vm.runInContext(source,context);
 vm.runInContext(scoped('src/domain/admin-actions.js','AdminActions'),context);
+vm.runInContext(scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity'),context);
 vm.runInContext(scoped('src/domain/discovery-recovery.js','DiscoveryRecovery'),context);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);

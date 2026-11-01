@@ -31,9 +31,25 @@ function resolutionActionability(candidate,decision,now=Date.now()){
  return false;
 }
 function discoveryReady(candidate,decision,now){return resolutionActionability(candidate,decision,now);}
+// An owner rejection or assignment stays on the decision when a later chunk rewrites the uncertain fields. Scoring is
+// not carried: the next attempt scores again. A rejected accepted id is searched again so a different id can be
+// evaluated, and that rejected id is not fetched as movie detail. The rejection does not apply to any other observation.
+function ownerMarkerCarry(previous){
+ if(!previous||typeof previous!=='object')return {};
+ const carried={};
+ if(previous.ownerIdentity&&typeof previous.ownerIdentity==='object')carried.ownerIdentity=previous.ownerIdentity;
+ if(Array.isArray(previous.rejectedTmdbIds)&&previous.rejectedTmdbIds.length)carried.rejectedTmdbIds=previous.rejectedTmdbIds.slice(0,8);
+ return carried;
+}
+function ownerRejected(decision,tmdbId){
+ if(tmdbId==null||tmdbId==='')return false;
+ const id=String(tmdbId);
+ return Array.isArray(decision?.rejectedTmdbIds)&&decision.rejectedTmdbIds.map(String).includes(id);
+}
 function recordUncertain(decisions,candidate,status,now=Date.now()){
  const evidenceKey=candidateEvidence(candidate),previous=decisions[candidate.key],same=previous?.evidenceKey===evidenceKey,attempts=same?(previous.attempts||0)+1:1,terminal=attempts>=DISCOVERY_ATTEMPT_LIMIT;
- decisions[candidate.key]={status,attempts,evidenceKey,lastAttemptAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),retryAt:terminal?null:new Date(now+Math.min(7,2**(attempts-1))*86400000).toISOString(),terminalReason:terminal?'repeated_uncertain_match':null};
+ const carried=ownerMarkerCarry(previous);
+ decisions[candidate.key]={status,attempts,evidenceKey,lastAttemptAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),retryAt:terminal?null:new Date(now+Math.min(7,2**(attempts-1))*86400000).toISOString(),terminalReason:terminal?'repeated_uncertain_match':null,...carried,...(Object.keys(carried).length&&previous.scoring&&typeof previous.scoring==='object'?{scoring:previous.scoring}:{})};
 }
 function discoveryCounts(items,decisions,now=Date.now()){
  const counts={ledgerTotal:items.length,currentUnresolved:0,readyNow:0,retryBackoff:0,historicalUnresolved:0,ambiguous:0,terminalNoMatch:0,rejectedNonfilm:0,expiredInactive:0};
@@ -90,7 +106,7 @@ function gateScoredCandidate(env,source,candidate,score,decisions,films,now,extr
 }
 function recordNeedsVerification(decisions,candidate,score,now=Date.now()){
  const evidenceKey=candidateEvidence(candidate),previous=decisions[candidate.key],same=previous?.status==='needs_verification'&&previous.evidenceKey===evidenceKey,attempts=same?(previous.attempts||0)+1:1,terminal=attempts>=DISCOVERY_ATTEMPT_LIMIT;
- decisions[candidate.key]={status:'needs_verification',attempts,evidenceKey,lastAttemptAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),retryAt:terminal?null:new Date(now+Math.min(7,2**(attempts-1))*86400000).toISOString(),terminalReason:terminal?'awaiting_confirmation':null,scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null}};
+ decisions[candidate.key]={status:'needs_verification',attempts,evidenceKey,lastAttemptAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),retryAt:terminal?null:new Date(now+Math.min(7,2**(attempts-1))*86400000).toISOString(),terminalReason:terminal?'awaiting_confirmation':null,scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null},...ownerMarkerCarry(previous)};
 }
 function scorePreview(candidate,score,gate,proposed){const row={observationKey:candidate.key,outcome:gate.outcome,reason:gate.reason,scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,confidence:score.confidence,score:score.score,acceptedTmdbId:score.acceptedTmdbId}};if(proposed?.length)row.proposedCandidates=proposed;if(gate.competingEditions?.length)row.competingEditions=gate.competingEditions;return row;}
 function searchHitCandidate(movie){return {tmdbId:String(movie.id),title:movie.title,original:movie.original_title,year:Number(movie.release_date?.slice(0,4))||null,runtime:movie.runtime??null,trusted:false};}
@@ -495,7 +511,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  let screenedOut=0,knownAliases=0,touched=0,migrated=0;for(const film of Object.values(films))if(film.tmdbId&&film.canonicalIdentity!=='tmdb:'+film.tmdbId){film.canonicalIdentity='tmdb:'+film.tmdbId;migrated++;}
  // Cheap pass updates availability for known identities even though no new lookup is needed.
  for(const candidate of source.items){const decision=decisions[candidate.key],reason=screenedNonfilmReason(candidate,decision);if(reason){if(decision?.status!=='excluded_nonfilm'){decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:startedAt};screenedOut++;}continue;}
-  if(candidate.confirmedTmdbId&&(!decision||decision.status==='excluded_nonfilm')){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
+  if(candidate.confirmedTmdbId&&(!decision||decision.status==='excluded_nonfilm')&&!ownerRejected(decision,candidate.confirmedTmdbId)){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
   const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate,source.programmeRunId);indexFilm(films[key]);touched++;}}
  }
  if(touched||migrated){if(!await saveDiscoveredFilms(env,films,source.programmeRunId,fence))return {schemaVersion:2,stage:'programme_changed',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,currentProgrammeRunId:null};}if(screenedOut||knownAliases){await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);}
@@ -510,12 +526,14 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
    let candidates=knownScorerCandidates(aliasIndex,candidate);
    const observation={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:candidate.durations};
    let score=scoreFilmResolution({observation,candidates});
-   let searched=!score.considered.some(row=>row.title.quality===1);
+   const rejectedTop=ownerRejected(decisions[candidate.key],score.acceptedTmdbId);
+   let searched=rejectedTop||!score.considered.some(row=>row.title.quality===1);
    if(searched)candidates=[...candidates,...await scoredSearchCandidates(query,candidate)],score=scoreFilmResolution({observation,candidates});
    const proposed=[];
+   if(ownerRejected(decisions[candidate.key],score.acceptedTmdbId)){recordUncertain(decisions,candidate,'no_confident_match',now);preview[candidate.key]=scorePreview(candidate,score,{outcome:'candidate_decision',reason:'owner_rejected',candidateDecision:{status:'no_confident_match'}},proposed);await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);checked++;continue;}
    let gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now);
    let movie=null;
-   if(gate.outcome==='needs_verification'&&score.status==='accepted'&&score.acceptedTmdbId){
+   if(gate.outcome==='needs_verification'&&score.status==='accepted'&&score.acceptedTmdbId&&!ownerRejected(decisions[candidate.key],score.acceptedTmdbId)){
     movie=await query('movie/'+score.acceptedTmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
     gate=gateScoredCandidate(pinned,source,candidate,score,decisions,films,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:detailCompetitors(aliasIndex,candidate,score.acceptedTmdbId,structuralCompetitorForms(score))});
    }
@@ -528,7 +546,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
     if(knownTmdb.has(String(movie.id)))saved=await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence);
     else{const old=films[id];if(!old)added++;films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
     if(!saved||!await publishedGenerationMatches(env,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
-    decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,identitySource:'tmdb_detail',checkedAt:new Date().toISOString(),evidenceKey:candidateEvidence(candidate),provenance:{authority:'tmdb_detail',searchHit:searched,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null},scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null}};
+    decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,identitySource:'tmdb_detail',checkedAt:new Date().toISOString(),evidenceKey:candidateEvidence(candidate),provenance:{authority:'tmdb_detail',searchHit:searched,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null},scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null},...ownerMarkerCarry(decisions[candidate.key])};
    }
    // A film is committed before its decision. A crash between writes is repaired by alias reuse.
    await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);checked++;
@@ -561,41 +579,53 @@ async function observationIndexShards(built,decisions){
 // writer may have stopped between a shard and its manifest). The manifest names the etags of the resolution map and the
 // generation ledger as they are now, so any later write to either makes the index stale for every reader.
 async function observationShardPut(env,run,index,items,revision,options={}){
- return await env.BUCKET.put(DiscoveryIndex.observationIndexShardKey(run,index),JSON.stringify(DiscoveryIndex.observationShardDocument(run,index,items,revision)),{httpMetadata:{contentType:'application/json'},customMetadata:{revision},...options});
+ const key=options.shardKey||DiscoveryIndex.observationIndexShardKey(run,index);
+ const put={httpMetadata:{contentType:'application/json'},customMetadata:{revision}};
+ if(options.onlyIf)put.onlyIf=options.onlyIf;
+ return await env.BUCKET.put(key,JSON.stringify(DiscoveryIndex.observationShardDocument(run,index,items,revision)),put);
 }
-async function writeObservationIndex(env,run,shards,fence,fields){
+async function writeObservationIndex(env,run,shards,fence,fields,layout){
+ const shardKey=layout?.shardKey||(index=>DiscoveryIndex.observationIndexShardKey(run,index));
+ const manifestKey=layout?.manifestKey||DiscoveryIndex.observationIndexManifestKey(run);
  for(let index=0;index<shards.length;index++){
-  const stored=await env.BUCKET.head(DiscoveryIndex.observationIndexShardKey(run,index));
+  const stored=await env.BUCKET.head(shardKey(index));
   if(stored?.customMetadata?.revision===shards[index].revision)continue;
-  await fence();await observationShardPut(env,run,index,shards[index].items,shards[index].revision);
+  await fence();await observationShardPut(env,run,index,shards[index].items,shards[index].revision,{shardKey:shardKey(index)});
  }
  const [resolution,ledger]=await Promise.all([env.BUCKET.head('epg/discovery-resolution.json'),env.BUCKET.head(epgGenerationKey(run,'discovery-latest.json'))]);
  if(!resolution?.etag||!ledger?.etag)return {written:false,reason:'source_unread'};
- await fence();await saveJSON(env,DiscoveryIndex.observationIndexManifestKey(run),DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),...fields,sources:{resolutionEtag:resolution.etag,ledgerEtag:ledger.etag},shards:shards.map(shard=>({items:shard.items.length,revision:shard.revision}))}));
+ await fence();await saveJSON(env,manifestKey,DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),...fields,sources:{resolutionEtag:resolution.etag,ledgerEtag:ledger.etag},shards:shards.map(shard=>({items:shard.items.length,revision:shard.revision}))}));
  return {written:true,reason:null};
 }
-// The observation index (src/domain/discovery-observation-index.js) of the chunk's generation, from the ledger and the
-// decisions the chunk already holds in memory: the current, unscreened observations that have a decision other than
-// verified or excluded. It is written after the checkpoint and the score preview, so a failure here never costs the
-// chunk its progress: every error but a lost lease is swallowed, and the previous index, whose etags no longer match,
-// is then read as stale. Owner reads use it instead of the ledger and the resolution map.
+// Two observation indexes of the chunk's generation, from the ledger and the decisions the chunk already holds in
+// memory. The unresolved index is the current, unscreened observations that have a decision other than verified or
+// excluded. The verified index is the current verified decisions, same generation fence and the same cap. Both are
+// written after the checkpoint and the score preview, so a failure here never costs the chunk its progress: every
+// error but a lost lease is swallowed, and a previous index whose etags no longer match is then read as stale. Owner
+// reads use an index instead of the ledger and the resolution map.
 async function saveObservationIndex(env,source,decisions,fence,writer){
  const run=source.programmeRunId||null;
  try{
   const generation=run?await publishedPointer(env):null;
   if(!run||generation?.phase!=='published'||generation.programmeRunId!==run)return {written:false,reason:'generation_not_published'};
-  const now=Date.now(),entries=[];let awaitingFirstLookup=0;
+  const now=Date.now(),unresolved=[],verified=[];let awaitingFirstLookup=0;
   for(const candidate of source.items){
    const decision=decisions[candidate.key];
    if(candidateActivity(candidate,now)!=='current'||screenedNonfilmReason(candidate,decision))continue;
    if(!decision){awaitingFirstLookup++;continue;}
-   if(decision.status==='verified'||decision.status==='excluded_nonfilm')continue;
-   entries.push({candidate,decision});
+   if(decision.status==='excluded_nonfilm')continue;
+   if(decision.status==='verified')verified.push({candidate,decision});
+   else unresolved.push({candidate,decision});
   }
-  const built=DiscoveryIndex.buildObservationIndex({programmeRunId:run,entries});
+  const built=DiscoveryIndex.buildObservationIndex({programmeRunId:run,entries:unresolved});
   if(built.error)return {written:false,reason:built.error};
+  const verifiedBuilt=DiscoveryIndex.buildObservationIndex({programmeRunId:run,entries:verified,scope:DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE});
+  if(verifiedBuilt.error)return {written:false,reason:verifiedBuilt.error};
   const shards=await observationIndexShards(built,decisions);
-  return await writeObservationIndex(env,run,shards,fence,{writer,coverage:built.coverage,counts:{...discoveryCounts(source.items,decisions,now),awaitingFirstLookup}});
+  const verifiedShards=await observationIndexShards(verifiedBuilt,decisions);
+  const unresolvedWritten=await writeObservationIndex(env,run,shards,fence,{writer,coverage:built.coverage,counts:{...discoveryCounts(source.items,decisions,now),awaitingFirstLookup}});
+  if(!unresolvedWritten.written)return unresolvedWritten;
+  return await writeObservationIndex(env,run,verifiedShards,fence,{writer,coverage:verifiedBuilt.coverage,counts:null},{shardKey:index=>DiscoveryIndex.observationVerifiedShardKey(run,index),manifestKey:DiscoveryIndex.observationVerifiedManifestKey(run)});
  }catch(e){
   if(e?.name==='LeaseLostError')throw e;
   try{console.log(JSON.stringify({event:'discovery_observation_index',programmeRunId:diagnosticId(run),written:false,error:diagnosticErrorCode(e)}));}catch{}

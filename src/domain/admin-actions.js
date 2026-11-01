@@ -234,6 +234,19 @@ function sameIssuance(issued, confirmation) {
   return CONFIRMATION_FIELDS.every(key => canonical(issued[key]) === canonical(confirmation[key]));
 }
 
+// Receipt-only recovery binds the submission to the stored issuance. It does not re-check eligibility: the decision may
+// already be the committed after-image, and a fresh version check would refuse the receipt of a write that landed.
+// The caller supplies `now`. An expired original issuance is `confirmation_expired`; a different field is
+// `confirmation_mismatch`. Neither result writes.
+export function bindIssuance(issued, confirmation, now) {
+  if (!isObject(issued) || !validateConfirmation(issued)) return {ok: false, refusal: 'confirmation_missing'};
+  if (!validateConfirmation(confirmation) || !sameIssuance(issued, confirmation)) return {ok: false, refusal: 'confirmation_mismatch'};
+  const nowMs = clockOf(now), expires = clockOf(issued.expiresAt);
+  if (nowMs === null || expires === null) return {ok: false, refusal: 'invalid_request'};
+  if (nowMs > expires) return {ok: false, refusal: 'confirmation_expired'};
+  return {ok: true, issued};
+}
+
 // The checks every submission passes against a fresh read made at submission time, in this order. The first failure
 // refuses the whole submission before any write; no input makes it throw. `principal` is what the Access-verified
 // request says about the caller; `issued` is the issuer's own record of the confirmation with this idempotency key.

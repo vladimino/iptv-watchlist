@@ -288,16 +288,19 @@ The 5 attempts and 24 hours are the data health thresholds `repeatedFailureAttem
 
 ## Discovery observation recovery: `GET /api/admin/discovery-recovery`
 
-One discovery observation (one EPG candidate key) is explained from the [observation index](../domain/discovery-observation-index.md). When the explanation allows it, the owner can send that observation back to the ordinary resolver queue with the guarded action `discovery_reconsider@1` ([ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md)). The action lifts the terminal fence of one decision. It calls no TMDB, runs no chunk and starts no series: the next ordinary chunk decides what happens. Everything sits behind the same Access application.
+One discovery observation (one EPG candidate key) is explained from the [observation index](../domain/discovery-observation-index.md). When the explanation allows it, the owner can send that observation back to the ordinary resolver queue with `discovery_reconsider@1` ([ADR 0061](../../adr/0061-discovery-observation-index-and-reconsider.md)), or assign or reject one movie id with `discovery_identity_correct@1` ([ADR 0080](../../adr/0080-discovery-identity-correction.md), Proposed). Neither action calls TMDB, runs a chunk or starts a series. Everything sits behind the same Access application.
 
-Source: [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recovery.js) (handlers and executor), [`src/domain/discovery-recovery.js`](../../../src/domain/discovery-recovery.js) (assessment and gate, bundled as `DiscoveryRecovery`), [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (the [guarded action contract](admin-actions.md), bundled as `AdminActions`), [`src/admin/discovery-recovery-view.js`](../../../src/admin/discovery-recovery-view.js) (the panel), and `loadDiscoveryRecovery`, `confirmDiscoveryReconsider` and `executeDiscoveryReconsider` in [`src/admin/limbo-client.js`](../../../src/admin/limbo-client.js). Tests: [`tests/discovery-reconsider.mjs`](../../../tests/discovery-reconsider.mjs), [`tests/admin-discovery-recovery-page.mjs`](../../../tests/admin-discovery-recovery-page.mjs), [`tests/discovery-recovery.mjs`](../../../tests/discovery-recovery.mjs); the [GET side-effect test](../../../tests/get-side-effects.mjs) pins the read sets of both GETs.
+Source: [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recovery.js) (handlers and both executors), [`src/domain/discovery-recovery.js`](../../../src/domain/discovery-recovery.js) (assessment and the reconsider gate, bundled as `DiscoveryRecovery`), [`src/domain/discovery-identity-review.js`](../../../src/domain/discovery-identity-review.js) (the identity offer and command, bundled as `DiscoveryIdentity`), [`src/domain/admin-actions.js`](../../../src/domain/admin-actions.js) (the [guarded action contract](admin-actions.md), bundled as `AdminActions`), [`src/admin/discovery-recovery-view.js`](../../../src/admin/discovery-recovery-view.js) (the panel), and `loadDiscoveryRecovery`, `confirmDiscoveryReconsider`, `executeDiscoveryReconsider`, `confirmDiscoveryIdentity` and `executeDiscoveryIdentity` in [`src/admin/limbo-client.js`](../../../src/admin/limbo-client.js). Tests: [`tests/discovery-reconsider.mjs`](../../../tests/discovery-reconsider.mjs), [`tests/discovery-identity-review.mjs`](../../../tests/discovery-identity-review.mjs), [`tests/admin-discovery-recovery-page.mjs`](../../../tests/admin-discovery-recovery-page.mjs), [`tests/discovery-recovery.mjs`](../../../tests/discovery-recovery.mjs); the [GET side-effect test](../../../tests/get-side-effects.mjs) pins the read sets of the GETs.
 
 | Route | Effect |
 | --- | --- |
-| `GET /api/admin/discovery-recovery?key=<key>[&pin=<pin>]` | Read-only assessment and action preview |
-| `POST /api/admin/discovery-recovery/confirm` | Issues a confirmation of one exact scope and stores it as an `approved` action record; changes no decision |
-| `POST /api/admin/discovery-recovery/reconsider` | Executes one issued confirmation |
-| `GET /api/admin/discovery-recovery/receipt?idempotencyKey=<key>` | Returns the stored action record; read-only |
+| `GET /api/admin/discovery-recovery?key=<key>[&pin=<pin>]` | Read-only assessment, reconsider preview and identity offer |
+| `POST /api/admin/discovery-recovery/confirm` | Issues a reconsideration and stores it as an `approved` action record; changes no decision |
+| `POST /api/admin/discovery-recovery/reconsider` | Executes one issued reconsideration |
+| `GET /api/admin/discovery-recovery/receipt?idempotencyKey=<key>` | Returns the stored reconsideration record; read-only |
+| `POST /api/admin/discovery-recovery/identity-confirm` | Issues one assign or reject; changes no decision |
+| `POST /api/admin/discovery-recovery/identity-correct` | Executes one issued identity correction |
+| `GET /api/admin/discovery-recovery/identity-receipt?idempotencyKey=<key>` | Returns the stored identity record; read-only |
 
 Any other method is 405 `method_not_allowed`, and an unknown path under `/api/admin/discovery-recovery/` is 404.
 
@@ -312,7 +315,7 @@ The GET routes get a bucket wrapper with only `get` and `head`, so they cannot p
 | `head` of `epg/discovery-resolution.json` and `epg/generations/<run>/discovery-latest.json` | Index freshness; no body |
 | `epg/resolver-continuation.json`, `epg/discovery-status.json`, `epg/resolver-lease.json` | The series state, the TMDB throttle (`retryAt`) and the live writer |
 
-A shard is read only when the manifest is readable. The receipt route reads only `admin/actions/discovery_reconsider/v1/<idempotencyKey>.json`. Nothing reads the ledger or the map body.
+A shard is read only when the manifest is readable. The reconsideration receipt reads only `admin/actions/discovery_reconsider/v1/<idempotencyKey>.json`. The identity receipt reads only `admin/actions/discovery_identity_correct/v1/<idempotencyKey>.json`. Nothing on these GETs reads the ledger, the resolution-map body or the catalogue.
 
 ### Parameters and pin
 
@@ -325,13 +328,14 @@ The pin is a digest of every key read with its etag (`absent`, `unavailable`). T
 
 ### Answer
 
-`{pin, evaluatedAt, atomic: false, target: {key}, index, indexed, observation, assessment, action, coordination, sources}`:
+`{pin, evaluatedAt, atomic: false, target: {key}, index, indexed, observation, assessment, identity, action, coordination, sources}`:
 
 - `index`: `{state, reasons, programmeRunId, writtenAt, writer, coverage, counts}`.
 - `indexed`: whether the key has an index record. Without one, `observation` and `assessment` are `null`.
 - `observation`: the index record (title, year, durations, shows, activity fields, `decision`, `decisionHash`).
-- `assessment`: the [recovery assessment](../domain/discovery-recovery.md), with `execute` as the [gate](../domain/discovery-recovery.md#the-reconsideration-gate).
-- `action`: the contract preview, `{capability, version, status, reason, gate, scopeFingerprint, affected, excluded, budget, confirmTtlMs, compensation, atomic: false, cost}`. `status` is `eligible` only when the gate is available on complete evidence. `cost` is `{tmdbCalls: 0, chunksStarted: 0, writes: {resolutionMap: 1, actionRecord: 3, observationIndex: 2}}`.
+- `assessment`: the [recovery assessment](../domain/discovery-recovery.md), with `execute` as the [reconsideration gate](../domain/discovery-recovery.md#the-reconsideration-gate). `review.available` stays false; it is not the identity action.
+- `identity`: the offer from [ADR 0080](../../adr/0080-discovery-identity-correction.md). `{capability, version, available, reason, trusted, hypothesis, rejectable, rejectedTmdbIds, current, coverage, effect, authority, programmeRunId}`. `trusted` holds the observation's confirmed movie id, or is empty. `hypothesis` is the scorer's accepted id with `trusted: false`, or null. `coverage.scope` is `current_unresolved_with_decision` and `coverage.complete` is the index flag. `effect.when` is when a later ordinary chunk would touch catalogue shows. The offer is not an admin-actions preview: the effect and the id are not chosen yet.
+- `action`: the reconsideration preview, `{capability, version, status, reason, gate, scopeFingerprint, affected, excluded, budget, confirmTtlMs, compensation, atomic: false, cost}`. `status` is `eligible` only when the reconsideration gate is available on complete evidence. `cost` is `{tmdbCalls: 0, chunksStarted: 0, writes: {resolutionMap: 1, actionRecord: 3, observationIndex: 2}}`.
 - `coordination`: the read status (`recorded`, `not_recorded`, `unavailable`) of the lease, the continuation and the status.
 - `sources`: the keys read.
 
@@ -390,14 +394,39 @@ The answer is `{replayed: false, receipt, durable, state, index, refusal?}`. `du
 
 `state` is `approved`, `running` or a receipt state. The receipt route returns `{idempotencyKey, state, record}`, with `state: unknown` for a `running` record. It answers 404 `not_found` when no record exists and 400 `invalid_request` for a malformed key.
 
+### Identity correction: `POST /api/admin/discovery-recovery/identity-confirm`
+
+`discovery_identity_correct@1` ([ADR 0080](../../adr/0080-discovery-identity-correction.md), Proposed; [capability](admin-actions.md#identity-correction-discovery_identity_correct1)). The owner assigns or rejects one numeric TMDB movie id on the one observation the panel is showing. Confirm writes the action record and no decision. Execute writes that one decision under the resolver lease.
+
+Both POSTs need the same Access assertion, same-origin `Origin` and `Content-Type: application/json` as reconsideration, and `X-IPTV-Admin-Action: discovery_identity_correct`. A reconsideration header on these routes is 403 `access_denied`.
+
+**Confirm.** The body is `{key, pin, idempotencyKey, accepted: true, effect, tmdbId, basis}`. `effect` is `assign` or `reject`. `tmdbId` matches `^[1-9]\d{0,11}$`. `basis` is required, trimmed, at most 200 characters, and has no control characters. The route refuses, with no action record, when the pin is stale, the offer is unavailable, or the command fails (`film_absent`, `year_conflict`, `tmdb_tv`, `not_on_decision`, `already_current`, `ambiguous_needs_stronger`, and the other reasons of `identityCommand`). An assign reads one key of `epg/discovered-films.json`, `tmdb_<id>`, and does not scan titles. A second confirm with the same idempotency key and a different effect or id is 409 `idempotency_conflict`. The answer is `{confirmation, command, plan, application, scope}`. `plan` is `{before, after}` for that key. `application.consumers` is `["resolution_decision"]`.
+
+**Execute.** The body is `{confirmation}`. The order matches reconsideration: replay a stored receipt, then a `running` intent. When that intent's after-image digest matches the stored decision, the route stores the receipt only and does not put the map again. When it does not match, the answer is unknown and nothing is written. Otherwise it refuses a live or unreadable lease before taking one, re-reads the index under the lease, re-checks the stored command (including the catalogue object for an assign), compare-and-swaps a running intent that holds the before-image, puts the resolution map by etag changing only that key, reads the decision back by digest, then refreshes the index. A digest or etag mismatch is `record_changed` and writes no decision. A lost compare-and-swap of the map is `failed` and keeps the other writer's decision. A put whose read-back does not match is `unknown`. The same confirmation then replays that receipt. If the decision read back and the final action-record put fails or loses its compare-and-swap, the answer is HTTP 409 with `decisionReadBack: true`, `durable: false` and `receipt: null`. That is not success. A replay of a stored receipt is `{replayed: true, receipt, durable: true, state}`. Receipt-only recovery accepts only the stored issuance: a different `confirmedAt`, `expiresAt`, scope or effect is `confirmation_mismatch` and does not put the map or a receipt. When that original issuance has expired and the decision already matches, the answer is `confirmation_expired` with `decisionReadBack: true` and `receipt: null`. It does not store a receipt and does not issue another confirmation.
+
+An assign sets `status: verified`, `tmdbId`, `filmId: tmdb_<id>`, `canonicalIdentity: tmdb:<id>`, `identitySource: owner`, clears `terminalReason` and `retryAt`, and drops that id from `rejectedTmdbIds`. A reject sets `needs_verification` when the status was `verified`, otherwise leaves the status, clears `tmdbId` only when it is the rejected id, clears `terminalReason` and `retryAt`, and appends the id to `rejectedTmdbIds` (at most eight). It does not block a similar title. The next ordinary chunk may search for a different id and does not fetch the rejected movie.
+
+The answer adds `application` and `reason` beside the receipt. `application.shows` is `next_ordinary_chunk`, `after_series_wait` or `next_series` when the assigned film is already canonical; `awaiting_catalog_film` when the confirmed id has no catalogue object; `not_this_action` for a reject. The route does not start the chunk and does not write `programme.json` or a historical generation. If `index.refreshed` is false, the list may still show the row until the next chunk.
+
+**Action record.** `admin/actions/discovery_identity_correct/v1/<idempotencyKey>.json`:
+
+```text
+{schemaVersion: 1, kind: "discovery_identity_action", idempotencyKey, state, issued, command, application, plan,
+ createdAt, startedAt, finishedAt,
+ provenance: {actor: "owner", authority: "cloudflare_access", programmeRunId, manifestEtag, observationKey},
+ beforeImage, afterImage, receipt, index}
+```
+
+`command` is `{effect, tmdbId, basis}`. The receipt route is read-only and returns the same `{idempotencyKey, state, record}` shape as reconsideration.
+
 ### The observation recovery panel
 
 «Разобрать наблюдение» on a limbo observation item toggles a panel under the item (`aria-expanded`, `aria-controls`) and issues one GET for that key. In Russian, the panel shows:
 
 - the verdict and what happened;
 - what will happen next;
-- when the observation needs identity review and no repair is available, the sentence «Автоматическое исправление этой проблемы пока недоступно»;
-- the facts: title, year, durations, the next airings in Europe/Madrid, the programme window, the decision, attempts, last and next attempt, whether the airings changed, the resolver series, the terminal reason and identity;
+- the sentence «Автоматическое исправление этой проблемы пока недоступно» only when identity review is suggested and the answer has no `identity` object;
+- the facts: title, year, durations, the next airings in Europe/Madrid, the programme window, the decision, attempts, last and next attempt, whether the airings changed, the resolver series, the terminal reason, and, when the identity offer is present, the evidence key, the known decision source, the untrusted hypothesis and the coverage limit;
 - the snapshot line.
 
 The identifiers (key, pin, digests, etags, the idempotency key, source keys and raw codes) appear only inside the closed «Технические подробности». A verdict, reason, gate, next step, series state or effect without declared copy renders «Невозможно достоверно объяснить состояние наблюдения» with no action. A stale or unavailable index says so, and offers only «Проверить заново».
@@ -409,6 +438,8 @@ The identifiers (key, pin, digests, etags, the idempotency key, source keys and 
 - **Confirm.** The checkbox only enables «Подтвердить», without redrawing the panel, so focus stays on it. «Подтвердить» sends the confirm POST.
 - **Execute.** The panel then shows the issued confirmation with its expiry in Madrid time, «Повторно направить на проверку» (focused) and «Отменить», which drops the confirmation and returns focus to the checkbox. Execution is sent once; whatever comes back, the panel reads the observation again with the held pin. The receipt (focused) stays above the fresh state: written, refused with the reason, aborted, failed or unknown, plus a warning when it was not stored or the index was not refreshed.
 - **Retry after a busy resolver.** A `lease_held` or `lease_unknown` refusal keeps the confirmation. «Проверить заново» then keeps it until it expires, so the owner can execute once the resolver is free; the execute button is offered only when the gate is available again.
+
+**Identity block «Идентичность этого наблюдения».** It is a separate section on the same panel, not a `<form>`. «Одно проверенное совпадение» above the inventory opens one key that is not a limbo row: the read uses the verified-observation index, one shard, and does not scan the ledger. When the offer is available it shows the evidence key, the coverage limit (unresolved observations that already have a decision, or current verified decisions; neither is the whole ledger), the current verified movie id when that is what is recorded, the untrusted hypothesis as text, the ids that may be rejected, radios for `assign` and `reject` (reject disabled when nothing may be rejected), a radio only for a confirmed movie id, a numeric movie-id field, a basis field, and a checkbox that names the observation key and the generation. The preview stays hidden until an effect and a real movie id are chosen and states the before and after. «Подтвердить идентичность» then «Записать идентичность» are the two posts. A repeat rejection that is already recorded stays on the form and sends nothing. `already_current` and the other command refusals stay on the form; only `stale_pin` reloads. The identity receipt is separate from the reconsideration receipt. A decision that read back without a stored receipt says the decision is already written, keeps the same confirmation, and labels the button «Сохранить квитанцию». That press stores the receipt and does not write the decision again. A replayed succeeded receipt, including one that omits `durable`, is shown as stored. An expired confirmation of an already written decision says the receipt will not be saved and does not offer that button. Controls are at least 44 px, and below 800 px the buttons in `.recovery-controls` are full width.
 
 Below 800 px the controls are full width. The page sends no token: the Access session is the only credential.
 
@@ -619,7 +650,7 @@ The route does not write `programme.json`, `titles.json`, `people.json`, `epg/pu
 - The catalogue routes do not read fingerprint and prediction state; see `queue_unavailable` above. Only the [prediction recovery read](#prediction-recovery-get-apiadminprediction-recovery) reads them, for one film per request.
 - Pages run over an in-memory projection of the whole programme object; a cold request costs six R2 reads and one parse of the programme, a warm one six reads and no parse of the programme.
 - The catalogue GET routes edit nothing. `POST /api/admin/films/<storedId>/title-review` is the [film title review](#film-title-review-post-apiadminfilmsstoredidtitle-review): one confirmed title, one conditional put of the overlay. `POST /api/admin/letterboxd-archive/preview` is the [archive preview](#letterboxd-archive-preview-post-apiadminletterboxd-archivepreview): it accepts a body and writes nothing. The [archive apply](#letterboxd-archive-apply) is four other POSTs and writes only after a separate confirmation. The health read suggests actions as the model states them and offers no way to run one; the poster summary links to `/admin/posters`.
-- Three admin pages can cause a write, each only after the owner's confirmation. `/admin/posters` calls the existing `POST /api/enrichment/catalog/posters`; `/admin/limbo` calls the two `POST /api/admin/discovery-recovery/*` routes of one observation; `/admin/letterboxd` calls the archive apply routes for one compared chunk.
+- Three admin pages can cause a write, each only after the owner's confirmation. `/admin/posters` calls the existing `POST /api/enrichment/catalog/posters`; `/admin/limbo` calls the reconsideration and identity-correction posts of one observation; `/admin/letterboxd` calls the archive apply routes for one compared chunk.
 - On `/admin/posters`: `no_poster_on_tmdb` and `tmdb_id_mismatch` are stored in `epg/catalog-poster-negatives.json` by the maintenance route ([ADR 0063](../../adr/0063-catalog-poster-negative-index.md)). They stay inside `verifiedMissing`, which is what the poster summary warns on, and they leave the ordinary queue. The browser history does not decide that queue. A code revert leaves the index in place; older code then shows those records as actionable again.
 
-Rollback of the read routes and the archive preview removes no R2 object, because they wrote none. Decisions reconsidered by confirmed actions stay reconsidered, and their action records stay ([runbook](../../runbooks/discovery-ledger.md#one-stuck-observation)). Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback). Facts written by a confirmed archive apply stay until that chunk's own rollback. A code revert does not remove them.
+Rollback of the read routes and the archive preview removes no R2 object, because they wrote none. Decisions reconsidered or identity-corrected by confirmed actions stay that way, and their action records stay ([runbook](../../runbooks/discovery-ledger.md#one-stuck-observation)). Posters written by confirmed runs stay, as described in the [poster runbook](../../runbooks/catalog-poster-hydration.md#rollback). Facts written by a confirmed archive apply stay until that chunk's own rollback. A code revert does not remove them.

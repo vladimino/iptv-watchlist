@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Лимбо данных</title>
-  <meta name="description" content="Страница владельца: фильмы и наблюдения без прогресса с причиной ожидания; чтение и одно подтверждаемое действие над одним наблюдением.">
+  <meta name="description" content="Страница владельца: фильмы и наблюдения без прогресса с причиной ожидания; чтение и подтверждаемые действия над одним наблюдением.">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/admin.css">
@@ -17,10 +17,18 @@
   <main class="admin-shell">
     <section class="page-heading">
       <div>
-        <p class="eyebrow">ВЛАДЕЛЕЦ · ЧТЕНИЕ И ОДНО ДЕЙСТВИЕ С ПОДТВЕРЖДЕНИЕМ</p>
+        <p class="eyebrow">ВЛАДЕЛЕЦ · ЧТЕНИЕ И ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ</p>
         <h1>Лимбо данных</h1>
-        <p class="admin-intro">Фильмы, по которым обработка не продвигается, и почему: ждут ли они по правилам, застряли или требуют ручного разбора. Чтение ничего не запускает и не меняет. Единственное действие — вернуть одно терминальное наблюдение в обычную очередь резолвера — выполняется только после явного подтверждения и никого не вызывает сам.</p>
+        <p class="admin-intro">Фильмы, по которым обработка не продвигается, и почему: ждут ли они по правилам, застряли или требуют ручного разбора. Чтение ничего не запускает и не меняет. Два действия выполняются только после явного подтверждения и никого не вызывают сами: вернуть одно терминальное наблюдение в обычную очередь резолвера, или подтвердить либо отклонить один id фильма у одного наблюдения. Проверенное совпадение, которого нет в списке ниже, открывается по точному ключу.</p>
       </div>
+    </section>
+    <section class="obs-verified-open" aria-labelledby="verified-open-title">
+      <h2 id="verified-open-title">Одно проверенное совпадение</h2>
+      <p class="muted">Ключ текущего наблюдения, которое резолвер уже записал как фильм. Чтение берёт одну строку индекса проверенных совпадений этого поколения и не просматривает реестр. Неполный или устаревший индекс ничего не записывает.</p>
+      <label class="obs-identity-option">Ключ наблюдения <input id="verified-key" type="text" maxlength="200" autocomplete="off" spellcheck="false"></label>
+      <button type="button" class="admin-more" id="verified-open">Открыть наблюдение</button>
+      <p id="verified-open-hint" class="obs-identity-hint" role="status"></p>
+      <section id="verified-panel" data-obs-recovery-slot="verified" aria-label="Разбор проверенного совпадения" hidden></section>
     </section>
     <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin?view=health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limbo" aria-current="page">Лимбо</a><a href="/admin/posters">Постеры</a></nav>
     <p id="limbo-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="limbo-snapshot-text">Снимок ещё не прочитан.</span></p>
