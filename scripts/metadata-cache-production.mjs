@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Production entry for the metadata cache cutover (ADR 0073). Default is read-only.
 // --apply sends only migrations/0006_metadata_cache.sql. The D1 token is sent only to
-// https://api.cloudflare.com/client/v4. --load copies the live metadata.json
-// into D1 and leaves mode r2. --activate flips the marker r2 to d1. Each write needs its own
-// --confirm and --target iptv. This script refuses --revert, never writes R2, and never calls
-// Time Travel restore. It does not replace scripts/metadata-cache-authority.mjs, which stays
-// offline and still refuses the production database.
+// https://api.cloudflare.com/client/v4, and only for database iptv. The script does not open a
+// scratch database. --load copies the live metadata.json into D1 and leaves mode r2.
+// --activate flips the marker r2 to d1. Each write needs its own --confirm and --target iptv.
+// This script refuses --revert, never writes R2, and never calls Time Travel restore. It does
+// not replace scripts/metadata-cache-authority.mjs, which stays offline and still refuses the
+// production database.
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -93,45 +94,6 @@ export function createCacheBinding(adapter){
  };
 }
 
-// Proves the changes() fence on the scratch database only. A batch whose fence matches nothing
-// must roll back the insert from that same batch. Production is not written when this fails.
-export async function proveCacheFence(adapter){
- const drop=()=>adapter.executeRendered([
-  'DROP TABLE IF EXISTS metadata_cache_fence_probe',
-  'DROP TABLE IF EXISTS metadata_cache_fence_cas',
- ]);
- await drop();
- await adapter.executeRendered([
-  'CREATE TABLE metadata_cache_fence_probe (id INTEGER PRIMARY KEY)',
-  'CREATE TABLE metadata_cache_fence_cas (id INTEGER PRIMARY KEY CHECK (id = 1), ok INTEGER NOT NULL CHECK (ok = 1))',
-  'INSERT INTO metadata_cache_fence_cas (id, ok) VALUES (1, 1)',
- ]);
- let failure=null;
- try{
-  await adapter.executeRendered([
-   'INSERT INTO metadata_cache_fence_probe (id) VALUES (1)',
-   'UPDATE metadata_cache_fence_cas SET ok=changes() WHERE id=1',
-  ]);
-  const applied=Number((await adapter.get('SELECT COUNT(*) AS n FROM metadata_cache_fence_probe'))?.n);
-  if(applied!==1)throw new OperatorStop('fence_not_atomic',3);
-  let failed=false;
-  try{
-   await adapter.executeRendered([
-    'INSERT INTO metadata_cache_fence_probe (id) VALUES (2)',
-    'UPDATE metadata_cache_fence_probe SET id=id WHERE 0',
-    'UPDATE metadata_cache_fence_cas SET ok=changes() WHERE id=1',
-   ]);
-  }catch(error){
-   failed=error instanceof D1Error&&error.kind==='statement';
-   if(!failed)throw error;
-  }
-  const remaining=Number((await adapter.get('SELECT COUNT(*) AS n FROM metadata_cache_fence_probe'))?.n);
-  if(!failed||remaining!==1)throw new OperatorStop('fence_not_atomic',3);
- }catch(error){failure=error;}
- try{await drop();}catch(error){if(!failure)failure=error;}
- if(failure)throw failure;
-}
-
 function parseArgs(argv){
  const args=argv.slice(2);
  const value=name=>{
@@ -168,11 +130,10 @@ function productionTarget(env){
  const accountId=String(env.D1_BACKFILL_ACCOUNT_ID||'').trim();
  const apiToken=String(env.D1_BACKFILL_API_TOKEN||'').trim();
  const configuredId=String(env.D1_BACKFILL_DATABASE_ID||'').trim();
- const scratchDatabaseId=String(env.D1_BACKFILL_SCRATCH_DATABASE_ID||'').trim();
  if(!/^[0-9a-f]{32}$/.test(accountId)||!apiToken)throw new OperatorStop('configuration',2);
  if(accountId!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('account_mismatch',3);
  if(configuredId&&configuredId!==PRODUCTION_DATABASE_ID)throw new OperatorStop('database_id_mismatch',3);
- return {accountId, apiToken, endpoint:productionEndpoint(env), scratchDatabaseId, maxBatchStatements:BATCH_STATEMENTS, maxBatchBytes:BATCH_BYTES};
+ return {accountId, apiToken, endpoint:productionEndpoint(env), maxBatchStatements:BATCH_STATEMENTS, maxBatchBytes:BATCH_BYTES};
 }
 
 // This operator is production-only. An inherited endpoint must not receive the live token.
@@ -186,13 +147,6 @@ function productionEndpoint(env){
  const endpoint=url.origin+url.pathname.replace(/\/$/,'');
  if(endpoint!==DEFAULT_ENDPOINT)throw new OperatorStop('endpoint_refused',3);
  return endpoint;
-}
-
-function requireScratch(target){
- const scratchDatabaseId=target.scratchDatabaseId;
- if(!/^[0-9a-f-]{36}$/.test(scratchDatabaseId))throw new OperatorStop('configuration',2);
- if(scratchDatabaseId===PRODUCTION_DATABASE_ID)throw new OperatorStop('database_id_mismatch',3);
- return scratchDatabaseId;
 }
 
 function normalize(error){
@@ -357,14 +311,6 @@ async function openProduction(env, fetchImpl, ctx){
  return {target, adapter, binding:createCacheBinding(adapter)};
 }
 
-async function openScratch(target, fetchImpl){
- const scratchDatabaseId=requireScratch(target);
- const adapter=createD1Adapter({target, databaseId:scratchDatabaseId, fetchImpl});
- const described=await adapter.describe();
- if(described.uuid!==scratchDatabaseId||described.uuid===PRODUCTION_DATABASE_ID||described.name===PRODUCTION_DATABASE_NAME)throw new OperatorStop('scratch_identity_mismatch',3);
- return adapter;
-}
-
 function tablesPresent(snapshot){
  return CACHE_TABLES.every(name=>snapshot.tables[name]);
 }
@@ -414,8 +360,6 @@ export async function runMetadataCacheProduction({argv=process.argv, env=process
   if(parsed.command==='activate'){
    if(snapshot.marker.cacheGeneration!==snapshot.marker.mirrorGeneration||metadata.etag!==snapshot.marker.mirrorEtag)throw new OperatorStop('metadata_cache_fence',3);
   }
-  const scratch=await openScratch(opened.target, fetchImpl);
-  await proveCacheFence(scratch);
   if(parsed.command==='load')return {exit:0, result:await loadCache(opened.binding, client, metadata, source, ctx, snapshot)};
   return {exit:0, result:await activateCache(opened.binding, client, metadata, source, ctx, snapshot)};
  }catch(error){
