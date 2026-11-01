@@ -276,6 +276,31 @@ function resolveRemovalByDiary(queue,id,rating,at){
  queue.films[id]={...entry,state:'rated',rating,lastResult:'diary',checkedAt:at,nextAttemptAt:null,claim:null,lastError:null};
  return true;
 }
+// A confirmed stored rating resolves a pending entry without a request (ADR 0077). A reopened entry is pending and
+// still carries its previous rating; the fact wins. Null and absence do not resolve it and do not mean watched.
+function resolveRemovalByFact(queue,id,rating,at){
+ const entry=queue.films[id],confirmed=confirmedHalfStar(rating);
+ if(!removalQueueV2(queue)||!entry||entry.state!=='pending'||confirmed==null)return false;
+ queue.films[id]={...entry,state:'rated',rating:confirmed,lastResult:'fact',checkedAt:at,nextAttemptAt:null,claim:null,lastError:null};
+ return true;
+}
+// Due pending entries whose fact store already holds a confirmed rating, before any member-page GET. `skip` is the
+// films the current Diary page listed without a rating: that page is not proof, and the stored rating does not stand
+// in for it. One compare-and-swap per film, then the same event settle. A paused queue still takes this path.
+async function resolveDueRemovalFacts(env,now=Date.now(),skip=[]){
+ const at=new Date(now).toISOString(),held=new Set(skip||[]);
+ let queue=await loadJSON(env,REMOVAL_LOOKUP_KEY);
+ if(!removalQueueV2(queue))return queue;
+ for(const id of removalDue(queue,now,Object.keys(queue.films).length)){
+  if(held.has(id))continue;
+  const rating=await LetterboxdFacts.confirmedFilmRating(env,id);
+  if(rating==null)continue;
+  let resolved=false;
+  queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{resolved=resolveRemovalByFact(q,id,rating,at);return resolved?q:null;});
+  if(resolved)await settleRemovalRefs(env,{ids:[id],now});
+ }
+ return loadJSON(env,REMOVAL_LOOKUP_KEY);
+}
 // Version 2 retention: an entry with an unresolved reference is never deleted, by age or by the cap. A pending entry
 // still expires after 14 days (no more requests). Only entries whose references are all resolved (legacy entries
 // included) follow the version 1 rules below.
@@ -447,6 +472,7 @@ async function lookupRemovalRatings(env,incoming=[],now=Date.now(),ref=null){
    const changed=applyRemovalEnqueue(q,films,ref,at);
    return pruneRemovalQueue(q,now)||changed?q:null;
   });
+  queue=await resolveDueRemovalFacts(env,now)||queue;
   // A 403 or 429 is about the source, not the film: the whole queue waits until the backoff ends.
   if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>now){summary.stoppedBy=queue.pausedBy||'blocked';summary.pausedUntil=queue.pausedUntil;}
   const due=summary.stoppedBy?[]:removalDue(queue,now,REMOVAL_LOOKUP_BATCH);

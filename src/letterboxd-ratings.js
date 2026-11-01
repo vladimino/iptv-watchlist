@@ -6,7 +6,9 @@
 // Diary cursor; until then start and step answer not_migrated and write nothing. The RATINGS_PIPELINE binding is ignored.
 // LETTERBOXD_DIARY_HISTORY is retired and unread (ADR 0075). A migrated run always starts in the Diary phase.
 // REMOVAL_RATING_LOOKUP is retired and unread (ADR 0077). A film the Diary did not rate stays eligible for the
-// bounded member-page lookup. The binding does not skip that lookup.
+// bounded member-page lookup unless a stored fact already holds a confirmed rating and the current Diary page did
+// not list that film. A film the page lists without a rating is still looked up. The binding does not skip the
+// lookup. A null or absent rating is not watched. A new reference that reopens an entry does not by itself request.
 // ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdRatings=(()=>{
@@ -157,13 +159,14 @@ const LetterboxdRatings=(()=>{
   const prior=run.diary||null;
   if((cp.diaryPagesRead||0)>=1)return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
-  let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0;
+  let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0,unratedLids=[];
   const afterPage=async({page,rows,next,history,readAt})=>{
    const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
    const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next}).map(item=>({...item,readAt}));
    for(const item of evidence)facts[item.ratingState]++;
    const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
    for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
+   unratedLids=[...new Set(evidence.filter(item=>item.rating==null&&item.lid).map(item=>item.lid))];
    const proved=evidence.filter(item=>item.rating!=null).map(item=>({lid:item.lid,rating:result.ratings[item.lid]??item.rating}));
    if(proved.length){const at=iso(clock());await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{let changed=false;for(const item of proved)if(resolveRemovalByDiary(q,item.lid,item.rating,at)){changed=true;resolved++;}return changed?q:null;});}
   };
@@ -176,7 +179,7 @@ const LetterboxdRatings=(()=>{
   if(leaseLost)throw new LeaseLost();
   const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next;
   const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,historicalCoverage:'incomplete',counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts,overflowSuspected:diary.counts.overflowSuspected?1:0}),
-   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
+   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
@@ -189,7 +192,8 @@ const LetterboxdRatings=(()=>{
  // the version 1 rules would otherwise delete it. Then the retention rules, then at most five lookups per step with the
  // claim-before-request, three-attempt, 403/429 pause and expiry rules of the queue; the run goes on while due entries
  // remain. Each claim moves the entry's next attempt at least an hour ahead, so a run ends. A paused queue ends the
- // lookups for this run. The retired binding does not (ADR 0077). No legacy candidate means no event list.
+ // lookups for this run. The retired binding does not (ADR 0077). A confirmed stored rating resolves a due entry
+ // first, with no claim and no member-page GET, including one a new reference just reopened. No legacy candidate means no event list.
  async function removalPhase(env,run,{own,remaining,clock}){
   const legacyLink=await linkLegacyRemovalRefs(env,{limit:LEGACY_LINK_PAGE,now:clock()});
   // The counter moves only when this step's queue write committed. A lost compare-and-swap does not count another scan's page.
@@ -200,9 +204,10 @@ const LetterboxdRatings=(()=>{
   if(settled.left>0||legacyLink.more){lookup.stoppedBy=settled.left>0?'settling':'legacy_link';return {settled,lookup,more:true};}
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
   const budget=STEP_LOOKUPS;
+  const started=clock();
+  await resolveDueRemovalFacts(env,started,run.diary?.unratedLids||[]);
   let queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
   if(!removalQueueV2(queue)){lookup.stoppedBy='queue_not_migrated';return {settled,lookup,more};}
-  const started=clock();
   if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>started){lookup.stoppedBy=queue.pausedBy||'blocked';lookup.pausedUntil=queue.pausedUntil;return {settled,lookup,more};}
   for(const id of removalDue(queue,started,budget)){
    if(!(remaining()>LEASE_MARGIN_MS)){more=true;break;}

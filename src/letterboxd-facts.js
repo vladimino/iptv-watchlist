@@ -166,6 +166,25 @@ function recordRatingChange(record,incoming,effective){
   return factKey;
  }
  async function resolveAlias(env,alias){return (await readJSON(env,FACTS_KEYS.links)).value?.[alias]||null;}
+ // The effective confirmed rating for one Letterboxd id (ADR 0023, ADR 0077). The view index is not a source.
+ // The winner is the greater of the stored rating and the films-list floor. Null and absence are not a rating.
+ async function confirmedFilmRating(env,lid){
+  if(!LID.test(String(lid||'')))return null;
+  let key=await resolveAlias(env,'letterboxd:'+lid);if(!key)return null;
+  let record=null;
+  for(let hop=0;hop<2;hop++){
+   record=(await readJSON(env,recordKey(key))).value;
+   const next=record?.redirectTo||record?.migrating?.to;
+   if(!next)break;
+   if(hop===1)return null;
+   key=next;
+  }
+  if(!record)return null;
+  const {value:filmsList}=await readJSON(env,FACTS_KEYS.filmsList);
+  const floor=(await summaryObservations('films-list',filmsList,String(lid),key)).rating||null;
+  const effective=greater(record.rating||null,floor),rating=Number(effective?.value);
+  return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;
+ }
 
  // Writes observations into one record. A redirected record is followed once; a fenced one sends the write to its target.
  async function recordObservations(env,factKey,links,observations,{floors={}}={}){
@@ -577,5 +596,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
 })();

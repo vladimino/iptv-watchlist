@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPages,diaryPage,diaryRow,migrated,QUEUE,CURSOR,HISTORY,RUN,SEPARATE,H,MIN,eventKeyOf,film,plain,g} from './ratings-harness.mjs';
+import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPages,diaryPage,diaryRow,migrated,QUEUE,CURSOR,HISTORY,RUN,SEPARATE,H,MIN,DAY,eventKeyOf,film,plain,g} from './ratings-harness.mjs';
 
 // ADR 0060 decisions 4, 5, 7 and 8, and ADR 0069: the ratings run record, its lease and checkpoints, the start and
 // step answers, stale runs, isolation, scheduled starts with no minimum interval, and a status that only reads.
@@ -221,6 +221,66 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(bucket.value(RUN).cause,'blocked');
  eq(net.memberFetches().map(url=>url.split('/').at(-2)),['due']);
  assert.equal(bucket.value(QUEUE).films.due.state,'rated');
+}
+
+// 5g. ADR 0077 decision 2. A confirmed stored rating is not requested, including after addRemovalRef reopens a rated
+// entry. The event receives the fact-precedence winner, not the stale queue rating. A null rating is not watched.
+{
+ const {bucket,env,R,net,ctx}=setup({pages:0});
+ const Facts=g(ctx,'LetterboxdFacts');
+ const oldAt=at(T0-2*DAY),ownerAt=at(T0-DAY),newAt=at(T0-H);
+ const oldKey=eventKeyOf(oldAt,'run-known-old'),newKey=eventKeyOf(newAt,'run-known-new'),blankKey=eventKeyOf(newAt,'run-blank');
+ migrated(bucket,{films:{
+  known:{url:film('known').url,state:'rated',rating:3,attempts:1,enqueuedAt:oldAt,nextAttemptAt:null,lastAttemptAt:oldAt,lastResult:'saved',checkedAt:oldAt,claim:null,refs:[{eventKey:oldKey,sourceRunId:'run-old',at:oldAt,resolved:true}]},
+  blank:{url:film('blank').url,state:'pending',attempts:0,enqueuedAt:newAt,nextAttemptAt:newAt,lastAttemptAt:null,lastResult:null,claim:null,refs:[]},
+ }});
+ await Facts.recordFilmFacts(env,'known',{watched:true,rating:3},{observedAt:oldAt,source:'letterboxd_diary',sourceRef:'diary:viewing:known'});
+ await Facts.recordFilmFacts(env,'known',{rating:4.5},{observedAt:ownerAt,source:'owner'});
+ await Facts.recordFilmFacts(env,'blank',{watched:true,rating:null},{observedAt:ownerAt,source:'owner'});
+ assert.equal(await Facts.confirmedFilmRating(env,'known'),4.5);
+ assert.equal(await Facts.confirmedFilmRating(env,'blank'),null);
+ await ctx.writeEvent(env,{id:'run-known-old',type:'watchlist',at:oldAt,total:0,baseline:false,added:[],removed:[{id:'known',title:'Known',year:1999,rating:3,ratingObservedAt:oldAt}]});
+ await ctx.writeEvent(env,{id:'run-known-new',type:'watchlist',at:newAt,total:0,baseline:false,added:[],removed:[{id:'known',title:'Known',year:1999}]});
+ await ctx.writeEvent(env,{id:'run-blank',type:'watchlist',at:newAt,total:0,baseline:false,added:[],removed:[{id:'blank',title:'Blank',year:2002}]});
+ await g(ctx,'enqueueRemovalRefs')(env,[film('known')],{eventKey:newKey,sourceRunId:'run-new',at:newAt});
+ await g(ctx,'enqueueRemovalRefs')(env,[film('blank')],{eventKey:blankKey,sourceRunId:'run-new',at:newAt});
+ assert.equal(bucket.value(QUEUE).films.known.state,'pending','a new reference reopens the rated entry');
+ assert.equal(bucket.value(QUEUE).films.known.rating,3,'the stale queue rating stays until the fact resolves it');
+ assert.equal(bucket.value(QUEUE).films.known.attempts,0);
+ net.diary.set(1,diaryPage([diaryRow('other',8,'2026-10-29','99001')],false));
+ net.members.set('known',1);
+ const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ await finishDiary(R,env,runId);
+ const reply=plain(await R.step(env,{runId}));
+ assert.equal(reply.reason,'finished');
+ assert.equal(reply.step.lookups,1);
+ eq(net.memberFetches().map(url=>url.split('/').at(-2)),['blank']);
+ const queue=bucket.value(QUEUE);
+ assert.equal(queue.films.known.state,'rated');
+ assert.equal(queue.films.known.rating,4.5);
+ assert.equal(queue.films.known.lastResult,'fact');
+ assert.equal(queue.films.known.attempts,0,'a stored rating is not claimed');
+ assert.equal(queue.films.known.claim,null);
+ assert.ok(queue.films.known.refs.every(ref=>ref.resolved===true));
+ assert.equal(bucket.value(newKey).removed[0].rating,4.5);
+ assert.equal(bucket.value(oldKey).removed[0].rating,3,'a rating already on an event stays');
+ assert.equal(queue.films.blank.state,'pending');
+ assert.notEqual(queue.films.blank.state,'rated');
+ assert.equal(queue.films.blank.attempts,1,'the unrated film still takes the claim');
+ assert.equal(bucket.value(blankKey).removed[0].rating,undefined);
+ const blankFact=bucket.value('letterboxd/facts/films/lb-blank.json');
+ assert.equal(blankFact.rating.value,null);
+ assert.equal(blankFact.watched.value,true,'the null rating did not become a new watched write');
+ const knownShot=plain(queue.films.known),eventShot=plain(bucket.value(newKey)),blankShot=plain(queue.films.blank);
+ await g(ctx,'enqueueRemovalRefs')(env,[film('known')],{eventKey:newKey,sourceRunId:'run-new',at:newAt});
+ assert.equal(bucket.value(QUEUE).films.known.state,'rated','the same reference does not reopen it');
+ net.fetches.length=0;
+ const second=plain(await R.start(env,{trigger:'manual'}));
+ await drain(R,env,second.runId);
+ assert.equal(net.memberFetches().length,0);
+ eq(bucket.value(QUEUE).films.known,knownShot);
+ eq(bucket.value(newKey),eventShot);
+ eq(bucket.value(QUEUE).films.blank,blankShot);
 }
 
 // 5b. Settlements are bounded per step: 150 unresolved references take two steps, the lookups come after them.
@@ -502,4 +562,4 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(net.diaryFetches().length,2);
 }
 
-console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause, the retired binding still looks up an unrated film and skips one the Diary rated, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');
+console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause, the retired binding still looks up an unrated film and skips one the Diary rated, a stored fact rates a reopened entry without a member-page GET, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');
