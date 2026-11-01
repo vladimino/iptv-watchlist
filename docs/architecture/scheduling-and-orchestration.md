@@ -117,16 +117,19 @@ sequenceDiagram
     opt D1_ENRICHMENT_WRITE is dry or on
         Worker->>R2: Read published enrichment records
         Worker->>D1: Read projection change keys
+        opt Schema v6 and the metadata cache marker is d1
+            Worker->>D1: Read metadata cache records
+        end
     end
     opt Flag on and source inputs complete
         Worker->>D1: Atomically write changed Films and Persons with keys
-        opt Schema v5 and film_sync_state present
+        opt Schema v5 or v6 with film_sync_state present
             Worker->>D1: Write metadata sync clocks with checkpoint
         end
     end
 ```
 
-The cron expression is `37 * * * *`. When `D1_ENRICHMENT_WRITE` is unset, the trigger performs no R2 reads or D1 writes. With `dry`, it reads the source and change keys but never writes. With `on`, the projector writes changed Films and Persons in existing fenced batches. At schema v5, `film_sync_state` uses that same writer: sync clocks for an already-changing Film share its batch, while a clock-only change uses its own fenced batch. The migration is not applied by a code deploy.
+The cron expression is `37 * * * *`. When `D1_ENRICHMENT_WRITE` is unset, the trigger performs no R2 reads or D1 writes. With `dry`, it reads the source and change keys but never writes. With `on`, the projector writes changed Films and Persons in existing fenced batches. At schema v5, `film_sync_state` uses that same writer: sync clocks for an already-changing Film share its batch, while a clock-only change uses its own fenced batch. That schema is applied. At schema v6, the same clocks are written, and when the metadata cache marker is `d1` the metadata records come from D1. The projector still does not write R2 or the cache. Migration `0006` is not applied by a code deploy, and the marker stays `r2` until a separate activation ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md)).
 
 The drift monitor is a read-only automation in the same registry. Its expected recurrence, after the owner-approved registry change recorded on 2026-10-31, is daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, enabled. It reads the live entries of the daily EPG task, the hourly task and the Ratings Task, then `epg_status` and read-only `ratings_sync_status` through the same Access-protected MCP, and only notifies the owner. It cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. The Ratings Task's own run is drawn in the next diagram. The daily commit does not read Diary. `RATINGS_PIPELINE` is retired ([ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md), Proposed): an incomplete migration fails closed, and a migrated one stays on the separate pipeline whatever the leftover binding holds. This page does not edit the monitor or any task.
 
