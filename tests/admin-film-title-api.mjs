@@ -69,7 +69,7 @@ const worker = context.worker;
 const resetCache = () => vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', context);
 const execution = {waitUntil() { throw new Error('no background work'); }};
 
-const film = {id: 'd5', tmdbId: '555', title: 'Dict Film', original: 'Dict Film', year: 2001, metadataAt: AT, synopsis: 's', peopleVersion: 1, directors: [], actors: [], shows: []};
+const film = {id: 'd5', tmdbId: '555', title: 'Dict Film', original: 'Dict Film', year: 2001, metadataAt: AT, synopsis: 's', peopleVersion: 1, directors: [], actors: [], shows: [], aliases: ['Прокатное имя', DICTIONARY]};
 function seed({overlay = true} = {}) {
   records.clear(); etags.clear(); gets = []; puts = []; failPuts = 0; race = null; corruptReadback = false; overlayGets = 0; resetCache();
   records.set(POINTER, {phase: 'published', programmeRunId: G1, publishedAt: AT}); etags.set(POINTER, 'ptr-1');
@@ -103,6 +103,16 @@ assert.equal(detail.body.item.preferred, DICTIONARY);
 assert.equal(detail.body.item.titleReview.filmId, 'film:d5');
 assert.equal(detail.body.item.titleReview.preferred.value, DICTIONARY);
 assert.equal(detail.body.item.titleReview.preferred.authority, null, 'a dictionary review is not an owner review');
+const options = detail.body.item.titleReview.options;
+const dictionaryOption = options.find(option => option.value === 'Из словаря');
+const programmeOption = options.find(option => option.value === 'Прокатное имя');
+assert.equal(dictionaryOption.origin, 'alias');
+assert.equal(dictionaryOption.provenance.source, 'dictionary');
+assert.equal(programmeOption.origin, 'alias');
+assert.equal(programmeOption.provenance.source, 'programme');
+assert.equal(options.filter(option => option.value === DICTIONARY).length, 1, 'the preferred dictionary title is not also an alias choice');
+assert.ok(detail.body.item.aliases.some(alias => alias.value === 'Из словаря' && alias.provenance.source === 'dictionary'));
+assert.ok(detail.body.item.aliases.some(alias => alias.value === 'Прокатное имя' && alias.provenance.source === 'programme'));
 assert.deepEqual(puts, [], 'GET writes nothing');
 const version = detail.body.item.titleReview.version;
 const pin = detail.body.pin;
@@ -291,6 +301,21 @@ seed();
   const seen = await call('/api/admin/films/film%3Ad5');
   assert.equal(seen.body.item.preferred, OWNER, 'a failed readback still stored the title, and the next read shows it');
   assert.equal(seen.body.item.titleReview.reviews.length, 1);
+}
+
+seed();
+{
+  detail = await call('/api/admin/films/film%3Ad5');
+  const picked = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias-dictionary', mode: 'alias', value: 'Из словаря', expectedVersion: detail.body.item.titleReview.version});
+  assert.equal(picked.status, 200, JSON.stringify(picked.body));
+  assert.equal(picked.body.changed, true);
+  assert.equal(overlay().films.d5.localization.value, 'Из словаря');
+  const again = await call('/api/admin/films/film%3Ad5');
+  const programmePick = await post('/api/admin/films/d5/title-review', {filmId: 'film:d5', requestId: 'req-alias-programme', mode: 'alias', value: 'Прокатное имя', expectedVersion: again.body.item.titleReview.version});
+  assert.equal(programmePick.status, 200, JSON.stringify(programmePick.body));
+  assert.equal(programmePick.body.changed, true);
+  assert.equal(overlay().films.d5.localization.value, 'Прокатное имя');
+  assert.ok(overlay().films.d5.aliases.some(alias => alias.value === 'Из словаря'));
 }
 
 console.log('admin film title review: conditional overlay write, replay, conflict, programme and watchlist');

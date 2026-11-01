@@ -63,7 +63,7 @@ function programmeOf(run){
   {id:'q2',tmdbId:'900002',title:'Тихая гавань',original:'Quiet Harbor',titleRu:'Тихая гавань',titleStatus:'provisional',year:2018,metadataAt:iso(-40),synopsis:'s',peopleVersion:1,directors:[],actors:[noName],shows:[]},
   {id:'b3',title:'Blank Reel',original:'Blank Reel',year:2024,directors:[],actors:[],shows:[]},
   {id:'c4',tmdbId:'900004',title:'Мой конфликт',original:'Conflict',titleRu:'Мой конфликт',titleStatus:'verified',titleConflicts:[{value:'Конфликт',source:'dictionary',reason:'owner_kept',authority:'owner'}],metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]},
-  {id:'d5',tmdbId:'555',title:'Dict Film',original:'Dict Film',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]},
+  {id:'d5',tmdbId:'555',title:'Dict Film',original:'Dict Film',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[],aliases:['Прокатное имя']},
   {id:'e6',tmdbId:'666',title:'Другое название',original:'Orig Title',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]},
  ];
  for(let index=0;index<30;index++)films.push({id:'p'+String(index).padStart(2,'0'),tmdbId:String(7000+index),title:'Маяк '+index,original:'Beacon '+index,titleRu:'Маяк '+index,titleStatus:'verified',metadataAt:iso(-1),synopsis:'s',peopleVersion:1,directors:[],actors:[],shows:[]});
@@ -123,6 +123,10 @@ for(const key of ['fingerprint','prediction','predictionHistory','shows','synops
 r=await call('/api/admin/films?q=1137844');assert.equal(r.body.items[0].rank,0,'external id rank');
 r=await call('/api/admin/films?q=словарный');
 assert.equal(r.body.items[0].id,'film:d5');assert.equal(r.body.items[0].localization.status,'reviewed');assert.equal(r.body.items[0].preferred,'Словарный фильм');
+r=await call('/api/admin/films?q='+encodeURIComponent('прокатное'));
+assert.equal(r.body.items[0].storedId,'d5');
+assert.ok(r.body.items[0].aliases.some(alias=>alias.value==='Прокатное имя'&&alias.provenance.source==='programme'));
+assert.ok(r.body.items[0].aliases.some(alias=>alias.value==='Из словаря'&&alias.provenance.source==='dictionary'));
 r=await call('/api/admin/films?q=другое');
 assert.equal(r.body.items[0].id,'film:e6');assert.equal(r.body.items[0].epgTitle,'Другое название');
 assert.ok(r.body.items[0].aliases.some(alias=>alias.value==='Другое название'&&alias.provenance.source==='epg'));

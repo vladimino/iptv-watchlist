@@ -216,6 +216,46 @@ function adminTitleForm(record) {
   return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Русское название</h3><p>Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b>. Статус: ${adminEscape(preferred.status || 'нет')}. Источник: ${adminEscape(preferred.authority || preferred.source || 'нет')}.</p><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}"><fieldset><legend>Выбрать из известных</legend><div class="title-review-options">${options || '<p class="muted">Нет вариантов.</p>'}</div></fieldset><label>Или своё название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><label class="title-review-accept"><input type="checkbox" data-title-accept> Записать это название в каталог. Это одно изменение одного фильма.</label><button type="submit" data-title-save disabled>Записать название</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form><h3>История правок</h3>${history ? `<ul>${history}</ul>` : '<p class="muted">Записей ещё нет.</p>'}</section>`;
 }
 
+function adminRestoreTitleAttempt(form, kept) {
+  if (!form || !kept || !kept.requestId) return;
+  const manual = form.querySelector('[data-title-manual]');
+  const basis = form.querySelector('[name="basis"]');
+  if (manual) manual.value = kept.mode === 'manual' ? kept.value : '';
+  if (basis) basis.value = kept.basis || '';
+  if (kept.mode === 'alias') {
+    for (const choice of form.querySelectorAll('input[name="title-review-choice"]')) choice.checked = choice.value === kept.value;
+  }
+  const accept = form.querySelector('[data-title-accept]');
+  if (accept) accept.checked = false;
+  const save = form.querySelector('[data-title-save]');
+  if (save) save.disabled = true;
+  delete form.dataset.busy;
+  form.dataset.requestId = kept.requestId;
+}
+
+// A 503 readback_failed can follow a put that already landed. The reread decides the sentence.
+// Until the card shows the submitted title, the same requestId and payload stay for one replay.
+function adminFinishUnknownTitle(kept, view) {
+  const detail = document.querySelector('#admin-detail');
+  const form = detail && detail.querySelector('[data-title-review]');
+  const preferred = view && view.entity && (view.entity.preferred || (view.entity.titleReview && view.entity.titleReview.preferred && view.entity.titleReview.preferred.value));
+  const landed = preferred != null && preferred === kept.value;
+  if (form && landed) {
+    const result = form.querySelector('[data-title-result]');
+    if (result) {
+      result.textContent = 'Название записано. Карточка сверена.';
+      result.focus();
+    }
+    return;
+  }
+  if (form) adminRestoreTitleAttempt(form, kept);
+  const result = form && form.querySelector('[data-title-result]');
+  if (result) {
+    result.textContent = 'Неизвестно, записалось ли название. Повторите отправку: это будет та же запись, без второй правки.';
+    result.focus();
+  }
+}
+
 function adminBindTitleReview(detail) {
   const form = detail.querySelector('[data-title-review]');
   if (!form) return;
@@ -248,6 +288,14 @@ function adminBindTitleReview(detail) {
         sync();
         result.textContent = 'Нет ответа от сервера. Можно повторить: это будет та же запись, без второй правки.';
         result.focus();
+        return;
+      }
+      if (response.status === 503 && response.error === 'readback_failed') {
+        sync();
+        const kept = {requestId: form.dataset.requestId, value, mode: body.mode, basis: body.basis || ''};
+        result.textContent = 'Неизвестно, записалось ли название. Сверяю карточку.';
+        result.focus();
+        Promise.resolve(onAdminRefresh()).then(view => adminFinishUnknownTitle(kept, view));
         return;
       }
       accept.checked = false;

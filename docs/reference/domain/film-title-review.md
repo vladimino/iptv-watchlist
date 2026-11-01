@@ -19,7 +19,7 @@ A title review is **not** an identity merge or split, a bulk update, a re-enrich
 | `filmId`, `canonicalIdentity` | Copied from the Film; shown, never edited here |
 | `version` | Compare-and-set token, see below |
 | `preferred` | `value` (`preferredTitle(film)`), `status` (`missing` / `provisional` / `reviewed`), `source`, `authority`, `reviewedAt` (only when reviewed), `basis` |
-| `options[]` | Selectable texts in display order: `value`, `origin` (`preferred`, `alias`, `original`, `epg`), `provenance`, `preferred` flag. Duplicate texts collapse to their first occurrence. `filmView` already seeds the original and EPG titles as aliases, so they usually appear as `alias` with `provenance.source` `letterboxd` or `epg` |
+| `options[]` | Selectable texts in display order: `value`, `origin` (`preferred`, `alias`, `original`, `epg`), `provenance`, `preferred` flag. Duplicate texts collapse to their first occurrence. `filmView` already seeds the original and EPG titles as aliases, so they usually appear as `alias` with `provenance.source` `letterboxd` or `epg`. The admin record merges two further lists onto that Film before `titleReviewState`: the published film's `aliases` (`provenance.source` `programme`; an entry that already carries provenance keeps it) and the dictionary entry's `aliases` (`provenance.source` `dictionary`). A text equal to the current preferred value is not added again |
 | `reviews[]` | The audit trail stored on the Film as `titleReviews` |
 | `heldConflicts` | Count of `localizationConflicts`, the automatic values held back by reviewed precedence |
 

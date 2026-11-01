@@ -23,7 +23,7 @@ A Film projection can already expose:
 | --- | --- | --- |
 | `id` (`film:…`), `canonicalIdentity` (`tmdb:<id>` or null) | Derived from Letterboxd id, trusted TMDB id, or a conflict id | Storage id (`lid`, `tmdb_<id>`) is separate; the reader keeps it as `storedId` on the lifecycle body |
 | `externalIds[]` | `scheme`, `value`, `trusted`, `conflicting`, `provenance` | A trusted TMDB id is set only when identity is `resolved` and there is a single id |
-| `aliases[]` | `kind: title`, `value`, `provenance.source` (`letterboxd`, `epg`, and later merges) | Alias text is not a reviewed title |
+| `aliases[]` | `kind: title`, `value`, `provenance.source` (`letterboxd`, `epg`, and later merges). The admin reader also merges the published film's alias strings (`programme`) and the dictionary entry's `aliases` (`dictionary`) | Alias text is not a reviewed title |
 | `originalTitle`, `epgTitle` | Facts already on the record | |
 | `localization` | `status` `missing` / `provisional` / `reviewed`, `value`, dimension envelope | The envelope is not the full title dictionary |
 | `localizationConflicts[]` | Held automatic overwrites | |

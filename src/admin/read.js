@@ -88,6 +88,23 @@ function adminConflicts(list){
 // A Film record of the query library from one programme film: identity from the stored ids, localization from the owner
 // dictionary and the provisional title cache, metadata from the fields the film already carries. The dimensions this
 // snapshot cannot see (fingerprint, prediction) are left off the record instead of being reported as missing.
+// filmView only seeds the original and EPG titles. The published film's own alias list and the
+// dictionary entry's aliases are known title variants too, and the picker is built from this record.
+function adminExtraTitleAliases(film,dictionary,preferred){
+ const incoming=[];
+ const push=(value,provenance)=>{
+  if(typeof value!=='string')return;
+  const text=value.replace(/\s+/g,' ').trim();
+  if(!text||text===preferred)return;
+  incoming.push({kind:'title',value:text,provenance:provenance||{source:'programme'}});
+ };
+ for(const alias of Array.isArray(film?.aliases)?film.aliases:[]){
+  if(typeof alias==='string')push(alias,{source:'programme'});
+  else if(alias&&typeof alias.value==='string')push(alias.value,alias.provenance||{source:'programme'});
+ }
+ for(const alias of Array.isArray(dictionary?.aliases)?dictionary.aliases:[])push(alias,{source:'dictionary'});
+ return incoming;
+}
 function adminFilmRecord(film,titles,clock,reviews){
  if(!film||typeof film!=='object')return null;
  const id=film.id==null?'':String(film.id);
@@ -95,16 +112,19 @@ function adminFilmRecord(film,titles,clock,reviews){
  const letterboxdId=id.startsWith('tmdb_')?null:id;
  const tmdbId=film.tmdbId==null||film.tmdbId===''?null:String(film.tmdbId);
  const original=film.original||null,titleRu=film.titleRu||null;
+ const dictionary=reviewedTitle(film)||null;
  const facts={
   letterboxdId,tmdbId,conflictingTmdbIds:null,localId:letterboxdId?'film:'+letterboxdId:null,now:clock,decision:null,
   metadata:{present:!!(film.metadataAt||film.discoveredAt||film.synopsis),metadataAt:film.metadataAt||film.discoveredAt||null,peopleVersion:film.peopleVersion??((film.directors||film.actors)?1:null),peopleNamesVersion:film.peopleNamesVersion,synopsisPresent:!!(film.synopsis||film.synopsisFetchedAt),failure:null,source:letterboxdId?'letterboxd':'tmdb'},
-  title:{original,titleRu,titleStatus:film.titleStatus||null,dictionary:reviewedTitle(film)||null,provisional:titles?.[id]||null,epgTitle:film.title&&film.title!==original&&film.title!==titleRu?film.title:null},
+  title:{original,titleRu,titleStatus:film.titleStatus||null,dictionary,provisional:titles?.[id]||null,epgTitle:film.title&&film.title!==original&&film.title!==titleRu?film.title:null},
   fingerprint:{present:false},prediction:{present:false},
  };
  const view=filmView(facts);
  if(!view)return null;
  const {fingerprint,prediction,predictionHistory,...record}=view;
- return adminApplyOwnerFilm({...record,storedId:id,preferred:view.localization?.value??null,year:Number.isFinite(film.year)?film.year:null,localizationConflicts:adminConflicts(film.titleConflicts)},reviews&&reviews[id]);
+ const preferred=view.localization?.value??null;
+ const aliases=typeof mergeAliases==='function'?mergeAliases(record.aliases,adminExtraTitleAliases(film,dictionary,preferred)):record.aliases;
+ return adminApplyOwnerFilm({...record,aliases,storedId:id,preferred,year:Number.isFinite(film.year)?film.year:null,localizationConflicts:adminConflicts(film.titleConflicts)},reviews&&reviews[id]);
 }
 function adminApplyOwnerFilm(record,entry){
  const localization=entry&&entry.localization;
