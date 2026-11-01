@@ -463,7 +463,7 @@ assert.ok(requests.every(request => request.method === 'GET'));
 assert.ok((listeners.get('#admin-detail') || []).some(item => item.type === 'input'));
 assert.ok((listeners.get('#admin-detail') || []).some(item => item.type === 'change'));
 assert.equal(run(`adminNameCommitUnknown({ok:false,status:0,error:'network'})`), true);
-assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'commit_unverified'})`), true);
+assert.equal(run(`adminNameCommitUnknown({ok:false,status:503,error:'readback_failed'})`), true);
 assert.equal(run(`adminNameCommitUnknown({ok:false,status:500,error:'http_500'})`), true);
 assert.equal(run(`adminNameCommitUnknown({ok:false,status:412,error:'version_conflict'})`), false);
 assert.equal(run(`adminNameCommitUnknown({ok:false,status:409,error:'request_id_reused'})`), false);
@@ -491,7 +491,7 @@ await run(`(async () => {
   adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:0, error:'network', body:null}; };
   await onAdminNameSubmit({target:form, preventDefault(){}});
   await onAdminNameSubmit({target:form, preventDefault(){}});
-  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:503, error:'commit_unverified', body:{error:'commit_unverified'}}; };
+  adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:503, error:'readback_failed', body:{error:'storage_unavailable', reason:'readback_failed'}}; };
   await onAdminNameSubmit({target:form, preventDefault(){}});
 })()`);
 const namePosts = run('__namePosts');
@@ -499,7 +499,7 @@ assert.equal(namePosts.length, 3);
 assert.equal(namePosts[0].requestId, namePosts[1].requestId);
 assert.equal(namePosts[1].requestId, namePosts[2].requestId);
 assert.equal(run('__nameForm.dataset.requestId'), namePosts[0].requestId);
-assert.equal(run('__nameStatus.textContent'), 'Нет подтверждения, что имя записано. Можно повторить: это будет та же запись, без второй правки.');
+assert.equal(run('__nameStatus.textContent'), 'Неизвестно, записалось ли имя. Сверяю карточку.');
 assert.equal(run('__nameButton.disabled'), false);
 await run(`(async () => {
   adminPost = async (path, body) => { globalThis.__namePosts.push(JSON.parse(JSON.stringify(body))); return {ok:false, status:412, error:'version_conflict', body:{error:'version_conflict'}}; };

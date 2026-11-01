@@ -7,14 +7,16 @@ async function adminPost(path,body,options={}){
  catch(error){return {ok:false,status:0,error:error&&error.name==='AbortError'?'aborted':'network',body:null};}
  let payload=null;
  try{payload=await response.json();}catch{payload=null;}
- if(!response.ok)return {ok:false,status:response.status,error:payload&&typeof payload.error==='string'?payload.error:'http_'+response.status,body:payload};
+ const reason=payload&&(typeof payload.reason==='string'?payload.reason:typeof payload.error==='string'?payload.error:null);
+ if(!response.ok)return {ok:false,status:response.status,error:reason||('http_'+response.status),body:payload};
  return {ok:true,status:response.status,error:null,body:payload};
 }
 // A missing response, or a response that cannot prove the put, keeps the same requestId. A definite
 // refusal (the server named a command or storage error and did not leave the outcome unknown) does not.
+// readback_failed is the shared reason inside 503 storage_unavailable: the put may already have landed.
 function adminNameCommitUnknown(result){
  if(!result||result.ok)return false;
- if(result.error==='network'||result.error==='aborted'||result.error==='commit_unverified')return true;
+ if(result.error==='network'||result.error==='aborted'||result.error==='readback_failed')return true;
  if(!result.status)return true;
  return result.status>=500&&result.error!=='review_unconditional'&&result.error!=='programme_unavailable'&&result.error!=='storage_unavailable';
 }

@@ -57,7 +57,7 @@ const ERROR_TEXT = {
   review_unconditional: 'Сохранённое имя нельзя перезаписать без версии объекта.',
   body_too_large: 'Запрос слишком большой.',
   review_store_unreadable: 'Хранилище имён записано в неожиданном виде. Сохранение остановлено.',
-  commit_unverified: 'Нет подтверждения, что имя записано. Можно повторить: это будет та же запись, без второй правки.',
+  readback_failed: 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.',
 };
 const SKEW_TEXT = {
   titles_newer: 'словарь названий новее программы',
@@ -354,6 +354,43 @@ function adminNameCommand(form, record, requestId) {
   return {command: {personId: record.id, requestId, mode: manual ? 'manual' : 'alias', value: manual || selected.value, expectedVersion: record.nameReview.version, ...(basis ? {basis} : {}), ...(roles.length ? {roles} : {})}};
 }
 
+function adminRestoreNameAttempt(form, kept) {
+  if (!form || !kept || !kept.requestId) return;
+  const manual = form.querySelector('#admin-name-manual');
+  const basis = form.querySelector('#admin-name-basis');
+  if (manual) manual.value = kept.mode === 'manual' ? kept.value : '';
+  if (basis) basis.value = kept.basis || '';
+  if (kept.mode === 'alias') {
+    for (const choice of form.querySelectorAll('input[name="person-name-alias"]')) choice.checked = choice.value === kept.value;
+  }
+  const wanted = new Set((kept.roles || []).map(role => role.id));
+  for (const box of form.querySelectorAll('input[name="person-name-role"]')) box.checked = wanted.has(box.value);
+  form.dataset.requestId = kept.requestId;
+}
+
+// A 503 readback_failed can follow a put that already landed. The reread decides the sentence.
+// Until the card shows the submitted name, the same requestId and payload stay for one replay.
+function adminFinishUnknownName(kept, view) {
+  const detail = document.querySelector('#admin-detail');
+  const form = detail && detail.querySelector('#admin-name-form');
+  const preferred = view && view.entity && (view.entity.preferred || (view.entity.nameReview && view.entity.nameReview.preferred && view.entity.nameReview.preferred.value));
+  const landed = preferred != null && preferred === kept.value;
+  if (form && landed) {
+    const result = form.querySelector('#admin-name-status');
+    if (result) {
+      result.textContent = 'Имя записано. Карточка сверена.';
+      if (typeof result.focus === 'function') result.focus();
+    }
+    return;
+  }
+  if (form) adminRestoreNameAttempt(form, kept);
+  const result = form && form.querySelector('#admin-name-status');
+  if (result) {
+    result.textContent = 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.';
+    if (typeof result.focus === 'function') result.focus();
+  }
+}
+
 function onAdminNameEdit(event) {
   const target = event.target;
   const form = target && target.id === 'admin-name-form' ? target : target && target.closest ? target.closest('#admin-name-form') : null;
@@ -377,9 +414,22 @@ async function onAdminNameSubmit(event) {
   status.textContent = 'Сохраняем…';
   const result = await adminPost('/people/'+encodeURIComponent(entity.id)+'/name-review', built.command);
   button.disabled = false;
+  if (result.error === 'network') {
+    status.textContent = 'Нет ответа от сервера. Можно повторить: это будет та же запись, без второй правки.';
+    if (typeof status.focus === 'function') status.focus();
+    return;
+  }
+  if (result.status === 503 && result.error === 'readback_failed') {
+    const kept = {requestId, value: built.command.value, mode: built.command.mode, basis: built.command.basis || '', roles: built.command.roles || []};
+    status.textContent = 'Неизвестно, записалось ли имя. Сверяю карточку.';
+    if (typeof status.focus === 'function') status.focus();
+    const view = await onAdminRefresh();
+    adminFinishUnknownName(kept, view);
+    return;
+  }
   if (!result.ok) {
     if (!adminNameCommitUnknown(result)) delete form.dataset.requestId;
-    status.textContent = adminNameCommitUnknown(result) ? ERROR_TEXT.commit_unverified : adminErrorText(result.error);
+    status.textContent = adminNameCommitUnknown(result) ? ERROR_TEXT.readback_failed : adminErrorText(result.error);
     if (typeof status.focus === 'function') status.focus();
     return;
   }

@@ -6,7 +6,7 @@ const ADMIN_PERSON_NAME_MAX=8000;
 const ADMIN_REVIEW_STATUS={
  missing_person:404,person_mismatch:400,missing_request_id:400,identity_change_forbidden:400,invalid_mode:400,invalid_name:400,invalid_basis:400,invalid_roles:400,
  rejected_identity:409,version_conflict:412,unknown_alias:400,unknown_role:400,unrelated_role:400,rejected_role:409,role_version_conflict:412,request_id_reused:409,
- review_incomplete:409,review_store_unreadable:409,storage_conflict:409,review_unconditional:503,commit_unverified:503,
+ review_incomplete:409,review_store_unreadable:409,storage_conflict:409,review_unconditional:503,
 };
 function adminPersonNameId(pathname){
  const prefix='/api/admin/people/',suffix='/name-review';
@@ -96,7 +96,7 @@ async function adminPersonNameRoute(request,env,url){
    try{fresh=await adminLoadSnapshot(env,false);}catch{fresh=null;}
    if(!adminPersonNameVerified(fresh,result)){
     ADMIN_SNAPSHOT_CACHE=null;
-    return adminReviewFailure({reason:'commit_unverified'});
+    return json({error:'storage_unavailable',reason:'readback_failed'},503);
    }
    return json(adminPersonNameAnswer(fresh,result.person.id,result));
   }

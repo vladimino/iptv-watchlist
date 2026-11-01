@@ -201,7 +201,8 @@ async function expectUnverified(kind){
  const saved=await post(body);
  assert.equal(fault,null,kind+' readback consumed the fault');
  assert.equal(saved.status,503,kind+' '+JSON.stringify(saved.body));
- assert.equal(saved.body.error,'commit_unverified');
+ assert.equal(saved.body.error,'storage_unavailable');
+ assert.equal(saved.body.reason,'readback_failed');
  assert.notEqual(saved.body.ok,true,kind+' is not a confirmed save');
  assert.equal(saved.body.nameReview,undefined);
  const storedPeople=records.get('admin/owner-reviews.json').people;
