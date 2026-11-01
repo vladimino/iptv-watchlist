@@ -215,7 +215,7 @@ function element(selector) {
     focus() {}, insertAdjacentHTML(position, markup) {this.innerHTML += markup;}, remove() {}, addEventListener() {},
   };
 }
-const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body', '#verified-open', '#verified-key', '#verified-panel', '#verified-open-hint'].map(selector => [selector, element(selector)]));
 const dynamic = new Map();
 const results = nodes.get('#limbo-results');
 const document = {

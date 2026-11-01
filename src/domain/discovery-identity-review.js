@@ -36,15 +36,18 @@ export function parseIdentityVersion(version) {
   return match ? {decisionHash: match[1], effect: match[2], tmdbId: match[3]} : null;
 }
 
-// The published generation pointer is the authority marker this route knows. An absent identity/programme marker means
-// today's R2 resolution map. Any other marker, or a pointer that is not a published generation, is unknown: the caller
-// writes nothing. This does not read D1 and does not treat a future published-EPG mode as permission to move decisions.
-export function identityStoreAuthority(generation) {
+// The published generation pointer is the R2 authority marker this route knows. An absent identity/programme marker
+// means today's R2 resolution map. Any other marker, or a pointer that is not a published generation, is unknown.
+// `publishedEpg` is the caller's read of the published-EPG authority, when a database binding exists. `{supported:false}`
+// (mode `d1`, or a schema that claims that store and cannot be read) refuses even when the R2 pointer still looks like
+// today's generation. A missing binding is omitted and keeps the R2 rule. This function does not read D1.
+export function identityStoreAuthority(generation, publishedEpg = null) {
   if (!identityObject(generation) || generation.phase !== 'published' || typeof generation.programmeRunId !== 'string' || !generation.programmeRunId) {
     return {authority: null, programmeRunId: null, reason: 'unknown_authority'};
   }
   const marker = generation.identityAuthority ?? generation.programmeAuthority ?? null;
   if (marker != null && marker !== 'r2') return {authority: null, programmeRunId: generation.programmeRunId, reason: 'unknown_authority'};
+  if (publishedEpg && publishedEpg.supported === false) return {authority: null, programmeRunId: generation.programmeRunId, reason: 'unknown_authority'};
   return {authority: 'r2', programmeRunId: generation.programmeRunId, reason: null};
 }
 
@@ -106,7 +109,8 @@ function showWhen(series) {
 export function identityOffer(input) {
   const record = identityObject(input?.record) ? input.record : null;
   const decision = identityObject(record?.decision) ? record.decision : null;
-  const authority = identityStoreAuthority(input?.generation);
+  const authority = identityStoreAuthority(input?.generation, input?.publishedEpg ?? null);
+  const scope = input?.index?.scope === 'current_verified' ? 'current_verified' : 'current_unresolved_with_decision';
   const series = identityObject(input?.series) ? input.series : null;
   const confirmed = identityMovieId(record?.confirmedTmdbId);
   const hypothesis = identityMovieId(decision?.scoring?.acceptedTmdbId);
@@ -119,7 +123,7 @@ export function identityOffer(input) {
     hypothesis: hypothesis ? {tmdbId: hypothesis, source: 'scoring', trusted: false} : null,
     rejectable, rejectedTmdbIds: rejectedIds(decision),
     current: {status: decision?.status ?? null, tmdbId: currentId, ownerEffect: decision?.ownerIdentity?.effect === 'assign' || decision?.ownerIdentity?.effect === 'reject' ? decision.ownerIdentity.effect : null},
-    coverage: {scope: 'current_unresolved_with_decision', complete: input?.index?.complete === true, awaitsFirstLookup: true},
+    coverage: {scope, complete: input?.index?.complete === true, awaitsFirstLookup: scope !== 'current_verified'},
     effect: showWhen(series), authority: authority.authority, programmeRunId: authority.programmeRunId,
   };
   const refuse = reason => ({...base, available: false, reason, effect: reason === 'eligible' ? base.effect : showWhen(series)});
@@ -183,8 +187,9 @@ export function identityIssue(key, offer, command) {
   };
 }
 
-// The next decision object. Assign verifies this id and clears the terminal fence. Reject keeps the decision
-// unverified for that id, records it in a bounded list, and does not touch any other observation.
+// The next decision object. Assign verifies this id and clears the terminal fence. Reject blocks that one id, clears
+// the terminal fence and the retry time so the next ordinary chunk may evaluate a different id, and does not touch
+// any other observation. The rejected id itself is not fetched as movie detail.
 export function appliedIdentityDecision(previous, command, {at, requestId, programmeRunId}) {
   const prior = identityObject(previous) ? previous : {};
   const rejected = rejectedIds(prior).filter(id => id !== command.tmdbId);
@@ -208,7 +213,8 @@ export function appliedIdentityDecision(previous, command, {at, requestId, progr
     tmdbId: clears ? null : prior.tmdbId ?? null,
     filmId: clears ? null : prior.filmId ?? null,
     canonicalIdentity: clears ? null : prior.canonicalIdentity ?? null,
-    identitySource: clears && prior.identitySource === 'owner' ? null : prior.identitySource ?? null,
+    identitySource: clears ? null : prior.identitySource ?? null,
+    terminalReason: null, retryAt: null,
     ownerIdentity, rejectedTmdbIds: nextRejected,
   };
 }

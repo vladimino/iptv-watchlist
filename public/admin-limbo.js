@@ -557,8 +557,21 @@ function onObsIdentityExecute(slot) {
   const pending = executeDiscoveryIdentity(entry.identityConfirmation).then(result => {
     entry.identityBusy = false;
     const body = result.body || {};
-    if (body.receipt) {
+    if (body.decisionReadBack && !body.receipt) {
+      entry.identityReceipt = {state: 'unstored'};
+      entry.identityDurable = false;
+      entry.identityApplication = body.application || entry.identityApplication;
+      entry.identityIndex = body.index ?? null;
+      entry.identityReason = null;
+    } else if (body.receipt && body.receipt.state === 'succeeded' && body.durable === false) {
+      entry.identityReceipt = {state: 'unstored'};
+      entry.identityDurable = false;
+      entry.identityApplication = body.application || entry.identityApplication;
+      entry.identityIndex = body.index ?? null;
+      entry.identityReason = null;
+    } else if (body.receipt) {
       entry.identityReceipt = body.receipt;
+      entry.identityDurable = body.durable === true;
       entry.identityApplication = body.application || entry.identityApplication;
       entry.identityIndex = body.index ?? null;
       entry.identityReason = body.reason || null;
@@ -769,6 +782,27 @@ function onLimboReset() {
   return limboRender();
 }
 
+function onVerifiedOpen() {
+  const input = document.querySelector('#verified-key');
+  const hint = document.querySelector('#verified-open-hint');
+  const panel = document.querySelector('#verified-panel');
+  const raw = String(input && input.value || '').trim();
+  if (!raw || raw.length > 200 || /[\u0000-\u001f\u007f]/.test(raw)) {
+    if (hint) hint.textContent = 'Нужен ключ наблюдения, без управляющих знаков.';
+    if (input && typeof input.focus === 'function') input.focus();
+    return Promise.resolve(null);
+  }
+  if (hint) hint.textContent = '';
+  let entry = obsRecovery.get('verified');
+  if (!entry || entry.key !== raw) {
+    entry = {key: raw, open: true, pin: null, seq: 0, answer: null, changed: false, accepted: false, confirmation: null, receipt: null, durable: null, index: null, busy: false, error: null, identityEffect: '', identityTarget: '', identityBasis: '', identityAccepted: false, identityConfirmation: null, identityPlan: null, identityApplication: null, identityReceipt: null, identityIndex: null, identityReason: null, identityBusy: false, identityDurable: null};
+    obsRecovery.set('verified', entry);
+  }
+  entry.open = true;
+  if (panel) panel.hidden = false;
+  return obsRecoveryLoad('verified');
+}
+
 function onLimboResult(event) {
   const closest = selector => event.target.closest ? event.target.closest(selector) : null;
   const open = closest('[data-limbo-recovery]');
@@ -856,6 +890,12 @@ function startLimbo() {
   document.querySelector('#limbo-results').addEventListener('click', onLimboResult);
   document.querySelector('#limbo-results').addEventListener('change', onLimboResultChange);
   document.querySelector('#limbo-results').addEventListener('input', onLimboResultChange);
+  document.querySelector('#verified-open').addEventListener('click', onVerifiedOpen);
+  document.querySelector('#verified-key').addEventListener('keydown', event => {if (event.key === 'Enter') {event.preventDefault(); onVerifiedOpen();}});
+  const verifiedPanel = document.querySelector('#verified-panel');
+  verifiedPanel.addEventListener('click', onLimboResult);
+  verifiedPanel.addEventListener('change', onLimboResultChange);
+  verifiedPanel.addEventListener('input', onLimboResultChange);
   document.querySelector('#limbo-refresh').addEventListener('click', onLimboRefresh);
   window.addEventListener('keydown', onLimboKey);
   window.addEventListener('popstate', onLimboHistory);

@@ -55,28 +55,54 @@ async function drPin(versions){
  return 'D1.'+(await adminDigest(JSON.stringify(tuple))).slice(0,32);
 }
 
-// The observation index of the published generation as one reader sees it now. With `key`, only the shard that can hold
-// that key is read; without it, every shard that has records. `cached` (an earlier result of this function) is reused,
-// and the manifest body cancelled, when the manifest etag has not changed. The resolution map and the generation ledger
-// are compared by `head` only.
-async function discoveryIndexRead(bucket,options={}){
- const pointer=await bucket.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- const run=generation?.phase==='published'&&typeof generation.programmeRunId==='string'&&generation.programmeRunId?generation.programmeRunId:null;
- const base={programmeRunId:run,manifest:null,manifestEtag:null,records:[],reasons:[],generation:generation&&typeof generation==='object'?generation:null};
- if(!run)return {...base,state:'unavailable',reasons:['no_published_generation']};
- const object=await bucket.get(DiscoveryIndex.observationIndexManifestKey(run));
+// The published-EPG authority, when a D1 binding exists. No binding keeps today's R2 fence. Schema older than the
+// published-EPG tables, or mode `r2`, also keeps it. Mode `d1`, a version that requires those tables and does not have
+// them, or a marker that cannot be read, is unsupported: the caller writes nothing and does not trust a lagging R2 mirror.
+const DI_PUBLISHED_EPG_TABLES=['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'];
+async function identityPublishedEpgSupport(env){
+ const db=env?.DB;
+ if(!db||typeof db.prepare!=='function')return {supported:true,mode:'r2'};
+ const one=async sql=>{const row=await db.prepare(sql).bind().first();return row??null;};
+ let version;
+ try{version=(await one('SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
+ catch(error){
+  if(/no such table/i.test(String(error?.message||error)))return {supported:true,mode:'r2'};
+  return {supported:false,mode:null};
+ }
+ let names;
+ try{
+  const listed=await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'published_epg%'").bind().all();
+  const rows=Array.isArray(listed)?listed:listed?.results;
+  names=Array.isArray(rows)?rows.map(row=>row?.name).filter(name=>typeof name==='string'):[];
+ }catch{return {supported:false,mode:null};}
+ const tables=DI_PUBLISHED_EPG_TABLES.every(name=>names.includes(name));
+ if(!tables)return Number(version)>=8?{supported:false,mode:null}:{supported:true,mode:'r2'};
+ if(!(Number(version)>=6))return {supported:true,mode:'r2'};
+ let row;
+ try{row=await one('SELECT mode, programme_run_id AS programmeRunId, mirror_programme_run_id AS mirrorProgrammeRunId FROM published_epg_authority WHERE id=1');}
+ catch{return {supported:false,mode:null};}
+ if(!row||(row.mode!=='r2'&&row.mode!=='d1'))return {supported:false,mode:null};
+ if(row.mode==='d1')return {supported:false,mode:'d1',programmeRunId:row.programmeRunId??null,mirrorProgrammeRunId:row.mirrorProgrammeRunId??null};
+ return {supported:true,mode:'r2'};
+}
+
+// One generation-scoped observation index as a reader sees it now. With `key`, only the shard that can hold that key
+// is read; without it, every shard that has records. The resolution map and the generation ledger are compared by `head`.
+async function readScopedObservationIndex(bucket,run,generation,scope,manifestKey,shardKey,options={}){
+ const base={programmeRunId:run,manifest:null,manifestEtag:null,records:[],reasons:[],generation,indexScope:scope};
+ const object=await bucket.get(manifestKey(run));
  const manifestEtag=object?String(object.etag??''):null;
- const cached=options.key===undefined&&options.cached&&options.cached.manifestEtag&&options.cached.manifestEtag===manifestEtag&&options.cached.manifest?.programmeRunId===run?options.cached:null;
+ const cached=options.key===undefined&&options.cached&&options.cached.indexScope===scope&&options.cached.manifestEtag&&options.cached.manifestEtag===manifestEtag&&options.cached.manifest?.programmeRunId===run?options.cached:null;
  let manifest,records;
  if(cached){await adminDiscardBody(object);manifest=cached.manifest;records=cached.records;}
  else{
-  const read=DiscoveryIndex.readObservationIndexManifest(object?await object.json():null,run);
+  const read=DiscoveryIndex.readObservationIndexManifest(object?await object.json():null,run,scope);
   if(!read.ok)return {...base,manifestEtag,state:read.state};
   manifest=read.manifest;
   records=[];
   const wanted=options.key!==undefined?[DiscoveryIndex.observationShard(options.key)]:manifest.shards.map((shard,index)=>shard.items>0?index:null).filter(index=>index!==null);
   for(const index of wanted){
-   const shardObject=await bucket.get(DiscoveryIndex.observationIndexShardKey(run,index));
+   const shardObject=await bucket.get(shardKey(run,index));
    const shard=DiscoveryIndex.readObservationIndexShard(shardObject?await shardObject.json():null,manifest,index);
    if(!shard.ok)return {...base,manifest,manifestEtag,state:shard.state};
    records.push(...shard.items);
@@ -86,6 +112,21 @@ async function discoveryIndexRead(bucket,options={}){
  const freshness=DiscoveryIndex.observationIndexFreshness(manifest,{programmeRunId:run,resolutionEtag:resolution?.etag??null,ledgerEtag:ledger?.etag??null});
  return {...base,manifest,manifestEtag,records,state:freshness.state,reasons:freshness.reasons,resolutionEtag:resolution?.etag??null};
 }
+// The unresolved index, and, for one key that is not in it, the verified index of the same generation. A list read
+// does not open the verified index. A keyed read never parses the ledger or the resolution map.
+async function discoveryIndexRead(bucket,options={}){
+ const pointer=await bucket.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ const run=generation?.phase==='published'&&typeof generation.programmeRunId==='string'&&generation.programmeRunId?generation.programmeRunId:null;
+ const base={programmeRunId:run,manifest:null,manifestEtag:null,records:[],reasons:[],generation:generation&&typeof generation==='object'?generation:null,indexScope:DiscoveryIndex.OBSERVATION_INDEX_SCOPE};
+ if(!run)return {...base,state:'unavailable',reasons:['no_published_generation']};
+ const unresolved=await readScopedObservationIndex(bucket,run,generation&&typeof generation==='object'?generation:null,DiscoveryIndex.OBSERVATION_INDEX_SCOPE,DiscoveryIndex.observationIndexManifestKey,DiscoveryIndex.observationIndexShardKey,options);
+ if(options.key===undefined||unresolved.records.some(item=>item.key===options.key)||!['fresh','stale','missing'].includes(unresolved.state))return unresolved;
+ const verified=await readScopedObservationIndex(bucket,run,generation&&typeof generation==='object'?generation:null,DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE,DiscoveryIndex.observationVerifiedManifestKey,DiscoveryIndex.observationVerifiedShardKey,{key:options.key});
+ if(verified.state==='missing')return unresolved;
+ if(verified.records.some(item=>item.key===options.key))return verified;
+ if(verified.state==='fresh'&&verified.manifest?.coverage?.complete===true)return unresolved;
+ return {...verified,records:[]};
+}
 function drIndexView(index){
  const manifest=index.manifest;
  return {state:index.state,reasons:index.reasons,programmeRunId:index.programmeRunId,writtenAt:manifest?.writtenAt??null,writer:manifest?.writer?.kind??null,coverage:manifest?.coverage??null,counts:manifest?.counts??null};
@@ -93,7 +134,7 @@ function drIndexView(index){
 
 // One observation judged now, from the index and the small coordination objects. `ownLeaseId` is the lease the executor
 // holds: it is not another writer.
-async function drObserve(bucket,versions,key,nowMs,ownLeaseId=null){
+async function drObserve(bucket,versions,key,nowMs,ownLeaseId=null,env=null){
  const index=await discoveryIndexRead(bucket,{key});
  const record=index.records.find(item=>item.key===key)||null;
  const [continuation,status,lease]=await Promise.all([drJson(bucket,DR_CONTINUATION_KEY),drJson(bucket,DR_STATUS_KEY),drJson(bucket,DISCOVERY_LEASE_KEY)]);
@@ -113,7 +154,8 @@ async function drObserve(bucket,versions,key,nowMs,ownLeaseId=null){
  const pin=await drPin(versions);
  const issues=assessment&&!assessment.error?[DiscoveryRecovery.reconsiderIssue(assessment)]:[];
  const preview=AdminActions.previewAction(DR_REGISTRY,{capability:DR_CAPABILITY.id,version:DR_CAPABILITY.version,subject:{kind:'observation',id:key},pin,ids:[key]},{pin,now,records:record?[{id:key,version:record.decisionHash}]:[],issues});
- const identity=DiscoveryIdentity.identityOffer({record,index:{state:index.state,complete:index.manifest?.coverage?.complete===true},generation:index.generation,series:assessment&&!assessment.error?assessment.series:null});
+ const publishedEpg=await identityPublishedEpgSupport(env);
+ const identity=DiscoveryIdentity.identityOffer({record,index:{state:index.state,complete:index.manifest?.coverage?.complete===true,scope:index.indexScope||index.manifest?.coverage?.scope||null},generation:index.generation,series:assessment&&!assessment.error?assessment.series:null,publishedEpg});
  return {pin,now,index,record,assessment,preview,identity,lease,continuation,status};
 }
 function drObservationView(record){
@@ -139,7 +181,7 @@ async function adminDiscoveryRecoveryRoute(request,env,url){
  if(url.searchParams.has('pin')){pin=url.searchParams.get('pin');if(!DR_PIN.test(pin))return adminError('invalid_pin',400);}
  const {bucket,versions}=drReadOnly(env.BUCKET);
  let observed;
- try{observed=await drObserve(bucket,versions,key,Date.now());}
+ try{observed=await drObserve(bucket,versions,key,Date.now(),null,env);}
  catch{return adminError('storage_unavailable',503);}
  if(pin&&pin!==observed.pin)return json({error:'stale_pin',pin:observed.pin},409);
  return json({
@@ -192,7 +234,7 @@ async function drConfirm(request,env,url){
  if(!key||typeof body.pin!=='string'||!DR_PIN.test(body.pin)||typeof body.idempotencyKey!=='string'||!DR_IDEMPOTENCY.test(body.idempotencyKey))return drRefused('invalid_request',400);
  if(body.accepted!==true)return drRefused('confirmation_missing',400);
  const {bucket,versions}=drReadOnly(env.BUCKET);
- const observed=await drObserve(bucket,versions,key,Date.now());
+ const observed=await drObserve(bucket,versions,key,Date.now(),null,env);
  if(observed.pin!==body.pin)return drRefused('stale_pin',409,{pin:observed.pin});
  if(observed.preview.status!=='eligible')return drRefused('not_eligible',409,{pin:observed.pin,reason:observed.assessment?.execute?.reason??observed.preview.reason});
  const issued=AdminActions.confirmAction(observed.preview,{now:observed.now,idempotencyKey:body.idempotencyKey,accepted:true});
@@ -330,35 +372,88 @@ function diPlan(record,command){
   :{status:decision.status==='verified'?'needs_verification':decision.status??'needs_verification',tmdbId:decision.tmdbId===command.tmdbId?null:decision.tmdbId??null,rejectedTmdbIds:[...new Set([...(decision.rejectedTmdbIds||[]),command.tmdbId])]};
  return {before,after};
 }
-// Best-effort index update for the one key. A verified decision leaves the unresolved shard; a rejection stays, with
-// the new decision view. Coverage counts move together when a row is removed so the manifest sum still matches.
-async function diRefreshIndex(env,run,key,decision,decisionHash,resolutionEtag,fence,idempotencyKey){
- const manifestObject=await env.BUCKET.get(DiscoveryIndex.observationIndexManifestKey(run));
- const read=DiscoveryIndex.readObservationIndexManifest(manifestObject?await manifestObject.json():null,run);
- if(!read.ok)return {refreshed:false,reason:read.state};
- const shard=DiscoveryIndex.observationShard(key),shardObject=await env.BUCKET.get(DiscoveryIndex.observationIndexShardKey(run,shard));
- const current=DiscoveryIndex.readObservationIndexShard(shardObject?await shardObject.json():null,read.manifest,shard);
- if(!current.ok)return {refreshed:false,reason:current.state};
- if(!shardObject||!current.items.some(item=>item.key===key))return {refreshed:false,reason:'record_absent'};
- const removing=decision?.status==='verified';
- const items=removing?current.items.filter(item=>item.key!==key):current.items.map(item=>item.key===key?{...item,decision:DiscoveryIndex.observationDecisionView(decision),decisionHash}:item);
+function diIndexLayout(scope){
+ const verified=scope===DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE;
+ return {scope:verified?DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE:DiscoveryIndex.OBSERVATION_INDEX_SCOPE,manifestKey:verified?DiscoveryIndex.observationVerifiedManifestKey:DiscoveryIndex.observationIndexManifestKey,shardKey:verified?DiscoveryIndex.observationVerifiedShardKey:DiscoveryIndex.observationIndexShardKey};
+}
+function diCoverageShift(coverage,delta){
+ if(!coverage||typeof coverage!=='object')return coverage;
+ const next={...coverage};
+ if(Number.isInteger(next.indexed))next.indexed=Math.max(0,next.indexed+delta);
+ if(Number.isInteger(next.eligible))next.eligible=Math.max(0,next.eligible+delta);
+ if(Number.isInteger(next.indexed)&&Number.isInteger(next.eligible))next.complete=next.indexed===next.eligible;
+ return next;
+}
+async function diLoadScoped(env,run,layout){
+ const manifestObject=await env.BUCKET.get(layout.manifestKey(run));
+ const read=DiscoveryIndex.readObservationIndexManifest(manifestObject?await manifestObject.json():null,run,layout.scope);
+ if(!read.ok)return {ok:false,reason:read.state};
+ return {ok:true,manifest:read.manifest,manifestObject};
+}
+async function diCommitShard(env,run,layout,loaded,shard,items,resolutionEtag,fence,idempotencyKey,coverage,shardObject){
  const revision=await discoveryDigest(DiscoveryIndex.canonicalJson(items));
  if(!await fence())return {refreshed:false,reason:'fence_lost'};
- const savedShard=await observationShardPut(env,run,shard,items,revision,{onlyIf:{etagMatches:shardObject.etag}});
+ const savedShard=await observationShardPut(env,run,shard,items,revision,{shardKey:layout.shardKey(run,shard),onlyIf:shardObject?{etagMatches:shardObject.etag}:{etagDoesNotMatch:'*'}});
  if(savedShard===null)return {refreshed:false,reason:'shard_changed'};
  const ledger=await env.BUCKET.head(epgGenerationKey(run,'discovery-latest.json'));
  if(!ledger?.etag)return {refreshed:false,reason:'source_unread'};
- const manifest=read.manifest;
- const coverage=removing&&manifest.coverage&&typeof manifest.coverage==='object'?{...manifest.coverage}:manifest.coverage;
- if(removing&&coverage){
-  if(Number.isInteger(coverage.indexed)&&coverage.indexed>0)coverage.indexed-=1;
-  if(Number.isInteger(coverage.eligible)&&coverage.eligible>0)coverage.eligible-=1;
-  if(Number.isInteger(coverage.indexed)&&Number.isInteger(coverage.eligible))coverage.complete=coverage.indexed===coverage.eligible;
- }
- const next=DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),writer:{kind:'discovery_identity_correct',idempotencyKey},sources:{resolutionEtag,ledgerEtag:ledger.etag},shards:manifest.shards.map((entry,index)=>index===shard?{items:items.length,revision}:{items:entry.items,revision:entry.revision}),coverage,counts:manifest.counts});
+ const next=DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),writer:{kind:'discovery_identity_correct',idempotencyKey},sources:{resolutionEtag,ledgerEtag:ledger.etag},shards:loaded.manifest.shards.map((entry,index)=>index===shard?{items:items.length,revision}:{items:entry.items,revision:entry.revision}),coverage,counts:loaded.manifest.counts});
  if(!await fence())return {refreshed:false,reason:'fence_lost'};
- const savedManifest=await env.BUCKET.put(DiscoveryIndex.observationIndexManifestKey(run),JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:manifestObject.etag}});
- return savedManifest===null?{refreshed:false,reason:'manifest_changed'}:{refreshed:true,reason:null,removed:removing};
+ const savedManifest=await env.BUCKET.put(layout.manifestKey(run),JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:loaded.manifestObject.etag}});
+ return savedManifest===null?{refreshed:false,reason:'manifest_changed'}:{refreshed:true,reason:null};
+}
+// Names the new resolution etag on an index whose row did not move, so that index is not left stale by this write.
+async function diRetarget(env,run,layout,resolutionEtag,fence,idempotencyKey){
+ const loaded=await diLoadScoped(env,run,layout);
+ if(!loaded.ok)return {refreshed:false,reason:loaded.reason};
+ if(loaded.manifest.sources?.resolutionEtag===resolutionEtag)return {refreshed:true,reason:null};
+ const ledger=await env.BUCKET.head(epgGenerationKey(run,'discovery-latest.json'));
+ if(!ledger?.etag)return {refreshed:false,reason:'source_unread'};
+ const next=DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),writer:{kind:'discovery_identity_correct',idempotencyKey},sources:{resolutionEtag,ledgerEtag:ledger.etag},shards:loaded.manifest.shards.map(entry=>({items:entry.items,revision:entry.revision})),coverage:loaded.manifest.coverage,counts:loaded.manifest.counts});
+ if(!await fence())return {refreshed:false,reason:'fence_lost'};
+ const saved=await env.BUCKET.put(layout.manifestKey(run),JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:loaded.manifestObject.etag}});
+ return saved===null?{refreshed:false,reason:'manifest_changed'}:{refreshed:true,reason:null};
+}
+async function diInsertRecord(env,run,layout,key,record,resolutionEtag,fence,idempotencyKey){
+ const loaded=await diLoadScoped(env,run,layout);
+ if(!loaded.ok)return {refreshed:false,reason:loaded.reason};
+ if(loaded.manifest.coverage?.complete!==true)return diRetarget(env,run,layout,resolutionEtag,fence,idempotencyKey);
+ const shard=DiscoveryIndex.observationShard(key);
+ const shardObject=await env.BUCKET.get(layout.shardKey(run,shard));
+ const current=DiscoveryIndex.readObservationIndexShard(shardObject?await shardObject.json():null,loaded.manifest,shard);
+ if(!current.ok)return {refreshed:false,reason:current.state};
+ if(current.items.some(item=>item.key===key))return diCommitShard(env,run,layout,loaded,shard,current.items.map(item=>item.key===key?record:item),resolutionEtag,fence,idempotencyKey,loaded.manifest.coverage,shardObject);
+ const items=[...current.items,record].sort((left,right)=>String(left.key).localeCompare(String(right.key),'en'));
+ return diCommitShard(env,run,layout,loaded,shard,items,resolutionEtag,fence,idempotencyKey,diCoverageShift(loaded.manifest.coverage,1),shardObject);
+}
+// Moves the one key between the unresolved and verified indexes, or updates it in place. A verified decision leaves
+// the unresolved shard and is inserted into the verified shard when that index is complete. A rejection of a verified
+// decision does the reverse. Coverage counts move together so the manifest sum still matches. The other index, when
+// it exists, is retargeted at the new resolution etag. Best effort: a failed refresh leaves that index stale.
+async function diRefreshIndex(env,run,key,sourceRecord,sourceScope,decision,decisionHash,resolutionEtag,fence,idempotencyKey){
+ const source=diIndexLayout(sourceScope);
+ const loaded=await diLoadScoped(env,run,source);
+ if(!loaded.ok)return {refreshed:false,reason:loaded.reason};
+ const shard=DiscoveryIndex.observationShard(key);
+ const shardObject=await env.BUCKET.get(source.shardKey(run,shard));
+ const current=DiscoveryIndex.readObservationIndexShard(shardObject?await shardObject.json():null,loaded.manifest,shard);
+ if(!current.ok)return {refreshed:false,reason:current.state};
+ if(!current.items.some(item=>item.key===key))return {refreshed:false,reason:'record_absent'};
+ const leaving=source.scope===DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE?decision?.status!=='verified':decision?.status==='verified';
+ const view=DiscoveryIndex.observationDecisionView(decision);
+ const items=leaving?current.items.filter(item=>item.key!==key):current.items.map(item=>item.key===key?{...item,decision:view,decisionHash}:item);
+ const edited=await diCommitShard(env,run,source,loaded,shard,items,resolutionEtag,fence,idempotencyKey,leaving?diCoverageShift(loaded.manifest.coverage,-1):loaded.manifest.coverage,shardObject);
+ if(!edited.refreshed)return edited;
+ const other=diIndexLayout(source.scope===DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE?DiscoveryIndex.OBSERVATION_INDEX_SCOPE:DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE);
+ let companion={refreshed:false};
+ try{
+  if(leaving){
+   const nextRecord={...sourceRecord,programmeRunId:run,decision:view,decisionHash};
+   delete nextRecord.indexScope;
+   companion=await diInsertRecord(env,run,other,key,nextRecord,resolutionEtag,fence,idempotencyKey);
+  }else companion=await diRetarget(env,run,other,resolutionEtag,fence,idempotencyKey);
+ }catch{companion={refreshed:false,reason:'error'};}
+ return {refreshed:true,reason:null,removed:leaving,companion:companion.refreshed===true};
 }
 async function diConfirm(request,env,url){
  if(!diPrincipal(request,url).owner)return drRefused('access_denied',403);
@@ -368,7 +463,7 @@ async function diConfirm(request,env,url){
  if(!key||typeof body.pin!=='string'||!DR_PIN.test(body.pin)||typeof body.idempotencyKey!=='string'||!DR_IDEMPOTENCY.test(body.idempotencyKey))return drRefused('invalid_request',400);
  if(body.accepted!==true)return drRefused('confirmation_missing',400);
  const {bucket,versions}=drReadOnly(env.BUCKET);
- const observed=await drObserve(bucket,versions,key,Date.now());
+ const observed=await drObserve(bucket,versions,key,Date.now(),null,env);
  if(observed.pin!==body.pin)return drRefused('stale_pin',409,{pin:observed.pin,reason:'stale_pin'});
  const offer=observed.identity;
  if(!offer?.available)return drRefused('not_eligible',409,{pin:observed.pin,reason:offer?.reason||'not_eligible'});
@@ -390,6 +485,39 @@ async function diConfirm(request,env,url){
  if(saved===null)return drRefused('idempotency_conflict',409);
  return json({confirmation:issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},plan,application,scope:{key,programmeRunId:observed.index.programmeRunId,decisionHash:observed.record.decisionHash}});
 }
+function diReceiptBody(record,extra){
+ return {replayed:extra.replayed===true,reconciled:extra.reconciled===true,receipt:record.receipt,durable:true,state:record.state,application:record.application??null,index:record.index??null};
+}
+async function diReadAction(env,idempotencyKey){
+ try{const object=await env.BUCKET.get(diActionKey(idempotencyKey));return object?{record:await object.json(),etag:object.etag}:{record:null,etag:null};}
+ catch{return {record:null,etag:null,error:true};}
+}
+function diUnstoredBody(record){
+ return json({replayed:false,durable:false,state:'unknown',receipt:null,decisionReadBack:true,application:record?.application??null,index:record?.index??null,error:'receipt_unstored',refusal:'in_progress',note:'The decision read back, but the owner receipt was not stored. Retrying this confirmation records the receipt only and does not write the decision again.'},409);
+}
+async function diUnstoredReceipt(env,submitted,confirmation,record){
+ const again=await diReadAction(env,submitted.idempotencyKey);
+ if(again.record?.receipt&&again.record.issued?.scopeKey===confirmation.scopeKey)return json(diReceiptBody(again.record,{replayed:true}));
+ return diUnstoredBody(record);
+}
+// The decision already matches the stored after-image. Persist the receipt only. A second map put is not attempted.
+async function diReconcileRunning(env,stored,confirmation,submitted){
+ const key=submitted.subject.id;
+ const afterHash=typeof stored.record.afterImage?.decisionHash==='string'?stored.record.afterImage.decisionHash:null;
+ if(!afterHash)return drRefused('in_progress',409,{state:'unknown',note:'An earlier submission with this key started and left no receipt. Its outcome is unknown: read the observation again; nothing is retried.'});
+ let map;
+ try{map=await env.BUCKET.get(DR_RESOLUTION_KEY);}catch{return drRefused('storage_unavailable',503);}
+ const decisions=map?await map.json():null;
+ const current=decisions&&typeof decisions==='object'&&!Array.isArray(decisions)?decisions[key]:null;
+ const digest=current&&typeof current==='object'&&!Array.isArray(current)?await discoveryDigest(DiscoveryIndex.canonicalJson(current)):null;
+ if(digest!==afterHash)return drRefused('in_progress',409,{state:'unknown',note:'An earlier submission started and the decision did not read back as that submission. Nothing is written again.'});
+ const receipt=AdminActions.receiptOf({confirmation,capability:DI_CAPABILITY,startedAt:stored.record.startedAt||new Date().toISOString(),finishedAt:new Date().toISOString(),outcomes:[{id:key,outcome:'written'}]});
+ const record={...stored.record,state:receipt.state,finishedAt:receipt.finishedAt,receipt};
+ let saved=null;
+ try{saved=await env.BUCKET.put(diActionKey(submitted.idempotencyKey),JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:stored.etag?{etagMatches:stored.etag}:{etagDoesNotMatch:'*'}});}catch{saved=null;}
+ if(saved!==null)return json({replayed:false,reconciled:true,receipt,durable:true,state:receipt.state,application:record.application??null,index:record.index??null});
+ return diUnstoredReceipt(env,submitted,confirmation,stored.record);
+}
 async function diExecute(request,env,url){
  if(!diPrincipal(request,url).owner)return drRefused('access_denied',403);
  const body=await drBody(request);
@@ -405,7 +533,7 @@ async function diExecute(request,env,url){
   if(stored.record.issued?.scopeKey!==confirmation.scopeKey)return drRefused('idempotency_conflict',409);
   return json({replayed:true,receipt:stored.record.receipt,state:stored.record.state,application:stored.record.application??null,index:stored.record.index??null});
  }
- if(stored.record.state==='running')return drRefused('in_progress',409,{state:'unknown',note:'An earlier submission with this key started and left no receipt. Its outcome is unknown: read the observation again; nothing is retried.'});
+ if(stored.record.state==='running')return await diReconcileRunning(env,stored,confirmation,submitted);
  const command=stored.record.command;
  if(!command||command.effect!==parsed.effect||command.tmdbId!==parsed.tmdbId)return drRefused('confirmation_mismatch',409);
  const held=await drJson(env.BUCKET,DISCOVERY_LEASE_KEY);
@@ -418,13 +546,14 @@ async function diExecute(request,env,url){
  const finish=async(fields,outcomes,options={})=>{
   const receipt=AdminActions.receiptOf({confirmation,capability:DI_CAPABILITY,startedAt,finishedAt:new Date().toISOString(),outcomes,aborted:options.aborted===true,refusal:options.refusal||null});
   const record={...action.record,...fields,state:receipt.state,finishedAt:receipt.finishedAt,receipt};
-  let durable=false;
-  try{const saved=await env.BUCKET.put(diActionKey(submitted.idempotencyKey),JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:action.etag?{etagMatches:action.etag}:{etagDoesNotMatch:'*'}});durable=saved!==null;}catch{durable=false;}
-  return json({replayed:false,receipt,durable,state:receipt.state,application:record.application??null,index:record.index??null,reason:options.reason||null,...(receipt.refusal?{refusal:receipt.refusal}:{})},receipt.state==='refused'?409:200);
+  let saved=null;
+  try{saved=await env.BUCKET.put(diActionKey(submitted.idempotencyKey),JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:action.etag?{etagMatches:action.etag}:{etagDoesNotMatch:'*'}});}catch{saved=null;}
+  if(saved===null&&receipt.state==='succeeded')return await diUnstoredReceipt(env,submitted,confirmation,record);
+  return json({replayed:false,receipt,durable:saved!==null,state:receipt.state,application:record.application??null,index:record.index??null,reason:options.reason||null,...(receipt.refusal?{refusal:receipt.refusal}:{})},receipt.state==='refused'?409:200);
  };
  try{
   const {bucket,versions}=drReadOnly(env.BUCKET);
-  const observed=await drObserve(bucket,versions,key,Date.now(),lease.id);
+  const observed=await drObserve(bucket,versions,key,Date.now(),lease.id,env);
   const film=command.effect==='assign'?await diCatalogFilm(env,command.tmdbId):{status:'recorded',film:null};
   const decided=film.status==='unavailable'?{ok:false,reason:'catalogue_unread'}:DiscoveryIdentity.identityCommand(observed.record,command,film.film);
   const offer=observed.identity;
@@ -457,7 +586,7 @@ async function diExecute(request,env,url){
   if(!landed)return await finish({},[{id:key,outcome:'unknown',error:'storage_error'}]);
   const resolutionEtag=written.etag??null;
   let index={refreshed:false,reason:'source_unread'};
-  if(resolutionEtag){try{index=await diRefreshIndex(env,observed.index.programmeRunId,key,next,nextHash,resolutionEtag,()=>renewDiscoveryLease(env,lease),submitted.idempotencyKey);}catch{index={refreshed:false,reason:'error'};}}
+  if(resolutionEtag){try{index=await diRefreshIndex(env,observed.index.programmeRunId,key,observed.record,observed.index.indexScope,next,nextHash,resolutionEtag,()=>renewDiscoveryLease(env,lease),submitted.idempotencyKey);}catch{index={refreshed:false,reason:'error'};}}
   return await finish({afterImage:{resolutionEtag,decisionHash:nextHash,decision:next},application,index},[{id:key,outcome:'written'}]);
  }finally{await releaseDiscoveryLease(env,lease);}
 }

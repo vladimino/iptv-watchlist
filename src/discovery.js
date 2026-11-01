@@ -32,7 +32,8 @@ function resolutionActionability(candidate,decision,now=Date.now()){
 }
 function discoveryReady(candidate,decision,now){return resolutionActionability(candidate,decision,now);}
 // An owner rejection or assignment stays on the decision when a later chunk rewrites the uncertain fields. Scoring is
-// not carried: the next attempt scores again, and a rejected accepted id stops before search and before movie detail.
+// not carried: the next attempt scores again. A rejected accepted id is searched again so a different id can be
+// evaluated, and that rejected id is not fetched as movie detail. The rejection does not apply to any other observation.
 function ownerMarkerCarry(previous){
  if(!previous||typeof previous!=='object')return {};
  const carried={};
@@ -588,8 +589,8 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
    let candidates=knownScorerCandidates(aliasIndex,candidate);
    const observation={key:candidate.key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration:candidate.duration??null,durations:candidate.durations};
    let score=scoreFilmResolution({observation,candidates});
-   if(ownerRejected(decisions[candidate.key],score.acceptedTmdbId)){recordUncertain(decisions,candidate,'no_confident_match',now);preview[candidate.key]=scorePreview(candidate,score,{outcome:'candidate_decision',reason:'owner_rejected',candidateDecision:{status:'no_confident_match'}},[]);await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);checked++;continue;}
-   let searched=!score.considered.some(row=>row.title.quality===1);
+   const rejectedTop=ownerRejected(decisions[candidate.key],score.acceptedTmdbId);
+   let searched=rejectedTop||!score.considered.some(row=>row.title.quality===1);
    if(searched)candidates=[...candidates,...await scoredSearchCandidates(query,candidate)],score=scoreFilmResolution({observation,candidates});
    let proposed=[],variantHeld=false;
    if(candidateDiscoveryMode(env)==='on'&&!score.considered.some(row=>row.title.quality===1)){
@@ -650,41 +651,53 @@ async function observationIndexShards(built,decisions){
 // writer may have stopped between a shard and its manifest). The manifest names the etags of the resolution map and the
 // generation ledger as they are now, so any later write to either makes the index stale for every reader.
 async function observationShardPut(env,run,index,items,revision,options={}){
- return await env.BUCKET.put(DiscoveryIndex.observationIndexShardKey(run,index),JSON.stringify(DiscoveryIndex.observationShardDocument(run,index,items,revision)),{httpMetadata:{contentType:'application/json'},customMetadata:{revision},...options});
+ const key=options.shardKey||DiscoveryIndex.observationIndexShardKey(run,index);
+ const put={httpMetadata:{contentType:'application/json'},customMetadata:{revision}};
+ if(options.onlyIf)put.onlyIf=options.onlyIf;
+ return await env.BUCKET.put(key,JSON.stringify(DiscoveryIndex.observationShardDocument(run,index,items,revision)),put);
 }
-async function writeObservationIndex(env,run,shards,fence,fields){
+async function writeObservationIndex(env,run,shards,fence,fields,layout){
+ const shardKey=layout?.shardKey||(index=>DiscoveryIndex.observationIndexShardKey(run,index));
+ const manifestKey=layout?.manifestKey||DiscoveryIndex.observationIndexManifestKey(run);
  for(let index=0;index<shards.length;index++){
-  const stored=await env.BUCKET.head(DiscoveryIndex.observationIndexShardKey(run,index));
+  const stored=await env.BUCKET.head(shardKey(index));
   if(stored?.customMetadata?.revision===shards[index].revision)continue;
-  await fence();await observationShardPut(env,run,index,shards[index].items,shards[index].revision);
+  await fence();await observationShardPut(env,run,index,shards[index].items,shards[index].revision,{shardKey:shardKey(index)});
  }
  const [resolution,ledger]=await Promise.all([env.BUCKET.head('epg/discovery-resolution.json'),env.BUCKET.head(epgGenerationKey(run,'discovery-latest.json'))]);
  if(!resolution?.etag||!ledger?.etag)return {written:false,reason:'source_unread'};
- await fence();await saveJSON(env,DiscoveryIndex.observationIndexManifestKey(run),DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),...fields,sources:{resolutionEtag:resolution.etag,ledgerEtag:ledger.etag},shards:shards.map(shard=>({items:shard.items.length,revision:shard.revision}))}));
+ await fence();await saveJSON(env,manifestKey,DiscoveryIndex.observationIndexManifest({programmeRunId:run,writtenAt:new Date().toISOString(),...fields,sources:{resolutionEtag:resolution.etag,ledgerEtag:ledger.etag},shards:shards.map(shard=>({items:shard.items.length,revision:shard.revision}))}));
  return {written:true,reason:null};
 }
-// The observation index (src/domain/discovery-observation-index.js) of the chunk's generation, from the ledger and the
-// decisions the chunk already holds in memory: the current, unscreened observations that have a decision other than
-// verified or excluded. It is written after the checkpoint and the score preview, so a failure here never costs the
-// chunk its progress: every error but a lost lease is swallowed, and the previous index, whose etags no longer match,
-// is then read as stale. Owner reads use it instead of the ledger and the resolution map.
+// Two observation indexes of the chunk's generation, from the ledger and the decisions the chunk already holds in
+// memory. The unresolved index is the current, unscreened observations that have a decision other than verified or
+// excluded. The verified index is the current verified decisions, same generation fence and the same cap. Both are
+// written after the checkpoint and the score preview, so a failure here never costs the chunk its progress: every
+// error but a lost lease is swallowed, and a previous index whose etags no longer match is then read as stale. Owner
+// reads use an index instead of the ledger and the resolution map.
 async function saveObservationIndex(env,source,decisions,fence,writer){
  const run=source.programmeRunId||null;
  try{
   const pointer=run?await env.BUCKET.get(EPG_GENERATION_KEY):null,generation=pointer?await pointer.json():null;
   if(!run||generation?.phase!=='published'||generation.programmeRunId!==run)return {written:false,reason:'generation_not_published'};
-  const now=Date.now(),entries=[];let awaitingFirstLookup=0;
+  const now=Date.now(),unresolved=[],verified=[];let awaitingFirstLookup=0;
   for(const candidate of source.items){
    const decision=decisions[candidate.key];
    if(candidateActivity(candidate,now)!=='current'||screenedNonfilmReason(candidate,decision))continue;
    if(!decision){awaitingFirstLookup++;continue;}
-   if(decision.status==='verified'||decision.status==='excluded_nonfilm')continue;
-   entries.push({candidate,decision});
+   if(decision.status==='excluded_nonfilm')continue;
+   if(decision.status==='verified')verified.push({candidate,decision});
+   else unresolved.push({candidate,decision});
   }
-  const built=DiscoveryIndex.buildObservationIndex({programmeRunId:run,entries});
+  const built=DiscoveryIndex.buildObservationIndex({programmeRunId:run,entries:unresolved});
   if(built.error)return {written:false,reason:built.error};
+  const verifiedBuilt=DiscoveryIndex.buildObservationIndex({programmeRunId:run,entries:verified,scope:DiscoveryIndex.OBSERVATION_VERIFIED_SCOPE});
+  if(verifiedBuilt.error)return {written:false,reason:verifiedBuilt.error};
   const shards=await observationIndexShards(built,decisions);
-  return await writeObservationIndex(env,run,shards,fence,{writer,coverage:built.coverage,counts:{...discoveryCounts(source.items,decisions,now),awaitingFirstLookup}});
+  const verifiedShards=await observationIndexShards(verifiedBuilt,decisions);
+  const unresolvedWritten=await writeObservationIndex(env,run,shards,fence,{writer,coverage:built.coverage,counts:{...discoveryCounts(source.items,decisions,now),awaitingFirstLookup}});
+  if(!unresolvedWritten.written)return unresolvedWritten;
+  return await writeObservationIndex(env,run,verifiedShards,fence,{writer,coverage:verifiedBuilt.coverage,counts:null},{shardKey:index=>DiscoveryIndex.observationVerifiedShardKey(run,index),manifestKey:DiscoveryIndex.observationVerifiedManifestKey(run)});
  }catch(e){
   if(e?.name==='LeaseLostError')throw e;
   try{console.log(JSON.stringify({event:'discovery_observation_index',programmeRunId:diagnosticId(run),written:false,error:diagnosticErrorCode(e)}));}catch{}

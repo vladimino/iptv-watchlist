@@ -15,10 +15,12 @@ export const OBSERVATION_INDEX_SHARDS = 16;
 export const OBSERVATION_INDEX_MAX_ITEMS = 3000;
 export const OBSERVATION_INDEX_MAX_SHOWS = 96;
 export const OBSERVATION_INDEX_SCOPE = 'current_unresolved_with_decision';
+export const OBSERVATION_VERIFIED_SCOPE = 'current_verified';
 export const OBSERVATION_INDEX_WRITERS = ['resolver_chunk', 'discovery_reconsider', 'discovery_identity_correct'];
 export const OBSERVATION_INDEX_STATES = ['fresh', 'stale', 'missing', 'other_generation', 'malformed', 'torn', 'unavailable'];
 
 const INDEX_DIRECTORY = 'discovery-observations';
+const VERIFIED_DIRECTORY = 'discovery-verified-observations';
 const KEY_MAX = 200;
 const TEXT_MAX = 200;
 const DURATIONS_MAX = 24;
@@ -67,6 +69,18 @@ export function observationShardName(shard) {
 
 export function observationIndexShardKey(programmeRunId, shard) {
   return observationIndexPrefix(programmeRunId) + 'shard-' + observationShardName(shard) + '.json';
+}
+
+export function observationVerifiedPrefix(programmeRunId) {
+  return `epg/generations/${programmeRunId}/${VERIFIED_DIRECTORY}/`;
+}
+
+export function observationVerifiedManifestKey(programmeRunId) {
+  return observationVerifiedPrefix(programmeRunId) + 'manifest.json';
+}
+
+export function observationVerifiedShardKey(programmeRunId, shard) {
+  return observationVerifiedPrefix(programmeRunId) + 'shard-' + observationShardName(shard) + '.json';
 }
 
 // FNV-1a over the UTF-16 code units of the key. Placement only; nothing compares keys by this value.
@@ -180,9 +194,10 @@ function recordPriority(record) {
 // The index content from the candidates the resolver selected: `entries` = [{candidate, decision}] (current, unscreened,
 // unresolved, with a decision). Records are bounded by OBSERVATION_INDEX_MAX_ITEMS; when the cap cuts, terminal records
 // come first, then ambiguous ones, then the rest, each by key, and the coverage says what was left out.
-export function buildObservationIndex({programmeRunId, entries}) {
+export function buildObservationIndex({programmeRunId, entries, scope = OBSERVATION_INDEX_SCOPE}) {
   if (typeof programmeRunId !== 'string' || !programmeRunId) return {error: 'invalid_generation'};
   if (!Array.isArray(entries)) return {error: 'invalid_entries'};
+  if (scope !== OBSERVATION_INDEX_SCOPE && scope !== OBSERVATION_VERIFIED_SCOPE) return {error: 'invalid_scope'};
   const records = [], omitted = {cap: 0, oversized: 0, malformed: 0}, seen = new Set();
   for (const entry of entries) {
     const shaped = observationIndexRecord(entry?.candidate, entry?.decision, programmeRunId);
@@ -200,7 +215,7 @@ export function buildObservationIndex({programmeRunId, entries}) {
   const eligible = entries.length;
   return {
     shards,
-    coverage: {scope: OBSERVATION_INDEX_SCOPE, eligible, indexed: kept.length, omitted, complete: kept.length === eligible, maxItems: OBSERVATION_INDEX_MAX_ITEMS},
+    coverage: {scope, eligible, indexed: kept.length, omitted, complete: kept.length === eligible, maxItems: OBSERVATION_INDEX_MAX_ITEMS},
   };
 }
 
@@ -230,7 +245,7 @@ function revisionValid(value) {
 
 // A manifest as a reader loaded it. Anything this module would not have written is `malformed`; a manifest of another
 // generation is `other_generation`.
-export function readObservationIndexManifest(raw, programmeRunId) {
+export function readObservationIndexManifest(raw, programmeRunId, scope = OBSERVATION_INDEX_SCOPE) {
   if (raw === null || raw === undefined) return {ok: false, state: 'missing'};
   if (!indexObject(raw) || raw.kind !== 'discovery_observation_index' || raw.schemaVersion !== OBSERVATION_INDEX_VERSION) return {ok: false, state: 'malformed'};
   if (typeof raw.programmeRunId !== 'string' || !raw.programmeRunId) return {ok: false, state: 'malformed'};
@@ -243,7 +258,7 @@ export function readObservationIndexManifest(raw, programmeRunId) {
     const shard = raw.shards[index];
     if (!indexObject(shard) || shard.shard !== observationShardName(index) || !Number.isInteger(shard.items) || shard.items < 0 || shard.items > OBSERVATION_INDEX_MAX_ITEMS || !revisionValid(shard.revision)) return {ok: false, state: 'malformed'};
   }
-  if (!indexObject(raw.coverage) || raw.coverage.scope !== OBSERVATION_INDEX_SCOPE || !Number.isInteger(raw.coverage.indexed) || typeof raw.coverage.complete !== 'boolean') return {ok: false, state: 'malformed'};
+  if (!indexObject(raw.coverage) || raw.coverage.scope !== scope || !Number.isInteger(raw.coverage.indexed) || typeof raw.coverage.complete !== 'boolean') return {ok: false, state: 'malformed'};
   if (raw.shards.reduce((sum, shard) => sum + shard.items, 0) !== raw.coverage.indexed) return {ok: false, state: 'malformed'};
   return {ok: true, state: 'readable', manifest: raw};
 }

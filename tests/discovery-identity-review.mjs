@@ -20,6 +20,8 @@ assert.equal(Identity.identityMovieId('tmdb_tv:11'), null);
 assert.equal(Identity.identityStoreAuthority({phase: 'published', programmeRunId: 'run-1'}).authority, 'r2');
 assert.equal(Identity.identityStoreAuthority({phase: 'published', programmeRunId: 'run-1', identityAuthority: 'd1'}).reason, 'unknown_authority');
 assert.equal(Identity.identityStoreAuthority({phase: 'building', programmeRunId: 'run-1'}).reason, 'unknown_authority');
+assert.equal(Identity.identityStoreAuthority({phase: 'published', programmeRunId: 'run-1'}, {supported: false, mode: 'd1'}).reason, 'unknown_authority');
+assert.equal(Identity.identityStoreAuthority({phase: 'published', programmeRunId: 'run-1'}, {supported: true, mode: 'r2'}).authority, 'r2');
 assert.equal(Identity.parseIdentityVersion('a'.repeat(64) + ':assign:11').effect, 'assign');
 assert.equal(Identity.parseIdentityVersion('a'.repeat(64) + ':reject:11').tmdbId, '11');
 assert.equal(Identity.parseIdentityVersion('short:assign:11'), null);
@@ -67,6 +69,8 @@ assert.equal(assigned.evidenceKey, 'ev');
 assert.equal(assigned.filmId, 'tmdb_11');
 const rejected = Identity.appliedIdentityDecision(previous, {effect: 'reject', tmdbId: '11', basis: 'не тот'}, {at: '2026-11-01T12:00:00.000Z', requestId: 'req-1', programmeRunId: 'run-1'});
 assert.equal(rejected.status, 'needs_verification');
+assert.equal(rejected.terminalReason, null);
+assert.equal(rejected.retryAt, null);
 assert.deepEqual(rejected.rejectedTmdbIds, ['11']);
 assert.equal(rejected.evidenceKey, 'ev');
 assert.equal(Identity.identityCommand({...record, decision: rejected}, {effect: 'reject', tmdbId: '11', basis: 'не тот'}, null).reason, 'already_current');
@@ -78,13 +82,15 @@ assert.match(obsIdentityBlocked(shown, {identityEffect: 'reject', identityTarget
 const sha = text => createHash('sha256').update(text).digest('hex');
 const memory = new MemoryBucket();
 const log = {puts: [], gets: []};
-const hooks = {beforePut: null, afterGet: null, putError: null};
+const hooks = {beforePut: null, afterGet: null, putError: null, putNull: null};
+const tmdbUrls = [];
 const bucket = {
   async get(key) {log.gets.push(key); const object = await memory.get(key); return hooks.afterGet ? hooks.afterGet(key, object) : object;},
   async head(key) {return memory.head(key);},
   async put(key, body, options = {}) {
     if (hooks.beforePut) await hooks.beforePut(key, body, options);
     if (hooks.putError && hooks.putError(key)) throw new Error('r2 put failed');
+    if (hooks.putNull && hooks.putNull(key, options)) return null;
     const saved = await memory.put(key, body, options);
     if (saved) log.puts.push(key);
     return saved;
@@ -95,7 +101,7 @@ const bucket = {
 let clock = Date.parse('2026-11-01T12:00:00.000Z'), tmdbCalls = 0;
 const FrozenDate = class extends Date {constructor(...args) {super(...(args.length ? args : [clock]));} static now() {return clock;}};
 const context = vm.createContext({Response, Request, Headers, URL, URLSearchParams, AbortSignal, Date: FrozenDate, Intl, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, crypto: webcrypto, console: {log() {}, error() {}, warn() {}}, setTimeout, structuredClone, encodeURIComponent, decodeURIComponent,
-  fetch: async url => {tmdbCalls++; return new Response(JSON.stringify(String(url).includes('/search/') ? {total_pages: 1, results: []} : {id: 11, title: 'Тихий', original_title: 'Quiet', release_date: '2001-01-01', runtime: 95}));}});
+  fetch: async url => {tmdbCalls++; tmdbUrls.push(String(url)); return new Response(JSON.stringify(String(url).includes('/search/') ? {total_pages: 1, results: []} : {id: 11, title: 'Тихий', original_title: 'Quiet', release_date: '2001-01-01', runtime: 95}));}});
 vm.runInContext(scoped('src/domain/discovery-observation-index.js', 'DiscoveryIndex'), context);
 for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/ratings-seed.js', 'src/discovery.js', 'src/letterboxd-facts.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), context);
@@ -124,7 +130,7 @@ const put = (key, value) => memory.put(key, JSON.stringify(value));
 const canonical = extra => ({id: 'tmdb_11', tmdbId: '11', canonicalIdentity: 'tmdb:11', title: 'Тихий берег', year: 2001, ...extra});
 async function seed(decisionExtra = {}, options = {}) {
   memory.objects.clear();
-  hooks.beforePut = hooks.afterGet = hooks.putError = null;
+  hooks.beforePut = hooks.afterGet = hooks.putError = hooks.putNull = null;
   const items = [candidate(KEY), candidate(OTHER, {title: 'Громкий берег'})];
   const decisions = {
     [KEY]: {status: 'needs_verification', attempts: 2, evidenceKey: evidenceOf(items[0]), lastAttemptAt: iso(-H), checkedAt: iso(-H), retryAt: null, terminalReason: null, scoring: {scorerVersion: '1', status: 'accepted', reason: 'unique', acceptedTmdbId: '11'}, ...decisionExtra},
@@ -147,7 +153,7 @@ async function seed(decisionExtra = {}, options = {}) {
     manifest.coverage.eligible = manifest.coverage.indexed + 5;
     await put(DI.observationIndexManifestKey(RUN), manifest);
   }
-  log.puts = []; log.gets = []; tmdbCalls = 0;
+  log.puts = []; log.gets = []; tmdbCalls = 0; tmdbUrls.length = 0;
 }
 const request = (path, init) => context.worker.fetch(new Request(ORIGIN + path, init), env, {waitUntil() {throw new Error('no background work');}});
 const get = async path => {const response = await request(path); return {status: response.status, body: await response.json()};};
@@ -199,8 +205,11 @@ assert.equal((await json(MAP))[OTHER].status, 'no_confident_match');
 assert.notEqual(JSON.stringify(await json(MAP)), beforeMap);
 assert.equal(tmdbCalls, 0, 'the correction calls no one');
 const again = await view();
-assert.equal(again.body.indexed, false, 'a verified observation leaves the unresolved index');
-assert.equal(again.body.identity.reason, 'target_absent');
+assert.equal(again.body.indexed, true, 'an assigned observation stays readable on the verified index');
+assert.equal(again.body.identity.coverage.scope, 'current_verified');
+assert.equal(again.body.identity.current.status, 'verified');
+assert.equal(again.body.identity.current.tmdbId, '11');
+assert.equal(again.body.identity.available, true);
 const replay = await post('identity-correct', {confirmation: assign.issued.body.confirmation});
 assert.equal(replay.body.replayed, true);
 assert.equal(replay.body.receipt.state, 'succeeded');
@@ -276,10 +285,14 @@ assert.equal(blind.body.replayed, true);
 assert.equal(blind.body.receipt.state, 'unknown');
 assert.equal((await json(MAP))[KEY].identitySource, 'owner');
 
-// The next ordinary chunk keeps an owner rejection and does not call TMDB for that id, and keeps an owner assignment.
-await seed();
+// A terminal rejection becomes eligible. The next ordinary chunk searches for another id and does not fetch the rejected movie.
+await seed({terminalReason: 'repeated_uncertain_match', retryAt: iso(48 * H)});
 const marked = await confirm('reject', '11', 'не тот фильм');
 assert.equal((await post('identity-correct', {confirmation: marked.issued.body.confirmation})).body.state, 'succeeded');
+const cleared = (await json(MAP))[KEY];
+assert.equal(cleared.terminalReason, null);
+assert.equal(cleared.retryAt, null);
+assert.equal(cleared.attempts, 2);
 context.report = {runId: RUN, films: []};
 await put('programme.json', context.report);
 await put('epg/published-generation.json', {phase: 'published', programmeRunId: RUN});
@@ -287,9 +300,12 @@ const waiting = await json(MAP);
 waiting[OTHER] = {...waiting[OTHER], retryAt: iso(48 * H), evidenceKey: evidenceOf(candidate(OTHER, {title: 'Громкий берег'}))};
 await put(MAP, waiting);
 tmdbCalls = 0;
+tmdbUrls.length = 0;
 await vm.runInContext('resolveDiscoveryBatch(env,report,4)', context);
 const afterChunk = (await json(MAP))[KEY];
-assert.equal(tmdbCalls, 0, 'a rejected accepted id is not looked up');
+assert.equal(afterChunk.attempts > 2, true, 'the observation was eligible and the chunk processed it');
+assert.equal(tmdbUrls.some(url => url.includes('/movie/11')), false, 'the rejected movie detail is not fetched');
+assert.equal(tmdbUrls.some(url => url.includes('/search/')), true, 'the chunk searches for a different id');
 assert.deepEqual(afterChunk.rejectedTmdbIds, ['11']);
 assert.equal(afterChunk.ownerIdentity.effect, 'reject');
 assert.notEqual(afterChunk.status, 'verified');
@@ -312,4 +328,110 @@ assert.equal(kept.tmdbId, '11');
 assert.ok(((await json(CATALOG)).tmdb_11.shows || []).length > 0, 'the cheap pass updates shows of the owner-verified film');
 assert.equal(tmdbCalls, 0);
 
-console.log('Discovery identity review: trusted id, explicit reject, title-only, year and television conflicts, stale and partial index, lease, CAS, unknown read-back, chunk stickiness passed');
+// A wrong automatic verification is readable from the verified index and can be rejected or replaced. GET does not parse the map.
+await seed({status: 'verified', tmdbId: '99', filmId: 'tmdb_99', canonicalIdentity: 'tmdb:99', identitySource: 'tmdb_detail', scoring: {scorerVersion: '1', status: 'accepted', reason: 'unique', acceptedTmdbId: '99'}});
+log.gets = [];
+const wrong = await view();
+assert.equal(wrong.body.indexed, true);
+assert.equal(wrong.body.identity.available, true, JSON.stringify(wrong.body.identity));
+assert.equal(wrong.body.identity.coverage.scope, 'current_verified');
+assert.equal(wrong.body.identity.coverage.complete, true);
+assert.equal(wrong.body.identity.current.tmdbId, '99');
+assert.equal(wrong.body.identity.current.status, 'verified');
+assert.equal(log.gets.includes(MAP), false, 'a verified read does not parse the resolution map');
+assert.equal(log.gets.some(key => key.includes('discovery-latest')), false, 'a verified read does not parse the ledger');
+const rejectedVerified = await confirm('reject', '99', 'это не тот фильм');
+assert.equal(rejectedVerified.issued.status, 200, JSON.stringify(rejectedVerified.issued.body));
+assert.match(rejectedVerified.issued.body.plan.before.status, /verified/);
+assert.equal(rejectedVerified.issued.body.plan.after.tmdbId, null);
+const rejectedVerifiedRun = await post('identity-correct', {confirmation: rejectedVerified.issued.body.confirmation});
+assert.equal(rejectedVerifiedRun.body.state, 'succeeded', JSON.stringify(rejectedVerifiedRun.body));
+const corrected = (await json(MAP))[KEY];
+assert.equal(corrected.status, 'needs_verification');
+assert.equal(corrected.tmdbId, null);
+assert.equal(corrected.terminalReason, null);
+assert.deepEqual(corrected.rejectedTmdbIds, ['99']);
+assert.equal((await json(MAP))[OTHER].status, 'no_confident_match');
+await seed({status: 'verified', tmdbId: '99', filmId: 'tmdb_99', canonicalIdentity: 'tmdb:99', identitySource: 'tmdb_detail', scoring: {acceptedTmdbId: '99'}});
+const replaced = await confirm('assign', '11', 'это другой фильм');
+assert.equal(replaced.issued.status, 200, JSON.stringify(replaced.issued.body));
+assert.equal((await post('identity-correct', {confirmation: replaced.issued.body.confirmation})).body.state, 'succeeded');
+assert.equal((await json(MAP))[KEY].tmdbId, '11');
+assert.equal((await json(MAP))[KEY].status, 'verified');
+assert.equal((await json(MAP))[KEY].identitySource, 'owner');
+const verifiedManifest = await json(DI.observationVerifiedManifestKey(RUN));
+verifiedManifest.coverage.complete = false;
+verifiedManifest.coverage.eligible = verifiedManifest.coverage.indexed + 4;
+await put(DI.observationVerifiedManifestKey(RUN), verifiedManifest);
+const partialVerified = await view();
+assert.equal(partialVerified.body.identity.reason, 'index_incomplete');
+assert.equal((await confirm('reject', '11', 'не тот')).issued.status, 409);
+
+// The final action-record put can fail after the decision landed. The answer is not success, and the same confirmation stores the receipt without writing the decision again.
+async function failFinalReceipt(mode) {
+  await seed();
+  const issued = await confirm('assign');
+  let armed = false;
+  const fail = key => {
+    if (!armed && key === MAP) {armed = true; return false;}
+    return armed && key.startsWith('admin/actions/discovery_identity_correct/');
+  };
+  if (mode === 'throw') hooks.putError = fail;
+  else hooks.putNull = fail;
+  const first = await post('identity-correct', {confirmation: issued.issued.body.confirmation});
+  hooks.putError = hooks.putNull = null;
+  assert.equal(first.body.decisionReadBack, true, mode + ' ' + JSON.stringify(first.body));
+  assert.equal(first.body.durable, false);
+  assert.notEqual(first.body.state, 'succeeded');
+  assert.equal(first.body.receipt, null);
+  assert.equal(first.status, 409);
+  const landed = (await json(MAP))[KEY];
+  assert.equal(landed.identitySource, 'owner');
+  assert.equal(landed.tmdbId, '11');
+  const snapshot = JSON.stringify(landed);
+  const second = await post('identity-correct', {confirmation: issued.issued.body.confirmation});
+  assert.equal(second.body.reconciled, true, mode + ' ' + JSON.stringify(second.body));
+  assert.equal(second.body.durable, true);
+  assert.equal(second.body.receipt.state, 'succeeded');
+  assert.equal(JSON.stringify((await json(MAP))[KEY]), snapshot, 'reconciliation does not write the decision again');
+  const third = await post('identity-correct', {confirmation: issued.issued.body.confirmation});
+  assert.equal(third.body.replayed, true);
+  assert.equal(third.body.receipt.state, 'succeeded');
+}
+await failFinalReceipt('throw');
+await failFinalReceipt('cas');
+
+// Mode d1, and an unreadable v8 marker, write nothing even when the R2 pointer matches or lags.
+const publishedTables = ['published_epg_authority', 'published_epg_cas', 'published_epg_generation', 'published_epg_document', 'published_epg_member', 'published_epg_show', 'published_epg_stage', 'published_epg_stage_chunk', 'published_epg_stage_row'];
+function publishedDb({version, tables, authority, explode}) {
+  return {prepare(sql) {
+    return {bind() {return {
+      async first() {
+        if (explode) throw new Error(explode);
+        if (sql.includes('schema_contract')) return {version};
+        if (sql.includes('published_epg_authority')) return authority;
+        return null;
+      },
+      async all() {return {results: (tables || []).map(name => ({name}))};},
+    };}};
+  }};
+}
+await seed();
+env.DB = publishedDb({version: 8, tables: publishedTables, authority: {mode: 'd1', programmeRunId: 'other-run', mirrorProgrammeRunId: 'older-run'}});
+assert.equal((await view()).body.identity.reason, 'unknown_authority');
+assert.equal((await confirm('assign')).issued.status, 409);
+assert.notEqual((await json(MAP))[KEY].identitySource, 'owner');
+env.DB = publishedDb({version: 8, tables: publishedTables, authority: {mode: 'd1', programmeRunId: RUN, mirrorProgrammeRunId: RUN}});
+assert.equal((await view()).body.identity.reason, 'unknown_authority');
+assert.equal((await confirm('assign')).issued.body.reason, 'unknown_authority');
+assert.notEqual((await json(MAP))[KEY].identitySource, 'owner');
+env.DB = publishedDb({version: 8, tables: [], authority: null});
+assert.equal((await view()).body.identity.reason, 'unknown_authority');
+env.DB = publishedDb({version: 8, tables: publishedTables, authority: {mode: 'r2', programmeRunId: RUN}});
+assert.equal((await view()).body.identity.available, true);
+env.DB = publishedDb({version: 6, tables: [], authority: {mode: 'd1'}});
+assert.equal((await view()).body.identity.available, true, 'schema before the published-EPG tables keeps the R2 fence');
+delete env.DB;
+assert.equal((await view()).body.identity.available, true);
+
+console.log('Discovery identity review: trusted id, explicit reject, verified wrong match, receipt reconciliation, D1 fence, title-only, year and television conflicts, stale and partial index, lease, CAS, unknown read-back, chunk eligibility passed');

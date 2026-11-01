@@ -146,14 +146,14 @@ The declaration is:
 | Issuance | The confirm route stores the command `{effect, tmdbId, basis}` on the action record, created only if absent. Execute trusts that stored command |
 | Executor lease | The resolver lease, refused when live or unreadable, and renewed before the map write |
 | Commit with CAS | R2 `onlyIf.etagMatches` on the decision map, after the decision digest matched the index hash and the version prefix. The running intent with the before-image is stored first |
-| Receipt | `receiptOf` in the action record. A replay returns it, including an `unknown` receipt. A `running` intent without a receipt is `in_progress` / unknown and is never redone |
+| Receipt | `receiptOf` in the action record. A replay returns it, including an `unknown` receipt. A decision read-back is not a stored receipt: if the final action-record put fails or loses its compare-and-swap after the decision landed, the answer is `decisionReadBack` with `durable: false` and no success. The same confirmation then stores the receipt only and does not put the map again. A `running` intent whose decision does not read back as that submission stays unknown and is not rewritten |
 | What changed | The JSON field `application` is outside the receipt: `consumers` is always `["resolution_decision"]`. `shows` is `next_ordinary_chunk`, `after_series_wait` or `next_series` when the assigned film is already in the catalogue, `awaiting_catalog_film` when a confirmed id has no catalogue object, and `not_this_action` for a reject |
 
 The catalogue etag is not part of the pin. Confirm and execute each re-read the one catalogue object for an assign. A catalogue change that fails the command writes no decision. A resolution-map change changes the pin, so execute usually refuses `stale_pin` before the digest compare.
 
-A reject appends the id to `rejectedTmdbIds` (at most eight movie ids) and does not clear another observation. The next chunk copies `ownerIdentity` and `rejectedTmdbIds`. It does not auto-verify that id and does not fetch its movie detail. Similar titles are not blocked.
+A reject appends the id to `rejectedTmdbIds` (at most eight movie ids), clears `terminalReason` and `retryAt` on that decision, and does not clear another observation. The next ordinary chunk may evaluate a different id. It copies `ownerIdentity` and `rejectedTmdbIds`, does not auto-verify the rejected id, searches again when that id is the first accepted score, and does not fetch its movie detail. Similar titles are not blocked.
 
-Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)), revoke of a stored correction ([AIR-132](https://trello.com/c/3AXbSoHe)), a television id, and any store whose published-generation marker is not absent and not `r2`.
+Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)), revoke of a stored correction ([AIR-132](https://trello.com/c/3AXbSoHe)), a television id, a published-EPG mode of `d1`, an unreadable published-EPG marker, and any store whose published-generation marker is not absent and not `r2`.
 
 ## Transport shape
 
