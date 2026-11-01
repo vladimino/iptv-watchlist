@@ -180,12 +180,28 @@ Please tell us:
 I am not asking you to change the schedule.
 ```
 
-## Owner decision still open
+## Owner decisions and follow-up — 1 November 2026
 
-This report does not choose. Closing AIR-322 as fixed would be wrong. It can close later as inconclusive once the owner picks:
+The owner explicitly accepted **INCONCLUSIVE** for [AIR-322](https://trello.com/c/MBQEUdpO) and authorized closing the RCA documentation without claiming a root cause or production fix. The diagnosis remains: the Worker committed successfully, the platform recorded the run as failed, and the actor/trigger of the later disable is unknown.
 
-1. **Support.** Send the draft, or hold it. Not sent.
-2. **Daily prompt.** Leave it, or approve a follow-up card that stops the daily task after the commit read-back and caps hourly Stage A at one or two chunks before predictions. Moving all twelve chunks onto one hourly run is the option this evidence argues against. No edit now.
-3. **Independent monitoring.** Keep the existing drift task only, or approve a separate non-ChatGPT alert. No second task was created.
+1. **Support: yes, owner sends.** The private draft in this report is approved for owner review and personal submission. ChatGPT and Cursor **did not send** the message and did not post task IDs in the public issue. The Support response, if any, is future evidence, not a condition for closing this RCA.
+2. **Duration mitigation: defer as a separately approved task.** [AIR-323](https://trello.com/c/SrWM43h0) ([P2] queued, not started) scopes the future Daily EPG commit-only prompt and a cap of one or two Hourly Stage A discovery chunks per invocation. It explicitly avoids transferring twelve sequential chunks into a single hourly execution; generation/lease safety, prediction progress, exact prompt approval and two normal-day observations are its acceptance gates. **No discovery-budget prompt change was made under AIR-322.**
+3. **Independent external alert: not now.** The existing Drift Task remains the detector. The owner intends to reassess monitoring when migrating orchestration to Cloudflare Workflows, with ChatGPT then potentially monitoring from outside. This is a direction, not a Workflows migration authorization or current architecture claim.
 
-Until one of those is approved, the accepted risk is a repeat: the next 17:00 Madrid run can again spend ~10 minutes on twelve chunks, be recorded `failed` after a successful Worker commit, and come back disabled, with no actor in `Automations.peek`. The 2 November 17:00 Madrid run is the next ordinary observation. This report does not claim it will stay enabled.
+### Actual Drift observation and separately approved prompt maintenance
+
+After the RCA's 16:34 UTC observation cutoff, the existing Drift Audit completed a normal run on **2026-11-01 at 17:26:15 UTC** (18:26 Madrid), with `recorded_status=completed`. It detected both the Worker-success / platform-failed discrepancy and stale task wording that treated retired `RATINGS_PIPELINE` as a live switch.
+
+Following the owner's explicit request to correct that wording, the coordinator updated **only the prompts** of these existing Scheduled Tasks and read each back:
+
+| Task | Registry update `updated_at` (UTC) | Verified retained state |
+| --- | --- | --- |
+| EPG `Automation_5d50308ce72c8191a50242fa604836b2` | 2026-11-01T17:53:38.958174Z | Enabled, same title, timing mode and daily 17:00 Europe/Madrid recurrence |
+| Ratings `6ae52289ae9481919a68eec9310f5d8c` | 2026-11-01T17:53:46.523740Z | Enabled, same title, timing mode and daily 17:30 Europe/Madrid recurrence |
+| Drift `6ade65245de481919b816c5f5026c121` | 2026-11-01T17:53:53.672037Z | Enabled, same title, timing mode and daily 18:15 Europe/Madrid recurrence |
+
+The EPG and Ratings prompts now treat `RATINGS_PIPELINE` as retired, and explain that `ratings_sync_status.switch=separate` is a permanent server mode rather than an environment binding; the Ratings prompt no longer expects the removed `disabled` start outcome. The Drift prompt checks the absent retired `RATINGS_PIPELINE` and `LETTERBOXD_DIARY_HISTORY` bindings, instead of requiring them set. Independent owner-only MCP read at **2026-11-01T17:53:06Z** confirmed both retired bindings `state=absent,valid=true`, while `ratings_sync_status` returned `switch=separate,pipeline=idle,migration=complete`; both reads had `sideEffects=none`.
+
+These are **task contract corrections**, not an experiment in duration or a demonstration that platform auto-disable is fixed. The prompt content, titles, schedules, timing modes and enabled states were checked before and after; no manual EPG, Ratings, discovery or predictions run was invoked. The independent Drift monitor is still hosted on ChatGPT and can fail itself.
+
+The remaining risk is unchanged: the next ordinary EPG run can be recorded `failed` and disabled even when the Worker finishes publication. The 2 November 17:00 Madrid execution is the next routine observation; no platform-deadline or auto-disable fix is claimed. Closing AIR-322 is an accepted **inconclusive evidence** disposition, not a success or a regression-resolution verdict.
