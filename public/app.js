@@ -663,7 +663,7 @@ function filmHistoryAction(action){
  if(action==='open')return loadFilmHistory(String(filmScreen));
  if(action==='close'){filmHistory={...filmHistory,token:filmHistory.token+1,status:'idle',events:[],data:null};renderFilmHistory();$('#film-screen-history [data-history-action]')?.focus?.({preventScroll:true});}
 }
-function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability'])setFilmHtml(id,'');if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');if(actions)actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));}
+function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability','film-similar-cards'])setFilmHtml(id,'');const similar=$('#film-similar');if(similar)similar.hidden=true;if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');if(actions)actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));renderSimilar();}
 function creditLinks(people,key){return (people||[]).map(p=>`<button type="button" class="credit-link" data-credit-kind="${key}" data-credit-id="${escapeHTML(p.id)}" title="Показать фильмы: ${escapeHTML(p.name)}">${escapeHTML(p.name)}</button>`).join(', ');}
 function credits(film){return `<div class="film-credits">${film.directors?.length?`<p><span class="credit-label">${film.directors.length>1?'Режиссёры':'Режиссёр'}</span> ${creditLinks(film.directors,'directors')}</p>`:''}${film.actors?.length?`<p><span class="credit-label">В ролях</span> ${creditLinks(film.actors,'actors')}</p>`:''}</div>`;}
 function selectPerson(key,id){const p=report.people?.[key]?.find(person=>person.id===id);if(!p)return;const onFilm=filmIdFromLocation();state[key]=id;const input=$('#'+key+'-input');if(input){input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');}const options=$('#'+key+'-options');if(options)options.hidden=true;if(!onFilm){render();return;}const list=urlForState('https://iptv.local/'),target=list.pathname+list.search+list.hash;window.history.pushState(null,'',target);applyFilmScreen(null);render();input?.focus?.({preventScroll:true});}
@@ -730,7 +730,7 @@ function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
 // effective viewing window count, so a film airing only on another channel, outside the period or in the black zone is not a find.
-const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5,FINDS_PERSON_CACHE=8;
+const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5,FINDS_PERSON_CACHE=8,SIMILAR_LIMIT=8;
 let findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false,watchedMarkEnabled:false},findsLoading=false;
 // One identity GET per selected actor or director. The cache keeps a few answers for this programme generation.
 // A generation change drops them. An in-flight answer for another generation or another selection is not shown.
@@ -956,6 +956,59 @@ function findsAiring(film,now=nowMs(),scope=findsScope()){
  if(!last)return {kind:'none',text:'Нет показов в текущем окне',show:null};
  return {kind:'catchup',text:`Архив · ${findsChannel(last)} · до ${madridStamp(findsUntil(film,now,scope))}`,show:last};
 }
+// Similar films on the open film's page. Two sources already in memory: the loaded watchlist (`films`) and the cached
+// catalog answer (`findsSource`). No second reader and no request. List filters, the Finds person check and channel
+// scope do not apply. A credit matches only when the id string is the same; a Letterboxd id and a TMDB id are not joined,
+// and a shared name is not a match. Unknown and not_applicable execution values are not a match.
+function similarVerifiedIdentity(film){const tmdb=film?.tmdbId==null?'':String(film.tmdbId);return /^\d+$/.test(tmdb)&&film.canonicalIdentity==='tmdb:'+tmdb?'tmdb:'+tmdb:null;}
+function similarCreditIds(people){const ids=[];for(const person of people||[]){const id=typeof person?.id==='string'?person.id:'';if(id&&!ids.includes(id))ids.push(id);}return ids;}
+function similarKnownExecution(execution){const out=[];if(!execution||typeof execution!=='object')return out;for(const dimension of EXECUTION_FILTERS){const value=execution[dimension.id];if(!value||value==='unknown'||value==='not_applicable'||!EXECUTION_VALUES[dimension.id]?.[value])continue;out.push(dimension.id+':'+value);}return out;}
+function similarFacetBundle(fingerprint,prediction){const fresh=prediction&&!prediction.stale?prediction:null;return {mechanics:knownFacetIds(fingerprint?.plotMechanics,MECHANIC_LABELS),moods:knownFacetIds([...(fingerprint?.moodIds||[]),...(fresh?.moodIds||[])],MOOD_LABELS),execution:similarKnownExecution(fingerprint?.execution)};}
+function similarNumbers(prediction){if(!prediction||prediction.stale||!Number.isFinite(prediction.predictedRating))return null;return {rating:prediction.predictedRating,probability:Number.isFinite(prediction.probability4Plus)?prediction.probability4Plus:null,confidence:prediction.confidence};}
+function similarWatchlistView(film){const item=enrichment.films?.[String(film.id)]||{},fingerprint=item.fingerprint&&typeof item.fingerprint==='object'?item.fingerprint:null;return {bundle:similarFacetBundle(fingerprint,item.prediction),prediction:similarNumbers(item.prediction),rated:item.actualRating!==null&&item.actualRating!==undefined};}
+function similarCatalogView(film){return {bundle:similarFacetBundle(film.fingerprint,film.prediction),prediction:similarNumbers(film.prediction)};}
+function similarOverlap(left,right,leftPeople,rightPeople){return {mechanics:left.mechanics.filter(id=>right.mechanics.includes(id)),moods:left.moods.filter(id=>right.moods.includes(id)),execution:left.execution.filter(id=>right.execution.includes(id)),directors:leftPeople.directors.filter(id=>rightPeople.directors.includes(id)),actors:leftPeople.actors.filter(id=>rightPeople.actors.includes(id))};}
+function similarTheme(overlap){return [overlap.mechanics.length,overlap.mechanics.length&&overlap.moods.length?overlap.moods.length:0,overlap.directors.length?1:0,overlap.actors.length,overlap.execution.length];}
+function similarSubstantive(overlap){return overlap.mechanics.length>0||overlap.directors.length>0||overlap.actors.length>0||overlap.execution.length>0;}
+function similarExecutionLabel(token){const id=String(token||'').split(':')[0],names={pace:'Похожий темп',plot_engine:'Похожий сюжетный двигатель',stakes:'Похожие ставки',payoff:'Похожая отдача',ending_quality:'Похожий финал'};if(names[id])return names[id];const dimension=EXECUTION_FILTERS.find(item=>item.id===id);return dimension?`Похоже: ${dimension.label}`:'Похожее исполнение';}
+function similarReason(overlap,fallback){if(overlap.mechanics.length)return {kind:overlap.moods.length?'mechanic_mood':'mechanic',label:overlap.mechanics.slice(0,2).map(id=>MECHANIC_LABELS[id]).join(' и ')};if(overlap.directors.length)return {kind:'director',label:'Общий режиссёр'};if(overlap.actors.length)return {kind:'actors',label:overlap.actors.length>1?'Общие актёры':'Общий актёр'};if(overlap.execution.length)return {kind:'execution',label:similarExecutionLabel(overlap.execution[0])};if(fallback)return {kind:'prediction',label:'Подходит по прогнозу'};return null;}
+function similarSameFilm(source,candidate){if(String(source.id)===String(candidate.id))return true;const left=similarVerifiedIdentity(source),right=similarVerifiedIdentity(candidate);if(left&&right&&left===right)return true;const sourceTmdb=/^\d+$/.test(String(source.tmdbId||''))?String(source.tmdbId):'',candidateTmdb=/^\d+$/.test(String(candidate.tmdbId||''))?String(candidate.tmdbId):'';if(sourceTmdb&&right==='tmdb:'+sourceTmdb)return true;if(candidateTmdb&&left==='tmdb:'+candidateTmdb)return true;return false;}
+function similarCompare(a,b){for(let i=0;i<a.theme.length;i++){const delta=b.theme[i]-a.theme[i];if(delta)return delta;}const rating=(b.prediction?.rating??-1)-(a.prediction?.rating??-1);if(rating)return rating;const probability=(b.prediction?.probability??-1)-(a.prediction?.probability??-1);if(probability)return probability;const until=(a.until??Infinity)-(b.until??Infinity);if(until)return until;return a.key.localeCompare(b.key,'en');}
+function similarIndependent(candidate,kept){return kept.every(item=>item.reasonKind!==candidate.reasonKind||candidate.mechanics.some(id=>!item.mechanics.includes(id)));}
+function buildSimilar(source,now=nowMs()){
+ if(!source)return [];
+ const origin=similarWatchlistView(source),people={directors:similarCreditIds(source.directors),actors:similarCreditIds(source.actors)};
+ const rows=[];
+ const consider=(film,view,sourceName)=>{
+  if(!film||similarSameFilm(source,film))return;
+  if(!findsShows(film,now,null).length)return;
+  const overlap=similarOverlap(origin.bundle,view.bundle,{directors:people.directors,actors:people.actors},{directors:similarCreditIds(film.directors),actors:similarCreditIds(film.actors)});
+  const substantive=similarSubstantive(overlap),fallback=!substantive&&!view.rated&&findsStrong({predictedRating:view.prediction?.rating,probability4Plus:view.prediction?.probability,confidence:view.prediction?.confidence,stale:false});
+  if(view.rated&&!substantive)return;
+  const reason=similarReason(overlap,fallback);if(!reason)return;
+  const verified=similarVerifiedIdentity(film);
+  rows.push({film,source:sourceName,theme:similarTheme(overlap),prediction:view.prediction,until:findsUntil(film,now,null),key:verified||'id:'+film.id,reasonKind:reason.kind,label:reason.label,mechanics:overlap.mechanics,badge:sourceName==='catalog'?'new':view.rated?'rewatch':'watchlist'});
+ };
+ for(const film of films||[])if(film.catalogOnly!==true)consider(film,similarWatchlistView(film),'watchlist');
+ if(findsFresh())for(const film of findsSource.films||[]){if(similarOnWatchlist(film))continue;if(film.tmdbId&&findsMarks.get(String(film.tmdbId))?.state==='marked')continue;const local=enrichment.films?.[String(film.id)];if(local&&local.actualRating!==null&&local.actualRating!==undefined)continue;consider(film,similarCatalogView(film),'catalog');}
+ rows.sort(similarCompare);
+ const picked=[],seen=new Set(),franchises=new Map();
+ for(const row of rows){
+  if(picked.length>=SIMILAR_LIMIT)break;
+  if(seen.has(row.key))continue;
+  const franchise=franchiseKey(row.film);
+  const group=franchise?franchises.get(franchise)||[]:[];
+  if(group.length&&!similarIndependent(row,group))continue;
+  seen.add(row.key);picked.push(row);if(franchise)franchises.set(franchise,[...group,row]);
+ }
+ return picked;
+}
+function similarOnWatchlist(film){const known=watchlistIdentities();return known.ids.has(String(film.id))||!!(film.tmdbId&&known.tmdb.has(String(film.tmdbId)));}
+function similarForecastText(prediction){if(!prediction)return '';const chance=Number.isFinite(prediction.probability)?` · ${Math.round(prediction.probability*100)}%`:'';return `Прогноз ${prediction.rating.toFixed(1)}${chance}`;}
+function similarBadge(kind){if(kind==='new')return '<span class="film-similar-badge is-new" title="Фильм вне watchlist, не новинка проката">NEW</span>';if(kind==='rewatch')return '<span class="film-similar-badge is-rewatch">Пересмотр</span>';return '<span class="film-similar-badge">В watchlist</span>';}
+function similarTitle(film){const title=film.title||film.original||'Фильм',local=(films||[]).some(item=>String(item.id)===String(film.id));if(local)return `<button type="button" class="film-similar-open" data-similar-open="${escapeHTML(String(film.id))}">${escapeHTML(title)}</button>`;const url=typeof film.url==='string'&&/^https:\/\/www\.themoviedb\.org\/movie\/\d+(?:\/[A-Za-z0-9-]+)?\/?$/.test(film.url)?film.url:'';if(url)return `<a class="film-similar-external" href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(title)}<span class="film-similar-out">TMDB</span></a>`;return escapeHTML(title);}
+function similarCard(row,now){const film=row.film,year=film.year?String(film.year):'Год не указан',airing=findsAiring(film,now,null),forecast=similarForecastText(row.prediction);return `<article class="film-similar-card" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${similarBadge(row.badge)}<h3>${similarTitle(film)}</h3><p class="film-similar-meta">${escapeHTML(year)}</p><p class="film-similar-airing">${escapeHTML(airing.text)}</p>${forecast?`<p class="film-similar-forecast">${escapeHTML(forecast)}</p>`:''}<p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;}
+function renderSimilar(now=nowMs()){const section=$('#film-similar');if(!section)return [];const film=filmScreen?films.find(item=>String(item.id)===String(filmScreen)):null,picks=film?buildSimilar(film,now):[];section.hidden=picks.length===0;const cards=$('#film-similar-cards');if(cards)cards.innerHTML=picks.map(row=>similarCard(row,now)).join('');return picks;}
 function findsLabels(film){
  const mechanics=(film.fingerprint?.plotMechanics||[]).filter(id=>MECHANIC_LABELS[id]).map(id=>MECHANIC_LABELS[id]);
  const moods=[...new Set([...(film.prediction?.moodIds||[]),...(film.fingerprint?.moodIds||[])])].filter(id=>MOOD_LABELS[id]).map(moodLabel);
@@ -1059,6 +1112,7 @@ function renderFinds(now=nowMs()){
  const caption=$('#finds-caption');if(caption)caption.textContent=findsCaption(list.length,scope,findsContextActive(context));
  syncResultSections(list.length,!!status);
  if(refocus&&document.activeElement!==active)document.querySelector(refocus)?.focus();
+ renderSimilar(now);
  return list;
 }
 async function loadCatalog(){
@@ -1286,6 +1340,8 @@ function onMovieClick(event){
  if(facet){selectFacet(facet.dataset.facetKind,facet.dataset.facetValue,facet.dataset.facetDimension);return;}
  const historyAction=event.target.closest?.('[data-history-action]');
  if(historyAction){filmHistoryAction(historyAction.dataset.historyAction);return;}
+ const similarOpen=event.target.closest?.('[data-similar-open]');
+ if(similarOpen){event.preventDefault?.();openFilm(similarOpen.dataset.similarOpen);return;}
  const compared=event.target.closest?.('[data-compare-open]');
  if(compared){event.preventDefault?.();openComparedFilm(compared.dataset.compareOpen);return;}
  const opener=event.target.closest?.('a.film-open');
