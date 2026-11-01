@@ -7,7 +7,6 @@ import path from 'node:path';
 import {mkdtemp} from 'node:fs/promises';
 import {BATCH_BYTES, createCacheBinding, migrationStatements, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, runMetadataCacheProduction, STATEMENT_BYTES} from '../scripts/metadata-cache-production.mjs';
 
-const SCRATCH_ID='00000000-0000-4000-8000-000000000001';
 const NOW=Date.parse('2026-11-01T10:00:00.000Z');
 const TOKEN='test-token-value';
 const SECRET='test-secret-value';
@@ -33,7 +32,6 @@ function baseEnv(overrides={}){
  return {
   D1_BACKFILL_ACCOUNT_ID:PRODUCTION_ACCOUNT_ID,
   D1_BACKFILL_API_TOKEN:TOKEN,
-  D1_BACKFILL_SCRATCH_DATABASE_ID:SCRATCH_ID,
   R2_SNAPSHOT_ACCOUNT_ID:PRODUCTION_ACCOUNT_ID,
   R2_SNAPSHOT_ACCESS_KEY_ID:'test-access',
   R2_SNAPSHOT_SECRET_ACCESS_KEY:SECRET,
@@ -49,14 +47,12 @@ async function install(options={}){
  const root=await mkdtemp(path.join(os.tmpdir(),'air313-'));
  roots.push(root);
  const productionFile=path.join(root,'production.sqlite');
- const scratchFile=path.join(root,'scratch.sqlite');
  sql(productionFile,'PRAGMA user_version=0;');
- sql(scratchFile,'PRAGMA user_version=0;');
  if(options.schema)applyMigrations(productionFile, options.schema);
  const objects=new Map();
- const state={loseWrite:!!options.loseWrite, race:!!options.race, flipAfterImport:!!options.flipAfterImport, seenGet:false, imported:false, atomicScratch:options.atomicScratch!==false, afterWrite:options.afterWrite||null, armed:null};
+ const state={loseWrite:!!options.loseWrite, race:!!options.race, flipAfterImport:!!options.flipAfterImport, seenGet:false, imported:false, afterWrite:options.afterWrite||null, armed:null};
  const calls={urls:[], batches:[]};
- const described={uuid:options.uuid||PRODUCTION_DATABASE_ID, name:options.name||'iptv', scratchName:options.scratchName||'scratch'};
+ const described={uuid:options.uuid||PRODUCTION_DATABASE_ID, name:options.name||'iptv'};
  function putObject(key, value){
   const text=typeof value==='string'?value:JSON.stringify(value);
   objects.set(key,{text, etag:createHash('sha256').update(text).digest('hex').slice(0,32)});
@@ -74,12 +70,7 @@ async function install(options={}){
   const text=result.stdout.trim();
   return responseJson({success:true,result:[{success:true,results:text?JSON.parse(text):[]}]});
  }
- function runBatch(file, statements, atomic){
-  if(!atomic){
-   const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+statements.join('\n'),encoding:'utf8',maxBuffer:1<<26});
-   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
-   return responseJson({success:true,result:statements.map(()=>({success:true,results:[]}))});
-  }
+ function runBatch(file, statements){
   const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+statements.join('\n')+'\nCOMMIT;\n',encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   return responseJson({success:true,result:statements.map(()=>({success:true,results:[]}))});
@@ -91,9 +82,9 @@ async function install(options={}){
   const database=target.pathname.match(/\/d1\/database\/([^/]+)(?:\/(.*))?$/);
   if(database){
    const id=database[1], rest=database[2]||'';
-   const file=id===PRODUCTION_DATABASE_ID?productionFile:id===SCRATCH_ID?scratchFile:null;
+   const file=id===PRODUCTION_DATABASE_ID?productionFile:null;
    if(!file)return responseJson({success:false,errors:[{message:'unknown database'}]},404);
-   if((init.method||'GET')==='GET'&&rest==='')return responseJson({success:true,result:{uuid:id===PRODUCTION_DATABASE_ID?described.uuid:id,name:id===PRODUCTION_DATABASE_ID?described.name:described.scratchName}});
+   if((init.method||'GET')==='GET'&&rest==='')return responseJson({success:true,result:{uuid:described.uuid,name:described.name}});
    if((init.method||'GET')==='GET'&&rest==='time_travel/bookmark')return responseJson({success:true,result:{bookmark:'bookmark-before-image'}});
    if((init.method||'GET')!=='POST'||rest!=='query')return responseJson({success:false},404);
    const body=JSON.parse(init.body);
@@ -102,7 +93,7 @@ async function install(options={}){
     if(id===PRODUCTION_DATABASE_ID&&state.loseWrite){state.loseWrite=false;throw new Error('socket hang up');}
     if(id===PRODUCTION_DATABASE_ID&&state.afterWrite){state.armed=state.afterWrite;state.afterWrite=null;}
     if(body.batch.some(item=>/INSERT\s+INTO\s+metadata_cache\b/i.test(item.sql)))state.imported=true;
-    return runBatch(file, body.batch.map(item=>item.sql), id===SCRATCH_ID?state.atomicScratch:true);
+    return runBatch(file, body.batch.map(item=>item.sql));
    }
    if(typeof body.sql==='string')return runRead(file, body.sql);
    return responseJson({success:false},400);
@@ -122,13 +113,19 @@ async function install(options={}){
   if(method==='GET')return new Response(object.text,{status:200,headers});
   return new Response('no',{status:403});
  }
- return {root, productionFile, scratchFile, putObject, fetchImpl, calls, objects, state};
+ return {root, productionFile, putObject, fetchImpl, calls, objects, state};
 }
 function argv(args){return ['node','metadata-cache-production.mjs',...args];}
 async function execute(args, installed, overrides={}){
  return runMetadataCacheProduction({argv:argv(args), env:baseEnv(overrides), fetchImpl:installed.fetchImpl, now:()=>NOW});
 }
 function productionBatches(calls){return calls.batches.filter(item=>item.id===PRODUCTION_DATABASE_ID);}
+function assertOnlyProduction(calls){
+ for(const url of calls.urls){
+  const match=url.match(/\/d1\/database\/([^/]+)/);
+  if(match)assert.equal(match[1],PRODUCTION_DATABASE_ID);
+ }
+}
 function assertQuiet(result){
  const text=JSON.stringify(result);
  assert.equal(text.includes(TOKEN),false);
@@ -250,7 +247,7 @@ assert.match(badTarget.stderr,/target_invalid/);
  const statements=sent.batch.map(item=>{assert.deepEqual(Object.keys(item),['sql']);return item.sql.replace(/;\s*$/,'');});
  assert.deepEqual(statements,migrationStatements(fs.readFileSync('migrations/0006_metadata_cache.sql','utf8')));
  assert.equal(statements.join('\n').includes('film_sync_state'),false);
- assert.equal(installed.calls.urls.some(url=>url.includes(SCRATCH_ID)),false);
+ assertOnlyProduction(installed.calls);
  assert.equal(sql(installed.productionFile,'SELECT version FROM schema_contract;',{json:true})[0].version,6);
  assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,0);
  const again=await execute(['--target','iptv','--apply','--confirm','apply'],installed);
@@ -307,15 +304,6 @@ assert.match(badTarget.stderr,/target_invalid/);
  assert.equal(outcome.result.writes,false);
  assert.equal(productionBatches(raced.calls).length,0);
  assert.equal(sql(raced.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,0);
- const broken=await install({schema:6,atomicScratch:false});
- broken.putObject('metadata.json',metadataBody());
- const fence=await execute(['--target','iptv','--load','--confirm','load'],broken);
- assert.equal(fence.exit,3,JSON.stringify(fence.result));
- assert.equal(fence.result.reason,'fence_not_atomic');
- assert.equal(fence.result.writeState,'none');
- assert.equal(fence.result.writes,false);
- assert.equal(productionBatches(broken.calls).length,0);
- assert.equal(sql(broken.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,0);
  const invalid=await install({schema:6});
  invalid.putObject('metadata.json','{');
  const bad=await execute(['--target','iptv','--load','--confirm','load'],invalid);
@@ -367,9 +355,12 @@ assert.match(badTarget.stderr,/target_invalid/);
  const fresh=await install({schema:6});
  fresh.putObject('metadata.json',metadataBody());
  sql(fresh.productionFile,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:heat',1,'Heat','2020-01-01T00:00:00.000Z');");
- const ready=await execute(['--target','iptv','--load','--confirm','load'],fresh);
+ const leftoverScratch='00000000-0000-4000-8000-000000000001';
+ const ready=await execute(['--target','iptv','--load','--confirm','load'],fresh,{D1_BACKFILL_SCRATCH_DATABASE_ID:leftoverScratch});
  assert.equal(ready.exit,0,JSON.stringify(ready.result));
- const activated=await execute(['--target','iptv','--activate','--confirm','activate'],fresh);
+ assert.equal(fresh.calls.urls.some(url=>url.includes(leftoverScratch)),false);
+ assertOnlyProduction(fresh.calls);
+ const activated=await execute(['--target','iptv','--activate','--confirm','activate'],fresh,{D1_BACKFILL_SCRATCH_DATABASE_ID:leftoverScratch});
  assert.equal(activated.exit,0,JSON.stringify(activated.result));
  assert.equal(activated.result.mode,'d1');
  assert.equal(activated.result.cacheGeneration,activated.result.mirrorGeneration);
@@ -379,6 +370,8 @@ assert.match(badTarget.stderr,/target_invalid/);
  assert.equal(sql(fresh.productionFile,'SELECT COUNT(*) AS n FROM film;',{json:true})[0].n,1);
  assert.equal(sql(fresh.productionFile,"SELECT COUNT(*) AS n FROM metadata_cache WHERE cache_key='orphan';",{json:true})[0].n,1);
  assert.equal(activated.result.writeState,'committed');
+ assert.equal(fresh.calls.urls.some(url=>url.includes(leftoverScratch)),false);
+ assertOnlyProduction(fresh.calls);
  assert.equal(fresh.calls.urls.some(url=>url.includes('time_travel/restore')),false);
  const loadLie=await install({schema:6,afterWrite:'load-empty'});
  loadLie.putObject('metadata.json',metadataBody());
