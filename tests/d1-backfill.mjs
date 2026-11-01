@@ -7,11 +7,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {manifestFor} from '../scripts/migration-export.mjs';
 import {loadDomainRules} from '../scripts/offline-import.mjs';
-import {BackfillStop,D1Error,createD1Adapter,probeAtomicity,readTarget,renderSql,runBackfill,runStageCleanup,schemaTables,stageOwner,verifyTargetIdentity} from '../scripts/d1-backfill.mjs';
+import {BackfillStop,D1Error,createD1Adapter,readTarget,renderSql,runBackfill,runStageCleanup,schemaTables,stageOwner,verifyTargetIdentity} from '../scripts/d1-backfill.mjs';
 
 // The executor never touches R2, a Worker binding or the deploy configuration, and the Worker bundle does not include it.
 const source=fs.readFileSync('scripts/d1-backfill.mjs','utf8');
 assert.doesNotMatch(source,/\bBUCKET\b|wrangler|d1_databases|env\.DB\b|BEGIN|COMMIT/);
+assert.doesNotMatch(source,/probeAtomicity|scratchDatabaseId|D1_BACKFILL_SCRATCH_DATABASE_ID/);
+assert.equal(fs.existsSync('scripts/d1-scratch-g4.mjs'),false);
+assert.equal(fs.existsSync('tests/d1-scratch-g4.mjs'),false);
 assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/d1-backfill/);
 // AIR-275 phase 1: the Worker is bound to D1 as DB, and only the read-only catalog views reach it.
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"d1_databases"[\s\S]*"binding": "DB"[\s\S]*"database_name": "iptv"/);
@@ -24,15 +27,14 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-backfill-'));
 const v1Migration=fs.readFileSync('migrations/0001_schema_v1.sql','utf8');
 const migration=['0001_schema_v1.sql','0002_generation_stage.sql','0003_candidate_show_identity.sql','0004_projection_state.sql'].map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n');
 const ACCOUNT='0123456789abcdef0123456789abcdef',TOKEN='test-d1-token';
-const TARGET='11111111-1111-4111-8111-111111111111',SCRATCH='22222222-2222-4222-8222-222222222222';
+const TARGET='11111111-1111-4111-8111-111111111111';
 const at='2026-10-26T01:00:00.000Z',later='2026-10-26T05:00:00.000Z';
 
 function sqlite(file,input,{json=false}={}){return spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});}
 function freshDatabase(name,{schema=true}={}){const file=path.join(root,name+'.sqlite');fs.rmSync(file,{force:true});if(schema){const result=sqlite(file,'PRAGMA foreign_keys=ON;\n'+migration);assert.equal(result.status,0,result.stderr);}else{const result=sqlite(file,'SELECT 1;');assert.equal(result.status,0,result.stderr);}return file;}
 function count(file,sql){const result=sqlite(file,sql,{json:true});assert.equal(result.status,0,result.stderr);const rows=result.stdout.trim()?JSON.parse(result.stdout):[];return rows[0]?.n??0;}
 
-// A fake Cloudflare D1 HTTP API over local SQLite files. atomic:true executes a multi-statement request inside one transaction
-// (what the real service must be proven to do); atomic:false executes statement by statement and keeps earlier writes on failure.
+// A fake Cloudflare D1 HTTP API over local SQLite files. A write batch runs as one transaction: a failing statement leaves no row of that batch.
 function fakeD1(databases){
  const calls=[],hooks=[];
  const server=http.createServer((request,response)=>{
@@ -46,20 +48,24 @@ function fakeD1(databases){
    if(request.method==='GET'&&!match[3])return send(200,{success:true,errors:[],messages:[],result:{uuid:database.uuid??match[2],name:database.name,version:'production'}});
    if(request.method!=='POST'||!match[3])return send(405,{success:false,errors:[{message:'Method not allowed'}]});
    const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
-   const call={database:match[2],sql:body.sql,write:!/^\s*SELECT\b/i.test(body.sql)};calls.push(call);
+   const statements=Array.isArray(body.batch)?body.batch.map(item=>String(item?.sql||'')):(typeof body.sql==='string'?[body.sql]:null);
+   if(!statements)return send(400,{success:false,errors:[{message:'Missing SQL'}]});
+   const sql=statements.join('\n');
+   const call={database:match[2],sql,batch:Array.isArray(body.batch),write:statements.some(text=>!/^\s*(SELECT|PRAGMA)\b/i.test(text))};calls.push(call);
    for(const hook of hooks){const result=await hook({...call,phase:'before'});if(typeof result==='number')return send(result,{success:false,errors:[{message:'Injected'}]});}
-   const input='PRAGMA foreign_keys=ON;\n'+(database.atomic!==false&&call.write?'BEGIN;\n'+body.sql+'\nCOMMIT;\n':body.sql+'\n');
+   const input='PRAGMA foreign_keys=ON;\n'+(call.write?'BEGIN;\n'+sql+'\nCOMMIT;\n':sql+'\n');
    const result=sqlite(database.file,input,{json:true});
-   for(const hook of hooks){const after=await hook({...call,phase:'after',ok:result.status===0});if(after==='drop'){request.socket.destroy();return;}if(typeof after==='number')return send(after,{success:false,errors:[{message:'Injected after commit'}]});}
+   for(const hook of hooks){const after=await hook({...call,phase:'after',ok:result.status===0});if(after==='drop'){request.socket.destroy();return;}if(after==='partial')return send(200,{success:true,errors:[],messages:[],result:[]});if(typeof after==='number')return send(after,{success:false,errors:[{message:'Injected after commit'}]});}
    if(result.status!==0)return send(400,{success:false,errors:[{code:7500,message:(result.stderr||'SQL error').trim().slice(0,300)}],result:[]});
    const text=result.stdout.trim();
    const rows=text?JSON.parse(text.split('\n').filter(Boolean).length&&text.startsWith('[')?text.replace(/\]\s*\[/g,','):'[]'):[];
-   send(200,{success:true,errors:[],messages:[],result:[{results:rows,success:true,meta:{changes:0}}]});
+   const reported=call.batch?statements.map(()=>({results:[],success:true,meta:{changes:0}})):[{results:rows,success:true,meta:{changes:0}}];
+   send(200,{success:true,errors:[],messages:[],result:reported});
   });
  });
  return {calls,hooks,server,async start(){await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));return 'http://127.0.0.1:'+server.address().port+'/client/v4';},async stop(){await new Promise(resolve=>server.close(resolve));}};
 }
-const envFor=(endpoint,extra={})=>({D1_BACKFILL_ACCOUNT_ID:ACCOUNT,D1_BACKFILL_API_TOKEN:TOKEN,D1_BACKFILL_DATABASE_ID:TARGET,D1_BACKFILL_SCRATCH_DATABASE_ID:SCRATCH,D1_BACKFILL_ENDPOINT:endpoint,...extra});
+const envFor=(endpoint,extra={})=>({D1_BACKFILL_ACCOUNT_ID:ACCOUNT,D1_BACKFILL_API_TOKEN:TOKEN,D1_BACKFILL_DATABASE_ID:TARGET,D1_BACKFILL_ENDPOINT:endpoint,...extra});
 
 // A production baseline snapshot in the exporter's manifest shape, with its consistency proof.
 const heat={id:'heat-1995',title:'Heat',original:'Heat',tmdbId:7,year:1995};
@@ -88,7 +94,10 @@ const noSleep=async()=>{};
 try{
  // Configuration comes from the environment only and refuses ambiguous targets.
  assert.throws(()=>readTarget({}),/D1_BACKFILL_ACCOUNT_ID/);
- assert.throws(()=>readTarget(envFor('https://api.example',{D1_BACKFILL_SCRATCH_DATABASE_ID:TARGET})),/scratch database must differ/);
+ const leftover=readTarget(envFor('https://api.example',{D1_BACKFILL_SCRATCH_DATABASE_ID:TARGET}));
+ assert.equal(leftover.databaseId,TARGET);
+ assert.equal(leftover.scratchDatabaseId,undefined);
+ assert.equal(readTarget(envFor('https://api.example')).scratchDatabaseId,undefined);
  assert.throws(()=>readTarget(envFor('http://d1.example.net')),/loopback/);
  assert.throws(()=>readTarget(envFor('https://api.example',{D1_BACKFILL_MAX_BATCH_STATEMENTS:'0'})),/positive integers/);
  assert.equal(readTarget({...envFor(''),D1_BACKFILL_ENDPOINT:''}).endpoint,'https://api.cloudflare.com/client/v4');
@@ -97,45 +106,42 @@ try{
  assert.deepEqual(schemaTables().includes('import_receipt'),true);
 
  const snapshot=writeSnapshot('baseline',baseBodies());
- const targetFile=freshDatabase('target'),scratchFile=freshDatabase('scratch',{schema:false});
- const fake=fakeD1({[TARGET]:{file:targetFile,name:'iptv'},[SCRATCH]:{file:scratchFile,name:'iptv-scratch'}});
+ // A failing last statement rolls its batch back. The executor never creates a probe table to learn that.
+ {
+  const rollFile=freshDatabase('rollback',{schema:false});
+  const rollFake=fakeD1({[TARGET]:{file:rollFile,name:'iptv'}});
+  const rollEndpoint=await rollFake.start();
+  const adapter=createD1Adapter({target:readTarget(envFor(rollEndpoint)),databaseId:TARGET,sleep:noSleep});
+  await adapter.transaction(async()=>{
+   await adapter.run('CREATE TABLE batch_ok (id INTEGER PRIMARY KEY)');
+   await adapter.run('INSERT INTO batch_ok (id) VALUES (1)');
+   await adapter.run('INSERT INTO batch_ok (id) VALUES (2)');
+  });
+  assert.equal(count(rollFile,'SELECT COUNT(*) AS n FROM batch_ok'),2);
+  await assert.rejects(adapter.transaction(async()=>{
+   await adapter.run('INSERT INTO batch_ok (id) VALUES (3)');
+   await adapter.run('INSERT INTO batch_ok (id) VALUES (4)');
+   await adapter.run('INSERT INTO batch_missing (id) VALUES (1)');
+  }),error=>error instanceof D1Error&&error.kind==='statement');
+  assert.equal(count(rollFile,'SELECT COUNT(*) AS n FROM batch_ok'),2,'a failed last statement rolls the batch back');
+  assert.equal(rollFake.calls.filter(call=>call.write).every(call=>call.batch),true);
+  assert.equal(rollFake.calls.filter(call=>/INSERT INTO batch_ok \(id\) VALUES \(3\)/.test(call.sql)).length,1);
+  await rollFake.stop();
+ }
+ const targetFile=freshDatabase('target');
+ const fake=fakeD1({[TARGET]:{file:targetFile,name:'iptv'}});
  const endpoint=await fake.start();
- const target=readTarget(envFor(endpoint,{D1_BACKFILL_MAX_BATCH_STATEMENTS:'200',D1_BACKFILL_MAX_BATCH_BYTES:'65536'}));
+ const target=readTarget(envFor(endpoint,{D1_BACKFILL_SCRATCH_DATABASE_ID:'22222222-2222-4222-8222-222222222222',D1_BACKFILL_MAX_BATCH_STATEMENTS:'200',D1_BACKFILL_MAX_BATCH_BYTES:'65536'}));
 
- // Atomicity is proven at the configured size on the scratch database, never assumed, and never touches the target.
- {
-  const probe=await probeAtomicity(createD1Adapter({target,databaseId:SCRATCH,sleep:noSleep}),{statements:200,bytes:65536});
-  assert.equal(probe.atomic,true,JSON.stringify(probe));
-  assert.equal(probe.statements,200);
-  assert.equal(probe.rowsAfterFailure,0);
-  assert.equal(fake.calls.some(call=>call.database===TARGET),false);
- }
- // A service that keeps earlier statements when the last one fails is a NO-GO before any target write.
- {
-  const loose=freshDatabase('loose',{schema:false}),looseTarget=freshDatabase('loose-target');
-  const looseFake=fakeD1({[TARGET]:{file:looseTarget,name:'iptv'},[SCRATCH]:{file:loose,name:'iptv-scratch',atomic:false}});
-  const looseEndpoint=await looseFake.start();
-  const report=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:readTarget(envFor(looseEndpoint)),output:output('loose'),sleep:noSleep});
-  assert.equal(report.status,'no_go');
-  assert.deepEqual(report.stopReasons,['batch_not_atomic']);
-  assert.equal(report.probe.rowsAfterFailure>0,true);
-  assert.equal(looseFake.calls.some(call=>call.database===TARGET),false,'the target is not even read');
-  assert.equal(count(looseTarget,'SELECT COUNT(*) AS n FROM import_receipt'),0);
-  await looseFake.stop();
- }
  // Wrong database identity: the target uuid or name differs from the configuration.
  {
-  const wrongFake=fakeD1({[TARGET]:{file:freshDatabase('wrong-target'),name:'iptv-staging'},[SCRATCH]:{file:freshDatabase('wrong-scratch',{schema:false}),name:'iptv-scratch'}});
+  const wrongFake=fakeD1({[TARGET]:{file:freshDatabase('wrong-target'),name:'iptv-staging'}});
   const wrongEndpoint=await wrongFake.start();
   const report=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:readTarget(envFor(wrongEndpoint)),output:output('wrong'),sleep:noSleep});
   assert.deepEqual(report.stopReasons,['target_identity_mismatch']);
   assert.equal(wrongFake.calls.filter(call=>call.database===TARGET&&call.write).length,0);
   await wrongFake.stop();
-  const sameName=fakeD1({[TARGET]:{file:freshDatabase('same-target'),name:'iptv'},[SCRATCH]:{file:freshDatabase('same-scratch',{schema:false}),name:'iptv'}});
-  const sameEndpoint=await sameName.start();
-  assert.deepEqual((await runBackfill({snapshot:snapshot.directory,mode:'d1',target:readTarget(envFor(sameEndpoint)),output:output('same'),sleep:noSleep})).stopReasons,['scratch_identity_mismatch']);
-  await sameName.stop();
-  const empty=fakeD1({[TARGET]:{file:freshDatabase('empty-target',{schema:false}),name:'iptv'},[SCRATCH]:{file:freshDatabase('empty-scratch',{schema:false}),name:'iptv-scratch'}});
+  const empty=fakeD1({[TARGET]:{file:freshDatabase('empty-target',{schema:false}),name:'iptv'}});
   const emptyEndpoint=await empty.start();
   const missing=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:readTarget(envFor(emptyEndpoint)),output:output('empty'),sleep:noSleep});
   assert.deepEqual(missing.stopReasons,['schema_missing']);
@@ -146,7 +152,10 @@ try{
  // First run, interrupted by --limit, then resumed; the same baseline twice more applies nothing.
  const bounded=await runBackfill({snapshot:snapshot.directory,mode:'d1',target,limit:2,output:output('bounded'),sleep:noSleep});
  assert.equal(bounded.status,'partial',JSON.stringify(bounded.stopReasons));
- assert.equal(bounded.probe.atomic,true);
+ assert.equal(bounded.probe,null);
+ assert.equal(fake.calls.every(call=>call.database===TARGET),true,'the run opens only the configured database');
+ assert.equal(fake.calls.filter(call=>call.write).every(call=>call.batch),true,'every write is one batch');
+ assert.equal(count(targetFile,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE '%probe%'"),0);
  assert.equal(bounded.identity.baseline,'first_run');
  assert.equal(bounded.result.applied,2);
  assert.equal(bounded.result.pending>0,true);
@@ -230,7 +239,7 @@ try{
 
  // A write whose response is lost is not retried: the run stops, and the next run reconciles through the read-back.
  {
-  const lostFile=freshDatabase('lost'),lostFake=fakeD1({[TARGET]:{file:lostFile,name:'iptv'},[SCRATCH]:{file:freshDatabase('lost-scratch',{schema:false}),name:'iptv-scratch'}});
+  const lostFile=freshDatabase('lost'),lostFake=fakeD1({[TARGET]:{file:lostFile,name:'iptv'}});
   const lostEndpoint=await lostFake.start(),lostTarget=readTarget(envFor(lostEndpoint));
   let armed=true;
   lostFake.hooks.push(({database,write,sql,phase})=>{if(armed&&phase==='after'&&database===TARGET&&write&&/INSERT INTO fingerprint_payload/.test(sql)){armed=false;return 'drop';}});
@@ -244,7 +253,7 @@ try{
   assert.equal(after.result.reconciled>=1,true,'the landed write is read back and receipted, not written again');
   assert.equal(after.result.parity.ok,true);
   // A batch that commits and then answers HTTP 500 is sent exactly once: the run stops, and the next run reconciles by read-back.
-  const fiveFile=freshDatabase('five'),fiveFake=fakeD1({[TARGET]:{file:fiveFile,name:'iptv'},[SCRATCH]:{file:freshDatabase('five-scratch',{schema:false}),name:'iptv-scratch'}});
+  const fiveFile=freshDatabase('five'),fiveFake=fakeD1({[TARGET]:{file:fiveFile,name:'iptv'}});
   const fiveEndpoint=await fiveFake.start(),fiveTarget=readTarget(envFor(fiveEndpoint));
   let fiveArmed=true;
   fiveFake.hooks.push(({database,write,sql,phase,ok})=>{if(fiveArmed&&phase==='after'&&ok&&database===TARGET&&write&&/INSERT INTO actual_rating/.test(sql)){fiveArmed=false;return 500;}});
@@ -260,6 +269,19 @@ try{
   assert.equal(fiveAfter.result.reconciled>=1,true);
   assert.equal(fiveFake.calls.filter(call=>call.database===TARGET&&/INSERT INTO actual_rating/.test(call.sql)).length,1,'the reconciling run did not resend it');
   assert.equal(fiveAfter.result.parity.ok,true);
+  // A success body that omits the statement results is not proof the batch landed, and that run does not send it again.
+  let partialArmed=true,partialSql=null;
+  fiveFake.hooks.push(({database,write,sql,phase})=>{if(partialArmed&&phase==='after'&&database===TARGET&&write){partialArmed=false;partialSql=sql;return 'partial';}});
+  sqlite(fiveFile,'DELETE FROM import_receipt;');
+  const beforePartial=fiveFake.calls.length;
+  const partial=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:fiveTarget,output:output('partial-body'),sleep:noSleep});
+  assert.deepEqual(partial.stopReasons,['write_uncertain']);
+  assert.equal(partial.noGo.details.reported,0);
+  const duringPartial=fiveFake.calls.slice(beforePartial).filter(call=>call.write);
+  assert.equal(duringPartial.length,1,'the short response was not retried in that run');
+  assert.equal(duringPartial[0].sql,partialSql);
+  const partialAfter=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:fiveTarget,output:output('partial-after'),sleep:noSleep});
+  assert.equal(partialAfter.status,'completed',JSON.stringify(partialAfter.noGo||partialAfter.result?.ledger));
   // A 503 on a write is just as uncertain and is not retried either.
   let writeBusy=true;
   fiveFake.hooks.push(({database,write,phase})=>{if(writeBusy&&phase==='before'&&database===TARGET&&write){writeBusy=false;return 503;}});
@@ -279,7 +301,7 @@ try{
 
  // A unit larger than the configured batch is not split across requests: the run stops.
  {
-  const smallFile=freshDatabase('small'),smallFake=fakeD1({[TARGET]:{file:smallFile,name:'iptv'},[SCRATCH]:{file:freshDatabase('small-scratch',{schema:false}),name:'iptv-scratch'}});
+  const smallFile=freshDatabase('small'),smallFake=fakeD1({[TARGET]:{file:smallFile,name:'iptv'}});
   const smallEndpoint=await smallFake.start();
   const small=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:readTarget(envFor(smallEndpoint,{D1_BACKFILL_MAX_BATCH_STATEMENTS:'3'})),output:output('small'),sleep:noSleep});
   assert.equal(small.status,'no_go');
@@ -359,11 +381,11 @@ try{
  {
   const stagedSchema=migration;
   const stagedDatabase=name=>{const file=path.join(root,name+'.sqlite');fs.rmSync(file,{force:true});const result=sqlite(file,'PRAGMA foreign_keys=ON;\n'+stagedSchema);assert.equal(result.status,0,result.stderr);return file;};
-  const STAGED_TARGET='33333333-3333-4333-8333-333333333333',STAGED_SCRATCH='44444444-4444-4444-8444-444444444444';
+  const STAGED_TARGET='33333333-3333-4333-8333-333333333333';
   const stagedFile=stagedDatabase('staged-target');
-  const stagedFake=fakeD1({[STAGED_TARGET]:{file:stagedFile,name:'iptv'},[STAGED_SCRATCH]:{file:freshDatabase('staged-scratch',{schema:false}),name:'iptv-scratch'}});
+  const stagedFake=fakeD1({[STAGED_TARGET]:{file:stagedFile,name:'iptv'}});
   const stagedEndpoint=await stagedFake.start();
-  const stagedTarget=readTarget(envFor(stagedEndpoint,{D1_BACKFILL_DATABASE_ID:STAGED_TARGET,D1_BACKFILL_SCRATCH_DATABASE_ID:STAGED_SCRATCH,D1_BACKFILL_MAX_BATCH_STATEMENTS:'200',D1_BACKFILL_MAX_BATCH_BYTES:'65536'}));
+  const stagedTarget=readTarget(envFor(stagedEndpoint,{D1_BACKFILL_DATABASE_ID:STAGED_TARGET,D1_BACKFILL_MAX_BATCH_STATEMENTS:'200',D1_BACKFILL_MAX_BATCH_BYTES:'65536'}));
   const first=await runBackfill({snapshot:snapshot.directory,mode:'d1',target:stagedTarget,output:output('staged-d1'),sleep:noSleep,stagedGeneration:true});
   assert.equal(first.status,'completed',JSON.stringify(first.noGo||first.stopReasons));
   assert.deepEqual(first.staged.limits,{maxStatements:200,maxBytes:65536});
@@ -431,11 +453,11 @@ try{
   assert.equal(cli.status,0,cli.stderr);
   assert.equal(JSON.parse(cli.stdout).status,'completed');
   // The target's high-water mark is the revised baseline now, so the CLI re-runs that one. The fake D1 server lives in this process, so the CLI runs asynchronously; a synchronous spawn would block the server it calls.
-  const cliD1=await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['scripts/d1-backfill.mjs','--snapshot',revised.directory,'--output',output('cli-d1'),'--target','d1'],{env:{PATH:process.env.PATH,...envFor(endpoint)}});let stdout='',stderr='';child.stdout.on('data',chunk=>stdout+=chunk);child.stderr.on('data',chunk=>stderr+=chunk);child.on('error',reject);child.on('close',status=>resolve({status,stdout,stderr}));});
+  const cliD1=await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['scripts/d1-backfill.mjs','--snapshot',revised.directory,'--output',output('cli-d1'),'--target','d1'],{env:{PATH:process.env.PATH,...envFor(endpoint),D1_BACKFILL_SCRATCH_DATABASE_ID:TARGET}});let stdout='',stderr='';child.stdout.on('data',chunk=>stdout+=chunk);child.stderr.on('data',chunk=>stderr+=chunk);child.on('error',reject);child.on('close',status=>resolve({status,stdout,stderr}));});
   assert.equal(cliD1.status,0,cliD1.stderr);
   assert.equal(JSON.parse(cliD1.stdout).result.applied,0);
   assert.equal(cliD1.stdout.includes(TOKEN),false);
  }
  await fake.stop();
 }finally{fs.rmSync(root,{recursive:true,force:true});}
-console.log('D1 backfill: environment-only target, scratch atomicity proof at size, non-atomic service NO-GO, identity and schema fence, bounded resume, empty reruns, changed baseline and delta, duplicate/stale/foreign receipts, lost-response writes, bounded retries, oversized units, fail-closed classes A and C, snapshot gates, dry-run and rollback rehearsal, staged generation with schema v2 fence, stage ownership NO-GO and approval-gated cleanup passed');
+console.log('D1 backfill: environment-only target with no scratch database, failing-statement rollback, short batch response, identity and schema fence, bounded resume, empty reruns, changed baseline and delta, duplicate/stale/foreign receipts, lost-response writes, bounded retries, oversized units, fail-closed classes A and C, snapshot gates, dry-run and rollback rehearsal, staged generation with schema v2 fence, stage ownership NO-GO and approval-gated cleanup passed');

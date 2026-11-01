@@ -26,16 +26,20 @@ INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:a','${T}');
 INSERT INTO film_person_credit VALUES ('film:a','person:actor/x','actor',0),('film:a','person:tmdb_actor/9','actor',1);`);
  return file;
 }
-// The fake Cloudflare API: GET describes the database, POST /query runs one statement.
-// A write request may carry several statements; it runs as one transaction, as the AIR-74 atomicity probe proved for D1.
+// The fake Cloudflare API: GET describes the database. A write is one batch and runs as one transaction.
 // onWrite runs before a write is applied, to let another actor act in between.
 function api(file,{name='iptv',uuid=UUID,failWrite=0,onWrite=null}={}){
  const calls={writes:0,reads:0};
  const fetchImpl=async(url,init)=>{
   if(init.method==='GET')return Response.json({success:true,result:{uuid,name}});
-  const sql=JSON.parse(init.body).sql,write=/^\s*(INSERT|UPDATE|DELETE)/i.test(sql);
+  const body=JSON.parse(init.body);
+  const statements=Array.isArray(body.batch)?body.batch.map(item=>item.sql):(body.sql==null?[]:[body.sql]);
+  const sql=statements.join('\n'),write=statements.some(text=>/^\s*(INSERT|UPDATE|DELETE)/i.test(text));
   if(write){calls.writes++;if(failWrite&&calls.writes===failWrite)throw new TypeError('connection reset');if(onWrite)await onWrite(calls.writes,sql);}else calls.reads++;
-  try{return Response.json({success:true,result:[{success:true,results:write?(sqlite(file,'BEGIN;\n'+sql+'\nCOMMIT;'),[]):sqlite(file,sql,true)}]});}
+  try{
+   if(write){sqlite(file,'BEGIN;\n'+sql+'\nCOMMIT;');return Response.json({success:true,result:statements.map(()=>({success:true,results:[]}))});}
+   return Response.json({success:true,result:[{success:true,results:sqlite(file,sql,true)}]});
+  }
   catch(error){return Response.json({success:false,errors:[{message:String(error.message)}]},{status:400});}
  };
  return {calls,adapter:createD1Adapter({target,databaseId:UUID,fetchImpl,retries:0,sleep:async()=>{}})};

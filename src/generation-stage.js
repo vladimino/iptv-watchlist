@@ -5,7 +5,7 @@
 import {generationProjection,pagedAll,replayGeneration,requireExpected} from './epg-repository.js';
 
 export const STAGE_TABLES=['generation_stage','generation_stage_chunk','stage_film_generation','stage_film_show','stage_candidate','stage_candidate_show'];
-// One chunk request stays inside the owner's scratch proof (1,000 statements, about 0.95 MB) with a margin.
+// One chunk request stays inside the configured batch caps (1,000 statements, 1 MiB) with a margin.
 export const DEFAULT_CHUNK_STATEMENTS=950;
 export const DEFAULT_CHUNK_BYTES=1000000;
 // Below the documented D1 limit of 100,000 bytes per statement. A row is never split.
