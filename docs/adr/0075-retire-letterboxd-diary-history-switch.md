@@ -1,9 +1,9 @@
 # ADR 0075: Diary page 1 is permanent on a migrated ratings run, and LETTERBOXD_DIARY_HISTORY is retired
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-01  
 **Recorded at:** 2026-11-01  
-**Approval source:** not documented  
+**Approval source:** The owner explicitly accepted ADR 0075 and separately visually approved the changed ratings `stateDiagram-v2` in `docs/architecture/scheduling-and-orchestration.md` on 2026-11-01 (Europe/Madrid), after [independent PASS review](https://github.com/vladimino/iptv-watchlist/pull/302#pullrequestreview-5727942206) of HEAD `dcd68abcc0ec685d3f7d32aa877229057ee27bc8` and successful PR CI. [Owner decision in PR #302](https://github.com/vladimino/iptv-watchlist/pull/302#issuecomment-6557730028). This acceptance does not authorize removing the Cloudflare `LETTERBOXD_DIARY_HISTORY` binding, modifying other flags or Scheduled Tasks, or performing manual Ratings/EPG/discovery, D1/R2 writes or migrations; the physical binding deletion remains a separate final owner gate after accepted deployment and safe read-only verification.  
 **Related work:** [AIR-307](https://trello.com/c/5ZU2RsEt); prerequisite [AIR-295](https://trello.com/c/VtFZ6cci); [ADR 0049](0049-letterboxd-diary-viewing-history.md); [ADR 0067](0067-diary-recent-window.md); [ADR 0074](0074-retire-ratings-pipeline-switch.md)  
 **Supersedes:** In part: [ADR 0049](0049-letterboxd-diary-viewing-history.md) where Diary is behind `LETTERBOXD_DIARY_HISTORY` and off by default; [ADR 0055](0055-retire-letterboxd-facts-switch.md) decision 5 where that binding stays a separate active switch; [ADR 0067](0067-diary-recent-window.md) only the clause that a diary gate that is off does not fetch; [ADR 0074](0074-retire-ratings-pipeline-switch.md) only the deferral of `LETTERBOXD_DIARY_HISTORY`. The page-1 budget, the history, the fail-closed migration and the permanent separate pipeline stay.  
 **Superseded by:** None
