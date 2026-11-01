@@ -255,6 +255,11 @@
 .posters-outcomes span{color:var(--muted)}
 .posters-dynamics h3{margin:12px 0 6px;font-size:15px}
 @media(max-width:800px){.posters-layout{grid-template-columns:minmax(0,1fr)}.posters-form{flex-direction:column;align-items:stretch}}
+.admin-original{margin:4px 0 10px}
+.other-titles{margin:12px 0}
+.other-titles summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.other-titles summary:focus{outline:2px solid var(--lime);outline-offset:2px}
+.other-titles ul{margin:8px 0 0}
 .title-review{margin-top:18px;max-width:100%}
 .title-review fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 12px;padding:10px 12px}
 .title-review legend{padding:0 4px}
