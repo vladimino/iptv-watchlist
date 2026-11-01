@@ -1,19 +1,33 @@
-# Letterboxd Diary viewing history — activation, observation, rollback
+# Letterboxd Diary viewing history — operation
 
-Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decisions: [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), [ADR 0054](../adr/0054-diary-first-epg-ratings.md) (Diary-first ratings), [ADR 0067](../adr/0067-diary-recent-window.md) (page 1 only). Card: [AIR-51](https://trello.com/c/33d4hKJ3).
+Contract: [Letterboxd Diary viewing history](../reference/integrations/letterboxd-diary-history.md). Decisions: [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md), [ADR 0054](../adr/0054-diary-first-epg-ratings.md) (Diary-first ratings), [ADR 0067](../adr/0067-diary-recent-window.md) (page 1 only), [ADR 0075](../adr/0075-retire-letterboxd-diary-history-switch.md) (the gate is retired). Card: [AIR-307](https://trello.com/c/5ZU2RsEt). The original activation was [AIR-51](https://trello.com/c/33d4hKJ3).
 
-A deploy does not activate anything. Each step below that changes production needs its own owner approval.
+Diary page 1 on a migrated ratings run is permanent. The Worker does not read `LETTERBOXD_DIARY_HISTORY`. Setting the binding to `off`, emptying it or deleting it does not stop the Diary phase. `diary.enabled: true` on `ratings_sync_status` and `enabled: true` on `GET /api/letterboxd/diary` mean the capability is on. They do not prove a fetch happened and they do not prove the binding is absent. `feature_flags` does: while the binding exists, `state: set` and `issue: retired`; after the later owner deletion, `state: absent`, `retired: true`, `valid: true`. `effective` is null either way.
 
-## Before activation (read-only)
+This code change does not delete the Cloudflare binding. `keep_vars: true` leaves it. The production binding was `on` at the 2026-11-01 AIR-306 readback. Deleting only that binding is a later owner step, after this code is deployed and a read-only check accepts it. Do not substitute that deletion with `off` or an empty value. `diary.enabled: true` after the deletion still does not prove a Diary fetch. Only a later routine Ratings Task run, not a manual start, confirms page-1 processing.
 
-1. Read `feature_flags` (MCP): `LETTERBOXD_DIARY_HISTORY` should be absent or `off`.
-2. Read the sync status (`epg_status`). Note the last commit time, so the next routine EPG commit can be observed. The stage runs only inside a routine commit; there is no manual endpoint.
+### Rollback of this retirement
+
+1. Disabling or deleting the binding does not stop Diary.
+2. After the binding is deleted, code from before ADR 0075 must not be deployed until `LETTERBOXD_DIARY_HISTORY=on` is restored and read back. That older code skips Diary when the binding is absent.
+3. A code revert does not roll back R2 history, the Diary cursor, facts or the removal queue.
+
+A deploy does not start a ratings run. Each production change still needs its own owner approval.
+
+## Historical activation (AIR-51)
+
+The steps below are how the gate was introduced. They are not a current instruction. Do not set the flag off, and do not remove it, to stop Diary.
+
+### Before activation (read-only) — historical
+
+1. Read `feature_flags` (MCP): `LETTERBOXD_DIARY_HISTORY` was expected absent or `off` before the first activation.
+2. Read the sync status (`epg_status`). Note the last commit time. At that time the stage ran only inside a routine commit.
 3. Read `GET /api/letterboxd/diary`. Before the first run, `state` is `null` and `entries` is `0`.
 
-## Activation (owner)
+### Activation (owner) — historical
 
-1. The owner sets `LETTERBOXD_DIARY_HISTORY=on` (plain text) on Worker `iptv`, then reads it back through `feature_flags`: `effective: on`.
-2. Wait for the next routine EPG commit. Do not start a sync for this.
+1. The owner set `LETTERBOXD_DIARY_HISTORY=on` (plain text) on Worker `iptv`, then read it back through `feature_flags`. That `effective: on` reading belonged to the old gate. The retired flag's `effective` is null.
+2. The next routine ratings run, not an EPG commit, is what reads Diary. Do not start one for this retirement.
 
 ## Observation after a commit (read-only)
 
@@ -92,8 +106,10 @@ This is not a storage migration and it is not a reason to repeat the cutover abo
 2. Do not set `RATINGS_PIPELINE=inline` and do not delete the binding as a rollback. The Worker ignores the binding. After the leftover binding is deleted, code from before ADR 0074 must not be deployed until `RATINGS_PIPELINE=separate` is restored and read back: that older code treats a missing binding as `inline`.
 3. Once migrated (cutover step 3), a code revert is **not** a rollback of R2. Earlier code prunes the version 2 queue without its references and writes the cursor back as version 1. Undoing it needs a separate owner decision on the stored objects. A run left `running` stays until a later start closes it.
 
-## Rollback
+## Historical rollback (AIR-51)
 
-1. The owner sets `LETTERBOXD_DIARY_HISTORY=off`, or removes it, and reads it back.
-2. The next commit makes no diary history request. The diary repair returns to its own page-1 request after a failed films list.
-3. `letterboxd/diary/history.json` and `state.json` stay. Deleting them is a separate owner-approved storage operation. A code revert removes the reader and the route; the objects are then ignored.
+These steps described turning the gate off. They are not current. Current rollback is [above](#rollback-of-this-retirement).
+
+1. The owner used to set `LETTERBOXD_DIARY_HISTORY=off`, or remove it, and read it back.
+2. The next commit then made no diary history request. That is no longer true: the ratings run still reads page 1, and the EPG commit does not read Diary either way.
+3. `letterboxd/diary/history.json` and `state.json` stay. Deleting them is a separate owner-approved storage operation. A code revert does not delete them.

@@ -132,7 +132,7 @@ assert.doesNotMatch(leaky.text,new RegExp(SECRET),'a value outside the known tok
 const k=name=>entry(leaky.report,name);
 assert.deepEqual([k('CANDIDATE_DISCOVERY').raw,k('CANDIDATE_DISCOVERY').redacted,k('CANDIDATE_DISCOVERY').shape,k('CANDIDATE_DISCOVERY').issue,k('CANDIDATE_DISCOVERY').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
 assert.deepEqual([k('LETTERBOXD_FACTS').raw,k('LETTERBOXD_FACTS').redacted,k('LETTERBOXD_FACTS').issue,k('LETTERBOXD_FACTS').effective],[null,true,'retired',null],'a near miss of a retired switch is redacted, not echoed');
-assert.deepEqual([k('LETTERBOXD_DIARY_HISTORY').raw,k('LETTERBOXD_DIARY_HISTORY').shape,k('LETTERBOXD_DIARY_HISTORY').issue,k('LETTERBOXD_DIARY_HISTORY').effective],[null,{type:'object'},'not_string','off']);
+assert.deepEqual([k('LETTERBOXD_DIARY_HISTORY').raw,k('LETTERBOXD_DIARY_HISTORY').shape,k('LETTERBOXD_DIARY_HISTORY').issue,k('LETTERBOXD_DIARY_HISTORY').effective,k('LETTERBOXD_DIARY_HISTORY').retired],[null,{type:'object'},'retired',null,true],'a non-string on the retired diary switch is redacted and inert');
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
 assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective],['bounded ','case_or_whitespace','full'],'a padded known token is shown, and it is invalid where the code does not trim');
 assert.deepEqual([k('REMOVAL_RATING_LOOKUP').raw,k('REMOVAL_RATING_LOOKUP').shape],[null,{type:'string',length:300}],'an over-long value is shape only');
@@ -161,20 +161,22 @@ for(const [name,expression] of Object.entries(consumer)){
  const compute=vm.runInContext('env=>'+expression,context);
  for(const value of samples){const environment={[name]:value};assert.equal(entry(reportOf(environment),name).effective,compute(environment),name+' = '+JSON.stringify(value));}
 }
-// The retired facts switch (ADR 0055) and the retired ratings pipeline switch (ADR 0074) have no reader left.
+// The retired facts switch (ADR 0055), the retired ratings pipeline switch (ADR 0074) and the retired diary switch (ADR 0075) have no reader left.
 for(const file of fs.readdirSync('src',{recursive:true}).filter(name=>name.endsWith('.js'))){
  const source=fs.readFileSync('src/'+file,'utf8');
  assert.doesNotMatch(source,/env\??\.LETTERBOXD_FACTS/,'src/'+file+' does not read LETTERBOXD_FACTS');
  assert.doesNotMatch(source,/env\??\.RATINGS_PIPELINE/,'src/'+file+' does not read RATINGS_PIPELINE');
+ assert.doesNotMatch(source,/env\??\.LETTERBOXD_DIARY_HISTORY/,'src/'+file+' does not read LETTERBOXD_DIARY_HISTORY');
 }
 for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),'LETTERBOXD_FACTS');assert.equal(item.effective,null);}
 for(const value of samples){const item=entry(reportOf({RATINGS_PIPELINE:value}),'RATINGS_PIPELINE');assert.equal(item.effective,null);assert.equal(item.retired,true);}
+for(const value of samples){const item=entry(reportOf({LETTERBOXD_DIARY_HISTORY:value}),'LETTERBOXD_DIARY_HISTORY');assert.equal(item.effective,null);assert.equal(item.retired,true);assert.equal(item.valid,value===undefined);assert.equal(item.issue,value===undefined?null:'retired');}
 
 // 6. Registry parity with the maintained reference and the governance checker.
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z0-9_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
+const RETIRED=['LETTERBOXD_DIARY_HISTORY','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');
