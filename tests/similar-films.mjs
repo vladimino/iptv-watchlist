@@ -109,7 +109,7 @@ load({films:[open,genreForecast,pace,actors,director,withMood,mechanic,richer],e
 }});
 same(ids(rows()),['richer','with-mood','mechanic','director','actors','pace','genre-forecast'],'a mechanic beats mood-less mechanic, people, execution and a prediction-only film');
 assert.equal(rows().find(row=>row.film.id==='with-mood').reasonKind,'mechanic_mood');
-assert.equal(rows().find(row=>row.film.id==='with-mood').label,'Ограбление');
+assert.equal(rows().find(row=>row.film.id==='with-mood').label,'Ограбление · Напряжённый');
 assert.equal(rows().find(row=>row.film.id==='richer').label,'Ограбление и Расследование');
 assert.equal(rows().find(row=>row.film.id==='director').label,'Общий режиссёр');
 assert.equal(rows().find(row=>row.film.id==='actors').label,'Общие актёры');
@@ -291,4 +291,67 @@ const before=run('JSON.stringify(enrichment)');
 run('renderSimilar(now)');
 assert.equal(run('JSON.stringify(enrichment)'),before,'rendering does not write enrichment');
 
-console.log('Similar films: eligibility, ranking, limits, franchise, identity, catalog and watchlist, freshness, links and no fetch passed');
+// watched is not on the enrichment view the page loads. A flag beside the rating is not a rewatch, and started is not one either.
+load({films:[open,watch('seen',{title:'Смотрел без оценки'}),watch('forecast-only',{title:'Только прогноз'})],enrichment:{
+ open:openStored,
+ seen:stored({mechanics:['heist'],prediction:strong(4.4,.8)}),
+ 'forecast-only':stored({prediction:strong(4.6,.9)}),
+}});
+vm.runInContext("enrichment.films.seen.watched=true;enrichment.films['forecast-only'].watched=true;startedIds=new Set(['seen'])",ui);
+const unseen=rows();
+assert.equal(unseen.find(row=>row.film.id==='seen').badge,'watchlist','a watched film with no stored rating stays on the watchlist until the view sends watched');
+assert.equal(unseen.find(row=>row.film.id==='forecast-only').label,'Подходит по прогнозу','the same gap still allows the prediction-only label');
+assert.equal(unseen.find(row=>row.film.id==='forecast-only').badge,'watchlist');
+
+// A same-generation refresh keeps the focused control. A real markup change restores it when that film is still shown.
+function richCards(){
+ const el={children:[],_html:''};
+ Object.defineProperty(el,'innerHTML',{get(){return this._html;},set(html){
+  this._html=html;this.children=[];
+  for(const match of String(html).matchAll(/<article class="film-similar-card"([\s\S]*?)<\/article>/g)){
+   const body=match[1],card={dataset:{similarId:(body.match(/data-similar-id="([^"]*)"/)||[])[1]||''},buttons:[],links:[]};
+   card.contains=node=>card.buttons.includes(node)||card.links.includes(node);
+   for(const buttonMatch of body.matchAll(/data-similar-open="([^"]*)"/g)){const button={dataset:{similarOpen:buttonMatch[1]},classList:{contains(){return false;}},closest(){return card;},focus(){ui.document.activeElement=button;}};card.buttons.push(button);}
+   for(const linkMatch of body.matchAll(/<a class="film-similar-external" href="([^"]*)"/g)){const link={dataset:{},classList:{contains(name){return name==='film-similar-external';}},getAttribute(name){return name==='href'?linkMatch[1]:null;},closest(){return card;},focus(){ui.document.activeElement=link;}};card.links.push(link);}
+   this.children.push(card);
+  }
+ }});
+ el.contains=node=>el.children.some(card=>card===node||card.contains(node));
+ el.querySelectorAll=selector=>{const found=[];for(const card of el.children){if(selector==='[data-similar-open]')found.push(...card.buttons);if(selector==='a.film-similar-external')found.push(...card.links);}return found;};
+ return el;
+}
+const rich=richCards();
+nodes['#film-similar-cards']=rich;
+nodes['#finds']={hidden:true,setAttribute(){}};
+nodes['#finds-cards']={innerHTML:''};
+nodes['#finds-title']={textContent:''};
+nodes['#finds-caption']={textContent:''};
+nodes['#finds-notice']={innerHTML:'',hidden:true};
+ui.document.activeElement=null;
+load({films:[open,watch('peer',{title:'Сосед',shows:[show(-1)]})],enrichment:{open:openStored,peer:stored({mechanics:['heist']})},catalogFilms:[catalog('tmdb_40',40,{title:'Снаружи',mechanics:['investigation'],shows:[show(-1)]})]});
+vm.runInContext('similarMarkup=""',ui);
+run('renderSimilar(now)');
+const focused=rich.querySelectorAll('[data-similar-open]')[0];
+assert.equal(focused.dataset.similarOpen,'peer');
+ui.document.activeElement=focused;
+run('renderFinds(now)');
+assert.equal(ui.document.activeElement,focused,'a same-generation catalog refresh does not rebuild the focused title');
+assert.equal(fetches.length,0,'the refresh test does not fetch');
+vm.runInContext("films.find(item=>item.id==='peer').title='Сосед 2'",ui);
+run('renderSimilar(now)');
+const moved=ui.document.activeElement;
+assert.notEqual(moved,focused,'a changed title replaces the card');
+assert.equal(moved.dataset.similarOpen,'peer','focus returns to the same loaded film');
+const external=rich.querySelectorAll('a.film-similar-external')[0];
+ui.document.activeElement=external;
+vm.runInContext("findsSource.films.find(item=>item.id==='tmdb_40').title='Другое снаружи'",ui);
+run('renderSimilar(now)');
+assert.notEqual(ui.document.activeElement,external);
+assert.equal(ui.document.activeElement.getAttribute('href'),'https://www.themoviedb.org/movie/40','focus returns to the same TMDB link');
+ui.document.activeElement=rich.querySelectorAll('[data-similar-open]')[0];
+vm.runInContext("films=films.filter(item=>item.id!=='peer')",ui);
+run('renderSimilar(now)');
+assert.equal(rich.querySelectorAll('[data-similar-open]').length,0,'the loaded film is gone');
+assert.equal(ui.document.activeElement?.classList?.contains('film-similar-external')||false,false,'focus is not moved onto a different card');
+
+console.log('Similar films: eligibility, ranking, limits, franchise, identity, catalog and watchlist, freshness, links, focus and no fetch passed');
