@@ -14,6 +14,14 @@ function setup({pages=12,extra={}}={}){
 }
 const at=ms=>new Date(ms).toISOString();
 async function drain(R,env,runId,limit=20){const replies=[];for(let i=0;i<limit;i++){const reply=plain(await R.step(env,{runId}));replies.push(reply);if(reply.nextAction!=='continue')break;}return replies;}
+// A migrated run always reads Diary page 1 first (ADR 0075). Removal sections publish one unrelated row so that page succeeds.
+function quietDiary(net){net.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-29','99001')],false));}
+async function finishDiary(R,env,runId){
+ const step=plain(await R.step(env,{runId}));
+ assert.equal(step.step.diaryPages,1,'the retired binding still reads Diary page 1');
+ assert.equal(step.nextAction,'continue');assert.equal(step.phase,'removal');
+ return step;
+}
 
 // 1. An absent, inline, invalid or separate binding on unmigrated storage: start and step answer not_migrated and
 // write nothing. The status reads pipeline blocked and switch separate. The binding is not consulted.
@@ -27,6 +35,10 @@ async function drain(R,env,runId,limit=20){const replies=[];for(let i=0;i<limit;
   assert.equal(status.pipeline,'blocked');assert.equal(status.switch,'separate');assert.equal(status.sideEffects,'none');
  }
  assert.equal(bucket.writes().length,0,'nothing written');assert.equal(net.fetches.length,0,'nothing requested');
+ for(const value of [undefined,'off','on','garbage']){
+  assert.equal(plain(await R.start({...env,LETTERBOXD_DIARY_HISTORY:value},{trigger:'manual'})).reason,'not_migrated',String(value));
+ }
+ assert.equal(net.fetches.length,0,'an unmigrated start still requests nothing');
 }
 
 // 2. A run reads Diary page 1 once, even when it links a next page and the cursor still says resumePage 2, then the
@@ -66,6 +78,21 @@ async function drain(R,env,runId,limit=20){const replies=[];for(let i=0;i<limit;
  assert.equal(plain(await R.status(env)).diary.historicalCoverage,'incomplete');
 }
 
+// 2b. ADR 0075: absent, on, off and garbage bindings take the same Diary-first path. Exactly page 1. enabled is the capability.
+for(const value of [undefined,'on','off','garbage','']){
+ const {bucket,env,R,net}=setup({pages:1,extra:{LETTERBOXD_DIARY_HISTORY:value}});
+ migrated(bucket);
+ const started=plain(await R.start(env,{trigger:'manual'}));
+ assert.equal(bucket.value(RUN).phase,'diary',String(value));
+ const replies=await drain(R,env,started.runId);
+ eq(replies.map(reply=>[reply.nextAction,reply.reason,reply.step?.diaryPages??null]),[['continue','more_work',1],['stop','finished',0]],String(value));
+ eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
+ const run=bucket.value(RUN);
+ assert.equal(run.diary.outcome,'recent_window');assert.equal(run.cause,null);assert.equal(run.state,'finished');
+ assert.equal(plain(await R.status(env)).diary.enabled,true);
+ assert.equal(Object.keys(bucket.value(HISTORY).entries).length,50);
+}
+
 // 3. A step whose lease is already too short reads nothing (`step_budget`) and the next step reads page 1, still not page 2.
 {
  const {bucket,env,R,net,clock}=setup();
@@ -87,9 +114,12 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  net.diary.set(1,status);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
  const replies=await drain(R,env,runId);
+ assert.equal(replies[0].phase,'removal','a failed page 1 still advances to removal');
+ assert.equal(replies[0].step.diaryPages,0,'that page is not counted as read');
  assert.equal(replies.at(-1).reason,'error',outcome);
+ assert.equal(replies.at(-1).state,'error',outcome);
  const run=bucket.value(RUN);
- assert.equal(run.diary.outcome,outcome);assert.equal(run.cause,outcome);assert.equal(run.diary.pagesRead,0);
+ assert.equal(run.state,'error');assert.equal(run.diary.outcome,outcome);assert.equal(run.cause,outcome);assert.equal(run.diary.pagesRead,0);
  eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
  assert.equal(bucket.value(CURSOR).lastSuccessAt,null);
  eq(R.health(run,T0),{lastSuccessAt:null,lastFailureAt:run.finishedAt,state,code});
@@ -103,9 +133,21 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(R.health(bucket.value(RUN),T0).code,'ok');
  assert.equal(net.diaryFetches().length,1);
 }
+{
+ const {bucket,env,R,net}=setup({pages:1,extra:{LETTERBOXD_DIARY_HISTORY:'off'}});
+ migrated(bucket);
+ net.diary.set(1,403);
+ const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ assert.equal(bucket.value(RUN).phase,'diary');
+ const replies=await drain(R,env,runId);
+ assert.equal(replies[0].phase,'removal');assert.equal(replies[0].step.diaryPages,0);
+ assert.equal(replies.at(-1).reason,'error');assert.equal(replies.at(-1).state,'error');
+ assert.equal(bucket.value(RUN).state,'error');assert.equal(bucket.value(RUN).cause,'blocked');assert.equal(bucket.value(RUN).diary.outcome,'blocked');
+ eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
+}
 
 // 5. The removal phase: settle first, then at most five lookups with claim tokens; a rating reaches every unresolved
-// removal event. A 403 pauses the queue and ends the lookups; the next run requests nothing while it is paused.
+// removal event. A 403 pauses the queue and ends the lookups; the next run requests no member page while it is paused.
 {
  const {bucket,env,R,net,ctx}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
  const films={};
@@ -113,10 +155,11 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  const eventAt=at(T0-2*H);
  await ctx.writeEvent(env,{id:'run-1-watchlist',type:'watchlist',at:eventAt,total:0,baseline:false,added:[],removed:ids.map(id=>({id,title:id,year:2000}))});
  for(const [n,id] of ids.entries())films[id]={url:film(id).url,state:'pending',attempts:0,enqueuedAt:at(T0-H+n),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[{eventKey:eventKeyOf(eventAt,'run-1-watchlist'),sourceRunId:'run-1',at:eventAt,resolved:false}]};
- migrated(bucket,{films});
+ migrated(bucket,{films});quietDiary(net);
  net.members.set('a',4);net.members.set('b','none');net.members.set('c',404);net.members.set('d',3.5);net.members.set('e',403);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
- assert.equal(bucket.value(RUN).phase,'removal','with the Diary off the run starts at the removal phase');
+ assert.equal(bucket.value(RUN).phase,'diary','a migrated run starts in the Diary phase');
+ await finishDiary(R,env,runId);
  const reply=plain(await R.step(env,{runId}));
  assert.equal(reply.reason,'finished');assert.equal(reply.step.lookups,5);
  eq(net.memberFetches().map(url=>url.split('/').at(-2)),['a','b','c','d','e']);
@@ -147,8 +190,9 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  for(let r=0;r<15;r++){const eventAt=at(T0-(r+1)*H);await ctx.writeEvent(env,{id:'run-'+r+'-watchlist',type:'watchlist',at:eventAt,total:0,baseline:false,added:[],removed:Array.from({length:10},(_,n)=>({id:'s'+n,title:'S'+n,year:2000}))});}
  for(let n=0;n<10;n++)films['s'+n]={url:film('s'+n).url,state:'rated',rating:4,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:Array.from({length:15},(_,r)=>({eventKey:eventKeyOf(at(T0-(r+1)*H),'run-'+r+'-watchlist'),sourceRunId:'run-'+r,at:at(T0-(r+1)*H),resolved:false}))};
  films.todo={url:film('todo').url,state:'pending',attempts:0,enqueuedAt:at(T0-H),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[]};
- migrated(bucket,{films});net.members.set('todo',2.5);
+ migrated(bucket,{films});quietDiary(net);net.members.set('todo',2.5);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ await finishDiary(R,env,runId);
  const first=plain(await R.step(env,{runId}));
  eq([first.nextAction,first.summary.removal.settled.resolved,first.summary.removal.lookup.stoppedBy,net.memberFetches().length],['continue',100,'settling',0]);
  const second=plain(await R.step(env,{runId}));
@@ -165,8 +209,9 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  const validAt=at(T0-2*H);
  await ctx.writeEvent(env,{id:'kept-watchlist',type:'watchlist',at:validAt,total:0,baseline:false,added:[],removed:[{id:'z-valid',title:'Z',year:2000}]});
  films['z-valid']={url:film('z-valid').url,state:'rated',rating:4.5,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:[{eventKey:eventKeyOf(validAt,'kept-watchlist'),sourceRunId:'kept',at:validAt,resolved:false}]};
- migrated(bucket,{films});
+ migrated(bucket,{films});quietDiary(net);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
+ await finishDiary(R,env,runId);
  const first=plain(await R.step(env,{runId}));
  eq([first.nextAction,first.summary.removal.settled.waiting,first.summary.removal.settled.resolved,first.summary.removal.lookup.stoppedBy],['continue',100,0,'settling'],'100 missing references come first by id');
  const second=plain(await R.step(env,{runId}));
@@ -180,19 +225,21 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
 // 5d. Across runs: a run that stopped after its first settle step leaves the unvisited references first in line, so
 // the next run reaches the valid one in its first step instead of rescanning the same hundred.
 {
- const {bucket,env,R,clock,ctx}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
+ const {bucket,env,R,clock,ctx,net}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
  const films={};
  for(let n=0;n<10;n++)films['w'+n]={url:film('w'+n).url,state:'rated',rating:3,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:Array.from({length:10},(_,r)=>({eventKey:eventKeyOf(at(T0-(r+1)*H),'lost-'+r+'-watchlist'),sourceRunId:'lost-'+r,at:at(T0-(r+1)*H),resolved:false}))};
  const validAt=at(T0-2*H);
  await ctx.writeEvent(env,{id:'kept-watchlist',type:'watchlist',at:validAt,total:0,baseline:false,added:[],removed:[{id:'z-valid',title:'Z',year:2000}]});
  films['z-valid']={url:film('z-valid').url,state:'rated',rating:2,attempts:1,enqueuedAt:at(T0-H),nextAttemptAt:null,lastAttemptAt:null,lastResult:'saved',claim:null,refs:[{eventKey:eventKeyOf(validAt,'kept-watchlist'),sourceRunId:'kept',at:validAt,resolved:false}]};
- migrated(bucket,{films});
+ migrated(bucket,{films});quietDiary(net);
  const one=plain(await R.start(env,{trigger:'manual'}));
+ await finishDiary(R,env,one.runId);
  const first=plain(await R.step(env,{runId:one.runId}));
  eq([first.nextAction,first.summary.removal.settled.resolved],['continue',0]);
  clock.now+=31*MIN;
  const two=plain(await R.start(env,{trigger:'manual'}));
  assert.equal(two.reason,'started');assert.equal(bucket.value(RUN).recent[0].cause,'abandoned');
+ await finishDiary(R,env,two.runId);
  const next=plain(await R.step(env,{runId:two.runId}));
  eq([next.reason,next.summary.removal.settled.resolved,next.summary.removal.settled.waiting],['more_work',1,99],'the valid reference is settled first, then the least recently checked missing ones');
  const last=plain(await R.step(env,{runId:two.runId}));
@@ -206,10 +253,10 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  const {bucket,env,R,net}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
  const films={},ids=Array.from({length:12},(_,n)=>'due'+String(n).padStart(2,'0'));
  for(const [n,id] of ids.entries()){films[id]={url:film(id).url,state:'pending',attempts:0,enqueuedAt:at(T0-H+n),nextAttemptAt:at(T0-H),lastAttemptAt:null,lastResult:null,claim:null,refs:[]};net.members.set(id,n%2?'none':3);}
- migrated(bucket,{films});
+ migrated(bucket,{films});quietDiary(net);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
  const replies=await drain(R,env,runId);
- eq(replies.map(reply=>[reply.nextAction,reply.step.lookups]),[['continue',5],['continue',5],['stop',2]]);
+ eq(replies.map(reply=>[reply.nextAction,reply.step.lookups]),[['continue',0],['continue',5],['continue',5],['stop',2]]);
  assert.equal(replies.at(-1).reason,'finished');
  eq(net.memberFetches().map(url=>url.split('/').at(-2)),ids,'every due film once, oldest first');
  assert.equal(bucket.value(RUN).checkpoint.removalChecked,12);
@@ -270,6 +317,7 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  const {bucket,env,R,net,ctx}=setup({pages:0,extra:{LETTERBOXD_DIARY_HISTORY:undefined}});
  const eventAt=at(T0-H),ref={eventKey:eventKeyOf(eventAt,'run-3-watchlist'),sourceRunId:'run-3',at:eventAt};
  migrated(bucket,{films:{a:{url:film('a').url,state:'pending',attempts:0,enqueuedAt:eventAt,nextAttemptAt:eventAt,lastAttemptAt:null,lastResult:null,claim:null,refs:[{...ref,resolved:false}]}}});
+ quietDiary(net);
  net.members.set('a',4);
  let raced=false;
  bucket.hooks.beforePut=async key=>{if(key===QUEUE&&!raced){raced=true;await g(ctx,'enqueueRemovalRefs')(env,[film('fresh')],{eventKey:eventKeyOf(at(T0),'run-4-watchlist'),sourceRunId:'run-4',at:at(T0)});}};

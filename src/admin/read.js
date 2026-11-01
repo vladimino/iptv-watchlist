@@ -133,12 +133,33 @@ function adminApplyOwnerFilm(record,entry){
  return {...record,localization,aliases,titleReviews:Array.isArray(entry.titleReviews)?entry.titleReviews:[],localizationConflicts:Array.isArray(entry.localizationConflicts)?entry.localizationConflicts:record.localizationConflicts,preferred:localization.value??null};
 }
 function adminTitleReview(film){return typeof titleReviewState==='function'?titleReviewState(film):null;}
+function adminPersonSlicePresent(stored){
+ if(!stored||typeof stored!=='object')return false;
+ if(stored.localization)return true;
+ if(Array.isArray(stored.aliases)&&stored.aliases.length)return true;
+ if(Array.isArray(stored.nameReviews)&&stored.nameReviews.length)return true;
+ if(Array.isArray(stored.roleLinks)&&stored.roleLinks.length)return true;
+ if(Array.isArray(stored.localizationConflicts)&&stored.localizationConflicts.length)return true;
+ return false;
+}
+function adminMergePersonAliases(viewAliases,storedAliases){
+ const merged=typeof mergeAliases==='function'?mergeAliases(viewAliases||[],storedAliases||[]):(storedAliases||viewAliases||[]);
+ const stamped=new Map();
+ for(const alias of storedAliases||[]){
+  if(!alias?.value)continue;
+  const provenance=alias.provenance;
+  if(provenance?.previousPreferred||provenance?.authority==='owner'||provenance?.added==='alias')stamped.set((alias.kind||'name')+'\0'+alias.value,alias);
+ }
+ if(!stamped.size)return merged;
+ return merged.map(alias=>stamped.get((alias.kind||'name')+'\0'+alias.value)||alias);
+}
 function adminPersonSubject(view,stored,clock){
  if(!view)return null;
- if(!stored?.localization)return {...view,preferred:view.localization?.value??null,nameReviews:Array.isArray(view.nameReviews)?view.nameReviews:[],roleLinks:Array.isArray(view.roleLinks)?view.roleLinks:[]};
- let subject={...view,localization:stored.localization,aliases:typeof mergeAliases==='function'?mergeAliases(view.aliases||[],stored.aliases||[]):(stored.aliases||view.aliases),localizationConflicts:Array.isArray(stored.localizationConflicts)?stored.localizationConflicts.slice():[],nameReviews:Array.isArray(stored.nameReviews)?stored.nameReviews.slice():[],roleLinks:Array.isArray(stored.roleLinks)?stored.roleLinks.slice():[]};
+ if(!adminPersonSlicePresent(stored))return {...view,preferred:view.localization?.value??null,nameReviews:Array.isArray(view.nameReviews)?view.nameReviews:[],roleLinks:Array.isArray(view.roleLinks)?view.roleLinks:[]};
+ const ownerLocalization=stored.localization?.status==='reviewed'&&stored.localization?.provenance?.authority==='owner'?stored.localization:null;
+ let subject={...view,localization:ownerLocalization||view.localization,aliases:adminMergePersonAliases(view.aliases,stored.aliases),localizationConflicts:Array.isArray(stored.localizationConflicts)?stored.localizationConflicts.slice():[],nameReviews:Array.isArray(stored.nameReviews)?stored.nameReviews.slice():[],roleLinks:Array.isArray(stored.roleLinks)?stored.roleLinks.slice():[]};
  const live=view.localization;
- if(live?.value&&subject.localization?.value!==live.value&&typeof reconcilePersonName==='function')subject=reconcilePersonName(subject,{status:live.status,value:live.value,source:live.source||null,authority:live.provenance?.authority||null,provenance:live.provenance||null},clock);
+ if(ownerLocalization&&live?.value&&subject.localization?.value!==live.value&&typeof reconcilePersonName==='function')subject=reconcilePersonName(subject,{status:live.status,value:live.value,source:live.source||null,authority:live.provenance?.authority||null,provenance:live.provenance||null},clock);
  return {...subject,preferred:subject.localization?.value??null};
 }
 function adminPersonRecord(person,people,clock,reviews){

@@ -56,11 +56,11 @@ flowchart LR
 
 ## Owner name confirmation
 
-**Visual review: owner approved on 2026-11-01** ([AIR-54 owner decision](https://trello.com/c/yKtj1ahy#comment-6ae70775d9cef4bee9fb0090)) after reviewing PR #294 HEAD `adc7768ee25b41ae04af878569e35d4fd09090c9`. The store follows the independently accepted [ADR 0072](../adr/0072-owner-reviewed-localization-overlay.md). Neither approval authorizes a production data write. It is not the identity diagram above. The owner confirms one Russian name on a Person card. One POST writes the `people` map of one R2 object and copies `films`, then reads that object back before it reports success. Programme, watchlist and admin reads overlay that name. A dictionary or automatic name is held once and is not applied. The identity GET does not read the object, and a saved role link does not replace a role id.
+**Visual review: owner approved on 2026-11-01** ([AIR-54 owner decision](https://trello.com/c/yKtj1ahy#comment-6ae70775d9cef4bee9fb0090)) after reviewing PR #294 HEAD `adc7768ee25b41ae04af878569e35d4fd09090c9`. The store follows the independently accepted [ADR 0072](../adr/0072-owner-reviewed-localization-overlay.md). Neither approval authorizes a production data write. It is not the identity diagram above. The owner adds one name variant on a Person card. The same POST writes the `people` map of one R2 object and copies `films`, then reads that object back before it reports success. With the preferred checkbox off, readers keep the current name and gain the alias. With it on, they overlay the new preferred name, and the previous preferred name stays selectable. A dictionary or automatic name is held once and is not applied. The identity GET does not read the object, and a saved role link does not replace a role id. The button label in the figure is **Сохранить вариант**. That label is the only change since the approved render and is **proposed for visual review**. The arrows are the approved flow.
 
 ```mermaid
 flowchart LR
-  form["Person card<br/>Сохранить имя"]
+  form["Person card<br/>Сохранить вариант"]
   post["POST one command"]
   pure["Name review contract"]
   object[("admin/owner-reviews.json<br/>people written, films copied")]

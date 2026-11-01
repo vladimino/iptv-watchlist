@@ -342,7 +342,7 @@ async function submit(parts, {manual = '', basis = '', accept = true} = {}) {
   });
   const personCard = detail.innerHTML;
   assert.match(personCard, /id="admin-name-form"/);
-  assert.match(personCard, /Сохранить имя/);
+  assert.match(personCard, /Сохранить вариант/);
   assert.match(personCard, /name="person-name-role"/);
   assert.match(personCard, /admin-folded/);
   assert.match(personCard, /<summary>Другие имена \(1\)<\/summary>/);

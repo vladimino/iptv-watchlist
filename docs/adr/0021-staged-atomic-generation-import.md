@@ -6,7 +6,7 @@
 **Approval source:** [owner review on PR #123](https://github.com/vladimino/iptv-watchlist/pull/123#pullrequestreview-5655427816) ("the design is accepted conceptually, conditional on a subsequent real-scratch G4 performance and atomicity gate"; no D1 or R2 operation or migration authorized)  
 **Related work:** [AIR-167](https://trello.com/c/6ZaRfXWL), [AIR-74](https://trello.com/c/5AdAmKPe), [AIR-165 executor](https://trello.com/c/cNTnYS1b), [ADR-0019](0019-live-d1-backfill-boundaries.md), [ADR-0017](0017-staged-d1-migration.md), [ADR-0001](0001-d1-schema-v1.md)  
 **Supersedes:** None (extends [ADR-0019](0019-live-d1-backfill-boundaries.md) item 8 for the programme generation unit only)  
-**Superseded by:** [ADR 0075](0075-backfill-single-database-batch.md) in part: a later backfill run does not open a scratch database and does not repeat the G4 harness. The staged generation design and the historical gate results stay. The decision text below is the 26 October 2026 record and is not rewritten.
+**Superseded by:** [ADR 0076](0076-backfill-single-database-batch.md) in part: a later backfill run does not open a scratch database and does not repeat the G4 harness. The staged generation design and the historical gate results stay. The decision text below is the 26 October 2026 record and is not rewritten.
 
 ## Context
 

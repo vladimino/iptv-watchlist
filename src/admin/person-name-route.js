@@ -5,7 +5,7 @@
 const ADMIN_PERSON_NAME_MAX=8000;
 const ADMIN_REVIEW_STATUS={
  missing_person:404,person_mismatch:400,missing_request_id:400,identity_change_forbidden:400,invalid_mode:400,invalid_name:400,invalid_basis:400,invalid_roles:400,
- rejected_identity:409,version_conflict:412,unknown_alias:400,unknown_role:400,unrelated_role:400,rejected_role:409,role_version_conflict:412,request_id_reused:409,
+ rejected_identity:409,version_conflict:412,unknown_alias:400,unknown_role:400,unrelated_role:400,rejected_role:409,role_version_conflict:412,request_id_reused:409,invalid_effect:400,roles_not_allowed:400,
  review_incomplete:409,review_store_unreadable:409,storage_conflict:409,review_unconditional:503,
 };
 function adminPersonNameId(pathname){
@@ -25,7 +25,9 @@ function adminPersonNameAnswer(snapshot,personId,result){
  const subjects=snapshot.records.personSubjects||{};
  const subject=subjects[personId]||result.person;
  const roster=Object.values(subjects);
- return {ok:true,idempotent:!!result.idempotent,changed:!!result.changed,version:result.version,personId,nameReview:personNameState(subject,roster),pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info};
+ const answer={ok:true,idempotent:!!result.idempotent,changed:!!result.changed,version:result.version,personId,nameReview:personNameState(subject,roster),pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info};
+ if(result.reason)answer.reason=result.reason;
+ return answer;
 }
 async function adminPersonNamePut(env,snapshot,result){
  const current=snapshot.reviewCache?.body??null;

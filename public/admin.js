@@ -58,6 +58,8 @@ const ERROR_TEXT = {
   body_too_large: 'Запрос слишком большой.',
   review_store_unreadable: 'Хранилище имён записано в неожиданном виде. Сохранение остановлено.',
   readback_failed: 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.',
+  invalid_effect: 'Команда имени не распознана. Обновите карточку и повторите.',
+  roles_not_allowed: 'Добавление варианта не связывает роли. Снимите роли или включите «Использовать как предпочтительное».',
 };
 const SKEW_TEXT = {
   titles_newer: 'словарь названий новее программы',
@@ -412,6 +414,7 @@ function adminBindTitleReview(detail) {
 function adminNameRussian(option, review) {
   const provenance = option && option.provenance;
   if (provenance && typeof provenance === 'object') {
+    if (provenance.previousPreferred === true) return true;
     if (provenance.authority === 'owner' || provenance.authority === 'dictionary') return true;
     if (provenance.source === 'owner' || provenance.source === 'dictionary') return true;
     if (provenance.language === 'ru') return true;
@@ -425,15 +428,14 @@ function adminNameForm(record) {
   const review = record.nameReview;
   if (!review || !review.version) return '';
   const russian = (review.options || []).filter(option => adminNameRussian(option, review));
-  const checked = Math.max(0, russian.findIndex(option => option.preferred));
-  const options = russian.map((option, index) => `<label class="admin-name-option"><input type="radio" name="person-name-alias" value="${adminEscape(option.value)}"${index === checked ? ' checked' : ''}> <span>${adminEscape(option.value)}</span> <small class="muted">${adminEscape(option.origin || '')}${option.preferred ? ' · текущее' : ''}</small></label>`).join('');
+  const options = russian.map(option => `<label class="admin-name-option"><input type="radio" name="person-name-alias" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span> <small class="muted">${adminEscape(option.origin || '')}${option.preferred ? ' · текущее' : ''}${option.provenance && option.provenance.previousPreferred ? ' · было предпочтительным' : ''}</small></label>`).join('');
   const folded = (review.options || []).map(option => `<li>${adminEscape(option.value)} · ${adminEscape(option.origin || '')} ${adminProvenance(option.provenance)}</li>`).join('');
-  const collisions = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}"${item.linked ? ' checked' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
+  const collisions = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}" disabled${item.linked ? ' checked' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
   const roleList = collisions ? `<fieldset><legend>Тот же человек в другой роли</legend><div class="admin-name-options">${collisions}</div></fieldset>` : '';
   const roleBlock = (review.collisions || []).length > 4 ? `<details class="admin-name-more"><summary>Тот же человек в другой роли (${review.collisions.length})</summary>${roleList}</details>` : roleList;
   const audit = (review.reviews || []).map(entry => `<li>${adminEscape(entry.at || '')} · ${adminEscape(entry.mode || '')} · ${adminEscape(entry.from?.value || '—')} → ${adminEscape(entry.to?.value || '')}${entry.linkedFrom ? ' · из ' + adminEscape(entry.linkedFrom) : ''}</li>`).join('');
   const preferred = review.preferred || {};
-  return `<form id="admin-name-form" class="admin-name-form"><h3>Русское имя</h3><p class="admin-name-current">Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b></p><p class="admin-name-current">Оригинал: <b>${adminEscape(review.original || record.original || 'нет')}</b></p><p class="muted">Введите имя или выберите подтверждённый русский вариант. Сохранение меняет это имя во всех показах и не объединяет id.</p>${options ? `<fieldset><legend>Подтверждённые русские варианты</legend><div class="admin-name-options">${options}</div></fieldset>` : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите имя.</p>'}<label>Своё имя<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${roleBlock}<details class="admin-name-more"><summary>Остальные варианты и происхождение</summary>${folded ? `<ul>${folded}</ul>` : '<p class="muted">Других вариантов нет.</p>'}</details>${audit ? `<details class="admin-name-more"><summary>Журнал</summary><ul>${audit}</ul></details>` : ''}<p id="admin-name-status" class="admin-name-status" role="status" tabindex="-1"></p><button type="submit">Сохранить имя</button></form>`;
+  return `<form id="admin-name-form" class="admin-name-form"><h3>Вариант имени</h3><p class="admin-name-current">Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b></p><p class="admin-name-current">Оригинал: <b>${adminEscape(review.original || record.original || 'нет')}</b></p><p class="muted">Без галочки сохранение только добавляет вариант. Предпочтительное имя, оригинал и показы не меняются.</p>${options ? `<fieldset><legend>Варианты</legend><div class="admin-name-options">${options}</div></fieldset>` : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите имя.</p>'}<label>Вариант<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><label class="admin-name-preferred"><input id="admin-name-preferred" name="person-name-preferred" type="checkbox"> <span>Использовать как предпочтительное</span></label><p id="admin-name-preview" class="admin-name-preview" hidden></p><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${roleBlock}<details class="admin-name-more"><summary>Остальные варианты и происхождение</summary>${folded ? `<ul>${folded}</ul>` : '<p class="muted">Других вариантов нет.</p>'}</details>${audit ? `<details class="admin-name-more"><summary>Журнал</summary><ul>${audit}</ul></details>` : ''}<p id="admin-name-status" class="admin-name-status" role="status" tabindex="-1"></p><button type="submit">Сохранить вариант</button></form>`;
 }
 
 function adminNameRequestId() {
@@ -458,26 +460,74 @@ function adminNameFrozen(personId, requestId) {
   return pending.command;
 }
 
+function adminNameChosen(form) {
+  const manualNode = form.querySelector('#admin-name-manual');
+  const selected = form.querySelector('input[name="person-name-alias"]:checked');
+  const manual = manualNode ? manualNode.value.replace(/\s+/g, ' ').trim() : '';
+  return manual || (selected && selected.value) || '';
+}
+
+function adminNameSync(form, record) {
+  if (!form) return;
+  const box = form.querySelector('#admin-name-preferred');
+  const prefer = !!(box && box.checked);
+  for (const input of form.querySelectorAll('input[name="person-name-role"]')) input.disabled = !prefer;
+  const preview = form.querySelector('#admin-name-preview');
+  if (!preview) return;
+  const next = adminNameChosen(form);
+  const current = record && record.nameReview && record.nameReview.preferred && record.nameReview.preferred.value || 'нет';
+  if (!prefer || !next) {
+    preview.hidden = true;
+    preview.textContent = '';
+    return;
+  }
+  preview.hidden = false;
+  preview.textContent = 'Сейчас: ' + current + ' → Станет: ' + next + '. Новое имя появится в фильмах и поиске.';
+}
+
 function adminNameCommand(form, record, requestId) {
   const manual = form.querySelector('#admin-name-manual').value.replace(/\s+/g, ' ').trim();
   const selected = form.querySelector('input[name="person-name-alias"]:checked');
   const basis = form.querySelector('#admin-name-basis').value.trim();
-  if (!manual && !selected) return {error: 'Выберите вариант или введите имя.'};
-  const roles = [...form.querySelectorAll('input[name="person-name-role"]:checked')].map(input => ({id: input.value, expectedVersion: input.getAttribute('data-version')}));
-  return {command: {personId: record.id, requestId, mode: manual ? 'manual' : 'alias', value: manual || selected.value, expectedVersion: record.nameReview.version, ...(basis ? {basis} : {}), ...(roles.length ? {roles} : {})}};
+  const box = form.querySelector('#admin-name-preferred');
+  if (!manual && !selected) return {error: 'Введите вариант или выберите его.'};
+  const explicit = !!box;
+  const prefer = explicit ? box.checked === true : true;
+  const roles = prefer ? [...form.querySelectorAll('input[name="person-name-role"]:checked')].map(input => ({id: input.value, expectedVersion: input.getAttribute('data-version')})) : [];
+  const command = {personId: record.id, requestId, mode: manual ? 'manual' : 'alias', value: manual || selected.value, expectedVersion: record.nameReview.version, ...(basis ? {basis} : {}), ...(roles.length ? {roles} : {})};
+  if (explicit) command.effect = prefer ? 'promote' : 'add_alias';
+  return {command};
+}
+
+function adminNameRetryText(kept) {
+  const value = kept && typeof kept.value === 'string' ? kept.value : '';
+  const head = 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.';
+  if (kept && kept.effect === 'add_alias') return head + ' Она только добавит вариант «' + value + '». Предпочтительное имя не изменится.';
+  return head + ' Она сделает предпочтительным «' + value + '».';
 }
 
 function adminRestoreNameAttempt(form, kept) {
   if (!form || !kept || !kept.requestId) return;
   const manual = form.querySelector('#admin-name-manual');
   const basis = form.querySelector('#admin-name-basis');
-  if (manual) manual.value = kept.mode === 'manual' ? kept.value : '';
   if (basis) basis.value = kept.basis || '';
+  let shown = false;
   if (kept.mode === 'alias') {
-    for (const choice of form.querySelectorAll('input[name="person-name-alias"]')) choice.checked = choice.value === kept.value;
+    for (const choice of form.querySelectorAll('input[name="person-name-alias"]')) {
+      choice.checked = choice.value === kept.value;
+      if (choice.checked) shown = true;
+    }
   }
+  // A radio that the refresh removed is not a cancelled command. The variant field shows that
+  // value, and the retry still posts the original command until the owner edits the form.
+  if (manual) manual.value = shown ? '' : (kept.value || '');
   const wanted = new Set((kept.roles || []).map(role => role.id));
   for (const box of form.querySelectorAll('input[name="person-name-role"]')) box.checked = wanted.has(box.value);
+  const prefer = form.querySelector('#admin-name-preferred');
+  // A command that omits effect is the historical promote. The checkbox shows the effect the
+  // retry will apply, including when the card was rebuilt with the box off.
+  if (prefer) prefer.checked = kept.effect !== 'add_alias';
+  adminNameSync(form, adminLive.entity);
   form.dataset.requestId = kept.requestId;
 }
 
@@ -503,14 +553,14 @@ function adminFinishUnknownName(kept, view) {
     adminNameDrop();
     delete form.dataset.requestId;
     if (result) {
-      result.textContent = 'Имя записано. Карточка сверена.';
+      result.textContent = kept.effect === 'add_alias' ? 'Вариант записан. Предпочтительное имя не изменилось.' : 'Имя записано. Карточка сверена.';
       if (typeof result.focus === 'function') result.focus();
     }
     return;
   }
   if (form) adminRestoreNameAttempt(form, kept);
   if (result) {
-    result.textContent = 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.';
+    result.textContent = adminNameRetryText(kept);
     if (typeof result.focus === 'function') result.focus();
   }
 }
@@ -519,6 +569,7 @@ function onAdminNameEdit(event) {
   const target = event.target;
   const form = target && target.id === 'admin-name-form' ? target : target && target.closest ? target.closest('#admin-name-form') : null;
   if (!form || !form.dataset) return;
+  adminNameSync(form, adminLive.entity);
   delete form.dataset.requestId;
   adminNameDrop();
 }
@@ -546,10 +597,17 @@ async function onAdminNameSubmit(event) {
   const result = await adminPost('/people/'+encodeURIComponent(command.personId)+'/name-review', command);
   button.disabled = false;
   if (result.ok) {
+    const added = command.effect === 'add_alias';
+    const duplicate = result.body && result.body.reason === 'duplicate_alias';
     adminNameDrop();
     delete form.dataset.requestId;
     adminLive.pin = null;
     await adminRender();
+    const statusNow = document.querySelector('#admin-name-status');
+    if (statusNow) {
+      statusNow.textContent = duplicate ? 'Такой вариант уже есть. Новой записи нет.' : added ? 'Вариант добавлен. Предпочтительное имя не изменилось.' : 'Имя записано. Карточка сверена.';
+      if (typeof statusNow.focus === 'function') statusNow.focus();
+    }
     return;
   }
   const stillPending = adminNameFrozen(entity.id, command.requestId);
@@ -564,7 +622,7 @@ async function onAdminNameSubmit(event) {
     return;
   }
   if (result.status === 503 && result.error === 'readback_failed') {
-    const kept = {requestId: command.requestId, value: command.value, mode: command.mode, basis: command.basis || '', roles: command.roles || []};
+    const kept = JSON.parse(JSON.stringify(command));
     status.textContent = 'Неизвестно, записалось ли имя. Сверяю карточку.';
     if (typeof status.focus === 'function') status.focus();
     const view = await onAdminRefresh();

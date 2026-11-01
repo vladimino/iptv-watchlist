@@ -215,4 +215,79 @@ async function expectUnverified(kind){
 }
 for(const kind of ['throw','corrupt','stale','mismatch'])await expectUnverified(kind);
 
+seed();
+const sandra={id:'actor/sandra-bullock',name:'Сандра Буллок',original:'Sandra Bullock',nameStatus:'provisional',nameSource:'wikidata',aliases:['Sandra Bullock']};
+const programmeBody=structuredClone(records.get('epg/generations/'+RUN+'/programme.json'));
+programmeBody.films.push({id:'three',title:'Three',original:'Three',directors:[],actors:[sandra],shows:[]},{id:'four',title:'Four',original:'Four',directors:[],actors:[structuredClone(sandra)],shows:[]});
+programmeBody.people.actors.push(sandra);
+records.set('epg/generations/'+RUN+'/programme.json',programmeBody);
+records.set('programme.json',structuredClone(programmeBody));
+records.set('people.json',{'actor/sandra-bullock':{name:'Сандра Буллок',original:'Sandra Bullock'}});
+resetCache();
+const sandraDetail=await call('/api/admin/people/person:actor/sandra-bullock');
+assert.equal(sandraDetail.status,200,JSON.stringify(sandraDetail.body));
+assert.equal(sandraDetail.body.item.nameReview.preferred.value,'Сандра Буллок');
+assert.equal(sandraDetail.body.item.nameReview.preferred.status,'provisional');
+assert.equal(sandraDetail.body.item.nameReview.original,'Sandra Bullock');
+const sandraVersion=sandraDetail.body.item.nameReview.version;
+const beforeSandra=puts.length;
+const aliasBody={personId:'person:actor/sandra-bullock',requestId:'sandra-add',mode:'manual',value:'Сандра Баллок',basis:'устаревший вариант',expectedVersion:sandraVersion,effect:'add_alias'};
+const aliasSaved=await post(aliasBody);
+assert.equal(aliasSaved.status,200,JSON.stringify(aliasSaved.body));
+assert.equal(aliasSaved.body.changed,true);
+assert.equal(aliasSaved.body.nameReview.preferred.value,'Сандра Буллок');
+assert.equal(aliasSaved.body.nameReview.preferred.status,'provisional');
+assert.notEqual(aliasSaved.body.nameReview.preferred.authority,'owner');
+assert.equal(aliasSaved.body.nameReview.reviews.find(entry=>entry.requestId==='sandra-add').effect,'alias_added');
+assert.deepEqual(aliasSaved.body.nameReview.roleLinks,[]);
+const sandraStored=records.get('admin/owner-reviews.json').people['person:actor/sandra-bullock'];
+assert.equal(sandraStored.localization,null);
+assert.equal(sandraStored.aliases.filter(alias=>alias.value==='Сандра Баллок').length,1);
+assert.equal(records.get('admin/owner-reviews.json').films['kept-film'],undefined);
+const sandraSearch=await call('/api/admin/people?q='+encodeURIComponent('Сандра Баллок'));
+assert.ok(sandraSearch.body.items.some(item=>item.id==='person:actor/sandra-bullock'&&item.preferred==='Сандра Буллок'));
+const sandraStill=await call('/api/admin/people?q='+encodeURIComponent('Сандра Буллок'));
+assert.ok(sandraStill.body.items.some(item=>item.id==='person:actor/sandra-bullock'));
+const aliasedProgramme=await call('/api/programme');
+const sandraCredits=aliasedProgramme.body.films.flatMap(film=>[...film.actors,...film.directors]).filter(person=>person.id==='actor/sandra-bullock');
+assert.equal(sandraCredits.length,2);
+for(const person of sandraCredits){
+ assert.equal(person.name,'Сандра Буллок');
+ assert.notEqual(person.nameStatus,'reviewed');
+ assert.ok((person.aliases||[]).includes('Сандра Баллок'));
+}
+const duplicateAlias=await post({...aliasBody,requestId:'sandra-add-2',expectedVersion:aliasSaved.body.version});
+assert.equal(duplicateAlias.status,200,JSON.stringify(duplicateAlias.body));
+assert.equal(duplicateAlias.body.changed,false);
+assert.equal(duplicateAlias.body.reason,'duplicate_alias');
+assert.equal(puts.length,beforeSandra+1);
+const aliasReplay=await post(aliasBody);
+assert.equal(aliasReplay.body.idempotent,true);
+assert.equal(puts.length,beforeSandra+1);
+const staleAlias=await post({...aliasBody,requestId:'sandra-stale',value:'Другая Сандра',expectedVersion:'name-review:1:stale'});
+assert.equal(staleAlias.status,412);
+const linkedAlias=await post({...aliasBody,requestId:'sandra-roles',value:'Ещё Сандра',expectedVersion:aliasSaved.body.version,roles:[{id:'person:director/mira-sol',expectedVersion:'x'}]});
+assert.equal(linkedAlias.status,400);
+assert.equal(linkedAlias.body.error,'roles_not_allowed');
+assert.equal(puts.length,beforeSandra+1);
+const promoted=await post({personId:'person:actor/sandra-bullock',requestId:'sandra-promote',mode:'manual',value:'Сандра Баллок',expectedVersion:aliasSaved.body.version,effect:'promote'});
+assert.equal(promoted.status,200,JSON.stringify(promoted.body));
+assert.equal(promoted.body.nameReview.preferred.value,'Сандра Баллок');
+assert.equal(promoted.body.nameReview.preferred.authority,'owner');
+assert.equal(promoted.body.nameReview.reviews.find(entry=>entry.requestId==='sandra-promote').effect,'preferred_changed');
+const priorOption=promoted.body.nameReview.options.find(option=>option.value==='Сандра Буллок');
+assert.equal(priorOption.provenance.previousPreferred,true);
+assert.equal(priorOption.provenance.historicalSource,'wikidata');
+const promotedProgramme=await call('/api/programme');
+const promotedCredits=promotedProgramme.body.films.flatMap(film=>[...film.actors,...film.directors]).filter(person=>person.id==='actor/sandra-bullock');
+assert.equal(promotedCredits.length,2);
+for(const person of promotedCredits){
+ assert.equal(person.name,'Сандра Баллок');
+ assert.ok((person.aliases||[]).includes('Сандра Буллок'));
+}
+const restored=await post({personId:'person:actor/sandra-bullock',requestId:'sandra-restore',mode:'alias',value:'Сандра Буллок',expectedVersion:promoted.body.version,effect:'promote'});
+assert.equal(restored.status,200,JSON.stringify(restored.body));
+assert.equal(restored.body.nameReview.preferred.value,'Сандра Буллок');
+assert.equal(restored.body.nameReview.options.find(option=>option.value==='Сандра Баллок').provenance.previousPreferred,true);
+
 console.log('Person name editor: confirm, replay, conflict, role link, programme overlay, held dictionary and readback passed');

@@ -68,7 +68,7 @@ assert.equal(D.parsePage('<html><title>Changed layout</title><div class="entry">
 const keyed=D.keyRows(D.parsePage(page([{lid:'Twice'},{lid:'Twice'},{lid:'Vid',viewing:'5'},{lid:'NoDate',date:null},{lid:null,slug:'only-slug'}],false)).rows);
 assert.deepEqual(plain(keyed.map(r=>r.key)),['day:lid:Twice|2026-10-29','day:lid:Twice|2026-10-29','viewing:5',null,'day:slug:only-slug|2026-10-29']);
 
-// 2. Gate off: the stage is inert and the commit requests nothing from Letterboxd (AIR-287: no films list, no repair).
+// 2. Unmigrated storage: the EPG commit does not read Diary, with the retired binding absent (ADR 0074, ADR 0075).
 publish(fifty);
 const film=id=>({id,url:`https://letterboxd.com/film/${id.toLowerCase()}/`,title:id,year:2020,shows:[]});
 const report=runId=>({runId,updatedAt:new Date().toISOString(),watchlistCount:1,films:[film('F0')],stats:{}});
@@ -240,6 +240,7 @@ writes.length=0;
 const read=await ctx.worker.fetch(new Request('https://site.example/api/letterboxd/diary?filmId=A'),env);
 const body=await read.json();
 assert.deepEqual([read.status,body.enabled,body.entries,body.unresolvedEntries,body.films],[200,true,3,1,1]);
+assert.equal((await D.readHistory(off)).enabled,true,'enabled is the capability, including when the retired binding is absent');
 assert.deepEqual(plain([body.film.viewingCount,body.film.viewingCountExact,body.film.lastWatchedAt,body.film.rewatches,body.film.rewatchesExact,body.film.entries.map(e=>e.watchedDate)]),[2,true,'2026-10-20',1,false,['2026-10-20','2026-01-02']]);
 assert.ok(body.film.entries.every(e=>e.aliases.every(alias=>typeof alias.firstObservedAt==='string')),'each slug alias carries the read that first saw it');
 assert.equal((await ctx.worker.fetch(new Request('https://site.example/api/letterboxd/diary?filmId=../x'),env)).status,400);
@@ -261,4 +262,4 @@ assert.equal(blocked.ratingsPipeline,'blocked');
 assert.equal(requests.length,0,'a blocked diary page is not requested by the commit');
 assert.equal(records.get('sync.json').ratingAttempt,undefined);
 
-console.log('Letterboxd diary history (AIR-304, ADR 0074): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, gate off untouched, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API, and an EPG commit that does not read Diary passed');
+console.log('Letterboxd diary history (AIR-307, ADR 0075): parser on a 50-row page, one fetch of page 1, a stored resume page is not a fetch plan, day cut at the bottom stays a lower bound, a later page 1 can prove the day, no false exactness, re-watches per row, unmigrated commit does not read Diary, steady-state increment, re-import and backdated rows, failures (HTTP, challenge, fetch, unreadable body, zero-row 200) without retry or loss, crash recovery repeats page 1, identity conflict, read API with enabled true, and an EPG commit that does not read Diary passed');
