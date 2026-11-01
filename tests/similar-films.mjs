@@ -13,8 +13,11 @@ assert.match(html,/id="film-similar"/);
 assert(html.indexOf('id="film-screen-availability"')<html.indexOf('id="film-similar"')&&html.indexOf('id="film-similar"')<html.indexOf('id="film-screen-identity"'),'the open film availability stays above similar films');
 assert.match(html,/id="film-similar" class="film-section film-similar" hidden/);
 assert.match(css,/\.film-similar\[hidden\]\{display:none\}/);
-assert.match(css,/\.film-similar-cards\{display:grid;grid-template-columns:repeat\(auto-fill,minmax\(240px,1fr\)\);gap:10px\}/);
+assert.match(css,/\.film-similar-cards\{display:grid;grid-template-columns:repeat\(auto-fill,minmax\(360px,1fr\)\);gap:12px\}/);
+assert.match(css,/\.film-similar-card\{[^}]*background:var\(--surface\)/);
+assert.match(css,/\.film-similar-card\.is-catalog\{border-color:#3f7a52;background:#1a2d21\}/);
 assert.match(css,/@media\(max-width:760px\)\{\.film-similar-cards\{grid-template-columns:1fr\}/);
+assert.match(css,/@media\(max-width:410px\)\{\.film-similar-card\.has-score \.film-head\{padding-top:84px/);
 assert.match(css,/\.film-similar-open:focus-visible,\.film-similar-external:focus-visible\{outline:2px solid var\(--lime\)/);
 assert.match(css,/\.film-similar-open,\.film-similar-external\{[^}]*overflow-wrap:anywhere/);
 assert.match(css,/\.film-screen\{max-width:760px/);
@@ -53,8 +56,8 @@ vm.runInContext(`viewClock=${now};urlReady=true`,ui);
 const run=(expression,input)=>{ui.input=input;return vm.runInContext(expression,ui);};
 const show=(offset,channel='Один')=>({channel,start:now+offset*hour,end:now+(offset+2)*hour});
 const strong=(rating=4.4,probability=.8,confidence='high')=>({predictedRating:rating,probability4Plus:probability,confidence,stale:false,moodIds:[]});
-const watch=(id,extra={})=>({id,title:extra.title||id,original:extra.original||extra.title||id,year:extra.year??2001,tmdbId:extra.tmdbId,canonicalIdentity:extra.canonicalIdentity,directors:extra.directors||[],actors:extra.actors||[],shows:extra.shows===undefined?[show(-5)]:extra.shows,url:extra.url,genres:extra.genres||['Драма'],catalogOnly:extra.catalogOnly===true});
-const catalog=(id,tmdb,extra={})=>({id,tmdbId:String(tmdb),canonicalIdentity:extra.canonicalIdentity||'tmdb:'+tmdb,title:extra.title||id,original:extra.original||extra.title||id,year:extra.year??2011,directors:extra.directors||[],actors:extra.actors||[],shows:extra.shows===undefined?[show(-4)]:extra.shows,url:Object.hasOwn(extra,'url')?extra.url:`https://www.themoviedb.org/movie/${tmdb}`,genres:extra.genres||['триллер'],fingerprint:Object.hasOwn(extra,'fingerprint')?extra.fingerprint:{plotMechanics:extra.mechanics||[],moodIds:extra.moods||[],execution:extra.execution||{}},prediction:extra.prediction===undefined?null:extra.prediction});
+const watch=(id,extra={})=>({id,title:extra.title||id,original:extra.original||extra.title||id,year:extra.year??2001,runtime:extra.runtime,poster:extra.poster,tmdbId:extra.tmdbId,canonicalIdentity:extra.canonicalIdentity,directors:extra.directors||[],actors:extra.actors||[],shows:extra.shows===undefined?[show(-5)]:extra.shows,url:extra.url,genres:extra.genres||['Драма'],catalogOnly:extra.catalogOnly===true});
+const catalog=(id,tmdb,extra={})=>({id,tmdbId:String(tmdb),canonicalIdentity:extra.canonicalIdentity||'tmdb:'+tmdb,title:extra.title||id,original:extra.original||extra.title||id,year:extra.year??2011,runtime:extra.runtime,poster:extra.poster,directors:extra.directors||[],actors:extra.actors||[],shows:extra.shows===undefined?[show(-4)]:extra.shows,url:Object.hasOwn(extra,'url')?extra.url:`https://www.themoviedb.org/movie/${tmdb}`,genres:extra.genres||['триллер'],fingerprint:Object.hasOwn(extra,'fingerprint')?extra.fingerprint:{plotMechanics:extra.mechanics||[],moodIds:extra.moods||[],execution:extra.execution||{}},prediction:extra.prediction===undefined?null:extra.prediction});
 const stored=(extra={})=>{const row={fingerprint:Object.hasOwn(extra,'fingerprint')?extra.fingerprint:{plotMechanics:extra.mechanics||[],moodIds:extra.moods||[],execution:extra.execution||{}},prediction:extra.prediction===undefined?null:extra.prediction,actualRating:extra.actualRating};if(Object.hasOwn(extra,'watched'))row.watched=extra.watched;return row;};
 function load({films,enrichment,catalogFilms=null,runId='G1',filmId='open'}){
  ui.filmsList=films;
@@ -87,7 +90,7 @@ load({films:[open,watch('only',{title:'Один'})],enrichment:{open:openStored,
 same(ids(rows()),['only']);
 assert.equal(run('renderSimilar(now).length'),1);
 assert.equal(nodes['#film-similar'].hidden,false);
-assert.equal((nodes['#film-similar-cards'].innerHTML.match(/class="film-similar-card"/g)||[]).length,1);
+assert.equal((nodes['#film-similar-cards'].innerHTML.match(/class="film-similar-card\b/g)||[]).length,1);
 
 // Mechanics outrank people, execution, genre and a higher forecast. Mood counts only beside a mechanic.
 const mechanic=watch('mechanic',{title:'Ограбление'});
@@ -142,7 +145,17 @@ load({films:[open,watch('low-prob',{original:'low-prob'}),watch('high-prob',{ori
  'id-b':stored({mechanics:['heist'],prediction:strong(3.5,.8)}),
  'id-a':stored({mechanics:['heist'],prediction:strong(3.5,.8)}),
 }});
-same(ids(rows()),['high-prob','low-prob','sooner','later','id-a','id-b'],'rating, probability, earlier availability, then the id');
+same(ids(rows()),['high-prob','low-prob'],'the same mechanic keeps the two strongest: rating, then probability');
+load({films:[open,watch('low-prob'),watch('high-prob'),watch('sooner',{shows:[show(-40)]}),watch('later',{shows:[show(-5)]}),watch('id-b'),watch('id-a')],enrichment:{
+ open:stored({mechanics:['heist','investigation','mystery','puzzle','chase_escape','rescue'],prediction:strong(4.1,.75)}),
+ 'low-prob':stored({mechanics:['heist'],prediction:strong(4.2,.71)}),
+ 'high-prob':stored({mechanics:['investigation'],prediction:strong(4.2,.9)}),
+ sooner:stored({mechanics:['mystery'],prediction:strong(4.0,.8)}),
+ later:stored({mechanics:['puzzle'],prediction:strong(4.0,.8)}),
+ 'id-b':stored({mechanics:['chase_escape'],prediction:strong(3.5,.8)}),
+ 'id-a':stored({mechanics:['rescue'],prediction:strong(3.5,.8)}),
+}});
+same(ids(rows()),['high-prob','low-prob','sooner','later','id-a','id-b'],'distinct reasons keep the tie-break: rating, probability, earlier availability, then the id');
 
 // A stale or missing forecast is not a number and does not outrank a current lower one.
 load({films:[open,watch('stale'),watch('fresh'),watch('none')],enrichment:{
@@ -151,23 +164,34 @@ load({films:[open,watch('stale'),watch('fresh'),watch('none')],enrichment:{
  fresh:stored({mechanics:['heist'],prediction:strong(4.0,.7,'medium')}),
  none:stored({mechanics:['heist'],prediction:null}),
 }});
-same(ids(rows()),['fresh','none','stale']);
+same(ids(rows()),['fresh','none']);
+assert.equal(rows().find(row=>row.film.id==='stale'),undefined,'a third copy of the same mechanic is left out, so the stale forecast is not a ninth label');
+load({films:[open,watch('stale'),watch('fresh'),watch('none')],enrichment:{
+ open:stored({mechanics:['heist','mystery','puzzle'],moods:['tense'],execution:{pace:'fast',plot_engine:'strong'},prediction:strong(4.1,.75)}),
+ stale:stored({mechanics:['puzzle'],prediction:{predictedRating:4.9,probability4Plus:.99,confidence:'high',stale:true}}),
+ fresh:stored({mechanics:['heist'],prediction:strong(4.0,.7,'medium')}),
+ none:stored({mechanics:['mystery'],prediction:null}),
+}});
+same(ids(rows()),['fresh','none','stale'],'distinct mechanics keep the tie-break: a current forecast, then no number, then a stale one');
 assert.equal(rows().find(row=>row.film.id==='stale').prediction,null);
-assert.doesNotMatch(run('renderSimilar(now).map(row=>similarCard(row,now)).join("")'),/Прогноз 4\.9/);
-assert.match(nodes['#film-similar-cards'].innerHTML,/Прогноз 4\.0 · 70%/);
+const staleMarkup=run('renderSimilar(now).map(row=>similarCard(row,now)).join("")');
+assert.doesNotMatch(staleMarkup,/4\.9/);
+assert.match(staleMarkup,/<span>ПРОГНОЗ<\/span><strong>4\.0<\/strong><small>70% на 4\.0\+<\/small>/);
 
-// Six, eight and more than eight. Nothing is invented to fill a short list, and the ninth is dropped.
+// One shared mechanic is one reason. Two cards may repeat it; the rest are left out. Nothing is invented to fill.
 function peers(count){
  const films=[open],enrichment={open:openStored};
  for(let i=0;i<count;i++){const id=`m${String(i).padStart(2,'0')}`;films.push(watch(id,{title:`Фильм ${String.fromCharCode(65+i)}`,original:`Peer${String.fromCharCode(65+i)}`}));enrichment[id]=stored({mechanics:['heist'],prediction:strong(4+i/100,.8)});}
  return {films,enrichment};
 }
 load(peers(6));
-assert.equal(rows().length,6,'six strong films stay six');
+same(ids(rows()),['m05','m04'],'six films that share one mechanic stay the two strongest');
+assert.equal(new Set(rows().map(row=>row.label)).size,1);
+assert.equal(new Set(rows().map(row=>row.signature)).size,1);
 load(peers(8));
-assert.equal(rows().length,8);
+same(ids(rows()),['m07','m06']);
 load(peers(10));
-same(ids(rows()),['m09','m08','m07','m06','m05','m04','m03','m02'],'the eight strongest, with no ninth');
+same(ids(rows()),['m09','m08'],'eight identical rationales do not become eight cards');
 
 // Franchise stem: a repeat of the same reason is skipped; a different reason or an extra mechanic is kept.
 load({films:[
@@ -185,7 +209,13 @@ load({films:[
  'rocky-4':stored({prediction:strong(4.6,.9)}),
  other:stored({mechanics:['heist'],prediction:strong(3.4,.5,'low')}),
 }});
-same(ids(rows()),['rocky','rocky-2','other','rocky-4'],'the same franchise stays when the mechanic differs or the reason is not the same');
+same(ids(rows()),['rocky','rocky-2','other','rocky-4'],'a sequel stays only for a different mechanic or a director, not for the same heist');
+load({films:[open,watch('origin',{original:'Dungeons and Dragons'}),watch('sequel',{original:'Dungeons and Dragons 2'})],enrichment:{
+ open:openStored,
+ origin:stored({mechanics:['heist'],moods:['tense'],prediction:strong(4.4,.8)}),
+ sequel:stored({mechanics:['heist'],moods:['tense'],prediction:strong(4.8,.9)}),
+}});
+same(ids(rows()),['sequel'],'the same mechanic plus a mood is not an independent franchise reason');
 load({films:[open,watch('rocky',{original:'Rocky'}),watch('rocky-2',{original:'Rocky II'})],enrichment:{open:openStored,rocky:stored({mechanics:['heist'],prediction:strong(4.5,.9)}),'rocky-2':stored({mechanics:['heist'],prediction:strong(4.9,.99)})}});
 same(ids(rows()),['rocky-2'],'a higher forecast does not keep a second copy of the same reason');
 
@@ -221,7 +251,7 @@ load({films:[open,listed,rated,started,watch('program-only',{title:'Только
 },catalogFilms:[outside,expired,far,edge,soon,catalog('tmdb_13',13,{title:'Оценён в каталоге',mechanics:['heist'],prediction:strong(4.4,.8)}),catalog('tmdb_14',14,{title:'<Скрипт>',mechanics:['scam'],url:'https://evil.example/movie/14',prediction:strong(4.4,.8)})]});
 vm.runInContext("enrichment.films.tmdb_13={actualRating:4,prediction:null};startedIds=new Set(['started']);findsMarks.set('12',{state:'marked'})",ui);
 const mixed=rows();
-same(ids(mixed),['rated','tmdb_11','started','listed','tmdb_14'],'watchlist, rewatch and catalog stay together; expired, future-edge, marked and rated catalog rows do not');
+same(ids(mixed),['rated','started','listed','tmdb_11','tmdb_14'],'watchlist films come first, then finds; expired, future-edge, marked and rated catalog rows do not');
 assert.equal(mixed.find(row=>row.film.id==='program-only'),undefined,'a loaded catalog-only programme row is neither watchlist nor a second catalog card');
 assert.equal(mixed.find(row=>row.film.id==='listed').badge,'watchlist');
 assert.equal(mixed.find(row=>row.film.id==='rated').badge,'rewatch');
@@ -305,15 +335,15 @@ load({films:[
  watch('rated-unknown',{title:'Оценка без факта'}),
  watch('started',{title:'Только начат'}),
 ],enrichment:{
- open:openStored,
+ open:stored({mechanics:['heist','investigation','mystery','puzzle','scam'],moods:['tense'],execution:{pace:'fast',plot_engine:'strong'},prediction:strong(4.1,.75)}),
  seen:stored({mechanics:['heist'],watched:true,prediction:strong(4.4,.8)}),
  'forecast-seen':stored({watched:true,prediction:strong(4.8,.95)}),
- denied:stored({mechanics:['heist'],watched:false,prediction:strong(4.4,.8)}),
+ denied:stored({mechanics:['investigation'],watched:false,prediction:strong(4.4,.8)}),
  'forecast-denied':stored({watched:false,prediction:strong(4.8,.95)}),
- unknown:stored({mechanics:['heist'],watched:null,prediction:strong(4.4,.8)}),
+ unknown:stored({mechanics:['mystery'],watched:null,prediction:strong(4.4,.8)}),
  'forecast-unknown':stored({watched:null,prediction:strong(4.8,.95)}),
- absent:stored({mechanics:['heist'],prediction:strong(4.4,.8)}),
- 'rated-denied':stored({mechanics:['heist'],watched:false,actualRating:4,prediction:strong(4.9,.99)}),
+ absent:stored({mechanics:['puzzle'],prediction:strong(4.4,.8)}),
+ 'rated-denied':stored({mechanics:['scam'],watched:false,actualRating:4,prediction:strong(4.9,.99)}),
  'rated-unknown':stored({watched:null,actualRating:4,prediction:strong(4.9,.99)}),
  started:stored({watched:false,prediction:strong(4.7,.9)}),
 }});
@@ -332,8 +362,11 @@ watchedBadge('forecast-unknown','watchlist');
 watchedBadge('absent','watchlist','a missing watched field is unknown, not false');
 watchedBadge('rated-denied','rewatch','a stored rating wins over watched:false');
 watchedGone('rated-unknown','a rating without a substantive match is not a prediction-only card');
-watchedBadge('started','watchlist','started is not watched');
-assert.equal(watchedRows.find(row=>row.film.id==='started').label,'Подходит по прогнозу');
+assert.equal(watchedRows.find(row=>row.film.id==='started'),undefined,'a third prediction-only label is not added beside two already shown');
+load({films:[open,watch('started',{title:'Только начат'})],enrichment:{open:openStored,started:stored({watched:false,prediction:strong(4.7,.9)})},filmId:'open'});
+vm.runInContext("startedIds=new Set(['started'])",ui);
+assert.equal(rows().find(row=>row.film.id==='started')?.badge,'watchlist','started is not watched');
+assert.equal(rows().find(row=>row.film.id==='started').label,'Подходит по прогнозу');
 assert.equal(fetches.length,0,'the watched matrix does not fetch');
 const watchedBefore=run('JSON.stringify(enrichment)');
 run('renderSimilar(now)');
@@ -348,11 +381,11 @@ const clashA=catalog('heat-lid',60,{title:'Связь А',shows:[]});
 const clashB=catalog('heat-lid',61,{title:'Связь Б',shows:[]});
 const disputed=catalog('tmdb_60',60,{title:'Спорный',mechanics:['heist'],prediction:strong(4.4,.8)});
 const namesake=catalog('tmdb_70',70,{title:'Жара',original:'Heat',year:1995,mechanics:['heist'],prediction:strong(4.4,.8)});
-const explicitNo=catalog('tmdb_80',80,{title:'Явно нет',mechanics:['heist'],prediction:strong(4.4,.8)});
+const explicitNo=catalog('tmdb_80',80,{title:'Явно нет',mechanics:['mystery'],prediction:strong(4.4,.8)});
 const ratedNo=catalog('tmdb_82',82,{title:'Оценка без просмотра',mechanics:['scam'],prediction:strong(4.4,.8)});
-const loose=catalog('loose-50',50,{title:'Без идентичности',canonicalIdentity:'unverified',mechanics:['investigation'],prediction:strong(4.2,.8)});
+const loose=catalog('loose-50',50,{title:'Без идентичности',canonicalIdentity:'unverified',mechanics:['puzzle'],prediction:strong(4.2,.8)});
 load({films:[open],enrichment:{
- open:openStored,
+ open:stored({mechanics:['heist','investigation','mystery','puzzle'],moods:['tense'],execution:{pace:'fast',plot_engine:'strong'},prediction:strong(4.1,.75)}),
  tmdb_50:stored({watched:true}),
  'solo-lid':stored({watched:true}),
  'heat-lid':stored({watched:true}),
@@ -374,7 +407,7 @@ function richCards(){
  const el={children:[],_html:''};
  Object.defineProperty(el,'innerHTML',{get(){return this._html;},set(html){
   this._html=html;this.children=[];
-  for(const match of String(html).matchAll(/<article class="film-similar-card"([\s\S]*?)<\/article>/g)){
+  for(const match of String(html).matchAll(/<article class="film-similar-card[^"]*"([\s\S]*?)<\/article>/g)){
    const body=match[1],card={dataset:{similarId:(body.match(/data-similar-id="([^"]*)"/)||[])[1]||''},buttons:[],links:[]};
    card.contains=node=>card.buttons.includes(node)||card.links.includes(node);
    for(const buttonMatch of body.matchAll(/data-similar-open="([^"]*)"/g)){const button={dataset:{similarOpen:buttonMatch[1]},classList:{contains(){return false;}},closest(){return card;},focus(){ui.document.activeElement=button;}};card.buttons.push(button);}
@@ -419,5 +452,98 @@ vm.runInContext("films=films.filter(item=>item.id!=='peer')",ui);
 run('renderSimilar(now)');
 assert.equal(rich.querySelectorAll('[data-similar-open]').length,0,'the loaded film is gone');
 assert.equal(ui.document.activeElement?.classList?.contains('film-similar-external')||false,false,'focus is not moved onto a different card');
+
+// Source order: up to four watchlist films, then finds. A fifth watchlist film does not come back after a short catalog tail.
+const sourceOpen=stored({mechanics:['heist','investigation'],moods:['tense'],execution:{pace:'fast',plot_engine:'strong'},prediction:strong(4.1,.75)});
+load({films:[
+ open,
+ watch('w-both',{title:'Две механики'}),
+ watch('w-mood',{title:'Механика и тон'}),
+ watch('w-director',{title:'Режиссёр',directors:[{id:'tmdb_director/525',name:'Манн'}]}),
+ watch('w-actors',{title:'Актёры',actors:[{id:'tmdb_actor/7',name:'Де Ниро'},{id:'tmdb_actor/8',name:'Пакчино'}]}),
+ watch('w-pace',{title:'Темп'}),
+],enrichment:{
+ open:sourceOpen,
+ 'w-both':stored({mechanics:['heist','investigation'],prediction:strong(4.9,.9)}),
+ 'w-mood':stored({mechanics:['heist'],moods:['tense'],prediction:strong(4.8,.9)}),
+ 'w-director':stored({prediction:strong(4.7,.9)}),
+ 'w-actors':stored({prediction:strong(4.6,.9)}),
+ 'w-pace':stored({execution:{pace:'fast'},prediction:strong(4.5,.9)}),
+},catalogFilms:[catalog('tmdb_61',61,{title:'Находка',mechanics:['investigation'],prediction:strong(4.9,.95)})]});
+same(ids(rows()),['w-both','w-mood','w-director','w-actors','tmdb_61'],'four watchlist films, then one find; the fifth watchlist film is not backfilled');
+same(JSON.stringify(rows().map(row=>row.source)),['watchlist','watchlist','watchlist','watchlist','catalog'],'the watchlist block stays ahead of the find');
+
+// Both sources can fill the eight. One source alone can use all eight. A single shared rationale still stops at two.
+const manyMechanics=['heist','investigation','mystery','puzzle','chase_escape','rescue','scam','survival','siege','ticking_clock'];
+const manyFilms=[open],manyEnrichment={open:stored({mechanics:manyMechanics,prediction:strong(4.1,.75)})};
+for(let i=0;i<manyMechanics.length;i++){const id=`u${i}`;manyFilms.push(watch(id,{title:`Разный ${i}`}));manyEnrichment[id]=stored({mechanics:[manyMechanics[i]],prediction:strong(4.5-i/100,.8)});}
+load({films:manyFilms,enrichment:manyEnrichment});
+assert.equal(rows().length,8,'a watchlist-only slate can use all eight when the reasons differ');
+assert.equal(new Set(rows().map(row=>row.signature)).size,8);
+assert.equal(rows().every(row=>row.source==='watchlist'),true);
+const catalogOnly=[open],catalogFilms=[];
+for(let i=0;i<manyMechanics.length;i++)catalogFilms.push(catalog(`tmdb_${80+i}`,80+i,{title:`Каталог ${i}`,mechanics:[manyMechanics[i]],prediction:strong(4.5-i/100,.8)}));
+load({films:catalogOnly,enrichment:{open:manyEnrichment.open},catalogFilms});
+assert.equal(rows().length,8,'a finds-only slate can use all eight when the reasons differ');
+assert.equal(rows().every(row=>row.source==='catalog'),true);
+load({films:[open],enrichment:{open:openStored},catalogFilms:Array.from({length:8},(_,i)=>catalog(`tmdb_${180+i}`,180+i,{title:`Одинаковый ${String.fromCharCode(65+i)}`,original:`SameHeist${String.fromCharCode(65+i)}`,mechanics:['heist'],prediction:strong(4.5-i/100,.8)}))});
+assert.equal(rows().length,2,'eight finds that share one rationale stay two');
+assert.equal(new Set(rows().map(row=>row.label)).size,1);
+
+// A film that also matches a person or execution does not spend a third copy of the mechanic label.
+load({films:[
+ open,
+ watch('only-a',{title:'Только ограбление A'}),
+ watch('only-b',{title:'Только ограбление B'}),
+ watch('also-director',{title:'Ещё режиссёр',directors:[{id:'tmdb_director/525',name:'Манн'}]}),
+ watch('also-actors',{title:'Ещё актёры',actors:[{id:'tmdb_actor/7',name:'Де Ниро'},{id:'tmdb_actor/8',name:'Пакчино'}]}),
+ watch('also-pace',{title:'Ещё темп'}),
+ watch('only-c',{title:'Только ограбление C'}),
+ watch('only-d',{title:'Только ограбление D'}),
+],enrichment:{
+ open:openStored,
+ 'only-a':stored({mechanics:['heist'],prediction:strong(4.2,.8)}),
+ 'only-b':stored({mechanics:['heist'],prediction:strong(4.1,.8)}),
+ 'also-director':stored({mechanics:['heist'],prediction:strong(4.6,.8)}),
+ 'also-actors':stored({mechanics:['heist'],prediction:strong(4.5,.8)}),
+ 'also-pace':stored({mechanics:['heist'],execution:{pace:'fast'},prediction:strong(4.4,.8)}),
+ 'only-c':stored({mechanics:['heist'],prediction:strong(4.0,.8)}),
+ 'only-d':stored({mechanics:['heist'],prediction:strong(3.9,.8)}),
+}});
+const varied=rows();
+assert.equal(varied.filter(row=>row.label==='Ограбление').length,2,'the mechanic label itself is not repeated past two');
+assert.equal(varied.find(row=>row.film.id==='also-actors').label,'Общие актёры');
+assert.equal(varied.find(row=>row.film.id==='also-pace').label,'Похожий темп');
+assert.equal(varied.find(row=>row.film.id==='only-c'),undefined);
+assert.equal(varied.find(row=>row.film.id==='only-d'),undefined);
+assert.ok(varied.length<8,'a slate of one mechanic does not fill eight cards by renaming it');
+
+// Posters and corner scores come from the films already loaded. A missing poster uses the Finds placeholder and adds no request.
+load({films:[
+ open,
+ watch('posted',{title:'С постером',original:'With Poster',poster:'https://image.tmdb.org/t/p/w185/abc.jpg',runtime:101}),
+ watch('plain',{title:'Без постера',year:1999}),
+],enrichment:{
+ open:openStored,
+ posted:stored({mechanics:['heist'],actualRating:4.5,prediction:strong(4.2,.8)}),
+ plain:stored({mechanics:['investigation']}),
+},catalogFilms:[catalog('tmdb_77',77,{title:'Находка без постера',original:'Find',year:2014,mechanics:[],execution:{plot_engine:'strong'},prediction:strong(4.4,.86)})]});
+const cardHtml=run('renderSimilar(now).map(row=>similarCard(row,now)).join("\\n")');
+const cardSlice=(id)=>{const at=cardHtml.indexOf(`data-similar-id="${id}"`),start=cardHtml.lastIndexOf('<article',at);return cardHtml.slice(start,cardHtml.indexOf('</article>',start));};
+const postedCard=cardSlice('posted'),plainCard=cardSlice('plain'),findCard=cardSlice('tmdb_77');
+assert.match(postedCard,/class="film-similar-card is-watchlist has-both-scores"/);
+assert.match(postedCard,/class="poster" src="https:\/\/image\.tmdb\.org\/t\/p\/w185\/abc\.jpg"/);
+assert.match(postedCard,/<span>МОЯ ОЦЕНКА<\/span><strong>4\.5<\/strong>/);
+assert.match(postedCard,/<span>ПРОГНОЗ<\/span><strong>4\.2<\/strong>/);
+assert.match(postedCard,/101 мин/);
+assert.match(postedCard,/Пересмотр/);
+assert.doesNotMatch(postedCard,/NEW/);
+assert.match(plainCard,/class="poster no-poster" aria-label="Постер недоступен">1999</);
+assert.doesNotMatch(plainCard,/score-badge|fetch\(/);
+assert.match(findCard,/class="film-similar-card is-catalog has-score"/);
+assert.match(findCard,/class="poster no-poster"/);
+assert.match(findCard,/class="film-similar-badge is-new"/);
+assert.equal(fetches.length,0,'a poster already on the film is not fetched again');
+assert.doesNotMatch(app.slice(app.indexOf('function similarPoster'),app.indexOf('function similarScoreBadges')),/fetch\(|image\.tmdb\.org\/t\/p\//,'the card does not invent a poster URL');
 
 console.log('Similar films: eligibility, ranking, limits, franchise, identity, catalog and watchlist, freshness, links, focus and no fetch passed');

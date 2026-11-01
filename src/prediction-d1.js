@@ -188,7 +188,23 @@ function displayOf(value){
  const {r2Key:_key,contentSha256:_sha,replacedAt:_at,...body}=value;
  return body;
 }
-function fingerprintKey(filmId,hash){return 'enrichment/films/'+encodeURIComponent(filmId)+'/fingerprints/'+hash+'.json';}
+export function fingerprintKey(filmId,hash){return 'enrichment/films/'+encodeURIComponent(filmId)+'/fingerprints/'+hash+'.json';}
+const FINGERPRINT_PROVENANCE=new Set(['generatedAt','invalidatedAt','fingerprintPromptVersion','produced','fields','previous']);
+export function fingerprintBodyFromPointer(record){
+ if(!record||typeof record!=='object'||typeof record.fingerprintHash!=='string'||!record.fingerprintHash)return null;
+ const body={};
+ for(const [key,value] of Object.entries(record))if(!FINGERPRINT_PROVENANCE.has(key))body[key]=value;
+ return body.fingerprintHash===record.fingerprintHash?body:null;
+}
+export async function fingerprintContentHash(value){return sha256(value);}
+export async function fingerprintPointerAgrees(record){
+ const body=fingerprintBodyFromPointer(record);
+ if(!body)return null;
+ const {fingerprintHash:_hash,...hashed}=body;
+ if(await sha256(hashed)!==record.fingerprintHash)return null;
+ return body;
+}
+export async function sameCanonical(left,right){return await sha256(left)===await sha256(right);}
 function profileKey(version){return 'enrichment/profile/versions/'+version+'.json';}
 
 function queuePieces(text){
