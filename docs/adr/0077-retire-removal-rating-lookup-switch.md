@@ -1,9 +1,9 @@
 # ADR 0077: The per-film removal lookup is permanent, and REMOVAL_RATING_LOOKUP is retired
 
-**Status:** Proposed
+**Status:** Accepted 2026-11-01
 **Original decision date:** 2026-11-01
 **Recorded at:** 2026-11-01
-**Approval source:** Not documented. The owner approved the functional scope on [AIR-272](https://trello.com/c/Oezn5dLP) (`retire now`, keep the bounded fallback). That approval is not acceptance of this record.
+**Approval source:** The owner explicitly accepted ADR 0077 on 2026-11-01 (Europe/Madrid) after [independent PASS review](https://github.com/vladimino/iptv-watchlist/pull/309#pullrequestreview-5728733217) of PR #309 HEAD `28c273f5daf5b3d4ee60f3444773eba129e8dfa6` and successful exact-HEAD PR CI. [Owner acceptance recorded in AIR-272](https://trello.com/c/Oezn5dLP#comment-6ae7550e7e849ddbef40da71). Acceptance approves only the documented architecture and ordinary PR delivery, not deletion or modification of any Cloudflare binding, a manual Ratings/EPG run, a Scheduled Task edit, migration or R2/D1 operation.
 **Related work:** [AIR-272](https://trello.com/c/Oezn5dLP); prerequisites [AIR-271](https://trello.com/c/k7kDc6Lf), [AIR-273](https://trello.com/c/TVB01Xm0), [AIR-51](https://trello.com/c/33d4hKJ3), [AIR-295](https://trello.com/c/VtFZ6cci); [ADR 0043](0043-removal-rating-lookup-queue.md); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md); [ADR 0074](0074-retire-ratings-pipeline-switch.md); [ADR 0075](0075-retire-letterboxd-diary-history-switch.md)
 **Supersedes:** In part: [ADR 0043](0043-removal-rating-lookup-queue.md) decision 6 (the off-by-default gate); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md) where `REMOVAL_RATING_LOOKUP` still selects the member-page lookup; [ADR 0055](0055-retire-letterboxd-facts-switch.md) decision 5 only where this binding stays an active switch; [ADR 0074](0074-retire-ratings-pipeline-switch.md) and [ADR 0075](0075-retire-letterboxd-diary-history-switch.md) only the deferral of `REMOVAL_RATING_LOOKUP`. The queue, the five-per-step and three-attempt budgets, the 403/429 pause, the event references, the Diary page-1 budget and the fail-closed migration stay.
 **Superseded by:** None
