@@ -20,7 +20,13 @@ assert.match(css,/@media\(max-width:760px\)\{\.film-similar-cards\{grid-template
 assert.match(css,/@media\(max-width:410px\)\{\.film-similar-card\.has-score \.film-head\{padding-top:84px/);
 assert.match(css,/\.film-similar-open:focus-visible,\.film-similar-external:focus-visible\{outline:2px solid var\(--lime\)/);
 assert.match(css,/\.film-similar-open,\.film-similar-external\{[^}]*overflow-wrap:anywhere/);
-assert.match(css,/\.film-screen\{max-width:760px/);
+assert.match(css,/#film-screen\{max-width:1280px\}/);
+assert.doesNotMatch(css,/\.film-screen\{[^}]*max-width/,'the film route sets this class on the document element, so the width cap stays on the section');
+assert.match(css,/\.film-read\{max-width:760px\}/);
+assert.match(css,/\.film-similar-card\{[^}]*max-width:none;justify-self:stretch\}/);
+const readOpen=html.indexOf('<div class="film-read">'),similarAt=html.indexOf('id="film-similar"'),readSlice=html.slice(readOpen,similarAt);
+assert(readOpen>0&&readOpen<html.indexOf('id="film-back"')&&similarAt>readOpen,'the readable column opens before the film body and closes before similar films');
+assert.equal((readSlice.match(/<div\b/g)||[]).length,(readSlice.match(/<\/div>/g)||[]).length,'the readable column is closed before similar films');
 assert.match(css,/color-scheme:dark/);
 assert.doesNotMatch(css,/prefers-color-scheme:\s*light/);
 
@@ -295,7 +301,7 @@ vm.runInContext("report={runId:'G2',films:[]}",ui);
 same(ids(rows()),['kept'],'a 409 leaves the cached generation unchanged, so the catalog half stays hidden');
 
 // A catalog film that is already loaded opens in place. Anything else uses a TMDB URL or plain text.
-load({films:[open,watch('local-peer',{title:'Сосед'})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:[catalog('tmdb_30',30,{title:'Снаружи',mechanics:['investigation']})]});
+load({films:[open,watch('local-peer',{title:'Сосед'})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:[catalog('tmdb_30',30,{title:'Снаружи',mechanics:['investigation'],prediction:strong(4.4,.8)})]});
 const linked=run('renderSimilar(now).map(row=>similarCard(row,now)).join("\\n")');
 assert.match(linked,/data-similar-open="local-peer"/);
 assert.match(linked,/href="https:\/\/www\.themoviedb\.org\/movie\/30"/);
@@ -427,7 +433,7 @@ nodes['#finds-title']={textContent:''};
 nodes['#finds-caption']={textContent:''};
 nodes['#finds-notice']={innerHTML:'',hidden:true};
 ui.document.activeElement=null;
-load({films:[open,watch('peer',{title:'Сосед',shows:[show(-1)]})],enrichment:{open:openStored,peer:stored({mechanics:['heist']})},catalogFilms:[catalog('tmdb_40',40,{title:'Снаружи',mechanics:['investigation'],shows:[show(-1)]})]});
+load({films:[open,watch('peer',{title:'Сосед',shows:[show(-1)]})],enrichment:{open:openStored,peer:stored({mechanics:['heist']})},catalogFilms:[catalog('tmdb_40',40,{title:'Снаружи',mechanics:['investigation'],shows:[show(-1)],prediction:strong(4.4,.8)})]});
 vm.runInContext('similarMarkup=""',ui);
 run('renderSimilar(now)');
 const focused=rich.querySelectorAll('[data-similar-open]')[0];
@@ -490,7 +496,7 @@ load({films:[open],enrichment:{open:openStored},catalogFilms:Array.from({length:
 assert.equal(rows().length,2,'eight finds that share one rationale stay two');
 assert.equal(new Set(rows().map(row=>row.label)).size,1);
 
-// A film that also matches a person or execution does not spend a third copy of the mechanic label.
+// A second mechanic label is kept before a person. Generic execution does not replace that mechanic or rescue a film whose mechanic is already capped. A person or a pace label appears only when that is the film's only overlap.
 load({films:[
  open,
  watch('only-a',{title:'Только ограбление A'}),
@@ -500,6 +506,8 @@ load({films:[
  watch('also-pace',{title:'Ещё темп'}),
  watch('only-c',{title:'Только ограбление C'}),
  watch('only-d',{title:'Только ограбление D'}),
+ watch('director-only',{title:'Только режиссёр',directors:[{id:'tmdb_director/525',name:'Манн'}]}),
+ watch('pace-only',{title:'Только темп'}),
 ],enrichment:{
  open:openStored,
  'only-a':stored({mechanics:['heist'],prediction:strong(4.2,.8)}),
@@ -509,14 +517,57 @@ load({films:[
  'also-pace':stored({mechanics:['heist'],execution:{pace:'fast'},prediction:strong(4.4,.8)}),
  'only-c':stored({mechanics:['heist'],prediction:strong(4.0,.8)}),
  'only-d':stored({mechanics:['heist'],prediction:strong(3.9,.8)}),
+ 'director-only':stored({prediction:strong(4.3,.8)}),
+ 'pace-only':stored({execution:{pace:'fast'},prediction:strong(4.8,.99)}),
 }});
 const varied=rows();
 assert.equal(varied.filter(row=>row.label==='Ограбление').length,2,'the mechanic label itself is not repeated past two');
-assert.equal(varied.find(row=>row.film.id==='also-actors').label,'Общие актёры');
-assert.equal(varied.find(row=>row.film.id==='also-pace').label,'Похожий темп');
+assert.equal(varied.find(row=>row.film.id==='also-director').label,'Ограбление','a shared director does not replace the first mechanic label');
+assert.equal(varied.find(row=>row.film.id==='also-actors').label,'Ограбление','a second mechanic label is kept before an unused actors label');
+assert.equal(varied.find(row=>row.film.id==='also-pace'),undefined,'a generic pace label does not rescue a capped mechanic');
 assert.equal(varied.find(row=>row.film.id==='only-c'),undefined);
 assert.equal(varied.find(row=>row.film.id==='only-d'),undefined);
+assert.equal(varied.find(row=>row.film.id==='director-only').label,'Общий режиссёр','a person label appears once the mechanic signature is exhausted and the film has no mechanic');
+assert.equal(varied.find(row=>row.film.id==='pace-only').label,'Похожий темп','a generic execution label appears only when it is the film\'s only overlap');
+same(ids(varied),['also-director','also-actors','director-only','pace-only'],'the stronger mechanic matches stay ahead of a higher-rated generic reason');
 assert.ok(varied.length<8,'a slate of one mechanic does not fill eight cards by renaming it');
+
+// Catalog NEW films clear the Finds floor before they are ranked. One qualifier stays one. A watchlist rewatch is not held to that floor.
+load({films:[open,watch('rewatch',{title:'Уже смотрел'})],enrichment:{
+ open:stored({mechanics:['heist'],execution:{protagonist_competence:'high',multi_party_goals:'strong',payoff:'strong',plot_engine:'strong'},prediction:strong(4.2,.8)}),
+ rewatch:stored({mechanics:['heist'],actualRating:4.5,watched:false,prediction:strong(2.0,.04)}),
+},catalogFilms:[
+ catalog('tmdb_dragon',4935,{title:'Как приручить дракона 2',mechanics:['heist'],prediction:strong(4.5,.87)}),
+ catalog('tmdb_ugly',429,{title:'Хороший, плохой, злой',execution:{protagonist_competence:'high'},prediction:strong(4.0,.61)}),
+ catalog('tmdb_eternals',524434,{title:'Вечные',execution:{multi_party_goals:'strong'},prediction:strong(2.5,.13)}),
+ catalog('tmdb_lorax',73723,{title:'Лоракс',execution:{payoff:'strong'},prediction:strong(2.0,.04)}),
+ catalog('tmdb_low',3,{title:'Низкая уверенность',mechanics:['investigation'],prediction:strong(4.6,.9,'low')}),
+ catalog('tmdb_stale',4,{title:'Устаревший',mechanics:['mystery'],prediction:{predictedRating:4.8,probability4Plus:.95,confidence:'high',stale:true,moodIds:[]}}),
+ catalog('tmdb_none',5,{title:'Без прогноза',mechanics:['puzzle'],prediction:null}),
+]});
+same(ids(rows()),['rewatch','tmdb_dragon'],'4.0/61%, 2.5/13% and 2.0/4% catalog films are not offered, and a rated rewatch with a weak forecast stays');
+assert.equal(rows().find(row=>row.film.id==='tmdb_dragon').label,'Ограбление');
+assert.equal(rows().length,2,'one qualifying catalog film is not padded to four');
+load({films:[open],enrichment:{open:stored({mechanics:['heist'],execution:{payoff:'strong',protagonist_competence:'high'},prediction:strong(4.1,.75)})},catalogFilms:[
+ catalog('tmdb_mech',1,{title:'Механика',mechanics:['heist'],execution:{protagonist_competence:'high'},prediction:strong(4.5,.8)}),
+ catalog('tmdb_pay',2,{title:'Отдача',execution:{payoff:'strong'},prediction:strong(4.6,.9)}),
+]});
+same(ids(rows()),['tmdb_mech','tmdb_pay'],'a mechanic match outranks a higher forecast whose only overlap is a generic execution value');
+assert.equal(rows()[0].label,'Ограбление','the mechanic label is not swapped for the unused competence label');
+assert.equal(rows()[1].label,'Похожая отдача');
+load({films:[open,watch('origin',{original:'Dragon Film'}),watch('sequel',{original:'Dragon Film 2'})],enrichment:{
+ open:stored({mechanics:['heist'],execution:{payoff:'strong',plot_engine:'strong'},prediction:strong(4.1,.75)}),
+ origin:stored({mechanics:['heist'],prediction:strong(4.2,.8)}),
+ sequel:stored({execution:{payoff:'strong'},prediction:strong(4.9,.99)}),
+}});
+same(ids(rows()),['origin'],'a generic execution value does not keep a franchise sequel');
+load({films:[open,watch('origin',{original:'Dragon Film'}),watch('sequel',{original:'Dragon Film 2'})],enrichment:{
+ open:stored({mechanics:['heist'],execution:{payoff:'strong',plot_engine:'strong'},prediction:strong(4.1,.75)}),
+ origin:stored({mechanics:['heist'],prediction:strong(4.2,.8)}),
+ sequel:stored({execution:{plot_engine:'strong'},prediction:strong(4.9,.99)}),
+}});
+same(ids(rows()),['origin','sequel'],'a shared plot engine can keep a franchise sequel');
+assert.equal(rows().find(row=>row.film.id==='sequel').label,'Похожий сюжетный двигатель');
 
 // Posters and corner scores come from the films already loaded. A missing poster uses the Finds placeholder and adds no request.
 load({films:[
