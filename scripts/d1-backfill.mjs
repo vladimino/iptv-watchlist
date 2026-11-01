@@ -125,6 +125,22 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
     await query(text,{write:true});
    }finally{state.buffer=null;}
   },
+  // Rendered statements, one HTTP batch. Each statement is its own batch entry so a semicolon inside a
+  // string is not a statement boundary. A write is not retried. Callers still prove atomicity on scratch.
+  async executeRendered(statements){
+   const batch=statements.map(sql=>{
+    const text=String(sql).trim().replace(/;+$/,'')+';';
+    if(Buffer.byteLength(text,'utf8')>100*1024)throw new D1Error('batch_too_large','A statement exceeds D1\'s 100 KB statement limit; it is not split');
+    return {sql:text};
+   });
+   const bytes=batch.reduce((sum,item)=>sum+Buffer.byteLength(item.sql,'utf8'),0);
+   if(!batch.length)return;
+   if(batch.length>target.maxBatchStatements||bytes>target.maxBatchBytes)throw new D1Error('batch_too_large','A unit needs '+batch.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
+   stats.batches++;stats.statements+=batch.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,batch.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
+   const payload=await request('POST',base+'/query',{batch},{write:true});
+   const results=Array.isArray(payload?.result)?payload.result:[];
+   if(results.some(item=>item&&item.success===false))throw new D1Error('statement',results.find(item=>item.success===false)?.error||'A statement failed');
+  },
  };
 }
 
