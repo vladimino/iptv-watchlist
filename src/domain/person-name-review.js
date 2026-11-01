@@ -114,6 +114,12 @@ function personNameState(person,people=[]){
 // `preferred` is the localized value or null and never the original credit text.
 function personNameProjection(person){return {...person,preferred:person?.localization?.value||null};}
 function nameReviewFailure(reason,extra={}){return {ok:false,reason,...extra};}
+function nameReviewEffect(command){
+ if(!command||command.effect==null)return {ok:true,effect:null};
+ if(command.effect==='promote')return {ok:true,effect:'preferred_changed'};
+ if(command.effect==='add_alias')return {ok:true,effect:'alias_added'};
+ return nameReviewFailure('invalid_effect');
+}
 function nameReviewRoles(command){
  if(command.roles==null)return {ok:true,roles:[]};
  if(!Array.isArray(command.roles))return nameReviewFailure('invalid_roles');
@@ -135,13 +141,16 @@ function validatePersonNameReviewShape(person,command){
  if(typeof command.requestId!=='string'||!command.requestId.trim())return nameReviewFailure('missing_request_id');
  for(const field of NAME_REVIEW_IDENTITY_FIELDS)if(Object.prototype.hasOwnProperty.call(command,field))return nameReviewFailure('identity_change_forbidden',{field});
  if(!NAME_REVIEW_MODES.includes(command.mode))return nameReviewFailure('invalid_mode',{modes:[...NAME_REVIEW_MODES]});
+ const effect=nameReviewEffect(command);
+ if(!effect.ok)return effect;
  const value=nameReviewText(command.value);
  if(!nameReviewValid(value))return nameReviewFailure('invalid_name',{maxLength:NAME_REVIEW_MAX_LENGTH});
  if(command.basis!=null&&(typeof command.basis!=='string'||command.basis.length>NAME_REVIEW_BASIS_MAX_LENGTH))return nameReviewFailure('invalid_basis',{maxLength:NAME_REVIEW_BASIS_MAX_LENGTH});
  const roles=nameReviewRoles(command);
  if(!roles.ok)return roles;
  if(roles.roles.some(role=>role.id===person.id))return nameReviewFailure('invalid_roles',{role:person.id});
- return {ok:true,value,basis:nameReviewBasis(command.basis),roles:roles.roles};
+ if(effect.effect==='alias_added'&&roles.roles.length)return nameReviewFailure('roles_not_allowed');
+ return {ok:true,value,basis:nameReviewBasis(command.basis),roles:roles.roles,effect:effect.effect};
 }
 // Validates one command against the current Person (and the linked roles the owner named) without
 // changing anything: the shape checks, then the state checks.
@@ -173,7 +182,18 @@ function validatePersonNameReview(person,command,people=[]){
 // record's own entry (linkedFrom null) counts; an entry a link wrote onto this record is not it.
 function samePersonNameReview(review,person,command,shape){
  const roleIds=shape.roles.map(role=>role.id).sort().join('\n'),reviewRoles=(review.roles||[]).slice().sort().join('\n');
- return review.personId===person.id&&review.linkedFrom==null&&review.mode===command.mode&&review.to?.value===shape.value&&(review.basis??null)===shape.basis&&reviewRoles===roleIds;
+ return review.personId===person.id&&review.linkedFrom==null&&review.mode===command.mode&&review.to?.value===shape.value&&(review.basis??null)===shape.basis&&reviewRoles===roleIds&&(review.effect??null)===(shape.effect??null);
+}
+function nameReviewMarkPrevious(aliases,prior){
+ const priorValue=prior?.value;
+ if(!priorValue)return aliases||[];
+ return (aliases||[]).map(alias=>{
+  if(!alias||alias.kind!=='name'||alias.value!==priorValue||alias.provenance?.previousPreferred)return alias;
+  const provenance={...(alias.provenance||{}),previousPreferred:true};
+  const historical=provenance.historicalSource||provenance.source||provenance.authority||prior.source||prior.provenance?.authority||prior.provenance?.source||null;
+  if(historical)provenance.historicalSource=historical;
+  return {...alias,provenance};
+ });
 }
 function nameReviewRemoveAlias(aliases,value){return mergeAliases((aliases||[]).filter(alias=>!(alias.kind==='name'&&alias.value===value)),[]);}
 function nameReviewAddLink(links,link){
@@ -200,8 +220,22 @@ function nameReviewApplyTo(record,fields,at){
   if(moved.localization===record.localization)return null;
   moved={...moved,aliases:nameReviewRemoveAlias(moved.aliases,value)};
  }
+ if(nameChanged)moved={...moved,aliases:nameReviewMarkPrevious(moved.aliases,record.localization)};
  const review=nameReviewEntry(record,{...fields,nameChanged},at);
+ if(fields.effect)review.effect=fields.effect;
  return {next:{...moved,nameReviews:[...(record.nameReviews||[]),review]},review};
+}
+function applyPersonNameAlias(person,command,at,checked){
+ const value=checked.value;
+ if(personNameOptions(person).some(option=>option.value===value))return {ok:true,idempotent:false,changed:false,person,people:[],review:null,reviews:[],version:checked.version,commit:[],reason:'duplicate_alias'};
+ const selected=checked.selected;
+ const selectedFrom=selected?(selected.origin==='alias'?selected.provenance?.source||'alias':selected.origin):null;
+ const provenance={source:NAME_REVIEW_AUTHORITY,authority:NAME_REVIEW_AUTHORITY,mode:command.mode,basis:checked.basis,requestId:command.requestId,added:'alias'};
+ const nextAliases=mergeAliases(person.aliases||[],[{kind:'name',value,provenance}]);
+ const review={contractVersion:NAME_REVIEW_CONTRACT_VERSION,requestId:command.requestId,personId:person.id,linkedFrom:null,at:stamp(at),mode:command.mode,authority:NAME_REVIEW_AUTHORITY,basis:checked.basis,selectedFrom,roles:[],effect:'alias_added',nameChanged:false,records:[],from:{value:person.localization?.value??null,status:person.localization?.status??'missing',source:person.localization?.source??null},to:{value,status:person.localization?.status??'missing'},version:{before:checked.version,after:null}};
+ const next={...person,aliases:nextAliases,nameReviews:[...(person.nameReviews||[]),review]};
+ review.version.after=personNameVersion(next);
+ return {ok:true,idempotent:false,changed:true,person:next,people:[],review,reviews:[],version:review.version.after,commit:[{id:next.id,version:{before:checked.version,after:review.version.after}}]};
 }
 // Applies one review. The result carries the next Person, its audit entry, the next linked role
 // records with their own audit entries, the new version and `commit`, the list of every record the
@@ -220,6 +254,7 @@ function applyPersonNameReview(person,command,at,people=[]){
  }
  const checked=validatePersonNameReview(person,command,people);
  if(!checked.ok)return checked;
+ if(shape.effect==='alias_added')return applyPersonNameAlias(person,command,at,checked);
  const {value,basis,selected,linked}=checked;
  const roleIds=linked.map(item=>item.record.id);
  const nothingToDo=nameReviewCarries(person,value)&&linked.every(item=>nameReviewCarries(item.record,value)&&nameReviewLinked(person,item.record.id)&&nameReviewLinked(item.record,person.id));
@@ -227,7 +262,7 @@ function applyPersonNameReview(person,command,at,people=[]){
  // selectedFrom names where the picked text came from: an alias reports its own source (wikidata, dictionary, letterboxd...).
  const selectedFrom=selected?(selected.origin==='alias'?selected.provenance?.source||'alias':selected.origin):null;
  const stampedAt=stamp(at);
- const applied=nameReviewApplyTo(person,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:roleIds,linkedFrom:null,before:checked.version},at);
+ const applied=nameReviewApplyTo(person,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:roleIds,linkedFrom:null,before:checked.version,effect:shape.effect==='preferred_changed'?'preferred_changed':null},at);
  if(!applied)return nameReviewFailure('illegal_transition',{from:person.localization?.status??null});
  let next=applied.next;
  const review=applied.review;
@@ -238,7 +273,7 @@ function applyPersonNameReview(person,command,at,people=[]){
   // A role that already carries the name is linked without an audit entry of its own; the
   // primary record's entry lists it under `records`.
   if(!nameReviewCarries(record,value)){
-   const roleApplied=nameReviewApplyTo(record,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:[],linkedFrom:person.id,before:item.version},at);
+   const roleApplied=nameReviewApplyTo(record,{value,basis,mode:command.mode,requestId:command.requestId,selectedFrom,roles:[],linkedFrom:person.id,before:item.version,effect:shape.effect==='preferred_changed'?'preferred_changed':null},at);
    if(!roleApplied)return nameReviewFailure('illegal_transition',{role:record.id,from:record.localization?.status??null});
    moved=roleApplied.next;roleReview=roleApplied.review;
   }

@@ -136,7 +136,7 @@ The bounded design is:
 | Limbo inventory of stuck and waiting films | Live, read-only: `GET /api/admin/limbo` reads the snapshot plus the prediction queue and the view index and evaluates the [data health model](data-health.md#limbo-inventory) ([route contract](../api/admin.md#limbo-inventory)). Films only |
 | Ledger-wide candidate queues and a publish-time admin index | Not implemented; a separate card, never a GET. The limbo inventory reports unresolved observations as unavailable until that index exists |
 | D1 `readFilm` / `readPerson` as the admin source | No. Only after the D1 cutover that makes those tables authoritative |
-| Reviewed-name write ([AIR-54](https://trello.com/c/yKtj1ahy)) | Live as [`POST /api/admin/people/<id>/name-review`](../api/admin.md#person-name-confirmation-post-apiadminpeopleidname-review). It writes the `people` map of `admin/owner-reviews.json` and copies `films`. The catalogue GET stays a read |
+| Reviewed-name write ([AIR-54](https://trello.com/c/yKtj1ahy)) | Live as [`POST /api/admin/people/<id>/name-review`](../api/admin.md#person-name-confirmation-post-apiadminpeopleidname-review). `effect: add_alias` stores one alias and does not replace the preferred name. `effect: promote`, and a command that omits `effect`, review the preferred name. Either way the route writes the `people` map of `admin/owner-reviews.json` and copies `films`. The catalogue GET stays a read |
 | Reviewed-title write ([AIR-53](https://trello.com/c/gkuy1awG)) | Not this route. The shared object reserves `films`; that card writes it |
 
 ## AIR-123 query contract

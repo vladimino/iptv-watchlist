@@ -31,8 +31,10 @@ function ownerFilmSlice(film){
  };
 }
 function ownerReviewPersonFields(person){
+ const localization=person?.localization;
+ const owner=localization?.status==='reviewed'&&localization?.provenance?.authority==='owner'?localization:null;
  return {
-  localization:person?.localization??null,
+  localization:owner,
   aliases:Array.isArray(person?.aliases)?person.aliases:[],
   nameReviews:Array.isArray(person?.nameReviews)?person.nameReviews:[],
   localizationConflicts:Array.isArray(person?.localizationConflicts)?person.localizationConflicts:[],
