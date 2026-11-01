@@ -114,9 +114,12 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  net.diary.set(1,status);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
  const replies=await drain(R,env,runId);
+ assert.equal(replies[0].phase,'removal','a failed page 1 still advances to removal');
+ assert.equal(replies[0].step.diaryPages,0,'that page is not counted as read');
  assert.equal(replies.at(-1).reason,'error',outcome);
+ assert.equal(replies.at(-1).state,'error',outcome);
  const run=bucket.value(RUN);
- assert.equal(run.diary.outcome,outcome);assert.equal(run.cause,outcome);assert.equal(run.diary.pagesRead,0);
+ assert.equal(run.state,'error');assert.equal(run.diary.outcome,outcome);assert.equal(run.cause,outcome);assert.equal(run.diary.pagesRead,0);
  eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
  assert.equal(bucket.value(CURSOR).lastSuccessAt,null);
  eq(R.health(run,T0),{lastSuccessAt:null,lastFailureAt:run.finishedAt,state,code});
@@ -137,8 +140,9 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
  assert.equal(bucket.value(RUN).phase,'diary');
  const replies=await drain(R,env,runId);
- assert.equal(replies.at(-1).reason,'error');
- assert.equal(bucket.value(RUN).cause,'blocked');assert.equal(bucket.value(RUN).diary.outcome,'blocked');
+ assert.equal(replies[0].phase,'removal');assert.equal(replies[0].step.diaryPages,0);
+ assert.equal(replies.at(-1).reason,'error');assert.equal(replies.at(-1).state,'error');
+ assert.equal(bucket.value(RUN).state,'error');assert.equal(bucket.value(RUN).cause,'blocked');assert.equal(bucket.value(RUN).diary.outcome,'blocked');
  eq(net.diaryFetches(),['https://letterboxd.com/demo-user/diary/']);
 }
 
