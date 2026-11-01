@@ -153,7 +153,7 @@ function parseArgs(argv){
  const confirm=args.includes('--confirm')?value('--confirm'):undefined;
  if(target===undefined){
   if(command!=='status')throw new OperatorStop('target_required',2);
-  return {report:{configured:false,writes:false}};
+  return {report:{configured:false,writes:false,writeState:'none'}};
  }
  if(target!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_invalid',2);
  if(command==='apply'&&confirm!=='apply')throw new OperatorStop('confirm',2);
@@ -319,9 +319,27 @@ function mirrorBucket(client, captured){
  };
 }
 
-async function openProduction(env, fetchImpl){
+// A production write is unknown from the moment the request is sent until the response
+// returns. A later read-back failure does not change a returned request back to "no write".
+function trackProductionWrites(adapter, ctx){
+ async function attempt(run){
+  ctx.writeState='unknown';
+  await run();
+  ctx.writeState='committed';
+ }
+ return {
+  stats:adapter.stats,
+  describe:()=>adapter.describe(),
+  get:(sql,params)=>adapter.get(sql,params),
+  all:(sql,params)=>adapter.all(sql,params),
+  run:(sql,params)=>attempt(()=>adapter.run(sql,params)),
+  executeRendered:statements=>attempt(()=>adapter.executeRendered(statements)),
+ };
+}
+
+async function openProduction(env, fetchImpl, ctx){
  const target=productionTarget(env);
- const adapter=createD1Adapter({target, databaseId:PRODUCTION_DATABASE_ID, fetchImpl});
+ const adapter=trackProductionWrites(createD1Adapter({target, databaseId:PRODUCTION_DATABASE_ID, fetchImpl}), ctx);
  const described=await adapter.describe();
  if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
  return {target, adapter, binding:createCacheBinding(adapter)};
@@ -342,10 +360,16 @@ function tablesAbsent(snapshot){
  return CACHE_TABLES.every(name=>!snapshot.tables[name]);
 }
 
+function writeReport(ctx){
+ const writeState=ctx.writeState==='committed'||ctx.writeState==='unknown'?ctx.writeState:'none';
+ if(writeState==='committed')return {writeState, writes:true, retry:false};
+ if(writeState==='unknown')return {writeState, writes:null, retry:false};
+ return {writeState, writes:false};
+}
+
 async function finish(stop, ctx){
- const result={reason:stop.reason, writes:stop.details?.committed===true};
+ const result={reason:stop.reason, ...writeReport(ctx)};
  if(stop.details?.writers)result.writers=stop.details.writers;
- if(stop.reason==='write_uncertain')result.retry=false;
  if(ctx.bookmark)result.bookmark=ctx.bookmark;
  if(ctx.identified&&ctx.binding&&stop.exit!==2){
   try{result.readback=await readSnapshot(ctx.binding);}catch{result.readback={unknown:true};}
@@ -354,11 +378,11 @@ async function finish(stop, ctx){
 }
 
 export async function runMetadataCacheProduction({argv=process.argv, env=process.env, fetchImpl=globalThis.fetch, now=()=>Date.now()}={}){
- const ctx={bookmark:null, binding:null, identified:false};
+ const ctx={bookmark:null, binding:null, identified:false, writeState:'none'};
  try{
   const parsed=parseArgs(argv);
   if(parsed.report)return {exit:0, result:parsed.report};
-  const opened=await openProduction(env, fetchImpl);
+  const opened=await openProduction(env, fetchImpl, ctx);
   ctx.binding=opened.binding;
   ctx.identified=true;
   ctx.bookmark=await readBookmark(opened.target, fetchImpl);
@@ -390,12 +414,12 @@ export async function runMetadataCacheProduction({argv=process.argv, env=process
 async function statusResult(ctx, snapshot, client, binding, clock){
  const partial=snapshot.schemaVersion===6&&(!tablesPresent(snapshot)||!snapshot.marker||(snapshot.marker.mode!=='r2'&&snapshot.marker.mode!=='d1'));
  if(partial)throw new OperatorStop('partial_schema',3);
- if(!client)return {configured:true, writes:false, bookmark:ctx.bookmark, schemaVersion:snapshot.schemaVersion, tables:snapshot.tables, marker:snapshot.marker, cacheRows:snapshot.cacheRows, r2:'not_configured'};
+ if(!client)return {configured:true, writes:false, writeState:'none', bookmark:ctx.bookmark, schemaVersion:snapshot.schemaVersion, tables:snapshot.tables, marker:snapshot.marker, cacheRows:snapshot.cacheRows, r2:'not_configured'};
  const writers=await writerReport(client, binding, clock);
  assertIdle(writers);
  const metadata=await readObject(client,'metadata.json',{required:false});
  if(!metadata)throw new OperatorStop('source_missing',3,{writers});
- return {configured:true, writes:false, bookmark:ctx.bookmark, schemaVersion:snapshot.schemaVersion, tables:snapshot.tables, marker:snapshot.marker, cacheRows:snapshot.cacheRows, writers, r2:{bucket:PRODUCTION_DATABASE_NAME, metadata:sourceSummary(metadata)}};
+ return {configured:true, writes:false, writeState:'none', bookmark:ctx.bookmark, schemaVersion:snapshot.schemaVersion, tables:snapshot.tables, marker:snapshot.marker, cacheRows:snapshot.cacheRows, writers, r2:{bucket:PRODUCTION_DATABASE_NAME, metadata:sourceSummary(metadata)}};
 }
 
 async function applyMigration(opened, ctx, snapshot, source){
@@ -409,7 +433,7 @@ async function applyMigration(opened, ctx, snapshot, source){
  await opened.adapter.executeRendered(statements);
  const readback=await readSnapshot(opened.binding);
  if(readback.schemaVersion!==6||readback.marker?.mode!=='r2'||readback.marker.cacheGeneration!==0||readback.marker.mirrorGeneration!==0||readback.cacheRows!==0)throw new OperatorStop('readback_mismatch',3);
- return {operation:'apply', writes:true, bookmark:ctx.bookmark, source, schemaVersion:readback.schemaVersion, mode:readback.marker.mode, cacheGeneration:readback.marker.cacheGeneration, mirrorGeneration:readback.marker.mirrorGeneration, cacheRows:readback.cacheRows};
+ return {operation:'apply', writes:true, writeState:'committed', bookmark:ctx.bookmark, source, schemaVersion:readback.schemaVersion, mode:readback.marker.mode, cacheGeneration:readback.marker.cacheGeneration, mirrorGeneration:readback.marker.mirrorGeneration, cacheRows:readback.cacheRows};
 }
 
 async function loadCache(binding, client, metadata, source, ctx, snapshot){
@@ -419,13 +443,13 @@ async function loadCache(binding, client, metadata, source, ctx, snapshot){
  let head;
  try{head=await client.head('metadata.json',{ifMatch:imported.mirrorEtag});}
  catch(error){
-  if(error instanceof ExportError&&error.kind==='source_changed')throw new OperatorStop('mirror_moved',3,{committed:true});
+  if(error instanceof ExportError&&error.kind==='source_changed')throw new OperatorStop('mirror_moved',3);
   throw error;
  }
- if(!head||head.etag!==imported.mirrorEtag)throw new OperatorStop('mirror_moved',3,{committed:true});
+ if(!head||head.etag!==imported.mirrorEtag)throw new OperatorStop('mirror_moved',3);
  const readback=await readSnapshot(binding);
  if(readback.marker?.mode!=='r2'||readback.marker.cacheGeneration!==imported.cacheGeneration||readback.marker.mirrorGeneration!==imported.mirrorGeneration||readback.marker.mirrorEtag!==imported.mirrorEtag||readback.cacheRows!==imported.keys)throw new OperatorStop('readback_mismatch',3);
- return {operation:'load', writes:true, bookmark:ctx.bookmark, source, mode:'r2', keys:imported.keys, cacheGeneration:imported.cacheGeneration, mirrorGeneration:imported.mirrorGeneration, mirrorEtag:imported.mirrorEtag, cacheRows:readback.cacheRows};
+ return {operation:'load', writes:true, writeState:'committed', bookmark:ctx.bookmark, source, mode:'r2', keys:imported.keys, cacheGeneration:imported.cacheGeneration, mirrorGeneration:imported.mirrorGeneration, mirrorEtag:imported.mirrorEtag, cacheRows:readback.cacheRows};
 }
 
 async function activateCache(binding, client, metadata, source, ctx, snapshot){
@@ -436,7 +460,7 @@ async function activateCache(binding, client, metadata, source, ctx, snapshot){
  const after=await activateMetadataCache(binding, mirrorBucket(client, metadata), {confirm:'activate'});
  const readback=await readSnapshot(binding);
  if(after.mode!=='d1'||readback.marker?.mode!=='d1'||readback.marker.cacheGeneration!==snapshot.marker.cacheGeneration)throw new OperatorStop('readback_mismatch',3);
- return {operation:'activate', writes:true, bookmark:ctx.bookmark, source, mode:'d1', cacheGeneration:readback.marker.cacheGeneration, mirrorGeneration:readback.marker.mirrorGeneration, cacheRows:readback.cacheRows};
+ return {operation:'activate', writes:true, writeState:'committed', bookmark:ctx.bookmark, source, mode:'d1', cacheGeneration:readback.marker.cacheGeneration, mirrorGeneration:readback.marker.mirrorGeneration, cacheRows:readback.cacheRows};
 }
 
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
@@ -444,7 +468,7 @@ if(invoked){
  runMetadataCacheProduction().then(({exit, result})=>{
   process.stdout.write(JSON.stringify(result)+'\n');
   if(exit===2)process.stderr.write('refuse: '+result.reason+'\n');
-  else if(exit===3)process.stderr.write('no-go: '+result.reason+(result.reason==='write_uncertain'?'; read back, do not retry':'')+'\n');
+  else if(exit===3)process.stderr.write('no-go: '+result.reason+(result.writeState==='unknown'?'; read back, do not retry':result.writeState==='committed'?'; the write returned, read back before another command':'')+'\n');
   else if(exit!==0)process.stderr.write('error: '+result.reason+'\n');
   process.exit(exit);
  }).catch(()=>{process.stderr.write('error: failed\n');process.exit(1);});

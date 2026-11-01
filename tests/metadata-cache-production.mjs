@@ -55,7 +55,7 @@ async function install(options={}){
  sql(scratchFile,'PRAGMA user_version=0;');
  if(options.schema)applyMigrations(productionFile, options.schema);
  const objects=new Map();
- const state={loseWrite:!!options.loseWrite, race:!!options.race, flipAfterImport:!!options.flipAfterImport, seenGet:false, imported:false, atomicScratch:options.atomicScratch!==false};
+ const state={loseWrite:!!options.loseWrite, race:!!options.race, flipAfterImport:!!options.flipAfterImport, seenGet:false, imported:false, atomicScratch:options.atomicScratch!==false, afterWrite:options.afterWrite||null, armed:null};
  const calls={urls:[], batches:[]};
  const described={uuid:options.uuid||PRODUCTION_DATABASE_ID, name:options.name||'iptv', scratchName:options.scratchName||'scratch'};
  function putObject(key, value){
@@ -63,6 +63,13 @@ async function install(options={}){
   objects.set(key,{text, etag:createHash('sha256').update(text).digest('hex').slice(0,32)});
  }
  function runRead(file, statement){
+  if(state.armed){
+   const armed=state.armed;
+   state.armed=null;
+   if(armed==='apply-version')return responseJson({success:true,result:[{success:true,results:[{version:5}]}]});
+   if(armed==='load-empty')return responseJson({success:true,result:[{success:true,results:[]}]});
+   if(armed==='activate-stale')return responseJson({success:true,result:[{success:true,results:[{mode:'r2',cacheGeneration:1,mirrorGeneration:1,mirrorEtag:'stale'}]}]});
+  }
   const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+statement,encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   const text=result.stdout.trim();
@@ -94,6 +101,7 @@ async function install(options={}){
    if(body.batch){
     calls.batches.push({id, body:init.body});
     if(id===PRODUCTION_DATABASE_ID&&state.loseWrite){state.loseWrite=false;throw new Error('socket hang up');}
+    if(id===PRODUCTION_DATABASE_ID&&state.afterWrite){state.armed=state.afterWrite;state.afterWrite=null;}
     if(body.batch.some(item=>/INSERT\s+INTO\s+metadata_cache\b/i.test(item.sql)))state.imported=true;
     return runBatch(file, body.batch.map(item=>item.sql), id===SCRATCH_ID?state.atomicScratch:true);
    }
@@ -115,7 +123,7 @@ async function install(options={}){
   if(method==='GET')return new Response(object.text,{status:200,headers});
   return new Response('no',{status:403});
  }
- return {root, productionFile, scratchFile, putObject, fetchImpl, calls, objects};
+ return {root, productionFile, scratchFile, putObject, fetchImpl, calls, objects, state};
 }
 function argv(args){return ['node','metadata-cache-production.mjs',...args];}
 async function execute(args, installed, overrides={}){
@@ -134,7 +142,7 @@ function metadataBody(){
 
 const bare=spawnSync(process.execPath,[script],{encoding:'utf8'});
 assert.equal(bare.status,0,bare.stderr);
-assert.deepEqual(JSON.parse(bare.stdout),{configured:false,writes:false});
+assert.deepEqual(JSON.parse(bare.stdout),{configured:false,writes:false,writeState:'none'});
 const revert=spawnSync(process.execPath,[script,'--revert','--target','iptv'],{encoding:'utf8'});
 assert.equal(revert.status,2);
 assert.match(revert.stderr,/refuse: revert_refused/);
@@ -238,6 +246,8 @@ assert.match(badTarget.stderr,/target_invalid/);
  const busy=await execute(['--target','iptv','--apply','--confirm','apply'],active);
  assert.equal(busy.exit,3,JSON.stringify(busy.result));
  assert.equal(busy.result.reason,'writer_active');
+ assert.equal(busy.result.writeState,'none');
+ assert.equal(busy.result.writes,false);
  assert.equal(productionBatches(active.calls).length,0);
  const leased=await install({schema:5});
  leased.putObject('metadata.json',metadataBody());
@@ -251,10 +261,23 @@ assert.match(badTarget.stderr,/target_invalid/);
  const uncertain=await execute(['--target','iptv','--apply','--confirm','apply'],lost);
  assert.equal(uncertain.exit,3,JSON.stringify(uncertain.result));
  assert.equal(uncertain.result.reason,'write_uncertain');
+ assert.equal(uncertain.result.writeState,'unknown');
+ assert.equal(uncertain.result.writes,null);
  assert.equal(uncertain.result.retry,false);
  assert.equal(uncertain.result.readback.schemaVersion,5);
  assert.equal(productionBatches(lost.calls).length,1);
  assert.equal(sql(lost.productionFile,'SELECT version FROM schema_contract;',{json:true})[0].version,5);
+ const lied=await install({schema:5,afterWrite:'apply-version'});
+ lied.putObject('metadata.json',metadataBody());
+ const mismatch=await execute(['--target','iptv','--apply','--confirm','apply'],lied);
+ assert.equal(mismatch.exit,3,JSON.stringify(mismatch.result));
+ assert.equal(mismatch.result.reason,'readback_mismatch');
+ assert.equal(mismatch.result.writeState,'committed');
+ assert.equal(mismatch.result.writes,true);
+ assert.equal(mismatch.result.retry,false);
+ assert.equal(mismatch.result.readback.schemaVersion,6);
+ assert.equal(sql(lied.productionFile,'SELECT version FROM schema_contract;',{json:true})[0].version,6);
+ assertQuiet(mismatch.result);
 }
 
 {
@@ -263,6 +286,8 @@ assert.match(badTarget.stderr,/target_invalid/);
  const outcome=await execute(['--target','iptv','--load','--confirm','load'],raced);
  assert.equal(outcome.exit,3,JSON.stringify(outcome.result));
  assert.equal(outcome.result.reason,'source_changed');
+ assert.equal(outcome.result.writeState,'none');
+ assert.equal(outcome.result.writes,false);
  assert.equal(productionBatches(raced.calls).length,0);
  assert.equal(sql(raced.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,0);
  const broken=await install({schema:6,atomicScratch:false});
@@ -270,6 +295,8 @@ assert.match(badTarget.stderr,/target_invalid/);
  const fence=await execute(['--target','iptv','--load','--confirm','load'],broken);
  assert.equal(fence.exit,3,JSON.stringify(fence.result));
  assert.equal(fence.result.reason,'fence_not_atomic');
+ assert.equal(fence.result.writeState,'none');
+ assert.equal(fence.result.writes,false);
  assert.equal(productionBatches(broken.calls).length,0);
  assert.equal(sql(broken.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,0);
  const invalid=await install({schema:6});
@@ -316,6 +343,8 @@ assert.match(badTarget.stderr,/target_invalid/);
  assert.equal(imported.exit,3,JSON.stringify(imported.result));
  assert.equal(imported.result.reason,'mirror_moved');
  assert.equal(imported.result.writes,true);
+ assert.equal(imported.result.writeState,'committed');
+ assert.equal(imported.result.retry,false);
  assert.equal(imported.result.readback.marker.mode,'r2');
  assert.equal(sql(moved.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,2);
  const fresh=await install({schema:6});
@@ -332,7 +361,32 @@ assert.match(badTarget.stderr,/target_invalid/);
  assert.equal(sql(fresh.productionFile,"SELECT mode FROM metadata_cache_authority;",{json:true})[0].mode,'d1');
  assert.equal(sql(fresh.productionFile,'SELECT COUNT(*) AS n FROM film;',{json:true})[0].n,1);
  assert.equal(sql(fresh.productionFile,"SELECT COUNT(*) AS n FROM metadata_cache WHERE cache_key='orphan';",{json:true})[0].n,1);
+ assert.equal(activated.result.writeState,'committed');
  assert.equal(fresh.calls.urls.some(url=>url.includes('time_travel/restore')),false);
+ const loadLie=await install({schema:6,afterWrite:'load-empty'});
+ loadLie.putObject('metadata.json',metadataBody());
+ const loadMismatch=await execute(['--target','iptv','--load','--confirm','load'],loadLie);
+ assert.equal(loadMismatch.exit,3,JSON.stringify(loadMismatch.result));
+ assert.equal(loadMismatch.result.reason,'metadata_cache_loss');
+ assert.equal(loadMismatch.result.writeState,'committed');
+ assert.equal(loadMismatch.result.writes,true);
+ assert.notEqual(loadMismatch.result.writes,false);
+ assert.equal(loadMismatch.result.retry,false);
+ assert.equal(sql(loadLie.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,2);
+ assert.equal(loadMismatch.result.readback.cacheRows,2);
+ const activateLie=await install({schema:6});
+ activateLie.putObject('metadata.json',metadataBody());
+ const primed=await execute(['--target','iptv','--load','--confirm','load'],activateLie);
+ assert.equal(primed.exit,0,JSON.stringify(primed.result));
+ activateLie.state.afterWrite='activate-stale';
+ const activateMismatch=await execute(['--target','iptv','--activate','--confirm','activate'],activateLie);
+ assert.equal(activateMismatch.exit,3,JSON.stringify(activateMismatch.result));
+ assert.equal(activateMismatch.result.reason,'metadata_cache_cas');
+ assert.equal(activateMismatch.result.writeState,'committed');
+ assert.equal(activateMismatch.result.writes,true);
+ assert.equal(activateMismatch.result.retry,false);
+ assert.equal(sql(activateLie.productionFile,"SELECT mode FROM metadata_cache_authority;",{json:true})[0].mode,'d1');
+ assertQuiet(activateMismatch.result);
  const modeSql=productionBatches(fresh.calls).map(item=>item.body).find(body=>body.includes("mode='d1'"));
  assert.equal(typeof modeSql,'string');
 }
