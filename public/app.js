@@ -730,7 +730,7 @@ function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
 // effective viewing window count, so a film airing only on another channel, outside the period or in the black zone is not a find.
-const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5,FINDS_PERSON_CACHE=8,SIMILAR_LIMIT=8;
+const FINDS_MIN_RATING=4,FINDS_MIN_PROBABILITY=.7,FINDS_LIMIT=5,FINDS_PERSON_CACHE=8,SIMILAR_LIMIT=8,SIMILAR_WATCHLIST_CAP=4;
 let findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false,watchedMarkEnabled:false},findsLoading=false;
 // One identity GET per selected actor or director. The cache keeps a few answers for this programme generation.
 // A generation change drops them. An in-flight answer for another generation or another selection is not shown.
@@ -976,38 +976,79 @@ function similarOverlap(left,right,leftPeople,rightPeople){return {mechanics:lef
 function similarTheme(overlap){return [overlap.mechanics.length,overlap.mechanics.length&&overlap.moods.length?overlap.moods.length:0,overlap.directors.length?1:0,overlap.actors.length,overlap.execution.length];}
 function similarSubstantive(overlap){return overlap.mechanics.length>0||overlap.directors.length>0||overlap.actors.length>0||overlap.execution.length>0;}
 function similarExecutionLabel(token){const id=String(token||'').split(':')[0],names={pace:'Похожий темп',plot_engine:'Похожий сюжетный двигатель',stakes:'Похожие ставки',payoff:'Похожая отдача',ending_quality:'Похожий финал'};if(names[id])return names[id];const dimension=EXECUTION_FILTERS.find(item=>item.id===id);return dimension?`Похоже: ${dimension.label}`:'Похожее исполнение';}
-function similarReason(overlap,fallback){if(overlap.mechanics.length){const mechanics=overlap.mechanics.slice(0,2).map(id=>MECHANIC_LABELS[id]).join(' и '),mood=overlap.moods.length?MOOD_LABELS[overlap.moods[0]]:null;return {kind:mood?'mechanic_mood':'mechanic',label:mood?`${mechanics} · ${mood}`:mechanics};}if(overlap.directors.length)return {kind:'director',label:'Общий режиссёр'};if(overlap.actors.length)return {kind:'actors',label:overlap.actors.length>1?'Общие актёры':'Общий актёр'};if(overlap.execution.length)return {kind:'execution',label:similarExecutionLabel(overlap.execution[0])};if(fallback)return {kind:'prediction',label:'Подходит по прогнозу'};return null;}
+// Every option is a real overlap. The first is the strongest label; later ones are used only when that signature was already shown.
+function similarOptions(overlap,fallback){
+ const options=[];
+ if(overlap.mechanics.length){
+  const mechanics=overlap.mechanics.slice(0,2),mood=overlap.moods.length?overlap.moods[0]:null,names=mechanics.map(id=>MECHANIC_LABELS[id]).join(' и ');
+  options.push(mood
+   ?{kind:'mechanic_mood',signature:'mechanic_mood:'+mechanics.join('+')+':'+mood,mechanics,label:`${names} · ${MOOD_LABELS[mood]}`}
+   :{kind:'mechanic',signature:'mechanic:'+mechanics.join('+'),mechanics,label:names});
+ }
+ if(overlap.directors.length)options.push({kind:'director',signature:'director',mechanics:[],label:'Общий режиссёр'});
+ if(overlap.actors.length)options.push({kind:'actors',signature:'actors',mechanics:[],label:overlap.actors.length>1?'Общие актёры':'Общий актёр'});
+ for(const token of overlap.execution)options.push({kind:'execution',signature:'execution:'+token,mechanics:[],label:similarExecutionLabel(token)});
+ if(fallback)options.push({kind:'prediction',signature:'prediction',mechanics:[],label:'Подходит по прогнозу'});
+ return options;
+}
+function similarFranchiseAllows(kept,option){
+ if(!kept.length)return true;
+ if(option.signature==='prediction')return false;
+ if(option.mechanics.some(id=>kept.some(item=>item.mechanics.includes(id))))return false;
+ return !kept.some(item=>item.signature===option.signature);
+}
+// A signature already shown is skipped when this film has another real one. The same signature stops at two.
+// A repeated mechanic yields to a reason that does not use it, when the film actually has that reason.
+function similarChoose(options,state,kept){
+ const usable=options.filter(option=>(state.signatures.get(option.signature)||0)<2&&similarFranchiseAllows(kept,option));
+ if(!usable.length)return null;
+ const unused=usable.filter(option=>!(state.signatures.get(option.signature)||0));
+ const pool=unused.length?unused:usable;
+ const distinct=pool.filter(option=>option.mechanics.every(id=>!(state.mechanics.get(id)||0)));
+ return (distinct.length?distinct:pool)[0];
+}
 function similarSameFilm(source,candidate){if(String(source.id)===String(candidate.id))return true;const left=similarVerifiedIdentity(source),right=similarVerifiedIdentity(candidate);if(left&&right&&left===right)return true;const sourceTmdb=/^\d+$/.test(String(source.tmdbId||''))?String(source.tmdbId):'',candidateTmdb=/^\d+$/.test(String(candidate.tmdbId||''))?String(candidate.tmdbId):'';if(sourceTmdb&&right==='tmdb:'+sourceTmdb)return true;if(candidateTmdb&&left==='tmdb:'+candidateTmdb)return true;return false;}
 function similarCompare(a,b){for(let i=0;i<a.theme.length;i++){const delta=b.theme[i]-a.theme[i];if(delta)return delta;}const rating=(b.prediction?.rating??-1)-(a.prediction?.rating??-1);if(rating)return rating;const probability=(b.prediction?.probability??-1)-(a.prediction?.probability??-1);if(probability)return probability;const until=(a.until??Infinity)-(b.until??Infinity);if(until)return until;return a.key.localeCompare(b.key,'en');}
-function similarIndependent(candidate,kept){return kept.every(item=>item.reasonKind!==candidate.reasonKind||candidate.mechanics.some(id=>!item.mechanics.includes(id)));}
+function similarTake(sorted,limit,state){
+ const picked=[];
+ for(const row of sorted){
+  if(picked.length>=limit)break;
+  if(state.seen.has(row.key))continue;
+  const franchise=franchiseKey(row.film),group=franchise?state.franchises.get(franchise)||[]:[];
+  const chosen=similarChoose(row.options,state,group);
+  if(!chosen)continue;
+  state.seen.add(row.key);
+  state.signatures.set(chosen.signature,(state.signatures.get(chosen.signature)||0)+1);
+  for(const id of chosen.mechanics)state.mechanics.set(id,(state.mechanics.get(id)||0)+1);
+  const next={...row,reasonKind:chosen.kind,label:chosen.label,signature:chosen.signature,mechanics:chosen.mechanics};
+  picked.push(next);
+  if(franchise)state.franchises.set(franchise,[...group,next]);
+ }
+ return picked;
+}
 function buildSimilar(source,now=nowMs()){
  if(!source)return [];
  const origin=similarWatchlistView(source),people={directors:similarCreditIds(source.directors),actors:similarCreditIds(source.actors)};
- const rows=[];
+ const watchlist=[],catalog=[];
  const consider=(film,view,sourceName)=>{
   if(!film||similarSameFilm(source,film))return;
   if(!findsShows(film,now,null).length)return;
   const overlap=similarOverlap(origin.bundle,view.bundle,{directors:people.directors,actors:people.actors},{directors:similarCreditIds(film.directors),actors:similarCreditIds(film.actors)});
   const substantive=similarSubstantive(overlap),fallback=!substantive&&!view.rewatch&&findsStrong({predictedRating:view.prediction?.rating,probability4Plus:view.prediction?.probability,confidence:view.prediction?.confidence,stale:false});
   if(view.rewatch&&!substantive)return;
-  const reason=similarReason(overlap,fallback);if(!reason)return;
+  const options=similarOptions(overlap,fallback);if(!options.length)return;
   const verified=similarVerifiedIdentity(film);
-  rows.push({film,source:sourceName,theme:similarTheme(overlap),prediction:view.prediction,until:findsUntil(film,now,null),key:verified||'id:'+film.id,reasonKind:reason.kind,label:reason.label,mechanics:overlap.mechanics,badge:sourceName==='catalog'?'new':view.rewatch?'rewatch':'watchlist'});
+  (sourceName==='catalog'?catalog:watchlist).push({film,source:sourceName,theme:similarTheme(overlap),prediction:view.prediction,until:findsUntil(film,now,null),key:verified||'id:'+film.id,options,badge:sourceName==='catalog'?'new':view.rewatch?'rewatch':'watchlist'});
  };
  const consumed=similarConsumedTmdb();
  for(const film of films||[])if(film.catalogOnly!==true)consider(film,similarWatchlistView(film),'watchlist');
  if(findsFresh())for(const film of findsSource.films||[]){if(similarOnWatchlist(film))continue;if(film.tmdbId&&findsMarks.get(String(film.tmdbId))?.state==='marked')continue;if(similarCatalogBlocked(film,consumed))continue;consider(film,similarCatalogView(film),'catalog');}
- rows.sort(similarCompare);
- const picked=[],seen=new Set(),franchises=new Map();
- for(const row of rows){
-  if(picked.length>=SIMILAR_LIMIT)break;
-  if(seen.has(row.key))continue;
-  const franchise=franchiseKey(row.film);
-  const group=franchise?franchises.get(franchise)||[]:[];
-  if(group.length&&!similarIndependent(row,group))continue;
-  seen.add(row.key);picked.push(row);if(franchise)franchises.set(franchise,[...group,row]);
- }
- return picked;
+ watchlist.sort(similarCompare);
+ catalog.sort(similarCompare);
+ const state={seen:new Set(),signatures:new Map(),mechanics:new Map(),franchises:new Map()},both=watchlist.length>0&&catalog.length>0;
+ const watchPicked=similarTake(watchlist,both?SIMILAR_WATCHLIST_CAP:SIMILAR_LIMIT,state);
+ const catalogPicked=similarTake(catalog,both?SIMILAR_LIMIT-watchPicked.length:watchlist.length?0:SIMILAR_LIMIT,state);
+ return [...watchPicked,...catalogPicked];
 }
 function similarOnWatchlist(film){const known=watchlistIdentities();return known.ids.has(String(film.id))||!!(film.tmdbId&&known.tmdb.has(String(film.tmdbId)));}
 // A catalog row is also dropped when the enrichment view already loaded says that film, or a trusted alias of it, is watched or rated.
@@ -1035,10 +1076,25 @@ function similarConsumedTmdb(){
  return consumed;
 }
 function similarCatalogBlocked(film,consumed){if(similarRewatch(similarViewItem(film.id)))return true;const verified=similarVerifiedIdentity(film);return !!verified&&consumed.has(verified.slice(5));}
-function similarForecastText(prediction){if(!prediction)return '';const chance=Number.isFinite(prediction.probability)?` · ${Math.round(prediction.probability*100)}%`:'';return `Прогноз ${prediction.rating.toFixed(1)}${chance}`;}
 function similarBadge(kind){if(kind==='new')return '<span class="film-similar-badge is-new" title="Фильм вне watchlist, не новинка проката">NEW</span>';if(kind==='rewatch')return '<span class="film-similar-badge is-rewatch">Пересмотр</span>';return '<span class="film-similar-badge">В watchlist</span>';}
 function similarTitle(film){const title=film.title||film.original||'Фильм',local=(films||[]).some(item=>String(item.id)===String(film.id));if(local)return `<button type="button" class="film-similar-open" data-similar-open="${escapeHTML(String(film.id))}">${escapeHTML(title)}</button>`;const url=typeof film.url==='string'&&/^https:\/\/www\.themoviedb\.org\/movie\/\d+(?:\/[A-Za-z0-9-]+)?\/?$/.test(film.url)?film.url:'';if(url)return `<a class="film-similar-external" href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(title)}<span class="film-similar-out">TMDB</span></a>`;return escapeHTML(title);}
-function similarCard(row,now){const film=row.film,year=film.year?String(film.year):'Год не указан',airing=findsAiring(film,now,null),forecast=similarForecastText(row.prediction);return `<article class="film-similar-card" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${similarBadge(row.badge)}<h3>${similarTitle(film)}</h3><p class="film-similar-meta">${escapeHTML(year)}</p><p class="film-similar-airing">${escapeHTML(airing.text)}</p>${forecast?`<p class="film-similar-forecast">${escapeHTML(forecast)}</p>`:''}<p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;}
+function similarPoster(film){const name=film.original||film.title||'';if(typeof film.poster==='string'&&film.poster)return `<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(name)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`;return `<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;}
+function similarScoreBadges(row){
+ const item=similarViewItem(row.film.id),raw=item?.actualRating,actual=raw!==null&&raw!==undefined&&Number.isFinite(Number(raw))?Number(raw):null,prediction=row.prediction;
+ if(actual===null&&!prediction)return '';
+ const actualBadge=actual===null?'':`<div class="score-badge score-actual" aria-label="Моя оценка ${actual.toFixed(1)} из 5"><span>МОЯ ОЦЕНКА</span><strong>${actual.toFixed(1)}</strong></div>`;
+ const chance=prediction&&Number.isFinite(prediction.probability)?Math.round(prediction.probability*100):null;
+ const predictedBadge=prediction?`<div class="score-badge score-predicted" aria-label="Прогноз ${prediction.rating.toFixed(1)} из 5${chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${prediction.rating.toFixed(1)}</strong>${chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'';
+ return `<div class="film-score-badges">${actualBadge}${predictedBadge}</div>`;
+}
+function similarCard(row,now){
+ const film=row.film,catalog=row.source==='catalog',scores=similarScoreBadges(row),airing=findsAiring(film,now,null);
+ const year=film.year?String(film.year):'Год не указан',runtime=Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:'';
+ const original=film.original&&film.original!==film.title?`<p class="original">${escapeHTML(film.original)}</p>`:'';
+ const genres=(film.genres||[]).filter(Boolean);
+ const both=scores.includes('score-actual')&&scores.includes('score-predicted');
+ return `<article class="film-similar-card ${catalog?'is-catalog':'is-watchlist'}${scores?both?' has-both-scores':' has-score':''}" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${scores}<div class="film-head"><div class="film-similar-poster">${catalog?similarBadge('new'):''}${similarPoster(film)}</div><div class="film-info"><h3>${similarTitle(film)}</h3>${original}<span class="film-year">${escapeHTML(year)}${runtime}</span>${genres.length?`<div class="film-tags">${genres.map(escapeHTML).join(' · ')}</div>`:''}${catalog?'':similarBadge(row.badge)}</div></div><p class="film-similar-airing">${escapeHTML(airing.text)}</p><p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;
+}
 // The last markup written into #film-similar-cards. An identical refresh keeps that DOM, so a focused title stays focused.
 let similarMarkup='';
 function similarFocusTarget(node){const card=node?.closest?.('.film-similar-card');if(!card)return null;if(node.dataset?.similarOpen)return {kind:'open',id:node.dataset.similarOpen};if(node.classList?.contains('film-similar-external'))return {kind:'external',href:node.getAttribute('href')||''};return null;}
