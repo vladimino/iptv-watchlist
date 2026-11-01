@@ -4,6 +4,10 @@
 // --producers-drained and an idle runner and writer lease. A deploy is not that
 // drain. --load copies the live mutable objects in bounded batches while the
 // runner and writer leases are idle, and leaves mode r2.
+// The snapshot keeps only mutable prediction keys. Other enrichment objects
+// do not count toward a budget. More than 5000 fingerprint or prediction
+// pointers refuses before a read of those films. A missing fingerprint body
+// refuses inside the import, before the hold.
 // A generation that moves during the copy is read again (catch-up), not a permanent block.
 // --activate sets mode d1 only when that fence, the leases and the parity read-back still agree.
 // --revert repairs the mutable mirrors from D1, deletes a mutable mirror the
@@ -20,7 +24,7 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createD1Adapter, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {createS3Store, readInstallCredentials} from './discovery-ledger-install.mjs';
 import {migrationStatements, OperatorStop, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, PRODUCTION_DATABASE_NAME, STATEMENT_BYTES} from './metadata-cache-production.mjs';
-import {activatePredictionDomain, importPredictionDomain, predictionMutableKey, predictionParity, readPredictionAuthority, reconcilePredictionIntents, releasePredictionWriters, revertPredictionDomain} from '../src/prediction-d1.js';
+import {PREDICTION_INDEX_LIMIT, activatePredictionDomain, importPredictionDomain, predictionMutableKey, predictionParity, readPredictionAuthority, reconcilePredictionIntents, releasePredictionWriters, revertPredictionDomain} from '../src/prediction-d1.js';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
@@ -87,15 +91,29 @@ async function objectJson(store,key){
  if(got.body)return JSON.parse(await new Response(got.body).text());
  return null;
 }
+function rememberMutable(keys,key,counts){
+ const kind=predictionMutableKey(key);
+ if(!kind)return;
+ if(kind==='fingerprint'&&++counts.fingerprints>PREDICTION_INDEX_LIMIT)throw new OperatorStop('prediction_domain_budget',3);
+ if(kind==='predictions'&&++counts.predictions>PREDICTION_INDEX_LIMIT)throw new OperatorStop('prediction_domain_budget',3);
+ keys.push(key);
+}
 async function listKeys(store,prefix){
- if(typeof store.keys==='function')return store.keys(prefix);
  const keys=[];
+ const counts={fingerprints:0,predictions:0};
+ if(typeof store.keys==='function'){
+  for(const key of await store.keys(prefix))rememberMutable(keys,key,counts);
+  return keys;
+ }
  let cursor;
  do{
   const page=typeof store.list==='function'&&store.list.length!==1?await store.list({prefix,cursor}):await store.list(cursor);
-  for(const item of page.objects||[])if(!prefix||String(item.key).startsWith(prefix))keys.push(item.key);
+  for(const item of page.objects||[]){
+   const key=String(item.key);
+   if(prefix&&!key.startsWith(prefix))continue;
+   rememberMutable(keys,key,counts);
+  }
   cursor=page.truncated?page.cursor||page.nextCursor:null;
-  if(keys.length>5000)throw new OperatorStop('prediction_domain_budget',3);
  }while(cursor);
  return keys;
 }
