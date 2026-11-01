@@ -47,6 +47,11 @@
 .admin-name-form input[type="text"],.admin-name-form textarea{width:100%;max-width:100%;box-sizing:border-box}
 .admin-name-form button{justify-self:start}
 .admin-name-status:empty{display:none}
+.admin-name-current{margin:0}
+.admin-folded,.admin-name-more{min-width:0;margin:12px 0}
+.admin-folded summary,.admin-name-more summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.admin-name-more ul,.admin-folded ul{overflow-wrap:anywhere}
+@media(max-width:800px){.admin-name-form button{width:100%;min-height:44px}}
 @media(max-width:800px){.admin-layout{grid-template-columns:minmax(0,1fr)}.admin-card h2{font-size:24px}.admin-card dl div{grid-template-columns:minmax(0,1fr);gap:2px}}
 .admin-snapshot{display:flex;align-items:flex-start;gap:10px;font-size:14px;color:#bdc9b7;background:#1c251a;border:1px solid #35412f;border-radius:8px;padding:11px 15px;margin:27px 0 8px;overflow-wrap:anywhere}
 .admin-snapshot[data-admin-skew=true]{border-color:#6b5a2a;color:#e6d9a6}
