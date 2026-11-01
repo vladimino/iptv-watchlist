@@ -60,10 +60,11 @@ export function endpointFor(override){
 export function renderSql(sql,params=[]){let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('Missing SQL parameter');return literal(params[index++]);});if(index!==params.length)throw new Error('Unused SQL parameter');return text;}
 function literal(value){if(value==null)return 'NULL';if(typeof value==='number'){if(!Number.isFinite(value))throw new Error('Bad SQL number');return String(value);}if(typeof value==='boolean')return value?'1':'0';return "'"+String(value).replaceAll("'","''")+"'";}
 
-// The D1 HTTP adapter. Reads are single statements. Writes are buffered inside transaction() and sent as ONE request
-// whose body is a batch. D1 runs that batch as one transaction and rolls it back when a statement fails. A write whose
-// outcome is unknown (the connection failed after sending, a transient status, or a success body that does not report
-// every statement) is never retried: the run stops and the next run reconciles through the importer's read-back.
+// The D1 HTTP adapter. Reads are single statements. Writes buffered inside transaction() go out as ONE request whose
+// body is {sql}: the statements joined by newlines. That is the request the scratch measurement exercised. executeRendered
+// stays a separate {batch} body for callers that already send one. A write whose outcome is unknown (the connection
+// failed after sending, a transient status, or a success body that does not prove every statement) is never retried:
+// the run stops and the next run reconciles through the importer's read-back.
 export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sleep=sleepFor,timeoutMs=120000}){
  const stats={requests:0,reads:0,batches:0,statements:0,largestBatchStatements:0,largestBatchBytes:0,retries:0};
  const state={buffer:null};
@@ -88,11 +89,17 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
    return payload;
   }
  }
- async function query(sql,{write=false}={}){
-  const payload=await request('POST',base+'/query',{sql},{write});
+ async function query(sql){
+  const payload=await request('POST',base+'/query',{sql});
   const results=Array.isArray(payload?.result)?payload.result:[];
   if(results.some(item=>item&&item.success===false))throw new D1Error('statement',results.find(item=>item.success===false)?.error||'A statement failed');
   return results;
+ }
+ function proveWrite(payload,expected){
+  const results=Array.isArray(payload?.result)?payload.result:[];
+  const failed=results.find(item=>item&&item.success===false);
+  if(failed)throw new D1Error('statement',failed.error||'A statement failed');
+  if(results.length!==expected||results.some(item=>item?.success!==true))throw new D1Error('write_uncertain','A write response did not prove every statement; its outcome is unknown and it is not retried',{expected,reported:results.length});
  }
  return {
   stats,
@@ -101,7 +108,7 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
    const statement=renderSql(sql,params)+';';
    if(state.buffer){state.buffer.push(statement);return Promise.resolve();}
    stats.batches++;stats.statements++;
-   return query(statement,{write:true}).then(()=>undefined);
+   return request('POST',base+'/query',{sql:statement},{write:true}).then(payload=>{proveWrite(payload,1);});
   },
   async get(sql,params=[]){const rows=await this.all(sql,params);return rows[0]??null;},
   async all(sql,params=[]){
@@ -117,11 +124,15 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
     await fn();
     const statements=state.buffer;
     if(!statements.length)return;
-    await sendBatch(statements);
+    if(statements.some(statement=>Buffer.byteLength(statement,'utf8')>100*1024))throw new D1Error('batch_too_large','A statement exceeds D1\'s 100 KB statement limit; it is not split');
+    const text=statements.join('\n'),bytes=Buffer.byteLength(text,'utf8');
+    if(statements.length>target.maxBatchStatements||bytes>target.maxBatchBytes)throw new D1Error('batch_too_large','A unit needs '+statements.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
+    stats.batches++;stats.statements+=statements.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,statements.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
+    proveWrite(await request('POST',base+'/query',{sql:text},{write:true}),statements.length);
    }finally{state.buffer=null;}
   },
   // Rendered statements, one HTTP batch. Each statement is its own batch entry so a semicolon inside a
-  // string is not a statement boundary. A write is not retried.
+  // string is not a statement boundary. Callers of this path are not the backfill unit. A write is not retried.
   executeRendered(statements){return sendBatch(statements);},
  };
  function batchEntry(sql){
@@ -135,11 +146,7 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
   if(!batch.length)return;
   if(batch.length>target.maxBatchStatements||bytes>target.maxBatchBytes)throw new D1Error('batch_too_large','A unit needs '+batch.length+' statements and '+bytes+' bytes, above the configured batch limits; the unit is not split because atomicity across requests is not available');
   stats.batches++;stats.statements+=batch.length;stats.largestBatchStatements=Math.max(stats.largestBatchStatements,batch.length);stats.largestBatchBytes=Math.max(stats.largestBatchBytes,bytes);
-  const payload=await request('POST',base+'/query',{batch},{write:true});
-  const results=Array.isArray(payload?.result)?payload.result:[];
-  // A reported statement failure is the batch's own rejection. A success body that does not name every statement is not proof.
-  if(results.some(item=>item&&item.success===false))throw new D1Error('statement',results.find(item=>item.success===false)?.error||'A statement failed');
-  if(results.length!==batch.length)throw new D1Error('write_uncertain','A batch response did not report every statement; its outcome is unknown and it is not retried',{expected:batch.length,reported:results.length});
+  proveWrite(await request('POST',base+'/query',{batch},{write:true}),batch.length);
  }
 }
 

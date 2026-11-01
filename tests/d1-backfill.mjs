@@ -34,7 +34,7 @@ function sqlite(file,input,{json=false}={}){return spawnSync('sqlite3',[...(json
 function freshDatabase(name,{schema=true}={}){const file=path.join(root,name+'.sqlite');fs.rmSync(file,{force:true});if(schema){const result=sqlite(file,'PRAGMA foreign_keys=ON;\n'+migration);assert.equal(result.status,0,result.stderr);}else{const result=sqlite(file,'SELECT 1;');assert.equal(result.status,0,result.stderr);}return file;}
 function count(file,sql){const result=sqlite(file,sql,{json:true});assert.equal(result.status,0,result.stderr);const rows=result.stdout.trim()?JSON.parse(result.stdout):[];return rows[0]?.n??0;}
 
-// A fake Cloudflare D1 HTTP API over local SQLite files. A write batch runs as one transaction: a failing statement leaves no row of that batch.
+// A fake Cloudflare D1 HTTP API over local SQLite files. A multi-statement {sql} write runs as one script: a failing statement leaves no row of that request. A {batch} body is the executeRendered shape, one result per entry.
 function fakeD1(databases){
  const calls=[],hooks=[];
  const server=http.createServer((request,response)=>{
@@ -48,18 +48,18 @@ function fakeD1(databases){
    if(request.method==='GET'&&!match[3])return send(200,{success:true,errors:[],messages:[],result:{uuid:database.uuid??match[2],name:database.name,version:'production'}});
    if(request.method!=='POST'||!match[3])return send(405,{success:false,errors:[{message:'Method not allowed'}]});
    const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
-   const statements=Array.isArray(body.batch)?body.batch.map(item=>String(item?.sql||'')):(typeof body.sql==='string'?[body.sql]:null);
-   if(!statements)return send(400,{success:false,errors:[{message:'Missing SQL'}]});
-   const sql=statements.join('\n');
-   const call={database:match[2],sql,batch:Array.isArray(body.batch),write:statements.some(text=>!/^\s*(SELECT|PRAGMA)\b/i.test(text))};calls.push(call);
+   const pieces=Array.isArray(body.batch)?body.batch.map(item=>String(item?.sql||'')):(typeof body.sql==='string'?body.sql.split(';').map(part=>part.trim()).filter(Boolean):null);
+   if(!pieces)return send(400,{success:false,errors:[{message:'Missing SQL'}]});
+   const sql=Array.isArray(body.batch)?pieces.join('\n'):body.sql;
+   const call={database:match[2],sql,batch:Array.isArray(body.batch),write:pieces.some(text=>!/^\s*(SELECT|PRAGMA)\b/i.test(text))};calls.push(call);
    for(const hook of hooks){const result=await hook({...call,phase:'before'});if(typeof result==='number')return send(result,{success:false,errors:[{message:'Injected'}]});}
    const input='PRAGMA foreign_keys=ON;\n'+(call.write?'BEGIN;\n'+sql+'\nCOMMIT;\n':sql+'\n');
    const result=sqlite(database.file,input,{json:true});
-   for(const hook of hooks){const after=await hook({...call,phase:'after',ok:result.status===0});if(after==='drop'){request.socket.destroy();return;}if(after==='partial')return send(200,{success:true,errors:[],messages:[],result:[]});if(typeof after==='number')return send(after,{success:false,errors:[{message:'Injected after commit'}]});}
+   for(const hook of hooks){const after=await hook({...call,phase:'after',ok:result.status===0});if(after==='drop'){request.socket.destroy();return;}if(after==='partial')return send(200,{success:true,errors:[],messages:[],result:[]});if(after==='blank')return send(200,{success:true,errors:[],messages:[],result:pieces.map(()=>({}))});if(after==='nulls')return send(200,{success:true,errors:[],messages:[],result:pieces.map(()=>null)});if(after==='failed-item')return send(200,{success:true,errors:[],messages:[],result:[{success:false,error:'boom'}]});if(typeof after==='number')return send(after,{success:false,errors:[{message:'Injected after commit'}]});}
    if(result.status!==0)return send(400,{success:false,errors:[{code:7500,message:(result.stderr||'SQL error').trim().slice(0,300)}],result:[]});
    const text=result.stdout.trim();
    const rows=text?JSON.parse(text.split('\n').filter(Boolean).length&&text.startsWith('[')?text.replace(/\]\s*\[/g,','):'[]'):[];
-   const reported=call.batch?statements.map(()=>({results:[],success:true,meta:{changes:0}})):[{results:rows,success:true,meta:{changes:0}}];
+   const reported=pieces.map((item,index)=>({results:index===0?rows:[],success:true,meta:{changes:0}}));
    send(200,{success:true,errors:[],messages:[],result:reported});
   });
  });
@@ -124,8 +124,30 @@ try{
    await adapter.run('INSERT INTO batch_missing (id) VALUES (1)');
   }),error=>error instanceof D1Error&&error.kind==='statement');
   assert.equal(count(rollFile,'SELECT COUNT(*) AS n FROM batch_ok'),2,'a failed last statement rolls the batch back');
-  assert.equal(rollFake.calls.filter(call=>call.write).every(call=>call.batch),true);
-  assert.equal(rollFake.calls.filter(call=>/INSERT INTO batch_ok \(id\) VALUES \(3\)/.test(call.sql)).length,1);
+  assert.equal(rollFake.calls.filter(call=>call.write).every(call=>call.batch===false),true,'the backfill unit is one {sql} request');
+  const joined=rollFake.calls.filter(call=>/INSERT INTO batch_ok \(id\) VALUES \(3\)/.test(call.sql));
+  assert.equal(joined.length,1);
+  assert.equal(joined[0].batch,false);
+  assert.match(joined[0].sql,/INSERT INTO batch_ok \(id\) VALUES \(3\)[\s\S]*INSERT INTO batch_missing/);
+  // A 200 body with one entry per statement but no success:true is not confirmation, and it is not sent again.
+  const blank=fakeD1({[TARGET]:{file:freshDatabase('blank',{schema:false}),name:'iptv'}});
+  const blankEndpoint=await blank.start();
+  const blankAdapter=createD1Adapter({target:readTarget(envFor(blankEndpoint)),databaseId:TARGET,sleep:noSleep});
+  blank.hooks.push(({write,phase})=>{if(phase==='after'&&write)return 'blank';});
+  await assert.rejects(blankAdapter.transaction(async()=>{
+   await blankAdapter.run('CREATE TABLE blank_ok (id INTEGER PRIMARY KEY)');
+   await blankAdapter.run('INSERT INTO blank_ok (id) VALUES (1)');
+  }),error=>error instanceof D1Error&&error.kind==='write_uncertain'&&error.details.expected===2&&error.details.reported===2);
+  assert.equal(blank.calls.filter(call=>call.write).length,1);
+  assert.equal(blank.calls.filter(call=>call.write)[0].batch,false);
+  blank.hooks.length=0;
+  blank.hooks.push(({write,phase})=>{if(phase==='after'&&write)return 'nulls';});
+  await assert.rejects(blankAdapter.executeRendered(['CREATE TABLE blank_batch (id INTEGER PRIMARY KEY);','INSERT INTO blank_batch (id) VALUES (1);']),error=>error instanceof D1Error&&error.kind==='write_uncertain'&&error.details.expected===2&&error.details.reported===2);
+  assert.equal(blank.calls.filter(call=>call.batch).length,1,'the unconfirmed batch was sent once');
+  blank.hooks.length=0;
+  blank.hooks.push(({write,phase})=>{if(phase==='after'&&write)return 'failed-item';});
+  await assert.rejects(blankAdapter.executeRendered(['INSERT INTO blank_batch (id) VALUES (2);']),error=>error instanceof D1Error&&error.kind==='statement'&&/boom/.test(error.message));
+  await blank.stop();
   await rollFake.stop();
  }
  const targetFile=freshDatabase('target');
@@ -154,7 +176,7 @@ try{
  assert.equal(bounded.status,'partial',JSON.stringify(bounded.stopReasons));
  assert.equal(bounded.probe,null);
  assert.equal(fake.calls.every(call=>call.database===TARGET),true,'the run opens only the configured database');
- assert.equal(fake.calls.filter(call=>call.write).every(call=>call.batch),true,'every write is one batch');
+ assert.equal(fake.calls.filter(call=>call.write).every(call=>call.batch===false),true,'every backfill write is one {sql} request');
  assert.equal(count(targetFile,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE '%probe%'"),0);
  assert.equal(bounded.identity.baseline,'first_run');
  assert.equal(bounded.result.applied,2);
