@@ -1,4 +1,4 @@
-# ADR 0078: D1 owns the published EPG generation only after its own marker is switched
+# ADR 0079: D1 owns the published EPG generation only after its own marker is switched
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-01  
@@ -10,7 +10,7 @@
 
 ## Context
 
-The published programme, its pointer, the show list and the watchlist order are R2 objects. [ADR 0008](0008-atomic-epg-publication.md) requires one coherent generation: readers pin that generation, and a writer that lost it does not update it. The v1 D1 tables `published_generation`, `film_generation`, `film_show` and `watchlist_film` cannot take that role on the live path. They reference `film(id)`. A publish that inserted them would mint a Film for a programme id that has none, and `src/epg-repository.js` `publishGeneration` also writes discovery candidates. Canonical Film and Person, credits, owner-reviewed names, the discovery ledger, ratings and prediction state are other domains. AIR-317, if it lands, is a separate marker and migration `0007`. It is not a prerequisite. Production today is schema v6. The metadata cache marker is `d1`. The cron is `37 * * * *` and runs only the enrichment projector.
+The published programme, its pointer, the show list and the watchlist order are R2 objects. [ADR 0008](0008-atomic-epg-publication.md) requires one coherent generation: readers pin that generation, and a writer that lost it does not update it. The v1 D1 tables `published_generation`, `film_generation`, `film_show` and `watchlist_film` cannot take that role on the live path. They reference `film(id)`. A publish that inserted them would mint a Film for a programme id that has none, and `src/epg-repository.js` `publishGeneration` also writes discovery candidates. Canonical Film and Person, credits, owner-reviewed names, the discovery ledger, ratings and prediction state are other domains. AIR-317, if it lands, is a separate marker and migration `0007`. It is not a prerequisite. Its open pull request already holds ADR 0078, so this record is 0079. Production today is schema v6. The metadata cache marker is `d1`. The cron is `37 * * * *` and runs only the enrichment projector.
 
 There is no transaction that covers D1 and R2 together. The Worker publisher uses the Worker binding `D1Database.batch`. The backfill's multi-statement `{sql}` body is a different transport. It is not evidence that this publisher's batch is atomic, and this delivery did not measure production D1.
 

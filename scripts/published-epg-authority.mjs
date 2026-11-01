@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Offline operator for the published EPG marker (ADR 0078). Default is read-only status.
+// Offline operator for the published EPG marker (ADR 0079). Default is read-only status.
 // --load copies local programme.json and watchlist.json into D1 and leaves mode r2.
 // --activate sets mode d1 only when the stored mirror etag is still that pointer file.
 // --revert sets mode r2 only when the pointer and programme.json match D1, and it keeps the rows.

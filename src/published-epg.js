@@ -1,4 +1,4 @@
-// ADR 0078. The published programme generation, its pointer, show rows and
+// ADR 0079. The published programme generation, its pointer, show rows and
 // watchlist membership. Schema v6 and v7, and a missing binding, keep the R2
 // objects. Schema v8 with a missing table or marker fails closed. Mode d1
 // reads and writes these tables and does not fall back to a different R2

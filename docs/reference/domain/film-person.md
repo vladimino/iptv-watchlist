@@ -132,7 +132,7 @@ D1 table `film_sync_state` ([ADR 0070](../../adr/0070-metadatasync-freshness-clo
 
 An explicit `shows: []` is known **no availability**. When a published programme run is known, missing `shows` or a mismatched `showsProgrammeRunId` must not produce hot. `epgLastAiring` is a fallback only when no explicit shows, no shows programme run and no published run are known. A new published EPG generation atomically replaces the current show set; it does not append old availability. See [candidate discovery](candidate-discovery.md).
 
-When `published_epg_authority.mode` is `d1` ([ADR 0078](../../adr/0078-d1-authoritative-published-epg.md), Proposed; not the production marker until a later activation), availability is that generation's D1 document plus `published_epg_show`. `film_epg_last_airing` is not a write of this publisher. `programme.json` and `watchlist.json` are the compatibility mirror, not a second authority. An explicit empty show list is still a member and zero show rows. The publisher does not mint a Film for a programme id.
+When `published_epg_authority.mode` is `d1` ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md), Proposed; not the production marker until a later activation), availability is that generation's D1 document plus `published_epg_show`. `film_epg_last_airing` is not a write of this publisher. `programme.json` and `watchlist.json` are the compatibility mirror, not a second authority. An explicit empty show list is still a member and zero show rows. The publisher does not mint a Film for a programme id.
 
 ## Existing storage and projections
 

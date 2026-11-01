@@ -1,5 +1,5 @@
 -- Schema v8: the published EPG generation, its pointer, programme shows and
--- watchlist membership (ADR 0078). Additive. It does not alter 0001-0006 and
+-- watchlist membership (ADR 0079). Additive. It does not alter 0001-0006 and
 -- does not create Film, candidate or prediction rows. 0007 is the open
 -- prediction migration; this file does not add those tables and does not
 -- lower schema_contract.version. A deploy does not apply this file.

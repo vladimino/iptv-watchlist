@@ -1,4 +1,4 @@
-// ADR 0078. D1 owns the published generation only after its own marker is d1.
+// ADR 0079. D1 owns the published generation only after its own marker is d1.
 // Counts and ids below are fixtures. Nothing here calls Cloudflare.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

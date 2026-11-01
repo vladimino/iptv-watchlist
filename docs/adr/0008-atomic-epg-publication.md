@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-24 (retrospective, [AIR-117](https://trello.com/c/ORglHnul))  
 **Approval source:** [AIR-48](https://trello.com/c/rVf8rRoJ), [PR #28](https://github.com/vladimino/iptv-watchlist/pull/28)  
 **Supersedes:** None documented  
-**Superseded by:** [ADR 0078](0078-d1-authoritative-published-epg.md) in part, and only while `published_epg_authority.mode` is `d1`: the coherent snapshot is that D1 generation, and `epg/published-generation.json` is the compatibility mirror. The decision below stands. Until that activation, R2 remains the pointer.
+**Superseded by:** [ADR 0079](0079-d1-authoritative-published-epg.md) in part, and only while `published_epg_authority.mode` is `d1`: the coherent snapshot is that D1 generation, and `epg/published-generation.json` is the compatibility mirror. The decision below stands. Until that activation, R2 remains the pointer.
 
 ## Context
 

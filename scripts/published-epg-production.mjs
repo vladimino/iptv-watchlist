@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Production entry for the published EPG cutover (ADR 0078). Default is read-only.
+// Production entry for the published EPG cutover (ADR 0079). Default is read-only.
 // --apply sends only migrations/0008_published_epg_authority.sql, and only when the
 // contract version is 6 or 7 and the published EPG tables are all absent. The inserted
 // marker stays mode r2. --load copies the live programme and watchlist into D1 and
