@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-24 (retrospective, [AIR-117](https://trello.com/c/ORglHnul))  
 **Approval source:** [AIR-80](https://trello.com/c/hQPjVTXv), [AIR-95](https://trello.com/c/kD8xjvVu), [AIR-96](https://trello.com/c/prY7T5iE)  
 **Supersedes:** None documented  
-**Superseded by:** None documented
+**Superseded by:** [ADR 0082](0082-retire-candidate-discovery.md) in part (only the optional `CANDIDATE_DISCOVERY` search gate is retired after the [owner decision of 2026-11-02](https://trello.com/c/ob6zOaAK#comment-6ae8b753b84ad0eed0e36ce5)); the structural matching, ambiguity and verification rules remain accepted
 
 ## Context
 
