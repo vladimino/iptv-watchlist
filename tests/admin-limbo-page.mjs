@@ -244,6 +244,9 @@ assert.equal(requests.length, 1);
 assert.match(requests[0].path, /cursor=/);
 assert.match(requests[0].path, /pin=/);
 assert.equal((results.innerHTML.match(/class="admin-hit limbo-item"/g) || []).length, 33);
+const queueIds = [...results.innerHTML.matchAll(/<section class="limbo-queue" data-limbo-queue="([^"]+)"/g)].map(match => match[1]);
+assert.deepEqual(queueIds, ['owner', 'automatic', 'unverified'].filter(id => queueIds.includes(id)), 'later pages join the existing queues in owner, automatic, unverified order: ' + queueIds.join(','));
+assert.equal(new Set(queueIds).size, queueIds.length, 'each queue heading exists once');
 assert.doesNotMatch(results.innerHTML, /data-limbo-more="items"/, 'the last page removes the button');
 assert.doesNotMatch(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Atmdb/, 'no catalogue link for a film outside the programme');
 
@@ -329,4 +332,43 @@ assert.equal(run(`limboQueueId({cause:'stalled'})`), 'owner');
 assert.equal(run(`limboQueueId({cause:'backoff'})`), 'automatic');
 assert.equal(run(`limboQueueId({cause:'unknown'})`), 'unverified');
 assert.equal(run(`limboQueueId({cause:'stale_projection'})`), 'unverified');
+
+// 12. A later page may repeat a queue and arrive in another order. Rows join the one existing section; headings stay in queue order.
+const row = (id, cause, reason, progress, completeness) => ({id, kind: 'film', cause, reason, subsystem: 'metadata', film: {title: id, year: 2001, inProgramme: true, storedId: 'raw-' + id}, evidence: {completeness, source: 'snapshot', observedAt: null, missing: [], anomalies: []}, progress: {status: progress}, age: {ms: cause === 'unknown' ? null : 86400000}, action: {suggested: 'wait', eligible: false}});
+const merged = run(`limboMergeHtml(limboResultsHtml(${JSON.stringify([row('a', 'stalled', 'no_progress', 'stalled', 'complete'), row('b', 'unknown', 'metadata_missing', 'unknown', 'missing')])}), ${JSON.stringify([row('c', 'unknown', 'metadata_missing', 'unknown', 'missing'), row('d', 'backoff', 'retry_waiting', 'waiting', 'complete'), row('e', 'stalled', 'no_progress', 'stalled', 'complete')])})`);
+assert.deepEqual([...merged.matchAll(/<section class="limbo-queue" data-limbo-queue="([^"]+)"/g)].map(match => match[1]), ['owner', 'automatic', 'unverified']);
+const owner = merged.slice(merged.indexOf('data-limbo-queue="owner"'), merged.indexOf('data-limbo-queue="automatic"'));
+const unverified = merged.slice(merged.indexOf('data-limbo-queue="unverified"'));
+assert.match(owner, /data-limbo-item="a"[\s\S]*data-limbo-item="e"/);
+assert.match(unverified, /data-limbo-item="b"[\s\S]*data-limbo-item="c"/);
+assert.doesNotMatch(owner, /data-limbo-item="b"|data-limbo-item="d"/);
+
+// 13. Arrow keys move the queue only from a queue button. A field in the open recovery keeps the key and the selection.
+const selectKey = listeners.get('#limbo-results').find(item => item.type === 'keydown').fn;
+const heldSelection = run('limboLive.selected');
+const field = {tagName: 'INPUT', closest() {return null;}};
+document.activeElement = field;
+let fieldPrevented = false;
+for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End']) selectKey({key, target: field, preventDefault() {fieldPrevented = true;}});
+assert.equal(fieldPrevented, false);
+assert.equal(document.activeElement, field);
+assert.equal(run('limboLive.selected'), heldSelection);
+const first = {getAttribute: () => 't1', closest(selector) {return selector === '[data-limbo-select]' ? this : null;}, focus() {}};
+const second = {getAttribute: () => 't2', closest(selector) {return selector === '[data-limbo-select]' ? this : null;}, focus() {document.activeElement = this;}};
+results.querySelectorAll = selector => selector === '[data-limbo-select]' ? [first, second] : [];
+document.activeElement = first;
+run(`limboSelect.set('t2','film-b'); limboLive.selected='film-a'`);
+let buttonPrevented = false;
+selectKey({key: 'ArrowDown', target: first, preventDefault() {buttonPrevented = true;}});
+assert.equal(buttonPrevented, true);
+assert.equal(document.activeElement, second);
+assert.equal(run('limboLive.selected'), 'film-b');
+delete results.querySelectorAll;
+
+// 14. A film with no title does not put its stored id on the card face.
+const untitled = run(`limboItemHtml(${JSON.stringify({id: 'bare', kind: 'film', cause: 'unknown', reason: 'metadata_missing', subsystem: 'metadata', film: {title: null, storedId: 'tmdb_77', inProgramme: false}, evidence: {completeness: 'missing', source: 'snapshot', observedAt: null, missing: [], anomalies: []}, progress: {status: 'unknown'}, age: {ms: null}, action: {suggested: 'investigate', eligible: null}})})`);
+const untitledFace = untitled.replace(/<details class="limbo-tech">[\s\S]*<\/details>/, '');
+assert.match(untitledFace, /Фильм без названия/);
+assert.doesNotMatch(untitledFace, /tmdb_77/);
+assert.match(untitled, /<details class="limbo-tech">[\s\S]*tmdb_77/);
 console.log('Admin limbo page: URL filters, history, pagination under the pin, empty, error, stale snapshot and keyboard passed');

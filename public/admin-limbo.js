@@ -347,7 +347,7 @@ function limboEmptyHtml(view, state) {
 
 function limboItemHtml(item) {
   const film = item.film;
-  const title = film?.title || (item.kind === 'observation' ? item.observation?.title || 'Наблюдение без названия' : film?.storedId || 'Фильм без названия');
+  const title = film?.title || (item.kind === 'observation' ? item.observation?.title || 'Наблюдение без названия' : 'Фильм без названия');
   const year = film?.year || item.observation?.year;
   const kindLabel = item.kind === 'observation' ? 'наблюдение' : film && film.inProgramme === false ? 'фильм каталога (вне программы)' : 'фильм';
   const meta = [year ? String(year) : null, kindLabel].filter(Boolean).join(' · ');
@@ -381,13 +381,80 @@ function limboItemHtml(item) {
   return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}">${face}${detail}</article>`;
 }
 
-function limboResultsHtml(items) {
+function limboGrouped(items) {
   const groups = new Map(LIMBO_QUEUES.map(id => [id, []]));
   for (const item of items) groups.get(limboQueueId(item)).push(item);
-  return LIMBO_QUEUES.filter(id => groups.get(id).length).map(id => {
-    const copy = LIMBO_QUEUE_COPY[id];
-    return `<section class="limbo-queue" data-limbo-queue="${id}" aria-label="${limboEscape(copy.title)}"><h3>${limboEscape(copy.title)}</h3><p class="limbo-queue-hint">${limboEscape(copy.hint)}</p>${groups.get(id).map(limboItemHtml).join('')}</section>`;
-  }).join('');
+  return groups;
+}
+
+function limboQueueSection(id, articles) {
+  const copy = LIMBO_QUEUE_COPY[id];
+  return `<section class="limbo-queue" data-limbo-queue="${id}" aria-label="${limboEscape(copy.title)}"><h3>${limboEscape(copy.title)}</h3><p class="limbo-queue-hint">${limboEscape(copy.hint)}</p>${articles}<span data-limbo-queue-end="${id}" hidden></span></section>`;
+}
+
+// Place a queue that this page has not shown yet. Later queues stay after earlier ones, even when a later page arrives first.
+function limboInsertSection(html, id, block) {
+  const index = LIMBO_QUEUES.indexOf(id);
+  for (let later = index + 1; later < LIMBO_QUEUES.length; later++) {
+    const token = `<section class="limbo-queue" data-limbo-queue="${LIMBO_QUEUES[later]}"`;
+    const pos = html.indexOf(token);
+    if (pos !== -1) return html.slice(0, pos) + block + html.slice(pos);
+  }
+  for (let earlier = index - 1; earlier >= 0; earlier--) {
+    const marker = `<span data-limbo-queue-end="${LIMBO_QUEUES[earlier]}" hidden></span>`;
+    const pos = html.indexOf(marker);
+    if (pos !== -1) {
+      const end = html.indexOf('</section>', pos);
+      const cut = end + '</section>'.length;
+      return html.slice(0, cut) + block + html.slice(cut);
+    }
+  }
+  return html + block;
+}
+
+// Add rows to the queues already on screen. Each queue section exists at most once, in owner, automatic, unverified order.
+function limboMergeHtml(html, items) {
+  let next = String(html || '');
+  const groups = limboGrouped(items);
+  for (const id of LIMBO_QUEUES) {
+    const list = groups.get(id);
+    if (!list.length) continue;
+    const articles = list.map(limboItemHtml).join('');
+    const marker = `<span data-limbo-queue-end="${id}" hidden></span>`;
+    if (next.includes(marker)) next = next.replace(marker, articles + marker);
+    else next = limboInsertSection(next, id, limboQueueSection(id, articles));
+  }
+  return next;
+}
+
+function limboResultsHtml(items) {
+  return limboMergeHtml('', items);
+}
+
+function limboAppendGrouped(results, items) {
+  if (typeof results.querySelector !== 'function') {
+    results.innerHTML = limboMergeHtml(results.innerHTML, items);
+    return;
+  }
+  const groups = limboGrouped(items);
+  for (const id of LIMBO_QUEUES) {
+    const list = groups.get(id);
+    if (!list.length) continue;
+    const articles = list.map(limboItemHtml).join('');
+    const section = results.querySelector(`[data-limbo-queue="${id}"]`);
+    if (section) {
+      const marker = typeof section.querySelector === 'function' ? section.querySelector(`[data-limbo-queue-end="${id}"]`) : null;
+      if (marker && typeof marker.insertAdjacentHTML === 'function') marker.insertAdjacentHTML('beforebegin', articles);
+      else if (typeof section.insertAdjacentHTML === 'function') section.insertAdjacentHTML('beforeend', articles);
+      continue;
+    }
+    const block = limboQueueSection(id, articles);
+    let anchor = null;
+    const index = LIMBO_QUEUES.indexOf(id);
+    for (let later = index + 1; later < LIMBO_QUEUES.length && !anchor; later++) anchor = results.querySelector(`[data-limbo-queue="${LIMBO_QUEUES[later]}"]`);
+    if (anchor && typeof anchor.insertAdjacentHTML === 'function') anchor.insertAdjacentHTML('beforebegin', block);
+    else results.insertAdjacentHTML('beforeend', block);
+  }
 }
 
 function limboQueueNotice(view, state) {
@@ -843,7 +910,8 @@ function onLimboMore() {
     limboLive.next = page.nextCursor;
     const results = document.querySelector('#limbo-results');
     if (button) button.remove();
-    results.insertAdjacentHTML('beforeend', limboResultsHtml(page.items) + (page.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : ''));
+    limboAppendGrouped(results, page.items);
+    if (page.nextCursor) results.insertAdjacentHTML('beforeend', '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>');
     return page;
   });
   limboLive.pending = pending;
@@ -917,6 +985,9 @@ function onLimboSelect(token) {
 
 function onLimboSelectKey(event) {
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return;
+  const target = event.target;
+  const select = target && target.closest ? target.closest('[data-limbo-select]') : null;
+  if (!select || target !== select) return;
   const results = document.querySelector('#limbo-results');
   if (!results || typeof results.querySelectorAll !== 'function') return;
   const buttons = [...results.querySelectorAll('[data-limbo-select]')];
