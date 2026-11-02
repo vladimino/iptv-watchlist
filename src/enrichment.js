@@ -56,13 +56,49 @@ function validateProfile(p){
 // The version record is written create-only, then current.json moves by compare-and-swap on the ETag read at the start,
 // so two concurrent publications cannot both become current and a version number is never rewritten.
 const PROFILE_PUBLISH_STATUS={impact_missing:400,impact_schema_unknown:400,from_mismatch:409,scope_unknown:400,identity_requires_same_hash:400,changed_fields_mismatch:400,global_field_requires_global:400,selective_requires_selectors:400,selector_kind_unknown:400,selector_invalid:400,field_not_covered:400,genre_floor_missing:400,selective_requires_owner_approval:400,approval_mismatch:400};
+// One Events object per committed current version. The id and timestamp come from that committed record, so a replay
+// writes the same key and does not mint another. The object keeps field names and the scope only: not the profile,
+// its hash, the approval or the declaration.
+function tasteProfileEventFromCurrent(current){
+ const at=current?.updatedAt,version=current?.version;
+ if(typeof at!=='string'||!Number.isFinite(Date.parse(at))||!Number.isInteger(version)||version<1)return null;
+ const impact=current.changeImpact,scope=impact?.scope==='selective'||impact?.scope==='global'||impact?.scope==='identity'?impact.scope:null;
+ const changedFields=impact&&Array.isArray(impact.changedFields)?impact.changedFields.filter(field=>typeof field==='string'):[];
+ const lineage=Array.isArray(current.lineage)?current.lineage:[],index=lineage.findIndex(link=>link?.version===version);
+ const fromVersion=index>0&&Number.isInteger(lineage[index-1]?.version)?lineage[index-1].version:null;
+ return {id:'taste-profile-'+version,type:'taste_profile',at,fromVersion,toVersion:version,changedFields,scope};
+}
+function sameCommittedPublication(current,body,profileHash){
+ return !!current&&current.version===body.version&&current.profileHash===profileHash&&JSON.stringify(canonical(current.changeImpact??null))===JSON.stringify(canonical(body.changeImpact??null));
+}
+// Records the event for a current record that is already committed. A missing object is created. An object already
+// stored for this version is left as it was. A write failure does not move current and does not throw.
+async function ensureTasteProfileEvent(env,current){
+ const event=tasteProfileEventFromCurrent(current);
+ if(!event)return {recorded:false};
+ try{
+  const existing=await loadJSON(env,removalEventKey(event));
+  if(existing)return existing.type==='taste_profile'&&existing.id===event.id&&existing.toVersion===event.toVersion?{recorded:true}:{recorded:false};
+  await writeEvent(env,event);
+  const stored=await loadJSON(env,removalEventKey(event));
+  return stored?.type==='taste_profile'&&stored.id===event.id?{recorded:true}:{recorded:false};
+ }catch{return {recorded:false};}
+}
+function publishedProfileResponse(value,eventState){
+ if(eventState?.recorded)return json(value);
+ return json({...value,publicationEvent:{recorded:false}});
+}
 async function publishProfile(env,body){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.schemaVersion!==1||!Number.isInteger(body.version)||body.version<1)return json({error:'Invalid version or schemaVersion'},400);
  const issue=validateProfile(body.profile);if(issue)return json({error:issue},400);
  const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openProfile(env),stored=head?null:await env.BUCKET.get(profileKey),current=head?head.value:(stored?await stored.json():null),currentEtag=head?head.object?.etag||null:stored?.etag||null;
- if(current&&body.version<=current.version)return json({error:'Version must increase',code:'version_not_increasing'},409);
- const profileHash=await contentHash(body.profile),next={version:body.version,profileHash},impact=body.changeImpact??null;
+ const profileHash=await contentHash(body.profile);
+ if(current&&body.version<=current.version){
+  if(body.dryRun!==true&&sameCommittedPublication(current,body,profileHash))await ensureTasteProfileEvent(env,current);
+  return json({error:'Version must increase',code:'version_not_increasing'},409);
+ }
+ const next={version:body.version,profileHash},impact=body.changeImpact??null;
  let changedFields=profileChangedFields(null,body.profile),declarationSha256=null;
  if(current){
   const text=profileDeclarationText(impact,next);declarationSha256=text?await profileDeclarationHash(text):null;
@@ -89,7 +125,7 @@ async function publishProfile(env,body){
  finally{if(routed.token&&settled)await PredictionD1.completePredictionWrite(env,profileKey,routed.token);}
  if(moved===null)return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);
  try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}
- return json(value);
+ return publishedProfileResponse(value,await ensureTasteProfileEvent(env,value));
 }
 async function profileDeclarationHash(text){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');}
 const MECHANICS=['heist','scam','investigation','mystery','chase_escape','rescue','escort_protection','survival','siege','ticking_clock','expedition_discovery','puzzle','plan_counterplan','multi_party_conflict'];

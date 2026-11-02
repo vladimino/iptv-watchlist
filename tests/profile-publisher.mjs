@@ -81,12 +81,19 @@ let r=await publish({version:1,profile,changeImpact:global});
 assert.equal(r.status,409);assert.equal(r.data.code,'from_mismatch');assert.equal(snapshot(),before,'a refused first publication writes nothing');
 r=await publish({version:1,profile});
 assert.equal(r.status,200);assert.equal(r.data.version,1);assert.equal(r.data.changeImpact,null);
+assert.equal(r.data.publicationEvent,undefined,'a recorded event is not added to the profile response');
 assert.deepEqual(r.data.lineage,[{version:1,profileHash:r.data.profileHash,changeImpact:null}]);
 const v1=read(versionKey(1));assert.equal(v1.profileHash,r.data.profileHash);assert.equal(v1.lineage,undefined,'the version record holds no lineage');
 assert.deepEqual(puts.filter(p=>p.key===versionKey(1)).map(p=>p.onlyIf),[{etagDoesNotMatch:'*'}],'the version record is create-only');
 assert.deepEqual(puts.filter(p=>p.key===currentKey).map(p=>p.onlyIf),[{etagDoesNotMatch:'*'}],'the first current pointer is create-only');
 const h1=r.data.profileHash;
 assert.deepEqual((await api('enrichment/profile')).data,read(currentKey),'GET returns the current record with its lineage');
+const events=()=>[...records.keys()].filter(key=>key.startsWith('events/items/'));
+const taste=version=>events().map(read).find(event=>event?.id==='taste-profile-'+version);
+const firstEvent=taste(1);
+assert.equal(events().length,1,'the first committed version records one event');
+assert.equal(firstEvent.type,'taste_profile');assert.equal(firstEvent.fromVersion,null);assert.equal(firstEvent.toVersion,1);assert.equal(firstEvent.scope,null);assert.deepEqual(firstEvent.changedFields,[]);
+assert.equal(firstEvent.at,read(currentKey).updatedAt);assert.equal(JSON.stringify(firstEvent).includes('profileHash'),false);
 
 // Every rejection leaves current.json and the version records untouched, and writes no version record.
 const changed={...profile,horrorPreferences:'Rules and causality matter'};
@@ -118,13 +125,20 @@ assert.deepEqual(read(versionKey(2)).changeImpact,approved);
 assert.deepEqual(r.data.lineage,[{version:1,profileHash:h1,changeImpact:null},{version:2,profileHash:h2,changeImpact:approved}]);
 assert.deepEqual(puts.filter(p=>p.key===currentKey).at(-1).onlyIf,{etagMatches:etagBefore},'current moves by compare-and-swap on the ETag read first');
 assert.equal(read(versionKey(1)).profileHash,h1,'the earlier record is untouched');
+const horrorEvent=taste(2);
+assert.equal(events().length,2);assert.equal(horrorEvent.fromVersion,1);assert.equal(horrorEvent.toVersion,2);assert.deepEqual(horrorEvent.changedFields,['horrorPreferences']);assert.equal(horrorEvent.scope,'selective');assert.equal(horrorEvent.at,read(versionKey(2)).updatedAt);
+const horrorText=JSON.stringify(horrorEvent);
+for(const secret of ['Rules and causality','declarationSha256','trello-comment',h2,'approval',changed.horrorPreferences])assert.equal(horrorText.includes(secret),false,secret);
 assert.equal((await publish({version:2,profile:changed,changeImpact:approved})).data.code,'version_not_increasing');
+assert.equal(events().length,2,'a replay of the committed publication does not add a second event');
 
 // Identity: same content, a new number.
 const identity=(from,hash)=>({impactSchemaVersion:1,from,scope:'identity',changedFields:[],selectors:[]});
 r=await publish({version:3,profile:changed,changeImpact:{...identity({version:2,profileHash:h2})}});
 assert.equal(r.status,200);assert.equal(r.data.lineage.length,3);
+assert.equal(taste(3).scope,'identity');assert.deepEqual(taste(3).changedFields,[]);assert.equal(taste(3).fromVersion,2);
 assert.equal((await publish({version:4,profile:{...changed,pace:'x'},changeImpact:identity({version:3,profileHash:h2})})).data.code,'identity_requires_same_hash');
+assert.equal(taste(4),undefined,'a refused publication records no event');
 
 // A retry after a crash between the two writes finds its own version record and completes; another record under that
 // number is a conflict.
@@ -133,7 +147,7 @@ const v4profile={...changed,calibration:'Recalibrated'};
 beforePut=async key=>{if(key===currentKey){beforePut=null;throw new Error('Simulated crash after the version record');}};
 let crashed;try{crashed=(await publish({version:4,profile:v4profile,changeImpact:global4})).status;}catch{crashed='thrown';}
 assert.ok(crashed==='thrown'||crashed>=500,'the crash surfaces as a failure');
-assert.ok(records.has(versionKey(4)),'the version record was written first');assert.equal(read(currentKey).version,3,'current did not move');
+assert.ok(records.has(versionKey(4)),'the version record was written first');assert.equal(read(currentKey).version,3,'current did not move');assert.equal(taste(4),undefined,'a version record without the current pointer has no event');
 const orphanUpdatedAt=read(versionKey(4)).updatedAt;
 r=await publish({version:4,profile:v4profile,changeImpact:global4});
 assert.equal(r.status,200,'the retry completes');assert.equal(r.data.updatedAt,orphanUpdatedAt,'and reuses the record already written');assert.equal(read(currentKey).version,4);
@@ -148,6 +162,18 @@ const h4=read(currentKey).profileHash;
 beforePut=async key=>{if(key===currentKey){beforePut=null;const winner={...read(currentKey),version:99,profileHash:'winner'};records.set(currentKey,JSON.stringify(winner));etags.set(currentKey,'etag-'+(++revision));}};
 r=await publish({version:5,profile:v4profile,changeImpact:identity({version:4,profileHash:h4})});
 assert.equal(r.status,409);assert.equal(r.data.code,'profile_changed');assert.equal(read(currentKey).profileHash,'winner','the concurrent winner stays current');
+assert.equal(taste(5),undefined,'the publication that lost compare-and-swap records no event');
+const winner=read(currentKey),paceImpact={impactSchemaVersion:1,from:{version:winner.version,profileHash:winner.profileHash},scope:'global',changedFields:['pace'],selectors:[]},paceProfile={...winner.profile,pace:'Much slower'};
+beforePut=async key=>{if(String(key).startsWith('events/items/')){beforePut=null;throw new Error('event put failed');}};
+r=await publish({version:100,profile:paceProfile,changeImpact:paceImpact});
+assert.equal(r.status,200);assert.equal(r.data.publicationEvent.recorded,false);assert.equal(read(currentKey).version,100);assert.equal(read(currentKey).publicationEvent,undefined,'the profile record does not store the event flag');
+assert.equal(taste(100),undefined);
+r=await publish({version:100,profile:paceProfile,changeImpact:paceImpact});
+assert.equal(r.data.code,'version_not_increasing');
+assert.equal(taste(100).scope,'global');assert.deepEqual(taste(100).changedFields,['pace']);assert.equal(taste(100).fromVersion,4);assert.equal(events().filter(key=>read(key).toVersion===100).length,1);
+const both={...paceImpact,from:{version:100,profileHash:read(currentKey).profileHash},changedFields:['pace','calibration']},bothProfile={...paceProfile,pace:'Even slower',calibration:'Again'};
+r=await publish({version:101,profile:bothProfile,changeImpact:both});
+assert.equal(r.status,200);assert.deepEqual(taste(101).changedFields,['pace','calibration']);assert.equal(taste(101).scope,'global');
 
 // A legacy current record without lineage or impact (written before this contract) starts the lineage.
 records.clear();etags.clear();
@@ -155,4 +181,20 @@ records.set(currentKey,JSON.stringify({version:7,schemaVersion:1,updatedAt:'2026
 r=await publish({version:8,profile:{...profile,pace:'Slower'},changeImpact:{impactSchemaVersion:1,from:{version:7,profileHash:'legacy'},scope:'global',changedFields:['pace'],selectors:[]}});
 assert.equal(r.status,200);assert.deepEqual(r.data.lineage.map(link=>[link.version,link.changeImpact?.scope??null]),[[7,null],[8,'global']]);
 assert.equal(records.has(versionKey(7)),false,'a legacy version record is not rewritten');
-console.log('Profile publisher: fixture publication decisions, canonical approval hash, fail-closed impact shape, dry run, no write on rejection, create-only version record, compare-and-swap pointer, crash retry, version conflict, concurrent publication, identity and legacy lineage passed');
+assert.equal(taste(7),undefined,'an existing current version is not given a backfilled event');
+assert.equal(taste(8).scope,'global');assert.deepEqual(taste(8).changedFields,['pace']);assert.equal(taste(8).fromVersion,7);
+records.clear();etags.clear();
+const d1Writes=[];
+ctx.PredictionD1={
+ async openProfile(){const text=records.get(currentKey);return {mode:'d1',value:text?JSON.parse(text):null,object:text?{etag:etags.get(currentKey)||'d1'}:null};},
+ async saveMutable(_env,key,value){if(key!==currentKey)return {handled:false};d1Writes.push(key);records.set(key,JSON.stringify(value));etags.set(key,'etag-d1');return {handled:true};},
+ async completePredictionWrite(){},
+ async routeRead(){return {handled:false};},
+ async overlayIndex(_env,value){return value;}
+};
+r=await publish({version:1,profile});
+assert.equal(r.status,200);assert.deepEqual(d1Writes,[currentKey]);assert.equal(taste(1).toVersion,1);assert.ok(events().every(key=>key.startsWith('events/items/')));
+r=await publish({version:1,profile});
+assert.equal(r.data.code,'version_not_increasing');assert.deepEqual(d1Writes,[currentKey],'a replay does not commit the profile again');assert.equal(events().length,1);
+delete ctx.PredictionD1;
+console.log('Profile publisher: fixture publication decisions, canonical approval hash, fail-closed impact shape, dry run, no write on rejection, create-only version record, compare-and-swap pointer, crash retry, version conflict, concurrent publication, identity and legacy lineage, one taste-profile event and its replay passed');
