@@ -2,7 +2,7 @@
 
 ## Current invariant
 
-[ADR 0082](../../adr/0082-retire-candidate-discovery.md) (Proposed) retires the optional variant search. The Worker does not plan title, year, spelling or numeral variant searches. `CANDIDATE_DISCOVERY` is not read and is not in the `feature_flags` registry. A leftover binding, including `on`, adds no TMDB request, no `proposedCandidates` and no catalog row, and does not turn a no-match into a verified decision.
+[ADR 0082](../../adr/0082-retire-candidate-discovery.md) (Accepted 2026-11-02) retires the optional variant search. The Worker does not plan title, year, spelling or numeral variant searches. `CANDIDATE_DISCOVERY` is not read and is not in the `feature_flags` registry. A leftover binding, including `on`, adds no TMDB request, no `proposedCandidates` and no catalog row, and does not turn a no-match into a verified decision.
 
 The chunk result and `epg/discovery-status.json` still include `variantCalls`, `variantErrors`, `variantThrottled` and `variantSkipped`. Each is 0. There is no variant-only hold. The ordinary exact-title search, the movie-detail gate, year and runtime checks, competing-edition and short-title safeguards, and the generation fence are unchanged ([scored resolution](scored-resolution.md)).
 
