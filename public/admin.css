@@ -109,7 +109,8 @@
 .health-board{display:grid;gap:10px;margin:4px 0 8px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
 .health-lead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px 16px;margin:0;font-size:22px;letter-spacing:-.3px}
 .health-lead span{font-size:15px;color:var(--muted)}
-.health-lead-attention b{color:#f3dd9a}.health-lead-clear b{color:#d7e7c4}.health-lead-unknown b{color:#aeb8ac}
+.health-lead-attention b,.health-lead-act b,.health-step-act{color:#f3dd9a}.health-lead-clear b{color:#d7e7c4}.health-lead-unknown b,.health-step-wait,.health-step-gap{color:var(--muted)}.health-lead-calm,.health-lead-calm b{color:var(--text)}
+.health-steps{margin:0;font-size:14px}
 .health-split{display:flex;flex-wrap:wrap;gap:8px;list-style:none;padding:0;margin:0}
 .health-split .health-verdict{margin:0;border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:13px}
 .health-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 16px;margin:0}
