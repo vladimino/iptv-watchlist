@@ -8,7 +8,7 @@ const HEALTH_SUBSYSTEM_TEXT = {
 };
 const HEALTH_STATUS_TEXT = {clear: 'в порядке', clear_in_scope: 'в порядке в пределах снимка', attention: 'требует внимания', unknown: 'неизвестно'};
 const HEALTH_EVIDENCE_TEXT = {observed: 'прочитано', not_supplied: 'источник не читается этой страницей', object_missing: 'объекта нет в хранилище'};
-const HEALTH_SEVERITY_TEXT = {critical: 'критично', warning: 'внимание', info: 'сведение'};
+const HEALTH_SEVERITY_TEXT = {critical: 'срочно', warning: 'важно', info: 'не срочно'};
 const HEALTH_CATEGORY_TEXT = {conflict: 'конфликт', stuck: 'застряло', stale: 'устарело', missing_asset: 'нет ресурса', external_refresh: 'нужен внешний источник', incomplete: 'не завершено'};
 const HEALTH_REASON_TEXT = {
   evidence_not_supplied: 'Источник не входит в это ограниченное чтение; состояние неизвестно, а не здорово.',
@@ -128,23 +128,45 @@ function healthSituation(group) {
   return '';
 }
 
+const HEALTH_ELIGIBILITY_SHORT = {
+  eligible: '', no_action_defined: 'шага нет', in_backoff: 'в паузе', awaiting_progress: 'ждёт прогресса',
+  evidence_incomplete: 'данных мало', generation_changed: 'поколение сменилось', manual_review_required: 'нужна ручная проверка',
+  identity_unverified: 'идентичность не подтверждена', terminal: 'терминально', owner_input_required: 'нужен ввод', already_queued: 'уже в очереди',
+};
+const HEALTH_GAP_REASONS = new Set(['evidence_not_supplied', 'evidence_object_missing', 'progress_unknown']);
+const HEALTH_WAIT_REASONS = new Set(['retry_waiting', 'work_pending', 'work_queued', 'all_deferred_by_retry']);
+const HEALTH_WAIT_ELIGIBILITY = new Set(['in_backoff', 'awaiting_progress', 'already_queued']);
+
 function healthReadyText(action) {
-  if (action.eligible === true) return 'готово, но эта страница действие не выполняет';
+  if (action.eligible === true) return 'готово';
   if (action.eligible === false) return 'сейчас недоступно';
   return 'готовность неизвестна';
+}
+
+// Presentation only. Critical and warning stay in the action band. An info group is routine waiting when the
+// evaluator already says to wait, names a waiting reason, or says the action is not eligible for a waiting reason.
+// A missing source is a gap, not a zero and not an urgent task. Eligible work stays in the action band.
+function healthBand(group) {
+  if (HEALTH_GAP_REASONS.has(group.reason)) return 'gap';
+  const action = group.action || {};
+  const routine = group.severity === 'info' && action.eligible !== true && (
+    action.suggested === 'wait' || HEALTH_WAIT_REASONS.has(group.reason) || HEALTH_WAIT_ELIGIBILITY.has(action.reason)
+  );
+  return routine ? 'wait' : 'act';
 }
 
 function healthNextStep(group) {
   const action = group.action || {};
   const concrete = healthEscape(HEALTH_ACTION_CODE_TEXT[action.code] || action.code || 'шаг не назван');
-  const verb = healthEscape(HEALTH_ACTION_TEXT[action.suggested] || action.suggested || 'разобраться');
-  const reason = healthEscape(HEALTH_ELIGIBILITY_TEXT[action.reason] || action.reason || 'причина не названа');
+  const ready = healthReadyText(action);
+  const known = Object.hasOwn(HEALTH_ELIGIBILITY_SHORT, action.reason) ? HEALTH_ELIGIBILITY_SHORT[action.reason] : action.reason;
+  const why = known ? `, ${healthEscape(known)}` : '';
   const links = [];
   if (group.subsystem === 'poster') links.push('<a href="/admin/posters">Постеры</a>');
   if (group.subsystem === 'letterboxd_archive') links.push('<a href="/admin/letterboxd">Архив Letterboxd</a>');
   if (HEALTH_LIMB_SUBSYSTEMS.has(group.subsystem)) links.push(`<a href="/admin/limb?subsystem=${healthEscape(group.subsystem)}">Лимб</a>`);
-  const where = links.length ? ` Перейти можно сюда, это не запуск и не признак готовности: ${links.join(', ')}.` : '';
-  return `Следующий шаг: ${concrete}. ${verb}, ${healthReadyText(action)} (${reason}). Эта страница ничего не выполняет.${where}`;
+  const where = links.length ? ` ${links.join(', ')}` : '';
+  return `Сейчас: ${concrete}. ${ready}${why}.${where}`;
 }
 
 function healthAffectedText(group) {
@@ -152,6 +174,7 @@ function healthAffectedText(group) {
   const observed = (evidence.complete || 0) + (evidence.partial || 0);
   const gap = group.reason === 'evidence_not_supplied' || group.reason === 'evidence_object_missing' || (!observed && (evidence.missing || 0) > 0);
   if (gap) return 'Неизвестно, сколько затронуто.';
+  if (group.subjectKind === 'film') return healthPlural(group.affected || 0, 'фильм', 'фильма', 'фильмов');
   const kind = HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind || 'запись';
   return `Затронуто: ${group.affected || 0} (${kind}).`;
 }
@@ -169,10 +192,12 @@ function healthGroupRow(group, now) {
   const more = group.issues > (group.sample || []).length ? ` и ещё ${group.issues - group.sample.length}` : '';
   const filmLinks = group.subjectKind === 'film' ? (group.sample || []).map(healthFilmLink).join(', ') : '';
   const rawSample = (group.sample || []).map(id => healthEscape(id)).join(', ');
+  const categoryText = HEALTH_CATEGORY_TEXT[group.category] || group.category;
   const situation = healthSituation(group);
+  const situationMark = situation && situation !== categoryText ? `<span class="health-situation">${healthEscape(situation)}</span>` : '';
   const eligible = action.eligible === true ? 'true' : action.eligible === false ? 'false' : 'null';
   return `<li class="health-group health-group-${healthEscape(group.severity)}" data-group="${healthEscape(group.key)}">
-    <div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(HEALTH_CATEGORY_TEXT[group.category] || group.category)}</span>${situation ? `<span class="health-situation">${healthEscape(situation)}</span>` : ''}<span class="health-group-count">${healthEscape(HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind)}: ${group.issues}</span></div>
+    <div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(categoryText)}</span>${situationMark}</div>
     <p class="health-group-why">${healthEscape(HEALTH_REASON_TEXT[group.reason] || group.reason)}</p>
     <p class="health-group-affected">${healthEscape(healthAffectedText(group))}</p>
     <p class="health-group-next">${healthNextStep(group)}</p>
@@ -198,20 +223,51 @@ function healthVerdictCounts(health) {
   return counts;
 }
 
+function healthUnreadText(sources) {
+  return Object.entries(sources || {}).filter(([, entry]) => entry.evidence !== 'observed').map(([name, entry]) => {
+    const label = HEALTH_SOURCE_TEXT[name] || name;
+    return `${label}: ${entry.evidence === 'object_missing' ? 'объекта нет' : 'не читается'}`;
+  }).join(', ');
+}
+
 function healthSummaryHtml(body) {
   const health = body.health || {};
   const scope = health.scope || {};
   const counts = healthVerdictCounts(health);
   const films = scope.coverage?.films === 'complete' ? 'вся программа' : scope.coverage?.films === 'partial' ? 'часть программы' : 'покрытие не заявлено';
-  const anomalies = (health.clock?.anomalies || []).length ? ` Аномалии часов: ${health.clock.anomalies.join(', ')}.` : '';
-  const generation = String(health.published?.programmeRunId || scope.programmeRunId || '—').slice(0, 8);
-  const observed = counts.total - counts.unknown;
-  return [
-    `<p class="health-verdict health-verdict-attention"><b>Требует внимания</b> — ${healthEscape(healthPlural(counts.attention, 'подсистема', 'подсистемы', 'подсистем'))}.</p>`,
-    `<p class="health-verdict health-verdict-clear"><b>В пределах проверенного всё хорошо</b> — ${healthEscape(healthPlural(counts.clear, 'подсистема', 'подсистемы', 'подсистем'))}.</p>`,
-    `<p class="health-verdict health-verdict-unknown"><b>Недостаточно данных</b> — ${healthEscape(healthPlural(counts.unknown, 'подсистема', 'подсистемы', 'подсистем'))}.</p>`,
-    `<p class="health-verdict-meta">Оценка на ${healthEscape(healthDate(health.now))} · поколение ${healthEscape(generation)}${health.published?.publishedAt ? ' от ' + healthEscape(healthDate(health.published.publishedAt)) : ''} · покрытие: прочитано ${observed} из ${counts.total} подсистем · фильмов прочитано: ${scope.subjects?.films ?? '—'} (${healthEscape(films)}). Сводного балла нет.${healthEscape(anomalies)}</p>`,
-  ].join('');
+  const anomalies = (health.clock?.anomalies || []).length ? `<p class="health-anomalies">Аномалии часов: ${healthEscape(health.clock.anomalies.join(', '))}.</p>` : '';
+  const sources = body.sources || {};
+  const sourceTotal = Object.keys(sources).length;
+  const sourceRead = Object.values(sources).filter(entry => entry.evidence === 'observed').length;
+  const unread = healthUnreadText(sources);
+  const lead = counts.attention ? 'attention' : counts.unknown ? 'unknown' : 'clear';
+  const leadText = lead === 'attention' ? 'Требует внимания' : lead === 'unknown' ? 'Недостаточно данных' : 'В пределах проверенного всё хорошо';
+  const leadCount = lead === 'attention' ? counts.attention : lead === 'unknown' ? counts.unknown : counts.clear;
+  return `<div class="health-board" data-lead="${lead}">
+    <p class="health-lead health-lead-${lead}"><b>${leadText}</b><span>${healthEscape(healthPlural(leadCount, 'подсистема', 'подсистемы', 'подсистем'))}</span></p>
+    <ul class="health-split">
+      <li class="health-verdict health-verdict-attention">Требует внимания <b>${counts.attention}</b></li>
+      <li class="health-verdict health-verdict-clear">В пределах проверенного всё хорошо <b>${counts.clear}</b></li>
+      <li class="health-verdict health-verdict-unknown">Недостаточно данных <b>${counts.unknown}</b></li>
+    </ul>
+    <dl class="health-facts">
+      <div><dt>Время</dt><dd>${healthEscape(healthDate(health.now))}</dd></div>
+      <div><dt>Источники</dt><dd>прочитано ${sourceRead} из ${sourceTotal}</dd></div>
+      <div><dt>Фильмы</dt><dd>${scope.subjects?.films ?? '—'}, ${healthEscape(films)}</dd></div>
+    </dl>
+    ${unread ? `<p class="health-unread">Не прочитано: ${healthEscape(unread)}.</p>` : ''}
+    ${anomalies}
+    <p class="health-score-note">Сводного балла нет.</p>
+  </div>`;
+}
+
+function healthIssuesHtml(groups, now) {
+  const bands = [['act', 'Разобраться'], ['wait', 'Штатное ожидание'], ['gap', 'Не хватает данных']];
+  return bands.map(([band, title]) => {
+    const rows = groups.filter(group => healthBand(group) === band);
+    if (!rows.length) return '';
+    return `<section class="health-band health-band-${band}"><h4 class="health-band-title">${title}</h4><ol class="health-groups">${rows.map(group => healthGroupRow(group, now)).join('')}</ol></section>`;
+  }).join('');
 }
 
 function healthSourcesText(sources) {
@@ -236,7 +292,7 @@ function renderAdminHealth(body) {
   const empty = document.querySelector('#admin-health-empty');
   const counts = healthVerdictCounts(health);
   const filmsComplete = health.scope?.coverage?.films === 'complete';
-  list.innerHTML = groups.map(group => healthGroupRow(group, now)).join('');
+  list.innerHTML = healthIssuesHtml(groups, now);
   empty.hidden = groups.length > 0;
   if (groups.length) {
     empty.textContent = '';
