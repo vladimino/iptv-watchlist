@@ -15,7 +15,7 @@ assert.equal(build.status,0);
 const worker=await import(pathToFileURL(path.join(root,'dist/server/index.js')).href);
 const bucket=new MemoryBucket();
 await importFixtures(bucket,await loadLocalCatalog());
-const env={BUCKET:bucket,PUBLISHED_EPG_DB_OPTIONAL:'standin'};
+const env={BUCKET:bucket,PUBLISHED_EPG_DB_OPTIONAL:'standin',OWNER_REVIEW_DB_OPTIONAL:'standin'};
 
 async function get(pathname){
  const response=await worker.default.fetch(new Request('http://127.0.0.1'+pathname),env);

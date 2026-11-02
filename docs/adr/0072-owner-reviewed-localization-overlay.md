@@ -6,7 +6,7 @@
 **Approval source:** [Owner's explicit acceptance of ADR 0072, 2026-11-01](https://trello.com/c/gkuy1awG#comment-6ae6edbab032e4a44465a021), after [independent PASS review of PR #295 HEAD f3e42cd](https://github.com/vladimino/iptv-watchlist/pull/295#pullrequestreview-5726985061)  
 **Related work:** [AIR-53](https://trello.com/c/gkuy1awG), [AIR-54](https://trello.com/c/yKtj1ahy), [film title review](../reference/domain/film-title-review.md), [person name review](../reference/domain/person-name-review.md)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** [ADR 0081](0081-d1-authoritative-owner-reviews.md) in part, and only after `owner_review_authority.mode` is switched to `d1`. This R2 overlay remains the authoritative contract until then.
 
 ## Context
 

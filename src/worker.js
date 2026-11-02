@@ -40,6 +40,10 @@ const loadJSON=async(env,key)=>{
  if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
  return value;
 };
+async function publishedOwnerReviews(env){
+ if(typeof OwnerReview==='undefined'||typeof OwnerReview.loadForRead!=='function')return {ok:true,body:await loadJSON(env,'admin/owner-reviews.json')};
+ return OwnerReview.loadForRead(env);
+}
 async function epgPublication(env){
  if(typeof PublishedEpg!=='undefined'){
   const live=await PublishedEpg.currentGeneration(env);
@@ -692,8 +696,9 @@ async fetch(request,env,execution){
     if(!data)return json({error:'Первое обновление ещё выполняется'},503);
     const watchlist=await loadJSON(pinned,'watchlist.json');
     const titles=await loadJSON(pinned,'titles.json')||{};
-    const reviews=await loadJSON(pinned,'admin/owner-reviews.json');
-    return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews));
+    const reviews=await publishedOwnerReviews(pinned);
+    if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
+    return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body));
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
@@ -704,8 +709,9 @@ async fetch(request,env,execution){
     if(pinned.epgPin?.authority!=='d1'&&report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};
     if(!data)return json({films:[]});
     const titles=await loadJSON(pinned,'titles.json')||{};
-    const reviews=await loadJSON(pinned,'admin/owner-reviews.json');
-    return json(presentLocalized(data,titles,reviews));
+    const reviews=await publishedOwnerReviews(pinned);
+    if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
+    return json(presentLocalized(data,titles,reviews.body));
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
