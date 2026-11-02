@@ -1,9 +1,9 @@
 # ADR 0082: Retire the optional candidate-discovery search
 
-**Status:** Proposed
+**Status:** Accepted
 **Original decision date:** 2026-11-01
 **Recorded at:** 2026-11-01
-**Approval source:** owner GO on [AIR-91](https://trello.com/c/ob6zOaAK) to delete the experimental path and keep the absent-flag behaviour; formal Accepted or Declined is a separate owner gate and is not implied by that GO
+**Approval source:** [explicit owner ADR Accepted and rendered Mermaid visual approval, 2026-11-02](https://trello.com/c/ob6zOaAK#comment-6ae8b753b84ad0eed0e36ce5), after [independent PASS review](https://github.com/vladimino/iptv-watchlist/pull/324#pullrequestreview-5734064102) on HEAD `e10579a693f18d6a87a53d7fd539eb9c99a8a9b6` and [green PR CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41414128288); the earlier owner GO authorized implementation only
 **Related work:** [AIR-91](https://trello.com/c/ob6zOaAK); prerequisites [AIR-86](https://trello.com/c/INQy9Hca) and [AIR-69](https://trello.com/c/FlcWZX7W); [ADR 0011](0011-bounded-title-variants.md); [ADR 0036](0036-scored-resolution-only.md)
 **Supersedes:** [ADR 0011](0011-bounded-title-variants.md) in part (the sentence that optional search is independently gated by `CANDIDATE_DISCOVERY`); [ADR 0036](0036-scored-resolution-only.md) in part (the bullet that `CANDIDATE_DISCOVERY` keeps its role as the only optional switch). The structural-form and ambiguity rules of ADR 0011, and the scored-only resolver of ADR 0036, stay
 **Superseded by:** None
@@ -36,7 +36,7 @@ Not decided here: enabling or re-evaluating variant search, any scorer or identi
 - One discovery search path. The historical NO-GO and INSUFFICIENT conclusions stay in their original sense and are not a plan to turn the search back on.
 - Diagnostics clients that read the four variant counters still parse them. They no longer rise above 0.
 - `candidateDiscoveryMode`, named as an example consumer in ADR 0039, is gone. The readout no longer computes an effective mode for this name.
-- The discovery diagram no longer draws an optional variant node. That drawing needs the owner's visual approval before merge. This Proposed record needs the owner's Accepted or Declined decision before merge. Neither gate is this implementation.
+- The discovery diagram no longer draws an optional variant node. The owner [explicitly accepted this ADR and visually approved the rendered updated diagram on 2026-11-02](https://trello.com/c/ob6zOaAK#comment-6ae8b753b84ad0eed0e36ce5) after independent review and successful CI. The decision covers architecture and code removal only, not a production data write or settings change.
 
 ## Recovery and migration boundary
 
@@ -51,4 +51,4 @@ Reverting the code restores the optional branch. It does not create a Cloudflare
 
 ## Follow-ups
 
-Formal owner acceptance or decline of this Proposed record, and owner visual approval of the discovery diagram. A production read of discovery status after deploy is observational and is not a new search.
+The [owner accepted this ADR and the rendered discovery diagram on 2026-11-02](https://trello.com/c/ob6zOaAK#comment-6ae8b753b84ad0eed0e36ce5). Merge, post-merge CI/CD and safe production readback remain separate delivery evidence. A production read of discovery status after deploy is observational and is not a new search.
