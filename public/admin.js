@@ -1083,6 +1083,13 @@ function adminRenderHealth(options = {}) {
     adminHealth.body = result.body;
     adminHealth.pin = result.body.pin || null;
     adminLive.pin = adminLive.pin || adminHealth.pin;
+    if (result.body.snapshot) {
+      adminLive.snapshot = result.body.snapshot;
+      const line = document.querySelector('#admin-snapshot-text');
+      if (line) line.textContent = adminSnapshotText(result.body.snapshot);
+      const banner = document.querySelector('#admin-snapshot');
+      if (banner) banner.setAttribute('data-admin-skew', result.body.snapshot.skew ? 'true' : 'false');
+    }
     healthState('ready');
     renderAdminHealth(result.body);
     return result;
