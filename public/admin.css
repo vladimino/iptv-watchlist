@@ -1,4 +1,5 @@
 .admin-page{overflow-x:hidden}.admin-page a:focus-visible{outline:2px solid var(--lime);outline-offset:4px}.admin-intro{color:var(--muted);margin:12px 0 0}
+.admin-health-heading,.brand-sub-health{display:none}html.admin-is-health .admin-catalog-heading,html.admin-is-health .brand-sub-catalog{display:none}html.admin-is-health .admin-health-heading{display:block}html.admin-is-health .brand-sub-health{display:inline}html.admin-is-health #admin-health-title{display:none}html.admin-is-health .admin-health-head{justify-content:flex-end}@media(max-width:760px){html.admin-is-health .brand-sub-health{display:none}}
 .admin-shell{max-width:1180px;padding-bottom:48px}
 .admin-home{color:var(--text);border:1px solid #465044;border-radius:8px;padding:8px 12px;text-decoration:none}
 .admin-home:hover{border-color:var(--lime);color:var(--lime)}
@@ -157,7 +158,7 @@
 .obs-identity-preview{margin:0 0 10px}
 .obs-identity-preview[hidden]{display:none}
 .obs-identity-receipt:focus{outline:2px solid #9bc48a;outline-offset:2px}
-.obs-verified-open{display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-width:0;max-width:100%;margin:0 0 16px}
+.obs-verified-open{display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-width:0;max-width:100%;margin:16px 0}
 .obs-verified-open h2,.obs-verified-open>p,.obs-verified-open section{flex:1 1 100%;min-width:0}
 .obs-verified-open input,.obs-verified-open button{min-height:44px}
 .obs-verified-open input{flex:1 1 12rem;width:auto;min-width:0;max-width:100%}

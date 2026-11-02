@@ -41,7 +41,24 @@ const bundleWithoutWrites = bundle.replaceAll("method:'POST'", 'method:read');
 assert.doesNotMatch(bundleWithoutWrites, /admin-query|\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|programme\.json|method:\s*['"](?:POST|PUT|PATCH|DELETE)/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page script reaches the API only through the client');
 assert.doesNotMatch(healthView, /\bfetch\(|\/api\//, 'the health view renders answers and makes no request of its own');
-for (const id of ['admin-health', 'admin-catalog', 'admin-view-catalog', 'admin-view-health', 'admin-health-refresh', 'admin-health-stale-refresh', 'admin-health-summary', 'admin-health-sources', 'admin-health-subsystems', 'admin-health-issues', 'admin-health-empty', 'admin-health-loading', 'admin-health-error', 'admin-health-stale']) assert.match(html, new RegExp(`id="${id}"`), id);
+for (const id of ['admin-health', 'admin-catalog', 'admin-view-catalog', 'admin-view-health', 'admin-health-refresh', 'admin-health-stale-refresh', 'admin-health-summary', 'admin-health-sources', 'admin-health-subsystems', 'admin-health-issues', 'admin-health-empty', 'admin-health-loading', 'admin-health-error', 'admin-health-stale', 'admin-catalog-page-title', 'admin-health-page-title', 'admin-catalog-page-intro', 'admin-health-page-intro', 'admin-health-title']) assert.match(html, new RegExp(`id="${id}"`), id);
+const healthDescription = 'Страница владельца: ограниченное чтение опубликованного снимка: что требует внимания и какие источники эта страница не читает. Чтение ничего не меняет.';
+const healthIntro = 'Ограниченное чтение опубликованного снимка: что требует внимания и какие источники эта страница не читает. Чтение ничего не меняет.';
+assert.match(html, /<title>Данные каталога<\/title>/);
+assert.match(html, /<h1 id="admin-catalog-page-title">Каталог данных<\/h1>/);
+assert.match(html, /<h1 id="admin-health-page-title">Здоровье данных<\/h1>/);
+assert.match(html, new RegExp(healthIntro.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+assert.ok(html.includes(healthDescription), 'the first-paint script uses the health description');
+assert.ok(page.includes(healthDescription), 'the view switch uses the same health description');
+assert.match(html, /var path = location\.pathname/);
+assert.match(html, /path === '\/admin\/health' \|\| \(path === '\/admin' && new URLSearchParams\(location\.search\)\.get\('view'\) === 'health'\)/);
+assert.match(html, /documentElement\.classList\.add\(health \? 'admin-is-health' : 'admin-is-catalog'\)/);
+assert.ok(html.indexOf('<title>Данные каталога</title>') < html.indexOf('documentElement.classList.add'), 'the route class is set from the head, before the body');
+assert.ok(html.indexOf('id="admin-catalog-page-title"') < html.indexOf('class="admin-views"') && html.indexOf('id="admin-health-page-title"') < html.indexOf('class="admin-views"') && html.indexOf('class="admin-views"') < html.indexOf('id="admin-health-title"'), 'both page headings sit above the nav; the section heading stays inside the health view');
+assert.match(css, /html\.admin-is-health \.admin-catalog-heading,html\.admin-is-health \.brand-sub-catalog\{display:none\}/);
+assert.match(css, /html\.admin-is-health \.admin-health-heading\{display:block\}/);
+assert.match(css, /html\.admin-is-health #admin-health-title\{display:none\}/);
+assert.match(css, /@media\(max-width:760px\)\{html\.admin-is-health \.brand-sub-health\{display:none\}/);
 assert.doesNotMatch(html, /<button[^>]*(?:retry|hydrat|import|запустить|повторить)/i, 'no execution buttons on the health view');
 assert.match(css, /\.health-group-critical/);
 assert.match(bundle, /credentials:'same-origin'/);
@@ -196,7 +213,7 @@ function element(selector) {
     },
   };
 }
-const nodes = new Map(['#admin-search', '#admin-queues', '#admin-queues-note', '#admin-results', '#admin-results-section', '#admin-detail', '#admin-loading', '#admin-error', '#admin-stale', '#admin-refresh', '#admin-empty', '#admin-snapshot', '#admin-snapshot-text', '#admin-detail-title', '#admin-health', '#admin-catalog', '#admin-view-catalog', '#admin-view-health', '.admin-views', '#admin-health-refresh', '#admin-health-stale-refresh', '#admin-health-summary', '#admin-health-sources', '#admin-health-subsystems', '#admin-health-issues', '#admin-health-empty', '#admin-health-loading', '#admin-health-error', '#admin-health-stale'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#admin-search', '#admin-queues', '#admin-queues-note', '#admin-results', '#admin-results-section', '#admin-detail', '#admin-loading', '#admin-error', '#admin-stale', '#admin-refresh', '#admin-empty', '#admin-snapshot', '#admin-snapshot-text', '#admin-detail-title', '#admin-health', '#admin-catalog', '#admin-view-catalog', '#admin-view-health', '.admin-views', '#admin-health-refresh', '#admin-health-stale-refresh', '#admin-health-summary', '#admin-health-sources', '#admin-health-subsystems', '#admin-health-issues', '#admin-health-empty', '#admin-health-loading', '#admin-health-error', '#admin-health-stale', 'meta[name="description"]'].map(selector => [selector, element(selector)]));
 const moreButton = element('[data-admin-more="film"]');
 const filmGroup = element('[data-admin-group="film"] .admin-group-items');
 const searchNode = nodes.get('#admin-search');
@@ -219,6 +236,19 @@ const document = {
     return nodes.get(selector) || null;
   },
 };
+const rootClasses = new Set();
+document.documentElement = {classList: {
+  add(name) {rootClasses.add(name);},
+  remove(name) {rootClasses.delete(name);},
+  toggle(name, force) {
+    const on = force === undefined ? !rootClasses.has(name) : Boolean(force);
+    if (on) rootClasses.add(name);
+    else rootClasses.delete(name);
+    return on;
+  },
+  contains(name) {return rootClasses.has(name);},
+}};
+document.title = '';
 document.activeElement = document.body;
 const stack = [];
 let index = -1;
@@ -262,6 +292,17 @@ vm.runInContext(bundle, ctx);
 const run = code => vm.runInContext(code, ctx);
 const settle = async () => {await run('adminLive.pending'); await new Promise(resolve => setTimeout(resolve, 0));};
 const url = () => new URL(window.location.href);
+const HEALTH_DESCRIPTION = 'Страница владельца: ограниченное чтение опубликованного снимка: что требует внимания и какие источники эта страница не читает. Чтение ничего не меняет.';
+const CATALOG_DESCRIPTION = 'Страница владельца: поиск фильмов и людей и очереди качества по опубликованной программе. Название одного фильма и русское имя человека записываются только после подтверждения.';
+function chrome() {
+  return {
+    title: document.title,
+    health: document.documentElement.classList.contains('admin-is-health'),
+    catalog: document.documentElement.classList.contains('admin-is-catalog'),
+    label: attrs.get('#admin-health:aria-labelledby'),
+    description: attrs.get('meta[name="description"]:content'),
+  };
+}
 const results = nodes.get('#admin-results'), detail = nodes.get('#admin-detail'), empty = nodes.get('#admin-empty'), error = nodes.get('#admin-error'), stale = nodes.get('#admin-stale'), loading = nodes.get('#admin-loading');
 
 // 1. Initial load with a deep link: detail from the live snapshot, the snapshot line, queue counts.
@@ -297,6 +338,7 @@ assert.equal(error.hidden, true);
 assert.equal(typeof run('adminLive.pin'), 'string');
 assert.ok(requests.every(request => request.method === 'GET' && request.path.startsWith('/api/admin/') && request.credentials === 'same-origin'), JSON.stringify(requests));
 assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/overview', '/api/admin/people/person%3Aactor%2Fmira-sol']);
+assert.deepEqual(chrome(), {title: 'Данные каталога', health: false, catalog: true, label: 'admin-health-title', description: CATALOG_DESCRIPTION}, 'a catalogue deep link keeps the catalogue title and heading');
 
 // 2. Back to the overview: no detail, queues still shown without a second overview read.
 requests = [];
@@ -456,6 +498,7 @@ assert.equal(healthNode.hidden, false);
 assert.equal(catalogNode.hidden, true);
 assert.equal(attrs.get('#admin-view-health:aria-current'), 'page');
 assert.equal(attrs.get('#admin-view-catalog:aria-current'), 'false');
+assert.deepEqual(chrome(), {title: 'Здоровье данных', health: true, catalog: false, label: 'admin-health-page-title', description: HEALTH_DESCRIPTION}, 'the old health alias paints the health title before it is canonicalised');
 assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/health']);
 assert.ok(requests.every(request => request.method === 'GET'));
 assert.match(nodes.get('#admin-health-summary').textContent, /Оценка на .* · поколение 11111111/);
@@ -488,15 +531,22 @@ assert.equal(url().searchParams.get('view'), null);
 assert.equal(url().searchParams.get('id'), 'film:blank');
 assert.equal(healthNode.hidden, true);
 assert.equal(catalogNode.hidden, false);
+assert.equal(chrome().title, 'Данные каталога');
+assert.equal(chrome().catalog, true);
+assert.equal(chrome().health, false);
 assert.match(detail.innerHTML, /Blank Reel/);
 window.history.back();
 await settle();
 assert.equal(url().searchParams.get('view'), 'health');
 assert.equal(healthNode.hidden, false);
+assert.equal(chrome().title, 'Здоровье данных', 'Back restores the health title');
+assert.equal(chrome().health, true);
 await run(`onAdminView({target:{closest(){return {getAttribute(){return 'catalog';}};}},preventDefault(){},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
 await settle();
 assert.equal(url().searchParams.get('view'), null);
 assert.equal(catalogNode.hidden, false);
+assert.equal(chrome().title, 'Данные каталога');
+assert.equal(chrome().catalog, true);
 window.location.href = 'http://127.0.0.1/admin?view=health';
 await run('adminRender()');
 await settle();
@@ -545,21 +595,30 @@ await run('adminRender()');
 await settle();
 assert.equal(url().pathname, '/admin/health', 'rendering a direct health URL does not rewrite it to /admin');
 assert.equal(url().searchParams.get('q'), 'мост');
+assert.deepEqual(chrome(), {title: 'Здоровье данных', health: true, catalog: false, label: 'admin-health-page-title', description: HEALTH_DESCRIPTION}, 'a direct /admin/health load uses the health title, heading class and description');
 assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/health']);
 window.history.pushState(null, '', '/admin?q=одинаковый');
 await run('onAdminHistory()');
 await settle();
 assert.equal(url().pathname, '/admin');
 assert.equal(url().searchParams.get('q'), 'одинаковый');
+assert.equal(chrome().title, 'Данные каталога', 'a catalogue history entry restores its title');
+assert.equal(chrome().catalog, true);
 await run(`onAdminView({target:{closest(){return {getAttribute(){return 'health';}};}},preventDefault(){},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
 await settle();
 assert.equal(url().pathname, '/admin/health');
 assert.equal(url().searchParams.get('q'), 'одинаковый');
 assert.equal(url().searchParams.get('view'), null);
+assert.equal(chrome().title, 'Здоровье данных');
+assert.equal(chrome().health, true);
+assert.equal(attrs.get('#admin-view-health:aria-current'), 'page');
 window.history.back();
 await settle();
 assert.equal(url().pathname, '/admin');
 assert.equal(url().searchParams.get('q'), 'одинаковый', 'Back restores the catalogue search');
+assert.equal(chrome().title, 'Данные каталога');
+assert.equal(chrome().health, false);
+assert.equal(attrs.get('#admin-view-catalog:aria-current'), 'page');
 const modifiedClick = run(`(() => { const event = {target:{closest(){return {getAttribute(){return 'health';}};}},preventDefault(){this.prevented=true;},metaKey:false,ctrlKey:true,shiftKey:false,altKey:false,button:0}; const before = window.location.href; const result = onAdminView(event); return {prevented: event.prevented === true, same: window.location.href === before, untouched: result == null}; })()`);
 assert.equal(modifiedClick.prevented, false);
 assert.equal(modifiedClick.same, true);

@@ -1022,7 +1022,34 @@ function adminShow(view, state) {
   adminDetail(view);
 }
 
+const ADMIN_CHROME = {
+  catalog: {
+    title: 'Данные каталога',
+    description: 'Страница владельца: поиск фильмов и людей и очереди качества по опубликованной программе. Название одного фильма и русское имя человека записываются только после подтверждения.',
+  },
+  health: {
+    title: 'Здоровье данных',
+    description: 'Страница владельца: ограниченное чтение опубликованного снимка: что требует внимания и какие источники эта страница не читает. Чтение ничего не меняет.',
+  },
+};
+
+function adminApplyChrome(view) {
+  const health = view === 'health';
+  const root = document.documentElement;
+  if (root && root.classList) {
+    root.classList.toggle('admin-is-health', health);
+    root.classList.toggle('admin-is-catalog', !health);
+  }
+  const chrome = ADMIN_CHROME[health ? 'health' : 'catalog'];
+  document.title = chrome.title;
+  const meta = document.querySelector('meta[name="description"]');
+  if (meta) meta.setAttribute('content', chrome.description);
+  const section = document.querySelector('#admin-health');
+  if (section) section.setAttribute('aria-labelledby', health ? 'admin-health-page-title' : 'admin-health-title');
+}
+
 function adminShowView(view) {
+  adminApplyChrome(view);
   const health = document.querySelector('#admin-health');
   const catalog = document.querySelector('#admin-catalog');
   health.hidden = view !== 'health';
