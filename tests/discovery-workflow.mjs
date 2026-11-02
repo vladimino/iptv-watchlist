@@ -1,4 +1,4 @@
-// AIR-323 / ADR 0082: the Discovery Workflow is inert unless DISCOVERY_EXECUTOR=workflow.
+// AIR-323 / ADR 0083: the Discovery Workflow is inert unless DISCOVERY_EXECUTOR=workflow.
 // Absent mode keeps one explicit chunk. Workflow mode does not run that chunk in the request, renews a spent
 // series without the hourly gate, and fences a second writer. No production binding is read or written.
 import fs from 'node:fs';
@@ -38,6 +38,11 @@ const INSTANCE=`discovery_${GENERATION.replace(/-/g,'')}_0`;
 const decided=()=>Object.keys(records.get('epg/discovery-resolution.json')||{}).length;
 const continuation=()=>records.get('epg/resolver-continuation.json');
 const items=count=>Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:200,durations:[200],firstAiring:now,lastAiring:now,airings:1,shows:[{channelId:'t',channel:'T',start:now,end:now+3600000}]}));
+function elect(series=0,programmeRunId=GENERATION){
+ const instanceId=`discovery_${String(programmeRunId).replace(/[^0-9A-Za-z]/g,'').slice(0,32)||'none'}_${series}`;
+ set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId,series,instanceId,phase:'running',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:0,lastProgress:null,recovery:null});
+ return instanceId;
+}
 function seed({stage='complete',remaining=12,reason='epg_committed',count=60,programmeRunId=GENERATION,published=GENERATION,syncId='sync-1'}={}){
  records.clear();etags.clear();puts.length=0;creates.length=0;
  set('programme.json',{runId:programmeRunId,updatedAt:iso,films:[{id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,shows:[]}]});
@@ -105,12 +110,14 @@ const direct=comparable(records.get('epg/discovery-resolution.json'));
 assert.equal(Object.keys(direct).length,60);
 seed({count:60});
 Object.assign(env,workflowEnv('workflow'));
+elect();
 const drained=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
 assert.equal(drained.reason,'complete');assert.deepEqual(comparable(records.get('epg/discovery-resolution.json')),direct);assert.equal(creates.length,0);
 
 // 5. Thirteen stubbed chunks renew a spent series instead of waiting for the hour.
 seed();
 Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
+elect();
 sleeps.length=0;context.calls=0;
 vm.runInContext(`advanceDiscovery=async env=>{calls++;const stored=await readContinuation(env);const n=calls;const at=new Date().toISOString();const programmeRunId=${JSON.stringify(GENERATION)};const record=n>=13?{stage:'complete',reason:null,at,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId}:n%12===0?{stage:'paused',reason:'chunk_budget',at,hopId:null,remainingChunks:0,nextCatchUpAt:new Date(Date.now()+3600000).toISOString(),retryAt:null,programmeRunId}:{stage:'paused',reason:null,at,hopId:null,remainingChunks:12-(n%12),nextCatchUpAt:null,retryAt:null,programmeRunId};if(!await replaceContinuation(env,record,stored.etag))throw new Error('stub lost the continuation');await saveJSON(env,'epg/discovery-status.json',{programmeRunId,remaining:n>=13?0:10,finishedAt:at});return {stage:record.stage,checked:1,remaining:n>=13?0:10,discovery:discoveryContract(record),diagnostic:{saved:{owned:true,write:'saved'}}};}`,context);
 const thirteen=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
@@ -119,10 +126,12 @@ assert.equal(context.calls,13);assert.equal(thirteen.reason,'complete');assert.e
 // 6. Backoff sleeps until retryAt and does not run a chunk. A live lease does the same.
 vm.runInContext('advanceDiscovery=async()=>{throw new Error("chunk was not allowed");}',context);
 seed();
+elect();
 set('epg/resolver-continuation.json',{stage:'paused',reason:'backoff',at:iso,hopId:null,remainingChunks:4,nextCatchUpAt:future,retryAt:future,programmeRunId:GENERATION});
 await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step),/long-sleep/);
 assert.equal(sleeps.at(-1),future);assert.equal(decided(),0);
 seed();
+elect();
 set('epg/resolver-lease.json',{id:'11111111-2222-4333-8444-555555555555',expiresAt:now+60000});
 set('epg/resolver-continuation.json',{stage:'running',reason:null,at:iso,hopId:'11111111-2222-4333-8444-555555555555',remainingChunks:4,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
 await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step),/long-sleep/);
@@ -141,17 +150,31 @@ const uncertain=await call('ensureDiscoveryWorkflow')(env);
 assert.equal(uncertain.reason,'start_uncertain');assert.equal(uncertain.instanceId,INSTANCE);
 assert.equal(records.get('epg/discovery-workflow.json').phase,'uncertain');
 binding.create=async request=>{creates.push(request);if(creates.filter(item=>item.id===request.id).length>1)throw new Error('Instance already exists');return {id:request.id};};
+const waiting=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(waiting.reason,'recovery_waiting');assert.equal(waiting.instanceId,INSTANCE);assert.equal(creates.length,1);
+const waitingAgain=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(waitingAgain.reason,'recovery_waiting');assert.equal(creates.length,1);
+records.get('epg/discovery-workflow.json').recovery.dueAt=new Date(Date.now()-1000).toISOString();
 const recovered=await call('reconcileDiscoveryWorkflow')(env);
 assert.equal(recovered.started,true);assert.equal(recovered.instanceId,INSTANCE);
 binding.get=async()=>({status:'complete'});
 set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso,hopId:null,remainingChunks:4,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+const armed=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(armed.reason,'recovery_waiting');assert.equal(armed.series,0);
+const duringCooldown=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(duringCooldown.reason,'recovery_waiting');assert.equal(creates.filter(item=>item.id!==INSTANCE).length,0);
+records.get('epg/discovery-workflow.json').recovery.dueAt=new Date(Date.now()-1000).toISOString();
 const successor=await call('reconcileDiscoveryWorkflow')(env);
 assert.equal(successor.started,true);assert.equal(successor.series,1);assert.notEqual(successor.instanceId,INSTANCE);
+const successorCreates=creates.length;
+const notAnother=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(notAnother.series,1);assert.notEqual(notAnother.reason,'started');assert.equal(creates.length,successorCreates);
 
 // 8. A stale generation does not apply, and two overlapping chunks cannot both hold the lease.
 const stale=call('workflowPlan')({mode:'workflow',published:GENERATION,pinned:OTHER,record:{programmeRunId:OTHER,stage:'paused',remainingChunks:12},now,chunks:0,chunkLimit:20,uncertainWrites:0});
 assert.equal(stale.action,'stop');assert.equal(stale.reason,'stale_generation');
 seed();
+elect(0,OTHER);
 const stopped=await call('runDiscoveryWorkflow')(env,{programmeRunId:OTHER,series:0},step);
 assert.equal(stopped.reason,'stale_generation');assert.equal(decided(),0);
 context.advanceDiscovery=realAdvance;
@@ -164,6 +187,7 @@ assert.equal(decided(),pair.filter(item=>item.progress).length*24,JSON.stringify
 // 9. A checkpoint that throws after the save is not run again inside the same step.
 context.advanceDiscovery=async(env,body)=>{const outcome=await realAdvance(env,body);throw new Error('after commit');};
 seed({count:48});
+elect();
 step.retried=0;creates.length=0;
 binding.create=async request=>{creates.push(request);return {id:request.id};};
 const rolled=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0,chunkLimit:1},step);
@@ -182,6 +206,81 @@ assert.equal(creates.length,0);assert.equal(puts.length,0);
 env.DISCOVERY_EXECUTOR='nope';
 pipeline=await status();
 assert.equal(pipeline.discoveryExecutor.configured,'invalid');assert.equal(pipeline.discoveryExecutor.degraded,true);assert.equal(creates.length,0);
+seed();
+env.DISCOVERY_EXECUTOR='workflow';
+elect();
+records.get('epg/discovery-workflow.json').updatedAt=new Date(Date.now()-16*60*1000).toISOString();
+binding.get=async()=>({status:'running'});
+creates.length=0;puts.length=0;
+pipeline=await status();
+assert.equal(pipeline.discoveryExecutor.owner,'workflow');assert.equal(pipeline.discoveryExecutor.stalled,true);assert.equal(pipeline.discoveryExecutor.degraded,true);assert.equal(creates.length,0);
+binding.get=async()=>({status:'complete'});
+creates.length=0;
+pipeline=await status();
+assert.equal(pipeline.discoveryExecutor.owner,'none');assert.equal(pipeline.discoveryExecutor.liveness,'complete');assert.equal(pipeline.discoveryExecutor.degraded,true);assert.equal(creates.length,0);
+seed();
+env.DISCOVERY_EXECUTOR='workflow';
+elect();
+records.get('epg/discovery-workflow.json').phase='stopped';
+records.get('epg/discovery-workflow.json').reason='no_progress';
+records.get('epg/discovery-workflow.json').recovery={attempts:1,reason:'no_progress',at:iso,dueAt:new Date(Date.now()+60000).toISOString(),quarantined:false};
+binding.get=async()=>({status:'running'});
+creates.length=0;
+pipeline=await status();
+assert.equal(pipeline.discoveryExecutor.owner,'none');assert.equal(pipeline.discoveryExecutor.degraded,true);assert.ok(pipeline.discoveryExecutor.recoveryDue);assert.equal(creates.length,0);
+
+// 12. A superseded series does not call TMDB or write Discovery after the successor owns the record.
+seed();
+elect(1);
+const discoveryKeys=['epg/discovery-resolution.json','epg/discovery-status.json','epg/resolver-continuation.json','epg/resolver-lease.json','epg/discovery-latest.json'];
+const before=new Map(discoveryKeys.map(key=>[key,JSON.stringify(records.get(key)||null)]));
+let fetches=0;
+const previousFetch=context.fetch;
+context.fetch=async(...args)=>{fetches++;return previousFetch(...args);};
+context.advanceDiscovery=realAdvance;
+puts.length=0;creates.length=0;
+const superseded=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+assert.equal(superseded.reason,'not_owner');assert.equal(fetches,0);assert.equal(puts.length,0);assert.equal(decided(),0);
+for(const key of discoveryKeys)assert.equal(JSON.stringify(records.get(key)||null),before.get(key),key);
+context.fetch=previousFetch;
+const originalSleep=step.sleepUntil.bind(step);
+step.sleepUntil=async(name,date)=>{sleeps.push(date.toISOString());elect(1);};
+seed();elect();
+set('epg/resolver-continuation.json',{stage:'paused',reason:'backoff',at:iso,hopId:null,remainingChunks:4,nextCatchUpAt:new Date(Date.now()+1000).toISOString(),retryAt:new Date(Date.now()+1000).toISOString(),programmeRunId:GENERATION});
+vm.runInContext('advanceDiscovery=async()=>{throw new Error("chunk was not allowed");}',context);
+fetches=0;puts.length=0;
+const woke=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+assert.equal(woke.reason,'not_owner');assert.equal(fetches,0);assert.equal(decided(),0);
+assert.equal(puts.filter(key=>key!=='epg/discovery-workflow.json').length,0);
+step.sleepUntil=originalSleep;
+
+// 13. Recovery waits out its due time, then one eligible retry can run, and a quarantined record creates nothing.
+seed();
+elect();
+records.get('epg/discovery-workflow.json').phase='stopped';
+records.get('epg/discovery-workflow.json').reason='no_progress';
+records.get('epg/discovery-workflow.json').recovery={attempts:1,reason:'no_progress',at:iso,dueAt:new Date(Date.now()+60000).toISOString(),quarantined:false};
+binding.get=async()=>({status:'running'});
+binding.create=async request=>{creates.push(request);if(creates.filter(item=>item.id===request.id).length>1)throw new Error('Instance already exists');return {id:request.id};};
+creates.length=0;
+const cooled=await call('reconcileDiscoveryWorkflow')(env);
+const cooledAgain=await call('ensureDiscoveryWorkflow')(env);
+assert.equal(cooled.reason,'recovery_waiting');assert.equal(cooledAgain.reason,'recovery_waiting');assert.equal(creates.length,0);
+records.get('epg/discovery-workflow.json').recovery.dueAt=new Date(Date.now()-1000).toISOString();
+const eligible=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(eligible.started,true);assert.equal(eligible.series,1);assert.equal(creates.length,1);
+vm.runInContext(`advanceDiscovery=async env=>{calls++;const stored=await readContinuation(env);const at=new Date().toISOString();const programmeRunId=${JSON.stringify(GENERATION)};const record={stage:'complete',reason:null,at,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId};if(!await replaceContinuation(env,record,stored.etag))throw new Error('stub lost the continuation');await saveJSON(env,'epg/discovery-status.json',{programmeRunId,remaining:0,finishedAt:at});return {stage:'complete',checked:1,remaining:0,discovery:discoveryContract(record),diagnostic:{saved:{owned:true,write:'saved'}}};}`,context);
+context.calls=0;
+const recoveredRun=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:1},step);
+assert.equal(context.calls,1);assert.equal(recoveredRun.reason,'complete');
+seed();
+elect();
+records.get('epg/discovery-workflow.json').phase='stopped';
+records.get('epg/discovery-workflow.json').reason='recovery_exhausted';
+records.get('epg/discovery-workflow.json').recovery={attempts:5,reason:'recovery_exhausted',at:iso,dueAt:new Date(Date.now()-1000).toISOString(),quarantined:true};
+creates.length=0;
+const quarantined=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(quarantined.reason,'recovery_exhausted');assert.equal(creates.length,0);
 
 // 11. The production entry is inert: no flag, no schedule, and cron does not start discovery.
 const wrangler=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));

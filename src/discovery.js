@@ -635,7 +635,7 @@ async function saveObservationIndex(env,source,decisions,fence,writer){
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
 const DISCOVERY_CHUNK_BUDGET=12;
 // Absent, null and '' stay on the external hourly executor. Only the exact token `workflow` leaves that path.
-// Any other string fails closed. The binding is not set by a deploy (ADR 0082).
+// Any other string fails closed. The binding is not set by a deploy (ADR 0083).
 function discoveryExecutorMode(env){
  const value=env?.DISCOVERY_EXECUTOR;
  if(value==null||value==='')return 'external';
@@ -1023,11 +1023,24 @@ async function presentContinuationDiscovery(env){
 }
 async function discoveryExecutorReadout(env,continuation){
  const configured=discoveryExecutorMode(env);
+ const now=Date.now();
  let stored=null;
  if(typeof readWorkflowState==='function'){try{stored=(await readWorkflowState(env)).record;}catch{stored={phase:'unknown'};}}
- const decision=continuation?continuationDecision(continuation,Date.now()):null;
- const active=!!stored&&['starting','running','waiting','uncertain'].includes(stored.phase);
- return {configured,owner:configured==='invalid'?'invalid':active?'workflow':'none',programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending:!!(continuation&&(continuation.remainingChunks>0||continuation.reason==='chunk_budget'||continuation.stage==='running')),eligible:!!decision?.run||continuation?.reason==='chunk_budget',degraded:configured==='invalid'||stored?.phase==='uncertain'||stored?.phase==='unknown',budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
+ let liveness=null;
+ if(stored?.instanceId&&typeof workflowInstanceStatus==='function'&&typeof env?.DISCOVERY_WORKFLOW?.get==='function')liveness=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,stored.instanceId);
+ const facts=typeof workflowReadoutFacts==='function'?workflowReadoutFacts(stored,liveness,now):{active:!!stored&&['starting','running','waiting','uncertain'].includes(stored?.phase),stalled:false,alive:false,dead:false,recoveryDue:stored?.recovery?.dueAt||null,recoveryWaiting:false,quarantined:false,updatedAt:stored?.updatedAt||null};
+ const decision=continuation?continuationDecision(continuation,now):null;
+ const pending=!!(continuation&&(continuation.remainingChunks>0||continuation.reason==='chunk_budget'||continuation.stage==='running'));
+ const terminal=stored?.phase==='stopped'&&['complete','backlog_empty','stale_generation','executor_not_workflow'].includes(stored.reason);
+ const stoppedWithBacklog=stored?.phase==='stopped'&&pending&&!terminal;
+ let owner='none';
+ if(configured==='invalid')owner='invalid';
+ else if(facts.dead)owner='none';
+ else if(liveness==='unknown')owner='unknown';
+ else if(facts.alive&&facts.active)owner='workflow';
+ else if(facts.active&&!facts.stalled&&liveness==null)owner='workflow';
+ const degraded=configured==='invalid'||stored?.phase==='uncertain'||stored?.phase==='unknown'||liveness==='unknown'||!!facts.stalled||stoppedWithBacklog||!!facts.recoveryWaiting||!!facts.quarantined||!!(facts.dead&&pending);
+ return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:!!decision?.run||continuation?.reason==='chunk_budget',degraded,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);

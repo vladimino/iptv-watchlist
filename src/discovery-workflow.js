@@ -1,4 +1,4 @@
-// AIR-323 / ADR 0082. Durable Discovery continuation. One bounded chunk per step.
+// AIR-323 / ADR 0083. Durable Discovery continuation. One bounded chunk per step.
 // The binding creates nothing by itself: only DISCOVERY_EXECUTOR=workflow calls create(), and nothing in this
 // file is scheduled. R2 holds the executor record for now; that key is not a permanent authority (AIR-320).
 const DISCOVERY_WORKFLOW_STATE_KEY='epg/discovery-workflow.json';
@@ -6,6 +6,11 @@ const DISCOVERY_WORKFLOW_CHUNK_LIMIT=20;
 const DISCOVERY_WORKFLOW_STALL_LIMIT=3;
 const DISCOVERY_WORKFLOW_WRITE_LIMIT=3;
 const DISCOVERY_WORKFLOW_STEP_CAP=160;
+const DISCOVERY_WORKFLOW_RECOVERY_LIMIT=4;
+const DISCOVERY_WORKFLOW_RECOVERY_BACKOFF_MS=[60000,300000,900000,3600000];
+const DISCOVERY_WORKFLOW_FRESH_MS=15*60*1000;
+const DISCOVERY_WORKFLOW_TERMINAL=new Set(['complete','backlog_empty','stale_generation','executor_not_workflow','recovery_exhausted']);
+const DISCOVERY_WORKFLOW_RECOVERABLE=new Set(['no_progress','write_uncertain','step_cap','rollover_uncertain','no_continuation']);
 function discoveryWorkflowChunkLimit(){return DISCOVERY_WORKFLOW_CHUNK_LIMIT;}
 function discoveryInstanceId(programmeRunId,series){
  const compact=String(programmeRunId||'').replace(/[^0-9A-Za-z]/g,'').slice(0,32)||'none';
@@ -25,6 +30,43 @@ async function writeWorkflowState(env,record,etag){
  return saved!==null;
 }
 function publishedProgrammeRunId(generation){return generation?.phase==='published'?generation.programmeRunId||null:null;}
+function workflowFailure(previous,reason,now){
+ const attempts=(previous?.attempts||0)+1;
+ const at=new Date(now).toISOString();
+ if(attempts>DISCOVERY_WORKFLOW_RECOVERY_LIMIT)return {attempts,reason:'recovery_exhausted',at,dueAt:null,quarantined:true};
+ const delay=DISCOVERY_WORKFLOW_RECOVERY_BACKOFF_MS[Math.min(attempts,DISCOVERY_WORKFLOW_RECOVERY_BACKOFF_MS.length)-1];
+ return {attempts,reason,at,dueAt:new Date(now+delay).toISOString(),quarantined:false};
+}
+function runningRecovery(recovery){
+ if(!recovery||recovery.quarantined)return null;
+ return {attempts:recovery.attempts||0,reason:recovery.reason||null,at:recovery.at||null,dueAt:null,quarantined:false};
+}
+function workflowRecoveryGate(record,now){
+ if(record?.recovery?.quarantined||record?.reason==='recovery_exhausted')return {action:'exhausted'};
+ if(record?.phase==='stopped'&&DISCOVERY_WORKFLOW_TERMINAL.has(record.reason))return {action:'stopped'};
+ if(record?.phase!=='stopped')return {action:'active'};
+ const due=Date.parse(record.recovery?.dueAt||'');
+ if(!Number.isFinite(due))return {action:'arm'};
+ if(due>now)return {action:'waiting',dueAt:record.recovery.dueAt};
+ return {action:'successor'};
+}
+async function workflowOwnerGate(env,ownId,series){
+ const record=(await readWorkflowState(env)).record;
+ if(record?.instanceId===ownId&&record.series===series)return {owned:true};
+ return {owned:false,reason:'not_owner'};
+}
+function workflowReadoutFacts(stored,liveness,now){
+ const updated=Date.parse(stored?.updatedAt||'');
+ const waiting=Date.parse(stored?.waitingUntil||'');
+ const active=!!stored&&['starting','running','waiting','uncertain'].includes(stored.phase);
+ const sleeping=stored?.phase==='waiting'&&Number.isFinite(waiting)&&waiting>now;
+ const stalled=active&&!sleeping&&(!Number.isFinite(updated)||now-updated>DISCOVERY_WORKFLOW_FRESH_MS);
+ const alive=liveness==='running'||liveness==='waiting'||liveness==='queued'||liveness==='paused';
+ const dead=liveness==='complete'||liveness==='errored'||liveness==='terminated'||liveness==='absent';
+ const recoveryDue=stored?.recovery?.dueAt||null;
+ const recoveryDueMs=Date.parse(recoveryDue||'');
+ return {active,stalled,alive,dead,recoveryDue,recoveryWaiting:Number.isFinite(recoveryDueMs)&&recoveryDueMs>now,quarantined:stored?.recovery?.quarantined===true||stored?.reason==='recovery_exhausted',updatedAt:stored?.updatedAt||null};
+}
 // Pure. The external hourly contract stays in continuationDecision; a future chunk_budget is renewed here only
 // when the saved status proves this generation still has work.
 function workflowPlan(input){
@@ -118,16 +160,16 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
  }
  try{
   await binding.create({id:instanceId,params:{programmeRunId,series}});
-  await settleWorkflowIfOwner(env,instanceId,{phase:'running',reason:'started',programmeRunId,series,recovery});
+  await settleWorkflowIfOwner(env,instanceId,{phase:'running',reason:'started',programmeRunId,series,recovery:runningRecovery(recovery),waitingUntil:null});
   return {started:true,attached:false,reason:'started',programmeRunId,instanceId,series};
  }catch(error){
   if(workflowCreateError(error)==='exists'){
-   await settleWorkflowIfOwner(env,instanceId,{phase:'running',reason:'attached',programmeRunId,series,recovery});
+   await settleWorkflowIfOwner(env,instanceId,{phase:'running',reason:'attached',programmeRunId,series,recovery:runningRecovery(recovery),waitingUntil:null});
    return {started:true,attached:true,reason:'attached',programmeRunId,instanceId,series};
   }
-  const attempts=(recovery?.attempts||0)+1;
-  await settleWorkflowIfOwner(env,instanceId,{phase:'uncertain',reason:'start_uncertain',programmeRunId,series,recovery:{attempts,reason:'start_uncertain',at:new Date().toISOString()}});
-  return {started:false,uncertain:true,reason:'start_uncertain',programmeRunId,instanceId,series};
+  const failure=workflowFailure(recovery,'start_uncertain',Date.now());
+  await settleWorkflowIfOwner(env,instanceId,{phase:failure.quarantined?'stopped':'uncertain',reason:failure.quarantined?'recovery_exhausted':'start_uncertain',programmeRunId,series,recovery:failure,waitingUntil:failure.dueAt});
+  return {started:false,uncertain:!failure.quarantined,reason:failure.quarantined?'recovery_exhausted':'start_uncertain',programmeRunId,instanceId,series,dueAt:failure.dueAt};
  }
 }
 async function ensureDiscoveryWorkflow(env){
@@ -142,12 +184,27 @@ async function ensureDiscoveryWorkflow(env){
  if(continuation&&discoveryContract(continuation).nextAction==='stop')return {started:false,reason:'stopped',programmeRunId};
  const state=await readWorkflowState(env),current=state.record;
  const same=current?.programmeRunId===programmeRunId;
- if(same&&current.instanceId&&['starting','running','waiting','uncertain'].includes(current.phase))return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
- if(same&&current.phase==='stopped'&&!['complete','backlog_empty','stale_generation'].includes(current.reason)){
-  const series=(current.series||0)+1;
-  return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,{attempts:(current.recovery?.attempts||0)+1,reason:'successor',at:new Date().toISOString()},current);
+ if(same&&current.instanceId&&['starting','running','waiting'].includes(current.phase))return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
+ if(same&&current.instanceId&&current.phase==='uncertain'){
+  const due=Date.parse(current.recovery?.dueAt||'');
+  if(current.recovery?.quarantined)return {started:false,reason:'recovery_exhausted',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+  if(Number.isFinite(due)&&due>Date.now())return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:current.recovery.dueAt};
+  return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
  }
- if(same&&current?.phase==='stopped')return {started:false,reason:'stopped',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+ if(same&&current?.phase==='stopped'){
+  const gate=workflowRecoveryGate(current,Date.now());
+  if(gate.action==='exhausted')return {started:false,reason:'recovery_exhausted',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+  if(gate.action==='stopped')return {started:false,reason:'stopped',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+  if(gate.action==='waiting')return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:gate.dueAt};
+  if(gate.action==='arm'){
+   const failure=workflowFailure(current.recovery,current.reason||'stopped',Date.now());
+   const next={...current,reason:failure.quarantined?'recovery_exhausted':current.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
+   if(!await writeWorkflowState(env,next,state.etag))return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+   return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
+  }
+  const series=(current.series||0)+1;
+  return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,current.recovery||null,current);
+ }
  const series=0;
  return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,null);
 }
@@ -166,11 +223,19 @@ async function reconcileDiscoveryWorkflow(env){
  const active=same&&['starting','running','waiting','uncertain'].includes(current.phase);
  if(active){
   const status=await workflowInstanceStatus(binding,current.instanceId);
-   if(status==='complete'||status==='errored'||status==='terminated'){
-   const series=(current.series||0)+1;
-   return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,{attempts:(current.recovery?.attempts||0)+1,reason:'successor',at:new Date().toISOString()},current);
+  if(status==='complete'||status==='errored'||status==='terminated'){
+   const failure=workflowFailure(current.recovery,'instance_'+status,Date.now());
+   const next={...current,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':failure.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
+   if(!await writeWorkflowState(env,next,state.etag))return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+   return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
   }
-  return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,{attempts:(current.recovery?.attempts||0)+1,reason:current.reason||'retry',at:new Date().toISOString()},current);
+  if(current.phase==='uncertain'||status==='absent'){
+   const due=Date.parse(current.recovery?.dueAt||'');
+   if(current.recovery?.quarantined)return {started:false,reason:'recovery_exhausted',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+   if(Number.isFinite(due)&&due>Date.now())return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:current.recovery.dueAt};
+   return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
+  }
+  return {started:false,reason:'in_progress',programmeRunId,instanceId:current.instanceId,series:current.series??0};
  }
  return ensureDiscoveryWorkflow(env);
 }
@@ -179,7 +244,18 @@ async function rolloverDiscoveryWorkflow(env,pinned,ownSeries){
  if(state.record?.programmeRunId&&state.record.programmeRunId!==pinned)return {started:false,reason:'stale_generation'};
  if(state.record?.instanceId&&state.record.instanceId!==discoveryInstanceId(pinned,ownSeries))return {started:true,attached:true,reason:'attached',programmeRunId:pinned,instanceId:state.record.instanceId,series:state.record.series};
  const series=(ownSeries||0)+1,instanceId=discoveryInstanceId(pinned,series);
- return createWorkflowInstance(env,pinned,series,instanceId,state.etag,{attempts:(state.record?.recovery?.attempts||0)+1,reason:'rollover',at:new Date().toISOString()},state.record);
+ return createWorkflowInstance(env,pinned,series,instanceId,state.etag,null,state.record);
+}
+async function stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks){
+ const state=await readWorkflowState(env);
+ const owned=state.record?.instanceId===ownId&&state.record.series===series;
+ let recovery=null,finalReason=reason;
+ if(owned&&DISCOVERY_WORKFLOW_RECOVERABLE.has(reason)){
+  recovery=workflowFailure(state.record.recovery,reason,Date.now());
+  if(recovery.quarantined)finalReason='recovery_exhausted';
+ }
+ await settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:finalReason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:recovery?.dueAt||null,recovery});
+ return {stopped:true,reason:finalReason,chunks,instanceId:ownId};
 }
 async function runDiscoveryWorkflow(env,payload,step){
  const pinned=payload?.programmeRunId||null;
@@ -190,15 +266,13 @@ async function runDiscoveryWorkflow(env,payload,step){
  let chunks=0,stalls=0,uncertainWrites=0,steps=0;
  const stepName=prefix=>prefix+'-'+(steps++);
  for(;;){
+  const gate=await step.do(stepName('owner'),()=>workflowOwnerGate(env,ownId,series));
+  if(!gate.owned)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
   if(steps>=DISCOVERY_WORKFLOW_STEP_CAP){
-   await step.do(stepName('cap'),()=>settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:'step_cap',programmeRunId:pinned,series,chunksThisInstance:chunks}));
-   return {stopped:true,reason:'step_cap',chunks,instanceId:ownId};
+   return step.do(stepName('cap'),()=>stopOwnedWorkflow(env,ownId,'step_cap',pinned,series,chunks));
   }
   const plan=await step.do(stepName('plan'),async()=>workflowPlan(await workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites)));
-  if(plan.action==='stop'){
-   await step.do(stepName('stop'),()=>settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:plan.reason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:null}));
-   return {stopped:true,reason:plan.reason,chunks,instanceId:ownId};
-  }
+  if(plan.action==='stop')return step.do(stepName('stop'),()=>stopOwnedWorkflow(env,ownId,plan.reason,pinned,series,chunks));
   if(plan.action==='wait'){
    const until=Number.isFinite(plan.until)?plan.until:Date.now()+1000;
    await step.do(stepName('wait'),()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:plan.reason,waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
@@ -206,7 +280,8 @@ async function runDiscoveryWorkflow(env,payload,step){
    continue;
   }
   if(plan.action==='renew'){
-   const renewed=await step.do(stepName('renew'),()=>renewDiscoverySeries(env,pinned));
+   const renewed=await step.do(stepName('renew'),async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {renewed:false,reason:'not_owner'};return renewDiscoverySeries(env,pinned);});
+   if(renewed.reason==='not_owner')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
    if(renewed.renewed){uncertainWrites=0;continue;}
    if(renewed.reason==='unknown_remaining'||renewed.reason==='backlog_empty'||renewed.reason==='stale_generation')continue;
    uncertainWrites++;
@@ -214,11 +289,13 @@ async function runDiscoveryWorkflow(env,payload,step){
    continue;
   }
   if(plan.action==='rollover'){
-   const rolled=await step.do(stepName('rollover'),()=>rolloverDiscoveryWorkflow(env,pinned,series));
-   if(!rolled.started)await step.do(stepName('rollover-stop'),()=>settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:'rollover_uncertain',programmeRunId:pinned,series,chunksThisInstance:chunks}));
+   const rolled=await step.do(stepName('rollover'),async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {started:false,reason:'not_owner'};return rolloverDiscoveryWorkflow(env,pinned,series);});
+   if(rolled.reason==='not_owner')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+   if(!rolled.started)await step.do(stepName('rollover-stop'),()=>stopOwnedWorkflow(env,ownId,'rollover_uncertain',pinned,series,chunks));
    return {stopped:true,reason:rolled.started?'rollover':'rollover_uncertain',chunks,instanceId:ownId,successor:rolled};
   }
-  const outcome=await step.do(stepName('chunk'),()=>runWorkflowChunk(env));
+  const outcome=await step.do(stepName('chunk'),async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {notOwner:true,progress:false,busy:false};return runWorkflowChunk(env);});
+  if(outcome.notOwner)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
   if(outcome.busy){
    const until=Date.parse(outcome.until||'')||Date.now()+1000;
    await step.do(stepName('busy'),()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:'busy',waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
@@ -227,14 +304,11 @@ async function runDiscoveryWorkflow(env,payload,step){
   }
   if(!outcome.progress){
    stalls++;
-   if(stalls>=DISCOVERY_WORKFLOW_STALL_LIMIT){
-    await step.do(stepName('stall'),()=>settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:'no_progress',programmeRunId:pinned,series,chunksThisInstance:chunks}));
-    return {stopped:true,reason:'no_progress',chunks,instanceId:ownId};
-   }
+   if(stalls>=DISCOVERY_WORKFLOW_STALL_LIMIT)return step.do(stepName('stall'),()=>stopOwnedWorkflow(env,ownId,'no_progress',pinned,series,chunks));
    await step.sleepUntil(stepName('stall-sleep'),new Date(Date.now()+1000));
    continue;
   }
   stalls=0;uncertainWrites=0;chunks++;
-  await step.do(stepName('progress'),()=>settleWorkflowIfOwner(env,ownId,{phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,waitingUntil:null}));
+  await step.do(stepName('progress'),()=>settleWorkflowIfOwner(env,ownId,{phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,waitingUntil:null,recovery:null}));
  }
 }
