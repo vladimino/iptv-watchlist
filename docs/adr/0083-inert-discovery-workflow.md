@@ -1,9 +1,9 @@
 # ADR 0083: Discovery continuation may run as an inert Cloudflare Workflow
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-02  
 **Recorded at:** 2026-11-02  
-**Approval source:** not an owner acceptance. Card approval of [AIR-323](https://trello.com/c/SrWM43h0) authorizes the implementation and an ordinary deploy, not acceptance of this record and not a production cutover  
+**Approval source:** explicit owner decision in the AIR-323 conversation on 2026-11-02: ADR 0083 Accepted, and both changed Mermaid diagrams visually approved, after [independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/325#pullrequestreview-5740324161) and [green exact-head CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41486148024). Decision recorded under [AIR-323](https://trello.com/c/SrWM43h0); architecture acceptance does not authorize a production cutover  
 **Related work:** [AIR-323](https://trello.com/c/SrWM43h0); switch successor [AIR-324](https://trello.com/c/kNtaEbm8); flag removal [AIR-325](https://trello.com/c/Q416Mx7v) after AIR-324  
 **Supersedes:** [ADR 0005](0005-external-chatgpt-tasks.md) and [ADR 0006](0006-one-chunk-discovery.md) in part, only while `DISCOVERY_EXECUTOR=workflow`  
 **Superseded by:** None
@@ -43,7 +43,7 @@ Accepting this record would approve the architecture only. It does not authorize
 ## Evidence
 
 - **Original decision:** [AIR-323](https://trello.com/c/SrWM43h0), including the owner GO on that card. That GO is for the build, not for this record's acceptance.
-- **Implementation:** this PR. The ADR stays Proposed until the owner accepts or declines it after an independent technical PASS and green exact-head CI.
+- **Implementation:** [PR #325](https://github.com/vladimino/iptv-watchlist/pull/325), with independent PASS and green exact-head CI before explicit owner acceptance of the ADR and visual approval of both changed Mermaid diagrams on 2026-11-02.
 - **Dated verification:** [local tests only](../evidence/discovery-workflow-air-323-2026-11-02.md). No production read or write.
 - **Uncertainty:** Platform step and state quotas are not copied into this record. The instance cap of 20 chunks is a product bound. Whether a finished instance id can be created again is handled by reading instance status in the reconciler and opening a successor; that path is not activated.
 
