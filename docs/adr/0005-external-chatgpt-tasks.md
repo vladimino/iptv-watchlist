@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-24 (retrospective, [AIR-116](https://trello.com/c/6MHbRFZR))  
 **Approval source:** [AIR-62](https://trello.com/c/CU71gW4c)  
 **Supersedes:** None documented  
-**Superseded by:** None documented
+**Superseded by:** [ADR 0082](0082-inert-discovery-workflow.md) in part, only while `DISCOVERY_EXECUTOR` is `workflow`. While that binding is absent, this decision stands unchanged.
 
 ## Context
 

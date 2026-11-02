@@ -1,7 +1,7 @@
 
 {
   "name": "iptv",
-  "main": "dist/server/index.js",
+  "main": "dist/server/workflow-entry.js",
   "compatibility_date": "2026-10-18",
   "workers_dev": true,
   "preview_urls": false,
@@ -29,6 +29,13 @@
     {
       "binding": "BUCKET",
       "bucket_name": "iptv"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "iptv-discovery",
+      "binding": "DISCOVERY_WORKFLOW",
+      "class_name": "DiscoveryWorkflow"
     }
   ]
 }

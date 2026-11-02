@@ -726,6 +726,14 @@ async function saveObservationIndex(env,source,decisions,fence,writer){
 }
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
 const DISCOVERY_CHUNK_BUDGET=12;
+// Absent, null and '' stay on the external hourly executor. Only the exact token `workflow` leaves that path.
+// Any other string fails closed. The binding is not set by a deploy (ADR 0082).
+function discoveryExecutorMode(env){
+ const value=env?.DISCOVERY_EXECUTOR;
+ if(value==null||value==='')return 'external';
+ return value==='external'||value==='workflow'?value:'invalid';
+}
+function discoveryChunkBudget(){return DISCOVERY_CHUNK_BUDGET;}
 const CONTINUATION_KEY='epg/resolver-continuation.json';
 // AIR-151: read-only diagnostics of the continuation boundary. Every POST /api/sync/epg step and
 // every discovery resolve request leaves one bounded entry (codes, counts, timestamps; no tokens,
@@ -742,7 +750,7 @@ const DIAGNOSTIC_VOCABULARY={
  runStage:['metadata','epg','complete'],
  stage:['idle','paused','running','complete','error','busy','partial','programme_changed','awaiting_epg_discovery','backoff','missing_secret'],
  nextAction:['continue','wait','stop'],
- reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned','interrupted'],
+ reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned','interrupted','delegated'],
  errorName:['Error','TypeError','RangeError','SyntaxError','ReferenceError','AbortError','TimeoutError'],
 };
 function diagnosticCode(list,value,fallback='other'){return value==null?null:list.includes(value)?value:fallback;}
@@ -1074,6 +1082,45 @@ async function advanceDiscovery(env,body={}){
  const contract=outcome.saved?discoveryContract(record):kept?.stage==='running'&&kept.hopId===hopId?discoveryContract(kept,{state:'running',reason:'orphaned',nextAction:'continue',remainingChunks:Math.max(0,budget-1),nextCatchUpAt:null}):discoveryContract(kept);
  return {...result,discovery:contract,diagnostic:trace};
 }
+// Workflow mode never rewrites the continuation record into `delegated`. The stored contract stays what the
+// Workflow reads; only the HTTP body tells an external client to stop driving chunks.
+function delegatedContract(contract,workflow){
+ const overlaid=discoveryContract(null,{state:contract?.state,remainingChunks:contract?.remainingChunks,nextAction:'wait',reason:'delegated',at:contract?.at,nextCatchUpAt:contract?.nextCatchUpAt,retryAt:contract?.retryAt,programmeRunId:contract?.programmeRunId});
+ return {...overlaid,delegated:true,executor:'workflow',workflow:workflow||null};
+}
+async function noteDiscoveryWorkflow(env){
+ if(discoveryExecutorMode(env)!=='workflow')return {started:false,reason:discoveryExecutorMode(env)==='invalid'?'invalid':'external'};
+ if(typeof ensureDiscoveryWorkflow!=='function')return {started:false,reason:'workflow_unavailable'};
+ try{return await ensureDiscoveryWorkflow(env);}catch{return {started:false,reason:'start_uncertain',uncertain:true};}
+}
+async function presentQueuedDiscovery(env,discovery){
+ const mode=discoveryExecutorMode(env);
+ if(mode==='external')return {discovery};
+ if(mode!=='workflow')return {discovery,executor:'invalid',delegated:false};
+ if(discovery?.nextAction==='stop')return {discovery,executor:'workflow',delegated:false};
+ const workflow=await noteDiscoveryWorkflow(env);
+ return {discovery:delegatedContract(discovery,workflow),executor:'workflow',delegated:true,workflow};
+}
+async function presentContinuationDiscovery(env){
+ const now=Date.now(),stored=await readContinuation(env),current=stored.record;
+ const lease=await loadJSON(env,'epg/resolver-lease.json');
+ const generation=await loadJSON(env,EPG_GENERATION_KEY);
+ const published=generation?.phase==='published'?generation.programmeRunId||null:null;
+ const last=current?.stage==='running'?await loadJSON(env,'epg/discovery-status.json'):null;
+ const health=continuationHealth(current,lease,last,now,published);
+ const contract=discoveryContract(current,current?.stage==='running'?runningOverride(health):{});
+ if(contract.nextAction==='stop')return {discovery:{...contract,delegated:false,executor:'workflow'},executor:'workflow',delegated:false,workflow:null};
+ const workflow=await noteDiscoveryWorkflow(env);
+ return {discovery:delegatedContract(contract,workflow),executor:'workflow',delegated:true,workflow};
+}
+async function discoveryExecutorReadout(env,continuation){
+ const configured=discoveryExecutorMode(env);
+ let stored=null;
+ if(typeof readWorkflowState==='function'){try{stored=(await readWorkflowState(env)).record;}catch{stored={phase:'unknown'};}}
+ const decision=continuation?continuationDecision(continuation,Date.now()):null;
+ const active=!!stored&&['starting','running','waiting','uncertain'].includes(stored.phase);
+ return {configured,owner:configured==='invalid'?'invalid':active?'workflow':'none',programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending:!!(continuation&&(continuation.remainingChunks>0||continuation.reason==='chunk_budget'||continuation.stage==='running')),eligible:!!decision?.run||continuation?.reason==='chunk_budget',degraded:configured==='invalid'||stored?.phase==='uncertain'||stored?.phase==='unknown',budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
+}
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);
  await openContinuationStep(env,step,true);
@@ -1082,7 +1129,10 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
   if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24)){step.branch='invalid_limit';response=json({error:'Invalid limit'},400);}
   else{
    const report=await loadJSON(env,'programme.json');
+   const executor=discoveryExecutorMode(env);
    if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
+   else if(executor==='invalid'){step.branch='executor_invalid';response=json({error:'discovery_executor_invalid',executor:'invalid'},503);}
+   else if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);response=json({...presented,diagnostic:step.diagnostic});}
    else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:body.chunks!==0,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
   }
  }catch(e){await closeContinuationStep(env,step,started,null,e,true);throw e;}
@@ -1095,5 +1145,7 @@ async function discoveryPipelineStatus(env){
  // AIR-154: the raw record cannot tell a live writer from an orphan; the derived health can.
  const continuationHealthReport=healthSummary(continuationHealth(continuation,lease,last,Date.now(),pinned.epgPin?.programmeRunId||null));
  const items=source?.items||[],decisionsMap=decisions||{},counts=ledgerCounts(source,decisionsMap,Date.now()),statuses={},confirmed=new Set();for(const candidate of items){const state=decisionsMap[candidate.key];if(state){statuses[state.status]=(statuses[state.status]||0)+1;if(state.status==='verified')confirmed.add(String(state.tmdbId));}}
- return {schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
+ const pipeline={schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
+ if(discoveryExecutorMode(env)!=='external')pipeline.discoveryExecutor=await discoveryExecutorReadout(env,continuation);
+ return pipeline;
 }

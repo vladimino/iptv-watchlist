@@ -40,13 +40,13 @@ Source: `.github/workflows/ci.yml`. The former independent Cloudflare Workers Bu
    - Merge commit: `PR #N: <PR title>`
 8. `wrangler.jsonc` configures:
    - Worker: `iptv`
-   - Entrypoint: `dist/server/index.js`
+   - Entrypoint: `dist/server/workflow-entry.js` (the Worker fetch handler plus the `DiscoveryWorkflow` class). `dist/server/index.js` stays the script local dev imports and does not import `cloudflare:workers`
    - Compatibility date `2026-10-18`, which enables `ctx.exports` for the resolver continuation. Do not add `disable_ctx_exports` or move the date before 2025-11-17.
    - R2 binding: `BUCKET` -> `iptv`
    - `keep_vars: true`, so dashboard variables such as `MCP_ACCESS_TEAM_DOMAIN` and `MCP_ACCESS_AUD` survive deploys
    - `preview_urls: false`
 
-Deploying the Worker does not apply `migrations/0008_published_epg_authority.sql` and does not change `published_epg_authority.mode`. Until a separate owner GO applies that file and a later GO activates the marker, R2 remains authoritative for the published EPG generation. The cron stays `37 * * * *` and stays the enrichment projector only.
+Deploying the Worker does not apply `migrations/0008_published_epg_authority.sql` and does not change `published_epg_authority.mode`. Until a separate owner GO applies that file and a later GO activates the marker, R2 remains authoritative for the published EPG generation. The cron stays `37 * * * *` and stays the enrichment projector only. `wrangler.jsonc` binds a Discovery Workflow named `iptv-discovery` (`DISCOVERY_WORKFLOW`, class `DiscoveryWorkflow`) and does not give it `schedules`. `DISCOVERY_EXECUTOR` is not a Wrangler var. `keep_vars: true` leaves the deployed value untouched, and the absent value is the external executor. A deploy therefore creates no Workflow instance and calls no TMDB. Setting the flag to `workflow` is a separate owner action ([AIR-324](https://trello.com/c/kNtaEbm8)), not this deploy ([ADR 0082](../adr/0082-inert-discovery-workflow.md), Proposed).
 
 A failed test/build, or a failed account-token or Worker-settings check, prevents deployment. A successful workflow confirms publication, not completion of data migration or end-to-end smoke tests. Use authorized read-only checks after deployment. For `/mcp`, use only the safe verification procedure in [docs/mcp.md](../reference/api/mcp.md). Exercising the resolver continuation in production writes `epg/*` records and calls TMDB, so it is a separately approved operation, never a deploy smoke test.
 
