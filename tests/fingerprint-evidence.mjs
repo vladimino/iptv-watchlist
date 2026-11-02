@@ -108,6 +108,25 @@ assert.match(d1.slice(d1.indexOf('async function loadFingerprint'),d1.indexOf('a
 assert.equal(call('predictionRunnerContract')().instructions.some(line=>/fingerprint\.evidence/.test(line)),false);
 const schema=(await api('schema',undefined,'GET')).data;
 assert.equal(schema.rules.some(line=>/fingerprint\.evidence/.test(line)),false);
+const published=schema.contract.fingerprint.evidence;
+assert.equal(published.required,false);
+assert.equal(published.whenAbsent,'legacy');
+assert.deepEqual(published.basis,['metadata','model_knowledge','web_research']);
+assert.deepEqual(published.metadataRefs,['metadata:synopsis','metadata:genres','metadata:runtime','metadata:credits']);
+assert.deepEqual(published.metadataSupports,['plotMechanics']);
+assert.equal(published.maxItems,4);assert.equal(published.maxRefs,4);assert.equal(published.sourceRefCap,8);
+assert.deepEqual(published.aggregate.order,['plotMechanics','generalExecution','genreExecution']);
+assert.match(published.aggregate.basis,/mixed/);
+assert.match(published.metadataPreflight,/prediction_validate/);
+assert.match(published.claimCoverage.generalExecution,/unknown/);
+for(const key of ['plot_engine','pace','stakes','chemistry','plan_counterplan_strength','multi_party_goals','decision_logic','payoff','action_readability'])assert.ok(published.executionQuality.includes(key),key);
+assert.equal(Object.hasOwn(schema.contract.fingerprint.rules,'evidence'),false);
+assert.match(schema.fingerprint.evidence,/optional/);
+const metadataOnly=(dimension,value)=>withEvidence({execution:{[dimension]:value},evidence:{plotMechanics:{heist:[item('metadata',['metadata:synopsis'])]},execution:{[dimension]:[item('metadata',['metadata:synopsis'],'high')]}},sourceBasis:'metadata',sourceRefs:['metadata:synopsis']});
+for(const [dimension,value] of [['chemistry','strong'],['plan_counterplan_strength','strong'],['multi_party_goals','strong'],['plot_engine','strong'],['pace','fast'],['stakes','high'],['action_readability','strong']])
+ assert.deepEqual(codes(metadataOnly(dimension,value),metadata),['fingerprint.evidence.execution.'+dimension+' invalid_ref'],dimension);
+const chemistryMixed=withEvidence({execution:{chemistry:'strong'},evidence:{plotMechanics:{heist:[item('metadata',['metadata:synopsis'])]},execution:{chemistry:[item('metadata',['metadata:synopsis']),item('model_knowledge',['model_knowledge'])]}},sourceBasis:'mixed',sourceRefs:['metadata:synopsis','model_knowledge']});
+assert.deepEqual(issuesOf(chemistryMixed,metadata),[]);
 
 const recorded=plain(call('predictionDiagnosticEvidence')(heistOnly));
 assert.equal(recorded.status,'recorded');
