@@ -732,6 +732,7 @@ async fetch(request,env,execution){
   if(['/api/sync/metadata','/api/sync/epg'].includes(url.pathname)&&request.method==='POST'){const body=await request.json();return await postSync(env,execution,url.pathname,body);}
   return json({error:'Not found'},404);
  }
+ if((request.method==='GET'||request.method==='HEAD')&&url.pathname==='/admin/limbo'){const target=new URL(request.url);target.pathname='/admin/limb';return new Response(null,{status:302,headers:{Location:target.pathname+target.search,'Cache-Control':'no-store'}});}
  const page=url.pathname==='/events'?'/':/^\/film\/[A-Za-z0-9_-]{1,80}$/.test(url.pathname)?'/':url.pathname,asset=ASSETS[page];if(asset&&request.method==='GET')return new Response(asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});
  return json({error:'Not found'},404);
  }catch(e){return json({error:e.message},502);}

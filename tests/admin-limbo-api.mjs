@@ -19,7 +19,8 @@ const build=fs.readFileSync('build.mjs','utf8');
 assert.match(build,/scoped\('src\/domain\/data-health\.js','DataHealth'\)/);
 assert.match(build,/scoped\('src\/domain\/limbo-inventory\.js','LimboInventory'\)/);
 assert.ok(build.indexOf('src/admin/read.js')<build.indexOf('src/admin/limbo.js')&&build.indexOf('src/admin/limbo.js')<build.indexOf("src/worker.js','utf8'));"),'the limbo module follows the read module and precedes the Worker entry');
-assert.match(build,/assets\['\/admin\/limbo'\]/);
+assert.match(build,/assets\['\/admin\/limb'\]/);
+assert.doesNotMatch(build,/assets\['\/admin\/limbo'\]/);
 assert.match(build,/src\/admin\/limbo-client\.js/);
 
 // R2 stand-in with etags and counters, as in the admin read test: every body is a real stream that must be consumed or cancelled.

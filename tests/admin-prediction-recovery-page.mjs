@@ -1,4 +1,4 @@
-// The prediction recovery panel on /admin/limbo. The view: Russian copy for every code of the assessment vocabulary, fail
+// The prediction recovery panel on /admin/limb. The view: Russian copy for every code of the assessment vocabulary, fail
 // closed on any undeclared code or on an answer that claims an action or a writer, escaping, codes and the pin only inside
 // the closed technical details, Madrid times. The page: the panel opens only from a film item of the prediction or
 // fingerprint subsystem, toggles with aria-expanded, reads through the client with the held pin, and after a change says

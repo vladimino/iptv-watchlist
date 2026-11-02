@@ -133,7 +133,7 @@ function limboUrl(state) {
   const params = new URLSearchParams();
   for (const name of ['kind', 'subsystem', 'cause', 'age']) if (state[name]) params.set(name, state[name]);
   const query = params.toString();
-  return query ? '/admin/limbo?' + query : '/admin/limbo';
+  return query ? '/admin/limb?' + query : '/admin/limb';
 }
 
 function limboWrite(state, mode) {
