@@ -63,3 +63,17 @@ context.lateEvent={id:'same-event',type:'watchlist',at:'2026-10-23T10:00:00Z',to
 let lateHTML=vm.runInContext('eventHTML(lateEvent)',context);assert.match(lateHTML,/<h3>Остальные удаления · 1<\/h3>/);assert.match(lateHTML,/Soon \(2014\)/);assert.doesNotMatch(lateHTML,/Вероятно просмотрены|★/);
 context.lateEvent.removed[0].rating=4;context.lateEvent.removed[0].ratingObservedAt='2026-10-23T12:00:00.000Z';
 lateHTML=vm.runInContext('eventHTML(lateEvent)',context);assert.equal(context.lateEvent.id,'same-event');assert.match(lateHTML,/<h3>Вероятно просмотрены · 1<\/h3>[\s\S]*Soon \(2014\) · 4\.0 ★/);assert.doesNotMatch(lateHTML,/Остальные удаления|ratingObservedAt/);
+context.tasteEvent={id:'taste-profile-3',type:'taste_profile',at:'2026-11-02T20:15:00.000Z',fromVersion:2,toVersion:3,changedFields:['horrorPreferences'],scope:'selective'};
+let tasteHTML=vm.runInContext('eventHTML(tasteEvent)',context);
+assert.match(tasteHTML,/Модель вкуса обновлена/);assert.match(tasteHTML,/Версия 2 → 3/);assert.match(tasteHTML,/Изменены предпочтения для хорроров/);assert.match(tasteHTML,/Влияние: выборочное/);
+assert.match(tasteHTML,/21:15/,'the publication time is shown in Europe/Madrid');
+assert.doesNotMatch(tasteHTML,/horrorPreferences|profileHash|approval|declarationSha256/);
+context.tasteMany={...context.tasteEvent,changedFields:['horrorPreferences','comedyPreferences'],scope:'global'};
+tasteHTML=vm.runInContext('eventHTML(tasteMany)',context);assert.match(tasteHTML,/Изменены несколько разделов модели вкуса/);assert.match(tasteHTML,/Влияние: глобальное/);assert.doesNotMatch(tasteHTML,/хоррор|комеди/);
+context.tasteIdentity={...context.tasteEvent,fromVersion:null,toVersion:1,changedFields:[],scope:'identity'};
+tasteHTML=vm.runInContext('eventHTML(tasteIdentity)',context);assert.match(tasteHTML,/Версия 1/);assert.match(tasteHTML,/Содержание модели не изменилось/);assert.doesNotMatch(tasteHTML,/Влияние:|→/);
+context.tasteUnknown={id:'<script>',type:'taste_profile',at:'2026-11-02T20:15:00.000Z',fromVersion:2,toVersion:3,changedFields:['<img src=x onerror=alert(1)>','horrorPreferences'],scope:'not-a-scope',profile:'secret profile',approval:{declarationSha256:'abc'}};
+tasteHTML=vm.runInContext('eventHTML(tasteUnknown)',context);assert.match(tasteHTML,/Изменены предпочтения для хорроров/);assert.doesNotMatch(tasteHTML,/Влияние:|<img|onerror|script>|secret profile|declarationSha256/);
+context.unknownType={id:'mystery',type:'no_such_event',at:'2026-11-02T20:16:00.000Z',changedFields:['<script>alert(1)</script>']};
+const unknownTypeHTML=vm.runInContext('eventHTML(unknownType)',context);assert.match(unknownTypeHTML,/activity-event/);assert.doesNotMatch(unknownTypeHTML,/Модель вкуса|<script>|alert/);
+console.log('Activity UI: taste-profile publication event, unknown scope and unknown type passed');
