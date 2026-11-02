@@ -76,7 +76,7 @@ let queue=await reconcile(R1);
  const runner=(await R1.api('enrichment/status')).data;
  assert.deepEqual([runner.fingerprintSchemaVersion,runner.fingerprintPromptVersion,runner.predictionPromptVersion,plain(runner.compatibility)],[1,1,1,{profileMode:'selective',fingerprintMode:'selective'}]);
  const a=await R1.diagnostics('A');
- assert.deepEqual(a.fingerprint,{presence:'recorded',schemaVersion:1,promptVersion:1,produced:'generated',previous:null,current:true,usable:true,invalidated:false,reason:'exact',migration:'none',mode:'selective'});
+ assert.deepEqual(a.fingerprint,{presence:'recorded',schemaVersion:1,promptVersion:1,produced:'generated',previous:null,current:true,usable:true,invalidated:false,reason:'exact',migration:'none',mode:'selective',evidence:{status:'legacy',note:'declared_source_not_verified'}});
  assert.deepEqual(a.prediction,{presence:'recorded',current:true,stale:false,profileMatch:true,cause:'current',reason:'exact',requiredWork:'none',mode:'selective',fingerprintMode:'selective'});
  assert.equal(a.index,'agreed');
  const d=await R1.diagnostics('D');

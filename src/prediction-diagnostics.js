@@ -53,7 +53,7 @@ function predictionDiagnosticClassification(kind){
 const PREDICTION_VALIDATION_STAGES=['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema'];
 function predictionDiagnosticValidation(validation){
  if(!validation||typeof validation!=='object')return null;
- const issues=Array.isArray(validation.issues)?validation.issues.filter(issue=>issue&&typeof issue==='object'&&typeof issue.path==='string'&&/^(fingerprint|prediction)(\.[A-Za-z0-9_]{1,40}){0,2}$/.test(issue.path)&&ISSUE_CODES.includes(issue.code)).slice(0,MAX_ISSUES).map(issue=>({path:issue.path,code:issue.code})):[];
+ const issues=Array.isArray(validation.issues)?validation.issues.filter(issue=>issue&&typeof issue==='object'&&typeof issue.path==='string'&&/^(fingerprint|prediction)(\.[A-Za-z0-9_]{1,40}){0,3}$/.test(issue.path)&&ISSUE_CODES.includes(issue.code)).slice(0,MAX_ISSUES).map(issue=>({path:issue.path,code:issue.code})):[];
  return {stage:PREDICTION_VALIDATION_STAGES.includes(validation.stage)?validation.stage:'unknown',reportedBy:validation.reportedBy==='caller'||validation.reportedBy==='worker'?validation.reportedBy:null,issues};
 }
 function predictionDiagnosticRetry(queue,filmId){
@@ -87,14 +87,45 @@ function predictionDiagnosticEligibility(queue,filmId,now){
  if(lane==='cold'&&queue.priorityCount)return {eligibleNow:false,cause:'waiting_behind_hot'};
  return {eligibleNow:false,cause:'not_ready'};
 }
+// A bounded reading of optional fingerprint evidence. Sources named here were declared by the writer. A declaration
+// is not an independent check. A fingerprint without the key stays legacy, and a missing fingerprint stays unknown.
+// Neither case invents claims.
+function predictionDiagnosticEvidence(fingerprint){
+ const note='declared_source_not_verified';
+ if(!fingerprint||typeof fingerprint!=='object'||Array.isArray(fingerprint))return {status:'unknown',note};
+ if(!Object.hasOwn(fingerprint,'evidence'))return {status:'legacy',note};
+ const evidence=fingerprint.evidence;
+ if(!evidence||typeof evidence!=='object'||Array.isArray(evidence))return {status:'unknown',note};
+ const claims=[],token=/^[a-z0-9_]{1,40}$/;
+ const take=(group,dimension,value,raw)=>{
+  if(!token.test(dimension)||!Array.isArray(raw)||claims.length>=32)return;
+  const items=[];
+  for(const item of raw){
+   if(items.length>=EVIDENCE_MAX_ITEMS||!item||typeof item!=='object'||Array.isArray(item))continue;
+   if(!EVIDENCE_BASIS.includes(item.basis)||!CONFIDENCE.includes(item.confidence)||!Array.isArray(item.refs))continue;
+   const refs=[];
+   for(const ref of item.refs){if(refs.length>=EVIDENCE_MAX_REFS||typeof ref!=='string')continue;if(ref==='model_knowledge'||METADATA_REFS.includes(ref)||evidenceUrlOk(ref))refs.push(ref);}
+   if(refs.length)items.push({basis:item.basis,refs,confidence:item.confidence});
+  }
+  if(items.length)claims.push({group,dimension,value:typeof value==='string'&&token.test(value)?value:null,items});
+ };
+ const mechanics=[];
+ if(Array.isArray(fingerprint.plotMechanics))for(const key of fingerprint.plotMechanics)if(typeof key==='string'&&!mechanics.includes(key))mechanics.push(key);
+ const plot=evidence.plotMechanics;
+ if(plot&&typeof plot==='object'&&!Array.isArray(plot))for(const key of mechanics)if(plot[key])take('mechanic',key,key,plot[key]);
+ const block=evidence.execution,execution=fingerprint.execution&&typeof fingerprint.execution==='object'&&!Array.isArray(fingerprint.execution)?fingerprint.execution:{};
+ if(block&&typeof block==='object'&&!Array.isArray(block))for(const key of [...GENERAL_EXECUTION,...GENRE_EXECUTION])if(block[key])take('execution',key,execution[key],block[key]);
+ return {status:'recorded',note,claims};
+}
 // `current` is the exact schema match of today; `usable` is the verdict in force (exact, or exact or compatible under the
 // transition rule) with its reason and migration class; the provenance fields come from the stored pointer.
 function predictionDiagnosticFingerprint(record,freshness=null,film=null){
  const mode=freshness?.fingerprintMode??'strict';
- if(!record||record.status==='unavailable')return {presence:'unknown',schemaVersion:null,promptVersion:null,current:null,usable:null,invalidated:null,reason:null,migration:null,mode};
- if(!record.fingerprint)return {presence:'not_recorded',schemaVersion:null,promptVersion:null,current:false,usable:false,invalidated:false,reason:'fingerprint_missing',migration:'full',mode};
+ const unknownEvidence={status:'unknown',note:'declared_source_not_verified'};
+ if(!record||record.status==='unavailable')return {presence:'unknown',schemaVersion:null,promptVersion:null,current:null,usable:null,invalidated:null,reason:null,migration:null,mode,evidence:unknownEvidence};
+ if(!record.fingerprint)return {presence:'not_recorded',schemaVersion:null,promptVersion:null,current:false,usable:false,invalidated:false,reason:'fingerprint_missing',migration:'full',mode,evidence:unknownEvidence};
  const fingerprint=record.fingerprint,verdict=freshness?.fingerprintVerdict?freshness.fingerprintVerdict(fingerprint,film?.genres):null;
- return {presence:'recorded',schemaVersion:fingerprint.fingerprintSchemaVersion??null,promptVersion:fingerprint.fingerprintPromptVersion??1,produced:fingerprint.produced??'generated',previous:fingerprint.previous??null,current:fingerprintCurrent(fingerprint),usable:verdict?fingerprintCompatibilityFresh(verdict):fingerprintCurrent(fingerprint),invalidated:!!fingerprint.invalidatedAt,reason:verdict?.reason??null,migration:verdict?.migration??null,mode};
+ return {presence:'recorded',schemaVersion:fingerprint.fingerprintSchemaVersion??null,promptVersion:fingerprint.fingerprintPromptVersion??1,produced:fingerprint.produced??'generated',previous:fingerprint.previous??null,current:fingerprintCurrent(fingerprint),usable:verdict?fingerprintCompatibilityFresh(verdict):fingerprintCurrent(fingerprint),invalidated:!!fingerprint.invalidatedAt,reason:verdict?.reason??null,migration:verdict?.migration??null,mode,evidence:predictionDiagnosticEvidence(fingerprint)};
 }
 function predictionDiagnosticPrediction(record,profile,freshness=strictFreshness(profile),film=null){
  if(!record||record.status==='unavailable')return {presence:'unknown',current:null,stale:'unknown',profileMatch:null,cause:'unknown'};
