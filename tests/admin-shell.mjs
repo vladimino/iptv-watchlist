@@ -55,6 +55,7 @@ assert.match(html, /path === '\/admin\/health' \|\| \(path === '\/admin' && new 
 assert.match(html, /documentElement\.classList\.add\(health \? 'admin-is-health' : 'admin-is-catalog'\)/);
 assert.ok(html.indexOf('<title>Данные каталога</title>') < html.indexOf('documentElement.classList.add'), 'the route class is set from the head, before the body');
 assert.ok(html.indexOf('id="admin-catalog-page-title"') < html.indexOf('class="admin-views"') && html.indexOf('id="admin-health-page-title"') < html.indexOf('class="admin-views"') && html.indexOf('class="admin-views"') < html.indexOf('id="admin-health-title"'), 'both page headings sit above the nav; the section heading stays inside the health view');
+assert.ok(html.indexOf('id="admin-health-summary"') < html.indexOf('id="admin-health-issues"') && html.indexOf('id="admin-health-issues"') < html.indexOf('id="admin-health-subsystems"') && html.indexOf('id="admin-health-subsystems"') < html.indexOf('id="admin-health-sources"'), 'issues come before subsystem cards and sources');
 assert.match(css, /html\.admin-is-health \.admin-catalog-heading,html\.admin-is-health \.brand-sub-catalog\{display:none\}/);
 assert.match(css, /html\.admin-is-health \.admin-health-heading\{display:block\}/);
 assert.match(css, /html\.admin-is-health #admin-health-title\{display:none\}/);
@@ -501,8 +502,15 @@ assert.equal(attrs.get('#admin-view-catalog:aria-current'), 'false');
 assert.deepEqual(chrome(), {title: 'Здоровье данных', health: true, catalog: false, label: 'admin-health-page-title', description: HEALTH_DESCRIPTION}, 'the old health alias paints the health title before it is canonicalised');
 assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/health']);
 assert.ok(requests.every(request => request.method === 'GET'));
-assert.match(nodes.get('#admin-health-summary').textContent, /Оценка на .* · поколение 11111111/);
-assert.match(nodes.get('#admin-health-summary').textContent, /Сводного балла нет/);
+const healthSummary = nodes.get('#admin-health-summary').innerHTML;
+assert.match(healthSummary, /Требует внимания<\/b> — [1-9]/);
+assert.match(healthSummary, /В пределах проверенного всё хорошо/);
+assert.match(healthSummary, /Недостаточно данных<\/b> — [1-9]/);
+assert.match(healthSummary, /Оценка на .* · поколение 11111111/);
+assert.match(healthSummary, /покрытие: прочитано/);
+assert.match(healthSummary, /Сводного балла нет/);
+assert.match(nodes.get('#admin-snapshot-text').textContent, /Поколение 11111111/, 'the health answer keeps the pinned snapshot line');
+assert.ok(html.indexOf('Что требует внимания') < html.indexOf('id="admin-health-issues"') && html.indexOf('id="admin-health-issues"') < html.indexOf('Подсистемы и источники'));
 assert.match(nodes.get('#admin-health-sources').textContent, /нерешённые наблюдения: не читается здесь/);
 assert.match(nodes.get('#admin-health-sources').textContent, /baseline Letterboxd: не читается здесь/);
 const cards = nodes.get('#admin-health-subsystems').innerHTML;
@@ -519,7 +527,11 @@ assert.match(issuesHtml, /Метаданные отсутствуют/);
 assert.match(issuesHtml, /data-admin-id="film:blank"/);
 assert.match(issuesHtml, /Источник не входит в это ограниченное чтение/);
 assert.doesNotMatch(issuesHtml, /<button/, 'no execution controls in the issue list');
+assert.match(issuesHtml, /Технические подробности/);
+assert.ok(issuesHtml.indexOf('health-group-why') < issuesHtml.indexOf('Технические подробности'), 'the reason stays outside the technical disclosure');
 assert.ok(issuesHtml.indexOf('health-severity-warning') < issuesHtml.indexOf('health-severity-info'), 'warnings before information');
+assert.match(issuesHtml, /Следующий шаг:/);
+assert.doesNotMatch(issuesHtml, /href="\/admin\/discovery|href="\/api\//);
 assert.equal(nodes.get('#admin-health-empty').hidden, true);
 assert.equal(nodes.get('#admin-health-loading').hidden, true);
 assert.equal(nodes.get('#admin-health-error').hidden, true);
@@ -555,7 +567,7 @@ etags.set('people.json', 'people-2');
 await run('adminRenderHealth()');
 await settle();
 assert.equal(nodes.get('#admin-health-stale').hidden, false, 'a changed dictionary under the held pin is a stale answer');
-assert.match(nodes.get('#admin-health-summary').textContent, /Оценка на/, 'the previous evaluation stays on screen');
+assert.match(nodes.get('#admin-health-summary').innerHTML, /Оценка на/, 'the previous evaluation stays on screen');
 await run('onAdminHealthRefresh()');
 await settle();
 assert.equal(nodes.get('#admin-health-stale').hidden, true);
@@ -569,6 +581,46 @@ assert.match(nodes.get('#admin-health-error').textContent, /Опубликова
 seed();
 vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);
 run(`onAdminKey({key:'Escape',preventDefault(){}})`);
+const snapshotText = nodes.get('#admin-snapshot-text').textContent;
+nodes.get('#admin-health-stale').hidden = false;
+run(`renderAdminHealth({health:{now:'2026-11-02T21:00:00.000Z',published:{programmeRunId:'11111111-1111-4111-8111-111111111111'},scope:{programmeRunId:'11111111-1111-4111-8111-111111111111',coverage:{films:'partial'},subjects:{films:2}},subsystems:{metadata:{status:'clear_in_scope',evidence:'observed',issues:0}},groups:[]},sources:{}})`) ;
+assert.equal(nodes.get('#admin-health-stale').hidden, false, 'ranking the answer does not hide the stale banner');
+assert.equal(nodes.get('#admin-snapshot-text').textContent, snapshotText, 'ranking the answer does not clear the pinned snapshot line');
+assert.equal(nodes.get('#admin-health-empty').hidden, false);
+assert.match(nodes.get('#admin-health-empty').textContent, /Покрытие фильмов неполное/);
+assert.equal(attrs.get('#admin-health-empty:data-verdict'), 'scoped');
+assert.doesNotMatch(nodes.get('#admin-health-empty').textContent, /В пределах проверенного всё хорошо/);
+run(`renderAdminHealth({health:{now:'2026-11-02T21:00:00.000Z',published:{programmeRunId:'11111111-1111-4111-8111-111111111111'},scope:{coverage:{films:'complete'},subjects:{films:2}},subsystems:{metadata:{status:'unknown',evidence:'not_supplied'}},groups:[]},sources:{}})`) ;
+assert.match(nodes.get('#admin-health-summary').innerHTML, /Недостаточно данных<\/b> — 1 подсистема/);
+assert.match(nodes.get('#admin-health-empty').textContent, /неизвестным, а не здоровым/);
+assert.equal(attrs.get('#admin-health-empty:data-verdict'), 'unknown');
+run(`renderAdminHealth({health:{now:'2026-11-02T21:00:00.000Z',published:{programmeRunId:'11111111-1111-4111-8111-111111111111'},scope:{coverage:{films:'complete'},subjects:{films:2}},subsystems:{metadata:{status:'clear',evidence:'observed'}},groups:[]},sources:{}})`) ;
+assert.equal(nodes.get('#admin-health-empty').textContent, 'В пределах проверенного всё хорошо.');
+assert.equal(attrs.get('#admin-health-empty:data-verdict'), 'clear');
+const situation = run(`({
+  unknown: healthSituation({reason:'evidence_not_supplied',category:'incomplete',progress:{},freshness:{},evidence:{}}),
+  waiting: healthSituation({reason:'retry_waiting',category:'incomplete',progress:{waiting:1},freshness:{},evidence:{}}),
+  stale: healthSituation({reason:'metadata_stale',category:'stale',progress:{},freshness:{stale:1},evidence:{}}),
+  partial: healthSituation({reason:'metadata_partial',category:'incomplete',progress:{},freshness:{},evidence:{partial:1}}),
+})`);
+assert.equal(situation.unknown, 'неизвестно');
+assert.equal(situation.waiting, 'ожидание');
+assert.equal(situation.stale, 'устарело');
+assert.equal(situation.partial, 'частично');
+const links = run(`({
+  poster: healthNextStep({subsystem:'poster',action:{suggested:'bounded_action'}}),
+  archive: healthNextStep({subsystem:'letterboxd_archive',action:{suggested:'bounded_action'}}),
+  limb: healthNextStep({subsystem:'metadata',action:{suggested:'investigate'}}),
+  programme: healthNextStep({subsystem:'programme',action:{suggested:'investigate'}}),
+  queue: healthNextStep({subsystem:'prediction_queue',action:{suggested:'wait'}}),
+})`);
+assert.match(links.poster, /href="\/admin\/posters"/);
+assert.match(links.archive, /href="\/admin\/letterboxd"/);
+assert.match(links.limb, /href="\/admin\/limb\?subsystem=metadata"/);
+assert.doesNotMatch(links.programme, /href=/);
+assert.doesNotMatch(links.queue, /href=/);
+assert.doesNotMatch(links.poster + links.archive + links.limb, /<button/);
+nodes.get('#admin-health-stale').hidden = true;
 assert.equal(url().searchParams.get('view'), 'health', 'Escape does not leave the health view');
 assert.deepEqual(['1 подсистема', '3 подсистемы', '5 подсистем', '11 подсистем', '21 подсистема'], [1, 3, 5, 11, 21].map(count => run(`healthPlural(${count}, 'подсистема', 'подсистемы', 'подсистем')`)));
 

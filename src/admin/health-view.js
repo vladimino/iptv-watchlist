@@ -118,6 +118,27 @@ function healthSubsystemCard(name, entry, derived) {
   return `<div class="health-card health-card-${healthEscape(status)}" data-subsystem="${healthEscape(name)}"><span class="health-card-name">${healthEscape(HEALTH_SUBSYSTEM_TEXT[name] || name)}</span><span class="health-card-status">${healthEscape(HEALTH_STATUS_TEXT[status] || status)}</span><small>${healthEscape(evidence)}${entry.issues ? ` · проблем: ${entry.issues}` : ''}${healthEscape(worst)}</small>${note ? `<small class="health-card-note">${healthEscape(note)}</small>` : ''}</div>`;
 }
 
+const HEALTH_LIMB_SUBSYSTEMS = new Set(['identity', 'metadata', 'localization', 'fingerprint', 'prediction']);
+
+function healthSituation(group) {
+  if (group.reason === 'evidence_not_supplied' || group.reason === 'evidence_object_missing' || group.reason === 'progress_unknown') return 'неизвестно';
+  if ((group.freshness || {}).unknown || (group.progress || {}).unknown) return 'неизвестно';
+  if (group.reason === 'retry_waiting' || (group.progress || {}).waiting) return 'ожидание';
+  if (group.category === 'stale' || (group.freshness || {}).stale) return 'устарело';
+  if (group.reason === 'metadata_partial' || (group.evidence || {}).partial) return 'частично';
+  return '';
+}
+
+function healthNextStep(group) {
+  const suggested = healthEscape(HEALTH_ACTION_TEXT[group.action?.suggested] || group.action?.suggested || 'разобраться');
+  const links = [];
+  if (group.subsystem === 'poster') links.push('<a href="/admin/posters">Постеры</a>');
+  if (group.subsystem === 'letterboxd_archive') links.push('<a href="/admin/letterboxd">Архив Letterboxd</a>');
+  if (HEALTH_LIMB_SUBSYSTEMS.has(group.subsystem)) links.push(`<a href="/admin/limb?subsystem=${healthEscape(group.subsystem)}">Лимб</a>`);
+  const where = links.length ? ` Открыть: ${links.join(', ')}.` : '';
+  return `Следующий шаг: ${suggested}. Эта страница ничего не выполняет.${where}`;
+}
+
 function healthGroupRow(group, now) {
   const action = group.action || {};
   const eligibility = action.eligible === true ? 'готово' : action.eligible === false ? 'недоступно' : 'неизвестно';
@@ -131,31 +152,48 @@ function healthGroupRow(group, now) {
   const threshold = !group.threshold ? '' : group.threshold.unit === 'records' ? `порог ${group.threshold.code} = ${group.threshold.value} записей` : `порог ${group.threshold.code} = ${healthDuration(group.threshold.value)}`;
   const sample = (group.sample || []).map(id => healthSubjectLink(group.subjectKind, id)).join(', ');
   const more = group.issues > (group.sample || []).length ? ` и ещё ${group.issues - group.sample.length}` : '';
-  const navigation = group.subjectKind === 'film' ? 'Открыть фильм в каталоге по ссылке.' : group.subsystem === 'prediction_queue' ? 'Смотреть очередь прогнозов в диагностике предсказаний.' : group.subsystem === 'discovery' ? 'Смотреть статус discovery pipeline.' : group.subsystem === 'poster' ? '' : group.subsystem === 'letterboxd_archive' ? 'Импорт архива — отдельная owner-операция.' : '';
+  const situation = healthSituation(group);
+  const affected = group.affected ? `Затронуто: ${group.affected} (${HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind}).` : 'Затронуто записей: 0.';
   return `<li class="health-group health-group-${healthEscape(group.severity)}" data-group="${healthEscape(group.key)}">
-    <div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(HEALTH_CATEGORY_TEXT[group.category] || group.category)}</span><span class="health-group-count">${healthEscape(HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind)}: ${group.issues}${group.affected !== group.issues ? ` · затронуто: ${group.affected}` : ''}</span></div>
+    <div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(HEALTH_CATEGORY_TEXT[group.category] || group.category)}</span>${situation ? `<span class="health-situation">${healthEscape(situation)}</span>` : ''}<span class="health-group-count">${healthEscape(HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind)}: ${group.issues}</span></div>
     <p class="health-group-why">${healthEscape(HEALTH_REASON_TEXT[group.reason] || group.reason)}</p>
+    <p class="health-group-affected">${healthEscape(affected)}</p>
+    <p class="health-group-next">${healthNextStep(group)}</p>
+    <p class="health-group-subjects">${sample || '—'}${healthEscape(more)}</p>
+    <details class="health-tech"><summary>Технические подробности</summary>
     <dl class="health-group-facts">
       <div><dt>Доказательства</dt><dd>${healthEscape(evidence || '—')}${healthEscape(missing)}${healthEscape(anomalies)} · прочитано ${healthEscape(healthAge(group.observedAt?.latest, now))}</dd></div>
       <div><dt>Свежесть / прогресс</dt><dd>${healthEscape([freshness, progress].filter(Boolean).join(' · ') || '—')}${since ? ' · ' + healthEscape(since) : ''}${retry ? ' · ' + healthEscape(retry) : ''}${threshold ? ' · ' + healthEscape(threshold) : ''}</dd></div>
-      <div><dt>Действие</dt><dd><b>${healthEscape(HEALTH_ACTION_TEXT[action.suggested] || action.suggested)}</b>: ${healthEscape(HEALTH_ACTION_CODE_TEXT[action.code] || action.code)} · ${healthEscape(eligibility)} (${healthEscape(HEALTH_ELIGIBILITY_TEXT[action.reason] || action.reason)})${navigation ? ' · ' + healthEscape(navigation) : ''}${group.subsystem === 'poster' && group.subjectKind !== 'film' ? ' · <a href="/admin/posters">Постеры: покрытие и ручная дозагрузка</a> (здесь не запускается)' : ''}</dd></div>
-      <div><dt>Субъекты</dt><dd>${sample || '—'}${healthEscape(more)}</dd></div>
-    </dl>
+      <div><dt>Действие</dt><dd><b>${healthEscape(HEALTH_ACTION_TEXT[action.suggested] || action.suggested)}</b>: ${healthEscape(HEALTH_ACTION_CODE_TEXT[action.code] || action.code)} · ${healthEscape(eligibility)} (${healthEscape(HEALTH_ELIGIBILITY_TEXT[action.reason] || action.reason)})</dd></div>
+    </dl></details>
   </li>`;
 }
 
-function healthSummaryText(body) {
+function healthVerdictCounts(health) {
+  const counts = {attention: 0, clear: 0, unknown: 0, total: 0};
+  for (const entry of Object.values(health.subsystems || {})) {
+    counts.total++;
+    if (entry.status === 'unknown') counts.unknown++;
+    else if (entry.status === 'clear' || entry.status === 'clear_in_scope') counts.clear++;
+    else counts.attention++;
+  }
+  return counts;
+}
+
+function healthSummaryHtml(body) {
   const health = body.health || {};
-  const counts = health.counts?.bySeverity || {};
   const scope = health.scope || {};
-  const parts = [
-    `Оценка на ${healthDate(health.now)}`,
-    `поколение ${String(health.published?.programmeRunId || scope.programmeRunId || '—').slice(0, 8)}${health.published?.publishedAt ? ' от ' + healthDate(health.published.publishedAt) : ''}`,
-    `фильмов прочитано: ${scope.subjects?.films ?? '—'} (${scope.coverage?.films === 'complete' ? 'вся программа' : 'часть'})`,
-    `критично: ${counts.critical ?? 0}, внимание: ${counts.warning ?? 0}, сведений: ${counts.info ?? 0}`,
-  ];
-  if ((health.clock?.anomalies || []).length) parts.push('аномалии часов: ' + health.clock.anomalies.join(', '));
-  return parts.join(' · ') + '. Сводного балла нет: полнота, свежесть и прогресс показаны отдельно.';
+  const counts = healthVerdictCounts(health);
+  const films = scope.coverage?.films === 'complete' ? 'вся программа' : scope.coverage?.films === 'partial' ? 'часть программы' : 'покрытие не заявлено';
+  const anomalies = (health.clock?.anomalies || []).length ? ` Аномалии часов: ${health.clock.anomalies.join(', ')}.` : '';
+  const generation = String(health.published?.programmeRunId || scope.programmeRunId || '—').slice(0, 8);
+  const observed = counts.total - counts.unknown;
+  return [
+    `<p class="health-verdict health-verdict-attention"><b>Требует внимания</b> — ${healthEscape(healthPlural(counts.attention, 'подсистема', 'подсистемы', 'подсистем'))}.</p>`,
+    `<p class="health-verdict health-verdict-clear"><b>В пределах проверенного всё хорошо</b> — ${healthEscape(healthPlural(counts.clear, 'подсистема', 'подсистемы', 'подсистем'))}.</p>`,
+    `<p class="health-verdict health-verdict-unknown"><b>Недостаточно данных</b> — ${healthEscape(healthPlural(counts.unknown, 'подсистема', 'подсистемы', 'подсистем'))}.</p>`,
+    `<p class="health-verdict-meta">Оценка на ${healthEscape(healthDate(health.now))} · поколение ${healthEscape(generation)}${health.published?.publishedAt ? ' от ' + healthEscape(healthDate(health.published.publishedAt)) : ''} · покрытие: прочитано ${observed} из ${counts.total} подсистем · фильмов прочитано: ${scope.subjects?.films ?? '—'} (${healthEscape(films)}). Сводного балла нет.${healthEscape(anomalies)}</p>`,
+  ].join('');
 }
 
 function healthSourcesText(sources) {
@@ -171,18 +209,29 @@ function healthSourcesText(sources) {
 function renderAdminHealth(body) {
   const health = body.health || {};
   const now = health.now;
-  document.querySelector('#admin-health-summary').textContent = healthSummaryText(body);
+  document.querySelector('#admin-health-summary').innerHTML = healthSummaryHtml(body);
   document.querySelector('#admin-health-sources').textContent = 'Источники: ' + healthSourcesText(body.sources);
   const subsystems = document.querySelector('#admin-health-subsystems');
   subsystems.innerHTML = Object.entries(health.subsystems || {}).map(([name, entry]) => healthSubsystemCard(name, entry)).join('');
   const groups = health.groups || [];
   const list = document.querySelector('#admin-health-issues');
   const empty = document.querySelector('#admin-health-empty');
-  const unknown = Object.values(health.subsystems || {}).filter(entry => entry.status === 'unknown').length;
-  const actionable = groups.filter(group => group.reason !== 'evidence_not_supplied');
+  const counts = healthVerdictCounts(health);
+  const filmsComplete = health.scope?.coverage?.films === 'complete';
   list.innerHTML = groups.map(group => healthGroupRow(group, now)).join('');
-  empty.hidden = actionable.length > 0;
-  empty.textContent = actionable.length ? '' : unknown ? `Среди прочитанных подсистем проблем не найдено. Не прочитано и остаётся неизвестным, а не здоровым: ${healthPlural(unknown, 'подсистема', 'подсистемы', 'подсистем')}.` : 'Проблем не найдено во всех прочитанных подсистемах.';
+  empty.hidden = groups.length > 0;
+  if (groups.length) {
+    empty.textContent = '';
+    empty.setAttribute('data-verdict', '');
+  } else if (counts.unknown || !filmsComplete) {
+    empty.textContent = counts.unknown
+      ? `Недостаточно данных. Не прочитано и остаётся неизвестным, а не здоровым: ${healthPlural(counts.unknown, 'подсистема', 'подсистемы', 'подсистем')}.`
+      : 'В пределах прочитанного проблем нет. Покрытие фильмов неполное, это не вся программа.';
+    empty.setAttribute('data-verdict', counts.unknown ? 'unknown' : 'scoped');
+  } else {
+    empty.textContent = 'В пределах проверенного всё хорошо.';
+    empty.setAttribute('data-verdict', 'clear');
+  }
 }
 
 // The health view state: loading, error, stale and ready are distinct nodes; ready keeps the last answer on screen
