@@ -79,7 +79,7 @@ const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Date,Ma
  console:{...console,log:line=>{try{const entry=JSON.parse(String(line));if(entry.event==='epg_phase'){phase=entry.phase;record(entry.phase,entry.edge);}}catch{}}},
  fetch:async url=>String(url).includes('/diary/')?new Response(diaryHtml,{status:200}):String(url).startsWith('https://epg.invalid/')?new Response(epgBody,{status:200}):new Response('',{status:404})});
 let epgBody='';
-vm.runInContext(fs.readFileSync('dist/server/index.js','utf8').replace('export const DiscoveryContinuation=','globalThis.DiscoveryContinuation=').replace('export default','globalThis.worker='),ctx);
+vm.runInContext(fs.readFileSync('dist/server/index.js','utf8').replace(/export \{[^}]+\};/g,'').replace('export const DiscoveryContinuation=','globalThis.DiscoveryContinuation=').replace('export default','globalThis.worker='),ctx);
 
 async function one(index){
  const runId='profile-run-'+index;let {report,objects,watch}=buildStore(runId);

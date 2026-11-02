@@ -27,7 +27,7 @@ const context=vm.createContext({
   return new Response(JSON.stringify({results:{bindings:[]}}),{status:200,headers:{'content-type':'application/json'}});
  }
 });
-vm.runInContext(fs.readFileSync('dist/server/index.js','utf8').replace(/^export default \{/m,'globalThis.worker={').replace(/^export const /gm,'const ')+'\nglobalThis.api={parseFilm,metadataSync,runD1EnrichmentProjection,LifecycleReader,EnrichmentProjection,catalogReady,displayReady,TMDB_RETIREMENTS_KEY};',context);
+vm.runInContext(fs.readFileSync('dist/server/index.js','utf8').replace(/export \{[^}]+\};/g,'').replace(/^export default \{/m,'globalThis.worker={').replace(/^export const /gm,'const ')+'\nglobalThis.api={parseFilm,metadataSync,runD1EnrichmentProjection,LifecycleReader,EnrichmentProjection,catalogReady,displayReady,TMDB_RETIREMENTS_KEY};',context);
 const api=context.api;
 assert.equal(api.TMDB_RETIREMENTS_KEY,RETIREMENTS_KEY);
 const plain=value=>JSON.parse(JSON.stringify(value));

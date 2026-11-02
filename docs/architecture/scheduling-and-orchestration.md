@@ -2,7 +2,7 @@
 
 Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron. The Worker's one cron trigger runs only the D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md)), shown last in the diagram: it reads R2, writes only D1, and stays inert while `D1_ENRICHMENT_WRITE` is unset. The Worker exposes owner-only MCP tools that perform work only when invoked. Expected task behavior: [Scheduled Task contract](../reference/scheduled-tasks.md). Sources: [scheduling ADR](../adr/0005-external-chatgpt-tasks.md), [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP contract](../reference/api/mcp.md) and [prediction operations](../runbooks/prediction-operations.md).
 
-The sequences below are **independent scheduled or externally driven flows**, not a single sequential execution. They are split for legibility; each uses the same existing Worker, Access, R2 and D1 boundaries. External tasks and the cron expression do not change. The publication commit is D1 only when the published EPG marker is `d1` ([ADR 0079](../adr/0079-d1-authoritative-published-epg.md), Accepted); until that later activation it stays the R2 pointer. Discovery continuation writes stay R2. The changed label was [visually approved by the owner on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44).
+The sequences below are **independent scheduled or externally driven flows**, not a single sequential execution. They are split for legibility; each uses the same existing Worker, Access, R2 and D1 boundaries. External tasks and the cron expression do not change. The publication commit is D1 only when the published EPG marker is `d1` ([ADR 0079](../adr/0079-d1-authoritative-published-epg.md), Accepted); until that later activation it stays the R2 pointer. Discovery continuation writes stay R2. The changed label was [visually approved by the owner on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44). The workflow `opt` in the daily and hourly sequence is Proposed ([ADR 0082](../adr/0082-inert-discovery-workflow.md)) and is not part of that approval. While `DISCOVERY_EXECUTOR` is absent, the sequence stays the external tasks.
 
 ### Daily EPG and hourly discovery continuation
 
@@ -51,6 +51,9 @@ sequenceDiagram
             MCP->>EPG: One discovery chunk
             MCP-->>Hourly: continue / wait / stop
         end
+    end
+    opt DISCOVERY_EXECUTOR is workflow
+        Note over EPG,R2: Absent flag keeps the external path above. Workflow mode stores intent, runs no chunk in the request, and answers delegated or wait rather than complete while work remains. The binding has no schedule.
     end
 ```
 
