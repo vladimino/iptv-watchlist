@@ -13,6 +13,8 @@
 // that disagrees refuses before any put. It does not open D1. A PUT whose
 // response is lost is writeState unknown and is not retried. A HEAD that
 // fails before the PUT is not an uncertain write.
+// An unrecognized failure keeps reason failed and adds detail: the error name,
+// a short code or kind, and a message with hashes, film ids and credentials removed.
 // A generation that moves during the copy is read again (catch-up), not a permanent block.
 // --activate sets mode d1 only when that fence, the leases and the parity read-back still agree.
 // --revert repairs the mutable mirrors from D1, deletes a mutable mirror the
@@ -138,6 +140,33 @@ export async function readPredictionSnapshot(store){
 function leasesBusy(snapshot,now){
  return [snapshot.leases?.runner,snapshot.leases?.writer].some(lease=>lease&&Number(lease.expiresAt)>now);
 }
+const FAILURE_TOKEN=/^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
+export function publicFailureDetail(error){
+ if(!error||typeof error!=='object')return null;
+ const detail={name:FAILURE_TOKEN.test(error.name)?error.name:'Error'};
+ for(const key of ['code','kind','phase']){
+  if(typeof error[key]==='string'&&FAILURE_TOKEN.test(error[key]))detail[key]=error[key];
+ }
+ if(Number.isInteger(error.status)&&error.status>=100&&error.status<=599)detail.status=error.status;
+ const message=redactFailureText(error.message);
+ if(message)detail.message=message;
+ return detail;
+}
+function redactFailureText(value){
+ let text=String(value??'').replace(/\s+/g,' ').trim();
+ if(!text)return '';
+ text=text.replace(/https?:\/\/[^\s]+/g,match=>{
+  try{
+   const url=new URL(match);
+   return url.origin+url.pathname.replace(/\/films\/[^/]+/g,'/films/[id]').replace(/\/runs\/[^/]+/g,'/runs/[id]');
+  }catch{return '[url]';}
+ });
+ text=text.replace(/\b[0-9a-f]{32,}\b/gi,'[redacted]');
+ text=text.replace(/enrichment\/films\/[^/\s]+/g,'enrichment/films/[id]');
+ text=text.replace(/enrichment\/runs\/[^/\s]+/g,'enrichment/runs/[id]');
+ text=text.replace(/(bearer|token|secret|password|signature|access[_-]?key)\s*[:=]\s*\S+/gi,'$1=[redacted]');
+ return text.length>180?text.slice(0,180):text;
+}
 function domainError(error){
  if(error instanceof OperatorStop)return error;
  if(error?.kind==='write_uncertain')return Object.assign(new OperatorStop('write_uncertain',3),{kind:'write_uncertain',committedUnits:error.committedUnits});
@@ -150,7 +179,7 @@ function domainError(error){
  else if(code==='prediction_domain_body_missing'||code==='prediction_domain_body_mismatch'||code==='prediction_domain_unlinked')stop=new OperatorStop(code,3);
  else if(code==='prediction_domain_budget')stop=new OperatorStop('prediction_domain_budget',3);
  else if(code==='prediction_domain_unavailable'||code==='prediction_domain_not_ready')stop=new OperatorStop(code,3);
- else stop=new OperatorStop('failed',1);
+ else {stop=new OperatorStop('failed',1);stop.detail=publicFailureDetail(error);}
  if(error?.committedUnits!=null)stop.committedUnits=error.committedUnits;
  return stop;
 }
@@ -380,7 +409,7 @@ export async function runPredictionDomainProduction({argv=process.argv,env=proce
   return {exit:0,result:await revertDomain(db,bucket)};
  }catch(error){
   const stop=domainError(error);
-  return {exit:stop.exit,result:{reason:stop.reason,...writeOutcome(error,stop)}};
+  return {exit:stop.exit,result:{reason:stop.reason,...(stop.detail?{detail:stop.detail}:{}),...writeOutcome(error,stop)}};
  }
 }
 
@@ -388,9 +417,15 @@ const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).
 if(invoked){
  runPredictionDomainProduction().then(({exit,result})=>{
   process.stdout.write(JSON.stringify(result)+'\n');
-  if(exit===2)process.stderr.write('refuse: '+result.reason+'\n');
-  else if(exit===3)process.stderr.write('no-go: '+result.reason+'\n');
-  else if(exit!==0)process.stderr.write('error: '+result.reason+'\n');
+  const suffix=result.detail?.message?': '+result.detail.message:'';
+  if(exit===2)process.stderr.write('refuse: '+result.reason+suffix+'\n');
+  else if(exit===3)process.stderr.write('no-go: '+result.reason+suffix+'\n');
+  else if(exit!==0)process.stderr.write('error: '+result.reason+suffix+'\n');
   process.exit(exit);
- }).catch(()=>{process.stderr.write('error: failed\n');process.exit(1);});
+ }).catch(error=>{
+  const detail=publicFailureDetail(error);
+  process.stdout.write(JSON.stringify({reason:'failed',writes:false,writeState:'none',...(detail?{detail}:{})})+'\n');
+  process.stderr.write('error: failed'+(detail?.message?': '+detail.message:'')+'\n');
+  process.exit(1);
+ });
 }

@@ -581,6 +581,10 @@ assert.equal(headFailed.exit,1);
 assert.equal(headFailed.result.reason,'failed');
 assert.equal(headFailed.result.writes,false);
 assert.equal(headFailed.result.writeState,'none');
+assert.equal(headFailed.result.detail.name,'Error');
+assert.equal(headFailed.result.detail.phase,'before-put');
+assert.equal(headFailed.result.detail.message,'head down');
+assert.equal(headFailed.result.detail.stack,undefined);
 assert.equal(headOnly.objects.has('enrichment/films/old/fingerprints/'+fingerprintHash+'.json'),false);
 let headCalls=0;
 const headAfter=new MemoryBucket();
@@ -599,6 +603,37 @@ assert.equal(headPartial.result.writes,true);
 assert.equal(headPartial.result.writeState,'partial');
 assert.equal(headPartial.result.committedUnits,1);
 assert.equal(headCalls,2);
+const detailDb=migrated('0007_prediction_authority');
+const detailBucket=new MemoryBucket();
+const hiddenHash='a'.repeat(64);
+await put(detailBucket,'enrichment/films/film:tmdb:9/fingerprint.json',{fingerprintHash:'b'.repeat(64)});
+const rawDetailGet=detailBucket.get.bind(detailBucket);
+detailBucket.get=async key=>{
+ if(String(key).endsWith('/fingerprint.json')){
+  const error=new Error('parse enrichment/films/film:tmdb:9/fingerprint.json '+hiddenHash+' bearer token=supersecret https://user:pass@example.com/films/film:tmdb:9/fingerprint.json');
+  error.kind='network';
+  error.code='ECONNRESET';
+  error.details={body:'should not leak'};
+  throw error;
+ }
+ return rawDetailGet(key);
+};
+const detailed=await run(['--load','--confirm','load','--target','iptv'],detailDb,detailBucket);
+assert.equal(detailed.exit,1);
+assert.equal(detailed.result.reason,'failed');
+assert.equal(detailed.result.writes,false);
+assert.equal(detailed.result.writeState,'none');
+assert.equal(detailed.result.detail.name,'Error');
+assert.equal(detailed.result.detail.kind,'network');
+assert.equal(detailed.result.detail.code,'ECONNRESET');
+assert.equal(detailed.result.detail.details,undefined);
+assert.match(detailed.result.detail.message,/enrichment\/films\/\[id\]\/fingerprint\.json/);
+assert.match(detailed.result.detail.message,/https:\/\/example.com\/films\/\[id\]\/fingerprint\.json/);
+assert.doesNotMatch(detailed.result.detail.message,/film:tmdb:9/);
+assert.doesNotMatch(detailed.result.detail.message,/supersecret/);
+assert.doesNotMatch(detailed.result.detail.message,new RegExp(hiddenHash));
+assert.equal(one(detailDb,"SELECT writes FROM prediction_domain_authority"),'open');
+assert.equal(one(detailDb,'SELECT COUNT(*) FROM prediction_fingerprint'),0);
 function headerValue(headers,name){
  if(!headers)return undefined;
  if(typeof headers.get==='function')return headers.get(name);
