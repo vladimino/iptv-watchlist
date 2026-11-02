@@ -162,7 +162,11 @@ export async function completePredictionWrite(env,key,token){
 async function objectText(bucket,key){
  const object=await bucket.get(key);
  if(!object)return null;
- return object.text?await object.text():JSON.stringify(await object.json());
+ // The Worker binding has text() and json(). The production reader returns a body stream.
+ if(typeof object.text==='function')return object.text();
+ if(typeof object.json==='function')return JSON.stringify(await object.json());
+ if(object.body!=null)return new Response(object.body).text();
+ return null;
 }
 async function readBody(bucket,key){
  const text=await objectText(bucket,key);
