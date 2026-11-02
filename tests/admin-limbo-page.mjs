@@ -28,6 +28,13 @@ assert.match(html, /<a href="\/admin\/limb" aria-current="page">Лимб<\/a>/, 
 assert.match(html, /<title>Лимб данных<\/title>/);
 assert.match(html, /brand-sub">\/ лимб</);
 assert.match(html, /<h1>Лимб данных<\/h1>/);
+const limbHeading = html.indexOf('<h1>Лимб данных</h1>');
+const limbNav = html.indexOf('<nav class="admin-views"');
+const limbSnapshot = html.indexOf('id="limbo-snapshot"');
+const limbVerified = html.indexOf('class="obs-verified-open"');
+const limbFilters = html.indexOf('id="limbo-causes"');
+assert.ok(limbHeading >= 0 && limbHeading < limbNav && limbNav < limbSnapshot && limbSnapshot < limbVerified && limbVerified < limbFilters, 'the nav sits under the heading and the verified key sits below the snapshot');
+for (const id of ['verified-open-title', 'verified-key', 'verified-open', 'verified-open-hint', 'verified-panel']) assert.match(html, new RegExp(`id="${id}"`), id);
 assert.match(html, /<b>В лимбе ничего нет<\/b>/);
 assert.match(html, /action="\/admin\/limb"/);
 assert.doesNotMatch(html, /Лимбо|лимбо/);
