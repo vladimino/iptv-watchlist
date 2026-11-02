@@ -167,6 +167,23 @@ await put(missingBucket,'enrichment/films/solo/fingerprint.json',record);
 await put(missingBucket,'enrichment/films/solo/fingerprints/print-2.json',body);
 const imported=await run(['--load','--confirm','load','--target','iptv'],missing,missingBucket);
 assert.equal(imported.exit,0,JSON.stringify(imported.result));
+const streamedDb=migrated('0007_prediction_authority');
+const streamedSource=new MemoryBucket();
+await put(streamedSource,'enrichment/films/solo/fingerprint.json',record);
+await put(streamedSource,'enrichment/films/solo/fingerprints/print-2.json',body);
+const streamed={
+ async get(key){
+  const got=await streamedSource.get(key);
+  if(!got)return null;
+  return {body:new Response(await got.text()).body};
+ },
+ list:options=>streamedSource.list(options),
+};
+const streamedLoad=await run(['--load','--confirm','load','--target','iptv'],streamedDb,streamed);
+assert.equal(streamedLoad.exit,0,JSON.stringify(streamedLoad.result));
+assert.equal(streamedLoad.result.writes,true);
+assert.equal(one(streamedDb,'SELECT COUNT(*) FROM prediction_fingerprint'),1);
+assert.equal(one(streamedDb,"SELECT writes FROM prediction_domain_authority"),'held');
 const gap=migrated('0007_prediction_authority');
 const gapBucket=new MemoryBucket();
 await put(gapBucket,'enrichment/films/solo/fingerprint.json',record);
