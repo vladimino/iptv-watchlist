@@ -103,6 +103,8 @@ assert.equal(missingFingerprint.lane,'hot');
 assert.equal(missingFingerprint.eligibleNow,true);
 assert.equal(missingFingerprint.cause,'ready');
 assert.equal(missingFingerprint.fingerprint.presence,'not_recorded');
+assert.equal(missingFingerprint.fingerprint.evidence.status,'unknown');
+assert.equal(missingFingerprint.fingerprint.evidence.note,'declared_source_not_verified');
 assert.equal(missingFingerprint.prediction.presence,'not_recorded');
 assert.equal(missingFingerprint.retry.classification,'not_recorded');
 assert.equal(missingFingerprint.index,'not_recorded');
@@ -121,6 +123,9 @@ assert.equal(stale.retry.attempts,null);
 assert.equal(stale.retry.failedAt,null);
 assert.equal(stale.retry.lastRunId,null);
 assert.equal(stale.retry.retryAt,'2026-10-24T07:59:59.000Z');
+assert.equal(stale.fingerprint.evidence.status,'legacy');
+assert.equal(stale.fingerprint.evidence.note,'declared_source_not_verified');
+assert.equal(Object.hasOwn(stale.fingerprint.evidence,'claims'),false);
 
 const lost=snap({films:{'film-zz-lost':{status:'unavailable',fingerprint:null,predictions:null}}});
 const lostFilm=calls('predictionFilmDiagnostic',lost,'film-zz-lost',NOW);
@@ -128,6 +133,7 @@ assert.equal(lostFilm.lane,'none');
 assert.equal(lostFilm.eligibleNow,false);
 assert.equal(lostFilm.cause,'not_in_queue');
 assert.equal(lostFilm.fingerprint.presence,'unknown');
+assert.equal(lostFilm.fingerprint.evidence.status,'unknown');
 assert.equal(lostFilm.prediction.presence,'unknown');
 
 const invalidated=snap({films:{'film-zz-old':{status:'recorded',fingerprint:{...fingerprint,invalidatedAt:'2026-10-24T07:30:00.000Z'},predictions:{current:currentPrediction}}}});
