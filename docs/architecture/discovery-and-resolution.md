@@ -1,6 +1,6 @@
 # Discovery, scored resolution and verification gate
 
-The discovery ledger tracks **observations**, not canonical Film records. A high score is only a hypothesis until independent movie-detail verification and the current-generation fence pass. Sources: [scored resolution reference](../reference/domain/scored-resolution.md), [candidate variants](../reference/domain/candidate-discovery.md), [observation ADR](../adr/0007-persistent-discovery-evidence.md), [detail gate ADR](../adr/0010-scored-detail-verification.md), [scorer](../../src/domain/scored-resolution.js) and [gate](../../src/domain/resolution-acceptance.js).
+The discovery ledger tracks **observations**, not canonical Film records. Which executor runs the next chunk is a separate flag ([ADR 0082](../adr/0082-inert-discovery-workflow.md), Proposed) and does not change scoring, acceptance, or the decision written for an observation. A high score is only a hypothesis until independent movie-detail verification and the current-generation fence pass. Sources: [scored resolution reference](../reference/domain/scored-resolution.md), [candidate variants](../reference/domain/candidate-discovery.md), [observation ADR](../adr/0007-persistent-discovery-evidence.md), [detail gate ADR](../adr/0010-scored-detail-verification.md), [scorer](../../src/domain/scored-resolution.js) and [gate](../../src/domain/resolution-acceptance.js).
 
 ```mermaid
 flowchart TD

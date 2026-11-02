@@ -24,6 +24,8 @@ flowchart TB
         mcp -->|allowlisted tool call| sync
         mcp -->|allowlisted tool call| prediction
         sync -->|explicit step after EPG commit| discovery
+        workflow["Discovery Workflow class, no schedule"]
+        discovery -.->|only if DISCOVERY_EXECUTOR is workflow| workflow
     end
     store[("R2 BUCKET: iptv")]
     d1[("D1 DB: iptv, follows R2")]
@@ -41,10 +43,10 @@ flowchart TB
     classDef current fill:#edf8ef,stroke:#579266,color:#15361e
     classDef gated fill:#fff3de,stroke:#a56c2b,color:#42300e
     class store,d1 current
-    class projector gated
+    class projector,workflow gated
 ```
 
-The **one-chunk continuation** is executed inside the explicit step/request that asks for it. `DiscoveryContinuation` is an internal entrypoint, not an unauthenticated public endpoint, a second Worker, a cross-isolate guarantee, or a self-fetch with credentials. Only authorized operations invoke write handlers. Route names such as GET/status cannot universally be assumed read-only: consult [deployment safety notes](../runbooks/deployment.md).
+The **one-chunk continuation** is executed inside the explicit step or request that asks for it while `DISCOVERY_EXECUTOR` is absent. The Discovery Workflow class is loaded with the Worker and has no schedule, so a deploy does not create an instance ([ADR 0082](../adr/0082-inert-discovery-workflow.md), Proposed). Only an exact `workflow` value starts one, and then still one chunk per durable step. `DiscoveryContinuation` is an internal entrypoint, not an unauthenticated public endpoint, a second Worker, a cross-isolate guarantee, or a self-fetch with credentials. Only authorized operations invoke write handlers. Route names such as GET/status cannot universally be assumed read-only: consult [deployment safety notes](../runbooks/deployment.md).
 
 `wrangler.jsonc` binds `BUCKET` to R2 `iptv` and `DB` to the D1 database `iptv`. R2 stays authoritative for every existing page and writer. Pages read D1 only through the [D1 catalog views](../reference/api/d1-catalog.md) under `/api/d1/`, behind the same Access policy as the rest of `/api/`. The D1 data is the backfilled copy of R2 ([D1 backfill runbook](../runbooks/d1-backfill.md)).
 
