@@ -180,7 +180,7 @@ Two issues with one id describe one problem: the more severe is kept; on equal s
 
 ## Owner page vocabulary
 
-The page `/admin/health` renders this answer and does not re-evaluate it. «Требует внимания» is a subsystem `attention`. «В пределах проверенного всё хорошо» is `clear` or `clear_in_scope`. «Недостаточно данных» is `unknown`. On a group, неизвестно, частично, устарело and ожидание repeat `unknown`, partial evidence, `stale` and `waiting`; they do not add a status. An empty group list is the clear verdict only when no subsystem is `unknown` and film coverage is `complete`. The page does not turn these words into a score, and it does not change a threshold.
+The page `/admin/health` renders this answer and does not re-evaluate it. «Требует внимания» is a subsystem `attention`. «В пределах проверенного всё хорошо» is `clear` or `clear_in_scope`. «Недостаточно данных» is `unknown`. On a group, неизвестно, частично, устарело and ожидание repeat `unknown`, partial evidence, `stale` and `waiting`; they do not add a status. An empty group list is the clear verdict only when no subsystem is `unknown` and film coverage is `complete`. The page does not turn these words into a score, and it does not change a threshold. A source that was not supplied, or an evidence object that is absent, is not an affected count of zero; the page says that count is unknown. A counted zero is a count the snapshot observed.
 
 ## Boundaries
 

@@ -105,9 +105,8 @@ function healthCounts(map, texts) {
   return Object.entries(map || {}).filter(([, count]) => count > 0).map(([key, count]) => `${texts[key] || key}: ${count}`).join(', ');
 }
 
-function healthSubjectLink(kind, id) {
-  if (kind === 'film') return `<a href="${healthEscape('/admin?kind=film&id=' + encodeURIComponent(id))}" data-admin-kind="film" data-admin-id="${healthEscape(id)}">${healthEscape(id)}</a>`;
-  return `<span>${healthEscape(id)}</span>`;
+function healthFilmLink(id) {
+  return `<a href="${healthEscape('/admin?kind=film&id=' + encodeURIComponent(id))}" data-admin-kind="film" data-admin-id="${healthEscape(id)}">Открыть фильм</a>`;
 }
 
 function healthSubsystemCard(name, entry, derived) {
@@ -129,19 +128,36 @@ function healthSituation(group) {
   return '';
 }
 
+function healthReadyText(action) {
+  if (action.eligible === true) return 'готово, но эта страница действие не выполняет';
+  if (action.eligible === false) return 'сейчас недоступно';
+  return 'готовность неизвестна';
+}
+
 function healthNextStep(group) {
-  const suggested = healthEscape(HEALTH_ACTION_TEXT[group.action?.suggested] || group.action?.suggested || 'разобраться');
+  const action = group.action || {};
+  const concrete = healthEscape(HEALTH_ACTION_CODE_TEXT[action.code] || action.code || 'шаг не назван');
+  const verb = healthEscape(HEALTH_ACTION_TEXT[action.suggested] || action.suggested || 'разобраться');
+  const reason = healthEscape(HEALTH_ELIGIBILITY_TEXT[action.reason] || action.reason || 'причина не названа');
   const links = [];
   if (group.subsystem === 'poster') links.push('<a href="/admin/posters">Постеры</a>');
   if (group.subsystem === 'letterboxd_archive') links.push('<a href="/admin/letterboxd">Архив Letterboxd</a>');
   if (HEALTH_LIMB_SUBSYSTEMS.has(group.subsystem)) links.push(`<a href="/admin/limb?subsystem=${healthEscape(group.subsystem)}">Лимб</a>`);
-  const where = links.length ? ` Открыть: ${links.join(', ')}.` : '';
-  return `Следующий шаг: ${suggested}. Эта страница ничего не выполняет.${where}`;
+  const where = links.length ? ` Перейти можно сюда, это не запуск и не признак готовности: ${links.join(', ')}.` : '';
+  return `Следующий шаг: ${concrete}. ${verb}, ${healthReadyText(action)} (${reason}). Эта страница ничего не выполняет.${where}`;
+}
+
+function healthAffectedText(group) {
+  const evidence = group.evidence || {};
+  const observed = (evidence.complete || 0) + (evidence.partial || 0);
+  const gap = group.reason === 'evidence_not_supplied' || group.reason === 'evidence_object_missing' || (!observed && (evidence.missing || 0) > 0);
+  if (gap) return 'Неизвестно, сколько затронуто.';
+  const kind = HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind || 'запись';
+  return `Затронуто: ${group.affected || 0} (${kind}).`;
 }
 
 function healthGroupRow(group, now) {
   const action = group.action || {};
-  const eligibility = action.eligible === true ? 'готово' : action.eligible === false ? 'недоступно' : 'неизвестно';
   const evidence = healthCounts(group.evidence, {complete: 'полные', partial: 'частичные', missing: 'отсутствуют'});
   const missing = Object.keys(group.missing || {}).length ? ` · не хватает: ${Object.keys(group.missing).join(', ')}` : '';
   const anomalies = Object.keys(group.anomalies || {}).length ? ` · аномалии: ${Object.keys(group.anomalies).join(', ')}` : '';
@@ -150,21 +166,23 @@ function healthGroupRow(group, now) {
   const retry = group.retryAt?.earliest ? `ближайший повтор ${healthDate(group.retryAt.earliest)}` : '';
   const since = group.lastProgressAt?.earliest ? `самый старый прогресс ${healthAge(group.lastProgressAt.earliest, now)}` : 'прогресс без отметки времени';
   const threshold = !group.threshold ? '' : group.threshold.unit === 'records' ? `порог ${group.threshold.code} = ${group.threshold.value} записей` : `порог ${group.threshold.code} = ${healthDuration(group.threshold.value)}`;
-  const sample = (group.sample || []).map(id => healthSubjectLink(group.subjectKind, id)).join(', ');
   const more = group.issues > (group.sample || []).length ? ` и ещё ${group.issues - group.sample.length}` : '';
+  const filmLinks = group.subjectKind === 'film' ? (group.sample || []).map(healthFilmLink).join(', ') : '';
+  const rawSample = (group.sample || []).map(id => healthEscape(id)).join(', ');
   const situation = healthSituation(group);
-  const affected = group.affected ? `Затронуто: ${group.affected} (${HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind}).` : 'Затронуто записей: 0.';
+  const eligible = action.eligible === true ? 'true' : action.eligible === false ? 'false' : 'null';
   return `<li class="health-group health-group-${healthEscape(group.severity)}" data-group="${healthEscape(group.key)}">
     <div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(HEALTH_CATEGORY_TEXT[group.category] || group.category)}</span>${situation ? `<span class="health-situation">${healthEscape(situation)}</span>` : ''}<span class="health-group-count">${healthEscape(HEALTH_SUBJECT_TEXT[group.subjectKind] || group.subjectKind)}: ${group.issues}</span></div>
     <p class="health-group-why">${healthEscape(HEALTH_REASON_TEXT[group.reason] || group.reason)}</p>
-    <p class="health-group-affected">${healthEscape(affected)}</p>
+    <p class="health-group-affected">${healthEscape(healthAffectedText(group))}</p>
     <p class="health-group-next">${healthNextStep(group)}</p>
-    <p class="health-group-subjects">${sample || '—'}${healthEscape(more)}</p>
+    ${filmLinks ? `<p class="health-group-subjects">${filmLinks}${healthEscape(more)}</p>` : ''}
     <details class="health-tech"><summary>Технические подробности</summary>
     <dl class="health-group-facts">
       <div><dt>Доказательства</dt><dd>${healthEscape(evidence || '—')}${healthEscape(missing)}${healthEscape(anomalies)} · прочитано ${healthEscape(healthAge(group.observedAt?.latest, now))}</dd></div>
       <div><dt>Свежесть / прогресс</dt><dd>${healthEscape([freshness, progress].filter(Boolean).join(' · ') || '—')}${since ? ' · ' + healthEscape(since) : ''}${retry ? ' · ' + healthEscape(retry) : ''}${threshold ? ' · ' + healthEscape(threshold) : ''}</dd></div>
-      <div><dt>Действие</dt><dd><b>${healthEscape(HEALTH_ACTION_TEXT[action.suggested] || action.suggested)}</b>: ${healthEscape(HEALTH_ACTION_CODE_TEXT[action.code] || action.code)} · ${healthEscape(eligibility)} (${healthEscape(HEALTH_ELIGIBILITY_TEXT[action.reason] || action.reason)})</dd></div>
+      <div><dt>Действие</dt><dd>${healthEscape(action.suggested || '—')} · ${healthEscape(action.code || '—')} · eligible ${eligible} · ${healthEscape(action.reason || '—')}</dd></div>
+      <div><dt>Субъекты</dt><dd>${rawSample || '—'}${healthEscape(more)}</dd></div>
     </dl></details>
   </li>`;
 }
