@@ -118,6 +118,15 @@
 .limbo-apply,.limbo-reset{width:auto;margin:0}
 .limbo-total{font-weight:400;letter-spacing:0;color:#7f8a7e;font-size:14px}
 .limbo-item{cursor:default;min-width:0;max-width:100%}
+.limbo-queue{margin:0 0 16px;min-width:0}
+.limbo-queue h3{margin:0 0 4px;font-size:16px}
+.limbo-queue-hint{margin:0 0 8px;color:var(--muted);font-size:13px;line-height:1.45}
+.limbo-select{display:block;width:100%;margin:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;min-height:44px}
+.limbo-item:has(.limbo-select[aria-expanded="true"]){border-color:var(--lime)}
+.limbo-select .admin-badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.limbo-detail[hidden]{display:none}
+.limbo-result{margin:6px 0 0;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
+.limbo-verified{margin:18px 0 0}
 .limbo-reason,.limbo-next,.limbo-when{margin:6px 0 0;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
 .limbo-when{color:var(--muted);font-size:13px}
 .limbo-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 0;min-width:0;max-width:100%}

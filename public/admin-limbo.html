@@ -19,19 +19,11 @@
       <div>
         <p class="eyebrow">ВЛАДЕЛЕЦ · ЧТЕНИЕ И ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ</p>
         <h1>Лимб данных</h1>
-        <p class="admin-intro">Фильмы, по которым обработка не продвигается, и почему: ждут ли они по правилам, застряли или требуют ручного разбора. Чтение ничего не запускает и не меняет. Два действия выполняются только после явного подтверждения и никого не вызывают сами: вернуть одно терминальное наблюдение в обычную очередь резолвера, или подтвердить либо отклонить один id фильма у одного наблюдения. Проверенное совпадение, которого нет в списке ниже, открывается по точному ключу.</p>
+        <p class="admin-intro">Очередь из трёх групп: требует решения, ждёт обычный автоматический шаг, или состояние не удалось проверить. Выбор записи показывает, что произошло, какой шаг следующий и чем кончилось. Чтение ничего не запускает и не меняет. Два действия выполняются только после явного подтверждения, только когда разбор сам называет их допустимыми, и никого не вызывают сами: вернуть одно терминальное наблюдение в обычную очередь резолвера, или подтвердить либо отклонить один id фильма у одного наблюдения. Проверенное совпадение, которого нет в очереди, открывается точным ключом в техническом поиске под списком.</p>
       </div>
     </section>
     <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb" aria-current="page">Лимб</a><a href="/admin/posters">Постеры</a></nav>
     <p id="limbo-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="limbo-snapshot-text">Снимок ещё не прочитан.</span></p>
-    <section class="obs-verified-open" aria-labelledby="verified-open-title">
-      <h2 id="verified-open-title">Одно проверенное совпадение</h2>
-      <p class="muted">Ключ текущего наблюдения, которое резолвер уже записал как фильм. Чтение берёт одну строку индекса проверенных совпадений этого поколения и не просматривает реестр. Неполный или устаревший индекс ничего не записывает.</p>
-      <label class="obs-identity-option">Ключ наблюдения <input id="verified-key" type="text" maxlength="200" autocomplete="off" spellcheck="false"></label>
-      <button type="button" class="admin-more" id="verified-open">Открыть наблюдение</button>
-      <p id="verified-open-hint" class="obs-identity-hint" role="status"></p>
-      <section id="verified-panel" data-obs-recovery-slot="verified" aria-label="Разбор проверенного совпадения" hidden></section>
-    </section>
     <section aria-labelledby="limbo-filters-title" class="limbo-filters">
       <h2 id="limbo-filters-title">Фильтры</h2>
       <div id="limbo-causes" class="admin-queues" role="group" aria-label="Причина ожидания"></div>
@@ -49,11 +41,22 @@
     <div class="admin-layout limbo-layout">
       <section aria-labelledby="limbo-results-title">
         <h2 id="limbo-results-title">Записи <small id="limbo-total" class="limbo-total"></small></h2>
-        <p id="limbo-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b>В лимбе ничего нет</b><span id="limbo-empty-text">По этому фильтру в прочитанном снимке нет записей без прогресса.</span></p>
+        <p id="limbo-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b id="limbo-empty-title">По этому фильтру записей нет</b><span id="limbo-empty-text">В прочитанном снимке нет записей без прогресса, которые проходят фильтр. Подсистемы, которые эта страница не читает, от этого не становятся здоровыми.</span></p>
         <div id="limbo-results"></div>
       </section>
       <aside id="limbo-context" class="admin-card limbo-context" aria-labelledby="limbo-context-title"><h2 id="limbo-context-title">Контекст конвейера</h2><div id="limbo-context-body"><p class="muted">Контекст появится после чтения снимка.</p></div></aside>
     </div>
+    <details class="limbo-tech limbo-verified" id="limbo-verified">
+      <summary>Технический поиск проверенного совпадения</summary>
+      <section class="obs-verified-open" aria-labelledby="verified-open-title">
+        <h2 id="verified-open-title">Одно проверенное совпадение</h2>
+        <p class="muted">Ключ текущего наблюдения, которое резолвер уже записал как фильм. Чтение берёт одну строку индекса проверенных совпадений этого поколения и не просматривает реестр. Неполный или устаревший индекс ничего не записывает.</p>
+        <label class="obs-identity-option">Ключ наблюдения <input id="verified-key" type="text" maxlength="200" autocomplete="off" spellcheck="false"></label>
+        <button type="button" class="admin-more" id="verified-open">Открыть наблюдение</button>
+        <p id="verified-open-hint" class="obs-identity-hint" role="status"></p>
+        <section id="verified-panel" data-obs-recovery-slot="verified" aria-label="Разбор проверенного совпадения" hidden></section>
+      </section>
+    </details>
   </main>
   <script src="/admin-limbo.js"></script>
 </body>

@@ -102,14 +102,24 @@ const LIMBO_ERROR_TEXT = {
   method_not_allowed: 'Страница делает только GET-запросы.',
 };
 const LIMBO_DEBOUNCE_MS = 200;
+// Display groups over the existing causes. Not a new cause and not a filter the API understands.
+const LIMBO_QUEUES = ['owner', 'automatic', 'unverified'];
+const LIMBO_QUEUE_COPY = {
+  owner: {title: 'Требует моего решения', hint: 'Само это не продолжится. Кнопка записи есть только в разборе и только когда он сам называет действие допустимым: заранее видно, что сейчас и что станет.'},
+  automatic: {title: 'Ожидает автоматическую обработку', hint: 'Следующий обычный шаг уже назначен или запись стоит в очереди. Эта страница его не запускает.'},
+  unverified: {title: 'Не удалось проверить', hint: 'По этим записям нельзя сказать, что они в порядке. Пустая подробность не означает, что всё хорошо.'},
+};
 const LIMBO_RECOVERY_SUBSYSTEMS = ['prediction', 'fingerprint'];
 const LIMBO_RECOVERY_FILM_ID = /^[A-Za-z0-9_-]{1,80}$/;
 
-const limboLive = {pin: null, snapshot: null, counts: null, seq: 0, controller: null, timer: null, pending: null, stale: false, next: null, state: null};
+const limboLive = {pin: null, snapshot: null, counts: null, seq: 0, controller: null, timer: null, pending: null, stale: false, next: null, state: null, selected: null};
 // One entry per rendered «Разобрать прогноз» panel: the stored film id it reads, whether it is open, the pin of its last
 // answer and a sequence number so that an older answer never replaces a newer one.
 const limboRecovery = new Map();
 let limboRecoveryNext = 0;
+let limboDetailNext = 0;
+// Select tokens stay numeric so an observation key never appears on the card face. The map is rebuilt with each render.
+const limboSelect = new Map();
 // One entry per rendered «Разобрать наблюдение» panel: the observation key, its last answer and pin, and the owner's
 // progress through the guarded action (the checkbox, the server-issued confirmation, the receipt).
 const obsRecovery = new Map();
@@ -287,6 +297,54 @@ function limboTechHtml(item) {
   return `<details class="limbo-tech"><summary>Технические подробности</summary><dl class="limbo-facts">${body}</dl></details>`;
 }
 
+function limboQueueId(item) {
+  if (item.cause === 'manual_review' || item.cause === 'external_archive' || item.cause === 'stalled') return 'owner';
+  if (item.cause === 'retry_eligible' || item.cause === 'backoff' || item.cause === 'pending') return 'automatic';
+  return 'unverified';
+}
+
+// What this page can honestly say about the outcome. A missing result is not a success, and a raw code stays in the technical block.
+function limboResultLine(item) {
+  const evidence = item.evidence || {};
+  const terminal = item.diagnostics && item.diagnostics.terminalReason;
+  if (item.cause === 'unknown' || evidence.completeness === 'missing' || evidence.completeness === 'partial' || item.progress?.status === 'unknown') return 'Результат не подтверждён: данных недостаточно, чтобы назвать исход. Это не значит, что всё в порядке.';
+  if (item.cause === 'stale_projection') return 'Результат текущего поколения не подтверждён: запись относится к другому снимку. Действие с этой страницы не выполняется.';
+  if (item.reason === 'terminal_without_resolution') {
+    const exhausted = terminal === 'no_more_evidence' ? ' Автоматические попытки на тех же данных исчерпаны.' : '';
+    return 'Итог конвейера — остановка без распознанного фильма.' + exhausted + ' Запись с карточки не делается, пока разбор сам не предложит действие.';
+  }
+  if (item.reason === 'identity_conflict' || item.reason === 'identity_ambiguous') return 'Итог автоматической сверки — столкновение или неоднозначность идентичности. Кнопка записи появится в разборе только если действие допустимо, и заранее покажет, что было и что станет.';
+  if (item.cause === 'backoff' || item.cause === 'pending' || item.cause === 'retry_eligible') return 'Итога ещё нет: запись ждёт обычный шаг. Эта страница его не запускает и ничего не записывает.';
+  if (item.cause === 'stalled') return 'Обычный шаг не назначен. Результата нет, и эта страница его не создаёт.';
+  if (item.cause === 'manual_review' || item.cause === 'external_archive') return 'Автоматического итога нет. Действие на странице — только то, которое разбор явно предлагает, с подтверждением.';
+  return 'Итог этой страницей не записывается.';
+}
+
+function limboObservationGap(observations) {
+  if (!observations) return 'unread';
+  if (observations.available === false) return 'unavailable';
+  if (observations.state === 'stale') return 'stale';
+  const omitted = observations.omitted || {};
+  const cut = (Number(omitted.cap) || 0) + (Number(omitted.oversized) || 0) + (Number(omitted.malformed) || 0);
+  if (observations.complete === false || cut > 0 || (Number(observations.awaitingFirstLookup) || 0) > 0) return 'partial';
+  return null;
+}
+
+function limboEmptyCopy(view, state) {
+  const observations = view.coverage && view.coverage.observations;
+  const gap = state.kind === 'film' ? null : limboObservationGap(observations);
+  if (gap === 'unavailable') return {title: 'Нельзя подтвердить, что записей нет', text: 'Индекс наблюдений не прочитан: ' + (LIMBO_OBSERVATION_UNAVAILABLE[observations.reason] || 'причина не названа') + '. Пустой список не означает, что нерешённых наблюдений нет.'};
+  if (gap === 'stale') return {title: 'Нельзя подтвердить, что записей нет', text: 'Индекс наблюдений устарел: карта решений или реестр изменились после его записи. Пустой список относится к моменту записи и не подтверждает отсутствие записей.'};
+  if (gap === 'partial') return {title: 'Нельзя подтвердить, что записей нет', text: 'Индекс наблюдений частичный. Записи, которые в него не вошли, здесь не видны, и их отсутствие не подтверждено.'};
+  if (gap === 'unread') return {title: 'Нельзя подтвердить, что записей нет', text: 'Покрытие наблюдений этим чтением не получено. Пустой список не означает, что нерешённых наблюдений нет.'};
+  return {title: 'По этому фильтру записей нет', text: 'В прочитанном снимке нет записей без прогресса, которые проходят фильтр. Подсистемы, которые эта страница не читает, от этого не становятся здоровыми.'};
+}
+
+function limboEmptyHtml(view, state) {
+  const copy = limboEmptyCopy(view, state);
+  return `<span aria-hidden="true">∅</span><b id="limbo-empty-title">${limboEscape(copy.title)}</b><span id="limbo-empty-text">${limboEscape(copy.text)}</span>`;
+}
+
 function limboItemHtml(item) {
   const film = item.film;
   const title = film?.title || (item.kind === 'observation' ? item.observation?.title || 'Наблюдение без названия' : film?.storedId || 'Фильм без названия');
@@ -314,7 +372,29 @@ function limboItemHtml(item) {
     links.push(`<button type="button" class="admin-more limbo-recovery-open" data-obs-recovery="${slot}" aria-expanded="false" aria-controls="obs-recovery-${slot}">Разобрать наблюдение</button>`);
     recovery = `<section class="limbo-recovery" id="obs-recovery-${slot}" data-obs-recovery-slot="${slot}" aria-label="Разбор наблюдения" hidden></section>`;
   }
-  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}"><span class="admin-hit-title">${limboEscape(title)}</span>${meta ? `<span class="admin-hit-meta">${limboEscape(meta)}</span>` : ''}<span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || 'Состояние не распознано')}</span>${reason ? `<p class="limbo-reason">${limboEscape(reason)}</p>` : ''}<p class="limbo-next">${limboEscape(limboNextLine(item))}</p>${when ? `<p class="limbo-when">${limboEscape(when)}</p>` : ''}${links.length ? `<div class="limbo-actions">${links.join('')}</div>` : ''}${recovery}${limboTechHtml(item)}</article>`;
+  const selected = item.id === limboLive.selected;
+  const selectToken = String(++limboDetailNext);
+  limboSelect.set(selectToken, item.id);
+  const detailId = 'limbo-detail-' + selectToken;
+  const face = `<button type="button" class="limbo-select" data-limbo-select="${selectToken}" aria-expanded="${selected ? 'true' : 'false'}" aria-controls="${detailId}"><span class="admin-hit-title">${limboEscape(title)}</span>${meta ? `<span class="admin-hit-meta">${limboEscape(meta)}</span>` : ''}<span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || 'Состояние не распознано')}</span></button>`;
+  const detail = `<div class="limbo-detail" id="${detailId}"${selected ? '' : ' hidden'}>${reason ? `<p class="limbo-reason">${limboEscape(reason)}</p>` : ''}<p class="limbo-next">${limboEscape(limboNextLine(item))}</p>${when ? `<p class="limbo-when">${limboEscape(when)}</p>` : ''}<p class="limbo-result">${limboEscape(limboResultLine(item))}</p>${links.length ? `<div class="limbo-actions">${links.join('')}</div>` : ''}${recovery}${limboTechHtml(item)}</div>`;
+  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}">${face}${detail}</article>`;
+}
+
+function limboResultsHtml(items) {
+  const groups = new Map(LIMBO_QUEUES.map(id => [id, []]));
+  for (const item of items) groups.get(limboQueueId(item)).push(item);
+  return LIMBO_QUEUES.filter(id => groups.get(id).length).map(id => {
+    const copy = LIMBO_QUEUE_COPY[id];
+    return `<section class="limbo-queue" data-limbo-queue="${id}" aria-label="${limboEscape(copy.title)}"><h3>${limboEscape(copy.title)}</h3><p class="limbo-queue-hint">${limboEscape(copy.hint)}</p>${groups.get(id).map(limboItemHtml).join('')}</section>`;
+  }).join('');
+}
+
+function limboQueueNotice(view, state) {
+  if (!state || state.kind === 'film') return '';
+  const observations = view.coverage && view.coverage.observations;
+  if (!observations || !limboObservationGap(observations)) return '';
+  return limboObservationText(observations, view.coverage.observationsObserved);
 }
 
 // A film item of the fingerprint or prediction subsystem with a stored id can be explained by the recovery assessment.
@@ -677,7 +757,15 @@ function limboShow(view, state) {
   empty.hidden = view.items.length > 0;
   limboRecovery.clear();
   obsRecovery.clear();
-  results.innerHTML = view.items.map(limboItemHtml).join('') + (view.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : '');
+  limboSelect.clear();
+  if (!view.items.length) {
+    limboLive.selected = null;
+    results.innerHTML = '';
+    empty.innerHTML = limboEmptyHtml(view, state);
+  } else {
+    if (!view.items.some(item => item.id === limboLive.selected)) limboLive.selected = view.items[0].id;
+    results.innerHTML = limboQueueNotice(view, state) + limboResultsHtml(view.items) + (view.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : '');
+  }
   document.querySelector('#limbo-context-body').innerHTML = limboContextHtml(view);
 }
 
@@ -755,7 +843,7 @@ function onLimboMore() {
     limboLive.next = page.nextCursor;
     const results = document.querySelector('#limbo-results');
     if (button) button.remove();
-    results.insertAdjacentHTML('beforeend', page.items.map(limboItemHtml).join('') + (page.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : ''));
+    results.insertAdjacentHTML('beforeend', limboResultsHtml(page.items) + (page.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : ''));
     return page;
   });
   limboLive.pending = pending;
@@ -812,6 +900,35 @@ function onVerifiedOpen() {
   return obsRecoveryLoad('verified');
 }
 
+function onLimboSelect(token) {
+  const id = limboSelect.get(token) || token;
+  if (!id || id === limboLive.selected) return;
+  limboLive.selected = id;
+  const results = document.querySelector('#limbo-results');
+  if (!results || typeof results.querySelectorAll !== 'function') return;
+  for (const article of results.querySelectorAll('[data-limbo-item]')) {
+    const current = article.getAttribute('data-limbo-item') === id;
+    const button = typeof article.querySelector === 'function' ? article.querySelector('[data-limbo-select]') : null;
+    if (button) button.setAttribute('aria-expanded', current ? 'true' : 'false');
+    const detail = typeof article.querySelector === 'function' ? article.querySelector('.limbo-detail') : null;
+    if (detail) detail.hidden = !current;
+  }
+}
+
+function onLimboSelectKey(event) {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return;
+  const results = document.querySelector('#limbo-results');
+  if (!results || typeof results.querySelectorAll !== 'function') return;
+  const buttons = [...results.querySelectorAll('[data-limbo-select]')];
+  if (!buttons.length) return;
+  const current = buttons.findIndex(button => button === document.activeElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : event.key === 'ArrowDown' ? Math.min(buttons.length - 1, current < 0 ? 0 : current + 1) : Math.max(0, current < 0 ? 0 : current - 1);
+  if (next === current) return;
+  event.preventDefault();
+  buttons[next].focus();
+  onLimboSelect(buttons[next].getAttribute('data-limbo-select'));
+}
+
 function onLimboResult(event) {
   const closest = selector => event.target.closest ? event.target.closest(selector) : null;
   const open = closest('[data-limbo-recovery]');
@@ -863,9 +980,15 @@ function onLimboResult(event) {
     return panel ? limboRecoveryLoad(panel.getAttribute('data-limbo-recovery-slot')) : null;
   }
   const more = closest('[data-limbo-more]');
-  if (!more) return;
+  if (more) {
+    event.preventDefault();
+    onLimboMore();
+    return;
+  }
+  const select = closest('[data-limbo-select]');
+  if (!select) return;
   event.preventDefault();
-  onLimboMore();
+  onLimboSelect(select.getAttribute('data-limbo-select'));
 }
 
 function onLimboResultChange(event) {
@@ -897,6 +1020,7 @@ function startLimbo() {
   document.querySelector('#limbo-causes').addEventListener('click', onLimboChip);
   document.querySelector('#limbo-subsystems').addEventListener('click', onLimboChip);
   document.querySelector('#limbo-results').addEventListener('click', onLimboResult);
+  document.querySelector('#limbo-results').addEventListener('keydown', onLimboSelectKey);
   document.querySelector('#limbo-results').addEventListener('change', onLimboResultChange);
   document.querySelector('#limbo-results').addEventListener('input', onLimboResultChange);
   document.querySelector('#verified-open').addEventListener('click', onVerifiedOpen);
