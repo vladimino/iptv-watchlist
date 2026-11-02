@@ -4,7 +4,7 @@
 **Original decision date:** 2026-11-02  
 **Recorded at:** 2026-11-02  
 **Approval source:** not an owner acceptance. Card approval of [AIR-323](https://trello.com/c/SrWM43h0) authorizes the implementation and an ordinary deploy, not acceptance of this record and not a production cutover  
-**Related work:** [AIR-323](https://trello.com/c/SrWM43h0); switch successor [AIR-324](https://trello.com/c/kNtaEbm8)  
+**Related work:** [AIR-323](https://trello.com/c/SrWM43h0); switch successor [AIR-324](https://trello.com/c/kNtaEbm8); flag removal [AIR-325](https://trello.com/c/Q416Mx7v) after AIR-324  
 **Supersedes:** [ADR 0005](0005-external-chatgpt-tasks.md) and [ADR 0006](0006-one-chunk-discovery.md) in part, only while `DISCOVERY_EXECUTOR=workflow`  
 **Superseded by:** None
 
@@ -16,7 +16,7 @@ The scored resolver, checkpoints, leases, the published generation and the TMDB 
 
 ## Decision
 
-1. **The flag.** `DISCOVERY_EXECUTOR` is `external` when absent, null or `''`. The exact string `workflow` selects the Workflow executor. Any other string, including case or whitespace differences, is `invalid`. Invalid does not trim and does not run a chunk: a continuation or resolve answers `503 discovery_executor_invalid`. An EPG commit still publishes and may queue its intent. The variable is not in `wrangler.jsonc` `vars`. `keep_vars: true` means a deploy does not set or clear it. Removing the variable is a later card after [AIR-324](https://trello.com/c/kNtaEbm8) has switched it and been accepted. This record does not create that card.
+1. **The flag.** `DISCOVERY_EXECUTOR` is `external` when absent, null or `''`. The exact string `workflow` selects the Workflow executor. Any other string, including case or whitespace differences, is `invalid`. Invalid does not trim and does not run a chunk: a continuation or resolve answers `503 discovery_executor_invalid`. An EPG commit still publishes and may queue its intent. The variable is not in `wrangler.jsonc` `vars`. `keep_vars: true` means a deploy does not set or clear it. Removing the variable is [AIR-325](https://trello.com/c/Q416Mx7v), and only after [AIR-324](https://trello.com/c/kNtaEbm8) has switched it and been accepted. This record does not authorize that removal.
 2. **External mode is today's contract.** `continuationDecision` is unchanged. A future `chunk_budget`, backoff, `retryAt` or error still waits. The hourly task still opens at most one series of 12 chunks and then waits for the hour. Scheduled Task prompts and their enabled state are not edited.
 3. **Workflow mode does not run a chunk in the request.** The EPG commit and the scan still queue the same fenced intent. `epg_sync_step` on a completed run, and `POST /api/enrichment/discovery/resolve`, do not call `advanceDiscovery`. If the stored contract is already `stop`, the response says so and `delegated` is false. Otherwise the response is `nextAction: wait`, `reason: delegated`, `delegated: true`. `delegated` is not written into the continuation record. The commit-tail resume path still copies the generation and queues discovery; it does not start a chunk, and it is not blocked by the executor.
 4. **One chunk per durable step.** The Workflow calls the existing `advanceDiscovery` inside one `step.do`. It does not loop inside a Worker isolate, does not chain `waitUntil`, does not fetch itself, and does not bypass Access. A step that may have committed does not throw, because the platform would retry it and run another chunk. An unsaved checkpoint is not reported as progress.
@@ -34,7 +34,7 @@ Keeping the hourly ChatGPT loop and raising its chunk cap was rejected: the cap 
 
 ## Consequences
 
-With the flag absent, operators see the same Daily EPG and hourly Stage A as before. The Worker script exports a Workflow class that does not run. When the flag is later set to `workflow`, the external client receives `delegated` and stops driving chunks, and the Workflow continues the same resolver. A code rollback with the variable absent returns to external mode. Instances and R2 objects already written are not deleted by that rollback. The flag is temporary. [AIR-324](https://trello.com/c/kNtaEbm8) is the switch. A removal card comes after that switch is accepted, not instead of this record.
+With the flag absent, operators see the same Daily EPG and hourly Stage A as before. The Worker script exports a Workflow class that does not run. When the flag is later set to `workflow`, the external client receives `delegated` and stops driving chunks, and the Workflow continues the same resolver. A code rollback with the variable absent returns to external mode. Instances and R2 objects already written are not deleted by that rollback. The flag is temporary. [AIR-324](https://trello.com/c/kNtaEbm8) is the switch. [AIR-325](https://trello.com/c/Q416Mx7v) is the removal card, and its prerequisite is AIR-324. This record does not remove the flag.
 
 ## Recovery and migration boundary
 
@@ -49,4 +49,4 @@ Accepting this record would approve the architecture only. It does not authorize
 
 ## Follow-ups
 
-[AIR-324](https://trello.com/c/kNtaEbm8) is the production switch. It is not authorized by this record. Discovery checkpoint ownership moving to D1 is AIR-320 and stays ahead of that switch. Flag removal is a card after AIR-324, not a card created here.
+[AIR-324](https://trello.com/c/kNtaEbm8) is the production switch. It is not authorized by this record. Discovery checkpoint ownership moving to D1 is AIR-320 and stays ahead of that switch. Flag removal is [AIR-325](https://trello.com/c/Q416Mx7v). Its prerequisite is AIR-324, and this record does not authorize that removal.
