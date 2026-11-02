@@ -68,7 +68,7 @@ Repeated conflicts across many hours are a finding for the owner. Look in the lo
 
 ## One film without a current prediction
 
-Open `/admin/limbo`, find the film among the prediction or fingerprint items and press «Разобрать прогноз» (or read `GET /api/admin/prediction-recovery?film=<storedId>`, [contract](../reference/api/admin.md#prediction-recovery-get-apiadminprediction-recovery)). The read writes nothing and starts nothing. There is no targeted retry or requeue of one film ([why](../reference/api/admin-actions.md#prediction-recovery)); act on the verdict instead:
+Open `/admin/limb`, find the film among the prediction or fingerprint items and press «Разобрать прогноз» (or read `GET /api/admin/prediction-recovery?film=<storedId>`, [contract](../reference/api/admin.md#prediction-recovery-get-apiadminprediction-recovery)). The read writes nothing and starts nothing. There is no targeted retry or requeue of one film ([why](../reference/api/admin-actions.md#prediction-recovery)); act on the verdict instead:
 
 | Verdict | What to do |
 | --- | --- |

@@ -187,7 +187,7 @@ Two issues with one id describe one problem: the more severe is kept; on equal s
 
 ## Limbo inventory
 
-`src/domain/limbo-inventory.js` is the per-subject view of one evaluation: the films and unresolved observations that are not progressing, each with the cause it is waiting on. It is pure as well and runs in the Worker as `LimboInventory`; the owner route `GET /api/admin/limbo` ([route contract](../api/admin.md#limbo-inventory)) feeds it and the page `/admin/limbo` shows it.
+`src/domain/limbo-inventory.js` is the per-subject view of one evaluation: the films and unresolved observations that are not progressing, each with the cause it is waiting on. It is pure as well and runs in the Worker as `LimboInventory`; the owner route `GET /api/admin/limbo` ([route contract](../api/admin.md#limbo-inventory)) feeds it and the page `/admin/limb` shows it.
 
 ```js
 limboItems(health, {films, observations}) -> [item]   // film and observation issues of identity, metadata, localization, fingerprint, prediction, in the result's order

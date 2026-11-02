@@ -1,4 +1,4 @@
-// The observation panel on /admin/limbo. The view: Russian copy for every verdict, gate reason, refusal and receipt state,
+// The observation panel on /admin/limb. The view: Russian copy for every verdict, gate reason, refusal and receipt state,
 // fail closed on an undeclared code, escaping, identifiers only inside the closed technical details, the action controls
 // only for an eligible preview. The page over the Worker bundle: an observation item opens its panel; the checkbox names
 // the exact observation and only enables «Подтвердить»; the server-issued confirmation, then one execution, then a fresh

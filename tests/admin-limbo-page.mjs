@@ -1,4 +1,4 @@
-// The /admin/limbo page on the live route: the page bundle runs against a DOM stand-in and its fetch goes to the Worker bundle
+// The /admin/limb page on the live route: the page bundle runs against a DOM stand-in and its fetch goes to the Worker bundle
 // over an R2 stand-in. Covers the filter state in the URL, history, pagination under the pin, and the states the owner must
 // tell apart: empty, error, stale snapshot, unavailable observations.
 import fs from 'node:fs';
@@ -23,8 +23,14 @@ for (const id of ['limbo-snapshot-text', 'limbo-causes', 'limbo-subsystems', 'li
 assert.ok(html.indexOf('id="limbo-causes"') < html.indexOf('id="limbo-results"'), 'filters come before results in tab order');
 assert.match(html, /<script src="\/admin-limbo\.js"><\/script>/);
 assert.match(html, /href="\/admin"/);
-assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limbo" id="admin-view-limbo">Лимбо<\/a>.*<\/nav>/, 'the admin sections link to the inventory');
-assert.match(html, /<a href="\/admin\/limbo" aria-current="page">Лимбо<\/a>/, 'the inventory is the current section on its own page');
+assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limb" id="admin-view-limbo">Лимб<\/a>.*<\/nav>/, 'the admin sections link to the inventory');
+assert.match(html, /<a href="\/admin\/limb" aria-current="page">Лимб<\/a>/, 'the inventory is the current section on its own page');
+assert.match(html, /<title>Лимб данных<\/title>/);
+assert.match(html, /brand-sub">\/ лимб</);
+assert.match(html, /<h1>Лимб данных<\/h1>/);
+assert.match(html, /<b>В лимбе ничего нет<\/b>/);
+assert.match(html, /action="\/admin\/limb"/);
+assert.doesNotMatch(html, /Лимбо|лимбо/);
 assert.doesNotMatch(html, /fetch\(|\/api\/|programme\.json/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
 assert.doesNotMatch(bundle, /\/api\/enrichment|\/api\/sync|\/mcp|localStorage|sessionStorage|Authorization|Bearer|method:\s*['"](?:PUT|PATCH|DELETE)/);
@@ -137,6 +143,11 @@ const results = nodes.get('#limbo-results'), empty = nodes.get('#limbo-empty'), 
 
 // 1. Deep link with a cause: one GET with the filter, the stalled film with why and since when, the context panel.
 await settle();
+assert.equal(url().pathname, '/admin/limb', 'the old page path is replaced once on boot');
+assert.equal(url().searchParams.get('cause'), 'stalled');
+const canonicalLimb = window.location.href;
+run('limboWrite(limboState(), "replace")');
+assert.equal(window.location.href, canonicalLimb, 'a second replace does not move the address');
 assert.deepEqual(requests.map(request => [request.method, request.path.split('?')[0], request.credentials]), [['GET', '/api/admin/limbo', 'same-origin']]);
 assert.match(requests[0].path, /cause=stalled/);
 assert.match(requests[0].path, /limit=25/);
@@ -260,4 +271,12 @@ assert.equal(prevented, true);
 assert.equal(url().search, '');
 
 assert.ok(requests.every(request => request.method === 'GET' && request.path.startsWith('/api/admin/limbo')), JSON.stringify(requests));
+window.location.href = 'http://127.0.0.1/admin/limbo?kind=film&subsystem=metadata&cause=backoff&age=3';
+run('limboWrite(limboState(), "replace")');
+assert.equal(url().pathname, '/admin/limb');
+assert.equal(url().search, '?kind=film&subsystem=metadata&cause=backoff&age=3');
+window.location.href = 'http://127.0.0.1/admin/limb?cause=stalled';
+run('limboWrite(limboState(), "replace")');
+assert.equal(url().pathname, '/admin/limb');
+assert.equal(url().searchParams.get('cause'), 'stalled');
 console.log('Admin limbo page: URL filters, history, pagination under the pin, empty, error, stale snapshot and keyboard passed');
