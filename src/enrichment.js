@@ -71,6 +71,9 @@ function tasteProfileEventFromCurrent(current){
 function sameCommittedPublication(current,body,profileHash){
  return !!current&&current.version===body.version&&current.profileHash===profileHash&&JSON.stringify(canonical(current.changeImpact??null))===JSON.stringify(canonical(body.changeImpact??null));
 }
+// Only a version body written by this publisher carries the marker. Historical current values do not, and a caller
+// cannot add it: the replay reads the stored version, never the request. D1 rebuilds current from that version body.
+function tasteProfileEventExpected(current){return current?.tasteProfileEventExpected===true;}
 // Records the event for a current record that is already committed. A missing object is created. An object already
 // stored for this version is left as it was. A write failure does not move current and does not throw.
 async function ensureTasteProfileEvent(env,current){
@@ -95,7 +98,7 @@ async function publishProfile(env,body){
  const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openProfile(env),stored=head?null:await env.BUCKET.get(profileKey),current=head?head.value:(stored?await stored.json():null),currentEtag=head?head.object?.etag||null:stored?.etag||null;
  const profileHash=await contentHash(body.profile);
  if(current&&body.version<=current.version){
-  if(body.dryRun!==true&&sameCommittedPublication(current,body,profileHash))await ensureTasteProfileEvent(env,current);
+  if(body.dryRun!==true&&tasteProfileEventExpected(current)&&sameCommittedPublication(current,body,profileHash))await ensureTasteProfileEvent(env,current);
   return json({error:'Version must increase',code:'version_not_increasing'},409);
  }
  const next={version:body.version,profileHash},impact=body.changeImpact??null;
@@ -107,7 +110,7 @@ async function publishProfile(env,body){
   if(!checked.ok)return json({error:'Invalid changeImpact',code:checked.code,changedFields,profileHash,declarationSha256},PROFILE_PUBLISH_STATUS[checked.code]||400);
  }else if(impact!=null)return json({error:'The first version has no predecessor',code:'from_mismatch',changedFields,profileHash},409);
  if(body.dryRun)return json({dryRun:true,valid:true,version:body.version,profileHash,changedFields,declarationSha256,from:current?{version:current.version,profileHash:current.profileHash}:null});
- const record={version:body.version,schemaVersion:1,updatedAt:new Date().toISOString(),profileHash,profile:body.profile,changeImpact:current?impact:null};
+ const record={version:body.version,schemaVersion:1,updatedAt:new Date().toISOString(),profileHash,profile:body.profile,changeImpact:current?impact:null,tasteProfileEventExpected:true};
  const versionKey=ENRICHMENT_KEY+'profile/versions/'+body.version+'.json';
  let saved=record;
  if(await env.BUCKET.put(versionKey,JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}})===null){
@@ -125,6 +128,7 @@ async function publishProfile(env,body){
  finally{if(routed.token&&settled)await PredictionD1.completePredictionWrite(env,profileKey,routed.token);}
  if(moved===null)return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);
  try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}
+ if(!tasteProfileEventExpected(value))return json(value);
  return publishedProfileResponse(value,await ensureTasteProfileEvent(env,value));
 }
 async function profileDeclarationHash(text){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');}
