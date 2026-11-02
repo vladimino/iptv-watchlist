@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['CANDIDATE_DISCOVERY','LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
+const REGISTERED=['LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -119,7 +119,6 @@ const exclusion=l('FINDS_TITLE_EXCLUSION');
 assert.deepEqual([exclusion.state,exclusion.raw,exclusion.retired,exclusion.valid,exclusion.issue,exclusion.effective],['set','on',true,false,'retired',null],'the retired Finds exclusion switch is inert and the production on is visible (ADR 0041)');
 const writer=l('PREDICTION_VERSION_OBJECTS');
 assert.deepEqual([writer.state,writer.raw,writer.retired,writer.valid,writer.issue,writer.effective],['set','on',true,false,'retired',null],'the retired prediction version writer switch is inert and the production on is visible (ADR 0045)');
-assert.equal(l('CANDIDATE_DISCOVERY').state,'absent');
 const posters=l('CATALOG_POSTER_HYDRATION');
 assert.deepEqual([posters.state,posters.raw,posters.retired,posters.valid,posters.issue,posters.effective],['set','off',true,false,'retired',null],'the retired poster hydration switch is inert and the production off is visible (ADR 0048)');
 const facts=l('LETTERBOXD_FACTS');
@@ -127,19 +126,19 @@ assert.deepEqual([facts.state,facts.raw,facts.retired,facts.valid,facts.issue,fa
 assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:12,absent:REGISTERED.length-12,invalid:11,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
-const leaky=await flags({CANDIDATE_DISCOVERY:'sk-'+SECRET,LETTERBOXD_FACTS:'On',LETTERBOXD_DIARY_HISTORY:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
+const leaky=await flags({D1_ENRICHMENT_WRITE:'sk-'+SECRET,LETTERBOXD_FACTS:'On',LETTERBOXD_DIARY_HISTORY:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
 assert.doesNotMatch(leaky.text,new RegExp(SECRET),'a value outside the known tokens never leaves the Worker');
 const k=name=>entry(leaky.report,name);
-assert.deepEqual([k('CANDIDATE_DISCOVERY').raw,k('CANDIDATE_DISCOVERY').redacted,k('CANDIDATE_DISCOVERY').shape,k('CANDIDATE_DISCOVERY').issue,k('CANDIDATE_DISCOVERY').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
+assert.deepEqual([k('D1_ENRICHMENT_WRITE').raw,k('D1_ENRICHMENT_WRITE').redacted,k('D1_ENRICHMENT_WRITE').shape,k('D1_ENRICHMENT_WRITE').issue,k('D1_ENRICHMENT_WRITE').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
 assert.deepEqual([k('LETTERBOXD_FACTS').raw,k('LETTERBOXD_FACTS').redacted,k('LETTERBOXD_FACTS').issue,k('LETTERBOXD_FACTS').effective],[null,true,'retired',null],'a near miss of a retired switch is redacted, not echoed');
 assert.deepEqual([k('LETTERBOXD_DIARY_HISTORY').raw,k('LETTERBOXD_DIARY_HISTORY').shape,k('LETTERBOXD_DIARY_HISTORY').issue,k('LETTERBOXD_DIARY_HISTORY').effective,k('LETTERBOXD_DIARY_HISTORY').retired],[null,{type:'object'},'retired',null,true],'a non-string on the retired diary switch is redacted and inert');
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
 assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective],['bounded ','case_or_whitespace','full'],'a padded known token is shown, and it is invalid where the code does not trim');
 assert.deepEqual([k('REMOVAL_RATING_LOOKUP').raw,k('REMOVAL_RATING_LOOKUP').shape,k('REMOVAL_RATING_LOOKUP').issue,k('REMOVAL_RATING_LOOKUP').effective,k('REMOVAL_RATING_LOOKUP').retired],[null,{type:'string',length:300},'retired',null,true],'an over-long value on the retired lookup switch is shape only and inert');
 assert.equal(leaky.report.summary.redacted,5);
-// The code trims CANDIDATE_DISCOVERY, so a padded on is known content, valid and on.
-const padded=entry((await flags({CANDIDATE_DISCOVERY:' on '})).report,'CANDIDATE_DISCOVERY');
-assert.deepEqual([padded.raw,padded.valid,padded.effective],[' on ',true,'on']);
+// No registered flag trims. A padded on is shown and is not the effective mode.
+const padded=entry((await flags({D1_ENRICHMENT_WRITE:' on '})).report,'D1_ENRICHMENT_WRITE');
+assert.deepEqual([padded.raw,padded.valid,padded.issue,padded.effective],[' on ',false,'case_or_whitespace','off']);
 
 // 4. Requirements on other flags.
 const unmet=await flags({LETTERBOXD_BASELINE_IMPORT:'on',PREDICTION_MATERIALIZATION:'on'});
@@ -152,7 +151,7 @@ assert.deepEqual(unmet.report.flags.filter(item=>item.requires).map(item=>item.n
 
 // 5. Parity: the effective mode is what each consumer computes, for every value shape.
 const consumer={
- CANDIDATE_DISCOVERY:'candidateDiscoveryMode(env)',LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
+ LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
  DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',
 };
 const samples=[undefined,'',' ','on','inline','separate',' separate','separate ','Separate','SEPARATE',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
@@ -161,13 +160,15 @@ for(const [name,expression] of Object.entries(consumer)){
  const compute=vm.runInContext('env=>'+expression,context);
  for(const value of samples){const environment={[name]:value};assert.equal(entry(reportOf(environment),name).effective,compute(environment),name+' = '+JSON.stringify(value));}
 }
-// The retired facts switch (ADR 0055), the retired ratings pipeline switch (ADR 0074) and the retired diary switch (ADR 0075) have no reader left.
+// The retired facts switch (ADR 0055), the retired ratings pipeline switch (ADR 0074), the retired diary switch (ADR 0075)
+// and the removed candidate-discovery switch (ADR 0082) have no reader left. The last one is not in the registry.
 for(const file of fs.readdirSync('src',{recursive:true}).filter(name=>name.endsWith('.js'))){
  const source=fs.readFileSync('src/'+file,'utf8');
  assert.doesNotMatch(source,/env\??\.LETTERBOXD_FACTS/,'src/'+file+' does not read LETTERBOXD_FACTS');
  assert.doesNotMatch(source,/env\??\.RATINGS_PIPELINE/,'src/'+file+' does not read RATINGS_PIPELINE');
  assert.doesNotMatch(source,/env\??\.LETTERBOXD_DIARY_HISTORY/,'src/'+file+' does not read LETTERBOXD_DIARY_HISTORY');
  assert.doesNotMatch(source,/env\??\.REMOVAL_RATING_LOOKUP/,'src/'+file+' does not read REMOVAL_RATING_LOOKUP');
+ assert.doesNotMatch(source,/CANDIDATE_DISCOVERY|candidateDiscoveryMode|candidateSearchVariants|collectVariantProposals/,'src/'+file+' does not read or plan candidate discovery');
 }
 for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),'LETTERBOXD_FACTS');assert.equal(item.effective,null);}
 for(const value of samples){const item=entry(reportOf({RATINGS_PIPELINE:value}),'RATINGS_PIPELINE');assert.equal(item.effective,null);assert.equal(item.retired,true);}

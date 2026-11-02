@@ -13,10 +13,11 @@ assert.match(verify([], {}, 'Documentation impact: docs/reference/api/mcp.md\nAr
 assert.match(verify([], {}, 'Documentation impact: docs/reference/api/mcp.md\nArchitecture impact: none - no contracts changed\nResearch evidence:').join(' '), /must declare "Research evidence/);
 // The template's guidance comment mentions the labels mid-line; only standalone lines count.
 assert.match(verify([], {}, '<!-- fill Documentation impact: paths -->\n- Architecture impact: `changed` or `none - reason`\nResearch evidence: no').join(' '), /must contain "Documentation impact/);
-assert.match(verify(['src/discovery.js'], {'src/discovery.js': '+const mode = env.CANDIDATE_DISCOVERY;'}).join(' '), /feature-flags/);
-assert.deepEqual(verify(['src/discovery.js','docs/reference/feature-flags.md'], {'src/discovery.js': '+const mode = env.CANDIDATE_DISCOVERY;'}), []);
-assert.deepEqual(verify(['tests/scorer.mjs'], {'tests/scorer.mjs': '+env.CANDIDATE_DISCOVERY = "on";'}), []);
-assert.deepEqual(verify(['src/discovery.js'], {'src/discovery.js': ' const mode = env.CANDIDATE_DISCOVERY;'}), []);
+assert.match(verify(['src/discovery.js'], {'src/discovery.js': '+const mode = env.LIFECYCLE_LOCALIZATION;'}).join(' '), /feature-flags/);
+assert.deepEqual(verify(['src/discovery.js','docs/reference/feature-flags.md'], {'src/discovery.js': '+const mode = env.LIFECYCLE_LOCALIZATION;'}), []);
+assert.deepEqual(verify(['tests/scorer.mjs'], {'tests/scorer.mjs': '+env.LIFECYCLE_LOCALIZATION = "on";'}), []);
+assert.deepEqual(verify(['src/discovery.js'], {'src/discovery.js': ' const mode = env.LIFECYCLE_LOCALIZATION;'}), []);
+assert.deepEqual(verify(['src/discovery.js'], {'src/discovery.js': '-function candidateDiscoveryMode(env){return env.CANDIDATE_DISCOVERY;}'}), [], 'a removed unregistered flag name does not force the flag page');
 assert.match(verify(['src/discovery.js'], {'src/discovery.js': "+const on = env.CATALOG_POSTER_HYDRATION==='on';"}).join(' '), /feature-flags/, 'the poster hydration flag is registered');
 assert.match(verify(['src/logic.js'], {}, base.replace('Research evidence: no','Research evidence: yes')).join(' '), /docs\/evidence/);
 assert.deepEqual(verify(['docs/evidence/example.md'],{},base.replace('Research evidence: no','Research evidence: yes')),[]);
