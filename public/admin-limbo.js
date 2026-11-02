@@ -103,11 +103,12 @@ const LIMBO_ERROR_TEXT = {
 };
 const LIMBO_DEBOUNCE_MS = 200;
 // Display groups over the existing causes. Not a new cause and not a filter the API understands.
-const LIMBO_QUEUES = ['owner', 'automatic', 'unverified'];
+const LIMBO_QUEUES = ['owner', 'stalled', 'automatic', 'unverified'];
 const LIMBO_QUEUE_COPY = {
-  owner: {title: 'Требует моего решения', hint: 'Само это не продолжится. Кнопка записи есть только в разборе и только когда он сам называет действие допустимым: заранее видно, что сейчас и что станет.'},
-  automatic: {title: 'Ожидает автоматическую обработку', hint: 'Следующий обычный шаг уже назначен или запись стоит в очереди. Эта страница его не запускает.'},
-  unverified: {title: 'Не удалось проверить', hint: 'По этим записям нельзя сказать, что они в порядке. Пустая подробность не означает, что всё хорошо.'},
+  owner: {title: 'Требует моего решения', hint: 'Дальше человек: конфликт, внешние данные или остановка, которую может снять разбор.'},
+  stalled: {title: 'Обычный шаг не назначен', hint: 'Прогресса нет, и повтор не стоит в расписании. Кнопки записи для этой причины нет.'},
+  automatic: {title: 'Ожидает автоматическую обработку', hint: 'Следующий обычный шаг уже назначен или запись стоит в очереди.'},
+  unverified: {title: 'Не удалось проверить', hint: 'По этим записям нельзя сказать, что они в порядке.'},
 };
 const LIMBO_RECOVERY_SUBSYSTEMS = ['prediction', 'fingerprint'];
 const LIMBO_RECOVERY_FILM_ID = /^[A-Za-z0-9_-]{1,80}$/;
@@ -201,6 +202,8 @@ function limboRenderFilters(state) {
   if (kind.value !== state.kind) kind.value = state.kind;
   const age = document.querySelector('#limbo-age');
   if (age.value !== state.age) age.value = state.age;
+  const tools = document.querySelector('#limbo-tools');
+  if (tools && (state.kind || state.subsystem || state.cause || state.age)) tools.open = true;
 }
 
 function limboBadge(tone, text) {
@@ -229,19 +232,27 @@ function limboReasonLine(item) {
 
 // Who moves next. A closed sentence, never the formal "разобраться · недопустимо (…)" combination and never a raw code.
 function limboNextLine(item) {
-  if (item.kind === 'observation' && (item.reason === 'identity_ambiguous' || item.reason === 'identity_conflict')) return 'Автоматическое исправление недоступно. Кнопка ниже только объясняет, почему.';
-  if (item.kind === 'observation' && item.reason === 'terminal_without_resolution') return 'Разбор ниже скажет, можно ли вернуть наблюдение в обычную очередь. Эта карточка ничего не записывает.';
+  if (item.kind === 'observation' && (item.reason === 'identity_ambiguous' || item.reason === 'identity_conflict')) return 'Дальше человек. Кнопка ниже объясняет, можно ли записать идентичность, и показывает, что сейчас и что станет.';
+  if (item.kind === 'observation' && item.reason === 'terminal_without_resolution') return 'Дальше человек, если разбор назовёт возврат в обычную очередь допустимым.';
   const lead = {
-    retry_eligible: 'Дальше обычный проход системы. Эта страница его не запускает.',
-    stalled: 'Повтор не назначен. Эта страница ничего не запускает.',
-    backoff: 'Ждать: повтор уже назначен и наступит сам.',
-    pending: 'Ждать: запись в очереди или недавно двигалась.',
-    manual_review: 'Нужен человек. Кнопка ниже только объясняет состояние и ничего не исправляет.',
-    stale_projection: 'Сначала перечитать снимок: данные другого поколения.',
-    external_archive: 'Нужны данные извне. Эта страница их не загружает.',
-    unknown: 'Состояние неизвестно. Это не значит, что всё в порядке.',
-  }[item.cause] || 'Дальше неизвестно. Подробности в технических данных.';
-  return limboRecoveryFilm(item) ? lead.replace(/\.$/, '') + '. Разбор прогноза только объясняет, запуск отсюда не делается.' : lead;
+    retry_eligible: 'Дальше обычный проход системы.',
+    stalled: 'Дальше никто не назначен.',
+    backoff: 'Дальше система, в уже назначенное время.',
+    pending: 'Дальше система: запись в очереди или недавно двигалась.',
+    manual_review: 'Дальше человек.',
+    stale_projection: 'Дальше перечитать снимок: данные другого поколения.',
+    external_archive: 'Дальше данные извне.',
+    unknown: 'Кто действует, по этим данным не назвать. Это не значит, что всё в порядке.',
+  }[item.cause] || 'Кто действует, по этим данным не назвать.';
+  return limboRecoveryFilm(item) ? lead.replace(/\.$/, '') + '. Разбор прогноза объясняет состояние.' : lead;
+}
+
+// Whether this list already knows an owner write is offered. It does not invent one and does not call it success.
+function limboOfferLine(item) {
+  const eligible = item.action && item.action.eligible;
+  if (eligible === true) return 'Действие для этой записи допустимо. Кнопка ниже открывает его и просит подтверждение.';
+  if (eligible === false) return 'Кнопки записи для этой записи нет.';
+  return 'Допустимость действия этим списком не подтверждена. Это не разрешение что-то записать.';
 }
 
 // The clock facts that change a decision: a scheduled retry, and how long the record has stood still. Empty states stay out.
@@ -298,7 +309,8 @@ function limboTechHtml(item) {
 }
 
 function limboQueueId(item) {
-  if (item.cause === 'manual_review' || item.cause === 'external_archive' || item.cause === 'stalled') return 'owner';
+  if (item.cause === 'manual_review' || item.cause === 'external_archive') return 'owner';
+  if (item.cause === 'stalled') return 'stalled';
   if (item.cause === 'retry_eligible' || item.cause === 'backoff' || item.cause === 'pending') return 'automatic';
   return 'unverified';
 }
@@ -314,10 +326,10 @@ function limboResultLine(item) {
     return 'Итог конвейера — остановка без распознанного фильма.' + exhausted + ' Запись с карточки не делается, пока разбор сам не предложит действие.';
   }
   if (item.reason === 'identity_conflict' || item.reason === 'identity_ambiguous') return 'Итог автоматической сверки — столкновение или неоднозначность идентичности. Кнопка записи появится в разборе только если действие допустимо, и заранее покажет, что было и что станет.';
-  if (item.cause === 'backoff' || item.cause === 'pending' || item.cause === 'retry_eligible') return 'Итога ещё нет: запись ждёт обычный шаг. Эта страница его не запускает и ничего не записывает.';
-  if (item.cause === 'stalled') return 'Обычный шаг не назначен. Результата нет, и эта страница его не создаёт.';
-  if (item.cause === 'manual_review' || item.cause === 'external_archive') return 'Автоматического итога нет. Действие на странице — только то, которое разбор явно предлагает, с подтверждением.';
-  return 'Итог этой страницей не записывается.';
+  if (item.cause === 'backoff' || item.cause === 'pending' || item.cause === 'retry_eligible') return 'Итога ещё нет.';
+  if (item.cause === 'stalled') return 'Обычный шаг не назначен. Результата нет.';
+  if (item.cause === 'manual_review' || item.cause === 'external_archive') return 'Автоматического итога нет.';
+  return 'Итог этой записью не назван.';
 }
 
 function limboObservationGap(observations) {
@@ -377,7 +389,7 @@ function limboItemHtml(item) {
   limboSelect.set(selectToken, item.id);
   const detailId = 'limbo-detail-' + selectToken;
   const face = `<button type="button" class="limbo-select" data-limbo-select="${selectToken}" aria-expanded="${selected ? 'true' : 'false'}" aria-controls="${detailId}"><span class="admin-hit-title">${limboEscape(title)}</span>${meta ? `<span class="admin-hit-meta">${limboEscape(meta)}</span>` : ''}<span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || 'Состояние не распознано')}</span></button>`;
-  const detail = `<div class="limbo-detail" id="${detailId}"${selected ? '' : ' hidden'}>${reason ? `<p class="limbo-reason">${limboEscape(reason)}</p>` : ''}<p class="limbo-next">${limboEscape(limboNextLine(item))}</p>${when ? `<p class="limbo-when">${limboEscape(when)}</p>` : ''}<p class="limbo-result">${limboEscape(limboResultLine(item))}</p>${links.length ? `<div class="limbo-actions">${links.join('')}</div>` : ''}${recovery}${limboTechHtml(item)}</div>`;
+  const detail = `<div class="limbo-detail" id="${detailId}"${selected ? '' : ' hidden'}>${reason ? `<p class="limbo-happened"><b>Что произошло.</b> ${limboEscape(reason)}</p>` : ''}<p class="limbo-next"><b>Кто дальше.</b> ${limboEscape(limboNextLine(item))}</p>${when ? `<p class="limbo-when"><b>Когда.</b> ${limboEscape(when)}</p>` : ''}<p class="limbo-result"><b>Итог.</b> ${limboEscape(limboResultLine(item))}</p><p class="limbo-offer"><b>Действие.</b> ${limboEscape(limboOfferLine(item))}</p>${links.length ? `<div class="limbo-actions">${links.join('')}</div>` : ''}${recovery}${limboTechHtml(item)}</div>`;
   return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}">${face}${detail}</article>`;
 }
 
@@ -814,6 +826,7 @@ function limboShow(view, state) {
   error.hidden = view.mode !== 'error';
   error.textContent = view.mode === 'error' ? limboErrorText(view.error) : '';
   const showResults = view.mode === 'ready';
+  limboClearFocus();
   if (!showResults) {
     empty.hidden = true;
     results.innerHTML = '';
@@ -832,6 +845,7 @@ function limboShow(view, state) {
   } else {
     if (!view.items.some(item => item.id === limboLive.selected)) limboLive.selected = view.items[0].id;
     results.innerHTML = limboQueueNotice(view, state) + limboResultsHtml(view.items) + (view.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : '');
+    limboPlaceDetail();
   }
   document.querySelector('#limbo-context-body').innerHTML = limboContextHtml(view);
 }
@@ -968,6 +982,58 @@ function onVerifiedOpen() {
   return obsRecoveryLoad('verified');
 }
 
+function limboUseFocusColumn() {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(min-width:801px)').matches;
+}
+
+function limboClearFocus() {
+  const focus = document.querySelector('#limbo-focus-body');
+  if (!focus) return;
+  if (typeof focus.replaceChildren === 'function') focus.replaceChildren();
+  else focus.innerHTML = '';
+  const empty = document.querySelector('#limbo-focus-empty');
+  if (empty) empty.hidden = false;
+}
+
+function limboDetailNode(button) {
+  const id = button && button.getAttribute ? button.getAttribute('aria-controls') : '';
+  if (!id || typeof document.getElementById !== 'function') return null;
+  return document.getElementById(id);
+}
+
+function limboRestoreDetail(detail) {
+  if (!detail || !detail.id) return;
+  const token = detail.id.startsWith('limbo-detail-') ? detail.id.slice('limbo-detail-'.length) : '';
+  const results = document.querySelector('#limbo-results');
+  const button = token && results && typeof results.querySelector === 'function' ? results.querySelector(`[data-limbo-select="${token}"]`) : null;
+  const article = button && button.closest ? button.closest('article') : null;
+  if (article && detail.parentElement !== article) article.appendChild(detail);
+}
+
+// On a wide screen the selected explanation is the column beside the queue. The markup stays the record's own detail,
+// so the guarded recovery controls keep their handlers. A narrow screen leaves it under the selected row.
+function limboPlaceDetail() {
+  const focus = document.querySelector('#limbo-focus-body');
+  const results = document.querySelector('#limbo-results');
+  if (!focus || !results || typeof results.querySelector !== 'function' || typeof document.getElementById !== 'function') return;
+  const empty = document.querySelector('#limbo-focus-empty');
+  if (!limboUseFocusColumn()) {
+    for (const detail of [...focus.querySelectorAll('.limbo-detail')]) limboRestoreDetail(detail);
+    if (empty) empty.hidden = false;
+    return;
+  }
+  const selected = results.querySelector('.limbo-select[aria-expanded="true"]');
+  const detail = limboDetailNode(selected);
+  for (const extra of [...focus.querySelectorAll('.limbo-detail')]) if (extra !== detail) limboRestoreDetail(extra);
+  if (!detail) {
+    if (empty) empty.hidden = false;
+    return;
+  }
+  detail.hidden = false;
+  if (detail.parentElement !== focus) focus.appendChild(detail);
+  if (empty) empty.hidden = true;
+}
+
 function onLimboSelect(token) {
   const id = limboSelect.get(token) || token;
   if (!id || id === limboLive.selected) return;
@@ -978,9 +1044,10 @@ function onLimboSelect(token) {
     const current = article.getAttribute('data-limbo-item') === id;
     const button = typeof article.querySelector === 'function' ? article.querySelector('[data-limbo-select]') : null;
     if (button) button.setAttribute('aria-expanded', current ? 'true' : 'false');
-    const detail = typeof article.querySelector === 'function' ? article.querySelector('.limbo-detail') : null;
+    const detail = (typeof article.querySelector === 'function' && article.querySelector('.limbo-detail')) || limboDetailNode(button);
     if (detail) detail.hidden = !current;
   }
+  limboPlaceDetail();
 }
 
 function onLimboSelectKey(event) {
@@ -1094,6 +1161,16 @@ function startLimbo() {
   document.querySelector('#limbo-results').addEventListener('keydown', onLimboSelectKey);
   document.querySelector('#limbo-results').addEventListener('change', onLimboResultChange);
   document.querySelector('#limbo-results').addEventListener('input', onLimboResultChange);
+  const focusBody = document.querySelector('#limbo-focus-body');
+  if (focusBody && focusBody.addEventListener) {
+    focusBody.addEventListener('click', onLimboResult);
+    focusBody.addEventListener('change', onLimboResultChange);
+    focusBody.addEventListener('input', onLimboResultChange);
+  }
+  if (typeof window.matchMedia === 'function') {
+    const media = window.matchMedia('(min-width:801px)');
+    if (typeof media.addEventListener === 'function') media.addEventListener('change', () => limboPlaceDetail());
+  }
   document.querySelector('#verified-open').addEventListener('click', onVerifiedOpen);
   document.querySelector('#verified-key').addEventListener('keydown', event => {if (event.key === 'Enter') {event.preventDefault(); onVerifiedOpen();}});
   const verifiedPanel = document.querySelector('#verified-panel');

@@ -19,33 +19,40 @@
       <div>
         <p class="eyebrow">ВЛАДЕЛЕЦ · ЧТЕНИЕ И ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ</p>
         <h1>Лимб данных</h1>
-        <p class="admin-intro">Очередь из трёх групп: требует решения, ждёт обычный автоматический шаг, или состояние не удалось проверить. Выбор записи показывает, что произошло, какой шаг следующий и чем кончилось. Чтение ничего не запускает и не меняет. Два действия выполняются только после явного подтверждения, только когда разбор сам называет их допустимыми, и никого не вызывают сами: вернуть одно терминальное наблюдение в обычную очередь резолвера, или подтвердить либо отклонить один id фильма у одного наблюдения. Проверенное совпадение, которого нет в очереди, открывается точным ключом в техническом поиске под списком.</p>
+        <p class="admin-intro">Сначала очередь. Выбор записи показывает, что произошло, кто действует дальше и известен ли итог. Чтение ничего не запускает. Запись — только подтверждённое действие в разборе этой записи.</p>
       </div>
     </section>
     <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb" aria-current="page">Лимб</a><a href="/admin/posters">Постеры</a></nav>
-    <p id="limbo-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="limbo-snapshot-text">Снимок ещё не прочитан.</span></p>
-    <section aria-labelledby="limbo-filters-title" class="limbo-filters">
-      <h2 id="limbo-filters-title">Фильтры</h2>
-      <div id="limbo-causes" class="admin-queues" role="group" aria-label="Причина ожидания"></div>
-      <div id="limbo-subsystems" class="admin-queues" role="group" aria-label="Подсистема"></div>
-      <form id="limbo-form" class="limbo-form" action="/admin/limb">
-        <label class="limbo-field">Вид<select id="limbo-kind" name="kind"><option value="">фильмы и наблюдения</option><option value="film">только фильмы</option><option value="observation">только наблюдения</option></select></label>
-        <label class="limbo-field">Без прогресса не менее, дней<input id="limbo-age" name="age" type="number" inputmode="numeric" min="0" max="365" step="1" placeholder="любой срок"></label>
-        <button type="submit" class="admin-refresh limbo-apply">Применить</button>
-        <button type="button" id="limbo-reset" class="admin-more limbo-reset">Сбросить фильтры</button>
-      </form>
-    </section>
     <p id="limbo-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем опубликованный снимок и очередь прогнозов…</p>
     <div id="limbo-stale" class="admin-state admin-state-stale" role="alert" hidden><span id="limbo-stale-text">Снимок изменился. Показанные записи относятся к прежнему снимку.</span><button type="button" id="limbo-refresh" class="admin-refresh">Обновить снимок</button></div>
     <p id="limbo-error" class="admin-state admin-state-error" role="alert" hidden></p>
     <div class="admin-layout limbo-layout">
       <section aria-labelledby="limbo-results-title">
-        <h2 id="limbo-results-title">Записи <small id="limbo-total" class="limbo-total"></small></h2>
+        <h2 id="limbo-results-title">Очередь <small id="limbo-total" class="limbo-total"></small></h2>
         <p id="limbo-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b id="limbo-empty-title">По этому фильтру записей нет</b><span id="limbo-empty-text">В прочитанном снимке нет записей без прогресса, которые проходят фильтр. Подсистемы, которые эта страница не читает, от этого не становятся здоровыми.</span></p>
         <div id="limbo-results"></div>
       </section>
-      <aside id="limbo-context" class="admin-card limbo-context" aria-labelledby="limbo-context-title"><h2 id="limbo-context-title">Контекст конвейера</h2><div id="limbo-context-body"><p class="muted">Контекст появится после чтения снимка.</p></div></aside>
+      <aside id="limbo-focus" class="admin-card limbo-focus" aria-labelledby="limbo-focus-title"><h2 id="limbo-focus-title">Выбранная запись</h2><p id="limbo-focus-empty" class="limbo-focus-empty">Выберите запись в очереди.</p><div id="limbo-focus-body"></div></aside>
     </div>
+    <details class="limbo-tech limbo-tools" id="limbo-tools">
+      <summary>Снимок и фильтры</summary>
+      <p id="limbo-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="limbo-snapshot-text">Снимок ещё не прочитан.</span></p>
+      <section aria-labelledby="limbo-filters-title" class="limbo-filters">
+        <h2 id="limbo-filters-title">Фильтры</h2>
+        <div id="limbo-causes" class="admin-queues" role="group" aria-label="Причина ожидания"></div>
+        <div id="limbo-subsystems" class="admin-queues" role="group" aria-label="Подсистема"></div>
+        <form id="limbo-form" class="limbo-form" action="/admin/limb">
+          <label class="limbo-field">Вид<select id="limbo-kind" name="kind"><option value="">фильмы и наблюдения</option><option value="film">только фильмы</option><option value="observation">только наблюдения</option></select></label>
+          <label class="limbo-field">Без прогресса не менее, дней<input id="limbo-age" name="age" type="number" inputmode="numeric" min="0" max="365" step="1" placeholder="любой срок"></label>
+          <button type="submit" class="admin-refresh limbo-apply">Применить</button>
+          <button type="button" id="limbo-reset" class="admin-more limbo-reset">Сбросить фильтры</button>
+        </form>
+      </section>
+    </details>
+    <details class="limbo-tech limbo-pipeline" id="limbo-pipeline">
+      <summary>Контекст конвейера и пороги</summary>
+      <div id="limbo-context" class="limbo-context"><div id="limbo-context-body"><p class="muted">Контекст появится после чтения снимка.</p></div></div>
+    </details>
     <details class="limbo-tech limbo-verified" id="limbo-verified">
       <summary>Технический поиск проверенного совпадения</summary>
       <section class="obs-verified-open" aria-labelledby="verified-open-title">
