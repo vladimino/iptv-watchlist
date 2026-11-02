@@ -6,7 +6,7 @@
 **Approval source:** [AIR-90 owner acceptance, 2026-10-28](https://trello.com/c/v9OH2Yhx) (explicitly accepted ADR-0036; architecture only, no production flag or write authorization)  
 **Related work:** [AIR-43](https://trello.com/c/7NY6n1Az), [AIR-68](https://trello.com/c/qbLDc6Ql), [AIR-69](https://trello.com/c/FlcWZX7W), [AIR-90](https://trello.com/c/v9OH2Yhx); [ADR 0010](0010-scored-detail-verification.md), [ADR 0012](0012-scored-resolution-rollout.md)  
 **Supersedes:** the operational boundary of [ADR 0012](0012-scored-resolution-rollout.md) (the `SCORED_RESOLUTION` runtime mode and its flag rollback); its rollout decision stays accepted history  
-**Superseded by:** None
+**Superseded by:** [ADR 0082](0082-retire-candidate-discovery.md) in part (only the statement that `CANDIDATE_DISCOVERY` is the remaining optional switch, per [owner approval on 2026-11-02](https://trello.com/c/ob6zOaAK#comment-6ae8b753b84ad0eed0e36ce5)); the scored-only resolver remains accepted
 
 ## Context
 
