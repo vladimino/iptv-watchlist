@@ -28,7 +28,7 @@ Before any background process resumes, confirm these copied leases are not stale
 Source: `.github/workflows/ci.yml`. The former independent Cloudflare Workers Builds integration has been disconnected.
 
 1. Pull requests into `main` run `test-and-build`. A GitHub ruleset must be configured separately if CI is required to block merging.
-2. Pushes to `main` run `npm ci --ignore-scripts`, `npm test`, and `npm run build`. The build uses Node.js 20 and uploads `dist/` as an artifact with one-day retention.
+2. Pushes to `main` run `npm ci --ignore-scripts`, `npm test`, and `npm run build` on Node.js 20. The same job then runs `node scripts/check-discovery-workflow-bundle.mjs` on Node.js 22. The Node.js 20 build is the artifact the deploy job downloads, kept for one day. The dry-run does not replace that artifact.
 3. The `deploy` job requires successful `test-and-build` and downloads that exact verified artifact. Deployment runs only on pushes to `main`.
 4. Deployment credentials belong to GitHub environment `Cloudflare Prod`:
    - Secret: `CLOUDFLARE_API_TOKEN`
@@ -40,13 +40,13 @@ Source: `.github/workflows/ci.yml`. The former independent Cloudflare Workers Bu
    - Merge commit: `PR #N: <PR title>`
 8. `wrangler.jsonc` configures:
    - Worker: `iptv`
-   - Entrypoint: `dist/server/index.js`
+   - Entrypoint: `dist/server/workflow-entry.js` (the Worker fetch handler plus the `DiscoveryWorkflow` class). `dist/server/index.js` stays the script local dev imports and does not import `cloudflare:workers`
    - Compatibility date `2026-10-18`, which enables `ctx.exports` for the resolver continuation. Do not add `disable_ctx_exports` or move the date before 2025-11-17.
    - R2 binding: `BUCKET` -> `iptv`
    - `keep_vars: true`, so dashboard variables such as `MCP_ACCESS_TEAM_DOMAIN` and `MCP_ACCESS_AUD` survive deploys
    - `preview_urls: false`
 
-Deploying the Worker does not apply `migrations/0008_published_epg_authority.sql` and does not change `published_epg_authority.mode`. Until a separate owner GO applies that file and a later GO activates the marker, R2 remains authoritative for the published EPG generation. The cron stays `37 * * * *` and stays the enrichment projector only.
+Deploying the Worker does not apply `migrations/0008_published_epg_authority.sql` and does not change `published_epg_authority.mode`. Until a separate owner GO applies that file and a later GO activates the marker, R2 remains authoritative for the published EPG generation. The cron stays `37 * * * *` and stays the enrichment projector only. `wrangler.jsonc` binds a Discovery Workflow named `iptv-discovery` (`DISCOVERY_WORKFLOW`, class `DiscoveryWorkflow`) and does not give it `schedules`. `DISCOVERY_EXECUTOR` is not a Wrangler var. `keep_vars: true` leaves the deployed value untouched, and the absent value is the external executor. A deploy therefore creates no Workflow instance and calls no TMDB. The generated `dist/server/workflow-entry.js` is checked offline with Wrangler `4.151.1` `deploy --dry-run` on Node.js 22 (`scripts/check-discovery-workflow-bundle.mjs`), after the Node.js 20 tests and build. That Wrangler release requires Node.js 22, so the Node.js 20 test run does not start it. The devDependency is the same version the production deploy action pins, installed by `npm ci` so the dry-run does not download another copy. The check does not deploy and does not create an instance. Setting the flag to `workflow` is a separate owner action ([AIR-324](https://trello.com/c/kNtaEbm8)), not this deploy ([ADR 0083](../adr/0083-inert-discovery-workflow.md), Proposed).
 
 A failed test/build, or a failed account-token or Worker-settings check, prevents deployment. A successful workflow confirms publication, not completion of data migration or end-to-end smoke tests. Use authorized read-only checks after deployment. For `/mcp`, use only the safe verification procedure in [docs/mcp.md](../reference/api/mcp.md). Exercising the resolver continuation in production writes `epg/*` records and calls TMDB, so it is a separately approved operation, never a deploy smoke test.
 

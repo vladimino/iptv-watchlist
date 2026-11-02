@@ -416,6 +416,8 @@ async function finishSync(env,run,report){const list=await loadJSON(env,'watchli
 // completes, and the AIR-159 handoff covers a run that never gets there.
 async function queueCommittedDiscovery(env,run){
  try{await queueDiscovery(env,'epg_committed',run.runId);}catch(e){run.discoveryError=String(e.message).slice(0,160);}
+ if(typeof discoveryExecutorMode!=='function'||discoveryExecutorMode(env)!=='workflow')return;
+ try{await noteDiscoveryWorkflow(env);}catch(e){run.discoveryError=String(e.message).slice(0,160);}
 }
 async function copyEpgGeneration(env,runId){
  for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(staged)await saveJSON(env,name==='programme.json'?name:'epg/'+name,await staged.json());}
@@ -632,10 +634,10 @@ async function syncStep(env,pathname,body,step){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const executor=discoveryExecutorMode(env);if(executor==='invalid'){step.branch='executor_invalid';return json({error:'discovery_executor_invalid',executor:'invalid'},503);}if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
- try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const discovery=await queueDiscovery(env,'epg_committed',run.runId);step.discovery=discoverySummary(discovery);return json({...result,discovery});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
+ try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await tracedPhase(run.runId,'generation_copy',()=>copyEpgGeneration(env,run.runId));await queueCommittedDiscovery(env,run);return completeWithRatings(env,run,committed);}}

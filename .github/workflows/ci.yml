@@ -59,6 +59,17 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Wrangler 4.151.1 requires Node.js >= 22. Tests and the uploaded build stay on Node.js 20.
+      # This step reuses the wrangler devDependency from npm ci; it does not download another copy.
+      # deploy --dry-run does not deploy and does not create a Workflow instance.
+      - name: Setup Node.js 22 for Wrangler dry-run
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Validate Discovery Workflow bundle
+        run: node scripts/check-discovery-workflow-bundle.mjs
+
       - name: Upload verified build
         uses: actions/upload-artifact@v6
         with:
