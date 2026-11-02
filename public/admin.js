@@ -79,7 +79,7 @@ function adminEscape(value) {
 function adminState() {
   const url = new URL(window.location.href);
   return {
-    view: url.searchParams.get('view') === 'health' ? 'health' : 'catalog',
+    view: url.pathname === '/admin/health' || url.searchParams.get('view') === 'health' ? 'health' : 'catalog',
     q: url.searchParams.get('q') ?? '',
     queue: url.searchParams.get('queue') ?? '',
     kind: url.searchParams.get('kind') === 'person' ? 'person' : 'film',
@@ -89,15 +89,15 @@ function adminState() {
 
 function adminUrl(state) {
   const params = new URLSearchParams();
-  if (state.view === 'health') params.set('view', 'health');
   if (state.q) params.set('q', state.q);
   if (state.queue) params.set('queue', state.queue);
   if (state.id) {
     params.set('kind', state.kind === 'person' ? 'person' : 'film');
     params.set('id', state.id);
   }
+  const path = state.view === 'health' ? '/admin/health' : '/admin';
   const query = params.toString();
-  return query ? '/admin?' + query : '/admin';
+  return query ? path + '?' + query : path;
 }
 
 function adminWrite(state, mode) {
