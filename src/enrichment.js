@@ -141,6 +141,24 @@ const GENRE_EXECUTION=Object.keys(EXECUTION).filter(key=>!GENERAL_EXECUTION.incl
 // from this file; a rule never carries caller data.
 const CONFIDENCE=['low','medium','high'],SOURCE_BASIS=['metadata','model_knowledge','web_research','mixed'];
 const FINGERPRINT_MAX_CHARS=12000;
+// Optional evidence beside the schema-1 rules (AIR-46). Omitting the key keeps today's caller-owned sourceBasis and
+// sourceRefs. When the key is present it is hashed with the content, checked here, and a disagreeing aggregate is
+// rejected rather than rewritten. Schema, prompt and the transition registry stay where they are; nothing here asks a
+// caller to start sending the map.
+const EVIDENCE_BASIS=['metadata','model_knowledge','web_research'];
+const METADATA_REFS=['metadata:synopsis','metadata:genres','metadata:runtime','metadata:credits'];
+// Metadata tokens may support a visible mechanic. Every execution dimension is a quality claim: a claim whose items
+// are all metadata is rejected. Genre dimensions stay optional, so a concrete genre value with no items is still valid.
+const EXECUTION_QUALITY=[...GENERAL_EXECUTION,...GENRE_EXECUTION];
+const EVIDENCE_MAX_ITEMS=4,EVIDENCE_MAX_REFS=4,EVIDENCE_SOURCE_REF_CAP=8;
+const EVIDENCE_CONTRACT={
+ required:false,whenAbsent:'legacy',keys:['plotMechanics','execution'],itemKeys:['basis','refs','confidence'],
+ basis:EVIDENCE_BASIS,confidence:CONFIDENCE,metadataRefs:METADATA_REFS,maxItems:EVIDENCE_MAX_ITEMS,maxRefs:EVIDENCE_MAX_REFS,sourceRefCap:EVIDENCE_SOURCE_REF_CAP,
+ metadataSupports:['plotMechanics'],executionQuality:EXECUTION_QUALITY,
+ claimCoverage:{plotMechanics:'every asserted mechanic has 1–4 items; no extra mechanic keys',generalExecution:'a value other than unknown or not_applicable requires items; unknown, not_applicable and an absent dimension must not have items',genreExecution:'optional; the same item rules when a genre dimension is present'},
+ aggregate:{order:['plotMechanics','generalExecution','genreExecution'],basis:'first-seen unique bases in that order; one basis keeps its name and more than one is mixed',refs:'first-seen unique refs in that order, capped at sourceRefCap'},
+ metadataPreflight:'prediction_validate accepts optional metadata, the film modelMetadata, only when evidence cites a metadata token. The tool reads no storage. Submit uses the modelMetadata stored for the run. A metadata token whose fact is absent is invalid_ref.'
+};
 const FINGERPRINT_RULES={
  fingerprintSchemaVersion:{kind:'const',value:FINGERPRINT_SCHEMA_VERSION},
  plotMechanics:{kind:'enum_list',values:MECHANICS},
@@ -181,12 +199,126 @@ function ruleIssues(root,rules,value){
  }
  return issues;
 }
-function fingerprintIssues(f){const issues=ruleIssues('fingerprint',FINGERPRINT_RULES,f);if(isObject(f)&&!issues.length&&JSON.stringify(f).length>FINGERPRINT_MAX_CHARS)issues.push({path:'fingerprint',code:'too_large'});return issues;}
+function evidenceUrlOk(value){
+ if(typeof value!=='string'||value.length>500)return false;
+ let url;try{url=new URL(value);}catch{return false;}
+ if(url.protocol!=='https:'||url.username||url.password)return false;
+ const host=url.hostname.toLowerCase().replace(/^\[|\]$/g,'');
+ if(!host||host==='localhost'||host.endsWith('.localhost')||host.endsWith('.local')||host.endsWith('.internal')||host==='0.0.0.0'||host==='::1'||host==='::')return false;
+ if(/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
+  const parts=host.split('.').map(Number);
+  if(parts.some(part=>part>255))return false;
+  const [a,b]=parts;
+  if(a===0||a===10||a===127||(a===192&&b===168)||(a===172&&b>=16&&b<=31)||(a===169&&b===254))return false;
+ }
+ if(host.includes(':')){
+  const mapped=/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
+  if(mapped)return evidenceUrlOk('https://'+mapped[1]+'/');
+  const head=host.split(':').find(Boolean)||'';
+  if(/^f[cd]/i.test(head)||/^fe[89ab]/i.test(head))return false;
+ }
+ return true;
+}
+function metadataListPresent(value){return typeof value==='string'&&value.trim().length>0||Array.isArray(value)&&value.some(item=>typeof item==='string'&&item.trim().length>0);}
+function metadataFactPresent(metadata,ref){
+ if(!isObject(metadata))return false;
+ if(ref==='metadata:synopsis')return typeof metadata.synopsis==='string'&&metadata.synopsis.trim().length>0;
+ if(ref==='metadata:genres')return metadataListPresent(metadata.genres);
+ if(ref==='metadata:runtime')return Number.isFinite(metadata.runtime)&&metadata.runtime>0||typeof metadata.runtime==='string'&&metadata.runtime.trim().length>0;
+ if(ref==='metadata:credits')return metadataListPresent(metadata.directors)||metadataListPresent(metadata.actors)||metadataListPresent(metadata.credits);
+ return false;
+}
+// Walk order for the aggregate is the asserted mechanic list, then general execution, then genre execution.
+// Within a claim, item order is the submitted order. Unique bases and refs keep that first-seen order.
+function evidenceIssues(fingerprint,metadata){
+ const issues=[],add=(path,code)=>{if(issues.length<MAX_ISSUES)issues.push({path,code});};
+ const evidence=fingerprint.evidence;
+ if(!isObject(evidence)){add('fingerprint.evidence','invalid_type');return issues;}
+ if(Object.keys(evidence).some(key=>key!=='plotMechanics'&&key!=='execution'))add('fingerprint.evidence','invalid_type');
+ const claims=[];
+ const readItems=(path,raw,required,quality,concrete)=>{
+  if(raw===undefined){if(required)add(path,'required');return;}
+  if(!concrete){add(path,'invalid_enum');return;}
+  if(!Array.isArray(raw)){add(path,'invalid_type');return;}
+  if(!raw.length){add(path,'too_few');return;}
+  if(raw.length>EVIDENCE_MAX_ITEMS){add(path,'too_many');return;}
+  const seen=new Set();let clean=true,metadataOnly=true;const parsed=[];
+  for(const item of raw){
+   if(!isObject(item)||Object.keys(item).some(key=>key!=='basis'&&key!=='refs'&&key!=='confidence')){add(path,'invalid_type');clean=false;continue;}
+   const {basis,refs,confidence}=item;
+   if(typeof basis!=='string'){add(path,'invalid_type');clean=false;}
+   else if(!EVIDENCE_BASIS.includes(basis)){add(path,'invalid_enum');clean=false;}
+   if(typeof confidence!=='string'){add(path,'invalid_type');clean=false;}
+   else if(!CONFIDENCE.includes(confidence)){add(path,'invalid_enum');clean=false;}
+   if(!Array.isArray(refs)){add(path,'invalid_type');clean=false;continue;}
+   if(!refs.length){add(path,'too_few');clean=false;continue;}
+   if(refs.length>EVIDENCE_MAX_REFS){add(path,'too_many');clean=false;continue;}
+   if(refs.some(ref=>typeof ref!=='string')){add(path,'invalid_type');clean=false;continue;}
+   if(refs.some(ref=>ref.length>500)){add(path,'too_long');clean=false;continue;}
+   const dup=new Set();let refsOk=EVIDENCE_BASIS.includes(basis);
+   for(const ref of refs){
+    if(dup.has(ref)){add(path,'invalid_ref');refsOk=false;break;}
+    dup.add(ref);
+    if(basis==='metadata'&&(!METADATA_REFS.includes(ref)||!metadataFactPresent(metadata,ref))){add(path,'invalid_ref');refsOk=false;break;}
+    else if(basis==='model_knowledge'&&ref!=='model_knowledge'){add(path,'invalid_ref');refsOk=false;break;}
+    else if(basis==='web_research'&&!evidenceUrlOk(ref)){add(path,'invalid_ref');refsOk=false;break;}
+   }
+   if(!refsOk)clean=false;
+   if(basis!=='metadata')metadataOnly=false;
+   const stamp=JSON.stringify(canonical({basis,refs,confidence}));
+   if(seen.has(stamp)){add(path,'invalid_ref');clean=false;}else seen.add(stamp);
+   if(refsOk&&EVIDENCE_BASIS.includes(basis)&&CONFIDENCE.includes(confidence))parsed.push({basis,refs,confidence});
+  }
+  if(clean&&quality&&metadataOnly){add(path,'invalid_ref');return;}
+  if(!clean)return;
+  claims.push({items:parsed});
+ };
+ const mechanics=[];
+ if(Array.isArray(fingerprint.plotMechanics))for(const key of fingerprint.plotMechanics)if(typeof key==='string'&&!mechanics.includes(key))mechanics.push(key);
+ const plot=evidence.plotMechanics;
+ if(plot===undefined){if(mechanics.length)add('fingerprint.evidence.plotMechanics','required');}
+ else if(!isObject(plot))add('fingerprint.evidence.plotMechanics','invalid_type');
+ else{
+  for(const key of Object.keys(plot))if(!mechanics.includes(key))add('fingerprint.evidence.plotMechanics.'+key,'invalid_enum');
+  for(const key of mechanics)readItems('fingerprint.evidence.plotMechanics.'+key,plot[key],true,false,MECHANICS.includes(key));
+ }
+ const execution=isObject(fingerprint.execution)?fingerprint.execution:{};
+ const concrete=key=>typeof execution[key]==='string'&&execution[key]!=='unknown'&&execution[key]!=='not_applicable'&&EXECUTION[key].includes(execution[key]);
+ const block=evidence.execution;
+ if(block===undefined){if(GENERAL_EXECUTION.some(concrete))add('fingerprint.evidence.execution','required');}
+ else if(!isObject(block))add('fingerprint.evidence.execution','invalid_type');
+ else{
+  for(const key of Object.keys(block))if(!Object.hasOwn(EXECUTION,key))add('fingerprint.evidence.execution.'+key,'invalid_enum');
+  for(const key of [...GENERAL_EXECUTION,...GENRE_EXECUTION]){
+   if(!Object.hasOwn(block,key)){if(GENERAL_EXECUTION.includes(key)&&concrete(key))add('fingerprint.evidence.execution.'+key,'required');continue;}
+   readItems('fingerprint.evidence.execution.'+key,block[key],GENERAL_EXECUTION.includes(key)&&concrete(key),EXECUTION_QUALITY.includes(key),concrete(key));
+  }
+ }
+ if(issues.length)return issues;
+ if(!claims.some(claim=>claim.items.length)){add('fingerprint.evidence','too_few');return issues;}
+ const bases=[],refs=[];
+ for(const claim of claims)for(const item of claim.items){if(!bases.includes(item.basis))bases.push(item.basis);for(const ref of item.refs)if(!refs.includes(ref)&&refs.length<EVIDENCE_SOURCE_REF_CAP)refs.push(ref);}
+ if(fingerprint.sourceBasis!==(bases.length===1?bases[0]:'mixed'))add('fingerprint.sourceBasis','invalid_enum');
+ const got=fingerprint.sourceRefs;
+ if(!Array.isArray(got)||got.length!==refs.length||got.some((ref,index)=>ref!==refs[index]))add('fingerprint.sourceRefs','invalid_ref');
+ return issues;
+}
+function fingerprintIssues(f,metadata){
+ const issues=ruleIssues('fingerprint',FINGERPRINT_RULES,f);
+ if(isObject(f)&&Object.hasOwn(f,'evidence')){
+  // The rule table only knows https and model_knowledge. An evidence object may also cite the four metadata tokens,
+  // so that one code is decided by the aggregate below instead of the table.
+  if(isObject(f.evidence)){const kept=issues.filter(issue=>!(issue.path==='fingerprint.sourceRefs'&&issue.code==='invalid_ref'));issues.length=0;issues.push(...kept);}
+  for(const issue of evidenceIssues(f,metadata)){if(issues.length>=MAX_ISSUES)break;if(!issues.some(have=>have.path===issue.path&&have.code===issue.code))issues.push(issue);}
+ }
+ if(isObject(f)&&!issues.length&&JSON.stringify(f).length>FINGERPRINT_MAX_CHARS)issues.push({path:'fingerprint',code:'too_large'});
+ return issues;
+}
 function predictionIssues(p){return ruleIssues('prediction',PREDICTION_RULES,p);}
 const issueText=issues=>issues.length?'Invalid '+issues.map(issue=>issue.path+' '+issue.code).join(', '):null;
 function validateFingerprint(f){return issueText(fingerprintIssues(f));}
 function validatePrediction(p){return issueText(predictionIssues(p));}
-function schemaContract(){return {version:1,fingerprint:{rules:FINGERPRINT_RULES,maxChars:FINGERPRINT_MAX_CHARS},prediction:{rules:PREDICTION_RULES},issueCodes:ISSUE_CODES,issuePath:'<fingerprint|prediction>[.<field>[.<execution dimension>]]; a list issue names the list, not the item',reportedVia:'POST /api/enrichment/submit results[].validation {stage, reportedBy, issues[]}'};}
+function schemaContract(){return {version:1,fingerprint:{rules:FINGERPRINT_RULES,maxChars:FINGERPRINT_MAX_CHARS,evidence:EVIDENCE_CONTRACT},prediction:{rules:PREDICTION_RULES},issueCodes:ISSUE_CODES,issuePath:'<fingerprint|prediction>[.<field>[.<dimension or evidence group>[.<claim>]]]; a list issue names the list, not the item',reportedVia:'POST /api/enrichment/submit results[].validation {stage, reportedBy, issues[]}'};}
 const fingerprintCurrent=f=>!!f&&f.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&!f.invalidatedAt;
 function executionFacet(execution){const out={};if(!execution||typeof execution!=='object')return out;for(const key of GENERAL_EXECUTION){const value=execution[key];if(typeof value==='string'&&EXECUTION[key].includes(value)&&value!=='unknown'&&value!=='not_applicable')out[key]=value;}return out;}
 // The display facet of a usable fingerprint: exact today; exact or compatible when the caller judged it under the transition rule.
@@ -1307,7 +1439,7 @@ async function enrichmentSubmit(env,body){
   let failureStage='storage_error',validationStage=null,reportedBy=null,issues=null;try{const state=await readFilmState(env,id);let fingerprint=state.fingerprint;
    if(item.failure&&!freshness.state(state.predictions?.current,fingerprint,source[id]?.genres)){failureStage='parse_error';validationStage='caller_reported';reportedBy='caller';issues=[];throw new Error('Reported malformed model response');}
    const usable=f=>freshness.fingerprintUsable(f,source[id]?.genres);
-   if(item.fingerprint&&!usable(fingerprint)){const found=fingerprintIssues(item.fingerprint);if(found.length){failureStage='parse_error';validationStage='fingerprint_schema';reportedBy='worker';issues=found;throw new Error('Invalid fingerprint');}fingerprint=await writeFingerprint(env,id,item.fingerprint,fingerprint,'generated');}
+   if(item.fingerprint&&!usable(fingerprint)){const found=fingerprintIssues(item.fingerprint,source[id]);if(found.length){failureStage='parse_error';validationStage='fingerprint_schema';reportedBy='worker';issues=found;throw new Error('Invalid fingerprint');}fingerprint=await writeFingerprint(env,id,item.fingerprint,fingerprint,'generated');}
    if(!usable(fingerprint)){failureStage='parse_error';validationStage='fingerprint_missing';reportedBy='worker';issues=[{path:'fingerprint',code:'required'}];throw new Error('Current fingerprint required');}
    if(freshness.state(state.predictions?.current,fingerprint,source[id]?.genres)){await updateViewIndex(env,id,{prediction:state.predictions.current,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});run.results[id] ||= 'already_current';delete run.failures[id];results.push({filmId:id,status:'already_current'});}
    // Lineage of a new prediction (AIR-12): the fingerprint's prompt version completes its identity, runId and trigger name the run
@@ -1650,7 +1782,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/status'&&request.method==='GET'){await recoverStopEvents(env);return json(await enrichmentStatus(env));}
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
- if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']});
+ if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']});
  if(path==='/api/enrichment/view'&&request.method==='GET')return json(await enrichmentView(env));
  if(path==='/api/enrichment/fingerprint-view/backfill'&&request.method==='POST')return backfillFingerprintView(env,body);
  if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}const updatedAt=new Date().toISOString();const facts=await LetterboxdFacts.recordFilmFacts(env,id,{rating},{observedAt:updatedAt,source:'owner'});if(facts.conflict){results.push({filmId:id,error:'Identity conflict; recorded for review'});continue;}if(!facts.accepted||facts.record.rating?.value!==rating){results.push({filmId:id,status:'older',rating:facts.record.rating?.value??null});continue;}await saveJSON(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});results.push({filmId:id,status:'saved'});}return json({results});}

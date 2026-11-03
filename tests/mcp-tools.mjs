@@ -254,6 +254,15 @@ assert.deepEqual(preflightBad.body.result.structuredContent,{success:false,valid
 assert.doesNotMatch(JSON.stringify(preflightBad.body),/PAYLOAD-CANARY/);
 const preflightGood=await tool(validateSealed,'prediction_validate',{fingerprint,prediction});
 assert.deepEqual(preflightGood.body.result.structuredContent,{success:true,valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:true,issues:[]},storage:'not_accessed',sideEffects:'none'});
+const evidenced={...fingerprint,plotMechanics:['heist'],evidence:{plotMechanics:{heist:[{basis:'metadata',refs:['metadata:synopsis'],confidence:'medium'}]}},sourceBasis:'metadata',sourceRefs:['metadata:synopsis']};
+const preflightMetaMissing=await tool(validateSealed,'prediction_validate',{fingerprint:evidenced});
+assert.equal(preflightMetaMissing.body.result.structuredContent.valid,false);
+assert.deepEqual(preflightMetaMissing.body.result.structuredContent.fingerprint.issues,[{path:'fingerprint.evidence.plotMechanics.heist',code:'invalid_ref'}]);
+const preflightMeta=await tool(validateSealed,'prediction_validate',{fingerprint:evidenced,metadata:{synopsis:'A crew plans a robbery.'}});
+assert.deepEqual(preflightMeta.body.result.structuredContent,{success:true,valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:false,issues:[]},storage:'not_accessed',sideEffects:'none'});
+const preflightMetaType=await tool(validateSealed,'prediction_validate',{fingerprint:evidenced,metadata:'text'});
+assert.equal(preflightMetaType.body.result.isError,true);
+assert.equal(preflightMetaType.body.result.structuredContent,undefined);
 const preflightOne=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_validate',{prediction});
 assert.deepEqual(preflightOne.body.result.structuredContent.fingerprint,{checked:false,issues:[]});assert.equal(preflightOne.body.result.structuredContent.valid,true,'answers without a bucket binding');
 assert.deepEqual(validateDenied,[]);
