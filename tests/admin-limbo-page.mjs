@@ -180,7 +180,11 @@ assert.match(limboVisible(results.innerHTML), /Дальше никто не на
 assert.match(limboVisible(results.innerHTML), /Что произошло/);
 assert.match(limboVisible(results.innerHTML), /Кто дальше/);
 assert.match(limboVisible(results.innerHTML), /<b>Итог\.<\/b>/);
-assert.match(limboVisible(results.innerHTML), /Кнопки записи для этой записи нет/);
+assert.match(limboVisible(results.innerHTML), /Кнопка ниже только читает объяснение прогноза\. Записи для этого фильма на странице нет/);
+assert.doesNotMatch(limboVisible(results.innerHTML), /Действие для этой записи допустимо|просит подтверждение/);
+assert.match(results.innerHTML, /<h3 class="limbo-detail-title" tabindex="-1">Застрявший <span class="admin-hit-meta">2020 · фильм<\/span><\/h3>/);
+assert.match(results.innerHTML, /data-limbo-jump="[^"]+" aria-controls="limbo-detail-[^"]+">К объяснению: Застрявший<\/button>/);
+assert.match(results.innerHTML, /data-limbo-jump="[^"]+" aria-controls="limbo-detail-[^"]+" hidden>К объяснению:/);
 assert.doesNotMatch(limboVisible(results.innerHTML), /Требует моего решения/);
 assert.doesNotMatch(limboVisible(results.innerHTML), /не применимо|недопустимо|Identity Review|admin-status-plain/);
 assert.match(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Astuck"/, 'a link to the film detail');
@@ -382,4 +386,69 @@ const untitledFace = untitled.replace(/<details class="limbo-tech">[\s\S]*<\/det
 assert.match(untitledFace, /Фильм без названия/);
 assert.doesNotMatch(untitledFace, /tmdb_77/);
 assert.match(untitled, /<details class="limbo-tech">[\s\S]*tmdb_77/);
+
+// 15. The offer follows the control on the row, never the health-model eligibility flag.
+const offerItem = (extra) => ({id: extra.id, kind: extra.kind, cause: 'retry_eligible', reason: 'retry_due', subsystem: extra.subsystem, film: extra.film, observation: extra.observation, subjectId: extra.subjectId, evidence: {completeness: 'complete', source: 'snapshot', observedAt: '2026-10-01T00:00:00.000Z', missing: [], anomalies: []}, progress: {status: 'due'}, age: {ms: 86400000}, action: extra.action});
+const offerHtml = extra => run(`limboItemHtml(${JSON.stringify(offerItem(extra))})`);
+const offerFace = html => html.replace(/<details class="limbo-tech">[\s\S]*?<\/details>/, '');
+const metadata = offerHtml({id: 'meta-1', kind: 'film', subsystem: 'metadata', film: {title: 'Справочник', year: 1999, inProgramme: true, storedId: 'tmdb_9'}, action: {suggested: 'bounded_action', code: 'metadata_refresh', eligible: true, reason: 'eligible'}});
+assert.match(offerFace(metadata), /Кнопки записи на этой странице нет\. Готовность в модели здоровья данных записью не является/);
+assert.doesNotMatch(metadata, /Разобрать прогноз|Разобрать наблюдение/);
+assert.doesNotMatch(offerFace(metadata), /Действие для этой записи допустимо|просит подтверждение|неизвестно|недопустимо|не применимо/);
+const prediction = offerHtml({id: 'pred-1', kind: 'film', subsystem: 'prediction', film: {title: 'Прогноз', year: 2011, inProgramme: true, storedId: 'pred_1'}, action: {suggested: 'bounded_action', code: 'prediction_retry', eligible: true, reason: 'eligible'}});
+assert.match(prediction, /Разобрать прогноз/);
+assert.match(offerFace(prediction), /Кнопка ниже только читает объяснение прогноза\. Записи для этого фильма на странице нет/);
+assert.doesNotMatch(offerFace(prediction), /Действие для этой записи допустимо|просит подтверждение/);
+const watched = offerHtml({id: 'obs-yes', kind: 'observation', subsystem: 'discovery', observation: {key: 'тихий|2001', title: 'Тихий дождь', year: 2001}, action: {suggested: 'review', eligible: true, reason: 'eligible'}});
+assert.match(watched, /Разобрать наблюдение/);
+assert.match(offerFace(watched), /Кнопка ниже только читает разбор\. Можно ли что-то записать, эта строка ещё не проверяла/);
+assert.doesNotMatch(offerFace(watched), /Действие для этой записи допустимо|просит подтверждение|неизвестно/);
+const unkeyed = offerHtml({id: 'obs-no', kind: 'observation', subsystem: 'discovery', subjectId: 'bad\nkey', observation: {title: 'Без ключа'}, action: {suggested: 'review', eligible: true, reason: 'eligible'}});
+assert.doesNotMatch(unkeyed, /Разобрать наблюдение|Разобрать прогноз/);
+assert.match(offerFace(unkeyed), /Кнопки записи на этой странице нет/);
+assert.doesNotMatch(offerFace(unkeyed), /Действие для этой записи допустимо/);
+const rows = [metadata, prediction, watched];
+for (const [html, title, year] of [[metadata, 'Справочник', '1999'], [prediction, 'Прогноз', '2011'], [watched, 'Тихий дождь', '2001']]) {
+  assert.match(html, new RegExp(`<h3 class="limbo-detail-title" tabindex="-1">${title} <span class="admin-hit-meta">${year} ·`));
+  assert.match(html, new RegExp(`К объяснению: ${title}</button>`));
+  assert.doesNotMatch(html.slice(0, html.indexOf('<details class="limbo-tech">')), /tmdb_9|pred_1|тихий\|2001/);
+}
+assert.equal(rows.length, 3);
+
+// 16. The jump focuses the detail heading. Arrow, Home and End stay on the queue buttons.
+const heading = {focus() {document.activeElement = this;}};
+const detail = {id: 'limbo-detail-9', parentElement: null, hidden: false, getAttribute(name) {return name === 'data-limbo-title' ? 'Тихий дождь' : null;}, querySelector(selector) {return selector === '.limbo-detail-title' ? heading : null;}};
+const queueButton = {getAttribute(name) {return name === 'aria-controls' ? 'limbo-detail-9' : name === 'data-limbo-select' ? '9' : null;}, closest(selector) {return selector === '[data-limbo-select]' ? this : null;}, focus() {document.activeElement = this;}};
+const otherButton = {getAttribute() {return '10';}, closest(selector) {return selector === '[data-limbo-select]' ? this : null;}, focus() {document.activeElement = this;}};
+results.querySelector = selector => selector === '[data-limbo-select="9"]' ? queueButton : selector === '.limbo-select[aria-expanded="true"]' ? queueButton : null;
+results.querySelectorAll = selector => selector === '[data-limbo-select]' ? [queueButton, otherButton] : [];
+document.getElementById = id => id === 'limbo-detail-9' ? detail : null;
+const click = listeners.get('#limbo-results').find(item => item.type === 'click').fn;
+const jump = {getAttribute(name) {return name === 'data-limbo-jump' ? '9' : null;}, closest(selector) {return selector === '[data-limbo-jump]' ? this : null;}};
+let jumpPrevented = false;
+click({target: jump, preventDefault() {jumpPrevented = true;}});
+assert.equal(jumpPrevented, true);
+assert.equal(document.activeElement, heading, 'the jump moves focus to the detail heading');
+document.activeElement = queueButton;
+let arrowPrevented = false;
+selectKey({key: 'ArrowDown', target: queueButton, preventDefault() {arrowPrevented = true;}});
+assert.equal(arrowPrevented, true);
+assert.equal(document.activeElement, otherButton, 'an arrow from a queue button does not focus the detail');
+const focusBody = element('#limbo-focus-body');
+focusBody.querySelectorAll = () => [];
+focusBody.appendChild = node => {node.parentElement = focusBody; focusBody.child = node;};
+const focusTitle = element('#limbo-focus-title');
+const focusEmpty = element('#limbo-focus-empty');
+nodes.set('#limbo-focus-body', focusBody);
+nodes.set('#limbo-focus-title', focusTitle);
+nodes.set('#limbo-focus-empty', focusEmpty);
+window.matchMedia = () => ({matches: true});
+run('limboPlaceDetail()');
+assert.equal(focusTitle.textContent, 'Тихий дождь');
+assert.equal(detail.parentElement, focusBody);
+assert.equal(focusEmpty.hidden, true);
+window.matchMedia = () => ({matches: false});
+run('limboPlaceDetail()');
+assert.equal(focusTitle.textContent, 'Выбранная запись');
+assert.equal(focusEmpty.hidden, false);
 console.log('Admin limbo page: URL filters, history, pagination under the pin, empty, error, stale snapshot and keyboard passed');

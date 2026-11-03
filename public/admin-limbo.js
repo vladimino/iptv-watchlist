@@ -247,12 +247,11 @@ function limboNextLine(item) {
   return limboRecoveryFilm(item) ? lead.replace(/\.$/, '') + '. Разбор прогноза объясняет состояние.' : lead;
 }
 
-// Whether this list already knows an owner write is offered. It does not invent one and does not call it success.
+// Which control this row actually draws. The health model's action.eligible describes the subject, not a button and not a confirmed write.
 function limboOfferLine(item) {
-  const eligible = item.action && item.action.eligible;
-  if (eligible === true) return 'Действие для этой записи допустимо. Кнопка ниже открывает его и просит подтверждение.';
-  if (eligible === false) return 'Кнопки записи для этой записи нет.';
-  return 'Допустимость действия этим списком не подтверждена. Это не разрешение что-то записать.';
+  if (limboRecoveryObservation(item)) return 'Кнопка ниже только читает разбор. Можно ли что-то записать, эта строка ещё не проверяла.';
+  if (limboRecoveryFilm(item)) return 'Кнопка ниже только читает объяснение прогноза. Записи для этого фильма на странице нет.';
+  return 'Кнопки записи на этой странице нет. Готовность в модели здоровья данных записью не является.';
 }
 
 // The clock facts that change a decision: a scheduled retry, and how long the record has stood still. Empty states stay out.
@@ -389,8 +388,10 @@ function limboItemHtml(item) {
   limboSelect.set(selectToken, item.id);
   const detailId = 'limbo-detail-' + selectToken;
   const face = `<button type="button" class="limbo-select" data-limbo-select="${selectToken}" aria-expanded="${selected ? 'true' : 'false'}" aria-controls="${detailId}"><span class="admin-hit-title">${limboEscape(title)}</span>${meta ? `<span class="admin-hit-meta">${limboEscape(meta)}</span>` : ''}<span class="admin-badges">${limboBadge(limboCauseTone(item.cause), LIMBO_CAUSE_LABELS[item.cause] || 'Состояние не распознано')}</span></button>`;
-  const detail = `<div class="limbo-detail" id="${detailId}"${selected ? '' : ' hidden'}>${reason ? `<p class="limbo-happened"><b>Что произошло.</b> ${limboEscape(reason)}</p>` : ''}<p class="limbo-next"><b>Кто дальше.</b> ${limboEscape(limboNextLine(item))}</p>${when ? `<p class="limbo-when"><b>Когда.</b> ${limboEscape(when)}</p>` : ''}<p class="limbo-result"><b>Итог.</b> ${limboEscape(limboResultLine(item))}</p><p class="limbo-offer"><b>Действие.</b> ${limboEscape(limboOfferLine(item))}</p>${links.length ? `<div class="limbo-actions">${links.join('')}</div>` : ''}${recovery}${limboTechHtml(item)}</div>`;
-  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}">${face}${detail}</article>`;
+  const jump = `<button type="button" class="limbo-jump" data-limbo-jump="${selectToken}" aria-controls="${detailId}"${selected ? '' : ' hidden'}>К объяснению: ${limboEscape(title)}</button>`;
+  const heading = `<h3 class="limbo-detail-title" tabindex="-1">${limboEscape(title)}${meta ? ` <span class="admin-hit-meta">${limboEscape(meta)}</span>` : ''}</h3>`;
+  const detail = `<div class="limbo-detail" id="${detailId}" data-limbo-title="${limboEscape(title)}"${selected ? '' : ' hidden'}>${heading}${reason ? `<p class="limbo-happened"><b>Что произошло.</b> ${limboEscape(reason)}</p>` : ''}<p class="limbo-next"><b>Кто дальше.</b> ${limboEscape(limboNextLine(item))}</p>${when ? `<p class="limbo-when"><b>Когда.</b> ${limboEscape(when)}</p>` : ''}<p class="limbo-result"><b>Итог.</b> ${limboEscape(limboResultLine(item))}</p><p class="limbo-offer"><b>Действие.</b> ${limboEscape(limboOfferLine(item))}</p>${links.length ? `<div class="limbo-actions">${links.join('')}</div>` : ''}${recovery}${limboTechHtml(item)}</div>`;
+  return `<article class="admin-hit limbo-item" data-limbo-item="${limboEscape(item.id)}">${face}${jump}${detail}</article>`;
 }
 
 function limboGrouped(items) {
@@ -986,6 +987,11 @@ function limboUseFocusColumn() {
   return typeof window.matchMedia === 'function' && window.matchMedia('(min-width:801px)').matches;
 }
 
+function limboFocusTitle(text) {
+  const node = document.querySelector('#limbo-focus-title');
+  if (node) node.textContent = text ? String(text) : 'Выбранная запись';
+}
+
 function limboClearFocus() {
   const focus = document.querySelector('#limbo-focus-body');
   if (!focus) return;
@@ -993,6 +999,7 @@ function limboClearFocus() {
   else focus.innerHTML = '';
   const empty = document.querySelector('#limbo-focus-empty');
   if (empty) empty.hidden = false;
+  limboFocusTitle('');
 }
 
 function limboDetailNode(button) {
@@ -1020,6 +1027,7 @@ function limboPlaceDetail() {
   if (!limboUseFocusColumn()) {
     for (const detail of [...focus.querySelectorAll('.limbo-detail')]) limboRestoreDetail(detail);
     if (empty) empty.hidden = false;
+    limboFocusTitle('');
     return;
   }
   const selected = results.querySelector('.limbo-select[aria-expanded="true"]');
@@ -1027,11 +1035,13 @@ function limboPlaceDetail() {
   for (const extra of [...focus.querySelectorAll('.limbo-detail')]) if (extra !== detail) limboRestoreDetail(extra);
   if (!detail) {
     if (empty) empty.hidden = false;
+    limboFocusTitle('');
     return;
   }
   detail.hidden = false;
   if (detail.parentElement !== focus) focus.appendChild(detail);
   if (empty) empty.hidden = true;
+  limboFocusTitle(detail.getAttribute('data-limbo-title') || '');
 }
 
 function onLimboSelect(token) {
@@ -1044,10 +1054,20 @@ function onLimboSelect(token) {
     const current = article.getAttribute('data-limbo-item') === id;
     const button = typeof article.querySelector === 'function' ? article.querySelector('[data-limbo-select]') : null;
     if (button) button.setAttribute('aria-expanded', current ? 'true' : 'false');
+    const jump = typeof article.querySelector === 'function' ? article.querySelector('[data-limbo-jump]') : null;
+    if (jump) jump.hidden = !current;
     const detail = (typeof article.querySelector === 'function' && article.querySelector('.limbo-detail')) || limboDetailNode(button);
     if (detail) detail.hidden = !current;
   }
   limboPlaceDetail();
+}
+
+function onLimboJump(token) {
+  const results = document.querySelector('#limbo-results');
+  const button = results && typeof results.querySelector === 'function' ? results.querySelector(`[data-limbo-select="${token}"]`) : null;
+  const detail = limboDetailNode(button);
+  const heading = detail && typeof detail.querySelector === 'function' ? detail.querySelector('.limbo-detail-title') : null;
+  if (heading && typeof heading.focus === 'function') heading.focus();
 }
 
 function onLimboSelectKey(event) {
@@ -1121,6 +1141,12 @@ function onLimboResult(event) {
   if (more) {
     event.preventDefault();
     onLimboMore();
+    return;
+  }
+  const jump = closest('[data-limbo-jump]');
+  if (jump) {
+    event.preventDefault();
+    onLimboJump(jump.getAttribute('data-limbo-jump'));
     return;
   }
   const select = closest('[data-limbo-select]');
