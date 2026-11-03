@@ -7,7 +7,7 @@ flowchart TD
     source["Configured EPG XML source"]
     parse["Authorized sync: parse broadcasts and match shows"]
     staging["Write complete EPG generation:<br/>programme, discovery snapshot, catalog"]
-    pointer[("Published generation pointer:<br/>R2 epg/published-generation.json until the marker is d1;<br/>D1 published_epg_authority after a later activation")]
+    pointer[("Published generation pointer:<br/>D1 published_epg_authority (d1 / open);<br/>R2 pointer is a compatibility mirror")]
     readers["Programme / film page / availability readers"]
     window["Availability projection:<br/>past 72h, future 24h for hot"]
     previous["Prior published generation remains readable"]
@@ -28,4 +28,4 @@ After the pointer switch the commit opens the discovery series of the new genera
 
 Availability calculations use a 72-hour lookback for hot showings and a 24-hour future planning window; the last known airing supports a 72-hour availability horizon. These domain computations are not equivalent to ingesting a new EPG. Late resolver activity must respect the pinned generation before writing programme or decisions.
 
-**Current/future boundary:** production still publishes through R2. [ADR 0079](../adr/0079-d1-authoritative-published-epg.md) (Accepted) makes D1 the published generation only after migration `0008` is applied and a later activation sets `published_epg_authority.mode` to `d1`. Until that activation the pointer node is the R2 object. After it, the same node is the D1 row, and `epg/published-generation.json` is the compatibility mirror, not a fallback to another generation. Discovery decisions stay R2. The v1 D1 tables that reference `film(id)` are not this publisher. See [D1 schema](../reference/data/d1-schema.md). The changed diagram was [visually approved by the owner on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44); no production migration or activation was authorized.
+**Current production (3 November 2026):** [ADR 0079](../adr/0079-d1-authoritative-published-epg.md) (Accepted) is activated: migration `0008` applied, `published_epg_authority.mode=d1`, `cutover=open`. D1 owns the published generation, programme/watchlist membership and generation fence. `programme.json`, `watchlist.json` and `epg/published-generation.json` are R2 compatibility mirrors, not a fallback on a D1 failure. Discovery decisions and continuation remain R2-authoritative pending [AIR-320](https://trello.com/c/4cA5GlJn). The original diagram was visually approved on 1 November; the newly revised current-state label needs owner visual approval. [Production evidence](../evidence/d1-migration/air-319-production-cutover-2026-11-03.md) records a first successful post-cutover generation: a scheduled-task-created run completed by one owner-authorized manual step on 3 November (published run `00ff34fa…`). Raw D1/R2 parity and programme/watchlist/availability consumers remain pending separate safe verification.
