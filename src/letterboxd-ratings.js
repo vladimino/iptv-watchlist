@@ -23,8 +23,14 @@ const LetterboxdRatings=(()=>{
  const iso=ms=>new Date(ms).toISOString();
  const clone=value=>JSON.parse(JSON.stringify(value));
  class LeaseLost extends Error{constructor(){super('Ratings step lease lost');}}
- async function read(env,key){const object=await env.BUCKET.get(key);return {object,value:object?await object.json():null};}
- const put=(env,key,object,value)=>env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ async function read(env,key){
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {object:owned.etag?{etag:owned.etag}:null,value:owned.value};}
+  const object=await env.BUCKET.get(key);return {object,value:object?await object.json():null};
+ }
+ const put=async(env,key,object,value)=>{
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.putOwned(env,key,object?.etag??null,value);if(owned.owned)return owned.saved;}
+  return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ };
 
  // Migration state from the two objects and the durable witness `letterboxd/ratings/migration.json`, which
  // ratings_storage_migrate writes after each object it has converted. A witnessed object found back at version 1 is
@@ -123,7 +129,7 @@ const LetterboxdRatings=(()=>{
    for(let attempt=0;attempt<5;attempt++){
     if(!(remaining()>0))throw new LeaseLost();
     const next=mutate(clone(owned.run));
-    const saved=await env.BUCKET.put(KEYS.run,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:{etagMatches:owned.etag}});
+    const saved=await put(env,KEYS.run,{etag:owned.etag},next);
     if(saved!==null){owned={run:next,etag:saved.etag};return next;}
     const {object,value}=await read(env,KEYS.run);
     if(!object||value?.state!=='running'||value.lease?.step!==stepId)throw new LeaseLost();

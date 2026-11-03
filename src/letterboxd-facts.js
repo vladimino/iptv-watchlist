@@ -135,9 +135,19 @@ function recordRatingChange(record,incoming,effective){
   return {};
  }
 
- // ---- R2 storage. Every write is a compare-and-swap with bounded retries that re-reads and re-applies.
- async function readJSON(env,key){const object=await env.BUCKET.get(key);return object?{value:await object.json(),etag:object.etag}:{value:null,etag:null};}
+ // ---- Storage. While the ratings marker is r2, every write is an R2 compare-and-swap.
+ // Once it is d1 and cutover open, the same keys are D1 documents and do not fall back (ADR 0084).
+ async function readJSON(env,key){
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {value:owned.value,etag:owned.etag};}
+  const object=await env.BUCKET.get(key);let value=object?await object.json():null;
+  if(key===FACTS_KEYS.viewIndex&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);
+  return {value,etag:object?.etag??null};
+ }
  async function casJSON(env,key,empty,apply){
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
+   try{const owned=await RatingsD1.casOwned(env,key,empty,apply);if(owned.owned)return owned.result;}
+   catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
+  }
   for(let attempt=0;attempt<5;attempt++){
    const {value,etag}=await readJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
    if(next==null)return {value:current,changed:false};
@@ -210,6 +220,7 @@ function recordRatingChange(record,incoming,effective){
 
  // The view index is a projection of records under every id of the film; it is never the source of a fact.
  async function projectRecords(env,records){
+  if(typeof RatingsD1!=='undefined'){const projected=await RatingsD1.projectView(env,records);if(projected.owned)return {changed:projected.changed};}
   if(!records.length)return {changed:0};
   let changed=0;
   await casJSON(env,FACTS_KEYS.viewIndex,{},index=>{

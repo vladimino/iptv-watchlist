@@ -4,6 +4,8 @@
 -- tables, the nine published-EPG tables, and both authority rows. A refusal
 -- creates nothing. The version becomes 9 and never goes down.
 -- 0009 before 0008, and 0007 after 0009, are not supported production paths.
+-- 0010 may already have moved a complete version 8 to version 10. This file
+-- still creates its tables in that case and does not lower the version.
 -- A deploy does not apply this file. The inserted marker is mode r2.
 -- Applying this file does not copy admin/owner-reviews.json and does not set mode d1.
 -- source_key is the programme stored id (film) or the role-specific person id.
@@ -17,7 +19,7 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
 WHERE NOT EXISTS (
  SELECT 1 FROM schema_contract
- WHERE id = 1 AND version >= 8 AND version < 9
+ WHERE id = 1
  AND (
   SELECT COUNT(*) FROM sqlite_master
   WHERE type = 'table' AND name IN (
@@ -44,6 +46,15 @@ WHERE NOT EXISTS (
  ) = 19
  AND EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1)
  AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id = 1)
+ AND (
+  (version >= 8 AND version < 9)
+  OR (
+   version >= 10
+   AND NOT EXISTS (
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'owner_review_authority'
+   )
+  )
+ )
 );
 
 CREATE TABLE owner_review_authority (
