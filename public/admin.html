@@ -50,13 +50,13 @@
       <p id="admin-health-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем ограниченные источники здоровья…</p>
       <div id="admin-health-stale" class="admin-state admin-state-stale" role="alert" hidden><span>Опубликованный снимок изменился с прошлого чтения. Оценка ниже относится к прежнему поколению.</span><button type="button" id="admin-health-stale-refresh" class="admin-refresh">Перечитать снимок</button></div>
       <p id="admin-health-error" class="admin-state admin-state-error" role="alert" hidden></p>
-      <h3 class="admin-health-subtitle">Что требует внимания</h3>
+      <h3 class="admin-health-subtitle">Проблемы и следующие шаги</h3>
       <p id="admin-health-empty" class="admin-state admin-health-empty" role="status" hidden></p>
-      <ol id="admin-health-issues" class="health-groups"></ol>
+      <div id="admin-health-issues"></div>
       <h3 class="admin-health-subtitle">Подсистемы и источники</h3>
       <div id="admin-health-subsystems" class="health-cards" role="list"></div>
       <p id="admin-health-sources" class="muted admin-health-sources"></p>
-      <p class="muted admin-health-note">ТОЛЬКО ЧТЕНИЕ. Предложенное действие и его готовность описывают состояние записи; выполнение действий здесь не предусмотрено.</p>
+      <p class="muted admin-health-note">ТОЛЬКО ЧТЕНИЕ. Ссылки открывают другую страницу админки и ничего не запускают. Готовность описывает запись, а не кнопку на этой странице.</p>
     </section>
     <div id="admin-catalog">
     <form class="search-panel" role="search" action="/admin">

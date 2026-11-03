@@ -503,14 +503,22 @@ assert.deepEqual(chrome(), {title: 'Здоровье данных', health: true
 assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/health']);
 assert.ok(requests.every(request => request.method === 'GET'));
 const healthSummary = nodes.get('#admin-health-summary').innerHTML;
-assert.match(healthSummary, /Требует внимания<\/b> — [1-9]/);
-assert.match(healthSummary, /В пределах проверенного всё хорошо/);
-assert.match(healthSummary, /Недостаточно данных<\/b> — [1-9]/);
-assert.match(healthSummary, /Оценка на .* · поколение 11111111/);
-assert.match(healthSummary, /покрытие: прочитано/);
+assert.match(healthSummary, /data-lead="act"/);
+assert.match(healthSummary, /<b>Разобраться<\/b><span>[1-9]/);
+assert.match(healthSummary, /Требует внимания <b>[1-9]/);
+assert.match(healthSummary, /Разобраться <b>[1-9]/);
+assert.match(healthSummary, /Штатное ожидание <b>[0-9]/);
+assert.match(healthSummary, /Не проверить <b>[0-9]/);
+assert.match(healthSummary, /В пределах проверенного всё хорошо <b>[0-9]/);
+assert.match(healthSummary, /Недостаточно данных <b>[1-9]/);
+assert.match(healthSummary, /Источники<\/dt><dd>прочитано [1-9] из [1-9]/);
+assert.match(healthSummary, /Фильмы<\/dt>/);
+assert.match(healthSummary, /Не прочитано:/);
 assert.match(healthSummary, /Сводного балла нет/);
+assert.doesNotMatch(healthSummary, /поколение/, 'the generation stays on the snapshot line, not in the summary paragraph');
 assert.match(nodes.get('#admin-snapshot-text').textContent, /Поколение 11111111/, 'the health answer keeps the pinned snapshot line');
-assert.ok(html.indexOf('Что требует внимания') < html.indexOf('id="admin-health-issues"') && html.indexOf('id="admin-health-issues"') < html.indexOf('Подсистемы и источники'));
+assert.match(html, /Ссылки открывают другую страницу админки и ничего не запускают/);
+assert.ok(html.indexOf('Проблемы и следующие шаги') < html.indexOf('id="admin-health-issues"') && html.indexOf('id="admin-health-issues"') < html.indexOf('Подсистемы и источники'));
 assert.match(nodes.get('#admin-health-sources').textContent, /нерешённые наблюдения: не читается здесь/);
 assert.match(nodes.get('#admin-health-sources').textContent, /baseline Letterboxd: не читается здесь/);
 const cards = nodes.get('#admin-health-subsystems').innerHTML;
@@ -529,8 +537,10 @@ assert.match(issuesHtml, /Источник не входит в это огра�
 assert.doesNotMatch(issuesHtml, /<button/, 'no execution controls in the issue list');
 assert.match(issuesHtml, /Технические подробности/);
 assert.ok(issuesHtml.indexOf('health-group-why') < issuesHtml.indexOf('Технические подробности'), 'the reason stays outside the technical disclosure');
-assert.ok(issuesHtml.indexOf('health-severity-warning') < issuesHtml.indexOf('health-severity-info'), 'warnings before information');
-assert.match(issuesHtml, /Следующий шаг:/);
+assert.ok(issuesHtml.indexOf('health-band-act') < issuesHtml.indexOf('health-band-wait') && issuesHtml.indexOf('health-band-wait') < issuesHtml.indexOf('health-band-gap'), 'action, then routine waiting, then missing evidence');
+assert.match(issuesHtml, /Дальше само:|Разобраться вручную:|Обновить оценку можно кнопкой|Проверить нельзя:|Ссылка только открывает страницу/);
+assert.doesNotMatch(issuesHtml, /На другой странице/);
+assert.doesNotMatch(issuesHtml, /Сейчас:/);
 assert.doesNotMatch(issuesHtml, /href="\/admin\/discovery|href="\/api\//);
 const issuesVisibleText = issuesHtml.replace(/<details class="health-tech">[\s\S]*?<\/details>/g, '').replace(/<[^>]+>/g, ' ');
 assert.match(issuesVisibleText, /Открыть фильм/);
@@ -538,8 +548,11 @@ assert.doesNotMatch(issuesVisibleText, /film:/, 'a stored film id is not visible
 assert.match(issuesHtml, /<details class="health-tech">[\s\S]*?film:blank/, 'the stored film id stays inside the disclosure');
 assert.match(issuesVisibleText, /Неизвестно, сколько затронуто/);
 assert.doesNotMatch(issuesVisibleText, /Затронуто записей: 0/);
-assert.match(issuesVisibleText, /Эта страница ничего не выполняет/);
-assert.match(issuesVisibleText, /сейчас недоступно|готовность неизвестна|готово, но эта страница действие не выполняет/);
+assert.doesNotMatch(issuesVisibleText, /сведение|Эта страница ничего не выполняет|не запуск|не выполняет|сейчас недоступно/);
+assert.doesNotMatch(issuesVisibleText, /(^|[^а-яё])готово([^а-яё]|$)/i);
+assert.match(issuesVisibleText, /Обновления метаданных там нет/);
+assert.match(issuesVisibleText, /Дальше само:|Проверить нельзя:/);
+assert.doesNotMatch(issuesVisibleText, /На другой странице|Запись к этому готова/);
 assert.equal(nodes.get('#admin-health-empty').hidden, true);
 assert.equal(nodes.get('#admin-health-loading').hidden, true);
 assert.equal(nodes.get('#admin-health-error').hidden, true);
@@ -575,7 +588,7 @@ etags.set('people.json', 'people-2');
 await run('adminRenderHealth()');
 await settle();
 assert.equal(nodes.get('#admin-health-stale').hidden, false, 'a changed dictionary under the held pin is a stale answer');
-assert.match(nodes.get('#admin-health-summary').innerHTML, /Оценка на/, 'the previous evaluation stays on screen');
+assert.match(nodes.get('#admin-health-summary').innerHTML, /Требует внимания/, 'the previous evaluation stays on screen');
 await run('onAdminHealthRefresh()');
 await settle();
 assert.equal(nodes.get('#admin-health-stale').hidden, true);
@@ -599,7 +612,8 @@ assert.match(nodes.get('#admin-health-empty').textContent, /Покрытие ф�
 assert.equal(attrs.get('#admin-health-empty:data-verdict'), 'scoped');
 assert.doesNotMatch(nodes.get('#admin-health-empty').textContent, /В пределах проверенного всё хорошо/);
 run(`renderAdminHealth({health:{now:'2026-11-02T21:00:00.000Z',published:{programmeRunId:'11111111-1111-4111-8111-111111111111'},scope:{coverage:{films:'complete'},subjects:{films:2}},subsystems:{metadata:{status:'unknown',evidence:'not_supplied'}},groups:[]},sources:{}})`) ;
-assert.match(nodes.get('#admin-health-summary').innerHTML, /Недостаточно данных<\/b> — 1 подсистема/);
+assert.match(nodes.get('#admin-health-summary').innerHTML, /<b>Недостаточно данных<\/b><span>1 подсистема/);
+assert.match(nodes.get('#admin-health-summary').innerHTML, /data-lead="unknown"/);
 assert.match(nodes.get('#admin-health-empty').textContent, /неизвестным, а не здоровым/);
 assert.equal(attrs.get('#admin-health-empty:data-verdict'), 'unknown');
 run(`renderAdminHealth({health:{now:'2026-11-02T21:00:00.000Z',published:{programmeRunId:'11111111-1111-4111-8111-111111111111'},scope:{coverage:{films:'complete'},subjects:{films:2}},subsystems:{metadata:{status:'clear',evidence:'observed'}},groups:[]},sources:{}})`) ;
@@ -616,28 +630,35 @@ assert.equal(situation.waiting, 'ожидание');
 assert.equal(situation.stale, 'устарело');
 assert.equal(situation.partial, 'частично');
 const links = run(`({
-  poster: healthNextStep({subsystem:'poster',action:{suggested:'bounded_action',code:'poster_hydration',eligible:false,reason:'identity_unverified'}}),
+  poster: healthNextStep({subsystem:'poster',reason:'posters_missing',action:{suggested:'bounded_action',code:'poster_hydration',eligible:true,reason:'eligible'}}),
   archive: healthNextStep({subsystem:'letterboxd_archive',action:{suggested:'bounded_action',code:'archive_import',eligible:true,reason:'eligible'}}),
-  limb: healthNextStep({subsystem:'metadata',action:{suggested:'investigate',code:'manual_review',eligible:null,reason:'manual_review_required'}}),
+  metadata: healthNextStep({subsystem:'metadata',reason:'metadata_missing',action:{suggested:'bounded_action',code:'metadata_refresh',eligible:true,reason:'eligible'}}),
+  prediction: healthNextStep({subsystem:'prediction',reason:'prediction_missing',action:{suggested:'bounded_action',code:'prediction_retry',eligible:true,reason:'eligible'}}),
+  discovery: healthNextStep({subsystem:'discovery',reason:'work_pending',action:{suggested:'bounded_action',code:'discovery_retry',eligible:true,reason:'eligible'}}),
+  limb: healthNextStep({subsystem:'metadata',action:{suggested:'investigate',code:'manual_review',eligible:null,reason:'evidence_incomplete'}}),
   programme: healthNextStep({subsystem:'programme',action:{suggested:'investigate',code:'check_scheduled_tasks',eligible:null,reason:'evidence_incomplete'}}),
-  queue: healthNextStep({subsystem:'prediction_queue',action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'in_backoff'}}),
+  queue: healthNextStep({subsystem:'prediction_queue',reason:'work_queued',action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'already_queued'}}),
+  retry: healthNextStep({subsystem:'prediction_queue',reason:'all_deferred_by_retry',retryAt:{earliest:'2026-11-03T00:00:00.000Z'},action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'in_backoff'}}),
+  reread: healthNextStep({subsystem:'programme',reason:'projection_generation_differs',action:{suggested:'wait',code:'reread_snapshot',eligible:false,reason:'generation_changed'}}),
 })`);
-assert.match(links.poster, /Следующий шаг: гидрация постеров/);
-assert.match(links.poster, /ограниченное действие, сейчас недоступно \(идентичность не подтверждена\)/);
-assert.match(links.poster, /не запуск и не признак готовности/);
-assert.match(links.poster, /href="\/admin\/posters"/);
-assert.match(links.archive, /импорт архива/);
-assert.match(links.archive, /готово, но эта страница действие не выполняет/);
-assert.match(links.archive, /href="\/admin\/letterboxd"/);
-assert.match(links.limb, /ручная проверка/);
-assert.match(links.limb, /готовность неизвестна/);
-assert.match(links.limb, /href="\/admin\/limb\?subsystem=metadata"/);
-assert.match(links.programme, /проверить Scheduled Tasks/);
-assert.match(links.programme, /готовность неизвестна \(данных недостаточно, чтобы судить\)/);
+assert.equal(links.poster, 'На странице «Постеры» есть свой запуск со своей проверкой. Ссылка только открывает страницу. <a href="/admin/posters">Постеры</a>');
+assert.doesNotMatch(links.poster, /На другой странице|Запись к этому готова|запускает|выполнит|<button/);
+assert.equal(links.archive, 'На странице «Архив Letterboxd» есть свой запуск со своей проверкой. Ссылка только открывает страницу. <a href="/admin/letterboxd">Архив Letterboxd</a>');
+assert.doesNotMatch(links.archive, /На другой странице|Запись к этому готова|<button/);
+assert.equal(links.metadata, 'Лимб только показывает записи. Обновления метаданных там нет. Ссылка только открывает страницу. <a href="/admin/limb?subsystem=metadata">Лимб</a>');
+assert.doesNotMatch(links.metadata, /На другой странице|Запись к этому готова/);
+assert.equal(links.prediction, 'Лимб только показывает записи. Повтора прогноза там нет. Ссылка только открывает страницу. <a href="/admin/limb?subsystem=prediction">Лимб</a>');
+assert.doesNotMatch(links.prediction, /На другой странице|Запись к этому готова/);
+assert.equal(links.discovery, 'Повтор discovery делает следующий шаг пайплайна. Страницы с этим действием нет.');
+assert.doesNotMatch(links.discovery, /На другой странице|href=/);
+assert.equal(links.limb, 'Разобраться вручную: ручная проверка. Хватит ли данных, неизвестно. <a href="/admin/limb?subsystem=metadata">Лимб</a>');
+assert.equal(links.programme, 'Разобраться вручную: проверить Scheduled Tasks. Хватит ли данных, неизвестно.');
 assert.doesNotMatch(links.programme, /href=/);
-assert.match(links.queue, /повтор прогноза/);
-assert.match(links.queue, /сейчас недоступно/);
-assert.doesNotMatch(links.queue, /href=/);
+assert.equal(links.queue, 'Дальше само: прогноз уже в очереди.');
+assert.doesNotMatch(links.queue, /повтор прогноза|недоступно|href=/);
+assert.equal(links.retry, 'Дальше само: в паузе. Ближайший повтор 03.11.2026, 01:00 Madrid.');
+assert.equal(links.reread, 'Поколение сменилось. Обновить оценку можно кнопкой «Перечитать».');
+assert.doesNotMatch(links.reread, /недоступно|Сейчас:/);
 assert.doesNotMatch(links.poster + links.archive + links.limb, /<button/);
 const rows = run(`({
   supplied: healthGroupRow({severity:'warning',subsystem:'observations',category:'incomplete',reason:'evidence_not_supplied',subjectKind:'subsystem',issues:1,affected:0,sample:['observations'],action:{suggested:'investigate',code:'supply_evidence',eligible:null,reason:'evidence_incomplete'},evidence:{missing:1},progress:{},freshness:{}}, '2026-11-02T21:00:00.000Z'),
@@ -655,8 +676,13 @@ assert.doesNotMatch(shown(rows.absent), /Затронуто: 0/);
 assert.match(rows.supplied, /<details[\s\S]*supply_evidence/);
 assert.match(rows.absent, /<details[\s\S]*letterboxd/);
 assert.doesNotMatch(shown(rows.absent), /letterboxd/);
-assert.match(shown(rows.zero), /Затронуто: 0 \(фильм\)/);
-assert.match(shown(rows.film), /Открыть фильм/);
+assert.match(shown(rows.zero), /0 фильмов/);
+assert.doesNotMatch(shown(rows.zero), /фильм: 0/);
+assert.match(shown(rows.film), /Открыть фильм 1/);
+assert.match(shown(rows.film), /Открыть фильм 2/);
+assert.match(outside(rows.film), /aria-label="Открыть фильм 1 в этой проблеме"/);
+assert.match(outside(rows.film), /aria-label="Открыть фильм 2 в этой проблеме"/);
+assert.doesNotMatch(outside(rows.film), /aria-label="[^"]*film:/);
 assert.match(outside(rows.film), /data-admin-id="film:blank"/);
 assert.match(outside(rows.film), /href="\/admin\?kind=film&(?:amp;)?id=film%3Ablank"/);
 assert.doesNotMatch(shown(rows.film), /film:/);
@@ -665,8 +691,54 @@ assert.match(rows.film, /<details[\s\S]*film:other/);
 assert.match(rows.film, /<details[\s\S]*metadata_refresh/);
 assert.doesNotMatch(shown(rows.queueRow), /prediction-queue/);
 assert.match(rows.queueRow, /<details[\s\S]*prediction-queue/);
-assert.match(shown(rows.queueRow), /проверить Scheduled Tasks/);
-assert.match(shown(rows.queueRow), /сейчас недоступно/);
+assert.match(shown(rows.queueRow), /Дальше само: прогноз уже в очереди/);
+assert.doesNotMatch(shown(rows.queueRow), /проверить Scheduled Tasks|сейчас недоступно/);
+assert.match(rows.queueRow, /<details[\s\S]*check_scheduled_tasks/);
+assert.doesNotMatch(shown(rows.film) + shown(rows.queueRow), /сведение|не выполняет|не запуск/);
+const bands = run(`healthIssuesHtml([
+  {severity:'warning',subsystem:'metadata',category:'incomplete',reason:'metadata_missing',subjectKind:'film',issues:1,affected:1,sample:['film:blank'],action:{suggested:'investigate',code:'metadata_refresh',eligible:false,reason:'identity_unverified'},evidence:{complete:1},progress:{},freshness:{}},
+  {severity:'info',subsystem:'prediction',category:'incomplete',reason:'work_queued',subjectKind:'film',issues:1,affected:1,sample:['film:queued'],action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'already_queued'},evidence:{complete:1},progress:{waiting:1},freshness:{}},
+  {severity:'info',subsystem:'discovery',category:'incomplete',reason:'work_pending',subjectKind:'subsystem',issues:1,affected:1,sample:['discovery'],action:{suggested:'wait',code:'check_scheduled_tasks',eligible:null,reason:'awaiting_progress'},evidence:{complete:1},progress:{waiting:1},freshness:{}},
+  {severity:'info',subsystem:'letterboxd_archive',category:'incomplete',reason:'evidence_not_supplied',subjectKind:'archive',issues:1,affected:0,sample:['letterboxd'],action:{suggested:'investigate',code:'supply_evidence',eligible:null,reason:'evidence_incomplete'},evidence:{missing:1},progress:{},freshness:{}},
+], '2026-11-02T21:00:00.000Z')`);
+const actBand = bands.slice(bands.indexOf('health-band-act'), bands.indexOf('health-band-wait'));
+const waitBand = bands.slice(bands.indexOf('health-band-wait'), bands.indexOf('health-band-gap'));
+const gapBand = bands.slice(bands.indexOf('health-band-gap'));
+assert.match(actBand, /Метаданные отсутствуют/);
+assert.match(actBand, /1 фильм/);
+assert.doesNotMatch(actBand, /уже в очереди|Неизвестно, сколько затронуто/);
+assert.match(waitBand, /уже в очереди/);
+assert.match(waitBand, /ждёт прогресса/);
+assert.match(gapBand, /Неизвестно, сколько затронуто/);
+assert.doesNotMatch(gapBand, /Затронуто: 0/);
+assert.equal(run(`healthBand({severity:'info',reason:'work_queued',action:{suggested:'wait',eligible:false,reason:'already_queued'}})`), 'wait');
+assert.equal(run(`healthBand({severity:'warning',reason:'work_queued',action:{suggested:'wait',eligible:false,reason:'already_queued'}})`), 'act');
+assert.equal(run(`healthBand({severity:'info',reason:'work_pending',action:{suggested:'wait',eligible:true,reason:'eligible'}})`), 'act');
+assert.equal(run(`healthBand({severity:'info',reason:'evidence_not_supplied',action:{suggested:'investigate',eligible:null,reason:'evidence_incomplete'}})`), 'gap');
+assert.equal(run(`healthBand({severity:'critical',reason:'evidence_object_missing',action:{suggested:'investigate',code:'reread_snapshot',eligible:null,reason:'evidence_incomplete'}})`), 'act');
+assert.equal(run(`healthBand({severity:'warning',reason:'progress_unknown',action:{suggested:'investigate',code:'supply_evidence',eligible:null,reason:'evidence_incomplete'}})`), 'act');
+const buried = run(`healthIssuesHtml([
+  {severity:'info',subsystem:'prediction',category:'incomplete',reason:'work_queued',subjectKind:'film',issues:1,affected:1,sample:['film:q'],action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'already_queued'},evidence:{complete:1},progress:{},freshness:{}},
+  {severity:'critical',subsystem:'programme',category:'incomplete',reason:'evidence_object_missing',subjectKind:'subsystem',issues:1,affected:0,sample:['programme'],action:{suggested:'investigate',code:'reread_snapshot',eligible:null,reason:'evidence_incomplete'},evidence:{missing:1},progress:{},freshness:{}},
+  {severity:'warning',subsystem:'prediction_queue',category:'incomplete',reason:'progress_unknown',subjectKind:'queue',issues:1,affected:4,sample:['prediction'],action:{suggested:'investigate',code:'supply_evidence',eligible:null,reason:'evidence_incomplete'},evidence:{partial:1},progress:{},freshness:{}},
+  {severity:'info',subsystem:'letterboxd_archive',category:'incomplete',reason:'evidence_not_supplied',subjectKind:'archive',issues:1,affected:0,sample:['letterboxd'],action:{suggested:'investigate',code:'supply_evidence',eligible:null,reason:'evidence_incomplete'},evidence:{missing:1},progress:{},freshness:{}},
+], '2026-11-02T21:00:00.000Z')`);
+assert.ok(buried.indexOf('health-severity-critical') < buried.indexOf('health-band-wait'), 'a critical missing source stays above routine waiting');
+assert.match(buried.slice(0, buried.indexOf('health-band-wait')), /Программа/);
+assert.match(buried.slice(0, buried.indexOf('health-band-wait')), /Очередь прогнозов/);
+assert.match(buried.slice(0, buried.indexOf('health-band-wait')), /Затронуто: 4 \(очередь\)/);
+assert.match(buried.slice(buried.indexOf('health-band-gap')), /Проверить нельзя/);
+assert.equal(run(`healthAffectedText({reason:'progress_unknown',subjectKind:'catalog',affected:0,evidence:{partial:1,missing:1}})`), 'Неизвестно, сколько затронуто.');
+assert.equal(run(`healthAffectedText({reason:'progress_unknown',subjectKind:'queue',affected:4,evidence:{partial:1}})`), 'Затронуто: 4 (очередь).');
+run(`renderAdminHealth({health:{now:'2026-11-02T21:00:00.000Z',published:{programmeRunId:'11111111-1111-4111-8111-111111111111'},scope:{coverage:{films:'complete'},subjects:{films:2}},subsystems:{prediction:{status:'attention',evidence:'observed'},letterboxd_archive:{status:'unknown',evidence:'not_supplied'}},groups:[{severity:'info',subsystem:'prediction',category:'incomplete',reason:'work_queued',subjectKind:'film',issues:1,affected:1,sample:['film:q'],action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'already_queued'},evidence:{complete:1},progress:{},freshness:{}},{severity:'info',subsystem:'letterboxd_archive',category:'incomplete',reason:'evidence_not_supplied',subjectKind:'archive',issues:1,affected:0,sample:['letterboxd'],action:{suggested:'investigate',code:'supply_evidence',eligible:null,reason:'evidence_incomplete'},evidence:{missing:1},progress:{},freshness:{}}]},sources:{letterboxd:{evidence:'not_supplied'}}})`);
+const calm = nodes.get('#admin-health-summary').innerHTML;
+assert.match(calm, /data-lead="calm"/);
+assert.match(calm, /<b>Срочного шага нет<\/b>/);
+assert.doesNotMatch(calm, /<b>Требует внимания<\/b>/);
+assert.match(calm, /Требует внимания <b>1<\/b>/);
+assert.match(calm, /Разобраться <b>0<\/b>/);
+assert.match(calm, /Штатное ожидание <b>1<\/b>/);
+assert.match(calm, /Не проверить <b>1<\/b>/);
 nodes.get('#admin-health-stale').hidden = true;
 assert.equal(url().searchParams.get('view'), 'health', 'Escape does not leave the health view');
 assert.deepEqual(['1 подсистема', '3 подсистемы', '5 подсистем', '11 подсистем', '21 подсистема'], [1, 3, 5, 11, 21].map(count => run(`healthPlural(${count}, 'подсистема', 'подсистемы', 'подсистем')`)));
