@@ -85,7 +85,12 @@ for (const [name, source] of [['admin', html], ['letterboxd', letterboxdHtml], [
   assert.equal((source.match(/<nav class="admin-views"/g) || []).length, 1, name);
   assert.ok(source.indexOf('class="admin-workspace"') < source.indexOf('<nav class="admin-views"') && source.indexOf('<nav class="admin-views"') < source.indexOf('class="admin-main"'), name);
   assert.doesNotMatch(source, /Лимбо|view=health|href="\/admin\/limbo"/, name);
+  assert.match(source, /<script src="\/status-footer\.js"><\/script>/, name);
+  assert.doesNotMatch(source, /src="\/app\.js"/, name);
+  assert.ok(source.indexOf('</main>') < source.indexOf('src="/status-footer.js"'), name);
 }
+assert.match(build, /assets\['\/status-footer\.js'\]=\{body:fs\.readFileSync\('public\/status-footer\.js','utf8'\),type:'text\/javascript'\}/);
+assert.doesNotMatch(fs.readFileSync('public/admin-actions.html', 'utf8'), /status-footer\.js/);
 assert.match(css, /\.admin-workspace\{display:grid;grid-template-columns:215px minmax\(0,1fr\)/);
 assert.match(css, /\.admin-main\{min-width:0\}/);
 assert.match(css, /\.admin-views\{display:flex;flex-direction:column;[^}]*border-right:1px solid var\(--line\)/);
