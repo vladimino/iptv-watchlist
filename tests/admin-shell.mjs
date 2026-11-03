@@ -198,7 +198,9 @@ function seed() {
 }
 seed();
 vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);
+let pauseAdminReads = null;
 const fakeFetch = async (input, init = {}) => {
+  if (pauseAdminReads) await pauseAdminReads(init);
   const url = new URL(String(input), 'http://127.0.0.1');
   requests.push({method: init.method || 'GET', path: url.pathname + url.search, credentials: init.credentials});
   return workerContext.worker.fetch(new Request('http://127.0.0.1' + url.pathname + url.search, {method: init.method || 'GET', headers: init.headers}), {BUCKET: bucket}, {waitUntil() {throw new Error('background work');}});
@@ -470,20 +472,185 @@ await settle();
 assert.equal(url().searchParams.get('id'), 'film:same-east');
 assert.match(detail.innerHTML, /Одинаковый рассвет/);
 
-// 5. Queue toggle in the URL; a film-only queue asks the films route alone.
+// 5. Changing the search drops the open card before the debounced read and replaces this history entry.
+const readsBeforeClear = requests.length;
 searchNode.value = '';
 run('onAdminSearch()');
+assert.equal(url().searchParams.get('q'), null);
+assert.equal(url().searchParams.get('id'), null);
+assert.equal(url().searchParams.get('kind'), null);
+assert.equal(detail.hidden, true);
+assert.equal(detail.innerHTML, '');
+assert.equal(requests.length, readsBeforeClear, 'the card is cleared before the debounced read');
 await new Promise(resolve => setTimeout(resolve, 260));
 await settle();
+assert.equal(detail.hidden, true);
+assert.equal(url().searchParams.get('id'), null);
+assert.match(results.innerHTML, /Введите запрос или выберите очередь/);
+assert.equal(requests.length, readsBeforeClear, 'an empty catalogue reuses the held overview');
+window.history.back();
+await settle();
+assert.equal(url().searchParams.get('q'), 'одинаковый');
+assert.equal(url().searchParams.get('id'), null, 'Back returns to the search under the replaced entry');
+window.history.forward();
+await settle();
+assert.equal(url().searchParams.get('id'), null);
+
+// 5b. A film queue drops a selected person at once. Back restores the card that the push left behind.
+document.activeElement = document.body;
+await run(`onAdminResult({target:{closest(selector){return selector==='[data-admin-id]'?{getAttribute(name){return {'data-admin-id':'person:actor/mira-sol','data-admin-kind':'person'}[name]||null;}}:null;}},preventDefault(){this.defaultPrevented=true;},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
+assert.equal(url().searchParams.get('id'), 'person:actor/mira-sol');
+assert.match(detail.innerHTML, /Мира Соль/);
+requests = [];
+const queuePending = run(`onAdminQueue({target:{closest(){return {getAttribute(name){return name==='data-admin-queue'?'localization-provisional':null;}};}}})`);
+assert.equal(url().searchParams.get('queue'), 'localization-provisional');
+assert.equal(url().searchParams.get('id'), null);
+assert.equal(url().searchParams.get('kind'), null);
+assert.equal(detail.hidden, true);
+assert.equal(detail.innerHTML, '');
+await queuePending;
+await settle();
+assert.equal(detail.hidden, true);
+assert.match(results.innerHTML, /Тихая гавань/);
+assert.equal(requests.some(request => request.path.includes('/films/film%3A') || request.path.includes('/people/person%3A')), false, 'the old card is not read again');
+assert.ok(requests.some(request => request.path.split('?')[0] === '/api/admin/films'));
+assert.ok(requests.every(request => request.method === 'GET'));
+window.history.back();
+await settle();
+assert.equal(url().searchParams.get('queue'), null);
+assert.equal(url().searchParams.get('id'), 'person:actor/mira-sol');
+assert.match(detail.innerHTML, /Мира Соль/);
+
+// 5c. A film-only queue still lists films, and Back restores the film the push left in history.
+await run(`onAdminResult({target:{closest(selector){return selector==='[data-admin-id]'?{getAttribute(name){return {'data-admin-id':'film:same-east','data-admin-kind':'film'}[name]||null;}}:null;}},preventDefault(){this.defaultPrevented=true;},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
 requests = [];
 await run(`onAdminQueue({target:{closest(){return {getAttribute(name){return name==='data-admin-queue'?'identity-unresolved':null;}};}}})`);
 assert.equal(url().searchParams.get('queue'), 'identity-unresolved');
+assert.equal(url().searchParams.get('id'), null);
 assert.match(results.innerHTML, /film:blank/);
-assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/films', '/api/admin/films/film%3Asame-east']);
+assert.equal(detail.hidden, true);
+assert.deepEqual(requests.map(request => request.path.split('?')[0]), ['/api/admin/films']);
 window.history.back();
 await settle();
 assert.equal(url().searchParams.get('queue'), null);
 assert.equal(url().searchParams.get('id'), 'film:same-east');
+assert.match(detail.innerHTML, /Одинаковый рассвет/);
+
+// 5d. A query with no hits, a failed read, and a late answer for the old card all leave the editor closed.
+searchNode.value = 'неттакого';
+run('onAdminSearch()');
+assert.equal(detail.hidden, true, 'the card is gone before the empty read');
+assert.equal(url().searchParams.get('id'), null);
+await new Promise(resolve => setTimeout(resolve, 260));
+await settle();
+assert.equal(empty.hidden, false);
+assert.equal(results.innerHTML, '');
+assert.equal(detail.hidden, true);
+assert.equal(error.hidden, true);
+
+await run(`onAdminResult({target:{closest(selector){return selector==='[data-admin-id]'?{getAttribute(name){return {'data-admin-id':'film:same-east','data-admin-kind':'film'}[name]||null;}}:null;}},preventDefault(){this.defaultPrevented=true;},metaKey:false,ctrlKey:false,shiftKey:false,altKey:false,button:0})`);
+assert.match(detail.innerHTML, /Одинаковый рассвет/);
+records.delete('epg/published-generation.json');
+vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);
+searchNode.value = 'маяк';
+run('onAdminSearch()');
+assert.equal(detail.hidden, true);
+assert.equal(detail.innerHTML, '');
+await new Promise(resolve => setTimeout(resolve, 260));
+await settle();
+assert.equal(error.hidden, false);
+assert.equal(detail.hidden, true);
+assert.equal(url().searchParams.get('id'), null);
+seed();
+vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);
+window.location.href = 'http://127.0.0.1/admin?q=одинаковый';
+await run('onAdminRefresh()');
+await settle();
+
+const heldReads = [];
+pauseAdminReads = () => new Promise(resolve => { heldReads.push(resolve); });
+window.location.href = 'http://127.0.0.1/admin?q=одинаковый&kind=film&id=film:same-east';
+const lateRead = run('adminRender()');
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.ok(heldReads.length > 0, 'the old catalogue read is still in flight');
+searchNode.value = 'маяк';
+run('onAdminSearch()');
+assert.equal(detail.hidden, true);
+assert.equal(url().searchParams.get('id'), null);
+assert.equal(url().searchParams.get('q'), 'маяк');
+const releaseLate = heldReads.splice(0);
+pauseAdminReads = null;
+for (const release of releaseLate) release();
+await lateRead;
+await settle();
+assert.equal(detail.hidden, true, 'the late answer does not put the old card back');
+assert.equal(detail.innerHTML, '');
+assert.equal(url().searchParams.get('id'), null);
+await new Promise(resolve => setTimeout(resolve, 260));
+await settle();
+assert.equal(url().searchParams.get('q'), 'маяк');
+assert.equal(url().searchParams.get('id'), null);
+assert.equal(detail.hidden, true);
+assert.doesNotMatch(detail.innerHTML, /Same Dawn|Одинаковый рассвет/);
+
+// 5e. Escape clears the query and the card. On a narrow screen the results come back.
+window.location.href = 'http://127.0.0.1/admin?q=мост&kind=film&id=film:blank';
+await run('adminRender()');
+await settle();
+assert.match(detail.innerHTML, /Blank Reel/);
+run(`onAdminKey({key:'Escape',target:{closest(){return null;}},preventDefault(){this.defaultPrevented=true;}})`);
+assert.equal(url().searchParams.get('q'), null);
+assert.equal(url().searchParams.get('id'), null);
+assert.equal(detail.hidden, true);
+await settle();
+assert.equal(detail.hidden, true);
+assert.equal(document.activeElement, searchNode);
+
+window.matchMedia = query => ({matches: String(query).includes('800px'), addEventListener() {}, removeEventListener() {}});
+window.location.href = 'http://127.0.0.1/admin?q=одинаковый&kind=person&id=person:actor/mira-sol';
+await run('adminRender()');
+await settle();
+run('adminPlaceCatalog()');
+assert.equal(nodes.get('#admin-results-section').hidden, true, 'a narrow open card hides the results');
+const backPending = run('onAdminDetailBack()');
+assert.equal(url().searchParams.get('id'), null);
+assert.equal(detail.hidden, true);
+assert.equal(nodes.get('#admin-results-section').hidden, false, 'leaving the card shows the results');
+await backPending;
+await settle();
+assert.equal(document.activeElement, searchNode);
+delete window.matchMedia;
+
+// 5f. Closing the card keeps an unknown command on that record and does not post it.
+window.location.href = 'http://127.0.0.1/admin?kind=person&id=person:actor/mira-sol';
+await run('adminRender()');
+await settle();
+const nameCommand = {personId: 'person:actor/mira-sol', requestId: 'req-keep-name', mode: 'manual', value: 'Брюс', expectedVersion: 'name-review:1:mira', effect: 'promote'};
+const titleCommand = {filmId: 'film:blank', requestId: 'req-keep-title', mode: 'manual', value: 'Пустая', expectedVersion: 'title-review:1:blank', effect: 'add_alias'};
+run(`adminNameHold(${JSON.stringify(nameCommand.personId)}, ${JSON.stringify(nameCommand)})`);
+run(`adminTitleHold('blank', ${JSON.stringify(titleCommand)})`);
+const postsBefore = requests.filter(request => request.method !== 'GET').length;
+await run(`onAdminQueue({target:{closest(){return {getAttribute(name){return name==='data-admin-queue'?'identity-unresolved':null;}};}}})`);
+assert.equal(detail.hidden, true);
+assert.equal(url().searchParams.get('id'), null);
+assert.equal(requests.filter(request => request.method !== 'GET').length, postsBefore);
+assert.equal(run(`adminNameFrozen('person:actor/mira-sol', 'req-keep-name').requestId`), 'req-keep-name');
+assert.equal(run(`adminNameFrozen('person:actor/mira-sol', 'req-keep-name').value`), 'Брюс');
+assert.equal(run(`adminTitleFrozen('blank', 'req-keep-title').requestId`), 'req-keep-title');
+window.location.href = 'http://127.0.0.1/admin?kind=film&id=film:blank';
+await run('adminRender()');
+await settle();
+assert.match(detail.innerHTML, /Blank Reel/);
+assert.doesNotMatch(detail.innerHTML, /req-keep-name/);
+assert.equal(run(`adminNameFrozen('person:actor/mira-sol', 'req-keep-name').effect`), 'promote');
+window.location.href = 'http://127.0.0.1/admin?kind=person&id=person:actor/mira-sol';
+await run('adminRender()');
+await settle();
+assert.equal(run(`adminNameFrozen('person:actor/mira-sol', 'req-keep-name').requestId`), 'req-keep-name');
+assert.equal(run(`adminTitleFrozen('blank', 'req-keep-title').value`), 'Пустая');
+assert.equal(requests.filter(request => request.method !== 'GET').length, postsBefore);
+run('adminNameDrop()');
+run('adminTitleDrop()');
 
 // 6. Pagination: 25 of 30 beacons, then the rest through the cursor under the same pin.
 window.location.href = 'http://127.0.0.1/admin?q=beacon';
