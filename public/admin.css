@@ -300,7 +300,18 @@
 .archive-upload h2{font-size:22px;letter-spacing:-.3px}
 .archive-form{display:flex;flex-direction:column;gap:6px;margin:10px 0 0}
 .archive-file input[type=file]{padding:6px}
-.archive-file input:focus-visible,.archive-time input:focus-visible,.archive-details summary:focus-visible,.archive-results:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.archive-file input:focus-visible,.archive-time input:focus-visible,.archive-details summary:focus-visible,.archive-technical summary:focus-visible,.archive-results:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.archive-steps{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px;padding:0;list-style:none;min-width:0;max-width:100%}
+.archive-steps li{flex:1 1 7.5rem;min-width:0;margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-size:13px;line-height:1.35;overflow-wrap:anywhere}
+.archive-steps li[data-reached=true]{color:var(--text)}
+.archive-steps li[aria-current=step]{border-color:var(--lime);color:var(--text);background:#1b251a}
+.archive-unverified{margin:10px 0 0;font-size:14px}
+.archive-unverified b{font-size:22px;margin-right:6px}
+.archive-technical{margin:14px 0 0;min-width:0}
+.archive-technical:not([open]) > :not(summary),.archive-details:not([open]) > :not(summary){display:none}
+.archive-technical summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.archive-technical ul,.archive-technical p{margin:6px 0 0;font-size:13px;overflow-wrap:anywhere}
+.archive-technical code{overflow-wrap:anywhere;word-break:break-all}
 .archive-hint{margin:0 0 8px;font-size:13px;overflow-wrap:anywhere}
 .archive-batch{display:flex;flex-direction:column;gap:8px;margin:0 0 12px;padding:12px 14px;border:1px solid #3a4038;border-radius:8px}
 .archive-batch h3{margin:0;font-size:16px}
@@ -335,7 +346,7 @@
 .archive-details ul{margin:6px 0 0;padding-left:18px;font-size:13px}
 .archive-details li{margin:0 0 6px;overflow-wrap:anywhere}
 .archive-row-facts{color:#c5d0c2}
-@media(max-width:800px){.archive-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.archive-actions button{flex:1 1 100%}}
+@media(max-width:800px){.archive-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.archive-totals .archive-total:last-child:nth-child(odd){grid-column:1 / -1}.archive-actions button{flex:1 1 100%}.archive-steps{flex-direction:column}.archive-steps li{flex:1 1 auto}}
 .posters-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .posters-action,.posters-unverified{margin-top:22px}
 .posters-action-intro,.posters-source{font-size:14px;line-height:1.5;color:var(--muted);margin:0 0 10px}
