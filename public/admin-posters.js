@@ -460,12 +460,18 @@ function onPostersOptions() {
   return postersRender();
 }
 
+function postersStaleAt() {
+  if (!postersLive.stale || !postersLive.read) return null;
+  const previous = posterCoverage(postersLive.read);
+  return previous && previous.complete ? postersDate(previous.observedAt) : null;
+}
+
 function onPostersForget() {
   const storage = postersStorage();
   try {if (storage) storage.removeItem(POSTER_HISTORY_KEY);} catch {}
   postersLive.history = posterHistoryRead(null);
   document.querySelector('#posters-dynamics').innerHTML = postersDynamicsHtml(postersLive.history);
-  if (postersLive.read) document.querySelector('#posters-coverage').innerHTML = postersCoverageHtml(postersLive.read, null);
+  if (postersLive.read) document.querySelector('#posters-coverage').innerHTML = postersCoverageHtml(postersLive.read, null, postersStaleAt());
 }
 
 function startPosters() {
