@@ -33,6 +33,6 @@ No source key, identity link or review text is in this record.
 
 **Import holds.** Seven rows match the object. The marker stays `r2`, so Admin, programme, watchlist and the catalogue still read `admin/owner-reviews.json`. An Admin save while the marker stays `r2` advances `generation` and puts the object; it does not rewrite these rows. Activation then refuses until a new import proves the object again. This import does not authorize that second import or the activation.
 
-**Not done.** Activation to `d1`, and revert. A code rollback does not drop the rows or return the marker.
+**Not done by this import.** Revert remains separate. Activation later ran at 23:13 UTC under its own confirmation and set the marker to `d1` without a second import ([activation record](air-314-owner-review-activate-2026-11-03.md)). A code rollback does not drop the rows or return the marker. This file is the 23:06 UTC read-back: marker `r2`, generation 1.
 
 **Limits.** One request, one read-back. No Worker route. No bookmark. The REST `{batch}` is not proof of Worker-binding atomicity; the read-back is the proof that this import landed.
