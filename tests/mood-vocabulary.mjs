@@ -7,12 +7,13 @@ assert.deepEqual(idsOf('  НАПРЯЖЁННЫЙ!!! '),['tense']);assert.deepEqu
 const labels=JSON.parse(vm.runInContext('JSON.stringify(MOOD_LABELS)',ctx));
 for(const [id,label] of Object.entries(labels))assert.deepEqual(idsOf(label),id==='black_humor'?['funny','black_humor']:[id],label);
 assert.deepEqual(idsOf('Романтический'),['romantic']);assert.deepEqual(idsOf('романтический'),['romantic']);
-for(const value of ['семьдесят','браконьер','двойная жизнь','конфронтация']){assert.equal(idsOf(value).includes('family'),false,value);assert.equal(idsOf(value).includes('military'),false,value);}
+for(const value of ['семь','семьдесят','семьсот','семь дней','браконьер','двойная жизнь','конфронтация']){assert.equal(idsOf(value).includes('family'),false,value);assert.equal(idsOf(value).includes('military'),false,value);assert.notEqual(statusOf(value),'mapped',value);}
 assert.deepEqual(idsOf('паранормальный'),['eerie']);assert.deepEqual(idsOf('war'),['military']);assert.deepEqual(idsOf('war film'),['military']);assert.deepEqual(idsOf('warning'),[]);assert.equal(statusOf('warning'),'unmapped');
 assert.deepEqual(idsOf('Чёрный юмор'),['funny','black_humor']);assert.deepEqual(idsOf('команда'),[]);assert.equal(statusOf('команда'),'unmapped');assert.deepEqual(idsOf('Дружба и команда'),['friendship']);
-assert.deepEqual(idsOf('ужасы'),[]);assert.deepEqual(idsOf('horror'),[]);assert.deepEqual(idsOf('мистический'),['eerie']);
+assert.deepEqual(idsOf('ужасы'),[]);assert.deepEqual(idsOf('horror'),[]);assert.deepEqual(idsOf('хоррор'),[]);assert.equal(statusOf('хоррор'),'unmapped');assert.deepEqual(idsOf('мистический'),['eerie']);
 assert.equal(statusOf('расследование'),'mechanic_only');assert.equal(statusOf('криминальная афера'),'mechanic_only');assert.deepEqual(idsOf('криминальная афера'),[]);assert.equal(statusOf('спасательная миссия'),'mechanic_only');assert.equal(statusOf('комиссия'),'unmapped');assert.equal(statusOf('детектив'),'unmapped');
 assert.deepEqual(idsOf('античный'),['historical']);assert.deepEqual(idsOf('брак'),['family']);
+for(const value of ['семья','семьи','семье','семью','семьёй','семей','семейный','семейная','брачный','отец и сын'])assert.deepEqual(idsOf(value),['family'],value);
 const union=JSON.parse(vm.runInContext('JSON.stringify(canonicalMoodFacet({moodLabels:["мрачный"],fingerprintHash:"same"},{moodLabels:["тёплый"],fingerprintHash:"same"}))',ctx));
 assert.deepEqual(union.moodIds,['dark','warm']);assert.equal(union.mappingVersion,2);
 assert.equal(vm.runInContext('FINGERPRINT_SCHEMA_VERSION+"/"+FINGERPRINT_PROMPT_VERSION+"/"+PREDICTION_PROMPT_VERSION',ctx),'1/1/1');

@@ -30,10 +30,10 @@ Normalization is unchanged: NFKC, Russian lower case, `ё` to `е`, punctuation 
 Rules that version 2 narrows:
 
 - «Романтический» is `romantic` only. The historical stem `антич` does not match inside that word. «античный» is still `historical`.
-- «семьдесят» is not `family`. «браконьер» is not `family`. «брак» and «брачный» still are.
+- «семь», «семьдесят», «семьсот» and «семь дней» are not `family`. The family noun matches a token that continues `семья`, `семьи`, `семье` or `семью`, and the exact token «семей». «семейный» still matches through `семейн`. «браконьер» is not `family`. «брак» and «брачный» still are.
 - «двойная жизнь» and «конфронтация» are not `military`. `war` and `war film` both are. `warning` is not.
 - «паранормальный» is `eerie` only. «параноидальный» is still `paranoid`.
-- «ужасы» and `horror` are not `eerie`. «мистический» is. The transliterated stem `хоррор` still maps to `eerie`.
+- «ужасы», `horror` and «хоррор» are not `eerie`. «мистический» is. A horror-genre word alone is not an independent frightening or mystical stem.
 - «команда» alone is not `friendship`. «Дружба и команда» is, through «дружб».
 - «Чёрный юмор» and «чёрная комедия» stay `funny` and `black_humor`.
 - «Военная осада» and «военная погоня» stay `military`, because the military rule matches before the mechanic span.
