@@ -125,7 +125,7 @@ Nothing is stored: a new generation is evaluated afresh, so a film can be hidden
 | `films[].availableNow` | Some returned show has started |
 | `films[].nextStart` | The earliest returned show that has not started, or `null` |
 | `films[].availableUntil` | The latest returned start plus 72 hours, when the last catch-up ends |
-| `films[].prediction` | The stored current prediction: rating, probability of 4+, the model's `confidence`, match signals, main risk and the canonical mood ids. When that snapshot already stores `confidenceAssessment`, the same object and `fingerprintHash` are copied here. A snapshot without the key omits both. The route does not recompute the assessment |
+| `films[].prediction` | The stored current prediction: rating, probability of 4+, the model's `confidence`, match signals, main risk and the canonical mood ids. When the snapshot has the `confidenceAssessment` key, that value is copied even if it is `null`, and `fingerprintHash` is copied with it. A snapshot without the key omits both. The route does not recompute the assessment |
 | `films[].fingerprint` | The fingerprint facet (plot mechanics, mood ids, the general execution dimensions without `unknown` / `not_applicable`) when the stored fingerprint is the one the prediction was made from, otherwise `null` |
 | `channels` | One row per channel id with the number of returned films that have a show on it, for channel and period filters on the client |
 

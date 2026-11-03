@@ -891,7 +891,25 @@ function findsShows(film,now,scope=findsScope()){
 function findsUntil(film,now,scope=findsScope()){const shows=findsShows(film,now,scope);return shows.length?Math.max(...shows.map(show=>show.start))+72*3600000:null;}
 function findsIdentity(film){return String(film.canonicalIdentity||(film.tmdbId?'tmdb:'+film.tmdbId:'')||film.id);}
 function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film of films||[]){ids.add(String(film.id));if(film.tmdbId)tmdb.add(String(film.tmdbId));}return {ids,tmdb};}
-function effectiveConfidence(prediction){if(!prediction||typeof prediction!=='object'||Array.isArray(prediction))return '';const model=typeof prediction.confidence==='string'?prediction.confidence:'';if(!Object.hasOwn(prediction,'confidenceAssessment'))return model;const value=prediction.confidenceAssessment;if(!value||typeof value!=='object'||Array.isArray(value)||value.assessmentVersion!==1)return 'low';if(typeof value.level!=='string'||!Object.hasOwn(EVIDENCE_CONFIDENCE_LEVEL,value.level))return 'low';if(typeof value.status!=='string'||!['evidenced','legacy','insufficient'].includes(value.status))return 'low';if(value.status!=='evidenced'&&value.level!=='low')return 'low';const bound=typeof prediction.fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(prediction.fingerprintHash)?prediction.fingerprintHash:null;const assessed=typeof value.fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(value.fingerprintHash)?value.fingerprintHash:null;if(!bound||assessed!==bound)return 'low';return value.level;}
+function effectiveConfidence(prediction){
+ if(!prediction||typeof prediction!=='object'||Array.isArray(prediction))return '';
+ const model=typeof prediction.confidence==='string'?prediction.confidence:'';
+ if(!Object.hasOwn(prediction,'confidenceAssessment'))return model;
+ const value=prediction.confidenceAssessment;
+ if(!value||typeof value!=='object'||Array.isArray(value)||value.assessmentVersion!==1)return 'low';
+ if(typeof value.level!=='string'||!Object.hasOwn(EVIDENCE_CONFIDENCE_LEVEL,value.level))return 'low';
+ if(typeof value.status!=='string'||!['evidenced','legacy','insufficient'].includes(value.status))return 'low';
+ if(value.status!=='evidenced'&&value.level!=='low')return 'low';
+ if(!Array.isArray(value.reasonCodes)||!value.coverage||typeof value.coverage!=='object'||Array.isArray(value.coverage))return 'low';
+ for(const key of ['mechanicsAsserted','mechanicsSupported','keyApplicable','keyConcrete','keySupported','keyUnknown','keyNotApplicable','genrePresent','genreSupported']){
+  const number=value.coverage[key];
+  if(typeof number!=='number'||!Number.isInteger(number)||number<0||number>99)return 'low';
+ }
+ const bound=typeof prediction.fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(prediction.fingerprintHash)?prediction.fingerprintHash:null;
+ const assessed=typeof value.fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(value.fingerprintHash)?value.fingerprintHash:null;
+ if(!bound||assessed!==bound)return 'low';
+ return value.level;
+}
 function findsStrong(prediction){const confidence=effectiveConfidence(prediction);return !!prediction&&!prediction.stale&&Number.isFinite(prediction.predictedRating)&&prediction.predictedRating>=FINDS_MIN_RATING&&Number.isFinite(prediction.probability4Plus)&&prediction.probability4Plus>=FINDS_MIN_PROBABILITY&&confidence!==''&&confidence!=='low';}
 // Contextual finds: every filter a catalog record can answer from its own fields (title search, genres, years, runtime, mechanics,
 // moods, execution, prediction thresholds, last chance, channel and period) is a hard constraint, with the same AND/OR rules as the
