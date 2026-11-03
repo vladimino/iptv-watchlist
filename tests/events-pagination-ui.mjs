@@ -52,4 +52,8 @@ assert.match(css,/#activity-more\.is-loading::before/,'spinner is visible in the
 assert.match(css,/#activity-more:disabled/,'disabled appearance is intentional');
 assert.match(css,/prefers-reduced-motion:reduce/,'spinner supports reduced motion');
 assert.match(html,/id="activity-status" role="status"/,'loading feedback is announced to assistive tech');
+assert.match(html,/<footer class="status-footer"/,'the events screen is the programme document and keeps its footer');
+assert.ok(html.indexOf('id="activity-list"')<html.indexOf('class="status-footer"'),'the footer follows the events list');
+assert.doesNotMatch(css,/html\.events-screen \.status-footer\{display:\s*none/,'the expanded events screen does not hide the footer');
+assert.match(css,/html\.events-screen \.activity-scroll\{max-height:calc\(100dvh - 220px\)\}/,'the events list stays capped so the footer is reached by page scroll');
 console.log('Events pagination UI: disabled + spinner + busy label, duplicate prevention, retry and cleanup passed');

@@ -3,6 +3,7 @@ import {bundleAdmin} from './src/admin/bundle.js';
 import {scoped,scopePersonIdentity} from './scripts/bundle-scope.mjs';
 const assets={};
 for(const [path,file,type] of [['/','index.html','text/html'],['/styles.css','styles.css','text/css'],['/app.js','app.js','text/javascript'],['/admin','admin.html','text/html'],['/admin.css','admin.css','text/css']]) assets[path]={body:fs.readFileSync('public/'+file,'utf8'),type};
+assets['/status-footer.js']={body:fs.readFileSync('public/status-footer.js','utf8'),type:'text/javascript'};
 assets['/admin/actions']={body:fs.readFileSync('public/admin-actions.html','utf8'),type:'text/html'};
 // The guarded action demonstration: the pure contract, the in-memory fixture executor, the presentation layer, the panel and the page script. The Worker never runs them.
 assets['/admin-actions.js']={body:bundleAdmin([fs.readFileSync('src/domain/admin-actions.js','utf8'),fs.readFileSync('src/admin/actions-fixture.js','utf8'),fs.readFileSync('src/admin/actions-presentation.js','utf8'),fs.readFileSync('src/admin/actions-view.js','utf8'),fs.readFileSync('public/admin-actions.js','utf8')]),type:'text/javascript'};

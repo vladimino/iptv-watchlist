@@ -165,4 +165,94 @@ assert.equal(unknownBatch.integrationAggregate,'1 требует внимани�
 assert.doesNotMatch(unknownBatch.integrations.resolver,/нет подтверждённого выполнения|Usage|выполняется/);
 assert.doesNotMatch(unknownBatch.integrationAggregate,/нет подтверждённого выполнения/);
 for(const sample of [unconfirmed.integrationAggregate,waitingGate.integrations.resolver])assert(sample.length<120);
-console.log('Status footer UI: four-line default, structured details, expand/collapse, Events navigation and responsive layout passed');
+
+const adminFooterJs=fs.readFileSync('public/status-footer.js','utf8');
+const sliceStart='const FOOTER_RUN_STATUS=';
+const sliceEnd='finally{footerLoading=false;}}';
+function footerSlice(source){
+  const from=source.indexOf(sliceStart);
+  const to=source.indexOf(sliceEnd, from);
+  assert.ok(from>=0&&to>from, 'footer reader slice');
+  assert.equal(source.indexOf(sliceStart, from+sliceStart.length), -1, 'footer reader slice stays in one place');
+  return source.slice(from, to+sliceEnd.length);
+}
+assert.equal(footerSlice(adminFooterJs), footerSlice(app), 'the admin footer reader matches the programme reader');
+for(const name of ['filmWord','madridStamp','madridDay']){
+  const marker=`function ${name}(`;
+  const line=source=>source.slice(source.indexOf(marker), source.indexOf('\n', source.indexOf(marker)));
+  assert.equal(line(adminFooterJs), line(app), name);
+}
+assert.deepEqual([...adminFooterJs.matchAll(/fetch\((['"])(.*?)\1\)/g)].map(match=>match[2]), ['/api/enrichment/footer/status']);
+assert.doesNotMatch(adminFooterJs, /\/api\/events|\/api\/enrichment\/view|src="\/app\.js"/);
+assert.match(adminFooterJs, /querySelector\('main\.admin-shell'\)/);
+assert.match(adminFooterJs, /insertAdjacentHTML\('beforeend'/);
+assert.match(adminFooterJs, /setInterval\(refreshStatusFooter,60000\)/);
+assert.match(adminFooterJs, /visibilitychange/);
+assert.match(adminFooterJs, /loadPredictionQueue\(\{quiet:true\}\)/);
+const adminMarkup=adminFooterJs.slice(adminFooterJs.indexOf('<footer class="status-footer"'), adminFooterJs.indexOf('</footer>')+'</footer>'.length);
+assert.equal(adminMarkup, footer.replaceAll('href="#activity-title"', 'href="/events"'));
+assert.match(adminMarkup, /id="status-details-label">Показать детали/);
+assert.match(adminMarkup, /<\/details>\s*<a class="footer-admin-link" href="\/admin">Админка<\/a>/);
+assert.doesNotMatch(html, /status-footer\.js/, 'the programme page keeps its own footer script');
+assert.doesNotMatch(css, /html\.film-screen \.status-footer\{display:\s*none/);
+assert.doesNotMatch(css, /html\.events-screen \.status-footer\{display:\s*none/);
+assert.match(css, /html\.film-screen \.workspace\{display:none!important\}/);
+assert.match(css, /html\.film-screen \.search-panel\{display:none!important\}/);
+assert.match(css, /html\.film-screen \.status-footer,html\.events-screen \.status-footer\{margin-top:28px\}/);
+assert.match(css, /\.admin-shell>\.status-footer\{margin-top:36px\}/);
+assert.doesNotMatch(css, /\.status-footer\{[^}]*position:\s*(?:fixed|sticky)/);
+
+const nodes=new Map();
+const listeners=[];
+const timers=[];
+const calls=[];
+let mounted=false, mode='fail', visibility='visible';
+function footerNode(){
+  const handlers=new Map();
+  return {textContent:'', hidden:false, open:false, dataset:{}, handlers, classList:{remove(){}, add(){}}, addEventListener(type,fn){handlers.set(type,fn);}, dispatch(type){handlers.get(type)?.();}};
+}
+const shell={insertAdjacentHTML(position, markup){assert.equal(position,'beforeend');mounted=true;for(const match of markup.matchAll(/id="([^"]+)"/g))nodes.set(match[1], footerNode());nodes.set('[data-integration="metadata"]', footerNode());}};
+const document={
+  get visibilityState(){return visibility;},
+  body:{classList:{contains(name){return name==='admin-page';}}},
+  addEventListener(type,fn){listeners.push({type,fn});},
+  querySelector(selector){
+    if(selector==='main.admin-shell')return shell;
+    if(selector==='.status-footer')return mounted?{className:'status-footer'}:null;
+    if(selector==='[data-integration="metadata"]')return nodes.get(selector)||null;
+    if(selector.startsWith('#'))return nodes.get(selector.slice(1))||null;
+    return null;
+  }
+};
+const adminContext=vm.createContext({Date, Intl, document, setInterval(fn,ms){timers.push({fn,ms});}, fetch:async url=>{calls.push(String(url));if(mode==='fail')return {ok:false};return {ok:true,json:async()=>({generatedAt:'2026-10-13T09:30:00Z',coverage:{},predictions:{},epgTmdb:{},watchlist:{},integrations:{aggregate:'unknown',sources:[]}})};}});
+vm.runInContext(adminFooterJs, adminContext);
+const textOf=id=>nodes.get(id).textContent;
+for(let i=0;i<5&&textOf('status-local-coverage')!=='статус недоступен';i++)await new Promise(resolve=>setImmediate(resolve));
+assert.deepEqual(calls, ['/api/enrichment/footer/status']);
+for(const id of ['status-local-coverage','status-window-coverage','status-last-run','status-integrations'])assert.equal(textOf(id), 'статус недоступен', id);
+assert.equal(textOf('taste-version'), '', 'a failed read does not invent a taste profile');
+assert.equal(timers.length, 1);assert.equal(timers[0].ms, 60000);
+visibility='hidden';
+timers[0].fn();
+assert.equal(calls.length, 1, 'a hidden admin tab does not read the footer');
+visibility='visible';
+mode='ok';
+timers[0].fn();
+for(let i=0;i<5&&textOf('status-integrations')==='статус недоступен';i++)await new Promise(resolve=>setImmediate(resolve));
+assert.equal(textOf('status-integrations'), 'нет данных');
+assert.match(textOf('status-local-coverage'), /0\/0/);
+const shown=textOf('status-local-coverage');
+mode='fail';
+timers[0].fn();
+await new Promise(resolve=>setImmediate(resolve));
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(textOf('status-local-coverage'), shown, 'a later quiet failure keeps the last reading');
+assert.equal(calls.length, 3);
+const details=nodes.get('status-details');
+assert.equal(details.dataset.footerBound, '1');
+details.open=true;details.dispatch('toggle');
+assert.equal(textOf('status-details-label'), 'Скрыть детали');
+details.open=false;details.dispatch('toggle');
+assert.equal(textOf('status-details-label'), 'Показать детали');
+assert.equal(listeners.filter(item=>item.type==='visibilitychange').length, 1);
+console.log('Status footer UI: four-line default, structured details, expand/collapse, Events navigation, film and admin visibility passed');
