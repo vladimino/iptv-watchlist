@@ -133,6 +133,13 @@
 .film-score-card p{display:flex;flex-wrap:wrap;gap:4px 10px;margin:6px 0 0;color:#d5dece;font-size:13px}
 .film-score-card.is-empty strong{display:none}
 .film-score-card.is-empty .film-missing{margin:6px 0 0;font-size:14px}
+.evidence-confidence{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.evidence-confidence-level,.evidence-confidence-limits{margin:0;color:var(--text);font-size:12px;line-height:1.35;letter-spacing:0;overflow-wrap:anywhere}
+.evidence-confidence-level strong{display:inline;margin:0;color:inherit;font-size:12px;font-weight:650;letter-spacing:0;line-height:1.35}
+.evidence-confidence-limits{margin-top:4px;color:var(--muted)}
+.evidence-confidence[data-level=high]{border-top-color:#829b54}
+.evidence-confidence[data-level=medium]{border-top-color:#c2a15a}
+.evidence-confidence[data-level=low]{border-top-color:#a87868}
 .film-section{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
 .film-section h2{margin:0 0 10px;color:var(--lime);font-size:12px;font-weight:650;letter-spacing:.14em;text-transform:uppercase}
 .film-page-synopsis{max-width:62ch;margin:0;font-size:16px;line-height:1.6;overflow-wrap:anywhere}
