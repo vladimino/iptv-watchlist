@@ -15,7 +15,7 @@ const bucket={
 const env={BUCKET:bucket};
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{tmdb_17:3.5},
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context);
 const get=async()=>{const response=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/available'),env,{waitUntil(){}});return {status:response.status,body:await response.json()};};
 
@@ -193,5 +193,26 @@ assert.equal(r.body.posterCoverage.catalog+r.body.posterCoverage.metadataCache+r
 seed();for(const key of CATALOG_KEYS)records.get(key).tmdb_15.poster=null;r=await get();
 assert.deepEqual(r.body.posterCoverage,{catalog:2,metadataCache:0,missing:1},'a duplicate identity that is not returned is not counted');
 assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+
+// A stored confidenceAssessment key is projected even when the value is null. Absence of the key leaves the DTO unchanged.
+seed();
+const assessmentHash='ab'.repeat(32);
+const coverage={mechanicsAsserted:0,mechanicsSupported:0,keyApplicable:0,keyConcrete:0,keySupported:0,keyUnknown:0,keyNotApplicable:0,genrePresent:0,genreSupported:0};
+const index=records.get(constant('ENRICHMENT_KEY')+'view-index.json');
+index.tmdb_7.prediction.confidenceAssessment=null;
+index.tmdb_18.prediction.confidenceAssessment={assessmentVersion:1,level:'medium',status:'evidenced',reasonCodes:['declared_source_not_verified'],coverage,fingerprintHash:assessmentHash};
+r=await get();
+const absent=r.body.films.find(film=>film.id==='tmdb_15').prediction;
+const nulled=r.body.films.find(film=>film.id==='tmdb_7').prediction;
+const carried=r.body.films.find(film=>film.id==='tmdb_18').prediction;
+assert.equal(Object.hasOwn(absent,'confidenceAssessment'),false);
+assert.equal(Object.hasOwn(absent,'fingerprintHash'),false);
+assert.equal(Object.hasOwn(nulled,'confidenceAssessment'),true);
+assert.equal(nulled.confidenceAssessment,null);
+assert.equal(nulled.fingerprintHash,'f');
+assert.equal(nulled.confidence,'high');
+assert.equal(carried.confidenceAssessment.level,'medium');
+assert.equal(carried.confidenceAssessment.fingerprintHash,assessmentHash);
+assert.deepEqual(puts,[]);
 
 console.log('Catalog available: pinned generation, verified catalog-only identity, real shows inside the 72h/24h window with statuses, current prediction for the current profile, watchlist/rating/seed exclusions, one entry per identity, deterministic order, channel summary, generation pin and no side effects passed');

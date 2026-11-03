@@ -21,7 +21,7 @@ const env={BUCKET:{
  list:async()=>({objects:[],truncated:false})}};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 ctx.env=env;
 const refresh=(report,trigger,options)=>ctx.refreshPredictionQueue(env,report,trigger,options);
 const mutate=(apply,trigger)=>ctx.mutatePredictionQueue(env,apply,trigger);

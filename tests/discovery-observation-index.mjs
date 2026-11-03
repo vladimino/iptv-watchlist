@@ -107,7 +107,7 @@ const context = vm.createContext({Response, Request, Headers, URL, URLSearchPara
   fetch: async url => {tmdbCalls++; return new Response(JSON.stringify(String(url).includes('/search/') ? {total_pages: 1, results: []} : {}));}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js', 'utf8'), context);
 vm.runInContext(scoped('src/domain/discovery-observation-index.js', 'DiscoveryIndex'), context);
-for (const file of ['src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/discovery.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/worker.js']) vm.runInContext(fs.readFileSync(file, 'utf8').replace('export default', 'globalThis.worker='), context);
+for (const file of ['src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/discovery.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/worker.js']) vm.runInContext(fs.readFileSync(file, 'utf8').replace('export default', 'globalThis.worker='), context);
 const env = {BUCKET: store, TMDB_API_READ_ACCESS_TOKEN: 'test', TMDB_REQUEST_INTERVAL_MS: 0};
 context.env = env;
 const RUN = 'run-1';

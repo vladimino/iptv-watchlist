@@ -18,7 +18,7 @@ function harness(){
   console:{...console,log:line=>lines.push(String(line))},
   fetch:async url=>{url=String(url);requests.push(url);const page=site.get(url);if(typeof page==='function')return page();return page!=null?{ok:true,status:200,headers:new Headers(),text:async()=>page}:{ok:false,status:404,headers:new Headers(),text:async()=>''};}});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
- for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+ for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
  return {ctx,records,requests,lines,site};
 }
 const row=(lid,date,stars)=>{const [y,m,d]=date.split('-');return `<tr class="diary-entry-row"><td><a href="/${USER}/diary/films/for/${y}/${m}/${d}/">${d}</a></td><td><div data-postered-identifier="{&quot;lid&quot;:&quot;${lid}&quot;}"></div><h3><a href="/${USER}/film/secret-title-${lid.toLowerCase()}/">Secret Title ${lid}</a></h3></td><td><span class="rating rated-${stars}"></span></td></tr>`;};

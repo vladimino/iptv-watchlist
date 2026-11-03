@@ -7,11 +7,12 @@ import {webcrypto} from 'node:crypto';
 
 const source=fs.readFileSync('src/domain/prediction-confidence.js','utf8');
 assert.doesNotMatch(source,/\bfetch\b|\bBUCKET\b|crypto|await |Date\.now|Math\.random|actualRating|predictedRating|sourceBasis/,'the assessor stays off storage, ratings and the derived basis');
-assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/prediction-confidence\.js/,'the Worker bundle does not load the assessor');
-for(const file of ['src/enrichment.js','src/worker.js','src/mcp.js','src/prediction-diagnostics.js','public/app.js'])
- assert.doesNotMatch(fs.readFileSync(file,'utf8'),/assessPredictionConfidence/,'no live path calls the assessor: '+file);
+assert.match(fs.readFileSync('build.mjs','utf8'),/prediction-confidence\.js/,'the Worker bundle loads the assessor');
+assert.match(fs.readFileSync('src/enrichment.js','utf8'),/assessPredictionConfidence\(/,'submit stores the assessment on a new snapshot');
+for(const file of ['src/worker.js','src/mcp.js','src/prediction-diagnostics.js','public/app.js'])
+ assert.doesNotMatch(fs.readFileSync(file,'utf8'),/assessPredictionConfidence/,'only submit calls the assessor: '+file);
 const ctx=vm.createContext({URL});
-vm.runInContext(source+'\nglobalThis.A={assessPredictionConfidence,presentConfidenceAssessment,CONFIDENCE_ASSESSMENT_VERSION,CONFIDENCE_ASSESSMENT_THRESHOLDS,KEY_EXECUTION,GENRE_EXECUTION,EXECUTION_VOCABULARY,CONFIDENCE_MECHANICS,REASON_ORDER};',ctx);
+vm.runInContext(source+'\nglobalThis.A={assessPredictionConfidence,presentConfidenceAssessment,effectivePredictionConfidence,CONFIDENCE_ASSESSMENT_VERSION,CONFIDENCE_ASSESSMENT_THRESHOLDS,KEY_EXECUTION,GENRE_EXECUTION:CONFIDENCE_GENRE_EXECUTION,EXECUTION_VOCABULARY,CONFIDENCE_MECHANICS,REASON_ORDER};',ctx);
 const A=ctx.A,plain=value=>JSON.parse(JSON.stringify(value));
 const enrichment=fs.readFileSync('src/enrichment.js','utf8');
 const literal=(name,text)=>Function('return '+text.match(new RegExp('(?:const |,)'+name+'=(\\[[^\\]]*\\]|\\{[^;]*?\\})(?=[;,])'))[1])();
@@ -219,6 +220,12 @@ assert.equal(A.assessPredictionConfidence(web).level,'medium');
 assert.ok(A.assessPredictionConfidence(web).reasonCodes.includes('declared_source_not_verified'));
 assert.equal(JSON.stringify(A.assessPredictionConfidence(web)).includes('example.com'),false,'the assessment does not copy a URL');
 
+const boundPrediction={confidence:'high',fingerprintHash:HASH,confidenceAssessment:once};
+assert.equal(A.effectivePredictionConfidence(boundPrediction),'high');
+assert.equal(A.effectivePredictionConfidence({confidence:'high',fingerprintHash:HASH}),'high','a snapshot without the key keeps the model level');
+assert.equal(A.effectivePredictionConfidence({confidence:'high',fingerprintHash:HASH,confidenceAssessment:{...once,fingerprintHash:'cd'.repeat(32)}}),'low');
+assert.equal(A.effectivePredictionConfidence({confidence:'high',fingerprintHash:HASH,confidenceAssessment:{...once,status:'legacy',level:'low'}}),'low');
+assert.equal(A.effectivePredictionConfidence({confidence:'high',confidenceAssessment:once}),'low','an assessment without the snapshot hash is not the model high');
 assert.equal(A.presentConfidenceAssessment(once).level,'high');
 assert.equal(A.presentConfidenceAssessment({...once,level:'high',status:'legacy'}),null);
 assert.equal(A.presentConfidenceAssessment({...once,reasonCodes:['nope','declared_source_not_verified']}).reasonCodes.includes('nope'),false);
@@ -227,7 +234,7 @@ assert.equal(A.presentConfidenceAssessment(null),null);
 // AIR-46 validator boundary: a synopsis-only execution claim is invalid_ref, not a coerced unknown.
 const worker=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),worker);
-for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])
+for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])
  vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),worker);
 const unknown=Object.fromEntries(Object.entries(A.EXECUTION_VOCABULARY).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
 worker.boundary={fingerprintSchemaVersion:1,plotMechanics:['heist'],execution:{...unknown,chemistry:'strong'},moodLabels:['мрачный','напряжённый'],strengths:['A'],risks:['B'],confidence:'medium',sourceBasis:'metadata',sourceRefs:['metadata:synopsis'],evidence:{plotMechanics:{heist:[item('metadata',['metadata:synopsis'],'medium')]},execution:{chemistry:[item('metadata',['metadata:synopsis'],'high')]}}};
