@@ -38,6 +38,20 @@ assert.match(build, /assets\['\/admin\/posters'\]/);
 assert.match(build, /assets\['\/admin-posters\.js'\]=\{body:bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/posters-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/posters-run\.js','utf8'\),fs\.readFileSync\('public\/admin-posters\.js','utf8'\)\]\)/);
 assert.match(build, /fs\.readFileSync\('src\/admin\/posters\.js','utf8'\)/, 'the Worker bundle carries the coverage route');
 assert.match(css, /@media\(max-width:800px\)\{\.posters-layout\{grid-template-columns:minmax\(0,1fr\)\}/);
+assert.match(html, /<button type="button" id="posters-recheck" class="admin-more posters-reread">Перечитать<\/button>/);
+assert.doesNotMatch(html, /Проверить заново/);
+assert.match(html, /<details id="posters-settings" class="posters-settings">\s*<summary>Дополнительные настройки<\/summary>/);
+assert.doesNotMatch(html, /id="posters-settings"[^>]*\sopen/);
+assert.match(html, /<h2 id="posters-dynamics-title">История этого браузера<\/h2>/);
+assert.doesNotMatch(html, /class="admin-layout posters-layout"/);
+{
+  const settingsAt = html.indexOf('id="posters-settings"');
+  const previewAt = html.indexOf('id="posters-preview"');
+  const runAt = html.indexOf('id="posters-run"');
+  const receiptAt = html.indexOf('id="posters-receipt"');
+  const historyAt = html.indexOf('id="posters-dynamics"');
+  assert.ok(settingsAt > 0 && settingsAt < previewAt && previewAt < runAt && runAt < receiptAt && receiptAt < historyAt, 'closed settings, then preview, run, receipt, then this-browser history');
+}
 
 // Worker over an R2 stand-in, with a TMDB stand-in.
 const records = new Map(), etags = new Map(), raw = new Map();
@@ -143,6 +157,11 @@ await settle();
 assert.deepEqual(requests.map(request => [request.method, request.path, request.credentials]), [['GET', '/api/admin/posters?limit=10', 'same-origin']]);
 assert.deepEqual([puts, tmdbCalls], [[], []]);
 const coverage = text('#posters-coverage');
+assert.match(coverage, /data-posters-kpi="missingPoster"[^>]*>\s*<b class="posters-kpi-value">15<\/b>/);
+assert.match(coverage, /data-posters-kpi="actionable"[^>]*>\s*<b class="posters-kpi-value">14<\/b>/);
+assert.match(coverage, /data-posters-kpi="held"[^>]*>\s*<b class="posters-kpi-value">0<\/b>/);
+assert.match(coverage, /data-posters-kpi="unverifiedMissing"[^>]*>\s*<b class="posters-kpi-value">1<\/b>/);
+assert.match(coverage, /<summary>Все числа и технические подробности<\/summary>/);
 assert.match(coverage, /data-posters-field="missingPoster"><dt>Без постера<\/dt><dd><b>15<\/b>/);
 assert.match(coverage, /data-posters-field="actionable"><dt>Можно дозагрузить сейчас<\/dt><dd><b>14<\/b>/);
 assert.match(coverage, /data-posters-field="noPosterHeld"><dt>На TMDB нет постера \(повтор после даты\)<\/dt><dd><b>0<\/b>/);
@@ -158,6 +177,9 @@ assert.match(preview, /Можно запустить после подтверж
 assert.match(preview, /Фильм f01 \(2001\)/);
 assert.match(preview, /не больше <b>10<\/b> записей/);
 assert.match(preview, /Проверка ничего не записала и не обращалась к TMDB/);
+assert.match(preview, /<summary>Идентификаторы первого пакета<\/summary>/);
+assert.match(preview, /TMDB 1 · f01/);
+assert.doesNotMatch(preview.split('<details')[0], /TMDB 1/, 'the open first batch names the film, not its ids');
 assert.equal(nodes.get('#posters-accept-label').hidden, false);
 assert.match(nodes.get('#posters-accept-text').textContent, /до 1 вызовов по 10 записей, не больше 10 записей, с начала очереди, поколение 11111111/);
 assert.equal(nodes.get('#posters-run').disabled, true, 'nothing runs before the exact scope is confirmed');
@@ -302,6 +324,8 @@ for (const [label, mutate, sentence, copyLine] of [
   assert.ok(requests.length >= 1 && requests.every(request => request.method === 'GET'), label + ': reads only');
   const coverageBox = text('#posters-coverage');
   assert.match(coverageBox, /Покрытие неизвестно: данные неполные/, label);
+  assert.equal((coverageBox.match(/posters-kpi-unknown/g) || []).length, 4, label + ': each lead figure is unknown');
+  assert.doesNotMatch(coverageBox, /posters-kpi-value">0</, label + ': an unknown lead is not zero');
   assert.match(coverageBox, sentence, label);
   assert.match(coverageBox, copyLine, label + ': the per-copy state stays visible');
   for (const field of ['catalogRecords', 'withPoster', 'missingPoster', 'actionable', 'noPosterHeld', 'identityReview', 'unverifiedMissing']) assert.match(coverageBox, new RegExp(`data-posters-field="${field}"><dt>[^<]+</dt><dd><b>неизвестно</b>`), label + ' ' + field);
@@ -374,6 +398,10 @@ await settle();
 const held = text('#posters-held');
 assert.match(held, /href="https:\/\/www\.themoviedb\.org\/movie\/2"/);
 assert.match(held, /data-tmdb="2"/);
+assert.doesNotMatch(held, /· TMDB /, 'the open held row hides the raw id');
+assert.match(held, /<summary>Идентификатор<\/summary><p>TMDB 2\./);
+assert.match(text('#posters-unverified'), /<summary>Идентификатор записи<\/summary><p>lost<\/p>/);
+assert.doesNotMatch(text('#posters-unverified').split('<details')[0], />lost</, 'the record id stays in the disclosure');
 assert.doesNotMatch(text('#posters-preview'), /Фильм f02/, 'a remembered answer is not in the ordinary first batch');
 assert.doesNotMatch(text('#posters-unverified'), /<a /, 'an unverified record stays plain text');
 await fire('#posters-held', 'click', {target: {dataset: {tmdb: '2'}}});

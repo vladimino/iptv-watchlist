@@ -82,6 +82,16 @@ function postersCopyState(copy) {
   return `записей ${copy.records}, без постера ${copy.missingPoster}, восстановимых ${copy.verifiedMissing}`;
 }
 
+function postersHeldTotal(coverage) {
+  if (!Number.isInteger(coverage.noPosterHeld) || !Number.isInteger(coverage.identityReview)) return null;
+  return coverage.noPosterHeld + coverage.identityReview;
+}
+
+function postersKpi(field, label, hint, value, delta) {
+  const unknown = value === null;
+  return `<li class="posters-kpi${unknown ? ' posters-kpi-unknown' : ''}" data-posters-kpi="${field}"><b class="posters-kpi-value">${unknown ? 'неизвестно' : value}</b>${delta}<span class="posters-kpi-label">${postersEscape(label)}</span><small>${postersEscape(hint)}</small></li>`;
+}
+
 function postersCoverageHtml(read, before) {
   const coverage = posterCoverage(read);
   const change = (field) => before && before.complete && coverage.complete && before[field] !== coverage[field] ? ` <small class="posters-change">было ${before[field]}</small>` : '';
@@ -94,10 +104,20 @@ function postersCoverageHtml(read, before) {
     ['Нужен разбор идентичности TMDB', coverage.identityReview, 'identityReview'],
     ['Без проверенного TMDB id', coverage.unverifiedMissing, 'unverifiedMissing'],
   ];
-  const note = '<p class="posters-source">Очередь решает сервер по запомненным ответам TMDB. История этого браузера показывает только ваши запуски и очередь не меняет.</p>';
+  const heldBefore = before && before.complete && Number.isInteger(before.noPosterHeld) && Number.isInteger(before.identityReview) ? before.noPosterHeld + before.identityReview : null;
+  const held = postersHeldTotal(coverage);
+  const heldChange = heldBefore !== null && held !== null && heldBefore !== held ? ` <small class="posters-change">было ${heldBefore}</small>` : '';
+  const kpis = `<ul class="posters-kpis">${[
+    postersKpi('missingPoster', 'Без постера', 'Записи каталога без изображения', coverage.missingPoster, change('missingPoster')),
+    postersKpi('actionable', 'Доступно сейчас', 'Обычный запуск может запросить их', coverage.actionable, change('actionable')),
+    postersKpi('held', 'Удержано', 'Нет постера 90 дней и ответ за другой фильм до разбора идентичности', held, heldChange),
+    postersKpi('unverifiedMissing', 'Нет проверенного id', 'Маршрут постеров эти записи не берёт', coverage.unverifiedMissing, change('unverifiedMissing')),
+  ].join('')}</ul>`;
+  const note = '<p class="posters-source">Очередь решает сервер по запомненным ответам TMDB. История этого браузера показывает только ваши запуски и очередь не меняет. Удержанные записи обычный запуск не чинит: «нет постера» ждёт срока, ответ за другой фильм — смены идентичности.</p>';
   const incomplete = coverage.complete ? '' : `<div class="action-status action-tone-blocked" id="posters-incomplete"><p><b>Покрытие неизвестно: данные неполные.</b> Числа ниже не считаются нулём, запуск недоступен, пока данные не будут полными. Страница эти объекты не создаёт и не чинит.</p><ul class="posters-list">${coverage.problems.map(code => `<li>${postersEscape(posterEvidenceText(code))}</li>`).join('')}</ul><ul class="posters-list">${(read.copies || []).map(copy => `<li>${postersEscape(POSTERS_COPY_ROLE[copy.role] || copy.role)}: ${postersEscape(postersCopyState(copy))}</li>`).join('')}</ul></div>`;
-  return `${incomplete}<dl class="posters-facts">${rows.map(([label, value, field]) => `<div data-posters-field="${field}"><dt>${postersEscape(label)}</dt><dd><b>${value === null ? 'неизвестно' : value}</b>${change(field)}</dd></div>`).join('')}</dl>${note}
-    <details class="action-tech"><summary>Технические подробности</summary><dl class="action-facts">${(read.copies || []).map(copy => `<div><dt>${postersEscape(copy.key)}</dt><dd>${postersEscape(postersCopyState(copy))}${copy.version ? `, версия ${postersEscape(copy.version)}` : ''}</dd></div>`).join('')}${coverage.complete ? '' : `<div><dt>Полнота</dt><dd>${postersEscape(coverage.problems.join(', '))}</dd></div>`}<div><dt>Проверка здоровья</dt><dd>${postersEscape(read.health?.issue ? `${read.health.issue.id} · ${read.health.issue.severity} · ${read.health.issue.action?.code}/${read.health.issue.action?.reason}` : 'проблем нет')}</dd></div><div><dt>Прочитано</dt><dd>${postersEscape((read.reads || []).join(', '))}</dd></div></dl></details>`;
+  const facts = `<dl class="posters-facts">${rows.map(([label, value, field]) => `<div data-posters-field="${field}"><dt>${postersEscape(label)}</dt><dd><b>${value === null ? 'неизвестно' : value}</b>${change(field)}</dd></div>`).join('')}</dl>`;
+  const technical = `<details class="action-tech"><summary>Технические подробности</summary><dl class="action-facts">${(read.copies || []).map(copy => `<div><dt>${postersEscape(copy.key)}</dt><dd>${postersEscape(postersCopyState(copy))}${copy.version ? `, версия ${postersEscape(copy.version)}` : ''}</dd></div>`).join('')}${coverage.complete ? '' : `<div><dt>Полнота</dt><dd>${postersEscape(coverage.problems.join(', '))}</dd></div>`}<div><dt>Проверка здоровья</dt><dd>${postersEscape(read.health?.issue ? `${read.health.issue.id} · ${read.health.issue.severity} · ${read.health.issue.action?.code}/${read.health.issue.action?.reason}` : 'проблем нет')}</dd></div><div><dt>Прочитано</dt><dd>${postersEscape((read.reads || []).join(', '))}</dd></div></dl></details>`;
+  return `${incomplete}${kpis}<details class="action-tech posters-all-counts"><summary>Все числа и технические подробности</summary>${facts}${note}${technical}</details>`;
 }
 
 function postersBacklogText(read) {
@@ -119,7 +139,7 @@ function postersDynamicsHtml(history) {
 
 function postersHeldRow(item, kind) {
   const when = kind === 'noPoster' ? `повтор после ${postersDate(item.nextCheckAt)}` : `проверено ${postersDate(item.checkedAt)}, обычный запуск не повторит`;
-  return `<li class="posters-held-row"><b>${postersFilmName(postersTitle(item), item.tmdbId)}</b><span class="muted">${postersEscape(when)} · TMDB ${postersEscape(item.tmdbId)}</span><button type="button" class="admin-more posters-held-pick" data-tmdb="${postersEscape(item.tmdbId)}">Перепроверить</button></li>`;
+  return `<li class="posters-held-row"><b>${postersFilmName(postersTitle(item), item.tmdbId)}</b><span class="muted">${postersEscape(when)}</span><button type="button" class="admin-more posters-held-pick" data-tmdb="${postersEscape(item.tmdbId)}">Перепроверить</button><details class="action-tech"><summary>Идентификатор</summary><p>TMDB ${postersEscape(item.tmdbId)}. Обычный запуск эту запись не повторит.</p></details></li>`;
 }
 
 function postersHeldHtml(read) {
@@ -159,7 +179,7 @@ function postersUnverifiedHtml(read) {
   if (!posterCoverage(read)?.complete || !Number.isInteger(unverified.count)) return '<p>Неизвестно: данные неполные.</p>';
   if (!unverified.count) return '<p>Таких записей нет.</p>';
   const more = unverified.count > unverified.sample.length ? `<p class="muted">Показаны первые ${unverified.sample.length} из ${unverified.count}.</p>` : '';
-  return `<ul class="posters-list">${unverified.sample.map(item => `<li><b>${postersEscape(postersTitle(item))}</b> · ${postersEscape(posterUnverifiedText(item.reason))} <small class="muted">${postersEscape(item.id)}</small></li>`).join('')}</ul>${more}`;
+  return `<ul class="posters-list">${unverified.sample.map(item => `<li><b>${postersEscape(postersTitle(item))}</b> · ${postersEscape(posterUnverifiedText(item.reason))}<details class="action-tech"><summary>Идентификатор записи</summary><p>${postersEscape(item.id)}</p></details></li>`).join('')}</ul>${more}`;
 }
 
 function postersStartText(cursor) {
@@ -178,7 +198,8 @@ function postersPreviewHtml(preview) {
   if (preview.status === 'eligible') {
     const terminal = postersLive.history.terminal || {};
     lines.push(`<p>В очереди ${postersEscape(postersStartText(preview.cursor))}: <b>${preview.remaining}</b> записей. За этот запуск — до ${preview.calls} вызовов по ${preview.limit}, то есть не больше <b>${preview.maxRecords}</b> записей (сейчас подходит ${preview.planned}).</p>`);
-    lines.push(`<h3 class="action-result-title">Первый пакет</h3><ol class="action-items">${preview.items.map(item => `<li><b>${postersFilmName(postersTitle(item), item.tmdbId)}</b><span class="muted">TMDB ${postersEscape(item.tmdbId)} · ${postersEscape(item.id)}${terminal[item.id] ? ' · в прошлый раз: ' + postersEscape(posterOutcomeText(terminal[item.id])) : ''}</span></li>`).join('')}</ol>`);
+    lines.push(`<h3 class="action-result-title">Первый пакет</h3><ol class="action-items">${preview.items.map(item => `<li><b>${postersFilmName(postersTitle(item), item.tmdbId)}</b></li>`).join('')}</ol>`);
+    lines.push(`<details class="action-tech"><summary>Идентификаторы первого пакета</summary><ul class="posters-list">${preview.items.map(item => `<li>${postersEscape(postersTitle(item))} · TMDB ${postersEscape(item.tmdbId)} · ${postersEscape(item.id)}${terminal[item.id] ? ' · в прошлый раз: ' + postersEscape(posterOutcomeText(terminal[item.id])) : ''}</li>`).join('')}</ul></details>`);
     lines.push('<p class="action-next">Проверка ничего не записала и не обращалась к TMDB.</p>');
   }
   return lines.join('');
