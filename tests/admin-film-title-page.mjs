@@ -169,6 +169,7 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   saved = []; refreshes = 0;
   context.editOnSave = null;
   formAfterRefresh = null;
+  context.adminTitleDrop();
   context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {error: 'storage_unavailable', reason: 'readback_failed'}};
   refreshView = {mode: 'ready', entity: {preferred: 'Хозяйское название', titleReview: {reviews: [{requestId: 'req-fixed', effect: 'preferred_changed', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:landed'}}]}}};
   const parts = buildForm();
@@ -402,8 +403,14 @@ async function submit(parts, {manual = '', basis = '', prefer = false} = {}) {
   assert.equal(form.dataset.requestId, 'req-fixed', 'a matching preferred title without the audit is not success');
   assert.equal(form.dataset.intent, 'promote', 'a promote retry shows the same effect');
   const add = form.querySelector('[data-title-add]');
-  for (const fn of form.listeners.get('change')) fn({target: add});
-  assert.equal(form.dataset.requestId, undefined, 'changing the effect drops the frozen command');
+  for (const fn of form.listeners.get('focusin') || []) fn({target: add});
+  assert.equal(form.dataset.requestId, 'req-fixed', 'focus on the other button keeps the unknown command');
+  assert.equal(form.dataset.intent, 'promote');
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed').effect, 'promote');
+  const manual = form.querySelector('[data-title-manual]');
+  manual.value = 'Другое название';
+  for (const fn of form.listeners.get('input')) fn({target: manual});
+  assert.equal(form.dataset.requestId, undefined, 'editing the field drops the frozen command');
   assert.equal(context.adminTitleFrozen('d5', 'req-fixed'), null);
 }
 
@@ -885,6 +892,104 @@ function pick(parts, radio) {
   assert.equal(back.form.dataset.requestId, 'req-fixed', 'returning to the film keeps the unknown command');
   assert.equal(back.manual.value, 'Хозяйское название');
   assert.match(back.result.textContent, /Неизвестно, записалось ли название/);
+}
+
+{
+  saved = []; refreshes = 0;
+  context.adminTitleDrop();
+  context.nextResponse = {ok: false, status: 503, error: 'readback_failed', body: {reason: 'readback_failed'}};
+  refreshView = {mode: 'ready', entity: {preferred: 'Словарный фильм'}};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  await submit(parts, {manual: 'Хозяйское название'});
+  const form = detail.querySelector('[data-title-review]');
+  const original = JSON.parse(JSON.stringify(saved[0].body));
+  for (const fn of form.listeners.get('focusin') || []) fn({target: form.querySelector('[data-title-promote]')});
+  assert.equal(form.dataset.requestId, original.requestId);
+  assert.equal(context.adminTitleFrozen('d5', original.requestId).effect, 'add_alias');
+  context.nextResponse = {ok: false, status: 0, error: 'network', body: null};
+  const retry = {preventDefault() {}, defaultPrevented: false, submitter: form.querySelector('[data-title-promote]')};
+  for (const fn of form.listeners.get('submit')) fn(retry);
+  await posted();
+  assert.equal(saved.length, 2);
+  assert.deepEqual(saved[1].body, original);
+}
+
+{
+  saved = [];
+  context.adminTitleDrop();
+  const originalRefresh = context.onAdminRefresh;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  context.onAdminRefresh = () => gate;
+  context.nextResponse = {ok: true, status: 200, error: null, body: {ok: true, changed: true, readback: true}};
+  const parts = buildForm();
+  context.adminBindTitleReview(detail);
+  const pendingSubmit = submit(parts, {manual: 'Хозяйское название'});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const other = buildForm();
+  other.form.dataset.storedId = 'other';
+  other.form.dataset.filmId = 'film:other';
+  other.result.textContent = 'карточка B';
+  detail.children = [other.form];
+  context.window = {location: new URL('http://127.0.0.1/admin?kind=film&id=film:other')};
+  release({mode: 'ready', kind: 'film', id: 'd5', entity: {id: 'film:d5', storedId: 'd5', preferred: 'Хозяйское название', aliases: [{value: 'Хозяйское название', provenance: {source: 'owner', authority: 'owner', added: 'alias'}}], titleReview: {reviews: [{requestId: 'req-fixed', effect: 'alias_added', to: {value: 'Хозяйское название'}, version: {after: 'title-review:1:landed'}}]}}});
+  await pendingSubmit;
+  assert.equal(other.result.textContent, 'карточка B');
+  assert.equal(other.form.dataset.requestId, undefined);
+  assert.equal(context.adminTitleFrozen('d5', 'req-fixed').value, 'Хозяйское название');
+  delete context.window;
+  const back = buildForm();
+  detail.children = [back.form];
+  context.adminBindTitleReview(detail);
+  assert.equal(back.form.dataset.requestId, 'req-fixed');
+  assert.match(back.result.textContent, /Неизвестно, записалось ли название/);
+  assert.doesNotMatch(back.result.textContent, /Карточка сверена/);
+  context.onAdminRefresh = originalRefresh;
+  context.adminTitleDrop();
+}
+
+{
+  context.adminNameDrop();
+  const status = field('p', {id: 'admin-name-status'});
+  const manual = field('input', {id: 'admin-name-manual'});
+  manual.value = 'Новое имя';
+  const basis = field('textarea', {id: 'admin-name-basis'});
+  const add = field('button', {'data-name-add': '', 'data-name-effect': 'add_alias', type: 'submit'});
+  const promote = field('button', {'data-name-promote': '', 'data-name-effect': 'promote', type: 'submit'});
+  const form = field('form', {id: 'admin-name-form'});
+  form.id = 'admin-name-form';
+  form.dataset.personId = 'person:a';
+  for (const child of [status, manual, basis, add, promote]) form.append(child);
+  promote.closest = () => form;
+  detail.children = [form];
+  vm.runInContext('adminLive.entity = {id: "person:a", nameReview: {version: "name-review:1:a", preferred: {value: "Старое"}}};', context);
+  const posts = [];
+  const previousPost = context.adminPost;
+  context.adminPost = async (path, body) => { posts.push(JSON.parse(JSON.stringify(body))); return {ok: false, status: 0, error: 'network', body: null}; };
+  await context.onAdminNameSubmit({target: form, preventDefault() {}});
+  const original = JSON.parse(JSON.stringify(posts[0]));
+  context.onAdminNameFocus({target: promote});
+  assert.equal(form.dataset.requestId, original.requestId);
+  assert.equal(context.adminNameFrozen('person:a', original.requestId).effect, 'add_alias');
+  await context.onAdminNameSubmit({target: form, preventDefault() {}, submitter: promote});
+  assert.deepEqual(posts[1], original);
+  const other = field('form', {id: 'admin-name-form'});
+  other.dataset.personId = 'person:b';
+  const otherStatus = field('p', {id: 'admin-name-status'});
+  otherStatus.textContent = 'карточка B';
+  other.append(otherStatus);
+  detail.children = [other];
+  context.adminFinishUnknownName(original, {mode: 'ready', kind: 'person', id: 'person:a', entity: {id: 'person:a', nameReview: {reviews: [{requestId: original.requestId, linkedFrom: null, effect: 'alias_added'}], roleLinks: [], preferred: {value: 'Старое'}}}});
+  assert.equal(otherStatus.textContent, 'карточка B');
+  assert.equal(other.dataset.requestId, undefined);
+  assert.equal(context.adminNamePending.personId, 'person:a');
+  detail.children = [form];
+  context.adminRestoreNameAttempt(form, context.adminNamePending.command);
+  assert.equal(form.dataset.requestId, original.requestId);
+  assert.match(status.textContent, /Неизвестно, записалось ли имя/);
+  context.adminPost = previousPost;
+  context.adminNameDrop();
 }
 
 console.log('admin film title page: unknown readback keeps the request, a matching reread says stored');
