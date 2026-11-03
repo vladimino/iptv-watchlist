@@ -19,11 +19,15 @@ const bundle = bundleAdmin([client, limboClient, fs.readFileSync('src/admin/pred
 // Static boundary: reads go through the client; the two write methods are the guarded discovery posts on their own
 // route; no token, no other API, no generic action button.
 assert.match(html, /ЧТЕНИЕ И ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ/);
-for (const id of ['limbo-snapshot-text', 'limbo-causes', 'limbo-subsystems', 'limbo-form', 'limbo-kind', 'limbo-age', 'limbo-reset', 'limbo-loading', 'limbo-stale', 'limbo-refresh', 'limbo-error', 'limbo-empty', 'limbo-results', 'limbo-total', 'limbo-context-body']) assert.match(html, new RegExp(`id="${id}"`), id);
-assert.ok(html.indexOf('id="limbo-results"') < html.indexOf('id="limbo-causes"'), 'the queue comes before the filter disclosure');
+for (const id of ['limbo-snapshot-text', 'limbo-causes', 'limbo-subsystems', 'limbo-form', 'limbo-kind', 'limbo-age', 'limbo-reset', 'limbo-loading', 'limbo-stale', 'limbo-refresh', 'limbo-error', 'limbo-empty', 'limbo-results', 'limbo-total', 'limbo-context-body', 'limbo-coverage', 'limbo-coverage-title', 'limbo-coverage-text', 'limbo-find', 'limbo-find-note']) assert.match(html, new RegExp(`id="${id}"`), id);
+assert.ok(html.indexOf('id="limbo-coverage"') < html.indexOf('id="limbo-find"') && html.indexOf('id="limbo-find"') < html.indexOf('id="limbo-causes"') && html.indexOf('id="limbo-causes"') < html.indexOf('id="limbo-results"'), 'the banner, the title field and the cause row sit above the queue');
 assert.match(html, /id="limbo-focus"/);
 assert.match(html, /id="limbo-focus-body"/);
-assert.match(html, /<summary>Снимок и фильтры<\/summary>/);
+assert.match(html, /<summary>Снимок и дополнительные фильтры<\/summary>/);
+assert.match(html, /<label class="limbo-field" for="limbo-find">Найти запись/);
+assert.match(html, /id="limbo-refresh"[^>]*>Обновить</);
+assert.doesNotMatch(html.slice(html.indexOf('id="limbo-stale"'), html.indexOf('id="limbo-error"')), /limbo-refresh/);
+assert.match(html, /Discovery, TMDB и синхронизация не запускаются/);
 assert.match(html, /<summary>Контекст конвейера и пороги<\/summary>/);
 assert.match(html, /<h2 id="limbo-focus-title">Выбранная запись<\/h2>/);
 assert.match(html, /<script src="\/admin-limbo\.js"><\/script>/);
@@ -37,9 +41,10 @@ const limbHeading = html.indexOf('<h1>Лимб данных</h1>');
 const limbNav = html.indexOf('<nav class="admin-views"');
 const limbSnapshot = html.indexOf('id="limbo-snapshot"');
 const limbVerified = html.indexOf('class="obs-verified-open"');
-const limbFilters = html.indexOf('id="limbo-causes"');
+const limbCauses = html.indexOf('id="limbo-causes"');
 const limbResults = html.indexOf('id="limbo-results"');
-assert.ok(limbHeading >= 0 && limbHeading < limbNav && limbNav < limbResults && limbResults < limbSnapshot && limbSnapshot < limbFilters && limbFilters < limbVerified, 'the queue sits under the nav, and the verified key sits after the filter disclosure');
+const limbSubsystems = html.indexOf('id="limbo-subsystems"');
+assert.ok(limbHeading >= 0 && limbHeading < limbNav && limbNav < limbCauses && limbCauses < limbResults && limbResults < limbSnapshot && limbSnapshot < limbSubsystems && limbSubsystems < limbVerified, 'the cause row sits under the nav and above the queue, and the verified key sits after the extra filters');
 for (const id of ['verified-open-title', 'verified-key', 'verified-open', 'verified-open-hint', 'verified-panel', 'limbo-verified']) assert.match(html, new RegExp(`id="${id}"`), id);
 assert.match(html, /<summary>Технический поиск проверенного совпадения<\/summary>/);
 assert.doesNotMatch(html, /<details[^>]*\bopen\b/, 'the verified search stays closed');
@@ -48,6 +53,9 @@ assert.match(page, /Требует моего решения/);
 assert.match(page, /Ожидает автоматическую обработку/);
 assert.match(page, /Не удалось проверить/);
 assert.match(css, /\.limbo-select\{[^}]*min-height:44px/);
+assert.match(css, /#limbo-find\{[^}]*min-height:44px/);
+assert.match(css, /\.limbo-item\[hidden\],\.limbo-queue\[hidden\]\{display:none\}/);
+assert.match(css, /@media\(max-width:800px\)\{\.limbo-coverage\{flex-direction:column/);
 assert.match(css, /\.limbo-queue\{/);
 assert.match(html, /action="\/admin\/limb"/);
 assert.doesNotMatch(html, /Лимбо|лимбо/);
@@ -133,7 +141,7 @@ function element(selector) {
     addEventListener(type, fn) {const list = listeners.get(selector) || []; list.push({type, fn}); listeners.set(selector, list);},
   };
 }
-const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body', '#verified-open', '#verified-key', '#verified-panel', '#verified-open-hint'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body', '#verified-open', '#verified-key', '#verified-panel', '#verified-open-hint', '#limbo-coverage', '#limbo-coverage-title', '#limbo-coverage-text', '#limbo-find', '#limbo-find-note', '#limbo-find-form', '#limbo-focus-empty'].map(selector => [selector, element(selector)]));
 const moreButton = element('[data-limbo-more="items"]');
 const document = {
   body: {name: 'body'}, activeElement: null,
@@ -202,8 +210,22 @@ assert.match(results.innerHTML, /data-limbo-queue="stalled"/);
 assert.match(results.innerHTML, /Обычный шаг не назначен\. Результата нет/);
 assert.match(results.innerHTML, /data-limbo-select=/);
 assert.match(results.innerHTML, /aria-expanded="true"/);
-assert.match(results.innerHTML, /Нерешённые наблюдения EPG недоступны: индекса наблюдений для опубликованного поколения ещё нет/, 'the queue itself says the observation index cannot confirm absence');
+assert.equal(nodes.get('#limbo-coverage').getAttribute('data-coverage'), 'unavailable');
+assert.match(nodes.get('#limbo-coverage-title').textContent, /Наблюдения не проверены/);
+assert.match(nodes.get('#limbo-coverage-text').textContent, /индекса наблюдений для опубликованного поколения ещё нет/);
+assert.match(nodes.get('#limbo-coverage-text').textContent, /Фильмы в этом чтении:/);
+assert.equal(nodes.get('#limbo-refresh').hidden, false);
+assert.doesNotMatch(results.innerHTML, /Нерешённые наблюдения EPG недоступны/, 'the coverage banner, not the queue, carries the index gap');
 assert.doesNotMatch(results.innerHTML, /В лимбе ничего нет/);
+requests = [];
+await listeners.get('#limbo-refresh').find(item => item.type === 'click').fn();
+await settle();
+assert.equal(requests.length, 1);
+assert.equal(requests[0].method, 'GET');
+assert.doesNotMatch(requests[0].path, /(?:^|[?&])(?:q|pin)=/);
+assert.match(requests[0].path, /\/api\/admin\/limbo/);
+assert.equal(stale.hidden, true);
+assert.match(nodes.get('#limbo-coverage-title').textContent, /Наблюдения не проверены/);
 assert.match(nodes.get('#limbo-context-body').innerHTML, /Нерешённые наблюдения EPG недоступны: индекса наблюдений для опубликованного поколения ещё нет/, 'observations are honestly unavailable');
 assert.match(nodes.get('#limbo-context-body').innerHTML, /неизвестны, а не здоровы/);
 assert.equal(loading.hidden, true); assert.equal(error.hidden, true); assert.equal(stale.hidden, true); assert.equal(empty.hidden, true);
@@ -263,6 +285,43 @@ assert.deepEqual(queueIds, ['owner', 'stalled', 'automatic', 'unverified'].filte
 assert.equal(new Set(queueIds).size, queueIds.length, 'each queue heading exists once');
 assert.doesNotMatch(results.innerHTML, /data-limbo-more="items"/, 'the last page removes the button');
 assert.doesNotMatch(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Atmdb/, 'no catalogue link for a film outside the programme');
+
+// 5b. The title field filters rows already painted, including a later page, and never sends a query.
+window.location.href = 'http://127.0.0.1/admin/limb';
+await run('limboRender()');
+await settle();
+assert.match(results.innerHTML, /data-limbo-more="items"/);
+const beforeFind = requests.length;
+nodes.get('#limbo-find').value = 'нет такого названия';
+await listeners.get('#limbo-find').find(item => item.type === 'input').fn({preventDefault() {}});
+assert.equal(requests.length, beforeFind, 'typing in the title field sends no request');
+assert.doesNotMatch(requests.map(request => request.path).join('\n'), /(?:^|[?&])q=/);
+const hiddenMiss = [...results.innerHTML.matchAll(/<article class="admin-hit limbo-item" data-limbo-item="[^"]+"( hidden)?>[\s\S]*?<span class="admin-hit-title">([^<]+)<\/span>/g)];
+assert.ok(hiddenMiss.length >= 25);
+assert.ok(hiddenMiss.every(match => match[1] === ' hidden'));
+assert.match(nodes.get('#limbo-find-note').textContent, /Показать ещё/);
+assert.match(nodes.get('#limbo-find-note').textContent, /не поиск по всему списку/);
+await run('onLimboMore()');
+await settle();
+assert.equal(requests.length, beforeFind + 1);
+assert.doesNotMatch(requests.at(-1).path, /(?:^|[?&])q=/);
+const stillHidden = [...results.innerHTML.matchAll(/<article class="admin-hit limbo-item" data-limbo-item="[^"]+"( hidden)?>[\s\S]*?<span class="admin-hit-title">([^<]+)<\/span>/g)];
+assert.ok(stillHidden.length > hiddenMiss.length, 'the next page is painted and then filtered');
+assert.ok(stillHidden.every(match => match[1] === ' hidden'));
+nodes.get('#limbo-find').value = 'Застрявший';
+run('onLimboFind()');
+const found = [...results.innerHTML.matchAll(/<article class="admin-hit limbo-item" data-limbo-item="[^"]+"( hidden)?>[\s\S]*?<span class="admin-hit-title">([^<]+)<\/span>/g)];
+assert.ok(found.some(match => !match[1] && match[2] === 'Застрявший'));
+assert.ok(found.filter(match => match[2] !== 'Застрявший').every(match => match[1] === ' hidden'));
+assert.equal(requests.length, beforeFind + 1);
+const findKey = {closest() {return null;}};
+document.activeElement = findKey;
+let findKeyPrevented = false;
+listeners.get('#limbo-results').find(item => item.type === 'keydown').fn({key: 'ArrowDown', target: findKey, preventDefault() {findKeyPrevented = true;}});
+assert.equal(findKeyPrevented, false);
+nodes.get('#limbo-find').value = '';
+run('onLimboFind()');
+assert.doesNotMatch(results.innerHTML, /<article class="admin-hit limbo-item"[^>]* hidden>/);
 
 // 6. Empty is not an error: no observation is listed, and the page says why that is not a verdict.
 window.location.href = 'http://127.0.0.1/admin/limbo?kind=observation';
@@ -325,15 +384,27 @@ assert.equal(url().searchParams.get('cause'), 'stalled');
 
 // 10. Empty copy follows the observation index. A gap is not an empty limb; a film-only filter can still be an empty filter.
 const showEmpty = (observations, kind) => run(`limboShow({mode:'ready', items:[], total:0, coverage:{films:'partial', filmsObserved:0, observations:${JSON.stringify(observations)}}, context:[], unread:[]}, {kind:'${kind}', subsystem:'', cause:'', age:''})`);
-await showEmpty({available: true, state: 'stale', complete: true, indexed: 0, omitted: {}}, '');
+await showEmpty({available: true, state: 'stale', complete: true, indexed: 3, omitted: {}, awaitingFirstLookup: 0, writtenAt: '2026-10-01T00:00:00.000Z'}, '');
 assert.match(empty.innerHTML, /Нельзя подтвердить, что записей нет/);
 assert.match(empty.innerHTML, /Индекс наблюдений устарел/);
+assert.equal(nodes.get('#limbo-coverage').getAttribute('data-coverage'), 'stale');
+assert.match(nodes.get('#limbo-coverage-title').textContent, /Индекс наблюдений устарел/);
+assert.match(nodes.get('#limbo-coverage-text').textContent, /В индексе 3/);
 assert.doesNotMatch(empty.innerHTML, /В лимбе ничего нет/);
-await showEmpty({available: true, state: 'fresh', complete: false, indexed: 0, omitted: {cap: 1, oversized: 0, malformed: 0}, awaitingFirstLookup: 2}, 'observation');
+await showEmpty({available: true, state: 'fresh', complete: false, indexed: 4, omitted: {cap: 1, oversized: 0, malformed: 0}, awaitingFirstLookup: 2, writtenAt: '2026-10-01T00:00:00.000Z'}, 'observation');
 assert.match(empty.innerHTML, /Индекс наблюдений частичный/);
+assert.equal(nodes.get('#limbo-coverage').getAttribute('data-coverage'), 'partial');
+assert.match(nodes.get('#limbo-coverage-title').textContent, /Наблюдения проверены частично/);
+assert.match(nodes.get('#limbo-coverage-text').textContent, /В индексе 4/);
+assert.match(nodes.get('#limbo-coverage-text').textContent, /ждут первой проверки 2/);
 await showEmpty({available: true, state: 'fresh', complete: true, indexed: 0, omitted: {}, awaitingFirstLookup: 0}, 'film');
 assert.match(empty.innerHTML, /По этому фильтру записей нет/);
+assert.equal(nodes.get('#limbo-coverage').getAttribute('data-coverage'), 'fresh');
+assert.match(nodes.get('#limbo-coverage-title').textContent, /Индекс наблюдений прочитан/);
 assert.doesNotMatch(empty.innerHTML, /В лимбе ничего нет/);
+await run(`limboShow({mode:'ready', items:[], total:0, coverage:{films:'partial', filmsObserved:2}, context:[], unread:[]}, {kind:'', subsystem:'', cause:'', age:''})`);
+assert.equal(nodes.get('#limbo-coverage').getAttribute('data-coverage'), 'unknown');
+assert.match(nodes.get('#limbo-coverage-title').textContent, /Покрытие не прочитано/);
 
 // 11. The three sentences name a terminal stop, a collision and a stale projection. The raw terminal code stays out of the result line.
 const sample = (extra) => run(`limboResultLine(${JSON.stringify(extra)})`);

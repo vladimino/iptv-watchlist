@@ -203,7 +203,7 @@ function limboRenderFilters(state) {
   const age = document.querySelector('#limbo-age');
   if (age.value !== state.age) age.value = state.age;
   const tools = document.querySelector('#limbo-tools');
-  if (tools && (state.kind || state.subsystem || state.cause || state.age)) tools.open = true;
+  if (tools && (state.kind || state.subsystem || state.age)) tools.open = true;
 }
 
 function limboBadge(tone, text) {
@@ -470,11 +470,109 @@ function limboAppendGrouped(results, items) {
   }
 }
 
-function limboQueueNotice(view, state) {
-  if (!state || state.kind === 'film') return '';
-  const observations = view.coverage && view.coverage.observations;
-  if (!observations || !limboObservationGap(observations)) return '';
-  return limboObservationText(observations, view.coverage.observationsObserved);
+function limboFindQuery() {
+  const input = document.querySelector('#limbo-find');
+  return String(input && input.value || '').trim().toLocaleLowerCase('ru-RU');
+}
+
+function limboDecodeText(value) {
+  return String(value || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+}
+
+function limboFindNote(query, shown, total, hasMore) {
+  if (!query) return 'Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Причина ниже отбирает весь список.';
+  if (!shown && hasMore) return 'Среди показанных строк совпадений нет. «Показать ещё» дочитает следующую страницу того же снимка, и поле применится к ней. Это не поиск по всему списку.';
+  if (!shown) return 'Среди показанных строк совпадений нет. Других страниц этого чтения нет. Это не поиск по всему списку.';
+  return 'Совпало ' + shown + ' из ' + total + ' показанных строк. Незагруженные страницы этим полем не просмотрены.';
+}
+
+function limboArticleHtmlMatches(article, query) {
+  const title = article.match(/<span class="admin-hit-title">([^<]*)<\/span>/);
+  if (!query) return true;
+  return limboDecodeText(title ? title[1] : '').toLocaleLowerCase('ru-RU').includes(query);
+}
+
+function limboSetArticleHidden(article, hide) {
+  const end = article.indexOf('>');
+  if (end < 0) return article;
+  let open = article.slice(0, end).replace(/\s+hidden\b/g, '');
+  if (hide) open += ' hidden';
+  return open + article.slice(end);
+}
+
+// The title field never becomes a request. It only hides rows already painted, including rows a later page appended.
+function limboApplyFind() {
+  const query = limboFindQuery();
+  const results = document.querySelector('#limbo-results');
+  const note = document.querySelector('#limbo-find-note');
+  if (!results) return;
+  let shown = 0;
+  let total = 0;
+  let hasMore = false;
+  if (typeof results.querySelectorAll === 'function') {
+    const articles = [...results.querySelectorAll('[data-limbo-item]')];
+    total = articles.length;
+    for (const article of articles) {
+      const title = typeof article.querySelector === 'function' ? article.querySelector('.admin-hit-title') : null;
+      const match = !query || String(title && title.textContent || '').toLocaleLowerCase('ru-RU').includes(query);
+      article.hidden = Boolean(query) && !match;
+      if (!article.hidden) shown += 1;
+    }
+    if (typeof results.querySelectorAll === 'function') {
+      for (const section of results.querySelectorAll('[data-limbo-queue]')) {
+        const visible = typeof section.querySelectorAll === 'function' && [...section.querySelectorAll('[data-limbo-item]')].some(article => !article.hidden);
+        section.hidden = Boolean(query) && !visible;
+      }
+    }
+    hasMore = Boolean(results.querySelector && results.querySelector('[data-limbo-more="items"]'));
+    const selected = typeof results.querySelector === 'function' ? results.querySelector('.limbo-select[aria-expanded="true"]') : null;
+    const selectedArticle = selected && selected.closest ? selected.closest('[data-limbo-item]') : null;
+    if (selectedArticle && selectedArticle.hidden) {
+      const detail = limboDetailNode(selected);
+      if (detail) detail.hidden = true;
+      const empty = document.querySelector('#limbo-focus-empty');
+      if (empty) empty.hidden = false;
+      limboFocusTitle('');
+    } else if (selected) limboPlaceDetail();
+  } else if (typeof results.innerHTML === 'string') {
+    hasMore = results.innerHTML.includes('data-limbo-more="items"');
+    results.innerHTML = results.innerHTML.replace(/<article class="admin-hit limbo-item"[\s\S]*?<\/article>/g, article => {
+      total += 1;
+      const match = limboArticleHtmlMatches(article, query);
+      if (match) shown += 1;
+      return limboSetArticleHidden(article, Boolean(query) && !match);
+    });
+  }
+  if (note) note.textContent = limboFindNote(query, shown, total, hasMore);
+}
+
+function limboCoverageBanner(view) {
+  const coverage = view && view.coverage || {};
+  const films = coverage.filmsObserved;
+  const filmLine = 'Фильмы в этом чтении: ' + (films ?? '—') + '. Покрытие фильмов в модели здоровья ' + (coverage.films === 'complete' ? 'полное' : 'частичное') + ': запись вне списка не считается здоровой.';
+  const observations = coverage.observations;
+  if (!observations) return {tone: 'unknown', title: 'Покрытие не прочитано', text: 'Этот ответ не назвал покрытие наблюдений. Пустой список от этого не значит, что записей нет. ' + filmLine};
+  if (observations.available === false) {
+    const reason = LIMBO_OBSERVATION_UNAVAILABLE[observations.reason] || 'индекс наблюдений не прочитан';
+    return {tone: 'unavailable', title: 'Наблюдения не проверены', text: 'Нерешённые наблюдения EPG недоступны: ' + reason + '. Их число не названо, и отсутствие строк ничего не говорит об их состоянии. ' + filmLine};
+  }
+  const omitted = observations.omitted || {};
+  const cut = (Number(omitted.cap) || 0) + (Number(omitted.oversized) || 0) + (Number(omitted.malformed) || 0);
+  const counts = 'В индексе ' + (observations.indexed ?? '—') + ', прочитано строк ' + (coverage.observationsObserved ?? '—') + ', не вошло по пределам индекса ' + cut + ', ждут первой проверки ' + (observations.awaitingFirstLookup ?? '—') + '.';
+  if (observations.state === 'stale') return {tone: 'stale', title: 'Индекс наблюдений устарел', text: counts + ' Карта решений или реестр изменились после записи. Показано состояние на момент записи. ' + filmLine};
+  if (observations.complete === false || cut > 0 || (Number(observations.awaitingFirstLookup) || 0) > 0) return {tone: 'partial', title: 'Наблюдения проверены частично', text: counts + ' ' + filmLine};
+  return {tone: 'fresh', title: 'Индекс наблюдений прочитан', text: counts + ' Индекс свежий и в своих пределах полный. Подсистемы, которые эта страница не читает, от этого не становятся здоровыми. ' + filmLine};
+}
+
+function limboPaintCoverage(view) {
+  const banner = document.querySelector('#limbo-coverage');
+  const title = document.querySelector('#limbo-coverage-title');
+  const text = document.querySelector('#limbo-coverage-text');
+  if (!title || !text) return;
+  const copy = view && view.mode === 'ready' ? limboCoverageBanner(view) : {tone: 'unknown', title: 'Покрытие не прочитано', text: 'Это чтение не подтвердило покрытие. Пустой список от этого не значит, что записей нет.'};
+  title.textContent = copy.title;
+  text.textContent = copy.text;
+  if (banner && banner.setAttribute) banner.setAttribute('data-coverage', copy.tone);
 }
 
 // A film item of the fingerprint or prediction subsystem with a stored id can be explained by the recovery assessment.
@@ -822,6 +920,7 @@ function limboShow(view, state) {
   const total = document.querySelector('#limbo-total');
   loading.hidden = true;
   stale.hidden = !limboLive.stale;
+  limboPaintCoverage(view);
   document.querySelector('#limbo-snapshot-text').textContent = limboSnapshotText(limboLive.snapshot);
   limboRenderFilters(state);
   error.hidden = view.mode !== 'error';
@@ -845,9 +944,11 @@ function limboShow(view, state) {
     empty.innerHTML = limboEmptyHtml(view, state);
   } else {
     if (!view.items.some(item => item.id === limboLive.selected)) limboLive.selected = view.items[0].id;
-    results.innerHTML = limboQueueNotice(view, state) + limboResultsHtml(view.items) + (view.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : '');
+    results.innerHTML = limboResultsHtml(view.items) + (view.nextCursor ? '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>' : '');
+    limboApplyFind();
     limboPlaceDetail();
   }
+  if (!view.items.length) limboApplyFind();
   document.querySelector('#limbo-context-body').innerHTML = limboContextHtml(view);
 }
 
@@ -927,6 +1028,7 @@ function onLimboMore() {
     if (button) button.remove();
     limboAppendGrouped(results, page.items);
     if (page.nextCursor) results.insertAdjacentHTML('beforeend', '<button type="button" class="admin-more" data-limbo-more="items">Показать ещё</button>');
+    limboApplyFind();
     return page;
   });
   limboLive.pending = pending;
@@ -955,6 +1057,11 @@ function onLimboForm(event) {
   if (limboLive.timer) clearTimeout(limboLive.timer);
   limboLive.timer = null;
   return limboRender();
+}
+
+function onLimboFind(event) {
+  if (event && event.preventDefault) event.preventDefault();
+  limboApplyFind();
 }
 
 function onLimboReset() {
@@ -1077,7 +1184,10 @@ function onLimboSelectKey(event) {
   if (!select || target !== select) return;
   const results = document.querySelector('#limbo-results');
   if (!results || typeof results.querySelectorAll !== 'function') return;
-  const buttons = [...results.querySelectorAll('[data-limbo-select]')];
+  const buttons = [...results.querySelectorAll('[data-limbo-select]')].filter(button => {
+    const article = button.closest ? button.closest('[data-limbo-item]') : null;
+    return !article || article.hidden !== true;
+  });
   if (!buttons.length) return;
   const current = buttons.findIndex(button => button === document.activeElement);
   const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : event.key === 'ArrowDown' ? Math.min(buttons.length - 1, current < 0 ? 0 : current + 1) : Math.max(0, current < 0 ? 0 : current - 1);
@@ -1177,6 +1287,10 @@ function onLimboHistory() {
 }
 
 function startLimbo() {
+  const findForm = document.querySelector('#limbo-find-form');
+  if (findForm) findForm.addEventListener('submit', onLimboFind);
+  const find = document.querySelector('#limbo-find');
+  if (find) find.addEventListener('input', onLimboFind);
   document.querySelector('#limbo-form').addEventListener('submit', onLimboForm);
   document.querySelector('#limbo-kind').addEventListener('change', onLimboForm);
   document.querySelector('#limbo-age').addEventListener('input', limboSchedule);
