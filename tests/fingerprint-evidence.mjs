@@ -163,12 +163,14 @@ assert.ok(result.results[0].validation.issues.some(issue=>issue.path==='fingerpr
 assert.equal(records.has('enrichment/films/'+ids[2]+'/fingerprint.json'),false);
 
 const proposal=fs.readFileSync('docs/reference/scheduled-tasks.md','utf8');
-assert.match(proposal,/### Proposed fingerprint evidence instruction \(not applied\)/);
+assert.match(proposal,/### Fingerprint evidence instruction in the live hourly task \(AIR-335, 2026-11-03\)/);
+assert.doesNotMatch(proposal,/### Proposed fingerprint evidence instruction \(not applied\)/);
+assert.match(proposal,/Live state, not merely a proposal/);
 assert.match(proposal,/Mutable prediction state/);
-assert.match(proposal,/On `prediction_only`, reuse the Worker fingerprint/);
+assert.match(proposal,/On `prediction_only`, reuse the existing Worker fingerprint/);
 assert.match(proposal,/Do not invent a URL/);
 assert.match(proposal,/Metadata does not support an execution-quality claim/);
-assert.match(proposal,/Keep `FINGERPRINT_PROMPT_VERSION` at 1 and keep `FINGERPRINT_TRANSITIONS` empty/);
+assert.match(proposal,/Keep `FINGERPRINT_SCHEMA_VERSION=1`, `FINGERPRINT_PROMPT_VERSION=1`, `PREDICTION_PROMPT_VERSION=1` and `FINGERPRINT_TRANSITIONS=\[\]`/);
 assert.doesNotMatch(proposal,/### Future fingerprint evidence instruction \(not active\)/);
 assert.equal(JSON.stringify(call('predictionRunnerContract')().instructions).includes('fingerprint.evidence'),false);
 assert.equal(call('schemaContract')().fingerprint.evidence.required,false);
@@ -179,7 +181,7 @@ const prompted=withEvidence({
  sourceBasis:'mixed',
  sourceRefs:['metadata:synopsis','metadata:genres','model_knowledge']
 });
-assert.deepEqual(issuesOf(prompted,metadata),[],'a fingerprint that follows the proposed Stage B delta is valid');
+assert.deepEqual(issuesOf(prompted,metadata),[],'a fingerprint that follows the live Stage B rules is valid');
 assert.equal(Object.hasOwn(prompted.evidence.execution,'pace'),false);
 assert.equal(Object.hasOwn(prompted.evidence.execution,'technical_plausibility'),false);
 assert.deepEqual(issuesOf(legacy),[],'prediction_only still omits the map');
