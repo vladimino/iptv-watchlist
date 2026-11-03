@@ -162,4 +162,42 @@ assert.equal(result.results[0].validation.stage,'fingerprint_schema');
 assert.ok(result.results[0].validation.issues.some(issue=>issue.path==='fingerprint.evidence.execution.payoff'&&issue.code==='invalid_ref'));
 assert.equal(records.has('enrichment/films/'+ids[2]+'/fingerprint.json'),false);
 
+const proposal=fs.readFileSync('docs/reference/scheduled-tasks.md','utf8');
+assert.match(proposal,/### Proposed fingerprint evidence instruction \(not applied\)/);
+assert.match(proposal,/Mutable prediction state/);
+assert.match(proposal,/On `prediction_only`, reuse the Worker fingerprint/);
+assert.match(proposal,/Do not invent a URL/);
+assert.match(proposal,/Metadata does not support an execution-quality claim/);
+assert.match(proposal,/Keep `FINGERPRINT_PROMPT_VERSION` at 1 and keep `FINGERPRINT_TRANSITIONS` empty/);
+assert.doesNotMatch(proposal,/### Future fingerprint evidence instruction \(not active\)/);
+assert.equal(JSON.stringify(call('predictionRunnerContract')().instructions).includes('fingerprint.evidence'),false);
+assert.equal(call('schemaContract')().fingerprint.evidence.required,false);
+
+const prompted=withEvidence({
+ execution:{plot_engine:'strong',decision_logic:'strong',technical_plausibility:'not_applicable'},
+ evidence:{plotMechanics:{heist:[item('metadata',['metadata:synopsis','metadata:genres'])]},execution:{plot_engine:[item('model_knowledge',['model_knowledge'],'high')],decision_logic:[item('model_knowledge',['model_knowledge'],'medium')]}},
+ sourceBasis:'mixed',
+ sourceRefs:['metadata:synopsis','metadata:genres','model_knowledge']
+});
+assert.deepEqual(issuesOf(prompted,metadata),[],'a fingerprint that follows the proposed Stage B delta is valid');
+assert.equal(Object.hasOwn(prompted.evidence.execution,'pace'),false);
+assert.equal(Object.hasOwn(prompted.evidence.execution,'technical_plausibility'),false);
+assert.deepEqual(issuesOf(legacy),[],'prediction_only still omits the map');
+
+const vocabulary={mechanics:plain(call('MECHANICS')),execution:plain(call('EXECUTION')),general:plain(call('GENERAL_EXECUTION')),domains:{}};
+const options={vocabulary,digest:()=>'unused'};
+const stored={...legacy,fingerprintPromptVersion:1};
+const sameTarget={fingerprintSchemaVersion:1,fingerprintPromptVersion:1};
+const nextPrompt={fingerprintSchemaVersion:1,fingerprintPromptVersion:2};
+assert.equal(call('fingerprintCompatibility')(stored,{genres:['Crime']},[],sameTarget,'selective',options).outcome,'current');
+const missing=call('fingerprintCompatibility')(stored,{genres:['Crime']},[],nextPrompt,'selective',options);
+assert.equal(missing.outcome,'stale');
+assert.equal(missing.reason,'transition_unknown');
+assert.equal(missing.migration,'global','a prompt bump with an empty registry re-queues every film');
+const globalBump=[{transitionSchemaVersion:1,axis:'fingerprint_prompt',from:1,to:2,scope:'global',changes:[{kind:'prompt_revised'}],selectors:[]}];
+const globalVerdict=call('fingerprintCompatibility')(stored,{genres:['Crime']},globalBump,nextPrompt,'selective',options);
+assert.equal(globalVerdict.reason,'transition_global');
+assert.equal(globalVerdict.migration,'global');
+assert.equal(call('fingerprintTransitionIssue')({transitionSchemaVersion:1,axis:'fingerprint_prompt',from:1,to:2,scope:'identity',changes:[{kind:'prompt_revised'}],selectors:[]},null,vocabulary,()=>'unused'),'identity_change_not_compatible');
+
 console.log('fingerprint evidence: optional map, aggregate, metadata facts, legacy hash and submit passed');
