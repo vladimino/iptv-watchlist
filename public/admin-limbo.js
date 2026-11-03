@@ -301,7 +301,8 @@ function limboRememberFilms(view) {
 function limboFreshnessMessage(nowMs) {
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
   if (typeof limboLive.shownAt === 'number' && now - limboLive.shownAt >= LIMBO_FRESH_MS) return 'Данные прочитаны больше часа назад.';
-  if (limboLive.filmNotice === 'films') return 'Данные изменились, можно обновить.';
+  // The list on screen is already this read. Say what changed; do not ask for another refresh.
+  if (limboLive.filmNotice === 'films') return 'Список обновлён: изменилось состояние не меньше 50 фильмов.';
   if (limboLive.filmNotice === 'unavailable') return 'Сравнение с прошлым снимком недоступно.';
   return '';
 }
@@ -1183,13 +1184,30 @@ function limboShowLimited() {
   const text = document.querySelector('#limbo-stale-text');
   if (text) text.textContent = 'Список не удалось перечитать. Прежние строки не показаны как актуальные.';
   if (stale) stale.hidden = false;
-  document.querySelector('#limbo-results').innerHTML = '';
+  const results = document.querySelector('#limbo-results');
+  if (results) results.innerHTML = '';
   const empty = document.querySelector('#limbo-empty');
   if (empty) empty.hidden = true;
   const total = document.querySelector('#limbo-total');
   if (total) total.textContent = '';
-  limboLive.stale = true;
+  limboClearFocus();
+  limboRecovery.clear();
+  obsRecovery.clear();
+  limboSelect.clear();
+  limboLive.selected = null;
+  limboLive.pin = null;
+  limboLive.snapshot = null;
+  limboLive.counts = null;
   limboLive.next = null;
+  limboLive.stale = true;
+  limboLive.filmNotice = null;
+  const verdict = document.querySelector('#limbo-verdict');
+  if (verdict) verdict.textContent = 'Список недоступен. Доступные действия не проверены.';
+  const actionCount = document.querySelector('#limbo-action-count');
+  if (actionCount) actionCount.textContent = '';
+  limboPaintCoverage(null);
+  const snapshot = document.querySelector('#limbo-snapshot-text');
+  if (snapshot) snapshot.textContent = 'Снимок ещё не прочитан.';
   limboNoteFreshness();
 }
 

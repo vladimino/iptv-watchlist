@@ -399,6 +399,9 @@ await settle();
 assert.equal(results.innerHTML, '', 'a failed retry does not keep the previous rows');
 assert.equal(stale.hidden, false);
 assert.match(nodes.get('#limbo-stale-text').textContent, /не удалось перечитать/);
+assert.match(nodes.get('#limbo-verdict').textContent, /Список недоступен/);
+assert.match(nodes.get('#limbo-verdict').textContent, /не проверены/);
+assert.equal(run('limboLive.pin'), null, 'a failed retry drops the old pin');
 await run('loadLimboLive = globalThis._loadLimboLive');
 
 // 8. Error: no published programme; no results, no fallback.
@@ -633,7 +636,8 @@ await run(`limboLive.adoptBaseline = false; limboLive.filmNotice = null; limboLi
 assert.equal(nodes.get('#limbo-freshness').hidden, true);
 await run(`limboLive.filmStates = {comparable:true, programmeRunId:'g1', count:0, films:[]}; limboRememberFilms({filmStates:{comparable:true, programmeRunId:'g1', count:50, films:${JSON.stringify(filmSet(50))}}}); limboNoteFreshness()`);
 assert.equal(nodes.get('#limbo-freshness').hidden, false);
-assert.match(nodes.get('#limbo-freshness-text').textContent, /Данные изменились, можно обновить/);
+assert.match(nodes.get('#limbo-freshness-text').textContent, /Список обновлён: изменилось состояние не меньше 50 фильмов/);
+assert.doesNotMatch(nodes.get('#limbo-freshness-text').textContent, /можно обновить/);
 await run(`limboLive.filmNotice = null; limboLive.shownAt = Date.now() - 60 * 1000; limboNoteFreshness()`);
 assert.equal(nodes.get('#limbo-freshness').hidden, true, 'a minute is not an hour');
 await run(`limboLive.shownAt = Date.now() - 61 * 60 * 1000; limboNoteFreshness()`);
@@ -657,5 +661,53 @@ assert.equal(run('limboPosts.confirm'), 1);
 assert.equal(run('limboPosts.execute'), 0);
 assert.equal(run(`obsRecovery.get('queue').accepted`), false);
 assert.equal(run(`obsRecovery.get('queue').confirmation`), null);
+
+// 15. A 409 whose unpinned retry fails drops the desktop detail and its action controls. Refresh is the way back.
+const focusPanel = nodes.get('#limbo-focus-body');
+focusPanel.innerHTML = '<section class="limbo-detail"><button type="button" data-obs-recovery-confirm>Подтвердить</button><button type="button" data-obs-recovery-execute>Выполнить</button></section>';
+nodes.get('#limbo-verdict').textContent = 'Подтверждённых действий: 1. Выберите запись.';
+nodes.get('#limbo-action-count').textContent = 'Подтверждённых действий во всём снимке: 1.';
+nodes.get('#limbo-coverage-line').textContent = 'Покрытие частичное.';
+await run(`globalThis.limboPosts = {confirm:0, execute:0}; confirmDiscoveryReconsider = () => { limboPosts.confirm++; return Promise.resolve({ok:true, body:{confirmation:{id:'c'}}}); }; executeDiscoveryReconsider = () => { limboPosts.execute++; return Promise.resolve({ok:true, body:{}}); }; globalThis._loadLimboLive = loadLimboLive; limboLive.selected = 'obs-1'; limboLive.pin = 'old-pin'; limboLive.next = 'cursor-old'; limboLive.snapshot = {programmeRunId:'g1'}; limboLive.counts = {total:10, actionNow:1, actionNowByCause:{manual_review:1}}; obsRecovery.set('queue', {key:'alpha|2014', pin:'old', accepted:true, busy:false, open:true, confirmation:{id:'c'}}); limboRecovery.set('pred', {filmId:'tmdb_1', pin:'p', open:true}); limboSelect.set('tok', 'obs-1'); loadLimboLive = (state, options) => options && options.pin ? Promise.resolve({mode:'stale', error:'stale_pin'}) : Promise.resolve({mode:'error', error:'http_503'});`);
+await run('limboRender()');
+await settle();
+assert.equal(run('limboPosts.confirm'), 0, 'a failed list retry does not confirm');
+assert.equal(run('limboPosts.execute'), 0, 'a failed list retry does not execute');
+assert.equal(focusPanel.innerHTML, '');
+assert.doesNotMatch(focusPanel.innerHTML, /Подтвердить|Выполнить|data-obs-recovery/);
+assert.equal(run('obsRecovery.size'), 0);
+assert.equal(run('limboRecovery.size'), 0);
+assert.equal(run('limboSelect.size'), 0);
+assert.equal(run('limboLive.selected'), null);
+assert.equal(run('limboLive.pin'), null);
+assert.equal(run('limboLive.next'), null);
+assert.equal(run('limboLive.snapshot'), null);
+assert.equal(results.innerHTML, '');
+assert.match(nodes.get('#limbo-verdict').textContent, /Список недоступен\. Доступные действия не проверены/);
+assert.doesNotMatch(nodes.get('#limbo-verdict').textContent, /Подтверждённых действий: 1/);
+assert.equal(nodes.get('#limbo-action-count').textContent, '');
+assert.match(nodes.get('#limbo-coverage-line').textContent, /Покрытие не прочитано/);
+assert.doesNotMatch(nodes.get('#limbo-coverage-line').textContent, /частичное/);
+await run('loadLimboLive = globalThis._loadLimboLive');
+await run('onLimboRefresh()');
+await settle();
+assert.equal(stale.hidden, true);
+assert.doesNotMatch(nodes.get('#limbo-verdict').textContent, /Список недоступен/);
+assert.equal(typeof run('limboLive.pin'), 'string');
+assert.doesNotMatch(focusPanel.innerHTML, /Подтвердить|Выполнить/);
+assert.equal(run('limboPosts.confirm'), 0);
+assert.equal(run('limboPosts.execute'), 0);
+
+// 16. A successful unpinned retry that changes 50 films does not ask for another refresh.
+await run(`globalThis._loadLimboLive = loadLimboLive; limboLive.pin = 'held'; limboLive.adoptBaseline = false; limboLive.filmNotice = null; limboLive.filmStates = {comparable:true, programmeRunId:'g-delta', count:0, films:[]}; limboLive.shownAt = Date.now(); const films = ${JSON.stringify(filmSet(50))}; loadLimboLive = (state, options) => options && options.pin ? Promise.resolve({mode:'stale', error:'stale_pin'}) : Promise.resolve({mode:'ready', pin:'fresh-pin', snapshot:{programmeRunId:'g-delta', evaluatedAt:'2026-11-03T14:00:00.000Z', sources:[], clock:{}}, attention:{mode:'now', checked:true, reason:null, now:0}, items:[], nextCursor:null, total:0, counts:{total:0, actionNow:0, byCause:{}, bySubsystem:{identity:0, metadata:0, localization:0, fingerprint:0, prediction:0}, byKind:{film:0, observation:0}, actionNowByCause:{}}, filmStates:{comparable:true, programmeRunId:'g-delta', count:50, films}, coverage:{films:'partial', filmsObserved:0, observations:null}, context:[], unread:[], thresholds:null});`);
+await run('limboRender()');
+await settle();
+assert.equal(nodes.get('#limbo-freshness').hidden, false);
+assert.match(nodes.get('#limbo-freshness-text').textContent, /Список обновлён: изменилось состояние не меньше 50 фильмов/);
+assert.doesNotMatch(nodes.get('#limbo-freshness-text').textContent, /можно обновить/);
+assert.equal(stale.hidden, true);
+assert.equal(run('limboPosts.confirm'), 0);
+assert.equal(run('limboPosts.execute'), 0);
+await run('loadLimboLive = globalThis._loadLimboLive');
 
 console.log('Admin limbo page: URL filters, history, pagination under the pin, empty, error, stale snapshot and keyboard passed');
