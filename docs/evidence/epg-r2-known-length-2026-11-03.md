@@ -4,7 +4,7 @@ Offline only. No production read or write.
 
 **Captured at:** 2026-11-03, 19:34 UTC.
 
-**Source:** Node.js v22.23.4 and Miniflare's workerd, compatibility date `2026-10-18`. `tests/epg-r2-known-length.mjs` loads the Worker sources, including `putKnownLength` and the discovery generation writer, as one module. D1 is Miniflare's local D1 with migrations `0001`–`0008` and `published_epg_authority.mode=d1`, `cutover=open`. R2 is Miniflare's local bucket. No isolate memory cap was set.
+**Source:** Node.js v22.23.4 and Miniflare's workerd, compatibility date `2026-10-18`. Measured tree `45a61612fbcc020f52286e01cf2d63a385687855`, parent `13dff02`. `tests/epg-r2-known-length.mjs` loads the Worker sources, including `putKnownLength` and the discovery generation writer, as one module. D1 is Miniflare's local D1 with migrations `0001`–`0008` and `published_epg_authority.mode=d1`, `cutover=open`. R2 is Miniflare's local bucket. No isolate memory cap was set.
 
 **Evidence lifecycle:** dated measurement. **Operational authority:** none. It does not clear a live EPG step, a lease reset, or a claim that the production isolate stayed under its limit. The 3 November Node memory reading stays in [epg-commit-memory-2026-11-03.md](epg-commit-memory-2026-11-03.md).
 
