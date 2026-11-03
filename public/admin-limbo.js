@@ -115,7 +115,9 @@ const LIMBO_QUEUE_COPY = {
 const LIMBO_RECOVERY_SUBSYSTEMS = ['prediction', 'fingerprint'];
 const LIMBO_RECOVERY_FILM_ID = /^[A-Za-z0-9_-]{1,80}$/;
 
-const limboLive = {pin: null, snapshot: null, counts: null, seq: 0, controller: null, timer: null, pending: null, stale: false, next: null, state: null, selected: null};
+const LIMBO_FRESH_MS = 60 * 60 * 1000;
+const LIMBO_FILM_CHANGES = 50;
+const limboLive = {pin: null, snapshot: null, counts: null, filmStates: null, shownAt: null, filmNotice: null, adoptBaseline: false, seq: 0, controller: null, timer: null, pending: null, stale: false, next: null, state: null, selected: null};
 // One entry per rendered «Разобрать прогноз» panel: the stored film id it reads, whether it is open, the pin of its last
 // answer and a sequence number so that an older answer never replaces a newer one.
 const limboRecovery = new Map();
@@ -264,6 +266,74 @@ function limboRenderFilters(state) {
   if (age.value !== state.age) age.value = state.age;
   const tools = document.querySelector('#limbo-tools');
   if (tools && (state.kind || state.subsystem || state.age)) tools.open = true;
+  const filters = document.querySelector('#limbo-filters-panel');
+  if (filters && Array.isArray(state.causes)) filters.open = true;
+}
+
+// Same comparison as LimboInventory.limboFilmDelta. The page holds the previous displayed set in memory for this view only.
+function limboFilmDelta(previous, next) {
+  if (!previous || previous.comparable !== true || !next || next.comparable !== true) return {comparable: false, changed: null};
+  if (!previous.programmeRunId || previous.programmeRunId !== next.programmeRunId) return {comparable: false, changed: null};
+  const before = new Map((previous.films || []).map(film => [film.id, film.signature]));
+  const after = new Map((next.films || []).map(film => [film.id, film.signature]));
+  let changed = 0;
+  for (const [id, signature] of after) if (before.get(id) !== signature) changed += 1;
+  for (const id of before.keys()) if (!after.has(id)) changed += 1;
+  return {comparable: true, changed};
+}
+
+function limboRememberFilms(view) {
+  const next = view && view.filmStates || null;
+  if (!limboLive.adoptBaseline && limboLive.filmStates && next) {
+    const delta = limboFilmDelta(limboLive.filmStates, next);
+    if (!delta.comparable) limboLive.filmNotice = 'unavailable';
+    else if (delta.changed >= LIMBO_FILM_CHANGES) limboLive.filmNotice = 'films';
+    else limboLive.filmNotice = null;
+  }
+  if (limboLive.adoptBaseline) {
+    limboLive.filmNotice = null;
+    limboLive.adoptBaseline = false;
+  }
+  limboLive.filmStates = next;
+  limboLive.shownAt = Date.now();
+}
+
+function limboFreshnessMessage(nowMs) {
+  const now = typeof nowMs === 'number' ? nowMs : Date.now();
+  if (typeof limboLive.shownAt === 'number' && now - limboLive.shownAt >= LIMBO_FRESH_MS) return 'Данные прочитаны больше часа назад.';
+  // The list on screen is already this read. Say what changed; do not ask for another refresh.
+  if (limboLive.filmNotice === 'films') return 'Список обновлён: изменилось состояние не меньше 50 фильмов.';
+  if (limboLive.filmNotice === 'unavailable') return 'Сравнение с прошлым снимком недоступно.';
+  return '';
+}
+
+function limboNoteFreshness(nowMs) {
+  const node = document.querySelector('#limbo-freshness');
+  const text = document.querySelector('#limbo-freshness-text');
+  if (!node || !text) return '';
+  const message = limboFreshnessMessage(nowMs);
+  text.textContent = message;
+  node.hidden = !message;
+  return message;
+}
+
+function limboVerdict(view, state) {
+  if (!view || view.mode !== 'ready') return 'Очередь ещё не прочитана.';
+  if (state && state.attention === 'now') {
+    const attention = view.attention || {};
+    if (attention.checked !== true) {
+      const reason = {
+        coordination_continuation: 'запись продолжения резолвера не прочитана',
+        coordination_status: 'состояние discovery не прочитано',
+        coordination_lease: 'блокировка резолвера не прочитана',
+        coordination_authority: 'режим опубликованной программы не прочитан',
+      }[attention.reason];
+      return 'Не удалось проверить доступные действия' + (reason ? ': ' + reason : '') + '.';
+    }
+    if ((attention.now || 0) > 0) return 'Подтверждённых действий: ' + attention.now + '. Выберите запись.';
+    return 'Подтверждённых действий сейчас нет в проверенной части снимка.';
+  }
+  return 'Все состояния. Записей в этом фильтре: ' + (Number.isInteger(view.total) ? view.total : '—') + '.';
 }
 
 function limboBadge(tone, text) {
@@ -697,14 +767,23 @@ function limboCoverageBanner(view) {
   return {tone: 'fresh', title: 'Индекс наблюдений прочитан', text: counts + ' Индекс свежий и в своих пределах полный. Подсистемы, которые эта страница не читает, от этого не становятся здоровыми. ' + filmLine};
 }
 
+function limboCoverageLine(tone) {
+  if (tone === 'partial') return 'Покрытие частичное.';
+  if (tone === 'stale') return 'Индекс наблюдений устарел.';
+  if (tone === 'unavailable') return 'Наблюдения не проверены.';
+  if (tone === 'fresh') return 'Индекс наблюдений прочитан в своих пределах.';
+  return 'Покрытие не прочитано.';
+}
+
 function limboPaintCoverage(view) {
   const banner = document.querySelector('#limbo-coverage');
   const title = document.querySelector('#limbo-coverage-title');
   const text = document.querySelector('#limbo-coverage-text');
-  if (!title || !text) return;
+  const line = document.querySelector('#limbo-coverage-line');
   const copy = view && view.mode === 'ready' ? limboCoverageBanner(view) : {tone: 'unknown', title: 'Покрытие не прочитано', text: 'Это чтение не подтвердило покрытие. Пустой список от этого не значит, что записей нет.'};
-  title.textContent = copy.title;
-  text.textContent = copy.text;
+  if (title) title.textContent = copy.title;
+  if (text) text.textContent = copy.text;
+  if (line) line.textContent = limboCoverageLine(copy.tone);
   if (banner && banner.setAttribute) banner.setAttribute('data-coverage', copy.tone);
 }
 
@@ -842,7 +921,10 @@ function onObsRecoveryConfirm(slot) {
     }
     entry.error = result.error;
     entry.accepted = false;
-    if (result.error === 'stale_pin' || result.error === 'not_eligible') return obsRecoveryLoad(slot, true).then(() => result);
+    if (result.error === 'stale_pin' || result.error === 'not_eligible') {
+      entry.confirmation = null;
+      return obsRecoveryLoad(slot, true).then(() => result);
+    }
     obsRender(slot, '[role="alert"]');
     return result;
   });
@@ -931,7 +1013,10 @@ function onObsIdentityConfirm(slot) {
     }
     entry.identityReason = result.body && typeof result.body.reason === 'string' ? result.body.reason : result.error;
     entry.identityAccepted = false;
-    if (result.error === 'stale_pin') return obsRecoveryLoad(slot, true).then(() => result);
+    if (result.error === 'stale_pin') {
+      entry.identityConfirmation = null;
+      return obsRecoveryLoad(slot, true).then(() => result);
+    }
     obsRender(slot, '[data-obs-identity-hint]');
     return result;
   });
@@ -1054,6 +1139,9 @@ function limboShow(view, state) {
   loading.hidden = true;
   stale.hidden = !limboLive.stale;
   limboPaintCoverage(view);
+  const verdict = document.querySelector('#limbo-verdict');
+  if (verdict) verdict.textContent = limboVerdict(view, state);
+  limboNoteFreshness();
   document.querySelector('#limbo-snapshot-text').textContent = limboSnapshotText(limboLive.snapshot);
   limboRenderFilters(state);
   error.hidden = view.mode !== 'error';
@@ -1085,6 +1173,53 @@ function limboShow(view, state) {
   document.querySelector('#limbo-context-body').innerHTML = limboContextHtml(view);
 }
 
+function limboRead(state, pin, signal) {
+  return loadLimboLive(state, {pin: pin || null, snapshot: limboLive.snapshot, signal});
+}
+
+function limboShowLimited() {
+  document.querySelector('#limbo-loading').hidden = true;
+  document.querySelector('#limbo-error').hidden = true;
+  const stale = document.querySelector('#limbo-stale');
+  const text = document.querySelector('#limbo-stale-text');
+  if (text) text.textContent = 'Список не удалось перечитать. Прежние строки не показаны как актуальные.';
+  if (stale) stale.hidden = false;
+  const results = document.querySelector('#limbo-results');
+  if (results) results.innerHTML = '';
+  const empty = document.querySelector('#limbo-empty');
+  if (empty) empty.hidden = true;
+  const total = document.querySelector('#limbo-total');
+  if (total) total.textContent = '';
+  limboClearFocus();
+  limboRecovery.clear();
+  obsRecovery.clear();
+  limboSelect.clear();
+  limboLive.selected = null;
+  limboLive.pin = null;
+  limboLive.snapshot = null;
+  limboLive.counts = null;
+  limboLive.next = null;
+  limboLive.stale = true;
+  limboLive.filmNotice = null;
+  const verdict = document.querySelector('#limbo-verdict');
+  if (verdict) verdict.textContent = 'Список недоступен. Доступные действия не проверены.';
+  const actionCount = document.querySelector('#limbo-action-count');
+  if (actionCount) actionCount.textContent = '';
+  limboPaintCoverage(null);
+  const snapshot = document.querySelector('#limbo-snapshot-text');
+  if (snapshot) snapshot.textContent = 'Снимок ещё не прочитан.';
+  limboNoteFreshness();
+}
+
+function limboAccept(view) {
+  limboLive.pin = view.pin || null;
+  limboLive.snapshot = view.snapshot || limboLive.snapshot;
+  limboLive.counts = view.counts || limboLive.counts;
+  limboLive.next = view.nextCursor;
+  limboLive.stale = false;
+  limboRememberFilms(view);
+}
+
 function limboRender() {
   const state = limboState();
   limboLive.state = state;
@@ -1092,23 +1227,22 @@ function limboRender() {
   if (limboLive.controller) limboLive.controller.abort();
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   limboLive.controller = controller;
+  const signal = controller ? controller.signal : undefined;
   document.querySelector('#limbo-loading').hidden = false;
-  const pending = loadLimboLive(state, {pin: limboLive.pin, snapshot: limboLive.snapshot, signal: controller ? controller.signal : undefined}).then(view => {
+  limboNoteFreshness();
+  const pending = limboRead(state, limboLive.pin, signal).then(async view => {
     if (seq !== limboLive.seq || view.mode === 'aborted') return view;
     if (view.mode === 'stale') {
-      limboLive.stale = true;
-      document.querySelector('#limbo-loading').hidden = true;
-      document.querySelector('#limbo-stale').hidden = false;
-      document.querySelector('#limbo-error').hidden = true;
-      return view;
+      const fresh = await limboRead(state, null, signal);
+      if (seq !== limboLive.seq || fresh.mode === 'aborted') return fresh;
+      if (fresh.mode !== 'ready') {
+        limboShowLimited();
+        return fresh;
+      }
+      view = fresh;
     }
-    if (view.mode === 'ready') {
-      limboLive.pin = view.pin || limboLive.pin;
-      limboLive.snapshot = view.snapshot || limboLive.snapshot;
-      limboLive.counts = view.counts || limboLive.counts;
-      limboLive.next = view.nextCursor;
-      limboLive.stale = false;
-    }
+    if (view.mode === 'ready') limboAccept(view);
+    else limboLive.stale = false;
     limboShow(view, state);
     return view;
   });
@@ -1130,7 +1264,10 @@ function onLimboRefresh() {
   limboLive.counts = null;
   limboLive.stale = false;
   limboLive.next = null;
-  document.querySelector('#limbo-stale').hidden = true;
+  limboLive.filmNotice = null;
+  limboLive.adoptBaseline = true;
+  const stale = document.querySelector('#limbo-stale');
+  if (stale) stale.hidden = true;
   return limboRender();
 }
 
@@ -1144,10 +1281,10 @@ function onLimboMore() {
   const pending = loadLimboMore(state, cursor, {pin: limboLive.pin}).then(page => {
     if (seq !== limboLive.seq) return page;
     if (page.mode === 'stale') {
-      limboLive.stale = true;
-      document.querySelector('#limbo-stale').hidden = false;
       if (button) button.disabled = false;
-      return page;
+      limboLive.pin = null;
+      limboLive.next = null;
+      return limboRender();
     }
     if (page.mode === 'error') {
       const error = document.querySelector('#limbo-error');
@@ -1239,6 +1376,7 @@ function onLimboForm(event) {
 function onLimboFind(event) {
   if (event && event.preventDefault) event.preventDefault();
   limboApplyFind();
+  limboNoteFreshness();
 }
 
 function limboClearFind() {
@@ -1531,6 +1669,11 @@ function startLimbo() {
   document.querySelector('#limbo-refresh').addEventListener('click', onLimboRefresh);
   window.addEventListener('keydown', onLimboKey);
   window.addEventListener('popstate', onLimboHistory);
+  // Paint the hour hint when the owner comes back. This does not read and does not schedule a timer.
+  const noteFreshness = () => limboNoteFreshness();
+  if (document.addEventListener) document.addEventListener('visibilitychange', noteFreshness);
+  window.addEventListener('focus', noteFreshness);
+  window.addEventListener('pageshow', noteFreshness);
   limboWrite(limboState(), 'replace');
   limboRender();
 }
