@@ -1132,7 +1132,29 @@ function onLimboFind(event) {
   limboApplyFind();
 }
 
+function limboClearFind() {
+  const input = document.querySelector('#limbo-find');
+  if (input) input.value = '';
+  limboApplyFind();
+}
+
+// A text field owns Escape. The title field only clears its own comparison. Any other field keeps the browser's own Escape.
+function limboEscapeOwner(target) {
+  const find = document.querySelector('#limbo-find');
+  if (target && find && target === find) return 'find';
+  if (!target) return '';
+  const tag = String(target.tagName || '').toLowerCase();
+  if (tag === 'textarea' || tag === 'select' || target.isContentEditable === true) return 'field';
+  if (tag !== 'input') return '';
+  const type = String(target.type || 'text').toLowerCase();
+  if (type === 'button' || type === 'submit' || type === 'reset' || type === 'checkbox' || type === 'radio' || type === 'file') return '';
+  return 'field';
+}
+
 function onLimboReset() {
+  limboClearFind();
+  const state = limboState();
+  if (!state.kind && !state.subsystem && !state.cause && !state.age) return Promise.resolve(null);
   limboWrite({kind: '', subsystem: '', cause: '', age: ''}, 'push');
   return limboRender();
 }
@@ -1344,6 +1366,13 @@ function onLimboResultChange(event) {
 
 function onLimboKey(event) {
   if (event.key !== 'Escape') return;
+  const owner = limboEscapeOwner(event.target);
+  if (owner === 'find') {
+    event.preventDefault();
+    limboClearFind();
+    return;
+  }
+  if (owner === 'field') return;
   const state = limboState();
   if (!state.kind && !state.subsystem && !state.cause && !state.age) return;
   event.preventDefault();
