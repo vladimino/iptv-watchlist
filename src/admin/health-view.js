@@ -210,7 +210,12 @@ function healthAffectedText(group) {
   return `Затронуто: ${group.affected || 0} (${kind}).`;
 }
 
-function healthGroupRow(group, now) {
+function healthGroupKey(group, index) {
+  if (group.key) return group.key;
+  return [group.subsystem || '', group.category || '', group.reason || '', group.severity || '', group.subjectKind || '', index].join('|');
+}
+
+function healthGroupBody(group, now) {
   const action = group.action || {};
   const evidence = healthCounts(group.evidence, {complete: 'полные', partial: 'частичные', missing: 'отсутствуют'});
   const missing = Object.keys(group.missing || {}).length ? ` · не хватает: ${Object.keys(group.missing).join(', ')}` : '';
@@ -228,11 +233,11 @@ function healthGroupRow(group, now) {
   const situation = healthSituation(group);
   const situationMark = situation && situation !== categoryText ? `<span class="health-situation">${healthEscape(situation)}</span>` : '';
   const eligible = action.eligible === true ? 'true' : action.eligible === false ? 'false' : 'null';
-  return `<li class="health-group health-group-${healthEscape(group.severity)}" data-group="${healthEscape(group.key)}">
-    <div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(categoryText)}</span>${situationMark}</div>
+  return `<div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><h4 id="admin-health-detail-subject" class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(categoryText)}</h4>${situationMark}</div>
     <p class="health-group-why">${healthEscape(HEALTH_REASON_TEXT[group.reason] || group.reason)}</p>
     <p class="health-group-affected">${healthEscape(healthAffectedText(group))}</p>
     <p class="health-group-next">${healthNextStep(group)}</p>
+    <p class="health-group-result">Подтверждённого результата в этом чтении нет.</p>
     ${filmLinks ? `<p class="health-group-subjects">${filmLinks}${healthEscape(more)}</p>` : ''}
     <details class="health-tech"><summary>Технические подробности</summary>
     <dl class="health-group-facts">
@@ -240,8 +245,22 @@ function healthGroupRow(group, now) {
       <div><dt>Свежесть / прогресс</dt><dd>${healthEscape([freshness, progress].filter(Boolean).join(' · ') || '—')}${since ? ' · ' + healthEscape(since) : ''}${retry ? ' · ' + healthEscape(retry) : ''}${threshold ? ' · ' + healthEscape(threshold) : ''}</dd></div>
       <div><dt>Действие</dt><dd>${healthEscape(action.suggested || '—')} · ${healthEscape(action.code || '—')} · eligible ${eligible} · ${healthEscape(action.reason || '—')}</dd></div>
       <div><dt>Субъекты</dt><dd>${rawSample || '—'}${healthEscape(more)}</dd></div>
-    </dl></details>
-  </li>`;
+    </dl></details>`;
+}
+
+function healthGroupRow(group, now) {
+  return `<li class="health-group health-group-${healthEscape(group.severity)}" data-group="${healthEscape(group.key)}">${healthGroupBody(group, now)}</li>`;
+}
+
+function healthOptionsHtml(groups, all, selectedKey) {
+  return groups.map(group => {
+    const index = all.indexOf(group);
+    const key = healthGroupKey(group, index);
+    const selected = key === selectedKey;
+    const title = `${HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem} · ${HEALTH_CATEGORY_TEXT[group.category] || group.category}`;
+    const why = HEALTH_REASON_TEXT[group.reason] || group.reason;
+    return `<button type="button" class="health-option${selected ? ' is-selected' : ''}" role="option" id="health-opt-${index}" aria-selected="${selected ? 'true' : 'false'}" tabindex="${selected ? '0' : '-1'}" data-issue-key="${healthEscape(key)}"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-option-title">${healthEscape(title)}</span><span class="health-option-why">${healthEscape(why)}</span></button>`;
+  }).join('');
 }
 
 function healthVerdictCounts(health) {
@@ -262,6 +281,22 @@ function healthUnreadText(sources) {
   }).join(', ');
 }
 
+function healthKpiCounts(body) {
+  const groups = body.health?.groups || [];
+  const sources = Object.values(body.sources || {});
+  return {
+    critical: groups.filter(group => group.severity === 'critical').length,
+    warning: groups.filter(group => group.severity === 'warning').length,
+    unknown: sources.filter(entry => entry.evidence !== 'observed').length,
+  };
+}
+
+function healthKpiHtml(body) {
+  const counts = healthKpiCounts(body);
+  const card = (kind, count, label, unit) => `<li class="health-kpi health-kpi-${kind}${count ? '' : ' is-zero'}" data-kpi="${kind}"><b class="health-kpi-value">${count}</b><span class="health-kpi-label">${label}</span><small>${unit}</small></li>`;
+  return `<ul class="health-kpis" data-critical="${counts.critical}" data-warning="${counts.warning}" data-unknown="${counts.unknown}">${card('critical', counts.critical, 'Критично', 'групп с важностью «срочно»')}${card('warning', counts.warning, 'Предупреждения', 'групп с важностью «важно»')}${card('unknown', counts.unknown, 'Неизвестно', 'источников не прочитано')}</ul>`;
+}
+
 function healthSummaryHtml(body) {
   const health = body.health || {};
   const scope = health.scope || {};
@@ -278,15 +313,8 @@ function healthSummaryHtml(body) {
   const lead = groups.length ? (steps.act ? 'act' : 'calm') : counts.attention ? 'attention' : counts.unknown ? 'unknown' : 'clear';
   const leadText = lead === 'act' ? 'Разобраться' : lead === 'calm' ? 'Срочного шага нет' : lead === 'attention' ? 'Требует внимания' : lead === 'unknown' ? 'Недостаточно данных' : 'В пределах проверенного всё хорошо';
   const leadCount = lead === 'act' ? healthPlural(steps.act, 'проблема', 'проблемы', 'проблем') : lead === 'calm' ? 'среди текущих групп' : healthPlural(lead === 'attention' ? counts.attention : lead === 'unknown' ? counts.unknown : counts.clear, 'подсистема', 'подсистемы', 'подсистем');
-  const stepLine = groups.length ? `<p class="health-steps"><span class="health-step-act">Разобраться <b>${steps.act}</b></span> · <span class="health-step-wait">Штатное ожидание <b>${steps.wait}</b></span> · <span class="health-step-gap">Не проверить <b>${steps.gap}</b></span></p>` : '';
   return `<div class="health-board" data-lead="${lead}">
     <p class="health-lead health-lead-${lead}"><b>${leadText}</b><span>${healthEscape(leadCount)}</span></p>
-    ${stepLine}
-    <ul class="health-split">
-      <li class="health-verdict health-verdict-attention">Требует внимания <b>${counts.attention}</b></li>
-      <li class="health-verdict health-verdict-clear">В пределах проверенного всё хорошо <b>${counts.clear}</b></li>
-      <li class="health-verdict health-verdict-unknown">Недостаточно данных <b>${counts.unknown}</b></li>
-    </ul>
     <dl class="health-facts">
       <div><dt>Время</dt><dd>${healthEscape(healthDate(health.now))}</dd></div>
       <div><dt>Источники</dt><dd>прочитано ${sourceRead} из ${sourceTotal}</dd></div>
@@ -294,17 +322,30 @@ function healthSummaryHtml(body) {
     </dl>
     ${unread ? `<p class="health-unread">Не прочитано: ${healthEscape(unread)}.</p>` : ''}
     ${anomalies}
-    <p class="health-score-note">Сводного балла нет.</p>
+    <p class="health-score-note">Сводного балла нет. Ноль остаётся нулём.</p>
   </div>`;
 }
 
+function healthQueueGroups(groups) {
+  return groups.filter(group => healthBand(group) !== 'wait');
+}
+
+function healthInboxHtml(groups, now, selectedKey) {
+  const queue = healthQueueGroups(groups);
+  const waits = groups.filter(group => healthBand(group) === 'wait');
+  const chosen = groups.find((group, index) => healthGroupKey(group, index) === selectedKey) || queue[0] || waits[0] || null;
+  const key = chosen ? healthGroupKey(chosen, groups.indexOf(chosen)) : '';
+  return {
+    key,
+    queue: queue.length ? healthOptionsHtml(queue, groups, key) : '<p class="health-queue-empty">Срочных проблем нет.</p>',
+    wait: healthOptionsHtml(waits, groups, key),
+    detail: chosen ? healthGroupBody(chosen, now) : '<p class="health-detail-empty">Выбранной проблемы нет.</p>',
+  };
+}
+
 function healthIssuesHtml(groups, now) {
-  const bands = [['act', 'Разобраться'], ['wait', 'Штатное ожидание'], ['gap', 'Не хватает данных']];
-  return bands.map(([band, title]) => {
-    const rows = groups.filter(group => healthBand(group) === band);
-    if (!rows.length) return '';
-    return `<section class="health-band health-band-${band}"><h4 class="health-band-title">${title}</h4><ol class="health-groups">${rows.map(group => healthGroupRow(group, now)).join('')}</ol></section>`;
-  }).join('');
+  const inbox = healthInboxHtml(groups, now, '');
+  return `<div class="health-queue">${inbox.queue}</div><div class="health-detail-slot">${inbox.detail}</div><div class="health-wait-slot">${inbox.wait}</div>`;
 }
 
 function healthSourcesText(sources) {
@@ -316,20 +357,96 @@ function healthSourcesText(sources) {
   }).join(' · ');
 }
 
-// Renders one health answer into the view's nodes. `body` is the parsed health answer.
+let healthRenderedGroups = [];
+let healthRenderedNow = '';
+let healthSelectedKey = '';
+
+function healthParkDetail() {
+  const detail = document.querySelector('#admin-health-detail');
+  const master = document.querySelector('.health-master');
+  if (!detail || !master || typeof master.append !== 'function' || detail.parentElement === master) return;
+  master.append(detail);
+}
+
+function healthPlaceDetail(narrow) {
+  const detail = document.querySelector('#admin-health-detail');
+  if (!detail) return;
+  detail.setAttribute('data-placement', narrow ? 'under-selected' : 'beside');
+  const selected = document.querySelector('#admin-health-issues .is-selected, #admin-health-wait-list .is-selected');
+  const master = document.querySelector('.health-master');
+  if (!selected || !master || typeof selected.after !== 'function' || typeof master.append !== 'function') return;
+  if (narrow) selected.after(detail);
+  else if (detail.parentElement !== master) master.append(detail);
+}
+
+function healthPaintSelection() {
+  healthParkDetail();
+  const inbox = healthInboxHtml(healthRenderedGroups, healthRenderedNow, healthSelectedKey);
+  healthSelectedKey = inbox.key;
+  document.querySelector('#admin-health-issues').innerHTML = inbox.queue;
+  const wait = document.querySelector('#admin-health-wait');
+  wait.hidden = !inbox.wait;
+  document.querySelector('#admin-health-wait-list').innerHTML = inbox.wait;
+  document.querySelector('#admin-health-detail-body').innerHTML = inbox.detail;
+  const narrow = typeof matchMedia === 'function' && matchMedia('(max-width: 800px)').matches;
+  healthPlaceDetail(narrow);
+}
+
+function healthApplySelection(key) {
+  if (!healthRenderedGroups.some((group, index) => healthGroupKey(group, index) === key)) return;
+  const focused = document.activeElement;
+  const keepFocus = !!(focused && focused.closest && focused.closest('[data-issue-key]'));
+  healthSelectedKey = key;
+  healthPaintSelection();
+  if (!keepFocus) return;
+  const selected = document.querySelector('#admin-health-issues .is-selected, #admin-health-wait-list .is-selected');
+  if (selected) selected.focus();
+}
+
+function onAdminHealthSelect(event) {
+  const option = event.target && event.target.closest ? event.target.closest('[data-issue-key]') : null;
+  if (!option || (event.target.closest && event.target.closest('a, summary, details'))) return;
+  event.preventDefault();
+  healthApplySelection(option.getAttribute('data-issue-key'));
+}
+
+function onAdminHealthOptionKey(event) {
+  const option = event.target && event.target.closest ? event.target.closest('[data-issue-key]') : null;
+  if (!option || (event.target.closest && event.target.closest('input, textarea, select'))) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    healthApplySelection(option.getAttribute('data-issue-key'));
+    return;
+  }
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+  const list = option.closest('[role="listbox"]');
+  if (!list || !list.querySelectorAll) return;
+  const options = [...list.querySelectorAll('[data-issue-key]')];
+  const index = options.indexOf(option);
+  const next = options[index + (event.key === 'ArrowDown' ? 1 : -1)];
+  if (!next) return;
+  event.preventDefault();
+  healthApplySelection(next.getAttribute('data-issue-key'));
+}
+
+// Renders one health answer into the view's nodes. `body` is the parsed health answer. Choosing a row only
+// repaints the already read groups; it does not fetch again and it does not write.
 function renderAdminHealth(body) {
   const health = body.health || {};
   const now = health.now;
+  const groups = health.groups || [];
+  healthRenderedGroups = groups;
+  healthRenderedNow = now;
+  if (!groups.some((group, index) => healthGroupKey(group, index) === healthSelectedKey)) healthSelectedKey = '';
   document.querySelector('#admin-health-summary').innerHTML = healthSummaryHtml(body);
+  document.querySelector('#admin-health-kpis').innerHTML = healthKpiHtml(body);
   document.querySelector('#admin-health-sources').textContent = 'Источники: ' + healthSourcesText(body.sources);
   const subsystems = document.querySelector('#admin-health-subsystems');
   subsystems.innerHTML = Object.entries(health.subsystems || {}).map(([name, entry]) => healthSubsystemCard(name, entry)).join('');
-  const groups = health.groups || [];
-  const list = document.querySelector('#admin-health-issues');
   const empty = document.querySelector('#admin-health-empty');
   const counts = healthVerdictCounts(health);
   const filmsComplete = health.scope?.coverage?.films === 'complete';
-  list.innerHTML = healthIssuesHtml(groups, now);
+  healthPaintSelection();
   empty.hidden = groups.length > 0;
   if (groups.length) {
     empty.textContent = '';

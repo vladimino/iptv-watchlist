@@ -1294,6 +1294,15 @@ function startAdmin() {
   document.querySelector('#admin-health-refresh').addEventListener('click', onAdminHealthRefresh);
   document.querySelector('#admin-health-stale-refresh').addEventListener('click', onAdminHealthRefresh);
   document.querySelector('#admin-health-issues').addEventListener('click', onAdminHealthLink);
+  document.querySelector('#admin-health-detail').addEventListener('click', onAdminHealthLink);
+  document.querySelector('#admin-health').addEventListener('click', onAdminHealthSelect);
+  document.querySelector('#admin-health').addEventListener('keydown', onAdminHealthOptionKey);
+  if (window.matchMedia) {
+    const healthMedia = window.matchMedia('(max-width: 800px)');
+    const placeHealth = () => healthPlaceDetail(healthMedia.matches);
+    if (healthMedia.addEventListener) healthMedia.addEventListener('change', placeHealth);
+    placeHealth();
+  }
   window.addEventListener('keydown', onAdminKey);
   window.addEventListener('popstate', onAdminHistory);
   adminWrite(adminState(), 'replace');

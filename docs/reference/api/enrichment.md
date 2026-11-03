@@ -100,6 +100,10 @@ The aggregate walks mechanics in list order, then the general execution dimensio
 
 Rollback is reverting this Worker. There is no migration. Bodies that omit `evidence` stay valid on this code and on the previous code. A later authorized generation is what would write a body that contains the map; this change writes none. The live hourly task prompt is unchanged. Turning generation on is a later card: a schema or prompt bump, an ADR-0035 declaration, and a separate change to that task.
 
+### Optional confidence assessment
+
+`assessPredictionConfidence` ([prediction confidence](../domain/prediction-confidence.md)) can score a fingerprint that already carries `evidence`. Submit, `prediction_validate` and the schema endpoint do not call it and do not add the result to a fingerprint or a prediction. `prediction.confidence` on a stored record remains the model's enum. The film page will show `confidenceAssessment` when a DTO already has that object; the current view and catalog responses do not add it.
+
 The validation summary does not alter item-failure semantics: a rejected item is a retryable `parse_error` with the ordinary backoff, re-delivery of the same film is idempotent and returns the stored `validation`, five consecutive distinct format failures stop the run as `format_error_storm`, and the [run-step diagnostic](run-diagnostics.md) `itemValidation.stages` entries keep their `{stage, reportedBy}` shape. The thrown validator message, the payload, the model output and the film title are never copied into the response, the run record, the queue or a log line; only paths and codes from the closed vocabulary are. The runner contract (`GET /api/enrichment/runner`, `itemFailures.validation`) and the MCP tool descriptions point the caller at the contract before `submit`. A retry record without a validation summary gains one only at that film's next rejection; nothing resets or retries deferred films.
 
 ## Letterboxd personal ratings and runtime
