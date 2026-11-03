@@ -49,7 +49,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  ASSETS:{},INITIAL_PERSONAL_RATINGS:{},FILM_TITLE_DICTIONARY:[],PERSON_NAME_DICTIONARY:[],
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
 vm.runInContext(scoped('src/domain/discovery-observation-index.js','DiscoveryIndex'),context);
-for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
+for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
 vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);
 vm.runInContext(scoped('src/domain/data-health.js','DataHealth'),context);
 vm.runInContext(scoped('src/domain/limbo-inventory.js','LimboInventory'),context);

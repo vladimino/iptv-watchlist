@@ -43,7 +43,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  FILM_TITLE_DICTIONARY:[{id:'d5',tmdbId:'555',original:'Dict Film',title:'Словарный фильм',sources:['https://www.wikidata.org/wiki/Q1'],aliases:['Из словаря'],status:'verified'}],
  PERSON_NAME_DICTIONARY:[{id:'director/alex-brewer',original:'Alex Brewer',name:'Алекс Брюэр',aliases:[],status:'verified',verification_basis:'user_supplied',source_url:null}],
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
-for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
+for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
 vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),context);
 vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js','utf8'),context);
 vm.runInContext(source,context);

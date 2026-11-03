@@ -66,7 +66,7 @@ const workerContext = vm.createContext({Response, Request, Headers, URL, URLSear
     if (typeof reply === 'function') return reply();
     return reply ? new Response(JSON.stringify(reply), {status: 200}) : new Response('missing', {status: 404});
   }});
-for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
+for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);

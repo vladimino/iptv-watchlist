@@ -41,7 +41,7 @@ assert.match(legacy,/data-status="legacy"/);
 assert.match(legacy,/У отпечатка нет карты доказательств\./);
 assert.doesNotMatch(legacy,/<script>|alert/);
 assert.match(legacy,/title="У отпечатка нет карты доказательств\."/);
-assert.equal(run('findsStrong(enrichment.films["heat-1995"].prediction)'),true,'Finds still uses the stored model confidence');
+assert.equal(run('findsStrong(enrichment.films["heat-1995"].prediction)'),false,'a legacy assessment is low and does not keep the model high');
 assert.equal(run('similarNumbers(enrichment.films["heat-1995"].prediction).confidence'),'high');
 
 run(`enrichment.films['heat-1995'].prediction.confidence='low'`);
@@ -52,7 +52,7 @@ const evidenced=run(`filmScore(${JSON.stringify(film)})`);
 assert.match(evidenced,/Качество доказательств: <strong>высокое<\/strong>/);
 assert.match(evidenced,/Источник заявлен моделью или ссылкой и отдельно не проверялся\./);
 assert.match(evidenced,/уверенность модели низкая/);
-assert.equal(run('findsStrong(enrichment.films["heat-1995"].prediction)'),false,'a high assessment does not promote a low model confidence');
+assert.equal(run('findsStrong(enrichment.films["heat-1995"].prediction)'),false,'a high assessment without the snapshot hash does not promote a low model confidence');
 assert.equal(run(`evidenceConfidenceHtml({assessmentVersion:1,level:'<img>',status:'evidenced',reasonCodes:[]})`),'');
 assert.equal(run(`evidenceConfidenceHtml({assessmentVersion:1,level:'high',status:'legacy',reasonCodes:[]})`),'');
 assert.equal(run(`evidenceConfidenceHtml({assessmentVersion:1,level:'high',status:'evidenced'})`),'','version, level and status alone do not render');
@@ -82,4 +82,4 @@ run(`enrichment.films['heat-1995'].prediction.fingerprintHash=${JSON.stringify(h
 const matched=run(`filmScore(${JSON.stringify(film)})`);
 assert.match(matched,/Качество доказательств: <strong>высокое<\/strong>/);
 assert.match(matched,/уверенность модели низкая/);
-assert.equal(run('findsStrong(enrichment.films["heat-1995"].prediction)'),false);
+assert.equal(run('findsStrong(enrichment.films["heat-1995"].prediction)'),true,'a bound high assessment is the Finds level');
