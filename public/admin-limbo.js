@@ -413,7 +413,14 @@ function limboEmptyCopy(view, state) {
   if (Array.isArray(state?.causes) && state.causes.length === 0) return {title: 'Ни одна причина не выбрана', text: 'Список пуст, потому что все индикаторы выключены. «Все причины» включает их снова. Это не значит, что записей нет.'};
   if (state?.attention === 'now') {
     if (view?.attention?.checked === true) return {title: 'Нет подтверждённых действий', text: 'Среди выбранных причин нет шага, который можно сделать сейчас. Ожидание, устаревший индекс и непроверенные записи остаются в режиме «Все состояния».'};
-    return {title: 'Подтверждённых действий нет', text: 'Очередь действий не проверена: индекс наблюдений не прочитан или не подтверждён. Полный список — «Все состояния». Пустой список не значит, что проблем нет.'};
+    const unread = {
+      coordination_continuation: 'запись продолжения резолвера не прочитана',
+      coordination_status: 'состояние discovery не прочитано',
+      coordination_lease: 'блокировка резолвера не прочитана',
+      coordination_authority: 'режим опубликованной программы не прочитан',
+    }[view?.attention?.reason];
+    const middle = unread ? 'Очередь действий не проверена: ' + unread + '.' : 'Очередь действий не проверена: индекс наблюдений не прочитан или не подтверждён.';
+    return {title: 'Подтверждённых действий нет', text: middle + ' Полный список — «Все состояния». Пустой список не значит, что проблем нет.'};
   }
   const observations = view.coverage && view.coverage.observations;
   const gap = state.kind === 'film' ? null : limboObservationGap(observations);

@@ -283,6 +283,10 @@ await settle();
 assert.match(requests.at(-1).path, /attention=now/);
 assert.match(empty.innerHTML, /Подтверждённых действий нет/);
 assert.match(empty.innerHTML, /не значит, что проблем нет/);
+const unreadCopy = run(`limboEmptyCopy({attention:{checked:false,reason:'coordination_status'}},{attention:'now'})`);
+assert.equal(unreadCopy.title, 'Подтверждённых действий нет');
+assert.match(unreadCopy.text, /состояние discovery не прочитано/);
+assert.match(unreadCopy.text, /не значит, что проблем нет/);
 assert.equal(results.innerHTML, '');
 assert.equal(nodes.get('#limbo-mode-now').getAttribute('aria-pressed'), 'true');
 // Pagination under the pin, in the full register: 30 films without metadata plus the two prediction items, 25 then the rest.

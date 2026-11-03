@@ -142,23 +142,30 @@ function drIndexView(index){
 }
 
 // The inventory already loaded these records and these three coordination objects. The same gates as one recovery read,
-// with no further request. Reconsider wins when both gates are available. A film is never passed here.
+// with no further request. Reconsider wins when both gates are available. A film is never passed here. An unreadable
+// continuation, status, lease or published-EPG marker is not a completed check. Mode `d1` is a completed check that
+// refuses reconsider: Discovery still writes R2, and this read does not offer that write.
 function observationOwnerAction(record,index,coordination,nowIso,nowMs){
- const continuation=coordination?.continuation,status=coordination?.status,lease=coordination?.lease;
- const leaseValue=lease?.status==='unavailable'?undefined:lease?.value;
+ const continuation=coordination?.continuation,status=coordination?.status,lease=coordination?.lease,publishedEpg=coordination?.publishedEpg;
+ const mode=publishedEpg?.mode;
+ if(continuation?.status==='unavailable'||status?.status==='unavailable'||lease?.status==='unavailable'||(mode!=='r2'&&mode!=='d1'))return {now:false,checked:false,capability:null,reason:'not_checked'};
+ const leaseValue=lease?.value;
  const health=continuation?.status==='recorded'&&leaseValue!==undefined?healthSummary(continuationHealth(continuation.value,leaseValue,status?.value,nowMs,index.programmeRunId)):null;
  const assessment=DiscoveryRecovery.assessObservationRecovery({
   now:nowIso,target:{key:record.key},published:{programmeRunId:index.programmeRunId},
   observation:DiscoveryIndex.observationAssessmentInput(record,screenedNonfilmReason(record,record.decision)),
   decision:record.decision,
-  series:{record:continuation?.status==='unavailable'?undefined:continuation?.value,health,lease:leaseValue},
+  series:{record:continuation?.value,health,lease:leaseValue},
   index:{state:index.state},throttle:{retryAt:typeof status?.value?.retryAt==='string'?status.value.retryAt:null},
  });
  const identity=DiscoveryIdentity.identityOffer({
   record,index:{state:index.state,complete:index.manifest?.coverage?.complete===true,scope:index.indexScope||index.manifest?.coverage?.scope||null},
-  generation:index.generation,series:assessment&&!assessment.error?assessment.series:null,publishedEpg:coordination?.publishedEpg,
+  generation:index.generation,series:assessment&&!assessment.error?assessment.series:null,publishedEpg,
  });
- if(assessment&&!assessment.error&&assessment.execute?.available===true)return {now:true,checked:true,capability:'discovery_reconsider',reason:'eligible'};
+ if(assessment&&!assessment.error&&assessment.execute?.available===true){
+  if(publishedEpg.supported===false&&mode==='d1')return {now:false,checked:true,capability:null,reason:'unknown_authority'};
+  return {now:true,checked:true,capability:'discovery_reconsider',reason:'eligible'};
+ }
  if(identity?.available===true)return {now:true,checked:true,capability:'discovery_identity',reason:'eligible'};
  return {now:false,checked:true,capability:null,reason:assessment?.execute?.reason||identity?.reason||'not_confirmed'};
 }

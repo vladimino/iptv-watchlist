@@ -5,7 +5,8 @@
 // etag only), evaluates the pure data health model over that projection and pages the issues it yields. When that index
 // is fresh or stale and holds records, the same request also reads, once, the three coordination objects the observation
 // recovery route already reads and the published-programme authority marker, and asks that route's adapter whether each
-// loaded record is an owner action now. Nothing here lists the bucket, reads a per-film enrichment object, the body of
+// loaded record is an owner action now. An absent object is a fact. An unreadable object or an unreadable marker is not
+// a completed check. Mode d1 is a completed refusal of reconsider. Nothing here lists the bucket, reads a per-film enrichment object, the body of
 // the resolution ledger or of the discovery snapshot, writes, starts work or calls another service. Without a readable
 // index of the published generation, unresolved observations are reported as unavailable, never as none, and the action
 // queue says it was not checked.
@@ -133,17 +134,29 @@ function limboReadToken(read){
  if(read.status==='not_recorded')return 'absent';
  return 'e:'+String(read.etag??'present');
 }
+function limboCoordinationMode(publishedEpg){
+ return publishedEpg?.mode==='r2'||publishedEpg?.mode==='d1'?publishedEpg.mode:'unread';
+}
+// Absent is a fact the gates use. Unavailable, in this order, is not a completed check. An unreadable published-EPG
+// marker is the same. Mode `d1` is a known mode, so the gates run and refuse reconsider.
+function limboCoordinationReason(continuation,status,lease,publishedEpg){
+ if(continuation?.status==='unavailable')return 'coordination_continuation';
+ if(status?.status==='unavailable')return 'coordination_status';
+ if(lease?.status==='unavailable')return 'coordination_lease';
+ if(limboCoordinationMode(publishedEpg)==='unread')return 'coordination_authority';
+ return null;
+}
 // One pass over the records already loaded. The three coordination objects are the ones the observation recovery read
-// opens; a failure of any of them refuses the action and does not fail the inventory. No per-record request.
+// opens. An unreadable one is not a completed check and does not fail the inventory. No per-record request.
 async function limboReadCoordination(env,observations){
  const readable=['fresh','stale'].includes(observations?.state);
  const records=Array.isArray(observations?.records)?observations.records:[];
- if(!readable||!records.length)return {judged:readable,version:''};
+ if(!readable||!records.length)return {judged:readable,version:'',reason:null};
  const [continuation,status,lease]=await Promise.all([drJson(env.BUCKET,DR_CONTINUATION_KEY),drJson(env.BUCKET,DR_STATUS_KEY),drJson(env.BUCKET,DISCOVERY_LEASE_KEY)]);
  let publishedEpg;
  try{publishedEpg=await identityPublishedEpgSupport(env);}catch{publishedEpg={supported:false,mode:null};}
- const mode=publishedEpg?.supported===false?'unsupported':(publishedEpg?.mode||'unread');
- return {judged:true,version:[limboReadToken(continuation),limboReadToken(status),limboReadToken(lease),mode].join('~'),continuation,status,lease,publishedEpg};
+ const reason=limboCoordinationReason(continuation,status,lease,publishedEpg);
+ return {judged:reason===null,reason,version:[limboReadToken(continuation),limboReadToken(status),limboReadToken(lease),limboCoordinationMode(publishedEpg)].join('~'),continuation,status,lease,publishedEpg};
 }
 function limboJudgeRecord(record,index,coordination,nowIso,nowMs){
  try{return observationOwnerAction(record,index,coordination,nowIso,nowMs);}
@@ -164,7 +177,7 @@ function limboWithActions(items,snapshot,nowMs){
 }
 function limboAttentionView(filter,snapshot,items){
  const observations=snapshot.observations,checked=snapshot.coordination?.judged===true;
- const reason=checked?null:(!observations||!observations.state?'index_unavailable':'index_'+observations.state);
+ const reason=checked?null:(snapshot.coordination?.reason||(!observations||!observations.state?'index_unavailable':'index_'+observations.state));
  const now=checked?items.filter(item=>item.ownerAction?.now===true).length:null;
  const byCause=checked?Object.fromEntries(LimboInventory.LIMBO_CAUSES.map(cause=>[cause,items.filter(item=>item.cause===cause&&item.ownerAction?.now===true).length])):null;
  return {mode:filter.attention==='now'?'now':'all',checked,reason,now,byCause};

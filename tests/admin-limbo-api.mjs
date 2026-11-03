@@ -480,4 +480,84 @@ resetCache();
 r=await call('/api/admin/limbo?attention=now&pin='+encodeURIComponent(actionPin));
 assert.equal(r.status,409);assert.equal(r.body.error,'stale_pin','a changed continuation is part of the coordination pin');
 
+// 13. Mode d1 is a completed check: an otherwise eligible reconsider is not an owner action. The writers are not called.
+function epgDb(mode,{throwAuthority=false}={}){
+ const tables=['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'];
+ return {prepare(sql){return {bind(){return this;},async first(){
+  if(throwAuthority)throw new Error('d1 down');
+  if(sql.includes('schema_contract'))return {version:8};
+  if(sql.includes('published_epg_authority'))return {mode,programmeRunId:G1,mirrorProgrammeRunId:null};
+  return null;
+ },async all(){return {results:tables.map(name=>({name}))};}};}};
+}
+async function callEnv(path,extra){
+ resetCache();
+ const response=await worker.fetch(new Request('https://iptv.example'+path),{...env,...extra},{waitUntil(){throw new Error('background');}});
+ assert.equal(openStreams(),0,'every opened R2 body is consumed or cancelled after '+path);
+ return {status:response.status,body:await response.json()};
+}
+seedActionable();
+r=await callEnv('/api/admin/limbo?attention=now',{DB:epgDb('d1')});
+assert.equal(r.status,200,JSON.stringify(r.body));
+assert.equal(r.body.attention.checked,true);
+assert.equal(r.body.attention.reason,null);
+assert.equal(r.body.attention.now,0);
+assert.equal(r.body.counts.actionNow,0);
+assert.deepEqual(r.body.items,[]);
+assert.match(decodeURIComponent(r.body.pin),/~d1$/);
+r=await callEnv('/api/admin/limbo?attention=all&kind=observation',{DB:epgDb('d1')});
+assert.equal(r.body.items.length,2);
+const quietD1=r.body.items.find(item=>item.observation.title==='Тихий дождь');
+assert.equal(quietD1.ownerAction.now,false);
+assert.equal(quietD1.ownerAction.checked,true);
+assert.equal(quietD1.ownerAction.capability,null);
+assert.equal(quietD1.ownerAction.reason,'unknown_authority');
+assert.ok(r.body.counts.total>r.body.items.length,'the full register stays beside the refused action');
+
+// 14. An unreadable coordination object is not a verified zero. The specific reason is on attention, the action counts
+// are null, and the full register keeps the rows with the write unchecked. An unreadable object still pins the tuple.
+async function unreadCoordination(key,reason){
+ seedActionable();
+ const failing={...bucket,async get(name){if(name===key){gets.push(name);throw new Error('r2 down');}return bucket.get(name);}};
+ const now=await callEnv('/api/admin/limbo?attention=now',{BUCKET:failing});
+ assert.equal(now.status,200,JSON.stringify(now.body));
+ assert.equal(now.body.attention.checked,false);
+ assert.equal(now.body.attention.reason,reason);
+ assert.equal(now.body.attention.now,null);
+ assert.equal(now.body.counts.actionNow,null);
+ assert.equal(now.body.counts.actionNowByCause,null);
+ assert.deepEqual(now.body.items,[]);
+ assert.ok(now.body.counts.total>0,'an unreadable coordination object does not drop the inventory');
+ assert.match(decodeURIComponent(now.body.pin),/unavailable/);
+ const all=await callEnv('/api/admin/limbo?attention=all&kind=observation',{BUCKET:failing});
+ assert.equal(all.body.items.length,2);
+ assert.ok(all.body.items.every(item=>item.ownerAction.now===false&&item.ownerAction.checked===false&&item.ownerAction.reason==='not_checked'));
+ return now.body.pin;
+}
+const statusPin=await unreadCoordination('epg/discovery-status.json','coordination_status');
+await unreadCoordination('epg/resolver-continuation.json','coordination_continuation');
+await unreadCoordination('epg/resolver-lease.json','coordination_lease');
+seedActionable();
+r=await call('/api/admin/limbo?attention=now&pin='+encodeURIComponent(statusPin));
+assert.equal(r.status,409);assert.equal(r.body.error,'stale_pin','a later readable status refuses the pin taken while it was unreadable');
+seedActionable();
+r=await callEnv('/api/admin/limbo?attention=now',{DB:epgDb('r2',{throwAuthority:true})});
+assert.equal(r.body.attention.checked,false);
+assert.equal(r.body.attention.reason,'coordination_authority');
+assert.equal(r.body.attention.now,null);
+assert.equal(r.body.counts.actionNow,null);
+assert.deepEqual(r.body.items,[]);
+r=await callEnv('/api/admin/limbo?attention=all&kind=observation',{DB:epgDb('r2',{throwAuthority:true})});
+assert.equal(r.body.items.length,2);
+assert.ok(r.body.items.every(item=>item.ownerAction.now===false&&item.ownerAction.checked===false));
+assert.ok(r.body.counts.total>0);
+// An unreadable object wins over a known d1 mode: the check is not completed.
+seedActionable();
+const failingStatus={...bucket,async get(name){if(name==='epg/discovery-status.json'){gets.push(name);throw new Error('r2 down');}return bucket.get(name);}};
+r=await callEnv('/api/admin/limbo?attention=now',{BUCKET:failingStatus,DB:epgDb('d1')});
+assert.equal(r.body.attention.checked,false);
+assert.equal(r.body.attention.reason,'coordination_status');
+assert.equal(r.body.attention.now,null);
+assert.deepEqual(r.body.items,[]);
+
 console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');
