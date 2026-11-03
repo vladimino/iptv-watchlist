@@ -226,13 +226,14 @@ async function adminLimboRoute(request,env,url){
  const attentionView=limboAttentionView(filter,snapshot,all);
  const counts=LimboInventory.limboCounts(all);
  counts.actionNow=attentionView.now;counts.actionNowByCause=attentionView.byCause;
+ const filmStates={...LimboInventory.limboFilmStates(all),programmeRunId:snapshot.tuple.programmeRunId};
  return json({
   pin:limboEncodePin(snapshot.tuple),
   snapshot:{...snapshot.info,evaluatedAt:health.now,sources:LIMBO_SOURCES,clock:health.clock},
   kind:filter.kind,subsystem:filter.subsystem,cause:filter.cause,causes:filter.causes,age:filter.minAgeDays,limit,
   attention:{mode:attentionView.mode,checked:attentionView.checked,reason:attentionView.reason,now:attentionView.now},
   items:page.items,nextCursor:page.nextCursor?limboEncodeCursor(snapshot.tuple,nowMs,page.nextCursor):null,total:page.total,
-  counts,
+  counts,filmStates,
   coverage:{films:health.scope.coverage.films,filmsObserved:health.scope.subjects.films.length,observations:limboObservationCoverage(snapshot.observations),observationsObserved:health.scope.subjects.observations.length},
   context:context.issues,unread:context.unread,
   thresholds:health.thresholds,

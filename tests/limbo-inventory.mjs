@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {evaluateDataHealth} from '../src/domain/data-health.js';
 import {
-  LIMBO_CAUSES, LIMBO_KINDS, LIMBO_SUBSYSTEMS, filterLimboItems, limboCause, limboContext, limboCounts, limboFilter, limboItems, pageLimboItems,
+  LIMBO_CAUSES, LIMBO_KINDS, LIMBO_SUBSYSTEMS, filterLimboItems, limboCause, limboContext, limboCounts, limboFilmDelta, limboFilmStates, limboFilter, limboItems, pageLimboItems,
 } from '../src/domain/limbo-inventory.js';
 
 // Pure and offline: no storage, network or clock of its own.
@@ -138,5 +138,29 @@ assert.deepEqual(pageLimboItems([], {limit: 25}), {items: [], total: 0, nextCurs
 const copy = structuredClone(films);
 assert.deepEqual(limboItems(health(films), {films}), items);
 assert.deepEqual(films, copy);
+
+// 7. Film signatures: one canonical film, not one issue row, and not an observation. Age and a retry clock are not a change.
+const filmRow = (id, extra = {}) => ({kind: 'film', subjectId: id, film: {id}, subsystem: 'prediction', cause: 'stalled', category: 'stuck', reason: 'no_progress', progress: {status: 'stalled', retryAt: '2026-11-01T00:00:00.000Z'}, age: {ms: 1, days: 0}, evidence: {observedAt: NOW}, ...extra});
+const aged = filmRow('film:a');
+const clocked = filmRow('film:a', {age: {ms: 9, days: 9}, progress: {status: 'stalled', retryAt: '2026-12-01T00:00:00.000Z'}, evidence: {observedAt: '2027-01-01T00:00:00.000Z'}});
+assert.equal(limboFilmStates([aged]).films[0].signature, limboFilmStates([clocked]).films[0].signature);
+const moved = filmRow('film:a', {cause: 'backoff', progress: {status: 'waiting'}});
+assert.notEqual(limboFilmStates([aged]).films[0].signature, limboFilmStates([moved]).films[0].signature);
+const rows = Array.from({length: 50}, (_, index) => filmRow('film:a', {reason: 'r' + index, subsystem: index % 2 ? 'metadata' : 'prediction'}));
+assert.equal(limboFilmStates(rows).count, 1, 'fifty issue rows of one film are one film');
+const fifty = Array.from({length: 50}, (_, index) => filmRow('film:' + index));
+const fortyNine = fifty.slice(0, 49);
+assert.equal(limboFilmStates(fifty).count, 50);
+assert.equal(limboFilmStates([]).comparable, true);
+assert.equal(limboFilmStates([{kind: 'observation', subjectId: 't|2014', cause: 'manual_review', subsystem: 'identity', progress: {status: 'terminal'}, reason: 'identity_ambiguous'}]).count, 0);
+assert.equal(limboFilmStates([{kind: 'film', subjectId: '', film: {id: ''}, subsystem: 'prediction', cause: 'stalled', progress: {status: 'stalled'}, reason: 'x'}]).comparable, false);
+const withRun = states => ({...states, programmeRunId: 'g1'});
+assert.equal(limboFilmDelta(withRun(limboFilmStates(fortyNine)), withRun(limboFilmStates(fortyNine))).changed, 0);
+assert.equal(limboFilmDelta(withRun(limboFilmStates(fortyNine)), withRun(limboFilmStates(fifty))).changed, 1);
+assert.equal(limboFilmDelta(withRun(limboFilmStates([])), withRun(limboFilmStates(fifty))).changed, 50);
+assert.equal(limboFilmDelta(withRun(limboFilmStates(fifty)), withRun(limboFilmStates([]))).changed, 50);
+assert.equal(limboFilmDelta(withRun(limboFilmStates([aged])), withRun(limboFilmStates(rows))).changed, 1);
+assert.equal(limboFilmDelta(withRun(limboFilmStates([aged])), {...withRun(limboFilmStates([aged])), programmeRunId: 'g2'}).comparable, false);
+assert.equal(limboFilmDelta(withRun(limboFilmStates([aged])), {comparable: false, programmeRunId: 'g1', films: []}).comparable, false);
 
 console.log('Limbo inventory: causes, items, context, counts, filters, pages and determinism passed');

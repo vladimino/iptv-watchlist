@@ -15,7 +15,7 @@
     <a class="admin-home" href="/">К программе</a>
   </header>
   <main class="admin-shell">
-    <section class="page-heading">
+    <section class="page-heading limbo-heading">
       <div>
         <p class="eyebrow">ВЛАДЕЛЕЦ · ЧТЕНИЕ И ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ</p>
         <h1>Лимб данных</h1>
@@ -26,40 +26,47 @@
       <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb" aria-current="page">Лимб</a><a href="/admin/posters">Постеры</a></nav>
       <div class="admin-main">
     <p id="limbo-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем опубликованный снимок и очередь прогнозов…</p>
-    <div id="limbo-stale" class="admin-state admin-state-stale" role="alert" hidden><span id="limbo-stale-text">Снимок изменился. Показанные записи относятся к прежнему снимку. «Обновить» перечитает его.</span></div>
-    <p id="limbo-error" class="admin-state admin-state-error" role="alert" hidden></p>
-    <section id="limbo-coverage" class="limbo-coverage" aria-labelledby="limbo-coverage-title">
-      <div>
-        <h2 id="limbo-coverage-title">Покрытие ещё не прочитано</h2>
-        <p id="limbo-coverage-text">Чтение снимка ничего не запускает.</p>
-      </div>
-      <div class="limbo-coverage-actions">
+    <section class="limbo-work" aria-labelledby="limbo-results-title">
+      <div class="limbo-head">
+        <div id="limbo-modes" class="limbo-modes" role="group" aria-label="Режим очереди">
+          <button type="button" id="limbo-mode-now" aria-pressed="true">Требует моего внимания</button>
+          <button type="button" id="limbo-mode-all" aria-pressed="false">Все состояния</button>
+        </div>
         <button type="button" id="limbo-refresh" class="admin-refresh">Обновить</button>
-        <p id="limbo-refresh-hint" class="limbo-refresh-hint">Перечитывает опубликованный снимок. Discovery, TMDB и синхронизация не запускаются.</p>
+      </div>
+      <p id="limbo-verdict" class="limbo-verdict" role="status">Очередь ещё не прочитана.</p>
+      <p id="limbo-freshness" class="limbo-freshness" role="status" hidden><span id="limbo-freshness-text"></span></p>
+      <p id="limbo-coverage-line" class="limbo-coverage-line">Покрытие не прочитано.</p>
+      <p id="limbo-stale" class="limbo-limit" role="status" hidden><span id="limbo-stale-text">Список не удалось перечитать. Прежние строки не показаны как актуальные.</span></p>
+      <p id="limbo-error" class="admin-state admin-state-error" role="alert" hidden></p>
+      <div class="admin-layout limbo-layout">
+        <section aria-labelledby="limbo-results-title">
+          <h2 id="limbo-results-title">Очередь <small id="limbo-total" class="limbo-total"></small></h2>
+          <p id="limbo-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b id="limbo-empty-title">По этому фильтру записей нет</b><span id="limbo-empty-text">В прочитанном снимке нет записей без прогресса, которые проходят фильтр. Подсистемы, которые эта страница не читает, от этого не становятся здоровыми.</span></p>
+          <div id="limbo-results"></div>
+        </section>
+        <aside id="limbo-focus" class="admin-card limbo-focus" aria-labelledby="limbo-focus-title"><h2 id="limbo-focus-title">Выбранная запись</h2><p id="limbo-focus-empty" class="limbo-focus-empty">Выберите запись в очереди.</p><div id="limbo-focus-body"></div></aside>
       </div>
     </section>
-    <form id="limbo-find-form" class="limbo-find" action="/admin/limb" role="search">
-      <div id="limbo-modes" class="limbo-modes" role="group" aria-label="Режим очереди">
-        <button type="button" id="limbo-mode-now" aria-pressed="true">Требует моего внимания</button>
-        <button type="button" id="limbo-mode-all" aria-pressed="false">Все состояния</button>
-      </div>
-      <label class="limbo-field limbo-find-field" for="limbo-find">Найти запись<input id="limbo-find" type="search" autocomplete="off" spellcheck="false" placeholder="название среди показанных строк"></label>
-      <div id="limbo-causes" class="limbo-causes" role="group" aria-label="Причины"></div>
-      <div class="limbo-cause-actions">
-        <button type="button" id="limbo-causes-all">Все причины</button>
-        <button type="button" id="limbo-causes-none">Снять выбор</button>
-      </div>
-      <p id="limbo-action-count" class="limbo-find-note"></p>
-      <p id="limbo-find-note" class="limbo-find-note">Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Кнопки причин отбирают весь список: нажатая входит, отпущенная нет. Если отпущены все, список пуст.</p>
-    </form>
-    <div class="admin-layout limbo-layout">
-      <section aria-labelledby="limbo-results-title">
-        <h2 id="limbo-results-title">Очередь <small id="limbo-total" class="limbo-total"></small></h2>
-        <p id="limbo-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b id="limbo-empty-title">По этому фильтру записей нет</b><span id="limbo-empty-text">В прочитанном снимке нет записей без прогресса, которые проходят фильтр. Подсистемы, которые эта страница не читает, от этого не становятся здоровыми.</span></p>
-        <div id="limbo-results"></div>
-      </section>
-      <aside id="limbo-focus" class="admin-card limbo-focus" aria-labelledby="limbo-focus-title"><h2 id="limbo-focus-title">Выбранная запись</h2><p id="limbo-focus-empty" class="limbo-focus-empty">Выберите запись в очереди.</p><div id="limbo-focus-body"></div></aside>
-    </div>
+    <details class="limbo-tech" id="limbo-filters-panel">
+      <summary>Фильтры</summary>
+      <form id="limbo-find-form" class="limbo-find" action="/admin/limb" role="search">
+        <label class="limbo-field limbo-find-field" for="limbo-find">Найти запись<input id="limbo-find" type="search" autocomplete="off" spellcheck="false" placeholder="название среди показанных строк"></label>
+        <div id="limbo-causes" class="limbo-causes" role="group" aria-label="Причины"></div>
+        <div class="limbo-cause-actions">
+          <button type="button" id="limbo-causes-all">Все причины</button>
+          <button type="button" id="limbo-causes-none">Снять выбор</button>
+        </div>
+        <p id="limbo-action-count" class="limbo-find-note"></p>
+        <p id="limbo-find-note" class="limbo-find-note">Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Кнопки причин отбирают весь список: нажатая входит, отпущенная нет. Если отпущены все, список пуст.</p>
+      </form>
+    </details>
+    <details class="limbo-tech limbo-coverage" id="limbo-coverage">
+      <summary>Покрытие и источники</summary>
+      <h2 id="limbo-coverage-title">Покрытие ещё не прочитано</h2>
+      <p id="limbo-coverage-text">Чтение снимка ничего не запускает.</p>
+      <p id="limbo-refresh-hint" class="limbo-refresh-hint">«Обновить» перечитывает опубликованный снимок. Discovery, TMDB и синхронизация не запускаются.</p>
+    </details>
     <details class="limbo-tech limbo-tools" id="limbo-tools">
       <summary>Снимок и дополнительные фильтры</summary>
       <p id="limbo-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="limbo-snapshot-text">Снимок ещё не прочитан.</span></p>
