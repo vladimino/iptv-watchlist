@@ -60,7 +60,7 @@ function bucketFor(objects){
  const tick=()=>new Promise(resolve=>setImmediate(resolve));
  return {
   async get(key){await tick();const body=bodies.get(key);if(!body)return null;return {etag:etags.get(key)||'e0',size:body.length,json:async()=>JSON.parse(body.toString()),text:async()=>body.toString()};},
-  async put(key,value,options={}){await tick();const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&bodies.has(key)||condition?.etagMatches&&condition.etagMatches!==(etags.get(key)||'e0'))return null;bodies.set(key,Buffer.from(typeof value==='string'?value:String(value)));etags.set(key,'e'+(++revision));return {etag:etags.get(key)};},
+  async put(key,value,options={}){await tick();const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&bodies.has(key)||condition?.etagMatches&&condition.etagMatches!==(etags.get(key)||'e0'))return null;let bytes;if(typeof value==='string')bytes=Buffer.from(value);else if(Buffer.isBuffer(value))bytes=value;else if(value instanceof Uint8Array)bytes=Buffer.from(value.buffer,value.byteOffset,value.byteLength);else if(value&&typeof value.getReader==='function'){const reader=value.getReader(),chunks=[];while(true){const step=await reader.read();if(step.done)break;chunks.push(Buffer.from(step.value));}bytes=Buffer.concat(chunks);}else bytes=Buffer.from(String(value));bodies.set(key,bytes);etags.set(key,'e'+(++revision));return {etag:etags.get(key)};},
   async delete(key){bodies.delete(key);},
   async list({prefix=''}={}){await tick();return {objects:[...bodies.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key,size:bodies.get(key).length})),truncated:false};}
  };

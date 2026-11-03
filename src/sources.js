@@ -51,9 +51,13 @@ function screenedNonfilmReason(candidate,decision){
  if(decision?.status==='verified'||candidate?.confirmedTmdbId)return null;
  return nonFilmEPGReason(candidate?.title);
 }
+function discoveryCandidateKey(item){
+ const parts=epgTitleParts(item?.title),year=item?.year||parts.year||null;
+ return parts.normalizedTitle+'|'+(year||'');
+}
 function canonicalDiscoveryCandidate(item){
  const parts=epgTitleParts(item.title),year=item.year||parts.year||null;
- return {...item,key:parts.normalizedTitle+'|'+(year||''),title:parts.title,normalizedTitle:parts.normalizedTitle,year,rawTitles:[...new Set(item.rawTitles||[item.title])].slice(0,8),durations:[...new Set(item.durations||[item.duration])].filter(Number.isFinite).slice(0,12)};
+ return {...item,key:discoveryCandidateKey(item),title:parts.title,normalizedTitle:parts.normalizedTitle,year,rawTitles:[...new Set(item.rawTitles||[item.title])].slice(0,8),durations:[...new Set(item.durations||[item.duration])].filter(Number.isFinite).slice(0,12)};
 }
 function dedupeShows(shows){return [...new Map((shows||[]).filter(show=>show&&Number.isFinite(Number(show.start))).map(show=>[`${show.channelId}:${show.start}`,show])).values()];}
 const EPG_GENERATION_KEY='epg/published-generation.json';
@@ -74,6 +78,87 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
   merged.set(key,{...item,seenInLatestSnapshot:seen,lastSeenAt:seen&&starts.length?Math.max(...starts):item.lastSeenAt||item.lastAiring||null,lastSeenProgrammeRunId:seen&&options.programmeRunId?options.programmeRunId:item.lastSeenProgrammeRunId||null,shows:seen?item.shows||[]:[]});
  }
  return [...merged.values()];
+}
+// One stored candidate at a time. `chunks` yields strings (a byte stream already decoded, or one whole text).
+// Exactly one top-level `items` array is visited per element; every other top-level field is returned parsed.
+// A missing or non-array `items`, a second `items`, a truncated document, or trailing non-whitespace throws,
+// so a commit never publishes a partial candidate list. Whitespace after the closing brace is allowed.
+async function forEachJsonArrayItems(chunks,field,onItem){
+ let buf='',pos=0,eof=false;
+ const source=chunks[Symbol.asyncIterator]();
+ const pull=async min=>{while(buf.length-pos<min&&!eof){const step=await source.next();if(step.done){eof=true;break;}if(step.value)buf+=step.value;}};
+ const compact=()=>{if(pos>262144){buf=buf.slice(pos);pos=0;}};
+ const need=async n=>{if(buf.length-pos<n)await pull(n);};
+ const skipWs=async()=>{while(true){await need(1);if(pos>=buf.length)return;const c=buf[pos];if(c!==' '&&c!=='\n'&&c!=='\r'&&c!=='\t')return;pos++;}};
+ const fail=()=>{throw new Error('Discovery ledger JSON is incomplete');};
+ const skipString=async()=>{if(buf[pos]!=='"')fail();pos++;while(true){await need(1);if(pos>=buf.length)fail();const c=buf[pos++];if(c==='\\'){await need(1);if(pos>=buf.length)fail();const e=buf[pos++];if(e==='u'){await need(4);if(buf.length-pos<4)fail();pos+=4;}}else if(c==='"')return;}};
+ const scanValue=async()=>{
+  await need(1);if(pos>=buf.length)fail();const c=buf[pos];
+  if(c==='"'){await skipString();return;}
+  if(c==='{'||c==='['){let depth=0;while(true){await need(1);if(pos>=buf.length)fail();const ch=buf[pos++];if(ch==='"'){pos--;await skipString();continue;}if(ch==='{'||ch==='[')depth++;else if(ch==='}'||ch===']'){depth--;if(depth===0)return;}}}
+  while(true){if(pos>=buf.length){if(eof)return;await pull(1);if(pos>=buf.length)return;}const ch=buf[pos];if(ch===','||ch===']'||ch==='}'||ch<=' ')return;pos++;}
+ };
+ await skipWs();await need(1);if(pos>=buf.length||buf[pos]!=='{')fail();pos++;
+ const wrapper={};let first=true,sawField=false;
+ while(true){
+  await skipWs();await need(1);if(pos>=buf.length)fail();
+  if(buf[pos]==='}'){pos++;break;}
+  if(!first){if(buf[pos]!==',')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();}
+  first=false;
+  if(buf[pos]!=='"')fail();
+  const keyStart=pos;await skipString();const key=JSON.parse(buf.slice(keyStart,pos));
+  await skipWs();await need(1);if(pos>=buf.length||buf[pos]!==':')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();
+  if(key===field){
+   if(sawField||buf[pos]!=='[')fail();
+   sawField=true;
+   pos++;let itemFirst=true;
+   while(true){
+    await skipWs();await need(1);if(pos>=buf.length)fail();
+    if(buf[pos]===']'){pos++;break;}
+    if(!itemFirst){if(buf[pos]!==',')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();}
+    itemFirst=false;const start=pos;await scanValue();const slice=buf.slice(start,pos);compact();await onItem(JSON.parse(slice));
+   }
+  }else{const start=pos;await scanValue();wrapper[key]=JSON.parse(buf.slice(start,pos));compact();}
+ }
+ if(!sawField)fail();
+ await skipWs();
+ if(pos<buf.length)fail();
+ return wrapper;
+}
+function groupDiscoveryRaws(items){
+ const groups=new Map(),order=[];
+ for(const raw of items||[]){const key=discoveryCandidateKey(raw);let list=groups.get(key);if(!list){list=[];groups.set(key,list);order.push(key);}list.push(raw);}
+ return {groups,order};
+}
+// Same candidate, in the same order, as mergeDiscoveryCandidates([...previous, ...reentry], latest, options),
+// but previous rows are pushed one at a time and dropped. `duplicates` holds canonical keys that occur more
+// than once in previous; those few rows stay buffered until `end`. Every other row is emitted immediately.
+function openDiscoveryMerge(latest,reentry,options,duplicates){
+ const latestGroups=groupDiscoveryRaws(latest),reentryGroups=groupDiscoveryRaws(reentry),emitted=new Set(),pending=new Map();
+ latest=null;reentry=null;
+ const take=(key)=>{const list=latestGroups.groups.get(key)||[];latestGroups.groups.delete(key);return list;};
+ // Re-entry is previous input, after the stored rows of the same canonical key and before latest.
+ const fold=(previousRaws,key)=>{
+  const re=reentryGroups.groups.get(key)||[];reentryGroups.groups.delete(key);emitted.add(key);
+  return mergeDiscoveryCandidates([...(previousRaws||[]),...re],take(key),options)[0]||null;
+ };
+ return {
+  push(raw){
+   const key=discoveryCandidateKey(raw);
+   if(duplicates?.has(key)){let slot=pending.get(key);if(!slot){slot={raws:[]};pending.set(key,slot);}slot.raws.push(raw);return null;}
+   return fold([raw],key);
+  },
+  end(){
+   const deferred=[];
+   for(const [key,slot] of pending){const item=fold(slot.raws,key);if(item)deferred.push({key,item});}
+   pending.clear();
+   const appended=[];
+   for(const key of reentryGroups.order){if(emitted.has(key)||!reentryGroups.groups.has(key))continue;const item=fold([],key);if(item)appended.push(item);}
+   for(const key of latestGroups.order){if(!latestGroups.groups.has(key))continue;const item=mergeDiscoveryCandidates([],take(key),options)[0];if(item)appended.push(item);}
+   latestGroups.groups.clear();reentryGroups.groups.clear();
+   return {deferred,appended};
+  }
+ };
 }
 // AIR-220 / ADR 0034: bounded discovery ledger. The active ledger holds the latest scan's candidates; candidates that left
 // the EPG move losslessly into a write-once segmented archive behind one compare-and-swap pointer.

@@ -17,11 +17,13 @@ The commit runs this under the discovery lease. It stops without publishing if:
 - the published generation pointer changed (its etag differs from the one read at the start);
 - the lease was lost;
 - `sync.json` no longer names the run in stage `epg`;
-- the archive pointer CAS lost a race.
+- the archive pointer CAS lost a race;
+- the published EPG authority already names a programme run and that run's ledger object cannot be read;
+- that authority's ledger, or the compatibility copy used in its place, names a different programme run.
 
-Such a stop leaves either the previous archive with some unreferenced versions, or the new archive plus the previous published generation. Both are consistent (ADR 0034, section 3). Retrying the same run is safe.
+Such a stop leaves either the previous archive with some unreferenced versions, or the new archive plus the previous published generation. Both are consistent (ADR 0034, section 3). A missing or mismatched ledger stops before those writes: the archive pointer, the generation files and the published pin stay put. An empty predecessor is only used when the authority has no programme run yet. Retrying the same run is safe.
 
-**The first bounded commit over today's full ledger parses that full ledger once, as every `full` commit does now.** That has the same memory risk as today. The production split is therefore planned and rehearsed separately (AIR-221/AIR-222), possibly as an offline split, and is not started by setting the flag on its own initiative.
+A stored ledger that exposes `body` or `text` is folded one candidate at a time. The next generation document is written as bytes, pulled one chunk at a time, and is not parsed back into objects. A `json`-only object is still parsed whole. Bounded mode still holds departure records as objects until the archive write. The production split remains a separate approved operation and is not started by setting the mode on its own initiative.
 
 In bounded mode no discovery chunk and no status read touches the archive. `POST /api/enrichment/discovery/scan` and `/reconcile` answer `409` whenever the mode is not `full` or an archive exists.
 
@@ -173,7 +175,7 @@ The production split replaces the Worker's own first bounded commit, which would
 3. A missing `exit` is not evidence of a missing write. A phase logs its `exit` only after its write returned, so a request killed between the two leaves the write done and unlogged. Check what was persisted with a safe read-only read: the sync status, and `GET /api/letterboxd/diary` for the diary `state` and `entries`.
 4. This is read-only; never repeat the commit to observe it.
 
-**Offline profile.** `npm run build`, then `node --expose-gc scripts/epg-memory-profile.mjs [--full] [--gc-at-markers] [--concurrency 2] [--scale 1]`.
+**Offline profile.** `npm run build`, then `node --expose-gc scripts/epg-memory-profile.mjs [--full] [--gc-at-markers] [--concurrency 2] [--scale 1]`. The commit-sized replay, including a D1 publication stand-in, is `node --expose-gc scripts/epg-commit-memory-profile.mjs --child --mode stream` (and `--mode legacy` for the in-memory parse). Node heap is not the Workers isolate limit. The dated reading is in [the 3 November evidence](../evidence/epg-commit-memory-2026-11-03.md).
 - It replays the built Worker against synthetic objects of the production sizes from an R2 size listing. It makes no request and needs no data.
 - It prints heap and RSS per phase. With `--gc-at-markers` the enter and exit figures are retained data; without it they include uncollected garbage.
 - Node heap is not workerd's 128 MB isolate limit: the figures rank phases.
