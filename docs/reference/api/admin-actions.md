@@ -185,7 +185,7 @@ The declaration is:
 
 The action record does not contain the ZIP, CSV text, film names, rating values or a token.
 
-On `/admin/letterboxd` this contract is shown as five steps. The lead totals are additions, changes and skips. Incomplete coverage is not labelled a full check. The archive hash, file hashes, programme run id, chunk id, plan hash and scope fingerprint stay in a closed disclosure. A `partial` or `unknown` receipt is not presented as success. The only retry control is on `unknown`, and it resubmits the issued confirmation instead of minting a key. The page does not retry by itself. Nothing here changes eligibility, the batch size or the commit.
+On `/admin/letterboxd` this contract is shown as five steps. The lead totals are additions, changes and skips. Incomplete coverage is not labelled a full check. The archive hash, file hashes, programme run id, chunk id, plan hash and scope fingerprint stay in a closed disclosure. A `partial` or `unknown` receipt is not presented as success. A lost response after confirm, commit or rollback has left the browser is shown as `unknown`, not as a write that never started. Stopping the wait does not cancel or roll back the Worker. Choosing another ZIP or another declared time disables new write controls on that preview until that file is checked, and does not drop an unresolved command. Forgetting the command is a separate control and is not a rollback. A manual retry resubmits the issued confirmation, or the same idempotency key, instead of minting a key. The page does not retry by itself. Nothing here changes eligibility, the batch size or the commit.
 
 ## Letterboxd archive rollback: `letterboxd_archive_rollback@1`
 

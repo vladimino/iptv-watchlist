@@ -296,4 +296,129 @@ await run('onArchiveCommit(0)');
 assert.equal(posted, issued);
 assert.equal(JSON.parse(posted).idempotencyKey, 'lb0123456789abcdef');
 assert.equal(run('archiveLive.keys[0]'), keyBefore);
+
+// 8. A commit whose response is lost is unknown, never "the write did not start", and the manual retry sends the same confirmation.
+function fire(selector, type) {
+  for (const item of listeners.get(selector) || []) if (item.type === type) item.fn({});
+}
+const lostCommit = async (fetchImpl) => {
+  ctx.fetch = fetchImpl;
+  run('archiveLive.issued[0] = {idempotencyKey:"lb0123456789abcdef", chunk:0}; archiveLive.committed = {}; archiveLive.stale = false;');
+  await run('onArchiveCommit(0)');
+  return result.innerHTML;
+};
+const networkHtml = await lostCommit(async () => {throw new Error('offline');});
+assert.match(networkHtml, /Исход партии 1 неизвестен/);
+assert.match(networkHtml, /Запрос на запись уже ушёл/);
+assert.match(networkHtml, /Повторить ту же запись/);
+assert.doesNotMatch(networkHtml, /не начиналась/);
+const unavailableHtml = await lostCommit(async () => new Response(JSON.stringify({error: 'storage_unavailable'}), {status: 503, headers: {'Content-Type': 'application/json'}}));
+assert.match(unavailableHtml, /Исход партии 1 неизвестен/);
+assert.doesNotMatch(unavailableHtml, /не начиналась|Ничего не записано/);
+const unreadableHtml = await lostCommit(async () => new Response('<html>cut</html>', {status: 200, headers: {'Content-Type': 'text/html'}}));
+assert.match(unreadableHtml, /Исход партии 1 неизвестен/);
+assert.doesNotMatch(unreadableHtml, /не начиналась/);
+const frozen = run('JSON.stringify(archiveLive.issued[0])');
+let replayed = null, replayPosts = 0;
+ctx.fetch = async (_url, init) => {
+  replayPosts++;
+  replayed = init.body.get('confirmation');
+  return new Response(JSON.stringify({mode: 'apply', writes: false, replayed: true, state: 'unknown', receipt: {state: 'unknown', counts: counts({unknown: 1})}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveCommit(0)');
+assert.equal(replayPosts, 1);
+assert.equal(replayed, frozen);
+
+// 9. Cancel or Escape after a write has left the browser does not idle the page or mint a new command.
+let commitPosts = 0;
+ctx.fetch = (_url, init) => new Promise((_resolve, reject) => {
+  commitPosts++;
+  if (init.signal) init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})));
+});
+run('archiveLive.issued[0] = {idempotencyKey:"lb0123456789abcdef", chunk:0}; archiveLive.committed = {};');
+const hangingCommit = run('onArchiveCommit(0)');
+assert.equal(commitPosts, 1);
+run('onArchiveCancel()');
+await hangingCommit;
+assert.match(result.innerHTML, /Исход партии 1 неизвестен/);
+assert.match(error.textContent, /не отменяет и не откатывает/);
+assert.doesNotMatch(result.innerHTML, /не начиналась/);
+assert.equal(idle.hidden, true, 'a cancelled commit does not return to the idle page');
+assert.equal(commitPosts, 1, 'cancel does not send a second commit');
+const afterCancel = run('JSON.stringify(archiveLive.issued[0])');
+let cancelReplay = null;
+ctx.fetch = async (_url, init) => {
+  cancelReplay = init.body.get('confirmation');
+  return new Response(JSON.stringify({mode: 'apply', writes: false, replayed: true, state: 'succeeded', receipt: {state: 'succeeded', counts: counts({already_applied: 1})}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveCommit(0)');
+assert.equal(cancelReplay, afterCancel);
+run('archiveLive.rollbackIssued[0] = {idempotencyKey:"lbrollback0123456789ab", chunk:0}; archiveLive.committed = {};');
+let rollbackPosts = 0;
+ctx.fetch = (_url, init) => new Promise((_resolve, reject) => {
+  rollbackPosts++;
+  if (init.signal) init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})));
+});
+const hangingRollback = run('onArchiveRollback(0)');
+for (const item of windowListeners) if (item.type === 'keydown') item.fn({key: 'Escape', preventDefault() {}});
+await hangingRollback;
+assert.match(result.innerHTML, /Исход отката партии 1 неизвестен/);
+assert.doesNotMatch(result.innerHTML, /не начиналась/);
+assert.equal(rollbackPosts, 1);
+const rollbackFrozen = run('JSON.stringify(archiveLive.rollbackIssued[0])');
+let rollbackReplay = null;
+ctx.fetch = async (_url, init) => {
+  rollbackReplay = JSON.parse(String(init.body)).confirmation;
+  return new Response(JSON.stringify({mode: 'rollback', writes: false, replayed: true, state: 'succeeded'}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveRollback(0)');
+assert.deepEqual(rollbackReplay, JSON.parse(rollbackFrozen));
+
+// 10. Choosing another file or export time stale the open preview. An unknown command stays frozen to the old file.
+ctx.fetch = fakeFetch;
+choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
+time.value = '';
+await submit();
+const scopeA = run('archiveLive.bound.file.name');
+choose(ARCHIVE, 'letterboxd-demo-user-2026-10-21-08-15-utc.zip');
+fire('#archive-file', 'change');
+assert.match(result.innerHTML, /Эта проверка относится к другому файлу/);
+assert.doesNotMatch(result.innerHTML, /data-archive-confirm|data-archive-commit/);
+const beforeStaleWrite = requests.length;
+await run('onArchiveConfirm(0)');
+await run('onArchiveCommit(0)');
+assert.equal(requests.length, beforeStaleWrite, 'the stale preview cannot confirm or apply the new file');
+await submit();
+assert.equal(run('archiveLive.stale'), false);
+assert.equal(run('archiveLive.bound.file.name'), 'letterboxd-demo-user-2026-10-21-08-15-utc.zip');
+assert.equal(run('archiveLive.issued[0]'), undefined, 'a fresh preview sets a new scope');
+assert.notEqual(run('archiveLive.bound.file.name'), scopeA);
+choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
+await submit();
+await lostCommit(async () => {throw new Error('offline');});
+const oldFile = run('archiveLive.bound.file');
+choose(ARCHIVE, 'letterboxd-demo-user-2026-10-21-08-15-utc.zip');
+fire('#archive-file', 'change');
+assert.match(result.innerHTML, /другому файлу/);
+assert.match(result.innerHTML, /Повторить ту же запись/);
+assert.doesNotMatch(result.innerHTML, /не начиналась/);
+const requestsBeforeHold = requests.length;
+await submit();
+assert.equal(requests.length, requestsBeforeHold, 'a new check does not discard the unknown command');
+assert.equal(run('archiveLive.issued[0].idempotencyKey'), 'lb0123456789abcdef');
+let heldName = null;
+ctx.fetch = async (_url, init) => {
+  heldName = init.body.get('archive').name;
+  return new Response(JSON.stringify({mode: 'apply', writes: false, replayed: true, state: 'unknown', receipt: {state: 'unknown', counts: counts({unknown: 1})}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveCommit(0)');
+assert.equal(heldName, oldFile.name);
+time.value = '2026-10-20T09:00Z';
+fire('#archive-generated-at', 'input');
+assert.equal(run('archiveLive.stale'), true);
+time.value = '';
+fire('#archive-generated-at', 'input');
+run('onArchiveResultClick({target: {getAttribute(name){return name === "data-archive-abandon" ? "0" : null;}, hasAttribute(name){return name === "data-archive-abandon";}, parentElement: null}})');
+assert.equal(run('archiveHasUnresolved()'), false);
+assert.match(error.textContent, /не откатывает/);
 console.log('admin-letterboxd-page: ok');
