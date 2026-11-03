@@ -164,6 +164,10 @@
 .limbo-cause-field{flex:0 1 16rem}
 .limbo-find-note{flex:1 1 100%;margin:0;color:var(--muted);font-size:13px;line-height:1.45}
 #limbo-find,#limbo-causes{min-height:44px}
+.limbo-modes,.limbo-cause-actions,.limbo-causes{display:flex;flex-wrap:wrap;gap:8px}
+.limbo-modes,.limbo-cause-actions{flex:1 1 100%}
+.limbo-modes button,.limbo-cause-actions button,.limbo-cause{min-height:44px}
+.limbo-cause{max-width:100%}
 .limbo-item[hidden],.limbo-queue[hidden]{display:none}
 .limbo-select{display:block;width:100%;margin:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;min-height:44px}
 @media(max-width:800px){.limbo-coverage{flex-direction:column;align-items:stretch}.limbo-find{flex-direction:column;align-items:stretch}.limbo-find-field,.limbo-cause-field{flex:1 1 auto;width:100%}#limbo-causes,#limbo-find{width:100%}.limbo-coverage .admin-refresh{width:100%}}

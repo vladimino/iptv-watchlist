@@ -97,6 +97,8 @@ const LIMBO_ERROR_TEXT = {
   unknown_kind: 'Такого вида записей нет.',
   unknown_subsystem: 'Такой подсистемы нет.',
   unknown_cause: 'Такой причины нет.',
+  conflicting_cause: 'Причина задана двумя способами. Оставьте один.',
+  unknown_attention: 'Такого режима очереди нет.',
   stale_cursor: 'Страница устарела. Откройте список заново.',
   evaluation_failed: 'Модель не смогла оценить снимок. Ничего не изменено.',
   method_not_allowed: 'Страница делает только GET-запросы.',
@@ -129,22 +131,49 @@ function limboEscape(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
 }
 
+function limboKnownCauses(values) {
+  const known = [];
+  for (const value of values) if (Object.prototype.hasOwnProperty.call(LIMBO_CAUSE_LABELS, value) && !known.includes(value)) known.push(value);
+  return known.sort((left, right) => left.localeCompare(right, 'en'));
+}
+
+// A legacy URL with a server filter and no mode is the full register. A bare URL is the attention queue.
 function limboState() {
   const url = new URL(window.location.href);
   const age = url.searchParams.get('age') ?? '';
-  return {
-    kind: url.searchParams.get('kind') ?? '',
-    subsystem: url.searchParams.get('subsystem') ?? '',
-    cause: url.searchParams.get('cause') ?? '',
-    age: /^(?:0|[1-9]\d{0,2})$/.test(age) ? age : '',
-  };
+  const kind = url.searchParams.get('kind') ?? '';
+  const subsystem = url.searchParams.get('subsystem') ?? '';
+  const legacyCause = url.searchParams.get('cause') ?? '';
+  const listed = url.searchParams.has('causes') ? url.searchParams.getAll('causes') : null;
+  let causes = null;
+  if (listed && legacyCause) causes = [];
+  else if (listed && listed.length === 1 && listed[0] === 'none') causes = [];
+  else if (listed) causes = limboKnownCauses(listed);
+  else if (legacyCause) causes = Object.prototype.hasOwnProperty.call(LIMBO_CAUSE_LABELS, legacyCause) ? [legacyCause] : [];
+  const requested = url.searchParams.get('attention');
+  const filtered = Boolean(kind || subsystem || age || causes);
+  const attention = requested === 'now' || requested === 'all' ? requested : filtered ? 'all' : 'now';
+  return {kind, subsystem, causes, age: /^(?:0|[1-9]\d{0,2})$/.test(age) ? age : '', attention};
 }
 
 function limboUrl(state) {
   const params = new URLSearchParams();
-  for (const name of ['kind', 'subsystem', 'cause', 'age']) if (state[name]) params.set(name, state[name]);
+  for (const name of ['kind', 'subsystem']) if (state[name]) params.set(name, state[name]);
+  if (Array.isArray(state.causes)) {
+    if (state.causes.length === 1) params.set('cause', state.causes[0]);
+    else if (!state.causes.length) params.append('causes', 'none');
+    else for (const cause of state.causes) params.append('causes', cause);
+  } else if (state.cause) params.set('cause', state.cause);
+  if (state.age) params.set('age', state.age);
+  const filtered = params.toString() !== '';
+  if (state.attention === 'all' && !filtered) params.set('attention', 'all');
+  if (state.attention !== 'all' && filtered) params.set('attention', 'now');
   const query = params.toString();
   return query ? '/admin/limb?' + query : '/admin/limb';
+}
+
+function limboFiltered(state) {
+  return Boolean(state.kind || state.subsystem || state.age || state.attention === 'all' || Array.isArray(state.causes));
 }
 
 function limboWrite(state, mode) {
@@ -192,22 +221,41 @@ function limboChip(group, code, label, count, pressed, hint) {
   return `<button type="button" class="admin-queue" data-limbo-${group}="${limboEscape(code)}" aria-pressed="${pressed ? 'true' : 'false'}"${hint ? ` title="${limboEscape(hint)}"` : ''}><span>${limboEscape(label)}</span><small>${count === null ? '—' : count}</small></button>`;
 }
 
+function limboCausePressed(state, code) {
+  return !Array.isArray(state.causes) || state.causes.includes(code);
+}
+
 function limboCauseOptions(state) {
-  const byCause = limboLive.counts && limboLive.counts.byCause;
-  const total = byCause ? Object.keys(LIMBO_CAUSE_LABELS).reduce((sum, code) => sum + (Number(byCause[code]) || 0), 0) : null;
-  const all = `<option value=""${state.cause ? '' : ' selected'}>все${total === null ? '' : ' · ' + total}</option>`;
-  const rest = Object.keys(LIMBO_CAUSE_LABELS).map(code => {
-    const count = byCause ? byCause[code] ?? 0 : null;
-    return `<option value="${limboEscape(code)}"${state.cause === code ? ' selected' : ''}>${limboEscape(LIMBO_CAUSE_LABELS[code])}${count === null ? '' : ' · ' + count}</option>`;
+  const inventory = limboLive.counts && limboLive.counts.byCause;
+  const actions = limboLive.counts && limboLive.counts.actionNowByCause;
+  return Object.keys(LIMBO_CAUSE_LABELS).map(code => {
+    const pressed = limboCausePressed(state, code);
+    const inventoryCount = inventory ? inventory[code] ?? 0 : null;
+    const actionCount = actions ? actions[code] ?? 0 : null;
+    const shown = state.attention === 'now' ? actionCount : inventoryCount;
+    const hint = (LIMBO_CAUSE_HINTS[code] || '') + ' Записей в снимке: ' + (inventoryCount === null ? 'не прочитано' : inventoryCount) + '. Подтверждённых действий: ' + (actionCount === null ? 'не проверено' : actionCount) + '.';
+    return `<button type="button" class="admin-queue limbo-cause" data-limbo-cause="${limboEscape(code)}" aria-pressed="${pressed ? 'true' : 'false'}" title="${limboEscape(hint)}"><span>${limboEscape(LIMBO_CAUSE_LABELS[code])}</span><small>${shown === null ? '—' : shown}</small></button>`;
   }).join('');
-  return all + rest;
+}
+
+function limboActionCountText(state) {
+  const counts = limboLive.counts;
+  if (!counts) return '';
+  if (counts.actionNow === null) return 'Подтверждённые действия не проверены. Число на кнопке в режиме «Все состояния» — записи снимка, не действия.';
+  if (state.attention === 'now') return 'Подтверждённых действий во всём снимке: ' + counts.actionNow + '. Записей в снимке: ' + counts.total + '. Число на кнопке — только действия.';
+  return 'Записей в снимке: ' + counts.total + '. Подтверждённых действий: ' + counts.actionNow + '. Число на кнопке — записи этой причины, не действия.';
 }
 
 function limboRenderFilters(state) {
   const counts = limboLive.counts;
   const causes = document.querySelector('#limbo-causes');
-  causes.innerHTML = limboCauseOptions(state);
-  if (causes.value !== state.cause) causes.value = state.cause;
+  if (causes) causes.innerHTML = limboCauseOptions(state);
+  const actionCount = document.querySelector('#limbo-action-count');
+  if (actionCount) actionCount.textContent = limboActionCountText(state);
+  const now = document.querySelector('#limbo-mode-now');
+  const all = document.querySelector('#limbo-mode-all');
+  if (now) now.setAttribute('aria-pressed', state.attention === 'now' ? 'true' : 'false');
+  if (all) all.setAttribute('aria-pressed', state.attention === 'all' ? 'true' : 'false');
   const subsystems = document.querySelector('#limbo-subsystems');
   subsystems.innerHTML = ['identity', 'metadata', 'localization', 'fingerprint', 'prediction'].map(code => limboChip('subsystem', code, LIMBO_SUBSYSTEM_LABELS[code], counts ? counts.bySubsystem[code] ?? 0 : null, state.subsystem === code)).join('');
   const kind = document.querySelector('#limbo-kind');
@@ -261,6 +309,14 @@ function limboNextLine(item) {
 
 // Which control this row actually draws. The health model's action.eligible describes the subject, not a button and not a confirmed write.
 function limboOfferLine(item) {
+  const action = item.ownerAction;
+  if (item.kind === 'observation' && action && action.now === true) {
+    return action.capability === 'discovery_identity'
+      ? 'Кнопка ниже читает разбор. Запись идентичности возможна только после отдельного подтверждения.'
+      : 'Кнопка ниже читает разбор. Возврат в обычную очередь возможен только после отдельного подтверждения.';
+  }
+  if (item.kind === 'observation' && action && (action.reason === 'index_not_current' || action.reason === 'index_incomplete')) return 'Сейчас действий нет, ждём обновления данных. Можно только перечитать состояние.';
+  if (item.kind === 'observation' && action && action.checked === true) return 'Сейчас действий нет. Кнопка ниже только перечитывает разбор и ничего не записывает.';
   if (limboRecoveryObservation(item)) return 'Кнопка ниже только читает разбор. Можно ли что-то записать, эта строка ещё не проверяла.';
   if (limboRecoveryFilm(item)) return 'Кнопка ниже только читает объяснение прогноза. Записи для этого фильма на странице нет.';
   return 'Кнопки записи на этой странице нет. Готовность в модели здоровья данных записью не является.';
@@ -354,6 +410,11 @@ function limboObservationGap(observations) {
 }
 
 function limboEmptyCopy(view, state) {
+  if (Array.isArray(state?.causes) && state.causes.length === 0) return {title: 'Ни одна причина не выбрана', text: 'Список пуст, потому что все индикаторы выключены. «Все причины» включает их снова. Это не значит, что записей нет.'};
+  if (state?.attention === 'now') {
+    if (view?.attention?.checked === true) return {title: 'Нет подтверждённых действий', text: 'Среди выбранных причин нет шага, который можно сделать сейчас. Ожидание, устаревший индекс и непроверенные записи остаются в режиме «Все состояния».'};
+    return {title: 'Подтверждённых действий нет', text: 'Очередь действий не проверена: индекс наблюдений не прочитан или не подтверждён. Полный список — «Все состояния». Пустой список не значит, что проблем нет.'};
+  }
   const observations = view.coverage && view.coverage.observations;
   const gap = state.kind === 'film' ? null : limboObservationGap(observations);
   if (gap === 'unavailable') return {title: 'Нельзя подтвердить, что записей нет', text: 'Индекс наблюдений не прочитан: ' + (LIMBO_OBSERVATION_UNAVAILABLE[observations.reason] || 'причина не названа') + '. Пустой список не означает, что нерешённых наблюдений нет.'};
@@ -440,6 +501,12 @@ function limboInsertSection(html, id, block) {
 // Add rows to the queues already on screen. Each queue section exists at most once, in owner, automatic, unverified order.
 function limboMergeHtml(html, items) {
   let next = String(html || '');
+  if ((limboLive.state || limboState()).attention === 'now') {
+    const articles = items.map(limboItemHtml).join('');
+    const marker = '<span data-limbo-queue-end="attention" hidden></span>';
+    if (next.includes(marker)) return next.replace(marker, articles + marker);
+    return next + `<section class="limbo-queue" data-limbo-queue="attention" aria-label="Требует моего внимания"><h3>Требует моего внимания</h3><p class="limbo-queue-hint">Только шаг, который можно сделать сейчас. Ожидание, устаревший индекс и обычная очередь здесь не показаны.</p>${articles}${marker}</section>`;
+  }
   const groups = limboGrouped(items);
   for (const id of LIMBO_QUEUES) {
     const list = groups.get(id);
@@ -457,7 +524,7 @@ function limboResultsHtml(items) {
 }
 
 function limboAppendGrouped(results, items) {
-  if (typeof results.querySelector !== 'function') {
+  if ((limboLive.state || limboState()).attention === 'now' || typeof results.querySelector !== 'function') {
     results.innerHTML = limboMergeHtml(results.innerHTML, items);
     return;
   }
@@ -492,7 +559,7 @@ function limboDecodeText(value) {
 }
 
 function limboFindNote(query, shown, total, hasMore) {
-  if (!query) return 'Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Причина в этой строке отбирает весь список.';
+  if (!query) return 'Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Кнопки причин отбирают весь список: нажатая входит, отпущенная нет.';
   if (!shown && hasMore) return 'Среди показанных строк совпадений нет. «Показать ещё» дочитает следующую страницу того же снимка, и поле применится к ней. Это не поиск по всему списку.';
   if (!shown) return 'Среди показанных строк совпадений нет. Других страниц этого чтения нет. Это не поиск по всему списку.';
   return 'Совпало ' + shown + ' из ' + total + ' показанных строк. Незагруженные страницы этим полем не просмотрены.';
@@ -1094,22 +1161,57 @@ function onLimboMore() {
   return pending;
 }
 
-function onLimboCause() {
-  const select = document.querySelector('#limbo-causes');
+function limboCauseSelection(state) {
+  return state.causes === null ? Object.keys(LIMBO_CAUSE_LABELS) : state.causes.slice();
+}
+
+function onLimboCauseToggle(code) {
+  if (!Object.prototype.hasOwnProperty.call(LIMBO_CAUSE_LABELS, code)) return Promise.resolve(null);
   const state = limboState();
-  const cause = String(select && select.value || '');
-  state.cause = Object.prototype.hasOwnProperty.call(LIMBO_CAUSE_LABELS, cause) ? cause : '';
+  const current = limboCauseSelection(state);
+  const next = current.includes(code) ? current.filter(item => item !== code) : current.concat(code);
+  state.causes = next.length === Object.keys(LIMBO_CAUSE_LABELS).length ? null : limboKnownCauses(next);
   limboWrite(state, 'push');
   return limboRender();
 }
 
+function onLimboCausesAll() {
+  const state = limboState();
+  if (state.causes === null) return Promise.resolve(null);
+  state.causes = null;
+  limboWrite(state, 'push');
+  return limboRender();
+}
+
+function onLimboCausesNone() {
+  const state = limboState();
+  if (Array.isArray(state.causes) && !state.causes.length) return Promise.resolve(null);
+  state.causes = [];
+  limboWrite(state, 'push');
+  return limboRender();
+}
+
+function onLimboMode(mode) {
+  const state = limboState();
+  const attention = mode === 'all' ? 'all' : 'now';
+  if (state.attention === attention) return Promise.resolve(null);
+  state.attention = attention;
+  limboWrite(state, 'push');
+  return limboRender();
+}
+
+function onLimboCauseClick(event) {
+  const button = event.target && event.target.closest ? event.target.closest('[data-limbo-cause]') : null;
+  if (!button) return;
+  if (event.preventDefault) event.preventDefault();
+  return onLimboCauseToggle(button.getAttribute('data-limbo-cause'));
+}
+
 function onLimboChip(event) {
-  const button = event.target.closest ? event.target.closest('[data-limbo-cause],[data-limbo-subsystem]') : null;
+  const button = event.target.closest ? event.target.closest('[data-limbo-subsystem]') : null;
   if (!button) return;
   const state = limboState();
-  const cause = button.getAttribute('data-limbo-cause');
   const subsystem = button.getAttribute('data-limbo-subsystem');
-  if (cause !== null) state.cause = state.cause === cause ? '' : cause;
   if (subsystem !== null) state.subsystem = state.subsystem === subsystem ? '' : subsystem;
   limboWrite(state, 'push');
   return limboRender();
@@ -1154,8 +1256,8 @@ function limboEscapeOwner(target) {
 function onLimboReset() {
   limboClearFind();
   const state = limboState();
-  if (!state.kind && !state.subsystem && !state.cause && !state.age) return Promise.resolve(null);
-  limboWrite({kind: '', subsystem: '', cause: '', age: ''}, 'push');
+  if (!limboFiltered(state)) return Promise.resolve(null);
+  limboWrite({kind: '', subsystem: '', causes: null, age: '', attention: 'now'}, 'push');
   return limboRender();
 }
 
@@ -1374,7 +1476,7 @@ function onLimboKey(event) {
   }
   if (owner === 'field') return;
   const state = limboState();
-  if (!state.kind && !state.subsystem && !state.cause && !state.age) return;
+  if (!limboFiltered(state)) return;
   event.preventDefault();
   onLimboReset();
 }
@@ -1392,7 +1494,12 @@ function startLimbo() {
   document.querySelector('#limbo-kind').addEventListener('change', onLimboForm);
   document.querySelector('#limbo-age').addEventListener('input', limboSchedule);
   document.querySelector('#limbo-reset').addEventListener('click', onLimboReset);
-  document.querySelector('#limbo-causes').addEventListener('change', onLimboCause);
+  const listen = (selector, type, fn) => {const node = document.querySelector(selector); if (node && node.addEventListener) node.addEventListener(type, fn);};
+  listen('#limbo-causes', 'click', onLimboCauseClick);
+  listen('#limbo-causes-all', 'click', onLimboCausesAll);
+  listen('#limbo-causes-none', 'click', onLimboCausesNone);
+  listen('#limbo-mode-now', 'click', () => onLimboMode('now'));
+  listen('#limbo-mode-all', 'click', () => onLimboMode('all'));
   document.querySelector('#limbo-subsystems').addEventListener('click', onLimboChip);
   document.querySelector('#limbo-results').addEventListener('click', onLimboResult);
   document.querySelector('#limbo-results').addEventListener('keydown', onLimboSelectKey);

@@ -11,7 +11,7 @@ import {scoped} from '../scripts/bundle-scope.mjs';
 import * as DI from '../src/domain/discovery-observation-index.js';
 
 const source=fs.readFileSync('src/admin/limbo.js','utf8');
-assert.doesNotMatch(source,/loadJSON|saveJSON|recoverStopEvents|enrichmentView|BUCKET\.(?:put|list|delete|head)|\.put\(|\.list\(|\.delete\(|\bfetch\(|waitUntil|resolver-lease|resolver-continuation|discovery-latest|discovery-resolution|discovered-films|enrichment\/films|get\('programme\.json'|\.prepare\(|readFilmState|refreshPredictionQueue/,'the limbo read never writes, lists, scans films, falls back or reaches another store');
+assert.doesNotMatch(source,/loadJSON|saveJSON|recoverStopEvents|enrichmentView|BUCKET\.(?:put|list|delete|head)|\.put\(|\.list\(|\.delete\(|\bfetch\(|waitUntil|discovery-latest|discovery-resolution|discovered-films|enrichment\/films|get\('programme\.json'|\.prepare\(|readFilmState|refreshPredictionQueue/,'the limbo read never writes, lists, scans films, falls back or reaches another store');
 assert.match(source,/ENRICHMENT_KEY\+'prediction-queue\.json'/);
 assert.match(source,/ENRICHMENT_KEY\+'view-index\.json'/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/url\.pathname==='\/api\/admin\/limbo'\)return await adminLimboRoute\(request,env,url\)/);
@@ -133,7 +133,12 @@ assert.match(r.body.pin,/^L2\|2%7C/);
 assert.equal(r.body.snapshot.programmeRunId,G1);
 assert.equal(r.body.snapshot.evaluatedAt,NOW);
 assert.equal(r.body.snapshot.queuePresent,true);assert.equal(r.body.snapshot.queueRefreshedAt,at(-H));assert.equal(r.body.snapshot.queueProgrammeRunId,G1);assert.equal(r.body.snapshot.indexPresent,true);
-assert.deepEqual(r.body.snapshot.sources,[POINTER,'epg/generations/<programmeRunId>/programme.json','titles.json','people.json','admin/owner-reviews.json',QUEUE,INDEX,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json']);
+assert.deepEqual(r.body.snapshot.sources,[POINTER,'epg/generations/<programmeRunId>/programme.json','titles.json','people.json','admin/owner-reviews.json',QUEUE,INDEX,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json','epg/resolver-continuation.json','epg/discovery-status.json','epg/resolver-lease.json']);
+assert.equal(r.body.attention.mode,'all');
+assert.equal(r.body.attention.checked,false);
+assert.equal(r.body.attention.now,null);
+assert.equal(r.body.counts.actionNow,null);
+assert.ok(r.body.items.every(item=>item.ownerAction&&item.ownerAction.now===false&&item.ownerAction.reason==='not_this_page'));
 assert.deepEqual(r.body.vocabulary.causes,['retry_eligible','stalled','backoff','pending','manual_review','stale_projection','external_archive','unknown']);
 assert.equal(r.body.limit,25);assert.equal(r.body.kind,null);assert.equal(r.body.age,null);
 assert.deepEqual(r.body.coverage.observations,{available:false,reason:'index_missing',state:'missing',programmeRunId:G1},'no index: unavailable, never none');
@@ -196,7 +201,7 @@ assert.deepEqual(r.body.unread.map(entry=>entry.subsystem),['discovery','letterb
 assert.equal(r.body.thresholds.stalledMs,14*D);
 
 // 3. Filters: by cause, subsystem, kind and age; unknown values are 400 before any read; observations are an honest empty list.
-for(const path of ['/api/admin/limbo?cause=nope','/api/admin/limbo?subsystem=poster','/api/admin/limbo?kind=person','/api/admin/limbo?age=-1','/api/admin/limbo?age=366','/api/admin/limbo?age=1.5','/api/admin/limbo?age=abc','/api/admin/limbo?limit=0','/api/admin/limbo?limit=26','/api/admin/limbo?pin=garbage','/api/admin/limbo?pin='+encodeURIComponent('1|a|b|c|d|e')]){
+for(const path of ['/api/admin/limbo?cause=nope','/api/admin/limbo?subsystem=poster','/api/admin/limbo?kind=person','/api/admin/limbo?age=-1','/api/admin/limbo?age=366','/api/admin/limbo?age=1.5','/api/admin/limbo?age=abc','/api/admin/limbo?limit=0','/api/admin/limbo?limit=26','/api/admin/limbo?pin=garbage','/api/admin/limbo?pin='+encodeURIComponent('1|a|b|c|d|e'),'/api/admin/limbo?cause=stalled&causes=backoff','/api/admin/limbo?attention=later','/api/admin/limbo?causes=nope']){
  gets=[];r=await call(path);assert.equal(r.status,400,path);assert.deepEqual(gets,[],path+' cost no read');
 }
 assert.equal((await call('/api/admin/limbo?cause=nope')).body.error,'unknown_cause');
@@ -205,6 +210,21 @@ assert.equal((await call('/api/admin/limbo?kind=person')).body.error,'unknown_ki
 assert.equal((await call('/api/admin/limbo?age=366')).body.error,'invalid_age');
 assert.equal((await call('/api/admin/limbo?limit=26')).body.error,'invalid_limit');
 assert.equal((await call('/api/admin/limbo?pin=garbage')).body.error,'invalid_pin');
+assert.equal((await call('/api/admin/limbo?cause=stalled&causes=backoff')).body.error,'conflicting_cause');
+assert.equal((await call('/api/admin/limbo?attention=later')).body.error,'unknown_attention');
+assert.equal((await call('/api/admin/limbo?causes=nope')).body.error,'unknown_cause');
+r=await call('/api/admin/limbo?causes=retry_eligible&causes=backoff');
+assert.equal(r.status,200);
+assert.ok(r.body.items.length>0&&r.body.items.every(item=>item.cause==='retry_eligible'||item.cause==='backoff'));
+assert.deepEqual(r.body.causes,['backoff','retry_eligible']);
+assert.equal(r.body.counts.total,all.length,'an OR of causes does not shrink the inventory counts');
+r=await call('/api/admin/limbo?causes=none');
+assert.equal(r.status,200);assert.deepEqual(r.body.items,[]);assert.equal(r.body.total,0);assert.equal(r.body.counts.total,all.length,'an empty cause selection is an empty page, not every cause');
+r=await call('/api/admin/limbo?attention=now');
+assert.equal(r.status,200);assert.deepEqual(r.body.items,[]);assert.equal(r.body.total,0);assert.equal(r.body.attention.checked,false);assert.equal(r.body.attention.now,null);assert.equal(r.body.counts.actionNow,null);
+assert.equal(r.body.counts.total,all.length,'attention mode does not call the unchecked inventory empty');
+r=await call('/api/admin/limbo?attention=all&cause=backoff');
+assert.deepEqual(r.body.items.map(item=>item.id),['prediction/incomplete/film:film:tomorrow5']);
 r=await call('/api/admin/limbo?cause=backoff&pin='+encodeURIComponent(pin));
 assert.deepEqual(r.body.items.map(item=>item.id),['prediction/incomplete/film:film:tomorrow5']);assert.equal(r.body.total,1);assert.equal(r.body.cause,'backoff');
 assert.equal(r.body.counts.total,all.length,'counts stay those of the whole inventory');
@@ -353,7 +373,7 @@ seed();const obsShards=seedIndex();gets=[];heads=[];
 r=await call('/api/admin/limbo?kind=observation');
 assert.equal(r.status,200,JSON.stringify(r.body));
 const withRecords=obsShards.map((shard,index)=>shard.items.length?DI.observationIndexShardKey(G1,index):null).filter(Boolean);
-assert.deepEqual(gets.slice(SNAPSHOT_KEYS.length),withRecords,'only the shards that hold records');
+assert.deepEqual(gets.slice(SNAPSHOT_KEYS.length),[...withRecords,'epg/resolver-continuation.json','epg/discovery-status.json','epg/resolver-lease.json'],'shards that hold records, then one read of the coordination objects');
 assert.deepEqual(heads.sort(),[LEDGER(G1),RESOLUTION].sort(),'the resolution map and the ledger by head only');
 assert.ok(!gets.includes(RESOLUTION)&&!gets.includes(LEDGER(G1))&&lists===0&&puts.length===0);
 assert.deepEqual(r.body.items.map(item=>[item.subjectId,item.observation.title,item.kind]).sort(),[['двойник|2001','Двойник','observation'],['тихий|2001','Тихий','observation']]);
@@ -362,12 +382,13 @@ assert.equal(r.body.items.find(item=>item.subjectId==='двойник|2001').rea
 assert.deepEqual(r.body.coverage.observations,{available:true,state:'fresh',reasons:[],programmeRunId:G1,writtenAt:at(-H),writer:'resolver_chunk',scope:'current_unresolved_with_decision',indexed:2,eligible:2,omitted:{cap:0,oversized:0,malformed:0},complete:true,awaitingFirstLookup:4});
 assert.equal(r.body.coverage.observationsObserved,2);
 const obsPin=r.body.pin;
-assert.match(obsPin,/\|manifest-1$/,'the manifest version is part of the pin');
-// Warm: the same manifest reuses the parsed shards and cancels its body.
+assert.match(obsPin,/^L3\|/,'a judged index pins the coordination objects too');
+assert.match(obsPin,/manifest-1/,'the manifest version is part of the pin');
+// Warm: the same manifest reuses the parsed shards and cancels its body. The coordination objects are read again.
 gets=[];resetStreams();
 r=await call('/api/admin/limbo?kind=observation&pin='+encodeURIComponent(obsPin));
 assert.equal(r.status,200);
-assert.deepEqual(gets.slice(SNAPSHOT_KEYS.length),[],'no shard is read again');
+assert.deepEqual(gets.slice(SNAPSHOT_KEYS.length),['epg/resolver-continuation.json','epg/discovery-status.json','epg/resolver-lease.json'],'no shard is read again');
 assert.ok(streams.cancelled.includes(manifestKey(G1)));
 // A chunk rewrote the index: the pin is stale.
 etags.set(manifestKey(G1),'manifest-2');
@@ -400,5 +421,63 @@ const failingIndex={...bucket,async get(key){gets.push(key);if(key===manifestKey
 const indexResponse=await worker.fetch(new Request('https://iptv.example/api/admin/limbo'),{BUCKET:failingIndex},{waitUntil(){throw new Error('background');}});
 assert.equal(indexResponse.status,200);
 assert.equal((await indexResponse.json()).coverage.observations.available,false);
+
+// 12. Attention is the existing recovery gate over the loaded index, not the coarse cause. A terminal observation with the
+// same evidence is a confirmed reconsider. An ambiguous one is not. A stale index makes both "not now", including a
+// coarse manual_review row, and the full register still lists them.
+function seedActionable(){
+ seed();
+ const quiet={status:'no_confident_match',attempts:5,evidenceKey:null,retryAt:null,terminalReason:'repeated_uncertain_match',lastAttemptAt:at(-20*D),checkedAt:at(-20*D)};
+ const gone={status:'ambiguous',attempts:2,evidenceKey:null,retryAt:at(D),lastAttemptAt:at(-H),checkedAt:at(-H)};
+ const decisions={'тихий дождь|2014':quiet,'исчезнувшая|2014':gone};
+ const candidate=(key,title)=>({...obsCandidate(key,title),year:2014,normalizedTitle:key.split('|')[0]});
+ const entries=[{candidate:candidate('тихий дождь|2014','Тихий дождь'),decision:quiet},{candidate:candidate('исчезнувшая|2014','Исчезнувшая'),decision:gone}];
+ const built=DI.buildObservationIndex({programmeRunId:G1,entries});
+ const shards=built.shards.map(items=>{const withHash=items.map(record=>({...record,decisionHash:sha(DI.canonicalJson(decisions[record.key]))}));return {items:withHash,revision:sha(DI.canonicalJson(withHash))};});
+ records.set(RESOLUTION,decisions);etags.set(RESOLUTION,'res-1');
+ records.set(LEDGER(G1),{programmeRunId:G1,items:[]});etags.set(LEDGER(G1),'ledger-1');
+ shards.forEach((shard,index)=>{const key=DI.observationIndexShardKey(G1,index);records.set(key,DI.observationShardDocument(G1,index,shard.items,shard.revision));etags.set(key,'shard-'+index+'-1');});
+ records.set(manifestKey(G1),DI.observationIndexManifest({programmeRunId:G1,writtenAt:at(-H),writer:{kind:'resolver_chunk',hopId:'hop-1'},sources:{resolutionEtag:'res-1',ledgerEtag:'ledger-1'},shards:shards.map(shard=>({items:shard.items.length,revision:shard.revision})),coverage:built.coverage,counts:{awaitingFirstLookup:0}}));
+ etags.set(manifestKey(G1),'manifest-action');
+}
+seedActionable();
+r=await call('/api/admin/limbo?attention=now');
+assert.equal(r.status,200,JSON.stringify(r.body));
+assert.equal(r.body.attention.checked,true);
+assert.equal(r.body.attention.now,1);
+assert.equal(r.body.counts.actionNow,1);
+assert.equal(r.body.counts.actionNowByCause.manual_review,1);
+assert.ok(r.body.counts.total>1,'the inventory count is not the action count');
+assert.deepEqual(r.body.items.map(item=>item.observation.title),['Тихий дождь']);
+assert.equal(r.body.items[0].cause,'manual_review');
+assert.deepEqual(r.body.items[0].ownerAction,{now:true,checked:true,capability:'discovery_reconsider',reason:'eligible'});
+const actionPin=r.body.pin;
+r=await call('/api/admin/limbo?attention=all&kind=observation');
+assert.deepEqual(r.body.items.map(item=>item.observation.title).sort(),['Исчезнувшая','Тихий дождь']);
+const disappeared=r.body.items.find(item=>item.observation.title==='Исчезнувшая');
+assert.equal(disappeared.cause,'manual_review');
+assert.equal(disappeared.ownerAction.now,false);
+assert.equal(disappeared.ownerAction.reason,'identity_ambiguous');
+r=await call('/api/admin/limbo?attention=all&limit=1');
+const otherCursor=r.body.nextCursor;
+r=await call('/api/admin/limbo?attention=now&limit=1&cursor='+encodeURIComponent(otherCursor));
+assert.equal(r.status,400);assert.equal(r.body.error,'stale_cursor','a cursor does not cross attention modes');
+etags.set(RESOLUTION,'res-moved');resetCache();
+r=await call('/api/admin/limbo?attention=now');
+assert.equal(r.body.attention.checked,true);
+assert.deepEqual(r.body.items,[],'a stale index is not an owner action, even for manual_review');
+assert.equal(r.body.attention.now,0);
+assert.equal(r.body.counts.actionNow,0);
+r=await call('/api/admin/limbo?attention=all&kind=observation');
+assert.equal(r.body.items.length,2);
+assert.ok(r.body.items.every(item=>item.ownerAction.now===false&&item.ownerAction.reason==='index_not_current'));
+r=await call('/api/admin/limbo?attention=now&pin='+encodeURIComponent(actionPin));
+assert.equal(r.status,200,'a moved resolution etag is index freshness, not a pin component');
+assert.equal(r.body.pin,actionPin);
+records.set('epg/resolver-continuation.json',{programmeRunId:G1,hop:1});
+etags.set('epg/resolver-continuation.json','cont-2');
+resetCache();
+r=await call('/api/admin/limbo?attention=now&pin='+encodeURIComponent(actionPin));
+assert.equal(r.status,409);assert.equal(r.body.error,'stale_pin','a changed continuation is part of the coordination pin');
 
 console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');

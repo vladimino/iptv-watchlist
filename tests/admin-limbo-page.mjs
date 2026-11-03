@@ -25,7 +25,11 @@ assert.match(html, /id="limbo-focus"/);
 assert.match(html, /id="limbo-focus-body"/);
 assert.match(html, /<summary>Снимок и дополнительные фильтры<\/summary>/);
 assert.match(html, /<label class="limbo-field limbo-find-field" for="limbo-find">Найти запись/);
-assert.match(html, /<label class="limbo-field limbo-cause-field" for="limbo-causes">Причина<select id="limbo-causes"/);
+assert.match(html, /<div id="limbo-causes" class="limbo-causes" role="group" aria-label="Причины">/);
+assert.match(html, /id="limbo-mode-now"[^>]*aria-pressed="true">Требует моего внимания/);
+assert.match(html, /id="limbo-mode-all"[^>]*aria-pressed="false">Все состояния/);
+assert.match(html, /id="limbo-causes-all">Все причины/);
+assert.match(html, /id="limbo-causes-none">Снять выбор/);
 assert.doesNotMatch(html, /class="limbo-primary"/);
 assert.match(html, /id="limbo-refresh"[^>]*>Обновить</);
 assert.doesNotMatch(html.slice(html.indexOf('id="limbo-stale"'), html.indexOf('id="limbo-error"')), /limbo-refresh/);
@@ -145,7 +149,7 @@ function element(selector) {
     addEventListener(type, fn) {const list = listeners.get(selector) || []; list.push({type, fn}); listeners.set(selector, list);},
   };
 }
-const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body', '#verified-open', '#verified-key', '#verified-panel', '#verified-open-hint', '#limbo-coverage', '#limbo-coverage-title', '#limbo-coverage-text', '#limbo-find', '#limbo-find-note', '#limbo-find-form', '#limbo-focus-empty'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#limbo-snapshot-text', '#limbo-causes', '#limbo-subsystems', '#limbo-form', '#limbo-kind', '#limbo-age', '#limbo-reset', '#limbo-loading', '#limbo-stale', '#limbo-refresh', '#limbo-error', '#limbo-empty', '#limbo-results', '#limbo-total', '#limbo-context-body', '#verified-open', '#verified-key', '#verified-panel', '#verified-open-hint', '#limbo-coverage', '#limbo-coverage-title', '#limbo-coverage-text', '#limbo-find', '#limbo-find-note', '#limbo-find-form', '#limbo-focus-empty', '#limbo-mode-now', '#limbo-mode-all', '#limbo-causes-all', '#limbo-causes-none', '#limbo-action-count'].map(selector => [selector, element(selector)]));
 const moreButton = element('[data-limbo-more="items"]');
 const document = {
   body: {name: 'body'}, activeElement: null,
@@ -208,9 +212,10 @@ assert.match(results.innerHTML, /Фильма нет в опубликованн
 assert.equal((results.innerHTML.match(/Открыть в каталоге данных/g) || []).length, 1, 'only the programme film links to the catalogue');
 assert.match(nodes.get('#limbo-snapshot-text').textContent, /Поколение 11111111/);
 assert.match(nodes.get('#limbo-snapshot-text').textContent, /очередь прогнозов от 30\.10\.2026/);
-assert.match(nodes.get('#limbo-causes').innerHTML, /<option value="stalled" selected>Застряло · /);
-assert.match(nodes.get('#limbo-causes').innerHTML, /Ждёт по backoff · 1/);
-assert.match(nodes.get('#limbo-causes').innerHTML, /<option value="">все · /);
+assert.match(nodes.get('#limbo-causes').innerHTML, /data-limbo-cause="stalled"[^>]*aria-pressed="true"/);
+assert.match(nodes.get('#limbo-causes').innerHTML, /data-limbo-cause="backoff"[^>]*aria-pressed="false"/);
+assert.match(nodes.get('#limbo-causes').innerHTML, /Ждёт по backoff/);
+assert.equal(nodes.get('#limbo-mode-all').getAttribute('aria-pressed'), 'true');
 assert.match(results.innerHTML, /data-limbo-queue="stalled"/);
 assert.match(results.innerHTML, /Обычный шаг не назначен\. Результата нет/);
 assert.match(results.innerHTML, /data-limbo-select=/);
@@ -237,11 +242,10 @@ assert.equal(loading.hidden, true); assert.equal(error.hidden, true); assert.equ
 const heldPin = run('limboLive.pin');
 assert.match(heldPin, /^L2\|/);
 
-// 2. Toggle to backoff through a chip: the URL changes, the request sends the held pin, the item says it is a normal wait.
+// 2. Pressing another cause keeps the first: the selection is an OR, the request sends the held pin, and the added row says it is a normal wait.
 requests = [];
-nodes.get('#limbo-causes').value = 'backoff';
-await run('onLimboCause()');
-assert.equal(url().searchParams.get('cause'), 'backoff');
+await run(`onLimboCauseToggle('backoff')`);
+assert.deepEqual(url().searchParams.getAll('causes').sort(), ['backoff', 'stalled']);
 assert.match(requests[0].path, /pin=/);
 assert.match(results.innerHTML, /Позже/);
 assert.match(results.innerHTML, /повтор назначен и ещё не наступил/);
@@ -271,9 +275,19 @@ assert.equal(url().searchParams.get('age'), null, 'an out-of-range age is not se
 await run('onLimboReset()');
 assert.equal(url().search, '');
 
-// 5. Pagination under the pin: 30 films without metadata plus the two prediction items, 25 then the rest.
+// 5. The bare URL is the attention queue. With no readable index it does not pretend the films are actions, and it does not drop the register: «Все состояния» still pages it.
 requests = [];
 window.location.href = 'http://127.0.0.1/admin/limbo';
+await run('limboRender()');
+await settle();
+assert.match(requests.at(-1).path, /attention=now/);
+assert.match(empty.innerHTML, /Подтверждённых действий нет/);
+assert.match(empty.innerHTML, /не значит, что проблем нет/);
+assert.equal(results.innerHTML, '');
+assert.equal(nodes.get('#limbo-mode-now').getAttribute('aria-pressed'), 'true');
+// Pagination under the pin, in the full register: 30 films without metadata plus the two prediction items, 25 then the rest.
+requests = [];
+window.location.href = 'http://127.0.0.1/admin/limbo?attention=all';
 await run('limboRender()');
 await settle();
 assert.equal((results.innerHTML.match(/class="admin-hit limbo-item"/g) || []).length, 25);
@@ -293,7 +307,7 @@ assert.doesNotMatch(results.innerHTML, /data-limbo-more="items"/, 'the last page
 assert.doesNotMatch(results.innerHTML, /href="\/admin\?kind=film&amp;id=film%3Atmdb/, 'no catalogue link for a film outside the programme');
 
 // 5b. The title field filters rows already painted, including a later page, and never sends a query.
-window.location.href = 'http://127.0.0.1/admin/limb';
+window.location.href = 'http://127.0.0.1/admin/limb?attention=all';
 await run('limboRender()');
 await settle();
 assert.match(results.innerHTML, /data-limbo-more="items"/);
@@ -492,6 +506,7 @@ assert.equal(run(`limboQueueId({cause:'stale_projection'})`), 'unverified');
 
 // 12. A later page may repeat a queue and arrive in another order. Rows join the one existing section; headings stay in queue order.
 const row = (id, cause, reason, progress, completeness) => ({id, kind: 'film', cause, reason, subsystem: 'metadata', film: {title: id, year: 2001, inProgramme: true, storedId: 'raw-' + id}, evidence: {completeness, source: 'snapshot', observedAt: null, missing: [], anomalies: []}, progress: {status: progress}, age: {ms: cause === 'unknown' ? null : 86400000}, action: {suggested: 'wait', eligible: false}});
+run(`limboLive.state={kind:'',subsystem:'',causes:null,age:'',attention:'all'}`);
 const merged = run(`limboMergeHtml(limboResultsHtml(${JSON.stringify([row('a', 'stalled', 'no_progress', 'stalled', 'complete'), row('b', 'unknown', 'metadata_missing', 'unknown', 'missing')])}), ${JSON.stringify([row('c', 'unknown', 'metadata_missing', 'unknown', 'missing'), row('d', 'backoff', 'retry_waiting', 'waiting', 'complete'), row('e', 'stalled', 'no_progress', 'stalled', 'complete')])})`);
 assert.deepEqual([...merged.matchAll(/<section class="limbo-queue" data-limbo-queue="([^"]+)"/g)].map(match => match[1]), ['stalled', 'automatic', 'unverified']);
 const stalled = merged.slice(merged.indexOf('data-limbo-queue="stalled"'), merged.indexOf('data-limbo-queue="automatic"'));

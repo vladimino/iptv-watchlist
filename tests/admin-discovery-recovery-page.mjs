@@ -47,7 +47,10 @@ assert.match(html, /Запросов к TMDB: 0\. Запусков резолв�
 assert.match(html, /ровно одна дополнительная обычная попытка/);
 assert.match(html, /<input type="checkbox" id="obs-accept-o1" data-obs-recovery-accept> <label for="obs-accept-o1">Я хочу снять терминальную отметку только с наблюдения «Тихий» \(2001\)/);
 assert.match(html, /data-obs-recovery-confirm disabled/);
-assert.match(html, /<details class="recovery-tech"><summary>Технические подробности<\/summary>/);
+assert.match(html, /<details class="recovery-tech"><summary>Техническая диагностика<\/summary>/);
+assert.match(html, /<summary>Почему система так решила\?<\/summary>/);
+assert.match(html, /нужно действие сейчас/);
+assert.doesNotMatch(html, /<h4>Данные<\/h4>/);
 assert.doesNotMatch(visible(html), /D1\.|f{64}|тихий\|2001|discovery_reconsider|0a0b0c0d/, 'identifiers only in the technical details');
 assert.match(V.obsRecoveryPanelHtml(okAnswer, {slot: 'o1', accepted: true}), /data-obs-recovery-confirm>Подтвердить/);
 html = V.obsRecoveryPanelHtml(okAnswer, {slot: 'o1', confirmation: {idempotencyKey: 'k'.repeat(20), expiresAt: '2026-10-31T12:10:00.000Z'}});

@@ -228,7 +228,7 @@ const document = {
     return dynamic.get(selector);
   },
 };
-const window = {addEventListener() {}, location: {href: 'http://127.0.0.1/admin/limbo'}, history: {pushState(s, t, url) {window.location.href = new URL(url, window.location.href).href;}, replaceState(s, t, url) {window.location.href = new URL(url, window.location.href).href;}, back() {}}};
+const window = {addEventListener() {}, location: {href: 'http://127.0.0.1/admin/limbo?attention=all'}, history: {pushState(s, t, url) {window.location.href = new URL(url, window.location.href).href;}, replaceState(s, t, url) {window.location.href = new URL(url, window.location.href).href;}, back() {}}};
 const ctx = vm.createContext({URL, URLSearchParams, document, window, history: window.history, fetch: fakeFetch, Array, Object, String, Number, Boolean, Math, JSON, Map, Set, Error, Promise, Date: FrozenDate, Intl, RegExp, setTimeout, clearTimeout, AbortController, console});
 vm.runInContext(bundle, ctx);
 const run = code => vm.runInContext(code, ctx);
