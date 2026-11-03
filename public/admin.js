@@ -1357,6 +1357,7 @@ function adminRender() {
     adminLive.pending = pending;
     return pending;
   }
+  if (!state.id) adminDismissDetail();
   const seq = ++adminLive.seq;
   if (adminLive.controller) adminLive.controller.abort();
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -1396,6 +1397,25 @@ function adminSchedule() {
     adminLive.timer = null;
     adminRender();
   }, ADMIN_DEBOUNCE_MS);
+}
+
+// The right-hand card is the record in the URL. Leaving that record hides it at once. An unknown
+// owner-review command stays on its film or person and is not posted again from here.
+function adminDismissDetail() {
+  const detail = document.querySelector('#admin-detail');
+  const host = adminDetailHost();
+  if (host) host.innerHTML = '';
+  if (detail) detail.hidden = true;
+  adminLive.entity = null;
+  adminPlaceCatalog();
+}
+
+function adminCancelCatalogueRead() {
+  adminLive.seq += 1;
+  if (adminLive.controller) {
+    adminLive.controller.abort();
+    adminLive.controller = null;
+  }
 }
 
 function adminPlaceCatalog() {
@@ -1472,9 +1492,20 @@ function onAdminMore(kind) {
 }
 
 function onAdminSearch() {
+  const field = document.querySelector('#admin-search');
   const state = adminState();
-  state.q = document.querySelector('#admin-search').value;
+  const next = field ? field.value : state.q;
+  if (next === state.q) {
+    adminWrite(state, 'replace');
+    adminSchedule();
+    return;
+  }
+  state.q = next;
+  state.id = '';
+  adminLive.state = state;
   adminWrite(state, 'replace');
+  adminDismissDetail();
+  adminCancelCatalogueRead();
   adminSchedule();
 }
 
@@ -1530,7 +1561,10 @@ function onAdminQueue(event) {
   const state = adminState();
   const code = button.getAttribute('data-admin-queue');
   state.queue = state.queue === code ? '' : code;
+  state.id = '';
+  adminLive.state = state;
   adminWrite(state, 'push');
+  adminDismissDetail();
   return adminRender();
 }
 
@@ -1541,9 +1575,12 @@ function onAdminKey(event) {
   if (state.view === 'health' || !state.q) return;
   event.preventDefault();
   state.q = '';
+  state.id = '';
+  adminLive.state = state;
   adminWrite(state, 'replace');
   const search = document.querySelector('#admin-search');
   search.value = '';
+  adminDismissDetail();
   adminRender();
   search.focus();
 }
