@@ -457,81 +457,133 @@ async function* ledgerChunks(object){
  if(typeof object.text==='function')yield await object.text();
 }
 // The same object loadJSON would parse for epg/discovery-latest.json, without parsing it.
+// A published programme run must resolve to that run's ledger. Null is only the first programme, before any run is published.
 async function locateDiscoveryLedger(env){
- const key='epg/discovery-latest.json',stagedName='discovery-latest.json';
+ const shared='epg/discovery-latest.json',stagedName='discovery-latest.json';
+ const mismatch=()=>{throw new Error('Discovery ledger does not match the published generation');};
  if(typeof PublishedEpg!=='undefined'){
   const live=await PublishedEpg.currentGeneration(env);
   if(live){
    const run=env.epgPin?.authority==='d1'&&env.epgPin.programmeRunId?env.epgPin.programmeRunId:live.programmeRunId;
    if(!run)return null;
    const copyKey=epgGenerationKey(run,stagedName);
-   if(await env.BUCKET.get(copyKey))return copyKey;
-   if(run!==live.programmeRunId)return null;
+   if(await env.BUCKET.get(copyKey))return {key:copyKey,expectRun:run};
+   if(run!==live.programmeRunId)mismatch();
    const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),body=pointer?await pointer.json():null;
-   if(body?.phase!=='published'||body.programmeRunId!==run)return null;
-   return key;
+   if(body?.phase!=='published'||body.programmeRunId!==run)mismatch();
+   return {key:shared,expectRun:run};
   }
  }
  const pinned=env.epgPin?.programmeRunId;
- if(pinned){const copyKey=epgGenerationKey(pinned,stagedName);if(await env.BUCKET.get(copyKey))return copyKey;}
- else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const copyKey=epgGenerationKey(generation.programmeRunId,stagedName);if(await env.BUCKET.get(copyKey))return copyKey;}}}
- return key;
+ if(pinned){const copyKey=epgGenerationKey(pinned,stagedName);if(await env.BUCKET.get(copyKey))return {key:copyKey,expectRun:pinned};}
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);
+ if(pointer){
+  const generation=await pointer.json();
+  if(generation?.phase==='published'&&generation.programmeRunId){
+   const copyKey=epgGenerationKey(generation.programmeRunId,stagedName);
+   if(await env.BUCKET.get(copyKey))return {key:copyKey,expectRun:generation.programmeRunId};
+  }
+ }
+ // No published D1 programme, or an R2 pointer whose ledger file is not there yet: an absent object is an empty predecessor.
+ return {key:shared,expectRun:null};
 }
 async function readLedgerView(env){
  const located=await locateDiscoveryLedger(env);
  if(!located)return {kind:'missing',items:[],archive:null,prevKeys:new Set(),duplicates:new Set()};
- const object=await env.BUCKET.get(located);
- if(!object)return {kind:'missing',items:[],archive:null,prevKeys:new Set(),duplicates:new Set()};
+ const object=await env.BUCKET.get(located.key);
+ if(!object){
+  if(located.expectRun)throw new Error('Discovery ledger is missing for the published generation');
+  return {kind:'missing',items:[],archive:null,prevKeys:new Set(),duplicates:new Set()};
+ }
+ const requireRun=wrapper=>{if(located.expectRun&&wrapper?.programmeRunId!==located.expectRun)throw new Error('Discovery ledger does not match the published generation');};
  if(!ledgerStreamable(object)){
   const value=typeof object.json==='function'?await object.json():null;
-  const items=value?.items||[];
+  requireRun(value);
+  if(!Array.isArray(value?.items))throw new Error('Discovery ledger JSON is incomplete');
+  const items=value.items;
   return {kind:'materialized',items,archive:value?.archive||null,prevKeys:new Set(items.map(item=>item?.key)),duplicates:new Set()};
  }
  const prevKeys=new Set(),duplicates=new Set(),seen=new Set();
  const wrapper=await forEachJsonArrayItems(ledgerChunks(object),'items',item=>{prevKeys.add(item?.key);const key=discoveryCandidateKey(item);if(seen.has(key))duplicates.add(key);else seen.add(key);});
- return {kind:'stream',key:located,archive:wrapper.archive||null,prevKeys,duplicates};
+ requireRun(wrapper);
+ return {kind:'stream',key:located.key,archive:wrapper.archive||null,prevKeys,duplicates};
 }
-function discoveryDocumentStream(meta,parts,ledger){
+// One chunk per pull. The consumer reads the prefix, then one encoded candidate, then the suffix.
+// A repeated comma chunk is shared and never mutated. Nothing is enqueued until a pull asks for it.
+function discoveryDocumentStream(meta,items,ledger){
  const encoder=new TextEncoder(),head=JSON.stringify(meta||{}),tail=JSON.stringify(ledger||{});
- const prefix=encoder.encode(tail==='{}'?head.slice(0,-1)+',"items":[':head.slice(0,-1)+',"items":[');
+ const prefix=encoder.encode(head.slice(0,-1)+',"items":[');
  const suffix=encoder.encode(tail==='{}'?']}':'],'+tail.slice(1));
  const comma=new Uint8Array([44]);
- return new ReadableStream({start(controller){
-  controller.enqueue(prefix);
-  let any=false;
-  for(let i=0;i<parts.length;i++){const part=parts[i];parts[i]=null;if(!part)continue;if(any)controller.enqueue(comma);controller.enqueue(part);any=true;}
-  parts.length=0;
-  controller.enqueue(suffix);
-  controller.close();
+ const iterator=items[Symbol.asyncIterator]();
+ let stage='prefix',started=false,held=null;
+ return new ReadableStream({async pull(controller){
+  try{
+   if(stage==='prefix'){controller.enqueue(prefix);stage='item';return;}
+   if(stage==='held'){controller.enqueue(held);held=null;stage='item';return;}
+   if(stage!=='item')return;
+   const step=await iterator.next();
+   if(step.done){controller.enqueue(suffix);controller.close();stage='done';return;}
+   if(started){held=step.value;controller.enqueue(comma);stage='held';return;}
+   started=true;controller.enqueue(step.value);
+  }catch(error){try{await iterator.return?.();}catch{}throw error;}
  }});
 }
 async function storePlannedDiscovery(env,runId,meta,planned,next){
- if(!planned.parts){next['discovery-latest.json']={...meta,items:planned.items,...planned.ledger};return;}
- await env.BUCKET.put(epgGenerationKey(runId,'discovery-latest.json'),discoveryDocumentStream(meta,planned.parts,planned.ledger),{httpMetadata:{contentType:'application/json'}});
+ if(!planned.emit){next['discovery-latest.json']={...meta,items:planned.items,...planned.ledger};return;}
+ try{await env.BUCKET.put(epgGenerationKey(runId,'discovery-latest.json'),discoveryDocumentStream(meta,planned.emit(),planned.ledger),{httpMetadata:{contentType:'application/json'}});}
+ finally{if(planned.holder)planned.holder.discovery=null;}
 }
-// Active rows become UTF-8 JSON bytes as they are folded, then the source list is dropped. Departures (bounded mode)
-// stay objects only for the archive write that follows; frozen mode keeps none. A repeated canonical key
-// reserves the position of its first row so the merged row stays there.
-async function streamLedgerItems(env,view,holder,reentry,options,active){
- let latest=holder?.discovery||[];
- if(holder)holder.discovery=null;
- const merge=openDiscoveryMerge(latest,reentry,options,view.duplicates);
- latest=null;
+// Departures (bounded mode) stay objects only for the archive write that follows; frozen mode keeps none.
+// The scan list stays reachable until the generation put has pulled the document. Encoding happens then, one row at a time.
+async function collectLedgerDecisions(env,view,holder,reentry,options,active){
+ const merge=openDiscoveryMerge(holder?.discovery||[],reentry,options,view.duplicates);
  const object=await env.BUCKET.get(view.key);
- if(!object)throw new Error('Discovery ledger JSON is incomplete');
- const encoder=new TextEncoder(),parts=[],departures=[],holes=new Map(),activeKeys=new Set();
- const encode=item=>encoder.encode(JSON.stringify(item));
- const place=item=>{if(!item)return;if(active(item)){parts.push(encode(item));activeKeys.add(item.key);}else departures.push(item);};
- await forEachJsonArrayItems(ledgerChunks(object),'items',raw=>{
-  const item=merge.push(raw);
-  if(item){place(item);return;}
-  const key=discoveryCandidateKey(raw);
-  if(!holes.has(key)){holes.set(key,parts.length);parts.push(null);}
- });
+ if(!object)throw new Error('Discovery ledger is missing for the published generation');
+ const departures=[],activeKeys=new Set();
+ const place=item=>{if(!item)return;if(active(item))activeKeys.add(item.key);else departures.push(item);};
+ await forEachJsonArrayItems(ledgerChunks(object),'items',raw=>{const item=merge.push(raw);if(item)place(item);});
  const tail=merge.end();
- for(const {key,item} of tail.deferred){const at=holes.get(key);if(active(item)){parts[at]=encode(item);activeKeys.add(item.key);}else{departures.push(item);parts[at]=null;}}
+ for(const {item} of tail.deferred)place(item);
  for(const item of tail.appended)place(item);
- return {parts,departures,activeKeys};
+ return {departures,activeKeys};
+}
+// Yields one UTF-8 candidate at a time and waits until that chunk is taken. A repeated canonical key is the exception:
+// rows after its first copy stay buffered until the merged row can be placed there. Production ledgers are unique.
+async function* iterateLedgerItems(env,view,holder,reentry,options,active){
+ const queue=[];
+ let wake=null,gate=null,stopped=false,failure=null;
+ const kick=()=>{const fn=wake;wake=null;if(fn)fn();};
+ const release=()=>{const fn=gate;gate=null;if(fn)fn();};
+ const task=(async()=>{
+  try{
+   const merge=openDiscoveryMerge(holder?.discovery||[],reentry,options,view.duplicates);
+   const object=await env.BUCKET.get(view.key);
+   if(!object)throw new Error('Discovery ledger is missing for the published generation');
+   const encoder=new TextEncoder(),encode=item=>encoder.encode(JSON.stringify(item));
+   const send=async bytes=>{if(stopped)return;queue.push(bytes);kick();while(queue.length>0&&!stopped)await new Promise(resolve=>{gate=resolve;});};
+   let holeOpen=false;const parked=[],holes=new Map();
+   await forEachJsonArrayItems(ledgerChunks(object),'items',async raw=>{
+    const item=merge.push(raw);
+    if(item){if(active(item)){const bytes=encode(item);if(holeOpen)parked.push(bytes);else await send(bytes);}return;}
+    const key=discoveryCandidateKey(raw);
+    if(!holes.has(key)){holes.set(key,parked.length);parked.push(null);holeOpen=true;}
+   });
+   const tail=merge.end();
+   for(const {key,item} of tail.deferred){const at=holes.get(key);parked[at]=item&&active(item)?encode(item):null;}
+   for(const bytes of parked)if(bytes)await send(bytes);
+   for(const item of tail.appended)if(active(item))await send(encode(item));
+  }catch(error){if(!stopped)failure=error;}
+  finally{stopped=true;kick();}
+ })();
+ try{
+  while(true){
+   while(!queue.length&&!stopped)await new Promise(resolve=>{wake=resolve;});
+   if(failure)throw failure;
+   if(!queue.length)break;
+   const bytes=queue.shift();release();yield bytes;
+  }
+ }finally{stopped=true;release();kick();try{await task;}catch{}}
 }
 async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publishedRunId,kind='commit',holder=null}){
  const sourceHolder=holder||discoveryHolder(latest);
@@ -546,8 +598,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  if(effective==='full'){
   if(view.kind!=='stream'){const items=mergeDiscoveryCandidates(view.items,latestList,options);latestList=null;if(sourceHolder)sourceHolder.discovery=null;return {items,ledger:{}};}
   latestList=null;
-  const streamed=await streamLedgerItems(env,view,sourceHolder,[],options,()=>true);
-  return {parts:streamed.parts,ledger:{}};
+  return {emit:()=>iterateLedgerItems(env,view,sourceHolder,[],options,()=>true),holder:sourceHolder,ledger:{}};
  }
  const fence=async()=>{
   if(!await renewDiscoveryLease(env,lease))throw new Error('Discovery archive fence lost: lease');
@@ -563,11 +614,12 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  for(const key of latestKeys)if(!prevKeys.has(key)){const segment=ledgerArchiveSegment(key,start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS);if(!wanted.has(segment))wanted.set(segment,[]);wanted.get(segment).push(key);}
  if(start)for(const [segment,keys] of wanted){const items=await readLedgerSegment(env,start,segment);for(const key of keys)if(items[key]){reentry.push(items[key].payload);found.add(key);}}
  const keep=item=>effective!=='bounded'||latestKeys.has(item.key);
- let items=null,parts=null,departures,activeKeys;
+ let items=null,emit=null,departures,activeKeys;
  if(view.kind==='stream'){
   latestList=null;
-  const streamed=await streamLedgerItems(env,view,sourceHolder,reentry,options,keep);
-  parts=streamed.parts;departures=streamed.departures;activeKeys=streamed.activeKeys;
+  const collected=await collectLedgerDecisions(env,view,sourceHolder,reentry,options,keep);
+  departures=collected.departures;activeKeys=collected.activeKeys;
+  emit=()=>iterateLedgerItems(env,view,sourceHolder,reentry,options,keep);
  }else{
   const merged=mergeDiscoveryCandidates([...(view.items||[]),...reentry],latestList,options);
   items=effective==='bounded'?merged.filter(keep):merged;
@@ -608,7 +660,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  }
  const alsoArchived=[...also].sort(),archive=manifest?{version:'v1',manifestId,segments:manifest.segmentCount,items:manifest.totals.items,bytes:manifest.totals.bytes,alsoArchived,uniqueArchivedItems:manifest.totals.items-alsoArchived.length}:null;
  const ledgerOut={ledgerMode:effective,archive};
- if(parts)return {parts,ledger:ledgerOut};
+ if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut};
  return {items,ledger:ledgerOut};
 }
 // `ledger` (AIR-220): `{latest, meta, mode}` lets the generation's discovery ledger be planned under this lease, fenced on the

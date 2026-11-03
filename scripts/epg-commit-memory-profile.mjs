@@ -1,7 +1,7 @@
 // Offline heap profile of one EPG commit at the synthetic volumes of the live ledger.
 // Node heap and RSS are not workerd's 128 MiB isolate limit. The script makes no network call and uses no production snapshot.
 //
-// Child: node --expose-gc scripts/epg-commit-memory-profile.mjs --child --mode stream|legacy [--gc-at-markers] [--out file]
+// Child: node --expose-gc scripts/epg-commit-memory-profile.mjs --child --mode stream|legacy [--gc-at-markers] [--gc-during-put] [--out file]
 // Optional volume flags: --ledger --latest --catalog --watch --archived --target-bytes
 // Parent (default): runs the stream and legacy children and prints their summaries.
 import fs from 'node:fs';
@@ -28,6 +28,7 @@ if(!flag('--child')){
 const MODE=value('--mode','stream');
 const GC=flag('--gc-at-markers');
 const GC_SAMPLE=flag('--gc-sample');
+const GC_PUT=flag('--gc-during-put');
 const LEDGER=Number(value('--ledger','34102'));
 const LATEST=Number(value('--latest','19868'));
 const CATALOG=Number(value('--catalog','2631'));
@@ -154,6 +155,7 @@ catalogParts.length=0;
 const manifest={schemaVersion:1,manifestId:'manifest-frozen',parentManifestId:null,segmentCount:64,hash:'fnv1a32-utf8',segments:Array.from({length:64},(_,segment)=>({segment,object:segment===reentrySegment?'epg/discovery-archive/v1/segments/'+segment+'/write-1.json':null,sha256:null,items:segment===reentrySegment?1:0,bytes:0})),totals:{items:ARCHIVED,bytes:10},upsertedKeys:[reentryKey],writer:{runId:OLD,kind:'split'}};
 const segmentBody={schemaVersion:1,segment:reentrySegment,writeId:'write-1',items:{[reentryKey]:{payload:{key:reentryKey,title:'Кандидат '+REENTRY,year:yearOf(REENTRY),description:'архив',firstAiring:1,lastAiring:1,airings:1,duration:100,shows:[],rawTitles:[reentryShown]},envelope:{archivedAt:'2026-10-28T00:00:00.000Z',archivedFromProgrammeRunId:OLD,archiveWriteId:'write-1'}}}};
 
+const putPeak={samples:0,heapMB:0,externalMB:0,arrayBuffersMB:0,combinedMB:0,liveMB:0,harnessMB:0,liveBytes:0,harnessBytes:0,combinedBytes:0,retainedLiveMB:0,retainedHeapMB:0,beforeRead:null};
 function bucket(){
  const objects=new Map(),etags=new Map();let revision=0;
  const retained=()=>{let n=0;const seen=new Set();for(const buf of objects.values()){if(seen.has(buf))continue;seen.add(buf);n+=buf.length;}return n;};
@@ -175,11 +177,34 @@ function bucket(){
    const only=options.onlyIf;
    if(only?.etagDoesNotMatch==='*'&&objects.has(key)||only?.etagMatches&&only.etagMatches!==etags.get(key))return null;
    let buf;
+   const watch=value&&typeof value.getReader==='function'&&String(key).includes('/generations/')&&String(key).endsWith('discovery-latest.json');
+   const sample=harness=>{
+    if(!watch)return;
+    const collected=GC_PUT&&global.gc&&putPeak.samples%2000===0;
+    if(collected)global.gc();
+    const m=process.memoryUsage(),heap=m.heapUsed,external=m.external,arrays=m.arrayBuffers,combined=heap+external;
+    const live=combined-retained()-harness;
+    putPeak.samples++;
+    putPeak.heapMB=Math.max(putPeak.heapMB,MB(heap));
+    putPeak.externalMB=Math.max(putPeak.externalMB,MB(external));
+    putPeak.arrayBuffersMB=Math.max(putPeak.arrayBuffersMB,MB(arrays));
+    putPeak.combinedMB=Math.max(putPeak.combinedMB,MB(combined));
+    putPeak.liveMB=Math.max(putPeak.liveMB,MB(Math.max(0,live)));
+    putPeak.harnessMB=Math.max(putPeak.harnessMB,MB(harness));
+    putPeak.liveBytes=Math.max(putPeak.liveBytes,Math.max(0,live));
+    putPeak.harnessBytes=Math.max(putPeak.harnessBytes,harness);
+    putPeak.combinedBytes=Math.max(putPeak.combinedBytes,combined);
+    if(collected){putPeak.retainedLiveMB=Math.max(putPeak.retainedLiveMB,MB(Math.max(0,live)));putPeak.retainedHeapMB=Math.max(putPeak.retainedHeapMB,MB(heap));}
+    if(!putPeak.beforeRead)putPeak.beforeRead={heapMB:MB(heap),externalMB:MB(external),arrayBuffersMB:MB(arrays),combinedMB:MB(combined),liveMB:MB(Math.max(0,live))};
+   };
    if(typeof value==='string')buf=Buffer.from(value);
    else if(Buffer.isBuffer(value))buf=value;
    else if(value&&typeof value.getReader==='function'){
+    sample(0);
     const reader=value.getReader(),chunks=[];
-    while(true){const step=await reader.read();if(step.done)break;chunks.push(Buffer.from(step.value));}
+    let harness=0;
+    while(true){const step=await reader.read();if(step.done)break;const piece=Buffer.from(step.value);chunks.push(piece);harness+=piece.length;sample(harness);}
+    sample(harness);
     buf=Buffer.concat(chunks);
    }else buf=Buffer.from(String(value));
    objects.set(key,buf);etags.set(key,'e'+(++revision));return {etag:etags.get(key)};
@@ -240,6 +265,7 @@ const summary={
  volumes:{watch:WATCH,catalog:CATALOG,latest:LATEST,ledger:LEDGER,archivedReported:ARCHIVED,ledgerBytes,catalogBytes:catalogBuf.length,reentryKey,reentrySegment},
  error,elapsedMs:Date.now()-started,stage:result?.stage||run.stage||null,
  authority:{run:published?.run||null,generation:published?Number(published.generation):null},
+ putBoundary:putPeak,
  phases:[...samples.values()]
 };
 console.log(JSON.stringify(summary));

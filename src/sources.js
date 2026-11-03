@@ -80,8 +80,9 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
  return [...merged.values()];
 }
 // One stored candidate at a time. `chunks` yields strings (a byte stream already decoded, or one whole text).
-// The `items` array is visited per element; every other top-level field is returned parsed. A truncated
-// ledger throws, so a commit never publishes a partial candidate list.
+// Exactly one top-level `items` array is visited per element; every other top-level field is returned parsed.
+// A missing or non-array `items`, a second `items`, a truncated document, or trailing non-whitespace throws,
+// so a commit never publishes a partial candidate list. Whitespace after the closing brace is allowed.
 async function forEachJsonArrayItems(chunks,field,onItem){
  let buf='',pos=0,eof=false;
  const source=chunks[Symbol.asyncIterator]();
@@ -98,7 +99,7 @@ async function forEachJsonArrayItems(chunks,field,onItem){
   while(true){if(pos>=buf.length){if(eof)return;await pull(1);if(pos>=buf.length)return;}const ch=buf[pos];if(ch===','||ch===']'||ch==='}'||ch<=' ')return;pos++;}
  };
  await skipWs();await need(1);if(pos>=buf.length||buf[pos]!=='{')fail();pos++;
- const wrapper={};let first=true;
+ const wrapper={};let first=true,sawField=false;
  while(true){
   await skipWs();await need(1);if(pos>=buf.length)fail();
   if(buf[pos]==='}'){pos++;break;}
@@ -107,7 +108,9 @@ async function forEachJsonArrayItems(chunks,field,onItem){
   if(buf[pos]!=='"')fail();
   const keyStart=pos;await skipString();const key=JSON.parse(buf.slice(keyStart,pos));
   await skipWs();await need(1);if(pos>=buf.length||buf[pos]!==':')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();
-  if(key===field&&buf[pos]==='['){
+  if(key===field){
+   if(sawField||buf[pos]!=='[')fail();
+   sawField=true;
    pos++;let itemFirst=true;
    while(true){
     await skipWs();await need(1);if(pos>=buf.length)fail();
@@ -117,6 +120,9 @@ async function forEachJsonArrayItems(chunks,field,onItem){
    }
   }else{const start=pos;await scanValue();wrapper[key]=JSON.parse(buf.slice(start,pos));compact();}
  }
+ if(!sawField)fail();
+ await skipWs();
+ if(pos<buf.length)fail();
  return wrapper;
 }
 function groupDiscoveryRaws(items){

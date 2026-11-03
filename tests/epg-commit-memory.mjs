@@ -13,6 +13,11 @@ import {d1Standin} from './d1-standin.mjs';
 
 const context=loadWorker();
 const call=code=>vm.runInContext(code,context);
+let encodedBytes=0;
+{
+ const Native=context.TextEncoder;
+ context.TextEncoder=class extends Native{encode(value){const bytes=super.encode(value);encodedBytes+=bytes.byteLength;return bytes;}};
+}
 const merge=(previous,latest,runId)=>call('mergeDiscoveryCandidates')(previous,latest,{replaceShows:true,programmeRunId:runId});
 const keyOf=raw=>call('discoveryCandidateKey')(raw);
 
@@ -39,6 +44,21 @@ function memoryBucket({stream=true,chunk=5}={}){
    return object;
   },
   async put(key,value,options={}){
+   if(value&&typeof value.getReader==='function'&&String(key).includes('/generations/')&&String(key).endsWith('discovery-latest.json')){
+    const prepared=encodedBytes-publishMark;
+    const reader=value.getReader();
+    let text='',reads=0,pending=0;const decoder=new TextDecoder();
+    while(true){
+     const step=await reader.read();
+     if(step.done){text+=decoder.decode();break;}
+     text+=decoder.decode(step.value,{stream:true});
+     reads++;
+     if(reads===2)pending=encodedBytes-publishMark;
+    }
+    assert.ok(prepared<Buffer.byteLength(text)/2,'encoded '+prepared+' bytes before the consumer read a '+Buffer.byteLength(text)+' byte document');
+    assert.ok(pending>0&&pending<Buffer.byteLength(text)/2,'two pulls had already encoded '+pending+' bytes');
+    value=text;
+   }
    const text=await read(value),only=options.onlyIf;
    if(only?.etagDoesNotMatch==='*'&&objects.has(key)||only?.etagMatches&&only.etagMatches!==etags.get(key))return null;
    objects.set(key,text);etags.set(key,'e'+(++revision));return {etag:etags.get(key)};
@@ -80,6 +100,18 @@ async function scan(text,size){
   assert.equal(scanned.wrapper.items,undefined);
  }
  await assert.rejects(scan(text.slice(0,-5),4),/Discovery ledger JSON is incomplete/);
+ const empty=await scan(JSON.stringify({programmeRunId:OLD,items:[]})+' \n\t',1);
+ assert.deepEqual(empty.items,[]);
+ assert.equal(empty.wrapper.programmeRunId,OLD);
+ const reject=async body=>{
+  for(const size of [1,3,body.length])await assert.rejects(scan(body,size),/Discovery ledger JSON is incomplete/);
+ };
+ await reject(JSON.stringify({programmeRunId:OLD,archive:{manifestId:'m'}}));
+ await reject(JSON.stringify({items:{}}));
+ await reject(JSON.stringify({items:null}));
+ await reject('{"note":1,"items":[],"items":[]}');
+ await reject(text+' true');
+ await reject(text+'\n{}');
 }
 
 function folded(previous,reentry,latest,runId){
@@ -137,7 +169,9 @@ function arm(store,previousItems){
  return payload;
 }
 const programmeBody=()=>({runId:RUN,updatedAt:'2026-11-03T16:00:00.000Z',watchlistCount:1,films:[{id:'film1',title:'Схватка',year:1995,shows:[{channelId:'c1',channel:'Кино',start:BASE,end:BASE+60000,epgTitle:'Схватка'}]}],people:{directors:[],actors:[]},stats:{}});
+let publishMark=0;
 async function publish(store,latest,db){
+ publishMark=encodedBytes;
  const env={BUCKET:store,DISCOVERY_LEDGER_MODE:'frozen',LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.invalid/guide.xml',...(db?{DB:db}:{})};
  const programme=programmeBody();
  await call('publishGenerationWithLedger')(env,RUN,latest,{programmeRunId:RUN,updatedAt:programme.updatedAt,rawCandidates:latest.length,filteredNonMovies:0},{'programme.json':programme,'discovered-films.json':{}},{updatedAt:programme.updatedAt,films:[{id:'film1',title:'Схватка'}]});
@@ -156,6 +190,16 @@ for(const [name,store] of [['chunked',memoryBucket({stream:true,chunk:5})],['jso
  assert.equal(store.objects.get('epg/discovery-archive/v1/current.json'),pointer,name+' archive pointer stays');
  assert.equal(JSON.parse(store.objects.get('epg/published-generation.json')).programmeRunId,RUN,name+' pin');
  assert.deepEqual(JSON.parse(store.objects.get('epg/discovery-latest.json')).items,written.items,name+' shared copy');
+}
+{
+ const store=memoryBucket({stream:true,chunk:1});
+ const again={...raw(0),description:'второе описание',airings:4,shows:[{channelId:'ch9',channel:'Канал 9',start:BASE+50,end:BASE+80,epgTitle:'ещё'}]};
+ const prior=merge([],[raw(0),raw(1),again,raw(4)],OLD);
+ arm(store,prior);
+ const next=[raw(1,3),raw(4,3)];
+ await publish(store,next,null);
+ const written=JSON.parse(store.objects.get('epg/generations/'+RUN+'/discovery-latest.json'));
+ assert.deepEqual(written.items,JSON.parse(JSON.stringify(merge(prior,next,RUN))),'repeated key');
 }
 
 {
@@ -226,6 +270,38 @@ for(const [name,store] of [['chunked',memoryBucket({stream:true,chunk:5})],['jso
  assert.equal(pin.run,OLD);
  assert.equal(Number(pin.generation),1);
  assert.equal(blocked.sql("SELECT COUNT(*) AS n FROM published_epg_generation WHERE programme_run_id='"+RUN+"'")[0].n,0);
+
+ const absent=memoryBucket({chunk:4});
+ arm(absent,previous);
+ const absentPointer=absent.objects.get('epg/discovery-archive/v1/current.json');
+ absent.objects.delete('epg/generations/'+OLD+'/discovery-latest.json');
+ absent.objects.delete('epg/discovery-latest.json');
+ const absentDb=openDb();
+ await assert.rejects(publish(absent,latest,absentDb),/Discovery ledger is missing for the published generation/);
+ const absentPin=absentDb.sql('SELECT programme_run_id AS run, generation FROM published_epg_authority WHERE id=1')[0];
+ assert.equal(absentPin.run,OLD);
+ assert.equal(Number(absentPin.generation),1);
+ assert.equal(absent.objects.has('epg/generations/'+RUN+'/discovery-latest.json'),false);
+ assert.equal(absent.objects.get('epg/discovery-archive/v1/current.json'),absentPointer);
+ assert.equal(JSON.parse(absent.objects.get('epg/published-generation.json')).programmeRunId,OLD);
+ assert.equal(absentDb.sql("SELECT COUNT(*) AS n FROM published_epg_generation WHERE programme_run_id='"+RUN+"'")[0].n,0);
+
+ const stale=memoryBucket({chunk:1});
+ arm(stale,previous);
+ const stalePointer=stale.objects.get('epg/discovery-archive/v1/current.json');
+ stale.objects.delete('epg/generations/'+OLD+'/discovery-latest.json');
+ const staleBody=JSON.parse(stale.objects.get('epg/discovery-latest.json'));
+ staleBody.programmeRunId='stale-run';
+ stale.objects.set('epg/discovery-latest.json',JSON.stringify(staleBody));
+ const staleDb=openDb();
+ await assert.rejects(publish(stale,latest,staleDb),/Discovery ledger does not match the published generation/);
+ const stalePin=staleDb.sql('SELECT programme_run_id AS run, generation FROM published_epg_authority WHERE id=1')[0];
+ assert.equal(stalePin.run,OLD);
+ assert.equal(Number(stalePin.generation),1);
+ assert.equal(stale.objects.has('epg/generations/'+RUN+'/discovery-latest.json'),false);
+ assert.equal(stale.objects.get('epg/discovery-archive/v1/current.json'),stalePointer);
+ assert.equal(JSON.parse(stale.objects.get('epg/published-generation.json')).programmeRunId,OLD);
+ assert.equal(staleDb.sql("SELECT COUNT(*) AS n FROM published_epg_generation WHERE programme_run_id='"+RUN+"'")[0].n,0);
 }
 
-console.log('epg commit memory: streamed ledger matches the in-memory merge, a truncated ledger and a refused pin leave the published generation, and a retry keeps the saved events');
+console.log('epg commit memory: streamed ledger matches the in-memory merge, a bad ledger and a missing or stale published ledger leave the pin, and a retry keeps the saved events');

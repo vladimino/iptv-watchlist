@@ -17,11 +17,13 @@ The commit runs this under the discovery lease. It stops without publishing if:
 - the published generation pointer changed (its etag differs from the one read at the start);
 - the lease was lost;
 - `sync.json` no longer names the run in stage `epg`;
-- the archive pointer CAS lost a race.
+- the archive pointer CAS lost a race;
+- the published EPG authority already names a programme run and that run's ledger object cannot be read;
+- that authority's ledger, or the compatibility copy used in its place, names a different programme run.
 
-Such a stop leaves either the previous archive with some unreferenced versions, or the new archive plus the previous published generation. Both are consistent (ADR 0034, section 3). Retrying the same run is safe.
+Such a stop leaves either the previous archive with some unreferenced versions, or the new archive plus the previous published generation. Both are consistent (ADR 0034, section 3). A missing or mismatched ledger stops before those writes: the archive pointer, the generation files and the published pin stay put. An empty predecessor is only used when the authority has no programme run yet. Retrying the same run is safe.
 
-A stored ledger that exposes `body` or `text` is folded one candidate at a time. The commit puts the next generation document as bytes and does not parse that document back into objects. A `json`-only object is still parsed whole. Bounded mode still holds departure records as objects until the archive write. The production split remains a separate approved operation and is not started by setting the mode on its own initiative.
+A stored ledger that exposes `body` or `text` is folded one candidate at a time. The next generation document is written as bytes, pulled one chunk at a time, and is not parsed back into objects. A `json`-only object is still parsed whole. Bounded mode still holds departure records as objects until the archive write. The production split remains a separate approved operation and is not started by setting the mode on its own initiative.
 
 In bounded mode no discovery chunk and no status read touches the archive. `POST /api/enrichment/discovery/scan` and `/reconcile` answer `409` whenever the mode is not `full` or an archive exists.
 
