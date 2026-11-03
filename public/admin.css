@@ -106,7 +106,24 @@
 .admin-health-empty{padding:14px;border:1px dashed var(--line);border-radius:12px;color:var(--text)}.admin-health-empty[data-verdict=clear]{color:#d7e7c4}
 .admin-health-empty[hidden]{display:none}
 .admin-health-note{font-size:13px;margin-top:18px}
-.health-board{display:grid;gap:10px;margin:4px 0 8px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.health-banner{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px 16px;align-items:start;margin:8px 0 0;padding:18px 18px 16px;border:1px solid var(--line);border-radius:18px;background:var(--surface)}
+.health-board{display:grid;gap:10px;margin:0}
+.health-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:12px 0;padding:0;list-style:none}
+.health-kpi{display:flex;flex-direction:column;justify-content:flex-end;gap:4px;min-width:0;min-height:124px;padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
+.health-kpi-value{font-size:44px;line-height:.9;letter-spacing:-1.5px;font-weight:650}
+.health-kpi-critical .health-kpi-value{color:#ffb4a2}.health-kpi-warning .health-kpi-value{color:#f3dd9a}.health-kpi-unknown .health-kpi-value{color:#d5ddd2}
+.health-kpi.is-zero .health-kpi-value{color:var(--muted)}
+.health-kpi-label{font-size:16px;font-weight:650}.health-kpi small{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.health-master{display:grid;grid-template-columns:minmax(240px,.9fr) minmax(280px,1.35fr);gap:16px;align-items:start}
+.health-detail{min-width:0;min-height:220px;padding:16px 18px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
+.health-option{display:grid;gap:3px;width:100%;margin:0 0 8px;padding:10px 12px;text-align:left;font:inherit;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:12px;cursor:pointer}
+.health-option.is-selected{border-color:#d9f279;box-shadow:inset 3px 0 0 #d9f279}
+.health-option:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.health-option-title{font-weight:650}.health-option-why{color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+.health-queue-empty,.health-detail-empty,.health-group-result{margin:0 0 8px;color:var(--muted)}
+.health-wait{margin-top:8px}
+.health-secondary{margin-top:18px}.health-secondary summary{cursor:pointer;color:var(--muted);font-size:14px}.health-secondary summary:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.health-secondary .health-cards{margin-top:10px}
 .health-lead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px 16px;margin:0;font-size:22px;letter-spacing:-.3px}
 .health-lead span{font-size:15px;color:var(--muted)}
 .health-lead-attention b,.health-lead-act b,.health-step-act{color:#f3dd9a}.health-lead-clear b{color:#d7e7c4}.health-lead-unknown b,.health-step-wait,.health-step-gap{color:var(--muted)}.health-lead-calm,.health-lead-calm b{color:var(--text)}
@@ -118,7 +135,7 @@
 .health-unread,.health-anomalies,.health-score-note{margin:0;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
 .health-band{margin:0 0 8px}.health-band-title{margin:12px 0 8px;font-size:13px;letter-spacing:.04em;font-weight:650}
 .health-band-act .health-band-title{color:#f3dd9a}.health-band-wait .health-band-title,.health-band-gap .health-band-title{color:var(--muted)}
-@media(max-width:800px){.health-lead{font-size:18px}.health-facts{grid-template-columns:1fr}}
+@media(max-width:800px){.health-lead{font-size:18px}.health-facts{grid-template-columns:1fr}.health-banner{padding:14px}.health-kpi{min-height:0;padding:12px}.health-kpi-value{font-size:32px}.health-master{grid-template-columns:minmax(0,1fr)}.health-detail{min-height:0}}
 @media(max-width:800px){.admin-health-head{flex-wrap:wrap}.health-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.health-group-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.health-group-count{margin-left:0;width:100%}}
 @media(max-width:340px){.health-cards{grid-template-columns:minmax(0,1fr)}}
 /* Limbo inventory */
