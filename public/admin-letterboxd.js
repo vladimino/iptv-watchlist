@@ -1,7 +1,7 @@
 // The archive preview page: one check per submit, the answer held in this tab's memory only. Leaving or resetting the page
 // drops it; nothing is written to storage, the URL or history. A write that has already left the browser is not undone by
 // Cancel, Escape, a new file or a failed response: the tab keeps that command and will not say the write never started.
-const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null};
+const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null};
 
 function archiveNode(selector) {return document.querySelector(selector);}
 
@@ -9,6 +9,11 @@ function archiveHasUnresolved() {
   const committed = archiveLive.committed || {};
   for (const key in committed) {
     const done = committed[key];
+    if (done && done.state === 'unknown' && !done.resolved) return true;
+  }
+  const rollbackResult = archiveLive.rollbackResult || {};
+  for (const key in rollbackResult) {
+    const done = rollbackResult[key];
     if (done && done.state === 'unknown' && !done.resolved) return true;
   }
   for (const key in archiveLive.confirmUnknown || {}) if (archiveLive.confirmUnknown[key]) return true;
@@ -22,6 +27,8 @@ function archiveCurrentStep(state) {
   if (archiveHasUnresolved()) return 5;
   const committed = archiveLive.committed || {};
   for (const key in committed) if (Object.prototype.hasOwnProperty.call(committed, key)) return 5;
+  const rollbackResult = archiveLive.rollbackResult || {};
+  for (const key in rollbackResult) if (Object.prototype.hasOwnProperty.call(rollbackResult, key)) return 5;
   const issued = archiveLive.issued || {};
   for (const key in issued) if (Object.prototype.hasOwnProperty.call(issued, key)) return 4;
   return 3;
@@ -75,6 +82,7 @@ function archiveClearMemory() {
   archiveLive.committed = {};
   archiveLive.rollbackIssued = {};
   archiveLive.rollbackKeys = {};
+  archiveLive.rollbackResult = {};
   archiveLive.confirmUnknown = {};
   archiveLive.rollbackConfirmUnknown = {};
   archiveLive.bound = null;
@@ -199,7 +207,15 @@ function archiveTransportLost(result) {
 function archiveSettleLostWrite(inflight) {
   const chunk = inflight.chunk;
   if (inflight.kind === 'commit') archiveLive.committed[chunk] = {state: 'unknown', transport: true, counts: null};
-  else if (inflight.kind === 'rollback') archiveLive.committed[chunk] = {state: 'unknown', transport: true, rollback: true, counts: null};
+  else if (inflight.kind === 'rollback') archiveLive.rollbackResult[chunk] = {state: 'unknown', transport: true, counts: null};
+  else if (inflight.kind === 'confirm') archiveLive.confirmUnknown[chunk] = true;
+  else if (inflight.kind === 'rollback-confirm') archiveLive.rollbackConfirmUnknown[chunk] = true;
+}
+
+function archiveMarkInProgress(inflight) {
+  const chunk = inflight.chunk;
+  if (inflight.kind === 'commit') archiveLive.committed[chunk] = {state: 'unknown', inProgress: true, counts: null};
+  else if (inflight.kind === 'rollback') archiveLive.rollbackResult[chunk] = {state: 'unknown', inProgress: true, counts: null};
   else if (inflight.kind === 'confirm') archiveLive.confirmUnknown[chunk] = true;
   else if (inflight.kind === 'rollback-confirm') archiveLive.rollbackConfirmUnknown[chunk] = true;
 }
@@ -217,14 +233,18 @@ function archiveApplyFailed(result) {
     if (archiveLive.answer) archiveRepaint();
     return result;
   }
+  const inProgress = !!(inflight && inflight.kind !== 'preview' && result.error === 'in_progress');
   const lost = inflight && inflight.kind !== 'preview' && archiveTransportLost(result);
-  if (lost) archiveSettleLostWrite(inflight);
-  else if (inflight && (inflight.kind === 'commit' || inflight.kind === 'rollback') && archiveLive.committed[inflight.chunk] && archiveLive.committed[inflight.chunk].transport) archiveLive.committed[inflight.chunk] = {state: 'refused', error: result.error, counts: null};
+  const rollbackRefused = !!(inflight && inflight.kind === 'rollback' && !inProgress && !lost);
+  if (inProgress) archiveMarkInProgress(inflight);
+  else if (lost) archiveSettleLostWrite(inflight);
+  else if (rollbackRefused) archiveLive.rollbackResult[inflight.chunk] = {state: 'refused', error: result.error};
+  else if (inflight && inflight.kind === 'commit' && archiveLive.committed[inflight.chunk] && archiveLive.committed[inflight.chunk].transport) archiveLive.committed[inflight.chunk] = {state: 'refused', error: result.error, counts: null};
   else if (inflight && inflight.kind === 'confirm') archiveLive.confirmUnknown[inflight.chunk] = false;
   else if (inflight && inflight.kind === 'rollback-confirm') archiveLive.rollbackConfirmUnknown[inflight.chunk] = false;
   const error = archiveNode('#archive-error');
   error.hidden = false;
-  error.textContent = lost ? archiveLostText(inflight.kind) : archiveErrorText(result.error, result.detail);
+  error.textContent = inProgress ? archiveErrorText(result.error, result.detail) : lost ? archiveLostText(inflight.kind) : rollbackRefused ? archiveRollbackRefusedBanner(result.error) : archiveErrorText(result.error, result.detail);
   if (error.focus) error.focus();
   if (archiveLive.answer) archiveRepaint();
   return result;
@@ -325,12 +345,12 @@ function onArchiveRollback(chunk) {
   if (!archiveLive.rollbackIssued[chunk] || archiveLive.controller) return Promise.resolve(null);
   const confirmation = archiveLive.rollbackIssued[chunk];
   const run = archiveBeginAction('rollback', chunk);
-  archiveLive.committed[chunk] = {state: 'unknown', transport: true, rollback: true, pending: true, counts: null};
+  archiveLive.rollbackResult[chunk] = {state: 'unknown', transport: true, pending: true, counts: null};
   archiveRepaint();
   const pending = postArchiveRollback(confirmation, {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
     if (result.mode !== 'ready') return archiveApplyFailed(result);
-    archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, rolledBack: true};
+    archiveLive.rollbackResult[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, rolledBack: true};
     archiveLive.inflight = null;
     archiveLive.controller = null;
     archiveShow('ready', archiveLive.answer);
@@ -346,6 +366,7 @@ function onArchiveAbandon(chunk) {
   delete archiveLive.committed[chunk];
   delete archiveLive.rollbackIssued[chunk];
   delete archiveLive.rollbackKeys[chunk];
+  delete archiveLive.rollbackResult[chunk];
   delete archiveLive.confirmUnknown[chunk];
   delete archiveLive.rollbackConfirmUnknown[chunk];
   const error = archiveNode('#archive-error');

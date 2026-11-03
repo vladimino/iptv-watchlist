@@ -364,6 +364,7 @@ function archiveCommitText(number, done) {
   if (done.state === 'partial') return `Партия ${number} записана частично.${detail} Это не успех.`;
   if (done.state === 'failed' && !wrote && !failed && skipped) return `Факты партии ${number} не изменились: более новые записи оставлены.${detail}`;
   if (done.state === 'failed' || done.state === 'aborted' || done.state === 'refused') return `Партия ${number} не записана.${detail} Это не успех.`;
+  if (done.state === 'unknown' && done.inProgress) return `Партия ${number} уже записывается. Исход ещё не получен. Повтори ту же запись тем же ключом. Это не отказ и не успех.`;
   if (done.state === 'unknown' && done.transport && done.rollback) return `Исход отката партии ${number} неизвестен. Запрос уже ушёл, ответ не получен. Откат мог начаться. Повтор вслепую не запускается. Это не успех.`;
   if (done.state === 'unknown' && done.transport) return `Исход партии ${number} неизвестен. Запрос на запись уже ушёл, ответ не получен. Запись могла начаться.${detail} Повтор вслепую не запускается. Это не успех.`;
   if (done.state === 'unknown') return `Исход партии ${number} неизвестен.${detail} Повтор вслепую не запускается. Это не успех.`;
@@ -371,6 +372,24 @@ function archiveCommitText(number, done) {
 }
 function archiveBatchIntro() {
   return '<p class="muted archive-apply-note">Запись не начинается сама. Сначала «Подтвердить партию» — сервер запоминает только согласие, без фактов. Затем «Записать партию» отправляет тот же архив ещё раз. Откат — тоже два отдельных шага. Архив нигде не сохраняется, поэтому новая проверка и новая запись просят выбрать файл снова. Одной кнопки на весь архив нет.</p>';
+}
+function archiveRollbackRefusedBanner(error) {
+  const known = {
+    confirmation_expired: 'Подтверждение отката истекло.',
+    confirmation_mismatch: 'Подтверждение отката не совпало с партией.',
+    confirmation_missing: 'Подтверждение отката не найдено.',
+    record_changed: 'Факты изменились после записи.',
+    not_eligible: 'Откат этой партии сейчас недоступен.',
+    invalid_request: 'Запрос отката не принят.',
+    idempotency_conflict: 'Ключ отката занят другой командой.',
+    stale_pin: 'Откат не сошёлся с квитанцией импорта.',
+  };
+  return (known[error] || 'Сервер отклонил откат.') + ' Запись, если она прошла, остаётся. Это не отмена записи.';
+}
+function archiveRollbackText(number, done) {
+  if (done.inProgress) return `Откат партии ${number} уже выполняется. Исход ещё не получен. Повтори тот же откат тем же ключом. Это не отказ и не успех.`;
+  if (done.state === 'refused') return `Откат партии ${number} отклонён. Запись, если она прошла, остаётся. Это не отмена записи.`;
+  return `Исход отката партии ${number} неизвестен. Запрос уже ушёл, ответ не получен. Откат мог начаться. Повтор вслепую не запускается. Это не успех.`;
 }
 function archiveRollbackHtml(chunk, number, rollback) {
   return rollback
@@ -399,7 +418,7 @@ function archiveActionHtml(answer, session) {
     let actions = '';
     if (done || (chunk.receipt && chunk.receipt.status === 'committed')) actions += '<p class="muted">Эта партия уже отправлена или уже есть в квитанции импорта. Итог и откат — в квитанции, отдельным подтверждением.</p>';
     else if (stale && !confirmUnknown[chunk.chunk]) actions += '<p class="muted">Запись по этой проверке выключена: выбран другой файл.</p>';
-    else if (confirmUnknown[chunk.chunk] && !held) actions += waiting ? '<p class="muted">Подтверждение отправлено, ответ ещё не прочитан.</p>' : `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Повторить то же подтверждение</button></div><p class="muted">Ответ на подтверждение не получен. Согласие могло сохраниться. Повтор отправит тот же ключ и не создаёт новый. Это не запись фактов.</p>`;
+    else if (confirmUnknown[chunk.chunk] && !held) actions += waiting ? '<p class="muted">Подтверждение отправлено, ответ ещё не прочитан.</p>' : `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Повторить то же подтверждение</button></div><p class="muted">Ответ на подтверждение не получен. Согласие могло сохраниться. Повтор отправит тот же ключ и не создаёт новый. Это не запись фактов.</p>${archiveAbandonHtml(chunk.chunk)}`;
     else if (!stale && chunk.confirmable && held) actions += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Записать партию ${number}</button></div><p class="muted">Подтверждение выдано, запись ещё не отправлялась. Запись отправит архив заново. Это не новая партия.</p>`;
     else if (!stale && chunk.confirmable) actions += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Подтвердить партию ${number}</button></div>`;
     return `<article class="archive-batch"><h3>Партия ${number}</h3><p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p>${archiveValueLine(chunk.values)}${why}${actions}</article>`;
@@ -415,31 +434,37 @@ function archiveReceiptHtml(answer, session) {
   const rollbackIssued = session && session.rollbackIssued || {};
   const confirmUnknown = session && session.confirmUnknown || {};
   const rollbackConfirmUnknown = session && session.rollbackConfirmUnknown || {};
+  const rollbackResult = session && session.rollbackResult || {};
   const chunks = batches.chunks || [];
   if (!chunks.length) return '<p class="muted">Квитанции нет: записывать нечего. Проверка ничего не записала.</p>';
   return chunks.map(chunk => {
     const number = chunk.chunk + 1;
     const done = committed[chunk.chunk];
     const rollback = rollbackIssued[chunk.chunk];
+    const attempt = rollbackResult[chunk.chunk];
+    const applyReceipt = done && !done.rollback && !done.rolledBack;
     let body = '';
-    if (done && done.rolledBack) {
-      const replay = done.replayed ? ' Повтор того же отката ничего не меняет.' : '';
-      body += `<p role="status">Откат партии ${number} выполнен.${archiveEscape(replay)} Состояние: ${archiveEscape(done.state || '—')}. Более поздняя запись, если она была, сохранена.</p>`;
-    } else if (done && done.pending) body += '<p role="status">Запрос отправлен, ответ ещё не прочитан. Это не успех и не отмена.</p>';
-    else if (done && done.rollback && done.state === 'unknown') {
-      body += `<p role="status">${archiveEscape(archiveCommitText(number, done))}</p>`;
-      if (!done.pending) body += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-rollback="${chunk.chunk}">Повторить тот же откат</button></div><p class="muted">Кнопка отправляет то же подтверждение отката и тот же ключ. Новый запрос не создаётся, и повтор сам не начинается.</p>${archiveAbandonHtml(chunk.chunk)}`;
-    } else if (done) {
+    if (applyReceipt && done.pending) body += '<p role="status">Запрос отправлен, ответ ещё не прочитан. Это не успех и не отмена.</p>';
+    else if (applyReceipt) {
       body += `<p role="status">${archiveEscape(archiveCommitText(number, done))}</p>`;
       if (done.state === 'unknown' && !done.pending) body += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Повторить ту же запись</button></div><p class="muted">Кнопка отправляет то же подтверждение и тот же ключ. Новый запрос не создаётся, и повтор сам не начинается.</p>${archiveAbandonHtml(chunk.chunk)}`;
-      if (done.state !== 'unknown') body += archiveRollbackHtml(chunk, number, rollback);
-    } else if (rollbackConfirmUnknown[chunk.chunk] && !rollback) body += `<p class="muted">Ответ на подтверждение отката не получен. Повтор отправит тот же ключ.</p><div class="archive-actions"><button type="button" class="admin-refresh" data-archive-rollback-confirm="${chunk.chunk}">Повторить то же подтверждение отката</button></div>${archiveAbandonHtml(chunk.chunk)}`;
-    else if (confirmUnknown[chunk.chunk] && !issued[chunk.chunk]) body += '<p class="muted">Ответ на подтверждение не получен. Запись фактов из этого шага не отправлялась. Неизвестный ответ не называется успехом.</p>';
-    else if (chunk.receipt && chunk.receipt.status === 'committed' && chunk.confirmable && !(session && session.stale)) {
+    }
+    if (attempt && attempt.rolledBack) {
+      const replay = attempt.replayed ? ' Повтор того же отката ничего не меняет.' : '';
+      body += `<p role="status">Откат партии ${number} выполнен.${archiveEscape(replay)} Состояние: ${archiveEscape(attempt.state || '—')}. Более поздняя запись, если она была, сохранена.</p>`;
+    } else if (attempt && attempt.pending) body += '<p role="status">Запрос отката отправлен, ответ ещё не прочитан. Это не успех и не отмена.</p>';
+    else if (attempt && attempt.state === 'unknown') {
+      body += `<p role="status">${archiveEscape(archiveRollbackText(number, attempt))}</p>`;
+      body += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-rollback="${chunk.chunk}">Повторить тот же откат</button></div><p class="muted">Кнопка отправляет то же подтверждение отката и тот же ключ. Новый запрос не создаётся, и повтор сам не начинается.</p>${archiveAbandonHtml(chunk.chunk)}`;
+    } else if (attempt && attempt.state === 'refused') body += `<p role="status">${archiveEscape(archiveRollbackText(number, attempt))}</p>`;
+    else if (rollbackConfirmUnknown[chunk.chunk] && !rollback) body += `<p class="muted">Ответ на подтверждение отката не получен. Повтор отправит тот же ключ. Это не успех.</p><div class="archive-actions"><button type="button" class="admin-refresh" data-archive-rollback-confirm="${chunk.chunk}">Повторить то же подтверждение отката</button></div>${archiveAbandonHtml(chunk.chunk)}`;
+    else if (applyReceipt && done.state !== 'unknown' && !done.pending) body += archiveRollbackHtml(chunk, number, rollback);
+    else if (!done && !attempt && chunk.receipt && chunk.receipt.status === 'committed' && chunk.confirmable && !(session && session.stale)) {
       body += '<p class="muted">Эта партия уже есть в квитанции импорта. Повтор записи идемпотентен. Откат — отдельное подтверждение.</p>';
       body += archiveRollbackHtml(chunk, number, rollback);
-    } else if (issued[chunk.chunk]) body += '<p class="muted">Квитанции ещё нет: подтверждение выдано, запись ещё не отправлялась. Это не успех.</p>';
-    else body += '<p class="muted">Квитанции ещё нет. Проверка ничего не записала.</p>';
+    } else if (!done && !attempt && confirmUnknown[chunk.chunk] && !issued[chunk.chunk]) body += '<p class="muted">Ответ на подтверждение не получен. Запись фактов из этого шага не отправлялась. Неизвестный ответ не называется успехом.</p>' + archiveAbandonHtml(chunk.chunk);
+    else if (!done && !attempt && issued[chunk.chunk]) body += '<p class="muted">Квитанции ещё нет: подтверждение выдано, запись ещё не отправлялась. Это не успех.</p>';
+    else if (!body) body += '<p class="muted">Квитанции ещё нет. Проверка ничего не записала.</p>';
     return `<article class="archive-batch"><h3>Квитанция партии ${number}</h3>${body}</article>`;
   }).join('');
 }

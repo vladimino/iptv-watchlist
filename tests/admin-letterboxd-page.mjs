@@ -421,4 +421,90 @@ fire('#archive-generated-at', 'input');
 run('onArchiveResultClick({target: {getAttribute(name){return name === "data-archive-abandon" ? "0" : null;}, hasAttribute(name){return name === "data-archive-abandon";}, parentElement: null}})');
 assert.equal(run('archiveHasUnresolved()'), false);
 assert.match(error.textContent, /не откатывает/);
+
+// 11. A lost confirm and a lost rollback confirmation can be retried with the same key or forgotten, even beside an apply receipt.
+run(`(() => {
+  const batches = archiveLive.answer.batches || (archiveLive.answer.batches = {});
+  if (!batches.chunks || !batches.chunks.length) batches.chunks = [{chunk:0, films:1, planHash:'${'ab'.repeat(32)}', scopeFingerprint:'cdef1234', changes:{}, values:{}, confirmable:true}];
+  batches.chunks[0].confirmable = true;
+  batches.programmeRunId = batches.programmeRunId || '${'11111111-1111-4111-8111-111111111111'}';
+  archiveLive.issued = {};
+  archiveLive.keys = {};
+  archiveLive.confirmUnknown = {};
+  archiveLive.committed = {};
+  archiveLive.rollbackResult = {};
+  archiveLive.stale = false;
+})()`);
+ctx.fetch = async () => {throw new Error('offline');};
+await run('onArchiveConfirm(0)');
+assert.match(result.innerHTML, /Повторить то же подтверждение/);
+assert.match(result.innerHTML, /data-archive-abandon="0"/);
+assert.equal(run('archiveHasUnresolved()'), true);
+assert.doesNotMatch(result.innerHTML, /не записана/);
+const confirmKey = run('archiveLive.keys[0]');
+let confirmPosts = 0, confirmKeySent = null;
+ctx.fetch = async (_url, init) => {
+  confirmPosts++;
+  confirmKeySent = init.body.get('idempotencyKey');
+  return new Response(JSON.stringify({mode: 'apply_confirm', writes: false, confirmation: {idempotencyKey: confirmKey, chunk: 0}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveConfirm(0)');
+assert.equal(confirmPosts, 1);
+assert.equal(confirmKeySent, confirmKey);
+assert.equal(run('archiveLive.confirmUnknown[0]'), false);
+run('archiveLive.issued = {}; archiveLive.confirmUnknown = {};');
+ctx.fetch = async () => {throw new Error('offline');};
+await run('onArchiveConfirm(0)');
+run('onArchiveResultClick({target: {getAttribute(name){return name === "data-archive-abandon" ? "0" : null;}, hasAttribute(name){return name === "data-archive-abandon";}, parentElement: null}})');
+assert.equal(run('archiveHasUnresolved()'), false);
+assert.match(error.textContent, /не откатывает/);
+
+run('archiveLive.committed[0] = {state:"succeeded", replayed:false, counts:{written:1}}; archiveLive.rollbackResult = {}; archiveLive.rollbackIssued = {}; archiveLive.rollbackKeys = {}; archiveLive.rollbackConfirmUnknown = {}; archiveShow("ready", archiveLive.answer);');
+ctx.fetch = async () => {throw new Error('offline');};
+await run('onArchiveRollbackConfirm(0)');
+assert.match(result.innerHTML, /записана полностью/);
+assert.match(result.innerHTML, /Повторить то же подтверждение отката/);
+assert.match(result.innerHTML, /data-archive-abandon="0"/);
+assert.doesNotMatch(result.innerHTML, /Подтвердить откат партии/);
+assert.doesNotMatch(result.innerHTML, /не записана/);
+const rollbackKey = run('archiveLive.rollbackKeys[0]');
+let rollbackConfirmBody = null;
+ctx.fetch = async (_url, init) => {
+  rollbackConfirmBody = JSON.parse(String(init.body));
+  return new Response(JSON.stringify({mode: 'rollback_confirm', writes: false, confirmation: {idempotencyKey: rollbackKey, chunk: 0}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveRollbackConfirm(0)');
+assert.equal(rollbackConfirmBody.idempotencyKey, rollbackKey);
+assert.match(result.innerHTML, /записана полностью/);
+assert.match(result.innerHTML, /Откатить партию 1/);
+assert.equal(run('archiveHasUnresolved()'), false);
+
+// 12. HTTP 409 in_progress stays unknown and replays the same confirmation.
+ctx.fetch = async () => new Response(JSON.stringify({error: 'in_progress', refusal: 'in_progress'}), {status: 409, headers: {'Content-Type': 'application/json'}});
+run('archiveLive.issued[0] = {idempotencyKey:"lb0123456789abcdef", chunk:0}; archiveLive.committed = {}; archiveLive.stale = false;');
+await run('onArchiveCommit(0)');
+assert.match(result.innerHTML, /уже записывается/);
+assert.match(result.innerHTML, /Повторить ту же запись/);
+assert.doesNotMatch(result.innerHTML, /не записана/);
+assert.equal(run('archiveLive.committed[0].state'), 'unknown');
+const progressFrozen = run('JSON.stringify(archiveLive.issued[0])');
+let progressPosted = null;
+ctx.fetch = async (_url, init) => {
+  progressPosted = init.body.get('confirmation');
+  return new Response(JSON.stringify({mode: 'apply', writes: true, replayed: false, state: 'succeeded', receipt: {state: 'succeeded', counts: counts({written: 1})}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveCommit(0)');
+assert.equal(progressPosted, progressFrozen);
+assert.match(result.innerHTML, /записана полностью/);
+
+// 13. A refused rollback does not rewrite the apply receipt as a write that never happened.
+run('archiveLive.rollbackIssued[0] = {idempotencyKey:"lbrollback0123456789ab", chunk:0};');
+ctx.fetch = async () => new Response(JSON.stringify({error: 'confirmation_expired', refusal: 'confirmation_expired'}), {status: 400, headers: {'Content-Type': 'application/json'}});
+await run('onArchiveRollback(0)');
+assert.match(result.innerHTML, /записана полностью/);
+assert.match(result.innerHTML, /Откат партии 1 отклонён/);
+assert.doesNotMatch(result.innerHTML, /не записана|Ничего не записано/);
+assert.doesNotMatch(error.textContent, /не записана|Ничего не записано/);
+assert.equal(run('archiveLive.committed[0].state'), 'succeeded');
+assert.equal(run('archiveLive.rollbackResult[0].state'), 'refused');
 console.log('admin-letterboxd-page: ok');
