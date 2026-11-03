@@ -192,10 +192,22 @@ function limboChip(group, code, label, count, pressed, hint) {
   return `<button type="button" class="admin-queue" data-limbo-${group}="${limboEscape(code)}" aria-pressed="${pressed ? 'true' : 'false'}"${hint ? ` title="${limboEscape(hint)}"` : ''}><span>${limboEscape(label)}</span><small>${count === null ? '—' : count}</small></button>`;
 }
 
+function limboCauseOptions(state) {
+  const byCause = limboLive.counts && limboLive.counts.byCause;
+  const total = byCause ? Object.keys(LIMBO_CAUSE_LABELS).reduce((sum, code) => sum + (Number(byCause[code]) || 0), 0) : null;
+  const all = `<option value=""${state.cause ? '' : ' selected'}>все${total === null ? '' : ' · ' + total}</option>`;
+  const rest = Object.keys(LIMBO_CAUSE_LABELS).map(code => {
+    const count = byCause ? byCause[code] ?? 0 : null;
+    return `<option value="${limboEscape(code)}"${state.cause === code ? ' selected' : ''}>${limboEscape(LIMBO_CAUSE_LABELS[code])}${count === null ? '' : ' · ' + count}</option>`;
+  }).join('');
+  return all + rest;
+}
+
 function limboRenderFilters(state) {
   const counts = limboLive.counts;
   const causes = document.querySelector('#limbo-causes');
-  causes.innerHTML = Object.keys(LIMBO_CAUSE_LABELS).map(code => limboChip('cause', code, LIMBO_CAUSE_LABELS[code], counts ? counts.byCause[code] ?? 0 : null, state.cause === code, LIMBO_CAUSE_HINTS[code])).join('');
+  causes.innerHTML = limboCauseOptions(state);
+  if (causes.value !== state.cause) causes.value = state.cause;
   const subsystems = document.querySelector('#limbo-subsystems');
   subsystems.innerHTML = ['identity', 'metadata', 'localization', 'fingerprint', 'prediction'].map(code => limboChip('subsystem', code, LIMBO_SUBSYSTEM_LABELS[code], counts ? counts.bySubsystem[code] ?? 0 : null, state.subsystem === code)).join('');
   const kind = document.querySelector('#limbo-kind');
@@ -480,7 +492,7 @@ function limboDecodeText(value) {
 }
 
 function limboFindNote(query, shown, total, hasMore) {
-  if (!query) return 'Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Причина ниже отбирает весь список.';
+  if (!query) return 'Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Причина в этой строке отбирает весь список.';
   if (!shown && hasMore) return 'Среди показанных строк совпадений нет. «Показать ещё» дочитает следующую страницу того же снимка, и поле применится к ней. Это не поиск по всему списку.';
   if (!shown) return 'Среди показанных строк совпадений нет. Других страниц этого чтения нет. Это не поиск по всему списку.';
   return 'Совпало ' + shown + ' из ' + total + ' показанных строк. Незагруженные страницы этим полем не просмотрены.';
@@ -498,6 +510,42 @@ function limboSetArticleHidden(article, hide) {
   let open = article.slice(0, end).replace(/\s+hidden\b/g, '');
   if (hide) open += ' hidden';
   return open + article.slice(end);
+}
+
+function limboOpeningHidden(article) {
+  const end = article.indexOf('>');
+  return end >= 0 && /\shidden\b/.test(article.slice(0, end));
+}
+
+function limboArticleId(article) {
+  const id = article.match(/data-limbo-item="([^"]+)"/);
+  return id ? limboDecodeText(id[1]) : '';
+}
+
+function limboMarkSelected(article, selected) {
+  let next = article.replace(/aria-expanded="(?:true|false)"/, `aria-expanded="${selected ? 'true' : 'false'}"`);
+  next = next.replace(/(<button type="button" class="limbo-jump"[\s\S]*?)(>)/, (_whole, open, end) => open.replace(/\s+hidden\b/g, '') + (selected ? '' : ' hidden') + end);
+  next = next.replace(/(<div class="limbo-detail"[\s\S]*?)(>)/, (_whole, open, end) => open.replace(/\s+hidden\b/g, '') + (selected ? '' : ' hidden') + end);
+  return next;
+}
+
+// When the open row is filtered out, the first row still on screen becomes the explanation. Nothing is focused and nothing is requested.
+function limboRetargetFindHtml(html, query) {
+  if (!query) return html;
+  const articles = [...html.matchAll(/<article class="admin-hit limbo-item"[\s\S]*?<\/article>/g)].map(match => match[0]);
+  const selected = articles.find(article => /aria-expanded="true"/.test(article));
+  if (!selected || !limboOpeningHidden(selected)) return html;
+  const next = articles.find(article => !limboOpeningHidden(article));
+  if (!next) return html;
+  const nextId = limboArticleId(next);
+  if (!nextId) return html;
+  limboLive.selected = nextId;
+  return html.replace(/<article class="admin-hit limbo-item"[\s\S]*?<\/article>/g, article => limboMarkSelected(article, limboArticleId(article) === nextId));
+}
+
+function limboFocusPrompt(text) {
+  const empty = document.querySelector('#limbo-focus-empty');
+  if (empty) empty.textContent = text || 'Выберите запись в очереди.';
 }
 
 // The title field never becomes a request. It only hides rows already painted, including rows a later page appended.
@@ -527,7 +575,16 @@ function limboApplyFind() {
     hasMore = Boolean(results.querySelector && results.querySelector('[data-limbo-more="items"]'));
     const selected = typeof results.querySelector === 'function' ? results.querySelector('.limbo-select[aria-expanded="true"]') : null;
     const selectedArticle = selected && selected.closest ? selected.closest('[data-limbo-item]') : null;
-    if (selectedArticle && selectedArticle.hidden) {
+    const firstVisible = articles.find(article => !article.hidden);
+    if (selectedArticle && selectedArticle.hidden && firstVisible) {
+      const button = typeof firstVisible.querySelector === 'function' ? firstVisible.querySelector('[data-limbo-select]') : null;
+      const token = button && button.getAttribute ? button.getAttribute('data-limbo-select') : '';
+      if (token) onLimboSelect(token);
+    } else if ((!selectedArticle || selectedArticle.hidden) && firstVisible && query) {
+      const button = typeof firstVisible.querySelector === 'function' ? firstVisible.querySelector('[data-limbo-select]') : null;
+      const token = button && button.getAttribute ? button.getAttribute('data-limbo-select') : '';
+      if (token) onLimboSelect(token);
+    } else if (selectedArticle && selectedArticle.hidden) {
       const detail = limboDetailNode(selected);
       if (detail) detail.hidden = true;
       const empty = document.querySelector('#limbo-focus-empty');
@@ -542,7 +599,9 @@ function limboApplyFind() {
       if (match) shown += 1;
       return limboSetArticleHidden(article, Boolean(query) && !match);
     });
+    results.innerHTML = limboRetargetFindHtml(results.innerHTML, query);
   }
+  limboFocusPrompt(query && shown === 0 ? 'Среди показанных строк совпадений нет. Это не весь список.' : '');
   if (note) note.textContent = limboFindNote(query, shown, total, hasMore);
 }
 
@@ -1035,6 +1094,15 @@ function onLimboMore() {
   return pending;
 }
 
+function onLimboCause() {
+  const select = document.querySelector('#limbo-causes');
+  const state = limboState();
+  const cause = String(select && select.value || '');
+  state.cause = Object.prototype.hasOwnProperty.call(LIMBO_CAUSE_LABELS, cause) ? cause : '';
+  limboWrite(state, 'push');
+  return limboRender();
+}
+
 function onLimboChip(event) {
   const button = event.target.closest ? event.target.closest('[data-limbo-cause],[data-limbo-subsystem]') : null;
   if (!button) return;
@@ -1295,7 +1363,7 @@ function startLimbo() {
   document.querySelector('#limbo-kind').addEventListener('change', onLimboForm);
   document.querySelector('#limbo-age').addEventListener('input', limboSchedule);
   document.querySelector('#limbo-reset').addEventListener('click', onLimboReset);
-  document.querySelector('#limbo-causes').addEventListener('click', onLimboChip);
+  document.querySelector('#limbo-causes').addEventListener('change', onLimboCause);
   document.querySelector('#limbo-subsystems').addEventListener('click', onLimboChip);
   document.querySelector('#limbo-results').addEventListener('click', onLimboResult);
   document.querySelector('#limbo-results').addEventListener('keydown', onLimboSelectKey);

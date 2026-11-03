@@ -37,13 +37,10 @@
       </div>
     </section>
     <form id="limbo-find-form" class="limbo-find" action="/admin/limb" role="search">
-      <label class="limbo-field" for="limbo-find">Найти запись<input id="limbo-find" type="search" autocomplete="off" spellcheck="false" placeholder="название среди показанных строк"></label>
-      <p id="limbo-find-note" class="limbo-find-note">Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Причина ниже отбирает весь список.</p>
+      <label class="limbo-field limbo-find-field" for="limbo-find">Найти запись<input id="limbo-find" type="search" autocomplete="off" spellcheck="false" placeholder="название среди показанных строк"></label>
+      <label class="limbo-field limbo-cause-field" for="limbo-causes">Причина<select id="limbo-causes" name="cause"><option value="">все</option></select></label>
+      <p id="limbo-find-note" class="limbo-find-note">Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Причина в этой строке отбирает весь список.</p>
     </form>
-    <section class="limbo-primary" aria-labelledby="limbo-cause-title">
-      <h2 id="limbo-cause-title">Причина</h2>
-      <div id="limbo-causes" class="admin-queues limbo-primary-causes" role="group" aria-label="Причина ожидания"></div>
-    </section>
     <div class="admin-layout limbo-layout">
       <section aria-labelledby="limbo-results-title">
         <h2 id="limbo-results-title">Очередь <small id="limbo-total" class="limbo-total"></small></h2>
