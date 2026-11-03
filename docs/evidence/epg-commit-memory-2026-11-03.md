@@ -4,7 +4,7 @@
 
 **Captured at:** 2026-11-03, 17:40–17:56 UTC.
 
-**Source:** Node.js v22.23.4, working tree based on `3fbaba377f7a66385c146df5cdd273cfd1c141ef`. The commit that adds this report is the measured tree. `scripts/epg-commit-memory-profile.mjs --child` loads the Worker sources in a `vm`, with a sqlite D1 stand-in (migrations through `0008`, `published_epg_authority.mode=d1`, `cutover=open`).
+**Source:** Node.js v22.23.4. Measured tree `062fecc84526c7ee712f3cbba223b213c20655d3`, parent `3fbaba377f7a66385c146df5cdd273cfd1c141ef`. `scripts/epg-commit-memory-profile.mjs --child` loads the Worker sources in a `vm`, with a sqlite D1 stand-in (migrations through `0008`, `published_epg_authority.mode=d1`, `cutover=open`).
 
 **Evidence lifecycle:** dated measurement. **Operational authority:** none. It does not clear a live EPG step, a lease reset, or a claim that the production isolate stayed under its limit.
 
