@@ -201,8 +201,8 @@ assert.match(results.innerHTML, new RegExp(`data-obs-recovery="${target}" aria-e
 assert.match(results.innerHTML, new RegExp(`<section class="limbo-recovery" id="obs-recovery-${target}" data-obs-recovery-slot="${target}" aria-label="Разбор наблюдения" hidden>`));
 const cardFace = html => html.replace(/<details class="limbo-tech">[\s\S]*?<\/details>/g, '');
 const face = cardFace(results.innerHTML).replace(/data-limbo-item="[^"]*"/g, '');
-assert.match(face, /Автоматическое исправление недоступно\. Кнопка ниже только объясняет, почему/);
-assert.match(face, /Разбор ниже скажет, можно ли вернуть наблюдение в обычную очередь/);
+assert.match(face, /Дальше человек\. Кнопка ниже объясняет, можно ли записать идентичность/);
+assert.match(face, /Дальше человек, если разбор назовёт возврат в обычную очередь допустимым/);
 assert.match(face, /class="limbo-actions"/);
 assert.doesNotMatch(face, /\|2001|observation:|недопустимо|не применимо|Identity Review|admin-status-plain|неизвестно/);
 assert.match(results.innerHTML, /<details class="limbo-tech">[\s\S]*тихий берег\|2001/);
