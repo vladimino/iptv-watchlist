@@ -39,7 +39,7 @@ flowchart TB
     cron -->|scheduled event| projector
     store -->|reads enrichment objects| projector
     projector -.->|on: Films and Persons; sync clocks at schema v5 or v6; metadata from D1 when the cache marker is d1| d1
-    sync -.->|D1 metadata cache (v6+) and published EPG/watchlist (v8), both d1| d1
+    sync -.->|"D1 metadata cache (v6+) and published EPG/watchlist (v8), both d1"| d1
     classDef current fill:#edf8ef,stroke:#579266,color:#15361e
     classDef gated fill:#fff3de,stroke:#a56c2b,color:#42300e
     class store,d1 current
