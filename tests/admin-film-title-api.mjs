@@ -59,7 +59,7 @@ const context = vm.createContext({Response, Request, Headers, URL, URLSearchPara
   FILM_TITLE_DICTIONARY: [{id: 'd5', tmdbId: '555', original: 'Dict Film', title: DICTIONARY, sources: ['https://www.wikidata.org/wiki/Q1'], aliases: ['Из словаря'], status: 'verified'}],
   PERSON_NAME_DICTIONARY: [],
   fetch: async () => { throw new Error('no outbound request'); }});
-for (const file of ['src/domain/film-person.js', 'src/domain/film-title-review.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
+for (const file of ['src/domain/film-person.js', 'src/domain/film-title-review.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), context);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), context);

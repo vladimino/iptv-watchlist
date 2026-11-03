@@ -9,7 +9,7 @@ assert.doesNotMatch(reader,/chris-pratt|Крис Прэтт/);
 // AIR-275 phase 2 (ADR 0056): only the enrichment projector reads the view in the Worker, through the scoped bundle copy.
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/domain\/film-person-reader\.js','LifecycleReader',\['readLifecycle'\]\)/);
 assert.match(fs.readFileSync('src/d1-enrichment.js','utf8'),/LifecycleReader\.readLifecycle\(/);
-for(const file of ['src/worker.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-reader|readLifecycle|shadowParity/,file);
+for(const file of ['src/worker.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/sources.js','src/mcp.js','src/continuation.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-reader|readLifecycle|shadowParity/,file);
 
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,encodeURIComponent});
 vm.runInContext(domain+'\n'+reader+'\nglobalThis.api={readLifecycle,shadowParity,semanticMismatches,storedFilmId,sidecarKey,FORBIDDEN_LIFECYCLE_KEYS};',ctx);

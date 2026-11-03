@@ -97,7 +97,7 @@ const workerContext = vm.createContext({Response, Request, Headers, URL, URLSear
   ASSETS: {}, INITIAL_PERSONAL_RATINGS: {}, FILM_TITLE_DICTIONARY: [], PERSON_NAME_DICTIONARY: [],
   fetch: async () => {tmdbCalls++; throw new Error('no outbound request');}});
 vm.runInContext(scoped('src/domain/discovery-observation-index.js', 'DiscoveryIndex'), workerContext);
-for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
+for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/sources.js', 'src/discovery.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), workerContext);
 vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), workerContext);
 vm.runInContext(scoped('src/domain/limbo-inventory.js', 'LimboInventory'), workerContext);

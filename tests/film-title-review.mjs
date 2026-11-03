@@ -11,7 +11,7 @@ assert.doesNotMatch(review,/linkFilms\(|localFilmId\(|externalIds\(|mergeExterna
 const topLevelNames=source=>new Set([...source.matchAll(/^(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map(match=>match[1]));
 const lifecycleNames=topLevelNames(domain);
 for(const name of topLevelNames(review))assert.equal(lifecycleNames.has(name),false,`${name} is already defined by film-person.js`);
-for(const file of ['src/sources.js','src/discovery.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/client.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-title-review|applyTitleReview|titleReviewState/,file);
+for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/mcp.js','src/continuation.js','public/app.js','public/admin.js','src/admin/client.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-title-review|applyTitleReview|titleReviewState/,file);
 assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/film-title-review\.js/);
 assert.match(fs.readFileSync('src/admin/film-title-route.js','utf8'),/applyTitleReview/);
 assert.match(fs.readFileSync('src/admin/read.js','utf8'),/titleReviewState/);

@@ -45,7 +45,9 @@ function memoryBucket({stream=true,chunk=5}={}){
   },
   async put(key,value,options={}){
    if(value&&typeof value.getReader==='function'&&String(key).includes('/generations/')&&String(key).endsWith('discovery-latest.json')){
-    const prepared=encodedBytes-publishMark;
+    // The decision walk already encoded each candidate to count UTF-8 bytes and dropped those arrays.
+    // What this read measures is the emit pass: two pulls must not encode the rest of the document.
+    const beforeRead=encodedBytes;
     const reader=value.getReader();
     let text='',reads=0,pending=0;const decoder=new TextDecoder();
     while(true){
@@ -53,10 +55,11 @@ function memoryBucket({stream=true,chunk=5}={}){
      if(step.done){text+=decoder.decode();break;}
      text+=decoder.decode(step.value,{stream:true});
      reads++;
-     if(reads===2)pending=encodedBytes-publishMark;
+     if(reads===2)pending=encodedBytes-beforeRead;
     }
-    assert.ok(prepared<Buffer.byteLength(text)/2,'encoded '+prepared+' bytes before the consumer read a '+Buffer.byteLength(text)+' byte document');
-    assert.ok(pending>0&&pending<Buffer.byteLength(text)/2,'two pulls had already encoded '+pending+' bytes');
+    const documentBytes=Buffer.byteLength(text);
+    assert.ok(pending>0&&pending<documentBytes/2,'two pulls encoded '+pending+' bytes of a '+documentBytes+' byte document');
+    assert.ok(encodedBytes-beforeRead<documentBytes,'emit pass encoded the document more than once');
     value=text;
    }
    const text=await read(value),only=options.onlyIf;
@@ -169,9 +172,7 @@ function arm(store,previousItems){
  return payload;
 }
 const programmeBody=()=>({runId:RUN,updatedAt:'2026-11-03T16:00:00.000Z',watchlistCount:1,films:[{id:'film1',title:'Схватка',year:1995,shows:[{channelId:'c1',channel:'Кино',start:BASE,end:BASE+60000,epgTitle:'Схватка'}]}],people:{directors:[],actors:[]},stats:{}});
-let publishMark=0;
 async function publish(store,latest,db){
- publishMark=encodedBytes;
  const env={BUCKET:store,DISCOVERY_LEDGER_MODE:'frozen',LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.invalid/guide.xml',...(db?{DB:db}:{})};
  const programme=programmeBody();
  await call('publishGenerationWithLedger')(env,RUN,latest,{programmeRunId:RUN,updatedAt:programme.updatedAt,rawCandidates:latest.length,filteredNonMovies:0},{'programme.json':programme,'discovered-films.json':{}},{updatedAt:programme.updatedAt,films:[{id:'film1',title:'Схватка'}]});
@@ -200,6 +201,55 @@ for(const [name,store] of [['chunked',memoryBucket({stream:true,chunk:5})],['jso
  await publish(store,next,null);
  const written=JSON.parse(store.objects.get('epg/generations/'+RUN+'/discovery-latest.json'));
  assert.deepEqual(written.items,JSON.parse(JSON.stringify(merge(prior,next,RUN))),'repeated key');
+}
+
+{
+ const probe=await call(`(async()=>{
+  const bucket={objects:new Map(),async put(key,value){const reader=value.getReader(),chunks=[];while(true){const step=await reader.read();if(step.done)break;chunks.push(step.value);}let n=0;for(const chunk of chunks)n+=chunk.byteLength;this.objects.set(key,n);}};
+  const bytes=new TextEncoder().encode('{"название":"Брат"}');
+  const source=()=>new ReadableStream({start(controller){controller.enqueue(bytes);controller.close();}});
+  await putKnownLength(bucket,'ok',bytes.byteLength,source(),{});
+  let short='stored',long='stored',bad='stored';
+  try{await putKnownLength(bucket,'short',bytes.byteLength+5,source(),{});}catch(error){short=String(error.message);}
+  try{await putKnownLength(bucket,'long',Math.max(0,bytes.byteLength-1),source(),{});}catch(error){long=String(error.message);}
+  try{await putKnownLength(bucket,'bad',Number.NaN,source(),{});}catch(error){bad=String(error.message);}
+  return {ok:bucket.objects.get('ok'),short,long,bad,hasShort:bucket.objects.has('short'),hasLong:bucket.objects.has('long')};
+ })()`);
+ const plain=JSON.parse(JSON.stringify(probe));
+ assert.equal(plain.ok,new TextEncoder().encode('{"название":"Брат"}').byteLength);
+ assert.match(plain.short,/length does not match/);
+ assert.match(plain.long,/length does not match/);
+ assert.match(plain.bad,/safe integer/);
+ assert.equal(plain.hasShort,false);
+ assert.equal(plain.hasLong,false);
+}
+{
+ const store=memoryBucket();
+ const text='{"a":1,"название":"Брат"}';
+ store.seed('epg/generations/'+RUN+'/discovery-latest.json',text);
+ store.seed('epg/generations/'+RUN+'/discovered-films.json','{}');
+ store.seed('epg/generations/'+RUN+'/programme.json','{}');
+ await call('copyEpgGeneration')({BUCKET:store},RUN);
+ assert.equal(store.objects.get('epg/discovery-latest.json'),text);
+ assert.equal(store.objects.get('epg/discovered-films.json'),'{}');
+ assert.equal(store.objects.get('programme.json'),'{}');
+ const bare=memoryBucket();
+ bare.seed('epg/generations/'+RUN+'/discovery-latest.json',text);
+ const get=bare.get.bind(bare);
+ bare.get=async key=>{const object=await get(key);if(object)object.size=undefined;return object;};
+ await assert.rejects(call('copyEpgGeneration')({BUCKET:bare},RUN),/safe integer/);
+ assert.equal(bare.objects.has('epg/discovery-latest.json'),false);
+}
+{
+ const store=memoryBucket();
+ arm(store,previous);
+ const pointer=store.objects.get('epg/discovery-archive/v1/current.json');
+ const put=store.put.bind(store);
+ store.put=async(key,value,options)=>{if(String(key).endsWith('/generations/'+RUN+'/discovery-latest.json'))throw new Error('R2 put failed');return put(key,value,options);};
+ await assert.rejects(publish(store,latest,null),/R2 put failed/);
+ assert.equal(JSON.parse(store.objects.get('epg/published-generation.json')).programmeRunId,OLD);
+ assert.equal(store.objects.get('epg/discovery-archive/v1/current.json'),pointer);
+ assert.equal(store.objects.has('epg/generations/'+RUN+'/discovery-latest.json'),false);
 }
 
 {
