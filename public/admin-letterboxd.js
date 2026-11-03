@@ -1,7 +1,7 @@
 // The archive preview page: one check per submit, the answer held in this tab's memory only. Leaving or resetting the page
 // drops it; nothing is written to storage, the URL or history. A write that has already left the browser is not undone by
 // Cancel, Escape, a new file or a failed response: the tab keeps that command and will not say the write never started.
-const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null};
+const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false};
 
 function archiveNode(selector) {return document.querySelector(selector);}
 
@@ -21,53 +21,105 @@ function archiveHasUnresolved() {
   return false;
 }
 
-function archiveCurrentStep(state) {
-  if (state === 'loading') return archiveLive.inflight && archiveLive.inflight.kind !== 'preview' ? 5 : 2;
-  if (state !== 'ready') return 1;
-  if (archiveHasUnresolved()) return 5;
+function archiveHasOutcome() {
   const committed = archiveLive.committed || {};
-  for (const key in committed) if (Object.prototype.hasOwnProperty.call(committed, key)) return 5;
+  for (const key in committed) if (committed[key] && !committed[key].pending) return true;
   const rollbackResult = archiveLive.rollbackResult || {};
-  for (const key in rollbackResult) if (Object.prototype.hasOwnProperty.call(rollbackResult, key)) return 5;
-  const issued = archiveLive.issued || {};
-  for (const key in issued) if (Object.prototype.hasOwnProperty.call(issued, key)) return 4;
-  return 3;
+  for (const key in rollbackResult) if (rollbackResult[key] && !rollbackResult[key].pending) return true;
+  const unknown = archiveLive.rollbackConfirmUnknown || {};
+  for (const key in unknown) if (unknown[key]) return true;
+  return false;
 }
 
 function archiveMarkStep(step) {
   if (!document.querySelectorAll) return;
+  const reached = archiveLive.reached || step || 1;
   for (const item of document.querySelectorAll('[data-archive-step]')) {
     const n = Number(item.getAttribute('data-archive-step'));
-    if (n === step) item.setAttribute('aria-current', 'step');
+    if (n === step) {item.setAttribute('aria-current', 'step'); if (item.scrollIntoView) item.scrollIntoView({block: 'nearest', inline: 'nearest'});}
     else if (item.removeAttribute) item.removeAttribute('aria-current');
-    if (n < step) item.setAttribute('data-reached', 'true');
+    if (n !== step && n <= reached) item.setAttribute('data-reached', 'true');
     else if (item.removeAttribute) item.removeAttribute('data-reached');
   }
 }
 
+function archivePaintResult() {
+  const step = archiveLive.viewStep || 1;
+  archiveMarkStep(step);
+  const upload = archiveNode('#archive-upload');
+  if (upload) upload.hidden = step !== 1;
+  const result = archiveNode('#archive-result');
+  if (!archiveLive.answer) {result.innerHTML = ''; return;}
+  result.innerHTML = step === 1 ? archiveStepReturnHtml() : archivePreviewHtml(archiveLive.answer, archiveLive);
+}
+
 function archiveRepaint() {
   if (!archiveLive.answer) return;
-  archiveMarkStep(archiveCurrentStep('ready'));
-  archiveNode('#archive-result').innerHTML = archivePreviewHtml(archiveLive.answer, archiveLive);
+  archivePaintResult();
+}
+
+function archiveSetWait(visible, writing) {
+  const progress = archiveNode('#archive-progress');
+  const loading = archiveNode('#archive-loading');
+  const cancel = archiveNode('#archive-cancel');
+  if (progress) progress.hidden = !visible;
+  loading.hidden = !visible;
+  cancel.hidden = !visible;
+  cancel.textContent = writing ? 'Прервать ожидание' : 'Отменить';
+  if (visible) loading.textContent = writing ? 'Запрос уже ушёл на сервер. Прервать ожидание не отменяет запись и не откатывает её.' : 'Сервер проверяет архив и сравнивает его с R2…';
+  if (visible && writing && cancel.focus) cancel.focus();
 }
 
 function archiveShow(state, payload) {
-  archiveMarkStep(archiveCurrentStep(state));
-  const loading = archiveNode('#archive-loading');
-  loading.hidden = state !== 'loading';
+  if (state === 'idle' || state === 'error') {archiveLive.viewStep = 1; archiveLive.reached = 1; archiveLive.navAway = false;}
+  const step = archiveLive.viewStep || 1;
+  archiveMarkStep(step);
+  const upload = archiveNode('#archive-upload');
+  if (upload) upload.hidden = step !== 1;
   const writing = archiveLive.inflight && archiveLive.inflight.kind !== 'preview';
-  loading.textContent = writing ? 'Запрос уже ушёл на сервер. Прервать ожидание не отменяет запись и не откатывает её.' : 'Сервер проверяет архив и сравнивает его с R2…';
+  archiveSetWait(state === 'loading', writing);
   archiveNode('#archive-idle').hidden = state !== 'idle';
   const error = archiveNode('#archive-error');
   error.hidden = state !== 'error';
   error.textContent = state === 'error' ? payload : '';
-  archiveNode('#archive-result').innerHTML = state === 'ready' ? archivePreviewHtml(payload, archiveLive) : '';
+  const result = archiveNode('#archive-result');
+  if (state === 'ready' && archiveLive.answer) result.innerHTML = step === 1 ? archiveStepReturnHtml() : archivePreviewHtml(payload, archiveLive);
+  else result.innerHTML = '';
   archiveNode('#archive-submit').disabled = state === 'loading';
-  const cancel = archiveNode('#archive-cancel');
-  cancel.hidden = state !== 'loading';
-  cancel.textContent = writing ? 'Прервать ожидание' : 'Отменить';
   if (state === 'error' && error.focus) error.focus();
-  if (state === 'ready' && archiveNode('#archive-result').focus) archiveNode('#archive-result').focus();
+  if (state === 'ready' && result.focus) result.focus();
+}
+
+function archiveOfferReceipt() {
+  if (!archiveHasOutcome()) return;
+  archiveLive.reached = Math.max(archiveLive.reached || 1, 5);
+  const step = archiveLive.viewStep || 1;
+  if (!archiveLive.navAway && (step === 4 || step === 5)) archiveLive.viewStep = 5;
+  archiveLive.navAway = false;
+}
+
+function onArchiveNav(target) {
+  if (!archiveLive.answer) return null;
+  const current = archiveLive.viewStep || 1;
+  let next = current;
+  if (target === 'back') next = Math.max(1, current - 1);
+  else {
+    const step = Number(target);
+    if (!Number.isInteger(step) || step < 2 || step > 5) return null;
+    if (step === 5 && !archiveHasOutcome()) return null;
+    const reached = archiveLive.reached || 1;
+    if (step > reached && step !== current + 1) return null;
+    next = step;
+  }
+  if (next === current) return null;
+  if (archiveLive.inflight && next !== 4 && next !== 5) archiveLive.navAway = true;
+  if (next === 4 || next === 5) archiveLive.navAway = false;
+  archiveLive.viewStep = next;
+  if (next > (archiveLive.reached || 1)) archiveLive.reached = next;
+  archiveRepaint();
+  const result = archiveNode('#archive-result');
+  if (result && result.innerHTML && result.focus) result.focus();
+  return null;
 }
 
 function archiveAbort() {
@@ -88,6 +140,9 @@ function archiveClearMemory() {
   archiveLive.bound = null;
   archiveLive.stale = false;
   archiveLive.inflight = null;
+  archiveLive.viewStep = 1;
+  archiveLive.reached = 1;
+  archiveLive.navAway = false;
 }
 
 function archiveFileMark(file, declared) {
@@ -131,6 +186,9 @@ function onArchiveSubmit(event) {
     archiveLive.answer = result.answer;
     archiveLive.bound = {file, declared, mark: archiveFileMark(file, declared)};
     archiveLive.stale = false;
+    archiveLive.viewStep = 2;
+    archiveLive.reached = 2;
+    archiveLive.navAway = false;
     archiveShow('ready', result.answer);
     return result;
   });
@@ -149,10 +207,9 @@ function onArchiveCancel() {
     return;
   }
   archiveSettleLostWrite(inflight);
-  archiveNode('#archive-loading').hidden = true;
+  archiveOfferReceipt();
+  archiveSetWait(false, false);
   archiveNode('#archive-submit').disabled = false;
-  archiveNode('#archive-cancel').hidden = true;
-  archiveNode('#archive-cancel').textContent = 'Отменить';
   const error = archiveNode('#archive-error');
   error.hidden = false;
   error.textContent = 'Ожидание прервано в браузере. Сервер это не отменяет и не откатывает. Исход неизвестен. Повтор сам не запускается.';
@@ -221,10 +278,8 @@ function archiveMarkInProgress(inflight) {
 }
 
 function archiveApplyFailed(result) {
-  archiveNode('#archive-loading').hidden = true;
+  archiveSetWait(false, false);
   archiveNode('#archive-submit').disabled = false;
-  archiveNode('#archive-cancel').hidden = true;
-  archiveNode('#archive-cancel').textContent = 'Отменить';
   archiveLive.controller = null;
   const inflight = archiveLive.inflight;
   archiveLive.inflight = null;
@@ -242,6 +297,7 @@ function archiveApplyFailed(result) {
   else if (inflight && inflight.kind === 'commit' && archiveLive.committed[inflight.chunk] && archiveLive.committed[inflight.chunk].transport) archiveLive.committed[inflight.chunk] = {state: 'refused', error: result.error, counts: null};
   else if (inflight && inflight.kind === 'confirm') archiveLive.confirmUnknown[inflight.chunk] = false;
   else if (inflight && inflight.kind === 'rollback-confirm') archiveLive.rollbackConfirmUnknown[inflight.chunk] = false;
+  if (inflight && (inflight.kind === 'commit' || inflight.kind === 'rollback' || inflight.kind === 'rollback-confirm')) archiveOfferReceipt();
   const error = archiveNode('#archive-error');
   error.hidden = false;
   error.textContent = inProgress ? archiveErrorText(result.error, result.detail) : lost ? archiveLostText(inflight.kind) : rollbackRefused ? archiveRollbackRefusedBanner(result.error) : archiveErrorText(result.error, result.detail);
@@ -256,14 +312,9 @@ function archiveBeginAction(kind, chunk) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   archiveLive.controller = controller;
   archiveLive.inflight = {kind, chunk};
-  const loading = archiveNode('#archive-loading');
-  loading.hidden = false;
-  loading.textContent = 'Запрос уже ушёл на сервер. Прервать ожидание не отменяет запись и не откатывает её.';
   archiveNode('#archive-error').hidden = true;
   archiveNode('#archive-submit').disabled = true;
-  const cancel = archiveNode('#archive-cancel');
-  cancel.hidden = false;
-  cancel.textContent = 'Прервать ожидание';
+  archiveSetWait(true, true);
   return {seq, signal: controller ? controller.signal : undefined};
 }
 
@@ -274,6 +325,8 @@ function onArchiveConfirm(chunk) {
   if (current.error) return archiveApplyFailed({mode: 'error', error: current.error, detail: null});
   const batch = (archiveLive.answer.batches && archiveLive.answer.batches.chunks || []).find(item => item.chunk === chunk);
   if (!batch || !batch.confirmable) return archiveApplyFailed({mode: 'error', error: 'not_eligible', detail: null});
+  archiveLive.viewStep = 4;
+  archiveLive.reached = Math.max(archiveLive.reached || 1, 4);
   if (!archiveLive.keys[chunk]) archiveLive.keys[chunk] = archiveIdempotencyKey();
   const run = archiveBeginAction('confirm', chunk);
   archiveLive.confirmUnknown[chunk] = true;
@@ -300,6 +353,8 @@ function onArchiveCommit(chunk) {
   if (archiveLive.stale && !(archiveLive.committed[chunk] && archiveLive.committed[chunk].state === 'unknown')) return Promise.resolve(null);
   const current = archiveCommandSource();
   if (current.error) return archiveApplyFailed({mode: 'error', error: current.error, detail: null});
+  archiveLive.viewStep = 4;
+  archiveLive.reached = Math.max(archiveLive.reached || 1, 4);
   const confirmation = archiveLive.issued[chunk];
   const run = archiveBeginAction('commit', chunk);
   archiveLive.committed[chunk] = {state: 'unknown', transport: true, pending: true, counts: null};
@@ -311,6 +366,7 @@ function onArchiveCommit(chunk) {
     archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, counts: receipt.counts || null};
     archiveLive.inflight = null;
     archiveLive.controller = null;
+    archiveOfferReceipt();
     archiveShow('ready', archiveLive.answer);
     return result;
   });
@@ -323,6 +379,8 @@ function onArchiveRollbackConfirm(chunk) {
   if (archiveLive.stale && !archiveLive.rollbackConfirmUnknown[chunk]) return Promise.resolve(null);
   const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
   if (!sha) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+  archiveLive.viewStep = 5;
+  archiveLive.reached = Math.max(archiveLive.reached || 1, 5);
   if (!archiveLive.rollbackKeys[chunk]) archiveLive.rollbackKeys[chunk] = archiveIdempotencyKey();
   const run = archiveBeginAction('rollback-confirm', chunk);
   archiveLive.rollbackConfirmUnknown[chunk] = true;
@@ -343,6 +401,8 @@ function onArchiveRollbackConfirm(chunk) {
 
 function onArchiveRollback(chunk) {
   if (!archiveLive.rollbackIssued[chunk] || archiveLive.controller) return Promise.resolve(null);
+  archiveLive.viewStep = 5;
+  archiveLive.reached = Math.max(archiveLive.reached || 1, 5);
   const confirmation = archiveLive.rollbackIssued[chunk];
   const run = archiveBeginAction('rollback', chunk);
   archiveLive.rollbackResult[chunk] = {state: 'unknown', transport: true, pending: true, counts: null};
@@ -353,6 +413,7 @@ function onArchiveRollback(chunk) {
     archiveLive.rollbackResult[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, rolledBack: true};
     archiveLive.inflight = null;
     archiveLive.controller = null;
+    archiveOfferReceipt();
     archiveShow('ready', archiveLive.answer);
     return result;
   });
@@ -369,6 +430,7 @@ function onArchiveAbandon(chunk) {
   delete archiveLive.rollbackResult[chunk];
   delete archiveLive.confirmUnknown[chunk];
   delete archiveLive.rollbackConfirmUnknown[chunk];
+  if ((archiveLive.viewStep || 1) === 5 && !archiveHasOutcome()) {archiveLive.viewStep = 4; archiveLive.reached = Math.min(archiveLive.reached || 4, 4);}
   const error = archiveNode('#archive-error');
   error.hidden = false;
   error.textContent = 'Команда для повтора забыта в этой вкладке. Сервер это не откатывает: если запись уже прошла, факты на месте.';
@@ -382,6 +444,7 @@ function onArchiveResultClick(event) {
   let action = null, chunk = null;
   while (node && node !== archiveNode('#archive-result')) {
     if (node.getAttribute) {
+      if (node.hasAttribute && node.hasAttribute('data-archive-nav')) {action = 'data-archive-nav'; chunk = node.getAttribute('data-archive-nav'); break;}
       for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon']) {
         if (node.hasAttribute && node.hasAttribute(name)) {action = name; chunk = Number(node.getAttribute(name)); break;}
       }
@@ -389,6 +452,7 @@ function onArchiveResultClick(event) {
     if (action) break;
     node = node.parentElement || node.parentNode;
   }
+  if (action === 'data-archive-nav') return onArchiveNav(chunk);
   if (action === 'data-archive-confirm') return onArchiveConfirm(chunk);
   if (action === 'data-archive-commit') return onArchiveCommit(chunk);
   if (action === 'data-archive-rollback-confirm') return onArchiveRollbackConfirm(chunk);
