@@ -96,6 +96,22 @@ assert.equal(old.items.some(item => item.id === 'identity/incomplete/film:film:r
 assert.deepEqual(filterLimboItems(items, {cause: 'backoff', subsystem: 'identity'}).items.map(item => item.subjectId), ['film:wait']);
 assert.deepEqual(filterLimboItems(items, {kind: 'observation'}).items, []);
 assert.deepEqual(filterLimboItems(items, {cause: 'nope'}), {error: 'unknown_cause'});
+assert.deepEqual(limboFilter({cause: 'stalled', causes: ['backoff']}), {error: 'conflicting_cause'});
+assert.deepEqual(limboFilter({causes: ['nope']}), {error: 'unknown_cause'});
+assert.deepEqual(limboFilter({attention: 'later'}), {error: 'unknown_attention'});
+assert.equal(limboFilter({attention: 'all'}).key, '|||');
+assert.equal(limboFilter({attention: 'now'}).key, '|||@now');
+assert.equal(limboFilter({causes: []}).key, '|||~');
+assert.equal(limboFilter({causes: ['manual_review', 'stalled']}).key, '|||~manual_review,stalled');
+assert.deepEqual(filterLimboItems(items, {causes: []}).items, []);
+const orItems = filterLimboItems(items, {causes: ['backoff', 'stalled']}).items;
+assert.ok(orItems.every(item => item.cause === 'backoff' || item.cause === 'stalled'));
+assert.deepEqual([...new Set(orItems.map(item => item.cause))].sort(), ['backoff', 'stalled'].filter(cause => items.some(item => item.cause === cause)).sort());
+const marked = items.map(item => ({...item, ownerAction: {now: item.cause === 'stalled', checked: true, capability: item.cause === 'stalled' ? 'discovery_reconsider' : null, reason: item.cause === 'stalled' ? 'eligible' : 'not_this_page'}}));
+assert.ok(filterLimboItems(marked, {attention: 'now'}).items.every(item => item.ownerAction.now === true));
+assert.equal(filterLimboItems(marked, {attention: 'now'}).items.some(item => item.cause !== 'stalled'), false);
+assert.equal(filterLimboItems(items, {attention: 'now'}).items.length, 0, 'an item without a confirmed action is not in the attention queue');
+assert.equal(filterLimboItems(marked, {}).items.length, marked.length);
 
 // 5. Pages: bounded, deterministic, cursor bound to filter key, limit and list.
 assert.deepEqual(pageLimboItems(null, {limit: 5}), {error: 'invalid_items'});

@@ -9,7 +9,11 @@ const ADMIN_PERSON_QUEUE_CODES=['localization-missing','localization-provisional
 
 function adminSearchParams(params,pin){
  const search=new URLSearchParams();
- for(const [name,value] of Object.entries(params||{}))if(value!==null&&value!==undefined&&value!=='')search.set(name,String(value));
+ for(const [name,value] of Object.entries(params||{})){
+  if(value===null||value===undefined||value==='')continue;
+  if(Array.isArray(value)){for(const item of value)if(item!==null&&item!==undefined&&item!=='')search.append(name,String(item));continue;}
+  search.set(name,String(value));
+ }
  if(pin)search.set('pin',pin);
  const text=search.toString();
  return text?'?'+text:'';
