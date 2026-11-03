@@ -43,6 +43,15 @@ assert.doesNotMatch(html, /Проверить заново/);
 assert.match(html, /<details id="posters-settings" class="posters-settings">\s*<summary>Дополнительные настройки<\/summary>/);
 assert.doesNotMatch(html, /id="posters-settings"[^>]*\sopen/);
 assert.match(html, /<h2 id="posters-dynamics-title">История этого браузера<\/h2>/);
+assert.match(html, /Хранится в localStorage этого браузера, общем для его вкладок/);
+assert.doesNotMatch(html, /этой вкладки/);
+assert.match(html, /Сервер не примет больше 10 записей за один вызов\. Эта страница сама не отправит больше 30 вызовов/);
+assert.doesNotMatch(html, /больше 30 подтверждённых вызовов/);
+assert.match(html, /<summary>Как устроена запись<\/summary>/);
+{
+  const intro = html.match(/<p class="posters-action-intro">([^<]*)<\/p>/)[1];
+  assert.doesNotMatch(intro, /блокировку|обе копии/, 'the open intro stays on the owner action');
+}
 assert.doesNotMatch(html, /class="admin-layout posters-layout"/);
 {
   const settingsAt = html.indexOf('id="posters-settings"');
@@ -231,7 +240,10 @@ assert.match(text('#posters-coverage'), /<b>7<\/b> <small class="posters-change"
 const stored = JSON.parse(store.get('iptv.admin.posters.v1'));
 assert.deepEqual([stored.lastSuccess.hydrated, stored.resume, stored.terminal], [9, {programmeRunId: G1, cursor: 'f09'}, {f02: 'no_poster_on_tmdb'}]);
 assert.match(text('#posters-dynamics'), /записано постеров: 9/);
-assert.match(nodes.get('#posters-accept-text').textContent, /после записи f09/, 'the next preview continues after the receipt position');
+assert.match(nodes.get('#posters-accept-text').textContent, /после записи f09/, 'the confirmation still names the exact saved position');
+assert.match(text('#posters-preview'), /с сохранённой позиции/);
+assert.match(text('#posters-preview'), /Старт: после записи f09/);
+assert.doesNotMatch(text('#posters-preview').split('<details')[0], /после записи f09/, 'the open preview does not lead with the raw cursor');
 assert.match(text('#posters-preview'), /Фильм f10/);
 assert.doesNotMatch(text('#posters-preview'), /Фильм f02/, 'the terminal record is behind the cursor');
 assert.ok(!JSON.stringify([...store.values()]).includes('secret-token'), 'no credential reaches the browser');
@@ -416,5 +428,41 @@ await settle();
 assert.deepEqual(posts().map(request => request.body), [{dryRun: false, limit: 1, expectedProgrammeRunId: G1, recheck: ['2']}]);
 assert.equal(posts().every(request => request.body.cursor === undefined), true);
 assert.deepEqual(tmdbCalls, ['2']);
+
+// 14. A failed re-read after a successful one does not leave the old figures as the current coverage, and a later success clears that label.
+seed();
+requests = []; puts = []; tmdbCalls = [];
+await fire('#posters-recheck', 'click');
+await settle();
+assert.match(text('#posters-coverage'), /data-posters-kpi="actionable"[^>]*>\s*<b class="posters-kpi-value">14<\/b>/);
+assert.doesNotMatch(text('#posters-coverage'), /не действует/);
+const failingGet = bucket.get;
+bucket.get = async key => {if (key === LIVE) throw new Error('down'); return failingGet(key);};
+requests = [];
+await fire('#posters-recheck', 'click');
+await settle();
+assert.match(nodes.get('#posters-error').textContent, /Хранилище не ответило/);
+assert.match(text('#posters-coverage'), /id="posters-stale"/);
+assert.match(text('#posters-coverage'), /Это не текущее покрытие/);
+assert.match(text('#posters-coverage'), /Доступно сейчас · не действует/);
+assert.match(text('#posters-coverage'), /posters-kpi-stale/);
+assert.match(text('#posters-snapshot-text'), /уже не действует/);
+assert.match(text('#posters-held'), /id="posters-held-stale"/);
+assert.equal(nodes.get('#posters-accept-label').hidden, true);
+assert.equal(nodes.get('#posters-run').disabled, true);
+assert.equal(nodes.get('#posters-held-run').disabled, true);
+assert.equal(await exec('onPostersRun()'), null);
+assert.equal(await exec('onPostersHeldRun()'), null);
+assert.deepEqual(posts(), []);
+bucket.get = failingGet;
+requests = [];
+await fire('#posters-recheck', 'click');
+await settle();
+assert.equal(nodes.get('#posters-error').hidden, true);
+assert.doesNotMatch(text('#posters-coverage'), /id="posters-stale"|не действует/);
+assert.match(text('#posters-coverage'), /data-posters-kpi="actionable"[^>]*>\s*<b class="posters-kpi-value">14<\/b>/);
+assert.equal(nodes.get('#posters-accept-label').hidden, false);
+assert.doesNotMatch(text('#posters-held'), /posters-held-stale/);
+assert.deepEqual(posts(), []);
 
 console.log('Admin posters page: read-only open, exact-scope confirmation, stale scope refused before any POST, one bounded batch with receipt and re-read, no repeat without confirmation, resolver busy, TMDB rate limit gate, forget history, read failure, the expected-generation fence across a G1 → G2 publish, unknown-not-zero coverage for a missing live copy, a missing or malformed generation copy and a missing pointer, TMDB links with real titles in every batch, and one confirmed recheck of a remembered answer passed');

@@ -38,10 +38,14 @@
     </section>
     <section aria-labelledby="posters-action-title" class="admin-card action-panel posters-action">
       <h2 id="posters-action-title">Ручная дозагрузка из TMDB</h2>
-      <p class="posters-action-intro">Сначала проверка очереди и объёма — она ничего не пишет. Затем подтверждение именно этого объёма и поколения, затем пакеты. Каждый пакет — один явный вызов существующего маршрута обслуживания. Он берёт блокировку резолвера, проверяет поколение перед каждой записью и пишет только поле постера в обе копии каталога с проверкой версии. Подтверждение защищает от случайного нажатия; доступ по-прежнему решает Cloudflare Access.</p>
+      <p class="posters-action-intro">Сначала проверка очереди и объёма — она ничего не пишет. Затем подтверждение именно этого объёма и поколения, затем пакеты. Подтверждение защищает от случайного нажатия; доступ по-прежнему решает Cloudflare Access.</p>
+      <details class="action-tech">
+        <summary>Как устроена запись</summary>
+        <p>Каждый пакет — один явный вызов существующего маршрута обслуживания. Он берёт блокировку резолвера, проверяет поколение перед каждой записью и пишет только поле постера в обе копии каталога с проверкой версии.</p>
+      </details>
       <details id="posters-settings" class="posters-settings">
         <summary>Дополнительные настройки</summary>
-        <p class="posters-source">По умолчанию один пакет из 10 записей с сохранённой позиции. Сервер всё равно не примет больше 10 записей за вызов и больше 30 подтверждённых вызовов.</p>
+        <p class="posters-source">По умолчанию один пакет из 10 записей с сохранённой позиции. Сервер не примет больше 10 записей за один вызов. Эта страница сама не отправит больше 30 вызовов за один подтверждённый запуск; маршрут число вызовов не считает.</p>
         <form id="posters-form" class="limbo-form posters-form" action="/admin/posters">
           <label class="limbo-field">Записей в пакете<select id="posters-limit" name="limit"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10" selected>10 (максимум)</option></select></label>
           <label class="limbo-field">Вызовов не больше<select id="posters-calls" name="calls"><option value="1" selected>1 пакет</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="30">30 (максимум)</option></select></label>
@@ -72,7 +76,7 @@
     </section>
     <section aria-labelledby="posters-dynamics-title" class="admin-card posters-dynamics">
       <h2 id="posters-dynamics-title">История этого браузера</h2>
-      <p class="posters-source">Только localStorage этой вкладки. Сервер не хранит журнал запусков, очередь по нему не строится, в другом браузере здесь будет пусто.</p>
+      <p class="posters-source">Хранится в localStorage этого браузера, общем для его вкладок. Сервер не хранит журнал запусков, очередь по нему не строится, в другом браузере здесь будет пусто.</p>
       <div id="posters-dynamics"><p class="muted">Истории пока нет.</p></div>
       <button type="button" id="posters-forget" class="admin-more">Забыть историю этого браузера</button>
     </section>
