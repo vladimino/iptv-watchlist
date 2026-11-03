@@ -31,7 +31,7 @@
         <p class="eyebrow">ВЛАДЕЛЕЦ</p>
         <div class="admin-catalog-heading">
           <h1 id="admin-catalog-page-title">Каталог данных</h1>
-          <p id="admin-catalog-page-intro" class="admin-intro">Поиск фильмов и людей и очереди качества по опубликованной программе. Название одного фильма и русское имя человека записываются только с их карточки, после подтверждения.</p>
+          <p id="admin-catalog-page-intro" class="admin-intro">Сначала поиск. Очереди качества — отдельно, пустые не показаны. Результат слева, карточка справа: «Добавить вариант» и «Сделать предпочтительным» — разные записи, и успех только после сверки.</p>
         </div>
         <div class="admin-health-heading">
           <h1 id="admin-health-page-title">Здоровье данных</h1>
@@ -79,21 +79,24 @@
     <form class="search-panel" role="search" action="/admin">
       <label class="search-box"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="admin-search" type="search" name="q" placeholder="Название, имя или внешний id" aria-label="Найти фильм или человека" autocomplete="off" enterkeyhint="search" maxlength="200"></label>
     </form>
-    <section aria-labelledby="admin-queue-title">
-      <h2 id="admin-queue-title">Очереди качества</h2>
+    <details id="admin-queues-panel" class="admin-queues-panel">
+      <summary id="admin-queues-summary">Очереди качества</summary>
       <div id="admin-queues" class="admin-queues" role="group" aria-label="Очереди качества"></div>
       <p id="admin-queues-note" class="admin-queues-note muted" hidden></p>
-    </section>
+    </details>
     <p id="admin-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем опубликованный снимок…</p>
     <div id="admin-stale" class="admin-state admin-state-stale" role="alert" hidden><span id="admin-stale-text">Опубликованный снимок изменился. Показанные результаты относятся к прежнему поколению.</span><button type="button" id="admin-refresh" class="admin-refresh">Обновить снимок</button></div>
     <p id="admin-error" class="admin-state admin-state-error" role="alert" hidden></p>
-    <div class="admin-layout">
-      <section aria-labelledby="admin-results-title">
+    <div class="admin-layout" id="admin-catalog-layout">
+      <section id="admin-results-section" aria-labelledby="admin-results-title">
         <h2 id="admin-results-title">Результаты</h2>
         <p id="admin-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b>Ничего не найдено</b><span>В опубликованной программе нет такой записи.</span></p>
         <div id="admin-results"></div>
       </section>
-      <article id="admin-detail" class="admin-card" aria-live="polite" hidden></article>
+      <article id="admin-detail" class="admin-card" aria-live="polite" hidden>
+        <button type="button" id="admin-detail-back" class="admin-detail-back" hidden>К результатам</button>
+        <div id="admin-detail-body"></div>
+      </article>
     </div>
     </div>
       </div>
