@@ -57,7 +57,10 @@
           <h3 id="admin-health-queue-title" class="admin-health-subtitle">Что требует внимания</h3>
           <div id="admin-health-issues" role="listbox" aria-labelledby="admin-health-queue-title"></div>
         </div>
-        <article id="admin-health-detail" class="health-detail" aria-live="polite"></article>
+        <article id="admin-health-detail" class="health-detail" aria-labelledby="admin-health-detail-title admin-health-detail-subject" aria-live="polite">
+          <h3 id="admin-health-detail-title" class="admin-health-subtitle">Выбранная проблема</h3>
+          <div id="admin-health-detail-body"></div>
+        </article>
       </div>
       <section id="admin-health-wait" class="health-wait" hidden>
         <h3 id="admin-health-wait-title" class="admin-health-subtitle">Штатное ожидание</h3>

@@ -214,7 +214,61 @@ function element(selector) {
     },
   };
 }
-const nodes = new Map(['#admin-search', '#admin-queues', '#admin-queues-note', '#admin-results', '#admin-results-section', '#admin-detail', '#admin-loading', '#admin-error', '#admin-stale', '#admin-refresh', '#admin-empty', '#admin-snapshot', '#admin-snapshot-text', '#admin-detail-title', '#admin-health', '#admin-catalog', '#admin-view-catalog', '#admin-view-health', '.admin-views', '#admin-health-refresh', '#admin-health-stale-refresh', '#admin-health-summary', '#admin-health-sources', '#admin-health-subsystems', '#admin-health-issues', '#admin-health-empty', '#admin-health-loading', '#admin-health-error', '#admin-health-stale', '#admin-health-kpis', '#admin-health-detail', '#admin-health-wait', '#admin-health-wait-list', 'meta[name="description"]'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#admin-search', '#admin-queues', '#admin-queues-note', '#admin-results', '#admin-results-section', '#admin-detail', '#admin-loading', '#admin-error', '#admin-stale', '#admin-refresh', '#admin-empty', '#admin-snapshot', '#admin-snapshot-text', '#admin-detail-title', '#admin-health', '#admin-catalog', '#admin-view-catalog', '#admin-view-health', '.admin-views', '#admin-health-refresh', '#admin-health-stale-refresh', '#admin-health-summary', '#admin-health-sources', '#admin-health-subsystems', '#admin-health-issues', '#admin-health-empty', '#admin-health-loading', '#admin-health-error', '#admin-health-stale', '#admin-health-kpis', '#admin-health-detail', '#admin-health-detail-body', '#admin-health-wait', '#admin-health-wait-list', '.health-master', 'meta[name="description"]'].map(selector => [selector, element(selector)]));
+function detachNode(node) {
+  const parent = node && node.parentElement;
+  if (!parent || !parent.childNodes) return;
+  parent.childNodes = parent.childNodes.filter(child => child !== node);
+}
+function attachNode(parent, node, index) {
+  detachNode(node);
+  if (!parent.childNodes) parent.childNodes = [];
+  node.parentElement = parent;
+  parent.childNodes.splice(index === undefined ? parent.childNodes.length : index, 0, node);
+}
+function mountOptions(host) {
+  host.childNodes = [];
+  host.querySelector = selector => host.childNodes.find(child => child.matches && child.matches(selector)) || null;
+  host.querySelectorAll = selector => host.childNodes.filter(child => child.matches && child.matches(selector));
+  let html = '';
+  Object.defineProperty(host, 'innerHTML', {
+    get() {return html;},
+    set(value) {
+      html = String(value);
+      host.childNodes = [];
+      const pattern = /<button\b([^>]*)>/g;
+      let match;
+      while ((match = pattern.exec(html))) {
+        const attrs = match[1];
+        const className = (/class="([^"]*)"/.exec(attrs) || [])[1] || '';
+        const key = (/data-issue-key="([^"]*)"/.exec(attrs) || [])[1] || '';
+        const button = {
+          className,
+          parentElement: host,
+          getAttribute(name) {return name === 'data-issue-key' ? key : null;},
+          matches(selector) {
+            if (selector === '.is-selected') return className.split(/\s+/).includes('is-selected');
+            if (selector === '[data-issue-key]') return true;
+            return false;
+          },
+          closest(selector) {return this.matches(selector) ? this : null;},
+          focus() {document.activeElement = this;},
+          after(node) {
+            const at = host.childNodes.indexOf(this);
+            attachNode(host, node, at + 1);
+          },
+        };
+        host.childNodes.push(button);
+      }
+    },
+  });
+}
+mountOptions(nodes.get('#admin-health-issues'));
+mountOptions(nodes.get('#admin-health-wait-list'));
+const healthMaster = nodes.get('.health-master');
+healthMaster.childNodes = [];
+healthMaster.append = function(node) {attachNode(this, node);};
+healthMaster.append(nodes.get('#admin-health-detail'));
 const moreButton = element('[data-admin-more="film"]');
 const filmGroup = element('[data-admin-group="film"] .admin-group-items');
 const searchNode = nodes.get('#admin-search');
@@ -234,6 +288,7 @@ const document = {
   querySelector(selector) {
     if (selector === '[data-admin-more="film"]') return nodes.get('#admin-results').innerHTML.includes('data-admin-more="film"') || moreButton.removed === false ? moreButton : null;
     if (selector === '[data-admin-group="film"] .admin-group-items') return filmGroup;
+    if (selector === '#admin-health-issues .is-selected, #admin-health-wait-list .is-selected') return nodes.get('#admin-health-issues').querySelector('.is-selected') || nodes.get('#admin-health-wait-list').querySelector('.is-selected');
     return nodes.get(selector) || null;
   },
 };
@@ -512,7 +567,9 @@ assert.match(healthSummary, /Сводного балла нет/);
 assert.doesNotMatch(healthSummary, /поколение/, 'the generation stays on the snapshot line, not in the summary paragraph');
 assert.match(nodes.get('#admin-snapshot-text').textContent, /Поколение 11111111/, 'the health answer keeps the pinned snapshot line');
 assert.match(html, /Ссылки открывают другую страницу админки и ничего не запускают/);
-assert.ok(html.indexOf('id="admin-health-summary"') < html.indexOf('id="admin-health-kpis"') && html.indexOf('id="admin-health-kpis"') < html.indexOf('Что требует внимания') && html.indexOf('Что требует внимания') < html.indexOf('id="admin-health-detail"') && html.indexOf('id="admin-health-detail"') < html.indexOf('Штатное ожидание') && html.indexOf('Штатное ожидание') < html.indexOf('Подсистемы и источники'));
+assert.ok(html.indexOf('id="admin-health-summary"') < html.indexOf('id="admin-health-kpis"') && html.indexOf('id="admin-health-kpis"') < html.indexOf('Что требует внимания') && html.indexOf('Что требует внимания') < html.indexOf('id="admin-health-detail"') && html.indexOf('Выбранная проблема') < html.indexOf('id="admin-health-detail-body"') && html.indexOf('id="admin-health-detail-body"') < html.indexOf('Штатное ожидание') && html.indexOf('Штатное ожидание') < html.indexOf('Подсистемы и источники'));
+assert.match(html, /aria-labelledby="admin-health-detail-title admin-health-detail-subject"/);
+assert.match(css, /\.health-detail \.health-group-title\{[^}]*font-size:22px/, 'the selected name is the panel headline');
 assert.match(nodes.get('#admin-health-sources').textContent, /нерешённые наблюдения: не читается здесь/);
 assert.match(nodes.get('#admin-health-sources').textContent, /baseline Letterboxd: не читается здесь/);
 const cards = nodes.get('#admin-health-subsystems').innerHTML;
@@ -541,7 +598,10 @@ assert.doesNotMatch(issuesHtml, /Дальше само:/, 'routine waiting is no
 const waitHtml = nodes.get('#admin-health-wait-list').innerHTML;
 assert.match(waitHtml, /role="option"/);
 assert.doesNotMatch(waitHtml, /Метаданные отсутствуют|Объект-источник отсутствует/);
-const detailHtml = nodes.get('#admin-health-detail').innerHTML;
+const detailHtml = nodes.get('#admin-health-detail-body').innerHTML;
+assert.match(detailHtml, /<h4 id="admin-health-detail-subject" class="health-group-title">[^<]+<\/h4>/);
+assert.ok(detailHtml.indexOf('admin-health-detail-subject') < detailHtml.indexOf('health-group-why') && detailHtml.indexOf('health-group-why') < detailHtml.indexOf('Технические подробности'), 'the selected name is a heading above the reason, and the disclosure stays below it');
+assert.doesNotMatch(detailHtml.slice(0, detailHtml.indexOf('health-group-why')), /film:|<\/h4>[^]*<\/h4>/);
 assert.match(detailHtml, /Технические подробности/);
 assert.ok(detailHtml.indexOf('health-group-why') < detailHtml.indexOf('Технические подробности'), 'the reason stays outside the technical disclosure');
 assert.match(detailHtml, /Неизвестно, сколько затронуто|Обновить оценку можно кнопкой|Подтверждённого результата в этом чтении нет/);
@@ -551,7 +611,8 @@ const metadataKey = issuesHtml.split('<button').find(part => part.includes('>М�
 const requestsBeforeSelect = requests.length;
 run(`healthApplySelection(${JSON.stringify(metadataKey)})`);
 assert.equal(requests.length, requestsBeforeSelect, 'choosing a problem does not read again');
-const chosen = nodes.get('#admin-health-detail').innerHTML;
+const chosen = nodes.get('#admin-health-detail-body').innerHTML;
+assert.notEqual(chosen.match(/<h4 id="admin-health-detail-subject" class="health-group-title">([^<]*)<\/h4>/)[1], detailHtml.match(/<h4 id="admin-health-detail-subject" class="health-group-title">([^<]*)<\/h4>/)[1], 'changing the row replaces the selected heading');
 assert.match(chosen, /Метаданные отсутствуют|Обновления метаданных там нет/);
 assert.match(chosen, /Открыть фильм/);
 assert.match(chosen, /aria-label="Открыть фильм"/);
@@ -570,10 +631,40 @@ run(`onAdminHealthOptionKey({key:' ',target:{closest(sel){if(sel==='input, texta
 assert.equal(run('globalThis.__healthKey'), true, 'Enter or Space selects the focused problem');
 run(`onAdminHealthOptionKey({key:'ArrowDown',target:{closest(sel){if(sel==='input, textarea, select')return {tag:'input'};return null;}},preventDefault(){globalThis.__healthArrow=true;}})`);
 assert.equal(run('typeof globalThis.__healthArrow'), 'undefined', 'arrows inside a field are not taken by the queue');
+const healthDetail = nodes.get('#admin-health-detail');
+const selectedInbox = nodes.get('#admin-health-issues').querySelector('.is-selected');
 run('healthPlaceDetail(true)');
-assert.equal(nodes.get('#admin-health-detail').getAttribute('data-placement'), 'under-selected');
+assert.equal(healthDetail.getAttribute('data-placement'), 'under-selected');
+assert.equal(healthDetail.parentElement, nodes.get('#admin-health-issues'), 'a narrow inbox selection sits in the inbox, not beside an empty column');
+assert.equal(nodes.get('#admin-health-issues').childNodes[nodes.get('#admin-health-issues').childNodes.indexOf(selectedInbox) + 1], healthDetail);
 run('healthPlaceDetail(false)');
-assert.equal(nodes.get('#admin-health-detail').getAttribute('data-placement'), 'beside');
+assert.equal(healthDetail.getAttribute('data-placement'), 'beside');
+assert.equal(healthDetail.parentElement, nodes.get('.health-master'), 'widening puts the panel back in the second column');
+const placedRequests = requests.length;
+const waitKey = nodes.get('#admin-health-wait-list').innerHTML.match(/data-issue-key="([^"]+)"/)[1];
+const waitRow = nodes.get('#admin-health-wait-list').querySelector('[data-issue-key]');
+document.activeElement = waitRow;
+run(`healthApplySelection(${JSON.stringify(waitKey)})`);
+assert.equal(requests.length, placedRequests, 'choosing a waiting row does not read or write');
+const repaintedWait = nodes.get('#admin-health-wait-list').querySelector('.is-selected');
+assert.equal(document.activeElement, repaintedWait, 'focus follows the repainted waiting row');
+assert.equal(repaintedWait.getAttribute('data-issue-key'), waitKey);
+run('healthPlaceDetail(true)');
+assert.equal(healthDetail.parentElement, nodes.get('#admin-health-wait-list'));
+assert.equal(nodes.get('#admin-health-wait-list').childNodes[nodes.get('#admin-health-wait-list').childNodes.indexOf(repaintedWait) + 1], healthDetail, 'a narrow waiting selection is under that row, not under the inbox');
+assert.match(nodes.get('#admin-health-detail-body').innerHTML, /<h4 id="admin-health-detail-subject"/);
+run('healthPlaceDetail(false)');
+assert.equal(healthDetail.parentElement, nodes.get('.health-master'));
+run(`renderAdminHealth({health:{now:'2026-11-02T21:00:00.000Z',published:{programmeRunId:'11111111-1111-4111-8111-111111111111'},scope:{coverage:{films:'complete'},subjects:{films:1}},subsystems:{prediction:{status:'attention',evidence:'observed'}},groups:[{severity:'info',subsystem:'prediction',category:'incomplete',reason:'work_queued',subjectKind:'film',issues:1,affected:1,sample:['film:q'],action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'already_queued'},evidence:{complete:1},progress:{},freshness:{}}]},sources:{}})`);
+assert.match(nodes.get('#admin-health-issues').innerHTML, /Срочных проблем нет/);
+assert.equal(nodes.get('#admin-health-issues').querySelector('.is-selected'), null);
+const onlyWait = nodes.get('#admin-health-wait-list').querySelector('.is-selected');
+assert.ok(onlyWait, 'a waiting-only answer selects the waiting row');
+run('healthPlaceDetail(true)');
+assert.equal(healthDetail.parentElement, nodes.get('#admin-health-wait-list'));
+assert.equal(nodes.get('#admin-health-wait-list').childNodes[nodes.get('#admin-health-wait-list').childNodes.indexOf(onlyWait) + 1], healthDetail, 'the only waiting row keeps the panel, rather than the empty inbox');
+run('healthPlaceDetail(false)');
+assert.equal(healthDetail.parentElement, nodes.get('.health-master'));
 assert.doesNotMatch(issuesVisibleText, /На другой странице|Запись к этому готова/);
 assert.equal(nodes.get('#admin-health-empty').hidden, true);
 assert.equal(nodes.get('#admin-health-loading').hidden, true);

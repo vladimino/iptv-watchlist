@@ -233,7 +233,7 @@ function healthGroupBody(group, now) {
   const situation = healthSituation(group);
   const situationMark = situation && situation !== categoryText ? `<span class="health-situation">${healthEscape(situation)}</span>` : '';
   const eligible = action.eligible === true ? 'true' : action.eligible === false ? 'false' : 'null';
-  return `<div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><span class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(categoryText)}</span>${situationMark}</div>
+  return `<div class="health-group-head"><span class="health-severity health-severity-${healthEscape(group.severity)}">${healthEscape(HEALTH_SEVERITY_TEXT[group.severity] || group.severity)}</span><h4 id="admin-health-detail-subject" class="health-group-title">${healthEscape(HEALTH_SUBSYSTEM_TEXT[group.subsystem] || group.subsystem)} · ${healthEscape(categoryText)}</h4>${situationMark}</div>
     <p class="health-group-why">${healthEscape(HEALTH_REASON_TEXT[group.reason] || group.reason)}</p>
     <p class="health-group-affected">${healthEscape(healthAffectedText(group))}</p>
     <p class="health-group-next">${healthNextStep(group)}</p>
@@ -372,7 +372,7 @@ function healthPlaceDetail(narrow) {
   const detail = document.querySelector('#admin-health-detail');
   if (!detail) return;
   detail.setAttribute('data-placement', narrow ? 'under-selected' : 'beside');
-  const selected = document.querySelector('#admin-health-issues .is-selected');
+  const selected = document.querySelector('#admin-health-issues .is-selected, #admin-health-wait-list .is-selected');
   const master = document.querySelector('.health-master');
   if (!selected || !master || typeof selected.after !== 'function' || typeof master.append !== 'function') return;
   if (narrow) selected.after(detail);
@@ -387,7 +387,7 @@ function healthPaintSelection() {
   const wait = document.querySelector('#admin-health-wait');
   wait.hidden = !inbox.wait;
   document.querySelector('#admin-health-wait-list').innerHTML = inbox.wait;
-  document.querySelector('#admin-health-detail').innerHTML = inbox.detail;
+  document.querySelector('#admin-health-detail-body').innerHTML = inbox.detail;
   const narrow = typeof matchMedia === 'function' && matchMedia('(max-width: 800px)').matches;
   healthPlaceDetail(narrow);
 }

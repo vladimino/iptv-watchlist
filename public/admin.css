@@ -116,6 +116,9 @@
 .health-kpi-label{font-size:16px;font-weight:650}.health-kpi small{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
 .health-master{display:grid;grid-template-columns:minmax(240px,.9fr) minmax(280px,1.35fr);gap:16px;align-items:start}
 .health-detail{min-width:0;min-height:220px;padding:16px 18px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
+.health-detail .admin-health-subtitle{margin:0 0 12px}
+.health-group-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 10px}
+.health-detail .health-group-title{margin:0;font-size:22px;line-height:1.15;letter-spacing:-.3px;color:var(--text);overflow-wrap:anywhere}
 .health-option{display:grid;gap:3px;width:100%;margin:0 0 8px;padding:10px 12px;text-align:left;font:inherit;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:12px;cursor:pointer}
 .health-option.is-selected{border-color:#d9f279;box-shadow:inset 3px 0 0 #d9f279}
 .health-option:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
