@@ -1,6 +1,6 @@
 # AIR-319: D1 published EPG production cutover, 3 November 2026
 
-**Verdict, updated at approximately 2026-11-03 20:42 UTC:** **First actual post-cutover D1 EPG generation publication succeeded** on a daily-task-created run completed with one separately owner-authorized manual step. Read-only MCP published-generation and downstream queue consumers agree on the new run. **Direct D1 row/R2 object parity and programme/watchlist/availability HTTP consumer acceptance remain PENDING.** This evidence grants no further writer or migration authority.
+**Verdict, updated at 2026-11-03 22:09 UTC:** **First actual post-cutover D1 EPG generation publication succeeded**, and a later fenced read-only comparison found the D1 authority, documents, membership and shows equal to the R2 generation copies and stable mirrors. `GET /api/programme` and `GET /api/watchlist` were not called. At this snapshot their mirror-repair predicate was already aligned, so the comparison does not show a lag those routes would write. This evidence grants no further writer or migration authority.
 
 ## Approved operator execution
 
@@ -38,12 +38,31 @@ Read-only MCP `epg_status` afterwards reported the same run at `stage=complete`,
 - `ratings_sync_status`: separate ratings pipeline `idle`, migration `complete`. Its latest scheduled run was pinned to the *old* programme run; two `event_missing` removal references were observed, without evidence tying them to this commit.
 - `feature_flags`: `D1_ENRICHMENT_WRITE=on` and `DISCOVERY_EXECUTOR` absent/effective external. No changes were made.
 
-These are read-only API-level consistency observations, not direct SQL reads of `published_epg_authority`, `published_epg_member` or `published_epg_show`, raw R2 etag/size/hash comparison of staged and mirrored objects, or independent programme/watchlist/availability response parity. No live read across those boundaries has been falsely claimed.
+These are read-only API-level consistency observations. At 20:42 UTC they were not yet direct SQL reads of `published_epg_authority`, `published_epg_member` or `published_epg_show`, and not a raw R2 etag/size/hash comparison. That comparison is the next section.
+
+## Direct D1 and R2 parity (22:09 UTC)
+
+Read-only. `node scripts/published-epg-production.mjs --target iptv` returned `writes: false`, `writeState: none`, schema 8, and idle sync, resolver and enrichment-projection leases. No `--apply`, `--load`, `--activate` or `--revert`. The same credential then ran only `SELECT` against production D1 and `HEAD`/`GET` against bucket `iptv`. The authority row and the seven object ETags were read again after the bodies; both slices matched. No mirror repair ran.
+
+| Check | Result |
+| --- | --- |
+| Authority | `mode=d1`, `cutover=open`, `programme_run_id=00ff34fa-e518-4ac7-ae63-b2e46f803503`, `generation=2`, `watchlist_generation=2` |
+| Mirror pointer | `mirror_programme_run_id` is that same run. Pointer object ETag prefix `b18e83dacac2` equals `mirror_etag`. Body is exactly `{programmeRunId, phase: published}` |
+| Generation row | `phase=published`, `published_at=2026-11-03T20:22:44.960Z`. `payload_sha256` prefix `8de0b9136063` equals SHA-256 of `published`, the programme text and the watchlist text |
+| Documents | Programme 39 ordered chunks and watchlist 26 ordered chunks, ordinals contiguous from 0. Concatenated text equals the root objects and the generation copies byte for byte. Programme 2,288,075 bytes, SHA-256 prefix `5e528ea18c0e`. Watchlist 1,542,383 bytes, SHA-256 prefix `aeceaf96632d` |
+| Membership | Programme 395 and watchlist 395, each ordinal `0..394`, distinct film ids, order equal to that document's `films` |
+| Shows | 971 D1 rows. The same 971 rows are extracted from the programme document by `programmeShows`. The multisets match |
+| Watchlist ETag | Root `watchlist.json` ETag prefix `9ecfaff1d7b1` equals `mirror_watchlist_etag`. The generation copy has the same ETag and size |
+| Programme ETag | Root and `epg/generations/00ff34fa-e518-4ac7-ae63-b2e46f803503/programme.json` share ETag prefix `3f29beb5ad0c` and size 2,288,075 |
+| Discovery ledger | `epg/discovery-latest.json` and the generation copy are both 45,040,540 bytes, SHA-256 prefix `f5c01504af8d`, same ETag prefix `d6961603ec4d` |
+| Stage rows | Two rows, both `published`: the previous run `71820185…` and this run. This run's stage counts are 790 members, 971 shows and 65 document parts. No `loading` or `validated` row |
+
+The previous generation row is still `published` and is not the authority pointer. `GET /api/programme` and `GET /api/watchlist` were not issued. The measured bodies and ETags are what `repairMirrors` treats as already aligned, so this snapshot does not show a mirror lag. Events and removal references were not read again; the earlier ratings observation of two `event_missing` references on the previous programme run stands unchanged. The hourly Discovery continuation was not retried.
 
 ## Safety and outstanding acceptance criteria
 
-The current Worker `src/worker.js` uses `PublishedEpg.repairMirrors` for `GET /api/programme` and `GET /api/watchlist`. In D1 mode, `src/published-epg.js` may repair R2 compatibility objects and update D1 mirror metadata. These HTTP GETs are not guaranteed read-only. The coordinator did **not** invoke them as unauthorized acceptance probes, so no direct document equality or pin-consistency acceptance can be claimed. A pipeline-status run id is not full raw parity. A separate explicitly permitted bounded inspection or operator-produced read-only result is required, with any possible mirror repair acknowledged.
+The current Worker `src/worker.js` uses `PublishedEpg.repairMirrors` for `GET /api/programme` and `GET /api/watchlist`. In D1 mode, `src/published-epg.js` may repair R2 compatibility objects and update D1 mirror metadata when those objects differ. These HTTP GETs were not used for this acceptance. The 22:09 UTC read already compared the documents and ETags those routes would repair, and they matched.
 
-The first actual post-cutover D1 EPG publish is now confirmed on a task-created run completed with one owner-approved manual step; an unattended daily-task success remains unverified. Do not close AIR-319 until remaining gates are resolved: (1) direct independent D1 authority/members/shows and raw R2 generation/mirror parity, or a qualified owner acceptance of those remaining unknowns; (2) programme/watchlist/availability and relevant consumers through a genuinely safe or separately authorized read route; (3) accepted documents, final exact-head CI and rendered owner visual approval of four Mermaid changes; (4) disposition of Discovery continuation and stale `epg_status.error` without unauthorized recovery.
+The first actual post-cutover D1 EPG publish is confirmed on a task-created run completed with one owner-approved manual step; an unattended daily-task success remains unverified. Direct D1 authority, membership, shows and R2 mirror parity for generation 2 passed at 22:09 UTC. Still separate from that parity: a live HTTP availability render was not requested in this read; Discovery continuation and the stale `epg_status.error` field were not changed; document merge and Mermaid approval stay on the documentation pull request.
 
 This report documents exactly **one separately authorized production EPG step**; all subsequent checks were read-only. The approval has been consumed. No new EPG step/start, Discovery chunk, repair, 0009, AIR-320, AIR-324, migration, lease reset, Access, R2/D1 flag or Scheduled Task action is authorized by this evidence.
