@@ -2,6 +2,10 @@ const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:
 function addGroup(left,right,displayed){const group={compared:(left?.compared||0)+(right?.compared||0),mismatched:(left?.mismatched||0)+(right?.mismatched||0)};if(displayed)group.displayed=(left?.displayed||0)+(right?.displayed||0);return group;}
 function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count?.films)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,films:addGroup(prior?.films,count.films,true),people:addGroup(prior?.people,count.people,true),cache:addGroup(prior?.cache,count.cache,false)}};}
 const loadJSON=async(env,key)=>{
+ if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
+  const routed=await DiscoveryAuthority.routeRead(env,key);
+  if(routed.handled)return routed.value;
+ }
  const publishedKey=key===EPG_GENERATION_KEY||key==='programme.json'||key==='watchlist.json'||key==='epg/discovery-latest.json'||key==='epg/discovered-films.json';
  if(publishedKey&&typeof PublishedEpg!=='undefined'){
   const live=await PublishedEpg.currentGeneration(env);
@@ -308,6 +312,10 @@ async function updatePublishedFiles(env,files){
  return publication.programmeRunId;
 }
 const saveJSON=async(env,key,value)=>{
+ if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
+  const routed=await DiscoveryAuthority.routeWrite(env,key,value);
+  if(routed.handled)return;
+ }
  if(typeof PredictionD1!=='undefined'){
   const routed=await PredictionD1.saveMutable(env,key,value);
   if(routed?.handled)return {etag:'d1'};

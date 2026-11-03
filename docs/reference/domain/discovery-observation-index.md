@@ -4,6 +4,8 @@ The observation index is a bounded projection of the current unresolved discover
 
 Source: [`src/domain/discovery-observation-index.js`](../../../src/domain/discovery-observation-index.js) (pure: shapes, sharding, bounds, manifest, validation, freshness; bundled as `DiscoveryIndex`); the writer `saveObservationIndex` in [`src/discovery.js`](../../../src/discovery.js); the reader `discoveryIndexRead` in [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recovery.js). Tests: [`tests/discovery-observation-index.mjs`](../../../tests/discovery-observation-index.mjs).
 
+While the discovery marker is absent, `r2`, or the schema is below version 10, the layout below is the index. When `discovery_authority.mode` is `d1` and `cutover` is `open` ([ADR 0084](../../adr/0084-d1-authoritative-discovery.md), Proposed), the owner read is the D1 rows for that programme: active observations joined to decisions, excluding `excluded_nonfilm`. `saveObservationIndex` does not write the R2 shards in that mode. A held marker fails the shard write closed and leaves the reader on R2. Version 10 without the tables, or a bad marker, fails the read closed and does not open the shards. Migration `0010` is not applied, so production still uses the shards. The shapes below remain the `r2` contract.
+
 ## Layout
 
 ```text

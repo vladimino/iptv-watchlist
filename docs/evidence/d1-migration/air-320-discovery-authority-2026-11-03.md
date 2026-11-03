@@ -1,0 +1,29 @@
+# AIR-320 discovery authority, local contract
+
+**Date:** 2026-11-03 (UTC)  
+**Scope:** `node tests/discovery-authority.mjs` against local SQLite files created in a temporary directory. Migrations `0001` through `0010` were applied only to those files, in order. No Cloudflare API, no production D1, no production R2, no TMDB.
+
+## Result
+
+The local contract holds for the cases in that file. After `npm ci`, `npm test` passed 209 self-contained files and `npm run build` completed. That run did not open production.
+
+- `0010` refuses schema v1 and a complete schema v8 before it creates a discovery table. The v8 file stays at version 8.
+- The full chain leaves version 10. The inserted marker is `mode` `r2`, `cutover` `open`, generation 0. `film` stays empty. A downgrade of `schema_contract.version` raises `schema_contract_downgrade`.
+- With the marker set to `d1` / `open` in that local file only: two acquirers, the second gets no lease; a departed observation is archived rather than deleted; a decision whose evidence key does not match is `discovery_fence` and the stored decision stays; decision history records the first hash; a renew for the sealed programme succeeds and a renew for an older programme does not.
+- A future `retryAt` makes `resolveDiscoveryChunk` return `backoff` without calling `fetch`.
+- Movie `tmdb:41` and TV `tmdb_tv:41` are both admitted. A duplicate movie id and a canonical identity that does not match the id throw `discovery_conflict` and leave the previous admission. Fifty movie admissions fit in batches of at most 40 statements. An observation with 40 shows round-trips. `film` stays empty.
+- An archive import with a bad SHA-256 writes nothing. A matching import of 30 items uses more than one batch, each at most 40 statements. A duplicate key in one segment throws `discovery_conflict`.
+- A reconsider intent left `running` answers `unknown` and does not clear `terminalReason`. The same key from `approved` writes the decision and the receipt. A replay ignores a bad expected hash. Identity assign stores `verified` and inserts no film. Identity reject stores `rejectedTmdbIds` `['41']`. A missing intent answers `missing`.
+- Continuation compare-and-swap rejects `d1:0` and accepts the current etag. The workflow record round-trips. `src/discovery-authority.js` does not call `ensureDiscoveryWorkflow` or `create()`.
+- The owner index is `fresh` for the current generation, `stale` for expected generation 0, and `unavailable` when the programme is null. A throwing `prepare` and a marker mode other than `r2` or `d1` are `discovery_unavailable`.
+- `scripts/discovery-authority.mjs` prints `mode` `d1` and `writes` `false` for that local file. `--database /tmp/iptv/discovery.sqlite` and `--activate` exit 2.
+
+## Not verified
+
+- Production D1 and production R2 were not opened.
+- `0009` and `0010` were not applied to any database outside the temporary directory.
+- The marker was not set to `d1` anywhere except that temporary file, inside the test.
+- Admin HTTP routes, the limbo page, and `GET /api/catalog/available` were not exercised.
+- A full resolver chunk after a newly published EPG, including TMDB 403 or 429, was not run. The backoff case stubs `fetch` so it throws if called.
+- Worker CPU on a production-sized ledger was not measured. The statement cap is asserted on the local batches above, not on a live generation.
+- This note does not authorize schema apply, import, hold, seal, activation, discovery, or TMDB.

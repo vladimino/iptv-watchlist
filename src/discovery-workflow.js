@@ -1,6 +1,6 @@
 // AIR-323 / ADR 0083. Durable Discovery continuation. One bounded chunk per step.
 // The binding creates nothing by itself: only DISCOVERY_EXECUTOR=workflow calls create(), and nothing in this
-// file is scheduled. R2 holds the executor record for now; that key is not a permanent authority (AIR-320).
+// file is scheduled. The executor record follows the discovery marker: D1 when it is d1, otherwise R2 (AIR-320).
 const DISCOVERY_WORKFLOW_STATE_KEY='epg/discovery-workflow.json';
 const DISCOVERY_WORKFLOW_CHUNK_LIMIT=20;
 const DISCOVERY_WORKFLOW_STALL_LIMIT=3;
@@ -22,10 +22,12 @@ function workflowCreateError(error){
  return /already exists|already_exists|duplicate/i.test(text)?'exists':'uncertain';
 }
 async function readWorkflowState(env){
+ if(typeof DiscoveryAuthority!=='undefined'){const routed=await DiscoveryAuthority.readWorkflow(env);if(routed.handled)return {record:routed.record,etag:routed.etag};}
  const object=await env.BUCKET.get(DISCOVERY_WORKFLOW_STATE_KEY);
  return {record:object?await object.json():null,etag:object?(object.etag||undefined):null};
 }
 async function writeWorkflowState(env,record,etag){
+ if(typeof DiscoveryAuthority!=='undefined'){const routed=await DiscoveryAuthority.writeWorkflow(env,record,etag);if(routed.handled)return routed.saved===true;}
  const saved=await env.BUCKET.put(DISCOVERY_WORKFLOW_STATE_KEY,JSON.stringify(record),{httpMetadata:{contentType:'application/json'},...(etag===undefined?{}:{onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}})});
  return saved!==null;
 }
