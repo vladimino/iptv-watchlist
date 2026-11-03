@@ -20,7 +20,7 @@ The coordinator's existing owner-only IPTV MCP tools returned:
 - `feature_flags`: D1_ENRICHMENT_WRITE on; DISCOVERY_EXECUTOR absent, effective external.
 - Already-opened production homepage and `/admin/health` browser tabs last opened after activation (about 07:20 UTC) displayed generation prefix `71820185` and 397 programme films. This is UI snapshot evidence, not raw HTTP document parity or independent D1 SQL mode verification.
 
-The daily EPG Scheduled Task was enabled for 17:00 Europe/Madrid. Its latest recorded EPG sync was on 2 November, **before** D1 cutover; the first naturally scheduled post-cutover EPG publish is therefore **not yet verified**.
+The daily EPG Scheduled Task was enabled for 17:00 Europe/Madrid. Its last recorded attempt was scheduled for 2 November and marked `failed` in the ChatGPT task registry, while the corresponding Worker EPG state was `complete` with zero EPG failures; the stored task result described an incomplete/waiting Discovery continuation. These are distinct outcomes. The last published EPG run is **before** the D1 cutover, so the first naturally scheduled post-cutover EPG publish is **not yet verified**.
 
 ## Safety and outstanding acceptance criteria
 

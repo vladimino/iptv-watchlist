@@ -26,9 +26,9 @@ Fingerprint, profile, and prediction bodies stay immutable R2 objects addressed 
 
 ## R2 mapping
 
-Until the write cutover, the R2 column is what production reads and writes. The D1 column is the future home, not a second live copy.
+This table describes the historical **offline baseline/importer mapping**, not the current production owner of each domain. Since 3 November 2026 the published EPG/watchlist generation is authoritative in the separate schema v8 `published_epg_*` tables, while R2 programme, watchlist and pointer objects are compatibility mirrors. The v1 `film`, `watchlist_film`, `programme_generation`, `film_generation` and `published_generation` mappings below remain historical repository inputs, not the live v8 publication path. The metadata cache and mutable prediction domains have their own earlier D1 cutovers.
 
-| R2 key or source | Future D1 | Role until cutover |
+| R2 key or source | Historical D1 importer mapping | Role in the original R2 baseline |
 | --- | --- | --- |
 | `watchlist.json` | `film`, `watchlist_film`, `film_metadata`, `film_person_credit`; `film_external_id` for the lid and the `letterboxd_slug` alias of the film permalink ([ADR 0052](../../adr/0052-letterboxd-slug-film-alias.md), `trusted=0`, so outside `film_external_id_one_trusted`) | R2 is the published watchlist |
 | `programme.json` shows | `programme_generation`, `film_generation`, `film_show` | R2 is the published generation |
