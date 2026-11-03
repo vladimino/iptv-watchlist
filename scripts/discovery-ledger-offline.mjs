@@ -11,7 +11,7 @@ export const REPO=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'
 const SOURCES=['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/enrichment.js','src/continuation.js','src/worker.js'];
 
 export function loadWorker(){
- const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,ASSETS:{},console:{...console,log:()=>{}},fetch:async()=>new Response('unavailable',{status:599})});
+ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,ReadableStream,crypto:webcrypto,setTimeout,ASSETS:{},console:{...console,log:()=>{}},fetch:async()=>new Response('unavailable',{status:599})});
  vm.runInContext(fs.readFileSync(path.join(REPO,'src/domain/film-person.js'),'utf8'),context);
  for(const file of SOURCES)vm.runInContext(fs.readFileSync(path.join(REPO,file),'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
  return context;
@@ -57,7 +57,14 @@ export function overlayStore(base,overlayDir){
   async put(key,value,options={}){
    const c=options.onlyIf,exists=!!locate(key);
    if(c?.etagDoesNotMatch==='*'&&exists||c?.etagMatches&&c.etagMatches!==etagOf(key))return null;
-   fs.writeFileSync(file(key),typeof value==='string'||Buffer.isBuffer(value)?value:String(value));deleted.delete(key);meta.set(key,'o'+(++revision));writes.push(key);
+   let body=value;
+   if(value&&typeof value.getReader==='function'){
+    const reader=value.getReader(),chunks=[];
+    while(true){const step=await reader.read();if(step.done)break;chunks.push(Buffer.from(step.value));}
+    body=Buffer.concat(chunks);
+   }else if(value instanceof Uint8Array&&!Buffer.isBuffer(value))body=Buffer.from(value.buffer,value.byteOffset,value.byteLength);
+   else if(typeof value!=='string'&&!Buffer.isBuffer(value))body=String(value);
+   fs.writeFileSync(file(key),body);deleted.delete(key);meta.set(key,'o'+(++revision));writes.push(key);
    return {etag:meta.get(key)};
   },
   async list({prefix=''}={}){

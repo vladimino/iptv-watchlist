@@ -62,6 +62,12 @@ Programme and watchlist reads stamp the saved name after the dictionary and the 
 
 For a documentation-only PR with no runtime or configuration changes, **both** required GitHub Actions jobs succeeding and one safe MCP `probe_read` are sufficient operational acceptance unless the card explicitly changes a contract that needs a targeted read. Do not trigger EPG, discovery, predictions, TMDB, imports or full storage parity as a deployment smoke test. A release touching a runtime API or persisted projection gets the **smallest matching safe readback** for that scope, rather than a blanket bucket snapshot, manual replay or speculative incident checklist. Keep both post-merge jobs and report their actual conclusions: they are delivery guarantees, not permission to operate production data writers. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
 
+## EPG commit memory
+
+The daily commit reads the active discovery ledger as bytes when the stored object provides a body or text, folds one candidate at a time, and puts one generation document. It does not raise the isolate limit, and it does not delete candidates. A commit that the platform kills for memory leaves the published generation and the D1 pin unchanged when the kill happens before those writes. Retry that same sync run after the discovery lease expires. The lease TTL is 90 seconds. Starting a new sync replaces the run record. Resetting the lease or removing ledger objects is not a memory remedy.
+
+Node measurements of this path are not the isolate limit. The dated synthetic reading and its limits are in [the 3 November evidence](../evidence/epg-commit-memory-2026-11-03.md). A green deploy does not by itself show that a live commit will stay under the limit.
+
 ## Troubleshooting and recovery
 
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
