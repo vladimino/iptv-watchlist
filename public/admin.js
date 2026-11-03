@@ -59,7 +59,7 @@ const ERROR_TEXT = {
   review_store_unreadable: 'Хранилище имён записано в неожиданном виде. Сохранение остановлено.',
   readback_failed: 'Неизвестно, записалось ли имя. Повторите отправку: это будет та же запись, без второй правки.',
   invalid_effect: 'Команда имени не распознана. Обновите карточку и повторите.',
-  roles_not_allowed: 'Добавление варианта не связывает роли. Снимите роли или включите «Использовать как предпочтительное».',
+  roles_not_allowed: 'Добавление варианта не связывает роли. Снимите роли или нажмите «Сделать предпочтительным».',
 };
 const SKEW_TEXT = {
   titles_newer: 'словарь названий новее программы',
@@ -256,16 +256,24 @@ function adminFilmTechnical(record) {
   return `<details class="admin-technical"><summary>Технические сведения</summary><dl>${rows.join('')}</dl><h3>Внешние id</h3>${adminExternalIds(record, seen)}${adminFilmAliasFacts(record, seen)}<p>Происхождение локализации: ${adminSource(record.localization, seen)}. Происхождение идентичности: ${adminSource(record.identity, seen)}.</p></details>`;
 }
 
+function adminDetailHost() {
+  return document.querySelector('#admin-detail-body') || document.querySelector('#admin-detail');
+}
+
 function adminDetail(view) {
   const detail = document.querySelector('#admin-detail');
+  const host = adminDetailHost();
+  if (!detail || !host) return;
   if (view.mode !== 'ready' || !view.id) {
     detail.hidden = true;
-    detail.innerHTML = '';
+    host.innerHTML = '';
+    adminPlaceCatalog();
     return;
   }
   detail.hidden = false;
   if (!view.entity) {
-    detail.innerHTML = '<h2 id="admin-detail-title" tabindex="-1">Запись не найдена</h2><p>В опубликованной программе нет записи с этим id.</p>';
+    host.innerHTML = '<h2 id="admin-detail-title" tabindex="-1">Запись не найдена</h2><p>В опубликованной программе нет записи с этим id.</p>';
+    adminPlaceCatalog();
     return;
   }
   const record = view.entity;
@@ -279,7 +287,7 @@ function adminDetail(view) {
     : '';
   const filmForm = kind === 'film' ? adminTitleForm(record) : '';
   const aliasBlock = adminAliases(record, kind);
-  const conflictBlock = `<h3>Конфликты локализации</h3>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}`;
+  const conflictBlock = `<details class="admin-conflicts"><summary>Конфликты локализации</summary>${conflicts ? `<ul>${conflicts}</ul>` : '<p class="muted">Конфликтов локализации нет. Неоднозначная идентичность и конфликт внешнего id показаны отдельно.</p>'}</details>`;
   const diagnostics = kind === 'person'
     ? `<details class="admin-folded"><summary>Алиасы, внешние id и конфликты</summary>${aliasBlock}<h3>Внешние id</h3>${adminExternalIds(record)}${conflictBlock}</details>`
     : `${aliasBlock}${conflictBlock}${adminFilmTechnical(record)}`;
@@ -289,8 +297,14 @@ function adminDetail(view) {
   const provenance = kind === 'film'
     ? `<p class="admin-provenance">Происхождение локализации: ${adminEscape(record.localization?.source || record.localization?.provenance?.authority || 'не указано')}. Происхождение идентичности: ${adminEscape(record.identity?.source || 'не указано')}.</p>`
     : `<p class="admin-provenance">Происхождение локализации: ${adminSource(record.localization)}. Происхождение идентичности: ${adminSource(record.identity)}.</p>`;
-  detail.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${filmJournal}${personForm}`;
-  if (kind === 'film') adminBindTitleReview(detail);
+  host.innerHTML = `<p class="eyebrow">${kind === 'person' ? 'ЧЕЛОВЕК' : 'ФИЛЬМ'}</p><h2 id="admin-detail-title" tabindex="-1">${adminEscape(title)}</h2>${kind === 'film' ? originalLine : ''}<div class="admin-badges">${adminStatus('локализация', record.localization?.status)}${adminStatus('идентичность', record.identity?.status)}${(record.externalIds || []).some(entry => entry?.conflicting) ? '<span class="admin-status admin-status-conflict">конфликт внешнего id</span>' : ''}</div>${provenance}${filmForm}<h3>Сводка</h3><dl>${adminFacts(record, kind)}</dl>${diagnostics}${filmTail}${filmJournal}${personForm}`;
+  if (kind === 'film') adminBindTitleReview(host);
+  else {
+    const form = host.querySelector('#admin-name-form');
+    if (form && adminNamePending && adminNamePending.personId === record.id) adminRestoreNameAttempt(form, adminNamePending.command);
+    else if (form) adminNameSync(form, record);
+  }
+  adminPlaceCatalog();
 }
 
 // A script that happens to be Cyrillic is not a Russian title. A dictionary or owner mark on
@@ -402,16 +416,28 @@ function adminTitleJournal(record) {
   return `<details class="title-review-journal"><summary>Журнал (${entries.length})</summary><ul>${adminTitleHistory(review)}</ul></details>`;
 }
 
+function adminChoiceSource(review, value) {
+  const option = ((review && review.options) || []).find(item => item && item.value === value);
+  const provenance = option && option.provenance;
+  if (!provenance) return '';
+  return provenance.source || provenance.authority || '';
+}
+
 function adminTitleForm(record) {
   const review = record.titleReview;
   if (!review || !review.version || !record.storedId) return '';
   const current = adminFilmCurrentTitle(review);
   const choices = adminRussianChoices(review);
-  const options = choices.map(option => `<label class="title-review-option"><input type="radio" name="title-review-choice" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span>${option.mark ? ` <small class="muted">${adminEscape(option.mark)}</small>` : ''}</label>`).join('');
+  const options = choices.map(option => {
+    const source = adminChoiceSource(review, option.value);
+    const mark = option.mark ? `<small class="muted">${adminEscape(option.mark)}</small>` : '';
+    const from = source ? `<small class="muted">${adminEscape(source)}</small>` : '';
+    return `<label class="title-review-option"><input type="radio" name="title-review-choice" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span>${mark ? ' ' + mark : ''}${from ? ' ' + from : ''}</label>`;
+  }).join('');
   const picker = options
     ? `<fieldset><legend>Варианты</legend><div class="title-review-options">${options}</div></fieldset>`
     : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите название.</p>';
-  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Вариант названия</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}" data-current="${adminEscape(current)}"><p class="title-review-current">Сейчас: <b>${adminEscape(current || 'нет')}</b></p>${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><label class="title-review-prefer"><input type="checkbox" data-title-prefer> <span>Использовать как предпочтительное</span></label><p class="title-review-preview" data-title-preview hidden></p><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><button type="submit" data-title-save>Сохранить вариант</button><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form></section>`;
+  return `<section class="title-review" aria-labelledby="title-review-title"><h3 id="title-review-title">Название</h3><form data-title-review data-film-id="${adminEscape(review.filmId || '')}" data-stored-id="${adminEscape(record.storedId)}" data-version="${adminEscape(review.version)}" data-current="${adminEscape(current)}"><p class="title-review-current">Сейчас: <b>${adminEscape(current || 'нет')}</b></p><p class="muted">«Добавить вариант» не меняет предпочтительное название. «Сделать предпочтительным» меняет его в карточках и поиске.</p>${picker}<label>Название <input type="text" name="manual" maxlength="200" autocomplete="off" data-title-manual></label><p class="title-review-preview" data-title-preview aria-live="polite" hidden></p><label>Основание, необязательно <textarea name="basis" maxlength="500" rows="2"></textarea></label><div class="title-review-actions"><button type="submit" data-title-add data-title-effect="add_alias">Добавить вариант</button><button type="submit" data-title-promote data-title-effect="promote">Сделать предпочтительным</button></div><p class="title-review-result" data-title-result role="status" tabindex="-1"></p></form></section>`;
 }
 
 // The command that was posted and whose outcome is still unknown. A refresh replaces the card and
@@ -450,37 +476,62 @@ function adminTitleSelected(form) {
 
 // An existing radio is already on the film. Adding it again is not a command. The current
 // preferred title is not a command either. A typed title is a command: the server decides duplicates.
-function adminTitleBlocked(form) {
+function adminTitleBlocked(form, effect) {
   const typed = adminTitleManual(form);
   const selected = adminTitleSelected(form);
-  if (typed || !selected) return '';
+  const next = typed || (selected && selected.value) || '';
+  if (!next) return 'Выберите вариант или введите название.';
   const current = form.dataset.current || '';
-  if (selected.value === current) return 'Это уже предпочтительное название.';
-  const prefer = form.querySelector('[data-title-prefer]');
-  if (!(prefer && prefer.checked)) return 'Этот вариант уже есть. Включите «Использовать как предпочтительное», чтобы сделать его основным.';
+  if (effect === 'promote') return next === current ? 'Это уже предпочтительное название.' : '';
+  if (!typed && selected) return 'Этот вариант уже есть. «Добавить вариант» ничего не запишет.';
+  if (typed === current) return 'Это уже предпочтительное название. Новой записи нет.';
   return '';
+}
+
+function adminTitlePreviewText(form, effect) {
+  const next = adminTitleChosen(form);
+  const current = form.dataset.current || '';
+  if (!next || adminTitleBlocked(form, effect)) return '';
+  if (effect === 'promote') return 'Сейчас: ' + (current || 'нет') + ' → Станет: ' + next + '. Предпочтительное название изменится во всех карточках и поиске.';
+  return 'Сейчас: ' + (current || 'нет') + ' → Станет: ' + (current || 'нет') + '. Добавится вариант «' + next + '». Предпочтительное название не изменится.';
 }
 
 function adminTitleSync(form) {
   if (!form) return;
-  const save = form.querySelector('[data-title-save]');
+  const add = form.querySelector('[data-title-add]');
+  const promote = form.querySelector('[data-title-promote]');
   const preview = form.querySelector('[data-title-preview]');
   const result = form.querySelector('[data-title-result]');
-  const box = form.querySelector('[data-title-prefer]');
-  const prefer = !!(box && box.checked);
-  const next = adminTitleChosen(form);
-  const current = form.dataset.current || '';
-  const blocked = adminTitleBlocked(form);
   const frozen = !!(form.dataset.requestId && adminTitleFrozen(form.dataset.storedId, form.dataset.requestId));
-  if (save) save.disabled = form.dataset.busy === '1' || (!frozen && !!blocked);
-  if (preview) {
-    const show = prefer && next && next !== current;
-    preview.hidden = !show;
-    preview.textContent = show
-      ? 'Сейчас: ' + (current || 'нет') + ' → Станет: ' + next + '. Предпочтительное название изменится во всех карточках и поиске.'
-      : '';
+  const busy = form.dataset.busy === '1';
+  const addBlocked = adminTitleBlocked(form, 'add_alias');
+  const promoteBlocked = adminTitleBlocked(form, 'promote');
+  if (add) {
+    add.disabled = busy || (!frozen && !!addBlocked);
+    if (addBlocked) add.setAttribute('title', addBlocked);
+    else adminClearAttr(add, 'title');
+    add.setAttribute('aria-pressed', form.dataset.intent === 'add_alias' ? 'true' : 'false');
   }
-  if (result && blocked && form.dataset.busy !== '1' && !frozen) result.textContent = blocked;
+  if (promote) {
+    promote.disabled = busy || (!frozen && !!promoteBlocked);
+    if (promoteBlocked) promote.setAttribute('title', promoteBlocked);
+    else adminClearAttr(promote, 'title');
+    promote.setAttribute('aria-pressed', form.dataset.intent === 'promote' ? 'true' : 'false');
+  }
+  if (preview) {
+    const armed = form.dataset.intent === 'add_alias' || form.dataset.intent === 'promote' ? adminTitlePreviewText(form, form.dataset.intent) : '';
+    const both = !armed && !addBlocked && !promoteBlocked ? adminTitlePreviewText(form, 'add_alias') + ' ' + adminTitlePreviewText(form, 'promote') : '';
+    const text = armed || both || adminTitlePreviewText(form, 'promote') || adminTitlePreviewText(form, 'add_alias');
+    preview.hidden = !text;
+    preview.textContent = text;
+  }
+  if (result && addBlocked && promoteBlocked && !busy && !frozen) result.textContent = promoteBlocked;
+}
+
+function adminClearAttr(node, name) {
+  if (!node) return;
+  if (typeof node.removeAttribute === 'function') node.removeAttribute(name);
+  else if (node.attrs) delete node.attrs[name];
 }
 
 function adminControlName(target) {
@@ -492,34 +543,32 @@ function adminControlName(target) {
   return typeof target.name === 'string' ? target.name : '';
 }
 
-// Choosing another stored title means the owner wants it preferred. Typing a new title drops that
-// automatic check, so a new alias is not saved as a promote by accident.
+// Choosing another stored title arms «Сделать предпочтительным». Typing a new title arms
+// «Добавить вариант», unless the owner already armed promote and is still editing that text.
 function adminTitleApplyChoice(form, target) {
   if (!form || !target) return;
   const manual = form.querySelector('[data-title-manual]');
-  const prefer = form.querySelector('[data-title-prefer]');
   if (adminControlName(target) === 'title-review-choice') {
     if (manual) manual.value = '';
     const current = form.dataset.current || '';
-    if (prefer) {
-      const other = target.value !== current;
-      prefer.checked = other;
-      if (other) form.dataset.preferAuto = '1';
-      else delete form.dataset.preferAuto;
-    }
+    const other = target.value !== current;
+    form.dataset.intent = other ? 'promote' : '';
+    if (other) form.dataset.intentAuto = '1';
+    else delete form.dataset.intentAuto;
     return;
   }
-  if (typeof target.hasAttribute === 'function' && target.hasAttribute('data-title-prefer')) {
-    delete form.dataset.preferAuto;
+  if (typeof target.getAttribute === 'function' && target.getAttribute('data-title-effect')) {
+    form.dataset.intent = target.getAttribute('data-title-effect');
+    delete form.dataset.intentAuto;
     return;
   }
   if (manual && target === manual) {
     const typed = manual.value.replace(/\s+/g, ' ').trim();
     if (!typed) return;
     for (const choice of form.querySelectorAll('input[name="title-review-choice"]')) choice.checked = false;
-    if (form.dataset.preferAuto === '1' && prefer) {
-      prefer.checked = false;
-      delete form.dataset.preferAuto;
+    if (form.dataset.intentAuto === '1' || form.dataset.intent !== 'promote') {
+      form.dataset.intent = 'add_alias';
+      delete form.dataset.intentAuto;
     }
   }
 }
@@ -548,13 +597,12 @@ function adminRestoreTitleAttempt(form, kept) {
   // A radio the refresh removed is not a cancelled command. The field shows that value, and the
   // retry still posts the original command until the owner edits the form.
   if (manual) manual.value = shown ? '' : (kept.value || '');
-  const prefer = form.querySelector('[data-title-prefer]');
-  // A command that omits effect is the historical promote. The checkbox shows the effect the
-  // retry will apply, including when the card was rebuilt with the box off.
-  if (prefer) prefer.checked = kept.effect !== 'add_alias';
-  delete form.dataset.preferAuto;
+  // A command that omits effect is the historical promote. The armed button is that same effect.
+  form.dataset.intent = kept.effect === 'add_alias' ? 'add_alias' : 'promote';
   delete form.dataset.busy;
   form.dataset.requestId = kept.requestId;
+  const result = form.querySelector('[data-title-result]');
+  if (result && form.dataset.busy !== '1') result.textContent = adminTitleRetryText(kept);
   adminTitleSync(form);
 }
 
@@ -606,42 +654,64 @@ function adminFinishUnknownTitle(kept, view) {
   }
 }
 
+function adminTitleEffectOf(event) {
+  const submitter = event && event.submitter;
+  if (!submitter || typeof submitter.getAttribute !== 'function') return '';
+  return submitter.getAttribute('data-title-effect') || '';
+}
+
 function adminBindTitleReview(detail) {
-  const form = detail.querySelector('[data-title-review]');
+  const form = detail && detail.querySelector ? detail.querySelector('[data-title-review]') : null;
   if (!form) return;
-  const save = form.querySelector('[data-title-save]');
   const manual = form.querySelector('[data-title-manual]');
   const result = form.querySelector('[data-title-result]');
-  const prefer = form.querySelector('[data-title-prefer]');
   const discardAttempt = () => { delete form.dataset.requestId; adminTitleDrop(); };
   const noteCleared = () => { if (result && form.dataset.busy !== '1') result.textContent = ''; };
-  form.addEventListener('change', event => {
+  const follow = event => {
     discardAttempt();
     adminTitleApplyChoice(form, event.target);
     noteCleared();
     adminTitleSync(form);
-  });
-  form.addEventListener('input', event => {
-    discardAttempt();
-    adminTitleApplyChoice(form, event.target);
-    noteCleared();
+  };
+  form.addEventListener('change', follow);
+  form.addEventListener('input', follow);
+  form.addEventListener('focusin', event => {
+    const effect = event.target && typeof event.target.getAttribute === 'function' ? event.target.getAttribute('data-title-effect') : '';
+    if (!effect) return;
+    const pending = adminTitleFrozen(form.dataset.storedId, form.dataset.requestId);
+    if (pending && effect !== (pending.effect || 'promote')) {
+      discardAttempt();
+      noteCleared();
+    }
+    form.dataset.intent = effect;
+    delete form.dataset.intentAuto;
     adminTitleSync(form);
   });
-  adminTitleSync(form);
+  const kept = adminTitlePending && adminTitleFrozen(form.dataset.storedId, adminTitlePending.command.requestId);
+  if (kept) adminRestoreTitleAttempt(form, kept);
+  else adminTitleSync(form);
   form.addEventListener('submit', event => {
     event.preventDefault();
-    if (save.disabled) return;
     const storedId = form.dataset.storedId;
+    const effect = adminTitleEffectOf(event);
     let body = adminTitleFrozen(storedId, form.dataset.requestId);
+    if (body && effect && effect !== (body.effect || 'promote')) {
+      discardAttempt();
+      body = null;
+    }
     if (!body) {
       const typed = manual.value.replace(/\s+/g, ' ').trim();
       const selected = form.querySelector('input[name="title-review-choice"]:checked');
       const value = typed || (selected ? selected.value : '');
+      const chosen = effect || form.dataset.intent || (typed ? 'add_alias' : '');
       if (!value) { result.textContent = form.querySelector('input[name="title-review-choice"]') ? 'Выберите вариант или введите название.' : 'Введите название.'; if (typeof result.focus === 'function') result.focus(); return; }
-      const blocked = adminTitleBlocked(form);
+      if (!chosen) { result.textContent = 'Выберите «Добавить вариант» или «Сделать предпочтительным».'; if (typeof result.focus === 'function') result.focus(); return; }
+      const blocked = adminTitleBlocked(form, chosen);
       if (blocked) { result.textContent = blocked; if (typeof result.focus === 'function') result.focus(); return; }
+      const button = form.querySelector(chosen === 'promote' ? '[data-title-promote]' : '[data-title-add]');
+      if (button && button.disabled) return;
       if (!form.dataset.requestId) form.dataset.requestId = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
-      body = {filmId: form.dataset.filmId, requestId: form.dataset.requestId, mode: typed ? 'manual' : 'alias', value, expectedVersion: form.dataset.version, effect: prefer && prefer.checked ? 'promote' : 'add_alias'};
+      body = {filmId: form.dataset.filmId, requestId: form.dataset.requestId, mode: typed ? 'manual' : 'alias', value, expectedVersion: form.dataset.version, effect: chosen};
       const basis = form.querySelector('[name="basis"]').value;
       if (basis.trim()) body.basis = basis;
       adminTitleHold(storedId, body);
@@ -651,26 +721,27 @@ function adminBindTitleReview(detail) {
     form.dataset.busy = '1';
     adminTitleSync(form);
     result.textContent = 'Записываем…';
+    const keptBody = JSON.parse(JSON.stringify(body));
     adminSaveFilmTitle(storedId, body).then(response => {
       form.dataset.busy = '0';
       if (response.ok) {
         const payload = response.body;
         const duplicate = payload && payload.reason === 'duplicate_alias';
         const unchanged = payload && payload.changed === false && !payload.idempotent;
-        adminTitleDrop();
-        delete form.dataset.requestId;
         if (duplicate || unchanged) {
+          adminTitleDrop();
+          delete form.dataset.requestId;
           adminTitleSync(form);
           result.textContent = duplicate ? 'Такой вариант уже есть. Новой записи нет.' : 'Название уже такое. Новой записи нет.';
           if (typeof result.focus === 'function') result.focus();
           return;
         }
-        if (prefer) prefer.checked = false;
-        delete form.dataset.preferAuto;
-        adminTitleSync(form);
-        result.textContent = body.effect === 'add_alias' ? 'Вариант добавлен. Предпочтительное название не изменилось.' : 'Название записано. Обновляю карточку.';
+        result.textContent = 'Сверяю карточку.';
         if (typeof result.focus === 'function') result.focus();
-        onAdminRefresh();
+        Promise.resolve(onAdminRefresh()).then(view => {
+          if (!adminTitleFrozen(storedId, keptBody.requestId)) return;
+          adminFinishUnknownTitle(keptBody, view);
+        });
         return;
       }
       if (!adminTitleFrozen(storedId, body.requestId)) {
@@ -687,16 +758,14 @@ function adminBindTitleReview(detail) {
       }
       if (response.status === 503 && response.error === 'readback_failed') {
         adminTitleSync(form);
-        const kept = JSON.parse(JSON.stringify(body));
         result.textContent = 'Неизвестно, записалось ли название. Сверяю карточку.';
         result.focus();
         Promise.resolve(onAdminRefresh()).then(view => {
-          if (!adminTitleFrozen(storedId, body.requestId)) return;
-          adminFinishUnknownTitle(kept, view);
+          if (!adminTitleFrozen(storedId, keptBody.requestId)) return;
+          adminFinishUnknownTitle(keptBody, view);
         });
         return;
       }
-      if (prefer) prefer.checked = false;
       adminTitleSync(form);
       discardAttempt();
       const reason = response.error;
@@ -760,15 +829,15 @@ function adminNameForm(record) {
     return `<label class="admin-name-option"><input type="radio" name="person-name-alias" value="${adminEscape(option.value)}"> <span>${adminEscape(option.value)}</span> <small class="muted">${adminEscape(option.origin || '')}${mark}</small></label>`;
   }).join('');
   const folded = (review.options || []).map(option => `<li>${adminEscape(option.value)} · ${adminEscape(option.origin || '')} ${adminProvenance(option.provenance)}</li>`).join('');
-  const collisions = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}" disabled${item.linked ? ' checked' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
-  const roleList = collisions ? `<fieldset><legend>Тот же человек в другой роли</legend><div class="admin-name-options">${collisions}</div></fieldset>` : '';
-  const roleBlock = (review.collisions || []).length > 4 ? `<details class="admin-name-more"><summary>Тот же человек в другой роли (${review.collisions.length})</summary>${roleList}</details>` : roleList;
   const audit = (review.reviews || []).map(entry => {
     const when = adminMadridWhen(entry.at);
     return `<li>${when ? adminEscape(when) + ' · ' : ''}${adminEscape(entry.mode || '')} · ${adminEscape(entry.from?.value || '—')} → ${adminEscape(entry.to?.value || '')}${entry.linkedFrom ? ' · из ' + adminEscape(entry.linkedFrom) : ''}</li>`;
   }).join('');
   const preferred = review.preferred || {};
-  return `<form id="admin-name-form" class="admin-name-form"><h3>Вариант имени</h3><p class="admin-name-current">Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b></p><p class="admin-name-current">Оригинал: <b>${adminEscape(review.original || record.original || 'нет')}</b></p><p class="muted">Без галочки сохранение только добавляет вариант. Предпочтительное имя, оригинал и показы не меняются.</p>${options ? `<fieldset><legend>Варианты</legend><div class="admin-name-options">${options}</div></fieldset>` : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите имя.</p>'}<label>Вариант<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><label class="admin-name-preferred"><input id="admin-name-preferred" name="person-name-preferred" type="checkbox"> <span>Использовать как предпочтительное</span></label><p id="admin-name-preview" class="admin-name-preview" hidden></p><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${roleBlock}<details class="admin-name-more"><summary>Остальные варианты и происхождение</summary>${folded ? `<ul>${folded}</ul>` : '<p class="muted">Других вариантов нет.</p>'}</details>${audit ? `<details class="admin-name-more"><summary>Журнал</summary><ul>${audit}</ul></details>` : ''}<p id="admin-name-status" class="admin-name-status" role="status" tabindex="-1"></p><button type="submit">Сохранить вариант</button></form>`;
+  const roleInputs = (review.collisions || []).map(item => `<label class="admin-name-option"><input type="checkbox" name="person-name-role" value="${adminEscape(item.id)}" data-version="${adminEscape(item.version || '')}"${item.linked ? ' checked disabled' : ''}> <span>${adminEscape(item.original || item.id)}</span> <small class="muted">${adminEscape(item.id)} · ${adminEscape(item.reason || '')}${item.linked ? ' · уже связано' : ''}</small></label>`).join('');
+  const roleField = roleInputs ? `<fieldset><legend>Тот же человек в другой роли</legend><p class="muted">Связь записывается только кнопкой «Сделать предпочтительным».</p><div class="admin-name-options">${roleInputs}</div></fieldset>` : '';
+  const roleBlockLive = (review.collisions || []).length > 4 ? `<details class="admin-name-more"><summary>Тот же человек в другой роли (${review.collisions.length})</summary>${roleField}</details>` : roleField;
+  return `<form id="admin-name-form" class="admin-name-form"><h3>Имя</h3><p class="admin-name-current">Сейчас: <b>${adminEscape(preferred.value || 'нет')}</b></p><p class="admin-name-current">Оригинал: <b>${adminEscape(review.original || record.original || 'нет')}</b></p><p class="muted">«Добавить вариант» не меняет предпочтительное имя. «Сделать предпочтительным» меняет его в фильмах и поиске.</p>${options ? `<fieldset><legend>Варианты</legend><div class="admin-name-options">${options}</div></fieldset>` : '<p class="muted">Нет варианта с подтверждённым русским происхождением. Введите имя.</p>'}<label>Вариант<input id="admin-name-manual" name="person-name-manual" type="text" maxlength="200" autocomplete="off" spellcheck="true"></label><p id="admin-name-preview" class="admin-name-preview" aria-live="polite" hidden></p><label>Пояснение, необязательно<textarea id="admin-name-basis" name="person-name-basis" maxlength="500" rows="2"></textarea></label>${roleBlockLive}<details class="admin-name-more"><summary>Остальные варианты и происхождение</summary>${folded ? `<ul>${folded}</ul>` : '<p class="muted">Других вариантов нет.</p>'}</details>${audit ? `<details class="admin-name-more"><summary>Журнал</summary><ul>${audit}</ul></details>` : ''}<p id="admin-name-status" class="admin-name-status" role="status" tabindex="-1"></p><div class="admin-name-actions"><button type="submit" data-name-add data-name-effect="add_alias" aria-pressed="false">Добавить вариант</button><button type="submit" data-name-promote data-name-effect="promote" aria-pressed="false">Сделать предпочтительным</button></div></form>`;
 }
 
 function adminNameRequestId() {
@@ -800,32 +869,106 @@ function adminNameChosen(form) {
   return manual || (selected && selected.value) || '';
 }
 
+function adminNameCurrentText(record) {
+  const value = record && record.nameReview && record.nameReview.preferred && record.nameReview.preferred.value;
+  return value || 'нет';
+}
+
+function adminNameBlocked(form, record, effect) {
+  const manualNode = form.querySelector('#admin-name-manual');
+  const manual = manualNode ? manualNode.value.replace(/\s+/g, ' ').trim() : '';
+  const selected = form.querySelector('input[name="person-name-alias"]:checked');
+  const next = manual || (selected && selected.value) || '';
+  if (!next) return 'Введите вариант или выберите его.';
+  const current = adminNameCurrentText(record);
+  if (effect === 'promote') return next === current ? 'Это уже предпочтительное имя.' : '';
+  if (!manual && selected) return 'Этот вариант уже есть. «Добавить вариант» ничего не запишет.';
+  if (manual === current) return 'Это уже предпочтительное имя. Новой записи нет.';
+  return '';
+}
+
+function adminNamePreviewText(form, record, effect) {
+  if (adminNameBlocked(form, record, effect)) return '';
+  const next = adminNameChosen(form);
+  const current = adminNameCurrentText(record);
+  if (effect === 'promote') return 'Сейчас: ' + current + ' → Станет: ' + next + '. Новое имя появится в фильмах и поиске.';
+  return 'Сейчас: ' + current + ' → Станет: ' + current + '. Добавится вариант «' + next + '». Предпочтительное имя не изменится.';
+}
+
 function adminNameSync(form, record) {
   if (!form) return;
   const box = form.querySelector('#admin-name-preferred');
-  const prefer = !!(box && box.checked);
-  for (const input of form.querySelectorAll('input[name="person-name-role"]')) input.disabled = !prefer;
-  const preview = form.querySelector('#admin-name-preview');
-  if (!preview) return;
-  const next = adminNameChosen(form);
-  const current = record && record.nameReview && record.nameReview.preferred && record.nameReview.preferred.value || 'нет';
-  if (!prefer || !next) {
-    preview.hidden = true;
-    preview.textContent = '';
+  const add = form.querySelector('[data-name-add]');
+  const promote = form.querySelector('[data-name-promote]');
+  if (!add && !promote) {
+    const prefer = !!(box && box.checked);
+    for (const input of form.querySelectorAll('input[name="person-name-role"]')) input.disabled = !prefer;
+    const preview = form.querySelector('#admin-name-preview');
+    if (!preview) return;
+    const next = adminNameChosen(form);
+    const current = adminNameCurrentText(record);
+    if (!prefer || !next) {
+      preview.hidden = true;
+      preview.textContent = '';
+      return;
+    }
+    preview.hidden = false;
+    preview.textContent = 'Сейчас: ' + current + ' → Станет: ' + next + '. Новое имя появится в фильмах и поиске.';
     return;
   }
-  preview.hidden = false;
-  preview.textContent = 'Сейчас: ' + current + ' → Станет: ' + next + '. Новое имя появится в фильмах и поиске.';
+  const addBlocked = adminNameBlocked(form, record, 'add_alias');
+  const promoteBlocked = adminNameBlocked(form, record, 'promote');
+  const frozen = !!(form.dataset.requestId && record && adminNameFrozen(record.id, form.dataset.requestId));
+  if (add) {
+    add.disabled = !frozen && !!addBlocked;
+    if (addBlocked) add.setAttribute('title', addBlocked);
+    else adminClearAttr(add, 'title');
+    add.setAttribute('aria-pressed', form.dataset.intent === 'add_alias' ? 'true' : 'false');
+  }
+  if (promote) {
+    promote.disabled = !frozen && !!promoteBlocked;
+    if (promoteBlocked) promote.setAttribute('title', promoteBlocked);
+    else adminClearAttr(promote, 'title');
+    promote.setAttribute('aria-pressed', form.dataset.intent === 'promote' ? 'true' : 'false');
+  }
+  const preview = form.querySelector('#admin-name-preview');
+  if (!preview) return;
+  const armed = form.dataset.intent === 'add_alias' || form.dataset.intent === 'promote' ? adminNamePreviewText(form, record, form.dataset.intent) : '';
+  const text = armed || adminNamePreviewText(form, record, 'promote') || adminNamePreviewText(form, record, 'add_alias');
+  preview.hidden = !text;
+  preview.textContent = text;
 }
 
-function adminNameCommand(form, record, requestId) {
+function adminNameSubmitEffect(event, form) {
+  const submitter = event && event.submitter;
+  const fromButton = submitter && typeof submitter.getAttribute === 'function' ? submitter.getAttribute('data-name-effect') : '';
+  if (fromButton) return fromButton;
+  if (form.dataset && form.dataset.intent) return form.dataset.intent;
+  const box = form.querySelector('#admin-name-preferred');
+  if (box) return box.checked ? 'promote' : 'add_alias';
+  const manual = form.querySelector('#admin-name-manual');
+  if (manual && manual.value.replace(/\s+/g, ' ').trim()) return 'add_alias';
+  return '';
+}
+
+function adminNameCommand(form, record, requestId, effect) {
   const manual = form.querySelector('#admin-name-manual').value.replace(/\s+/g, ' ').trim();
   const selected = form.querySelector('input[name="person-name-alias"]:checked');
   const basis = form.querySelector('#admin-name-basis').value.trim();
   const box = form.querySelector('#admin-name-preferred');
+  const buttons = form.querySelector('[data-name-add]');
   if (!manual && !selected) return {error: 'Введите вариант или выберите его.'};
-  const explicit = !!box;
-  const prefer = explicit ? box.checked === true : true;
+  let explicit = !!box || !!buttons;
+  let prefer;
+  if (buttons) {
+    if (effect !== 'promote' && effect !== 'add_alias') return {error: 'Выберите «Добавить вариант» или «Сделать предпочтительным».'};
+    prefer = effect === 'promote';
+  } else {
+    prefer = explicit ? box.checked === true : effect === 'add_alias' ? false : true;
+    if (!explicit && effect === 'add_alias') explicit = true;
+  }
+  const blocked = buttons ? adminNameBlocked(form, record, prefer ? 'promote' : 'add_alias') : '';
+  if (blocked) return {error: blocked};
   const roles = prefer ? [...form.querySelectorAll('input[name="person-name-role"]:checked')].map(input => ({id: input.value, expectedVersion: input.getAttribute('data-version')})) : [];
   const command = {personId: record.id, requestId, mode: manual ? 'manual' : 'alias', value: manual || selected.value, expectedVersion: record.nameReview.version, ...(basis ? {basis} : {}), ...(roles.length ? {roles} : {})};
   if (explicit) command.effect = prefer ? 'promote' : 'add_alias';
@@ -857,11 +1000,13 @@ function adminRestoreNameAttempt(form, kept) {
   const wanted = new Set((kept.roles || []).map(role => role.id));
   for (const box of form.querySelectorAll('input[name="person-name-role"]')) box.checked = wanted.has(box.value);
   const prefer = form.querySelector('#admin-name-preferred');
-  // A command that omits effect is the historical promote. The checkbox shows the effect the
-  // retry will apply, including when the card was rebuilt with the box off.
+  // A command that omits effect is the historical promote. The armed button is that same effect.
   if (prefer) prefer.checked = kept.effect !== 'add_alias';
-  adminNameSync(form, adminLive.entity);
+  form.dataset.intent = kept.effect === 'add_alias' ? 'add_alias' : 'promote';
   form.dataset.requestId = kept.requestId;
+  const result = form.querySelector('#admin-name-status');
+  if (result) result.textContent = adminNameRetryText(kept);
+  adminNameSync(form, adminLive.entity);
 }
 
 // A 503 readback_failed can follow a put that already landed. The reread proves it only when the
@@ -898,13 +1043,39 @@ function adminFinishUnknownName(kept, view) {
   }
 }
 
+function onAdminNameFocus(event) {
+  const target = event.target;
+  if (!target || typeof target.getAttribute !== 'function') return;
+  const effect = target.getAttribute('data-name-effect');
+  if (!effect) return;
+  const form = target.closest ? target.closest('#admin-name-form') : null;
+  if (!form || !form.dataset) return;
+  const personId = adminLive.entity && adminLive.entity.id;
+  const pending = adminNameFrozen(personId, form.dataset.requestId);
+  if (pending && effect !== (pending.effect || 'promote')) {
+    delete form.dataset.requestId;
+    adminNameDrop();
+  }
+  form.dataset.intent = effect;
+  adminNameSync(form, adminLive.entity);
+}
+
 function onAdminNameEdit(event) {
   const target = event.target;
   const form = target && target.id === 'admin-name-form' ? target : target && target.closest ? target.closest('#admin-name-form') : null;
   if (!form || !form.dataset) return;
-  adminNameSync(form, adminLive.entity);
+  const effect = target && typeof target.getAttribute === 'function' ? target.getAttribute('data-name-effect') : '';
+  const named = target && (target.name || (typeof target.getAttribute === 'function' ? target.getAttribute('name') : ''));
+  if (effect) form.dataset.intent = effect;
+  else if (target && target.id === 'admin-name-manual' && form.dataset.intent !== 'promote') form.dataset.intent = 'add_alias';
+  else if (named === 'person-name-alias') {
+    const manual = form.querySelector('#admin-name-manual');
+    if (manual) manual.value = '';
+    form.dataset.intent = target.value !== adminNameCurrentText(adminLive.entity) ? 'promote' : '';
+  }
   delete form.dataset.requestId;
   adminNameDrop();
+  adminNameSync(form, adminLive.entity);
 }
 
 async function onAdminNameSubmit(event) {
@@ -912,35 +1083,47 @@ async function onAdminNameSubmit(event) {
   if (!form) return;
   event.preventDefault();
   const status = form.querySelector('#admin-name-status');
-  const button = form.querySelector('button[type="submit"]');
+  const buttons = [...form.querySelectorAll('button[type="submit"]')];
+  const button = buttons[0] || form.querySelector('button[type="submit"]');
   const entity = adminLive.entity;
   if (!entity || !entity.nameReview) return;
-  const frozen = adminNameFrozen(entity.id, form.dataset.requestId);
-  let command = frozen;
+  const effect = adminNameSubmitEffect(event, form);
+  let command = adminNameFrozen(entity.id, form.dataset.requestId);
+  if (command && effect && effect !== (command.effect || 'promote')) {
+    adminNameDrop();
+    delete form.dataset.requestId;
+    command = null;
+  }
   if (!command) {
     const requestId = form.dataset.requestId || adminNameRequestId();
-    const built = adminNameCommand(form, entity, requestId);
+    const built = adminNameCommand(form, entity, requestId, effect);
     if (built.error) {status.textContent = built.error; return;}
     command = built.command;
     adminNameHold(entity.id, command);
   }
   form.dataset.requestId = command.requestId;
-  button.disabled = true;
+  for (const item of buttons) item.disabled = true;
+  if (button && !buttons.length) button.disabled = true;
   status.textContent = 'Сохраняем…';
+  const kept = JSON.parse(JSON.stringify(command));
   const result = await adminPost('/people/'+encodeURIComponent(command.personId)+'/name-review', command);
-  button.disabled = false;
+  for (const item of buttons) item.disabled = false;
+  if (button && !buttons.length) button.disabled = false;
   if (result.ok) {
-    const added = command.effect === 'add_alias';
     const duplicate = result.body && result.body.reason === 'duplicate_alias';
-    adminNameDrop();
-    delete form.dataset.requestId;
-    adminLive.pin = null;
-    await adminRender();
-    const statusNow = document.querySelector('#admin-name-status');
-    if (statusNow) {
-      statusNow.textContent = duplicate ? 'Такой вариант уже есть. Новой записи нет.' : added ? 'Вариант добавлен. Предпочтительное имя не изменилось.' : 'Имя записано. Карточка сверена.';
-      if (typeof statusNow.focus === 'function') statusNow.focus();
+    const unchanged = result.body && result.body.changed === false && !result.body.idempotent;
+    if (duplicate || unchanged) {
+      adminNameDrop();
+      delete form.dataset.requestId;
+      status.textContent = duplicate ? 'Такой вариант уже есть. Новой записи нет.' : 'Имя уже такое. Новой записи нет.';
+      if (typeof status.focus === 'function') status.focus();
+      return;
     }
+    status.textContent = 'Сверяю карточку.';
+    adminLive.pin = null;
+    const view = await onAdminRefresh();
+    if (!adminNameFrozen(entity.id, kept.requestId)) return;
+    adminFinishUnknownName(kept, view);
     return;
   }
   const stillPending = adminNameFrozen(entity.id, command.requestId);
@@ -968,17 +1151,37 @@ async function onAdminNameSubmit(event) {
       delete form.dataset.requestId;
       adminNameDrop();
     }
-    status.textContent = adminNameCommitUnknown(result) ? ERROR_TEXT.readback_failed : adminErrorText(result.error);
+    status.textContent = adminNameCommitUnknown(result) ? adminNameRetryText(command) : adminErrorText(result.error);
     if (typeof status.focus === 'function') status.focus();
   }
 }
 
 function adminRenderQueues(state) {
   const queues = document.querySelector('#admin-queues');
-  queues.innerHTML = (adminLive.queues || []).map(item => {
-    const pressed = state.queue === item.code;
-    return `<button type="button" class="admin-queue" data-admin-queue="${adminEscape(item.code)}" data-admin-kind="${adminEscape(item.kind)}" aria-pressed="${pressed ? 'true' : 'false'}"><span>${adminEscape(ADMIN_LABELS[item.code] || item.code)}</span><small>${item.kind === 'person' ? 'люди' : 'фильмы'} · ${item.count}</small></button>`;
-  }).join('');
+  if (!queues) return;
+  const summary = document.querySelector('#admin-queues-summary');
+  const panel = document.querySelector('#admin-queues-panel');
+  const items = Array.isArray(adminLive.queues) ? adminLive.queues : [];
+  if (adminLive.queues == null) {
+    queues.innerHTML = '';
+    if (summary) summary.textContent = 'Очереди качества';
+  } else {
+    const shown = items.filter(item => item && (item.count > 0 || state.queue === item.code));
+    const group = (kind, title) => {
+      const rows = shown.filter(item => (item.kind === 'person' ? 'person' : 'film') === kind);
+      if (!rows.length) return '';
+      const buttons = rows.map(item => {
+        const pressed = state.queue === item.code;
+        return `<button type="button" class="admin-queue" data-admin-queue="${adminEscape(item.code)}" data-admin-kind="${adminEscape(item.kind)}" aria-pressed="${pressed ? 'true' : 'false'}"><span>${adminEscape(ADMIN_LABELS[item.code] || item.code)}</span><small>${item.kind === 'person' ? 'люди' : 'фильмы'} · ${item.count}</small></button>`;
+      }).join('');
+      return `<div class="admin-queue-group"><h3>${title}</h3><div class="admin-queue-buttons">${buttons}</div></div>`;
+    };
+    const html = group('film', 'Фильмы') + group('person', 'Люди');
+    queues.innerHTML = html || '<p class="muted admin-queues-empty">Нет записей в очередях.</p>';
+    const active = items.filter(item => item && item.count > 0).length;
+    if (summary) summary.textContent = active ? 'Очереди качества · ' + active : 'Очереди качества';
+    if (panel && state.queue) panel.open = true;
+  }
   const note = document.querySelector('#admin-queues-note');
   const unavailable = adminLive.unavailableQueues || [];
   note.hidden = !unavailable.length;
@@ -1001,6 +1204,7 @@ function adminShow(view, state) {
   error.hidden = view.mode !== 'error';
   error.textContent = view.mode === 'error' ? adminErrorText(view.error) : '';
   const showResults = view.mode === 'ready';
+  adminLive.resultsReady = showResults;
   if (resultsSection) resultsSection.hidden = !showResults;
   if (!showResults) {
     empty.hidden = true;
@@ -1152,6 +1356,36 @@ function adminSchedule() {
   }, ADMIN_DEBOUNCE_MS);
 }
 
+function adminPlaceCatalog() {
+  const detail = document.querySelector('#admin-detail');
+  const results = document.querySelector('#admin-results-section');
+  const back = document.querySelector('#admin-detail-back');
+  const layout = document.querySelector('#admin-catalog-layout');
+  if (!detail) return;
+  let narrow = false;
+  const mediaHost = typeof window === 'undefined' ? null : window;
+  if (mediaHost && mediaHost.matchMedia) {
+    const media = mediaHost.matchMedia('(max-width: 800px)');
+    narrow = !!(media && media.matches);
+  }
+  const state = adminLive.state || {id: ''};
+  const focus = !!(narrow && !detail.hidden && state.id);
+  if (back) back.hidden = !focus;
+  if (layout && layout.classList) layout.classList.toggle('admin-catalog-focus', focus);
+  if (results) results.hidden = focus ? true : !adminLive.resultsReady;
+}
+
+function onAdminDetailBack() {
+  const state = adminState();
+  state.id = '';
+  adminWrite(state, 'push');
+  return adminRender().then(view => {
+    const search = document.querySelector('#admin-search');
+    if (search && typeof search.focus === 'function') search.focus();
+    return view;
+  });
+}
+
 function onAdminRefresh() {
   adminLive.pin = null;
   adminLive.snapshot = null;
@@ -1288,7 +1522,10 @@ function startAdmin() {
   document.querySelector('#admin-detail').addEventListener('submit', onAdminNameSubmit);
   document.querySelector('#admin-detail').addEventListener('input', onAdminNameEdit);
   document.querySelector('#admin-detail').addEventListener('change', onAdminNameEdit);
+  document.querySelector('#admin-detail').addEventListener('focusin', onAdminNameFocus);
   document.querySelector('#admin-queues').addEventListener('click', onAdminQueue);
+  const catalogBack = document.querySelector('#admin-detail-back');
+  if (catalogBack) catalogBack.addEventListener('click', onAdminDetailBack);
   document.querySelector('#admin-refresh').addEventListener('click', onAdminRefresh);
   document.querySelector('.admin-views').addEventListener('click', onAdminView);
   document.querySelector('#admin-health-refresh').addEventListener('click', onAdminHealthRefresh);
@@ -1302,6 +1539,8 @@ function startAdmin() {
     const placeHealth = () => healthPlaceDetail(healthMedia.matches);
     if (healthMedia.addEventListener) healthMedia.addEventListener('change', placeHealth);
     placeHealth();
+    const placeCatalog = () => adminPlaceCatalog();
+    if (healthMedia.addEventListener) healthMedia.addEventListener('change', placeCatalog);
   }
   window.addEventListener('keydown', onAdminKey);
   window.addEventListener('popstate', onAdminHistory);
