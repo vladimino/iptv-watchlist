@@ -7,14 +7,16 @@
 // and leaves mode r2. --activate holds mode d1 only with --producers-drained,
 // re-reads R2, and opens the cutover when the bytes still match. A mismatch
 // returns mode to r2 and does not write R2. A failed re-read leaves the hold.
-// --revert --confirm r2 copies the D1 documents back to R2 and then sets mode r2.
+// --revert --confirm r2 copies the D1 documents back to R2 and then sets mode r2
+// only while the generation is still the copied snapshot. A D1 write in between
+// leaves the marker at d1. While mode is d1 the ratings lease is read from D1.
 // Each write needs its own --confirm and --target iptv. This script does not
 // call Time Travel restore and does not start a ratings run.
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
-import {activateDocuments, importDocuments, listDocuments, ratingsMutableKey, releaseHeld, revertMarker, sealHeld} from '../src/ratings-d1.js';
+import {activateDocuments, importDocuments, listDocuments, ratingsMutableKey, ratingsRunActivity, readRatingsRun, releaseHeld, revertMarker, sealHeld} from '../src/ratings-d1.js';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials, rfc3986, signRequest} from './r2-snapshot-export.mjs';
@@ -148,7 +150,7 @@ async function putDocument(credentials,fetchImpl,key,text){
  await response.body?.cancel();
 }
 
-async function writerReport(client,binding,now){
+async function writerReport(client,binding,now,marker){
  const sync=await readText(client,'sync.json');
  let syncState='absent';
  if(sync){
@@ -162,11 +164,13 @@ async function writerReport(client,binding,now){
  const resolverState=lease&&Number(JSON.parse(lease.text).expiresAt)>now?'active':'idle';
  const row=await binding.prepare("SELECT lease_until AS leaseUntil FROM projection_run WHERE projection=?").bind('enrichment').first();
  const projectionState=row?.leaseUntil&&Date.parse(row.leaseUntil)>now?'active':'idle';
- const run=await readText(client,'letterboxd/ratings/run.json');
  let ratingsState='absent';
- if(run){
-  const value=JSON.parse(run.text);
-  ratingsState=value?.state==='running'&&Date.parse(value?.lease?.expiresAt)>now?'active':'idle';
+ if(marker?.mode==='d1'){
+  const live=await readRatingsRun(binding);
+  ratingsState=ratingsRunActivity(live.value,now);
+ }else{
+  const run=await readText(client,'letterboxd/ratings/run.json');
+  if(run)ratingsState=ratingsRunActivity(JSON.parse(run.text),now);
  }
  return {sync:syncState,resolver:resolverState,projection:projectionState,ratings:ratingsState};
 }
@@ -204,7 +208,7 @@ export async function runRatingsProduction({argv=process.argv,env=process.env,fe
  if(credentials.accountId!==PRODUCTION_ACCOUNT_ID||credentials.bucket!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('bucket_identity',3);
  if(credentials.endpoint!==PRODUCTION_R2_ENDPOINT||credentials.endpointOverride)throw new OperatorStop('endpoint_refused',3);
  const client=createReadOnlyClient({credentials,fetchImpl});
- const writers=await writerReport(client,binding,now);
+ const writers=await writerReport(client,binding,now,snapshot.marker);
  if(args.command!=='--release-hold')assertIdle(writers);
  if(args.command==='--apply'){
   const decision=applyDecision(snapshot);
@@ -244,9 +248,12 @@ export async function runRatingsProduction({argv=process.argv,env=process.env,fe
   return {operation:'seal-hold',writes:true,writeState:'committed',mode:sealed.mode,cutover:sealed.cutover};
  }
  const stored=await listDocuments(binding);
+ if(stored.mode!=='d1'||stored.cutover!=='open')throw new OperatorStop('ratings_domain_not_authoritative',3);
  for(const item of stored.documents)await putDocument(credentials,fetchImpl,item.key,item.text);
- const reverted=await revertMarker(binding,{confirm:'r2'});
- return {operation:'revert',writes:true,writeState:'committed',mode:reverted.mode,cutover:reverted.cutover,documents:stored.documents.length};
+ let reverted;
+ try{reverted=await revertMarker(binding,{confirm:'r2',generation:stored.generation});}
+ catch(error){throw normalize(error);}
+ return {operation:'revert',writes:true,writeState:'committed',mode:reverted.mode,cutover:reverted.cutover,generation:reverted.generation,documents:stored.documents.length};
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){

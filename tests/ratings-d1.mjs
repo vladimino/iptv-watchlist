@@ -7,7 +7,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as RatingsD1 from '../src/ratings-d1.js';
-import {activateDocuments, casOwned, importDocuments, overlayView, projectView, putOwned, readOwned, readRatingsAuthority, releaseHeld, revertMarker, routeRead, sealHeld} from '../src/ratings-d1.js';
+import {activateDocuments, casOwned, importDocuments, listDocuments, overlayView, projectView, putOwned, readOwned, readRatingsAuthority, readRatingsRun, ratingsRunActivity, releaseHeld, revertMarker, routeRead, sealHeld} from '../src/ratings-d1.js';
 import {d1Standin} from './d1-standin.mjs';
 import {applyDecision} from '../scripts/ratings-domain-production.mjs';
 
@@ -170,9 +170,82 @@ const docs=[{key:'letterboxd/facts/films/lb-abc.json',text:filmText},{key:'lette
  const outside=await overlayView(env,{});
  assert.equal(outside.out.watched,true);
  assert.equal(outside.out.actualRating,null);
- const reverted=await revertMarker(env,{confirm:'r2'});
+ const open=await readRatingsAuthority(db,env);
+ const reverted=await revertMarker(env,{confirm:'r2',generation:open.generation});
  assert.equal(reverted.mode,'r2');
  assert.equal((await routeRead(env,'letterboxd/ratings/run.json')).handled,false);
+}
+
+{
+ const db=load(chainNames);
+ db.sql(fs.readFileSync('migrations/0010_ratings_authority.sql','utf8'));
+ db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open', generation=3");
+ const env={DB:db,BUCKET:bucket(),RATINGS_DB_REQUIRED:'on'};
+ const expiresAt=new Date(Date.now()+60000).toISOString();
+ const stale=await putOwned(env,'letterboxd/ratings/run.json',null,{schemaVersion:1,state:'idle'});
+ assert.ok(stale.saved);
+ env.BUCKET.records.set('letterboxd/ratings/run.json',{state:'idle'});
+ const running=await putOwned(env,'letterboxd/ratings/run.json',stale.saved.etag,{schemaVersion:1,state:'running',lease:{step:'step-1',expiresAt}});
+ assert.ok(running.saved);
+ const live=await readRatingsRun(env);
+ assert.equal(live.source,'d1');
+ assert.equal(ratingsRunActivity(live.value,Date.now()),'active');
+ assert.equal(ratingsRunActivity(env.BUCKET.records.get('letterboxd/ratings/run.json'),Date.now()),'idle');
+ const copied=await listDocuments(env);
+ assert.equal(copied.mode,'d1');
+ const raced=await putOwned(env,'letterboxd/ratings/run.json',running.saved.etag,{schemaVersion:1,state:'running',lease:{step:'step-2',expiresAt},checkpoint:{diaryPagesRead:2}});
+ assert.ok(raced.saved);
+ await assert.rejects(revertMarker(env,{confirm:'r2',generation:copied.generation}),error=>error.code==='ratings_domain_fence');
+ const still=await readRatingsAuthority(db,env);
+ assert.equal(still.mode,'d1');
+ assert.equal(still.cutover,'open');
+ assert.equal((await routeRead(env,'letterboxd/ratings/run.json')).value.checkpoint.diaryPagesRead,2);
+}
+
+{
+ const db=load(chainNames);
+ db.sql(fs.readFileSync('migrations/0010_ratings_authority.sql','utf8'));
+ db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open'");
+ const env={DB:db,BUCKET:bucket(),RATINGS_DB_REQUIRED:'on'};
+ const original=db.batch.bind(db);
+ db.batch=async statements=>{
+  const text=statements.map(item=>item.text).join('\n');
+  if(text.includes('ratings_view')&&text.includes('ratings_document'))throw new Error('killed');
+  return original(statements);
+ };
+ const at='2026-02-02T00:00:00.000Z';
+ await assert.rejects(Facts.recordFilmFacts(env,'abc',{watched:false,rating:4},{observedAt:at,source:'owner'}));
+ assert.equal(one(db,"SELECT COUNT(*) FROM ratings_document WHERE key='letterboxd/facts/films/lb-abc.json'"),0);
+ assert.equal(one(db,'SELECT COUNT(*) FROM ratings_view'),0);
+ db.batch=original;
+ const batches=[];
+ db.batch=async statements=>{batches.push(statements.map(item=>item.text).join('\n'));return original(statements);};
+ const saved=await Facts.recordFilmFacts(env,'abc',{watched:false,rating:4},{observedAt:at,source:'owner'});
+ assert.equal(saved.accepted,true);
+ const joined=batches.filter(text=>text.includes('ratings_document')&&text.includes('ratings_view'));
+ assert.equal(joined.length,1);
+ const shown=await overlayView(env,{abc:{actualRating:9,watched:true,prediction:{predictedRating:1}}});
+ assert.equal(shown.abc.watched,false);
+ assert.equal(shown.abc.actualRating,4);
+ assert.equal(shown.abc.prediction.predictedRating,1);
+ const origPrepare=db.prepare.bind(db);
+ let viewReads=0;
+ db.prepare=sql=>{
+  const prepared=origPrepare(sql);
+  if(!String(sql).includes('FROM ratings_view WHERE alias_id'))return prepared;
+  return {bind(...params){
+   const statement=prepared.bind(...params);
+   const all=statement.all.bind(statement);
+   statement.all=async()=>{viewReads+=1;if(viewReads>1)throw new Error('projection_stopped');return all();};
+   return statement;
+  }};
+ };
+ await assert.rejects(Facts.recordFilmFacts(env,'zzz',{watched:true,rating:null},{observedAt:at,source:'owner'}));
+ db.prepare=origPrepare;
+ const kept=await overlayView(env,{});
+ assert.equal(kept.zzz.watched,true);
+ assert.equal(kept.zzz.actualRating,null);
+ assert.equal(kept.abc.actualRating,4);
 }
 
 {

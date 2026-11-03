@@ -7,7 +7,8 @@
 // on R2 and a writer fails closed instead of writing R2. Mode d1 with cutover
 // open does not fall back to R2. The view index in R2 is not a rating source
 // once that marker is open: watched, actualRating and watchlist are replaced
-// from ratings_view. Events stay in R2 as a projection of a confirmed rating.
+// from ratings_view. A film-record compare-and-swap writes that projection in
+// the same batch. Events stay in R2 as a projection of a confirmed rating.
 // Archive receipts, ZIP bytes and HTML snapshots stay in R2.
 // This module does not import. The Worker bundle wraps it.
 
@@ -167,7 +168,7 @@ function writeStatements(key,text,etag,now,previousEtag,mode){
  return statements;
 }
 
-export async function putOwned(env,key,previousEtag,value,{mode='d1'}={}){
+export async function putOwned(env,key,previousEtag,value,{mode='d1',extra=[]}={}){
  if(!ratingsMutableKey(key))return {owned:false};
  if(mode!=='d1'&&mode!=='r2')throw failed('ratings_domain_unavailable');
  const gate=await requireOpen(env,mode);
@@ -175,7 +176,9 @@ export async function putOwned(env,key,previousEtag,value,{mode='d1'}={}){
  const text=JSON.stringify(value);
  const etag=await digest(text);
  const now=new Date().toISOString();
- try{await fenced(gate.db,writeStatements(key,text,etag,now,previousEtag,mode));}
+ const statements=writeStatements(key,text,etag,now,previousEtag,mode);
+ const bump=statements.pop();
+ try{await fenced(gate.db,[...statements,...(extra||[]),bump]);}
  catch(error){
   if(error.code==='ratings_domain_fence')return {owned:true,saved:null};
   throw error;
@@ -194,7 +197,8 @@ export async function casOwned(env,key,empty,apply){
   const base=current.value??clone(empty);
   const next=await apply(clone(base),current.etag);
   if(next==null)return {owned:true,result:{value:base,changed:false}};
-  const saved=await putOwned(env,key,current.etag,next);
+  const extra=key.startsWith('letterboxd/facts/films/')?await viewWrites(gate.db,[next]):[];
+  const saved=await putOwned(env,key,current.etag,next,{extra});
   if(!saved.owned)throw failed('ratings_domain_not_authoritative');
   if(saved.saved)return {owned:true,result:{value:next,changed:true}};
  }
@@ -212,23 +216,20 @@ function projectionIds(links={}){
  return [...(links.letterboxd?[String(links.letterboxd)]:[]),...(links.tmdb?['tmdb_'+links.tmdb]:[])];
 }
 
-export async function projectView(env,records){
- const gate=await requireOpen(env,'d1');
- if(!gate.open)return {owned:false,changed:0};
+async function viewWrites(db,records){
  const list=(records||[]).filter(record=>record&&record.factKey&&record.links);
- if(!list.length)return {owned:true,changed:0};
+ if(!list.length)return [];
  const wanted=new Map();
  for(const record of list){
   const row=projectionRow(record);
   for(const id of projectionIds(record.links))wanted.set(id,{...row,alias_id:id});
  }
- if(!wanted.size)return {owned:true,changed:0};
+ if(!wanted.size)return [];
  if(wanted.size>200)throw failed('ratings_domain_unavailable');
  const ids=[...wanted.keys()];
- const existing=new Map((await many(gate.db,'SELECT alias_id, fact_key, watched, actual_rating, watchlist, rating_known FROM ratings_view WHERE alias_id IN ('+ids.map(()=>'?').join(',')+')',ids)).map(row=>[row.alias_id,row]));
+ const existing=new Map((await many(db,'SELECT alias_id, fact_key, watched, actual_rating, watchlist, rating_known FROM ratings_view WHERE alias_id IN ('+ids.map(()=>'?').join(',')+')',ids)).map(row=>[row.alias_id,row]));
  const now=new Date().toISOString();
  const statements=[];
- let changed=0;
  for(const [id,row] of wanted){
   const prior=existing.get(id);
   const watched=row.present.watched?row.watched:(prior?prior.watched:null);
@@ -236,13 +237,19 @@ export async function projectView(env,records){
   const ratingKnown=row.present.rating?1:(prior?Number(prior.rating_known):0);
   const actual=row.present.rating?row.actual_rating:(prior?prior.actual_rating:null);
   if(prior&&prior.fact_key===row.fact_key&&(prior.watched??null)===(watched??null)&&(prior.watchlist??null)===(watchlist??null)&&Number(prior.rating_known)===ratingKnown&&(prior.actual_rating??null)===(actual??null))continue;
-  changed++;
   statements.push(['INSERT INTO ratings_view (alias_id, fact_key, watched, actual_rating, watchlist, rating_known, updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(alias_id) DO UPDATE SET fact_key=excluded.fact_key, watched=excluded.watched, actual_rating=excluded.actual_rating, watchlist=excluded.watchlist, rating_known=excluded.rating_known, updated_at=excluded.updated_at',[id,row.fact_key,watched,actual,watchlist,ratingKnown,now]]);
  }
+ return statements;
+}
+
+export async function projectView(env,records){
+ const gate=await requireOpen(env,'d1');
+ if(!gate.open)return {owned:false,changed:0};
+ const statements=await viewWrites(gate.db,records);
  if(!statements.length)return {owned:true,changed:0};
  const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
  await fenced(gate.db,batch);
- return {owned:true,changed};
+ return {owned:true,changed:statements.length};
 }
 
 export async function overlayView(env,index){
@@ -372,16 +379,29 @@ export async function sealHeld(env,{confirm,generation}={}){
  return next;
 }
 
-export async function revertMarker(env,{confirm}={}){
- if(confirm!=='r2')throw failed('ratings_domain_not_confirmed');
+export function ratingsRunActivity(value,now){
+ if(!value)return 'absent';
+ return value.state==='running'&&Date.parse(value.lease?.expiresAt)>now?'active':'idle';
+}
+
+export async function readRatingsRun(env){
+ const db=database(env);
+ const authority=await readRatingsAuthority(db,env);
+ if(!authority.tables||authority.mode!=='d1')return {source:'r2',value:null,generation:authority.generation||0};
+ const document=await readParts(db,'letterboxd/ratings/run.json');
+ return {source:'d1',value:document.value,generation:authority.generation};
+}
+
+export async function revertMarker(env,{confirm,generation}={}){
+ if(confirm!=='r2'||!Number.isInteger(generation))throw failed('ratings_domain_not_confirmed');
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
  if(!authority.ready)throw failed('ratings_domain_not_authoritative');
  await fenced(db,[
-  ["UPDATE ratings_domain_authority SET mode='r2', cutover='open' WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?",[authority.generation]],
+  ["UPDATE ratings_domain_authority SET mode='r2', cutover='open' WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?",[generation]],
   [FENCE_SQL,[]],
  ]);
  const next=await readRatingsAuthority(db,env);
- if(next.mode!=='r2'||next.cutover!=='open')throw failed('ratings_domain_fence');
+ if(next.mode!=='r2'||next.cutover!=='open'||next.generation!==generation)throw failed('ratings_domain_fence');
  return next;
 }
