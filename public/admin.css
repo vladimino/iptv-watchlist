@@ -298,6 +298,10 @@
 @media(max-width:800px){.action-facts div{grid-template-columns:minmax(0,1fr);gap:2px}.action-buttons button{flex:1 1 100%}}
 .archive-upload{margin-top:18px}
 .archive-upload[hidden]{display:none}
+.archive-progress{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:14px 0 0}
+.archive-progress[hidden]{display:none}
+.archive-progress .admin-state{flex:1 1 16rem;margin:0}
+.archive-progress .admin-more{width:auto;margin:0}
 .archive-upload h2{font-size:22px;letter-spacing:-.3px}
 .archive-form{display:flex;flex-direction:column;gap:6px;margin:10px 0 0}
 .archive-file input[type=file]{padding:6px}
@@ -347,7 +351,7 @@
 .archive-details ul{margin:6px 0 0;padding-left:18px;font-size:13px}
 .archive-details li{margin:0 0 6px;overflow-wrap:anywhere}
 .archive-row-facts{color:#c5d0c2}
-@media(max-width:800px){.archive-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.archive-totals .archive-total:last-child:nth-child(odd){grid-column:1 / -1}.archive-actions button{flex:1 1 100%}.archive-steps{flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px}.archive-steps li{flex:0 0 auto;max-width:11rem}}
+@media(max-width:800px){.archive-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.archive-totals .archive-total:last-child:nth-child(odd){grid-column:1 / -1}.archive-actions button,.archive-progress .admin-more{flex:1 1 100%}.archive-steps{flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px}.archive-steps li{flex:0 0 auto;max-width:11rem}}
 .posters-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .posters-action,.posters-unverified{margin-top:22px}
 .posters-action-intro,.posters-source{font-size:14px;line-height:1.5;color:var(--muted);margin:0 0 10px}

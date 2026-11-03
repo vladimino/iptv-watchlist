@@ -58,16 +58,26 @@ function archiveRepaint() {
   archivePaintResult();
 }
 
+function archiveSetWait(visible, writing) {
+  const progress = archiveNode('#archive-progress');
+  const loading = archiveNode('#archive-loading');
+  const cancel = archiveNode('#archive-cancel');
+  if (progress) progress.hidden = !visible;
+  loading.hidden = !visible;
+  cancel.hidden = !visible;
+  cancel.textContent = writing ? 'Прервать ожидание' : 'Отменить';
+  if (visible) loading.textContent = writing ? 'Запрос уже ушёл на сервер. Прервать ожидание не отменяет запись и не откатывает её.' : 'Сервер проверяет архив и сравнивает его с R2…';
+  if (visible && writing && cancel.focus) cancel.focus();
+}
+
 function archiveShow(state, payload) {
   if (state === 'idle' || state === 'error') {archiveLive.viewStep = 1; archiveLive.reached = 1; archiveLive.navAway = false;}
   const step = archiveLive.viewStep || 1;
   archiveMarkStep(step);
   const upload = archiveNode('#archive-upload');
   if (upload) upload.hidden = step !== 1;
-  const loading = archiveNode('#archive-loading');
-  loading.hidden = state !== 'loading';
   const writing = archiveLive.inflight && archiveLive.inflight.kind !== 'preview';
-  loading.textContent = writing ? 'Запрос уже ушёл на сервер. Прервать ожидание не отменяет запись и не откатывает её.' : 'Сервер проверяет архив и сравнивает его с R2…';
+  archiveSetWait(state === 'loading', writing);
   archiveNode('#archive-idle').hidden = state !== 'idle';
   const error = archiveNode('#archive-error');
   error.hidden = state !== 'error';
@@ -76,9 +86,6 @@ function archiveShow(state, payload) {
   if (state === 'ready' && archiveLive.answer) result.innerHTML = step === 1 ? archiveStepReturnHtml() : archivePreviewHtml(payload, archiveLive);
   else result.innerHTML = '';
   archiveNode('#archive-submit').disabled = state === 'loading';
-  const cancel = archiveNode('#archive-cancel');
-  cancel.hidden = state !== 'loading';
-  cancel.textContent = writing ? 'Прервать ожидание' : 'Отменить';
   if (state === 'error' && error.focus) error.focus();
   if (state === 'ready' && result.focus) result.focus();
 }
@@ -201,10 +208,8 @@ function onArchiveCancel() {
   }
   archiveSettleLostWrite(inflight);
   archiveOfferReceipt();
-  archiveNode('#archive-loading').hidden = true;
+  archiveSetWait(false, false);
   archiveNode('#archive-submit').disabled = false;
-  archiveNode('#archive-cancel').hidden = true;
-  archiveNode('#archive-cancel').textContent = 'Отменить';
   const error = archiveNode('#archive-error');
   error.hidden = false;
   error.textContent = 'Ожидание прервано в браузере. Сервер это не отменяет и не откатывает. Исход неизвестен. Повтор сам не запускается.';
@@ -273,10 +278,8 @@ function archiveMarkInProgress(inflight) {
 }
 
 function archiveApplyFailed(result) {
-  archiveNode('#archive-loading').hidden = true;
+  archiveSetWait(false, false);
   archiveNode('#archive-submit').disabled = false;
-  archiveNode('#archive-cancel').hidden = true;
-  archiveNode('#archive-cancel').textContent = 'Отменить';
   archiveLive.controller = null;
   const inflight = archiveLive.inflight;
   archiveLive.inflight = null;
@@ -309,14 +312,9 @@ function archiveBeginAction(kind, chunk) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   archiveLive.controller = controller;
   archiveLive.inflight = {kind, chunk};
-  const loading = archiveNode('#archive-loading');
-  loading.hidden = false;
-  loading.textContent = 'Запрос уже ушёл на сервер. Прервать ожидание не отменяет запись и не откатывает её.';
   archiveNode('#archive-error').hidden = true;
   archiveNode('#archive-submit').disabled = true;
-  const cancel = archiveNode('#archive-cancel');
-  cancel.hidden = false;
-  cancel.textContent = 'Прервать ожидание';
+  archiveSetWait(true, true);
   return {seq, signal: controller ? controller.signal : undefined};
 }
 

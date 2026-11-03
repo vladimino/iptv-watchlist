@@ -30,6 +30,9 @@ assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through th
 assert.doesNotMatch(bundle, /localStorage|sessionStorage|indexedDB|caches\.|document\.cookie|Authorization|Bearer|history\.(push|replace)State|\/api\/letterboxd\/baseline|\/api\/sync|\/mcp/);
 assert.doesNotMatch(bundle + html, /Импортировать|Применить|\/commit|\/validate|data-archive-apply/i, 'no control commits by itself or calls the service-token route');
 assert.equal((html.match(/<button/g) || []).length, 3, 'submit, cancel and reset are the only buttons in the static page');
+const uploadBlock = html.slice(html.indexOf('id="archive-upload"'), html.indexOf('id="archive-progress"'));
+assert.doesNotMatch(uploadBlock, /id="archive-cancel"|id="archive-loading"/, 'the stop-wait control is outside the file form');
+assert.ok(html.indexOf('id="archive-progress"') < html.indexOf('id="archive-cancel"') && html.indexOf('id="archive-cancel"') < html.indexOf('id="archive-result"'));
 assert.match(html, /<ol id="archive-steps" class="archive-steps" aria-label="Шаги проверки архива">/);
 assert.equal((html.match(/data-archive-step="/g) || []).length, 5);
 assert.doesNotMatch(html.slice(html.indexOf('id="archive-steps"'), html.indexOf('</ol>')), /<button/, 'the step list is not a row of buttons');
@@ -76,13 +79,15 @@ const fakeFetch = async (input, init = {}) => {
 const listeners = new Map();
 function element(selector) {
   return {
-    selector, hidden: false, innerHTML: '', textContent: '', value: '', disabled: false, files: [],
+    selector, parent: null, hidden: false, innerHTML: '', textContent: '', value: '', disabled: false, files: [],
     focus() {document.activeElement = this;},
     reset() {nodes.get('#archive-file').files = []; nodes.get('#archive-file').value = ''; nodes.get('#archive-generated-at').value = '';},
     addEventListener(type, fn) {const list = listeners.get(selector) || []; list.push({type, fn}); listeners.set(selector, list);},
   };
 }
-const nodes = new Map(['#archive-form', '#archive-file', '#archive-generated-at', '#archive-submit', '#archive-cancel', '#archive-reset', '#archive-loading', '#archive-error', '#archive-idle', '#archive-result', '#archive-upload'].map(selector => [selector, element(selector)]));
+const nodes = new Map(['#archive-form', '#archive-file', '#archive-generated-at', '#archive-submit', '#archive-cancel', '#archive-reset', '#archive-loading', '#archive-error', '#archive-idle', '#archive-result', '#archive-upload', '#archive-progress'].map(selector => [selector, element(selector)]));
+nodes.get('#archive-cancel').parent = nodes.get('#archive-progress');
+nodes.get('#archive-loading').parent = nodes.get('#archive-progress');
 const steps = [1, 2, 3, 4, 5].map(n => ({
   n, attrs: {},
   getAttribute(name) {return name === 'data-archive-step' ? String(this.n) : (Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null);},
@@ -90,6 +95,10 @@ const steps = [1, 2, 3, 4, 5].map(n => ({
   removeAttribute(name) {delete this.attrs[name];},
 }));
 const document = {activeElement: null, querySelector: selector => nodes.get(selector) || null, querySelectorAll: selector => selector === '[data-archive-step]' ? steps : []};
+function effectivelyShown(node) {
+  for (let item = node; item; item = item.parent) if (item.hidden) return false;
+  return true;
+}
 function currentStep() {
   const item = steps.find(step => step.attrs['aria-current'] === 'step');
   assert.ok(item, 'one step is current');
@@ -118,6 +127,7 @@ assert.deepEqual(requests, []);
 assert.equal(gets, 0);
 assert.equal(idle.hidden, false); assert.equal(loading.hidden, true); assert.equal(error.hidden, true); assert.equal(result.innerHTML, '');
 assert.equal(upload.hidden, false);
+assert.equal(effectivelyShown(nodes.get('#archive-cancel')), false);
 assert.equal(currentStep(), 1);
 
 // 2. Local checks stop the request before it is sent.
@@ -146,7 +156,10 @@ assert.equal(loading.hidden, false);
 assert.equal(currentStep(), 1, 'a preview stays on the file step until it succeeds');
 assert.match(loading.textContent, /Сервер проверяет архив/);
 assert.equal(nodes.get('#archive-submit').disabled, true);
-assert.equal(nodes.get('#archive-cancel').hidden, false);
+assert.equal(effectivelyShown(nodes.get('#archive-cancel')), true, 'preview cancel is visible, including its ancestors');
+assert.equal(nodes.get('#archive-cancel').textContent, 'Отменить');
+assert.equal(nodes.get('#archive-progress').hidden, false);
+assert.equal(upload.hidden, false);
 await pending;
 assert.deepEqual(requests.map(request => [request.url, request.method, request.credentials, request.cache, request.fields.join(',')]), [['/api/admin/letterboxd-archive/preview', 'POST', 'same-origin', 'no-store', 'archive']]);
 assert.equal(requests[0].headers.Authorization, undefined);
@@ -586,4 +599,46 @@ assert.equal(currentStep(), 5);
 assert.match(result.innerHTML, /Исход партии 1 неизвестен/);
 assert.doesNotMatch(result.innerHTML, /не начиналась/);
 assert.equal(run('archiveLive.issued[0].idempotencyKey'), frozenKey);
+
+// 15. Stop-wait stays visible through its ancestors on every write, and it does not mint a new key.
+function prepareWritable() {
+  choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
+  run(`(() => {
+    const file = document.querySelector('#archive-file').files[0];
+    archiveLive.bound = {file, declared: '', mark: [file.name, file.size, file.lastModified, ''].join('\\0')};
+    archiveLive.stale = false;
+    archiveLive.answer.batches.chunks[0].confirmable = true;
+    archiveLive.answer.batches.programmeRunId = archiveLive.answer.batches.programmeRunId || '${G1}';
+  })()`);
+}
+const waitKinds = [
+  ['confirm', `archiveLive.viewStep=4; archiveLive.reached=4; archiveLive.issued={}; archiveLive.keys={}; archiveLive.confirmUnknown={}; archiveLive.committed={}; archiveLive.rollbackResult={}; archiveLive.rollbackIssued={}; archiveLive.rollbackConfirmUnknown={};`, 'onArchiveConfirm(0)', 4, () => run('archiveLive.keys[0]')],
+  ['commit', `archiveLive.viewStep=4; archiveLive.reached=4; archiveLive.issued[0]={idempotencyKey:'lb0123456789abcdef',chunk:0}; archiveLive.committed={}; archiveLive.confirmUnknown={};`, 'onArchiveCommit(0)', 4, () => run('archiveLive.issued[0].idempotencyKey')],
+  ['rollback-confirm', `archiveLive.viewStep=5; archiveLive.reached=5; archiveLive.committed[0]={state:'succeeded',replayed:false,counts:{written:1}}; archiveLive.rollbackIssued={}; archiveLive.rollbackKeys={}; archiveLive.rollbackResult={}; archiveLive.rollbackConfirmUnknown={};`, 'onArchiveRollbackConfirm(0)', 5, () => run('archiveLive.rollbackKeys[0]')],
+  ['rollback', `archiveLive.viewStep=5; archiveLive.reached=5; archiveLive.rollbackIssued[0]={idempotencyKey:'lbrollback0123456789ab',chunk:0}; archiveLive.rollbackResult={};`, 'onArchiveRollback(0)', 5, () => run('archiveLive.rollbackIssued[0].idempotencyKey')],
+];
+for (const [kind, setup, invoke, step, keyOf] of waitKinds) {
+  let posts = 0;
+  ctx.fetch = (_url, init) => new Promise((_resolve, reject) => {
+    posts++;
+    if (init && init.signal) init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})));
+  });
+  prepareWritable();
+  run(setup);
+  const pending = run(invoke);
+  const kept = keyOf();
+  assert.equal(upload.hidden, true, kind + ' hides the file form');
+  assert.equal(effectivelyShown(nodes.get('#archive-cancel')), true, kind + ' stop-wait is visible through its ancestors');
+  assert.equal(nodes.get('#archive-cancel').textContent, 'Прервать ожидание', kind);
+  assert.match(loading.textContent, /не отменяет запись и не откатывает/);
+  assert.equal((loading.textContent.match(/не отменяет запись/g) || []).length + (result.innerHTML.match(/не отменяет запись|ответ ещё не прочитан/g) || []).length, 1, kind + ' progress is not duplicated');
+  assert.equal((result.innerHTML.match(/class="admin-card archive-result archive-step"/g) || []).length, 1, kind);
+  assert.equal(currentStep(), step, kind);
+  run('onArchiveCancel()');
+  await pending;
+  assert.equal(posts, 1, kind + ' cancel does not send another request');
+  assert.equal(keyOf(), kept, kind + ' keeps the same key');
+  assert.equal(effectivelyShown(nodes.get('#archive-cancel')), false, kind);
+  assert.doesNotMatch(result.innerHTML, /не начиналась/);
+}
 console.log('admin-letterboxd-page: ok');

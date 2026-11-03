@@ -35,12 +35,14 @@
         <p id="archive-time-hint" class="muted archive-hint">Только для переименованного файла: у обычного имени время читается из имени, а на экране показывается по Мадриду. Поле UTC оставь пустым, если файл не переименовывали.</p>
         <div class="archive-actions">
           <button type="submit" id="archive-submit" class="admin-refresh">Проверить архив</button>
-          <button type="button" id="archive-cancel" class="admin-more" hidden>Отменить</button>
           <button type="button" id="archive-reset" class="admin-more">Очистить</button>
         </div>
       </form>
     </section>
-    <p id="archive-loading" class="admin-state" role="status" aria-busy="true" hidden>Сервер проверяет архив и сравнивает его с R2…</p>
+    <div id="archive-progress" class="archive-progress" hidden>
+      <p id="archive-loading" class="admin-state" role="status" aria-busy="true" hidden>Сервер проверяет архив и сравнивает его с R2…</p>
+      <button type="button" id="archive-cancel" class="admin-more" hidden>Отменить</button>
+    </div>
     <p id="archive-error" class="admin-state admin-state-error" role="alert" tabindex="-1" hidden></p>
     <p id="archive-idle" class="empty" role="status"><span aria-hidden="true">∅</span><b>Архив ещё не проверялся</b><span>Выбери файл и нажми «Проверить архив». Результат живёт только в этой вкладке до очистки или ухода со страницы.</span></p>
     <div id="archive-result" class="archive-results" tabindex="-1" aria-live="polite"></div>
