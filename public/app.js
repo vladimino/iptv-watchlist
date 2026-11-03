@@ -512,8 +512,9 @@ const EVIDENCE_CONFIDENCE_REASONS={
 };
 function evidenceConfidenceHtml(value,fingerprintHash){
  if(!value||typeof value!=='object'||Array.isArray(value)||value.assessmentVersion!==1)return '';
+ if(typeof value.level!=='string'||!Object.hasOwn(EVIDENCE_CONFIDENCE_LEVEL,value.level))return '';
+ if(typeof value.status!=='string'||!['evidenced','legacy','insufficient'].includes(value.status))return '';
  const level=EVIDENCE_CONFIDENCE_LEVEL[value.level];
- if(!level||!{evidenced:1,legacy:1,insufficient:1}[value.status])return '';
  if(value.status!=='evidenced'&&value.level!=='low')return '';
  if(!Array.isArray(value.reasonCodes)||!value.coverage||typeof value.coverage!=='object'||Array.isArray(value.coverage))return '';
  for(const key of ['mechanicsAsserted','mechanicsSupported','keyApplicable','keyConcrete','keySupported','keyUnknown','keyNotApplicable','genrePresent','genreSupported']){

@@ -56,6 +56,9 @@ assert.equal(run('findsStrong(enrichment.films["heat-1995"].prediction)'),false,
 assert.equal(run(`evidenceConfidenceHtml({assessmentVersion:1,level:'<img>',status:'evidenced',reasonCodes:[]})`),'');
 assert.equal(run(`evidenceConfidenceHtml({assessmentVersion:1,level:'high',status:'legacy',reasonCodes:[]})`),'');
 assert.equal(run(`evidenceConfidenceHtml({assessmentVersion:1,level:'high',status:'evidenced'})`),'','version, level and status alone do not render');
+const inherited={assessmentVersion:1,reasonCodes:['legacy_no_evidence'],coverage:{mechanicsAsserted:0,mechanicsSupported:0,keyApplicable:0,keyConcrete:0,keySupported:0,keyUnknown:0,keyNotApplicable:0,genrePresent:0,genreSupported:0},fingerprintHash:null};
+assert.equal(run(`evidenceConfidenceHtml(${JSON.stringify({...inherited,level:'toString',status:'evidenced'})})`),'','an inherited level name does not render');
+assert.equal(run(`evidenceConfidenceHtml(${JSON.stringify({...inherited,level:'low',status:'constructor'})})`),'','an inherited status name does not render');
 const dropped=JSON.parse(JSON.stringify(assessment));
 delete dropped.coverage.keySupported;
 dropped.level='high';
