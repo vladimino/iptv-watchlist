@@ -496,12 +496,12 @@ const EVIDENCE_CONFIDENCE_REASONS={
  legacy_no_evidence:'У отпечатка нет карты доказательств.',
  evidence_unusable:'Карта доказательств не читается.',
  unsupported_schema:'Версия отпечатка не входит в эту таблицу.',
- evidence_shape:'Часть карты не совпала с заявлением и не вошла в оценку.',
+ evidence_shape:'Карта не совпала с заявлением, поэтому качество доказательств не выставлено.',
  metadata_only_execution:'Описания сюжета недостаточно для качества исполнения.',
  metadata_mechanic:'Механика опирается на описание фильма.',
  declared_source_not_verified:'Источник заявлен моделью или ссылкой и отдельно не проверялся.',
  low_item_confidence:'Часть доказательств помечена как слабая.',
- duplicate_ref:'Повторяющиеся ссылки ослабили оценку.',
+ duplicate_ref:'Повторяющиеся ссылки делают карту недостаточной.',
  unknown_gap:'Неизвестное измерение — пробел в доказательствах, а не низкое качество известного исполнения.',
  no_asserted_mechanics:'Заявленных механик нет.',
  partial_mechanic_coverage:'Подтверждены не все заявленные механики.',
@@ -510,12 +510,20 @@ const EVIDENCE_CONFIDENCE_REASONS={
  not_applicable_excluded:'Неприменимые измерения не снижают оценку.',
  genre_optional:'Жанровые измерения учитываются только там, где они есть.'
 };
-function evidenceConfidenceHtml(value){
+function evidenceConfidenceHtml(value,fingerprintHash){
  if(!value||typeof value!=='object'||Array.isArray(value)||value.assessmentVersion!==1)return '';
  const level=EVIDENCE_CONFIDENCE_LEVEL[value.level];
  if(!level||!{evidenced:1,legacy:1,insufficient:1}[value.status])return '';
  if(value.status!=='evidenced'&&value.level!=='low')return '';
- const notes=Object.keys(EVIDENCE_CONFIDENCE_REASONS).filter(code=>Array.isArray(value.reasonCodes)&&value.reasonCodes.includes(code)).map(code=>EVIDENCE_CONFIDENCE_REASONS[code]);
+ if(!Array.isArray(value.reasonCodes)||!value.coverage||typeof value.coverage!=='object'||Array.isArray(value.coverage))return '';
+ for(const key of ['mechanicsAsserted','mechanicsSupported','keyApplicable','keyConcrete','keySupported','keyUnknown','keyNotApplicable','genrePresent','genreSupported']){
+  const number=value.coverage[key];
+  if(typeof number!=='number'||!Number.isInteger(number)||number<0||number>99)return '';
+ }
+ const bound=typeof fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(fingerprintHash)?fingerprintHash:null;
+ const assessed=typeof value.fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(value.fingerprintHash)?value.fingerprintHash:null;
+ if(bound&&assessed!==bound)return '';
+ const notes=Object.keys(EVIDENCE_CONFIDENCE_REASONS).filter(code=>value.reasonCodes.includes(code)).map(code=>EVIDENCE_CONFIDENCE_REASONS[code]);
  const visible=notes.slice(0,3).join(' '),title=notes.join(' ');
  return `<div class="evidence-confidence" data-level="${value.level}" data-status="${value.status}"${title?` title="${escapeHTML(title)}"`:''}><p class="evidence-confidence-level">Качество доказательств: <strong>${level}</strong></p>${visible?`<p class="evidence-confidence-limits">${escapeHTML(visible)}</p>`:''}</div>`;
 }
@@ -523,7 +531,7 @@ function filmWhy(prediction){if(!prediction||!Number.isFinite(prediction.predict
 function setFilmHtml(id,html){const node=$('#'+id);if(node)node.innerHTML=html;}
 function availableShows(film,now=viewingClock()){const model=viewingWindow(now);return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&(inArchive(model,show)||inFuture(model,show))).sort((a,b)=>a.start-b.start||String(a.channel||'').localeCompare(String(b.channel||''),'ru'));}
 function nearestAvailable(shows,now){const live=shows.find(show=>show.start<=now&&finiteTime(show.end)!==null&&show.end>now),upcoming=shows.find(show=>show.start>now);if(live&&upcoming)return {show:live,also:upcoming,label:'Сейчас в эфире',nextLabel:'Следующий показ'};if(live)return {show:live,label:'Сейчас в эфире'};if(upcoming)return {show:upcoming,label:'Ближайший показ'};return shows.length?{show:shows[shows.length-1],label:'Последний доступный показ'}:null;}
-function filmScore(film){const item=enrichment.films?.[String(film.id)]||{},actual=item.actualRating,prediction=item.prediction;const rating=actual!==null&&actual!==undefined&&Number.isFinite(Number(actual))?`<article class="film-score-card"><span>Оценка Letterboxd</span><strong>${Number(actual).toFixed(1)}</strong></article>`:`<article class="film-score-card is-empty"><span>Оценка Letterboxd</span><p class="film-missing">Оценка Letterboxd не сохранена</p></article>`;const forecast=prediction&&Number.isFinite(prediction.predictedRating)?(()=>{const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'',confidence=confidenceText(prediction.confidence),assessed=evidenceConfidenceHtml(prediction.confidenceAssessment),model=confidence?(assessed?`уверенность модели ${escapeHTML(confidence)}`:`уверенность ${escapeHTML(confidence)}`):'';return `<article class="film-score-card"><span>Прогноз</span><strong>${Number(prediction.predictedRating).toFixed(1)}</strong><p>${chance?`<span>шанс 4.0+ ${chance}</span>`:''}${model?`<span>${model}</span>`:''}${prediction.stale?'<span>ожидает пересчёта</span>':''}</p>${assessed}</article>`;})():'<article class="film-score-card is-empty"><span>Прогноз</span><p class="film-missing">Прогноз ещё не готов</p></article>';return `<section class="film-score" aria-label="Оценка и прогноз"><div class="film-score-row">${forecast}${rating}</div>${filmWhy(prediction)}</section>`;}
+function filmScore(film){const item=enrichment.films?.[String(film.id)]||{},actual=item.actualRating,prediction=item.prediction;const rating=actual!==null&&actual!==undefined&&Number.isFinite(Number(actual))?`<article class="film-score-card"><span>Оценка Letterboxd</span><strong>${Number(actual).toFixed(1)}</strong></article>`:`<article class="film-score-card is-empty"><span>Оценка Letterboxd</span><p class="film-missing">Оценка Letterboxd не сохранена</p></article>`;const forecast=prediction&&Number.isFinite(prediction.predictedRating)?(()=>{const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'',confidence=confidenceText(prediction.confidence),assessed=evidenceConfidenceHtml(prediction.confidenceAssessment,prediction.fingerprintHash),model=confidence?(assessed?`уверенность модели ${escapeHTML(confidence)}`:`уверенность ${escapeHTML(confidence)}`):'';return `<article class="film-score-card"><span>Прогноз</span><strong>${Number(prediction.predictedRating).toFixed(1)}</strong><p>${chance?`<span>шанс 4.0+ ${chance}</span>`:''}${model?`<span>${model}</span>`:''}${prediction.stale?'<span>ожидает пересчёта</span>':''}</p>${assessed}</article>`;})():'<article class="film-score-card is-empty"><span>Прогноз</span><p class="film-missing">Прогноз ещё не готов</p></article>';return `<section class="film-score" aria-label="Оценка и прогноз"><div class="film-score-row">${forecast}${rating}</div>${filmWhy(prediction)}</section>`;}
 function filmSynopsis(film){const text=String(film.synopsis||'').trim();return `<section class="film-section"><h2>Синопсис</h2>${text?`<p class="film-page-synopsis">${escapeHTML(text)}</p>`:'<p class="film-missing">Синопсис не сохранён</p>'}</section>`;}
 function filmPeople(label,people,key){if(!people?.length)return '';return `<div class="film-people-row"><h3>${label}</h3><div class="film-people">${creditLinks(people,key)}</div></div>`;}
 function filmCredits(film){const directors=filmPeople(film.directors?.length>1?'Режиссёры':'Режиссёр',film.directors,'directors'),actors=filmPeople('В ролях',film.actors,'actors');return `<section class="film-section"><h2>Люди</h2>${directors||actors?directors+actors:'<p class="film-missing">Режиссёр и актёры не указаны</p>'}</section>`;}

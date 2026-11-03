@@ -77,10 +77,13 @@ function claimSupport(list,reasons,qualityOnly){
  if(duplicate)rank=Math.max(0,rank-1);
  return order[rank];
 }
+function rejectedEvidence(reasons){
+ return reasons.has('evidence_shape')||reasons.has('duplicate_ref')||reasons.has('metadata_only_execution');
+}
 function levelFor(reasons,counts){
  const {mechanicsAsserted,mechanicsSupported,keySupported,keyConcrete,keyHigh,keyUnknown,keyApplicable,keyLow}=counts;
- const blocked=reasons.has('evidence_shape')||reasons.has('duplicate_ref')||reasons.has('metadata_only_execution');
- const high=!blocked&&mechanicsAsserted>=1&&mechanicsSupported===mechanicsAsserted&&keySupported===keyConcrete&&keyConcrete>=CONFIDENCE_ASSESSMENT_THRESHOLDS.highSupportedMin&&keyHigh>=CONFIDENCE_ASSESSMENT_THRESHOLDS.highSupportedMin&&keyUnknown<=CONFIDENCE_ASSESSMENT_THRESHOLDS.highUnknownMax&&keyLow===0;
+ // Rejected maps return before this function. The guard keeps a rejected map off `high` if that changes.
+ const high=!rejectedEvidence(reasons)&&mechanicsAsserted>=1&&mechanicsSupported===mechanicsAsserted&&keySupported===keyConcrete&&keyConcrete>=CONFIDENCE_ASSESSMENT_THRESHOLDS.highSupportedMin&&keyHigh>=CONFIDENCE_ASSESSMENT_THRESHOLDS.highSupportedMin&&keyUnknown<=CONFIDENCE_ASSESSMENT_THRESHOLDS.highUnknownMax&&keyLow===0;
  if(high)return 'high';
  const medium=mechanicsAsserted>=1&&mechanicsSupported*2>=mechanicsAsserted&&keySupported>=CONFIDENCE_ASSESSMENT_THRESHOLDS.mediumSupportedMin&&keySupported*2>=keyConcrete&&keyUnknown*2<=keyApplicable&&keyLow*2<=keySupported;
  return medium?'medium':'low';
@@ -146,10 +149,10 @@ function assessPredictionConfidence(fingerprint){
  if(counts.keyNotApplicable>0)reasons.add('not_applicable_excluded');
  if(counts.keyLow>0)reasons.add('low_item_confidence');
  const coverage={mechanicsAsserted:counts.mechanicsAsserted,mechanicsSupported:counts.mechanicsSupported,keyApplicable:counts.keyApplicable,keyConcrete:counts.keyConcrete,keySupported:counts.keySupported,keyUnknown:counts.keyUnknown,keyNotApplicable:counts.keyNotApplicable,genrePresent:counts.genrePresent,genreSupported:counts.genreSupported};
- if(!mechanicsSupported&&!counts.keySupported){
-  reasons.add('evidence_unusable');
-  return confidenceResult('low','insufficient',reasons,coverage,hash);
- }
+ // A rejected claim fails the whole map. Usable neighbours are counted, not promoted to evidenced/medium.
+ // unknown and not_applicable with no evidence items are gaps and do not set these reasons.
+ if(!mechanicsSupported&&!counts.keySupported)reasons.add('evidence_unusable');
+ if(rejectedEvidence(reasons)||reasons.has('evidence_unusable'))return confidenceResult('low','insufficient',reasons,coverage,hash);
  return confidenceResult(levelFor(reasons,counts),'evidenced',reasons,coverage,hash);
 }
 function presentConfidenceAssessment(value){

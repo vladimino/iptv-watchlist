@@ -62,6 +62,8 @@ assert.ok(once.reasonCodes.includes('unknown_gap'));
 assert.ok(once.reasonCodes.includes('not_applicable_excluded'));
 assert.ok(once.reasonCodes.includes('key_coverage_complete'));
 assert.ok(!once.reasonCodes.includes('metadata_only_execution'));
+assert.ok(!once.reasonCodes.includes('evidence_shape'),'unknown and not_applicable without items are gaps, not a rejected map');
+assert.ok(!once.reasonCodes.includes('duplicate_ref'));
 assert.deepEqual(once.reasonCodes,A.REASON_ORDER.filter(code=>once.reasonCodes.includes(code)),'reason codes keep the fixed order');
 
 const changed=fingerprint({
@@ -108,7 +110,8 @@ const metadataExecution=fingerprint({
 const rejectedQuality=A.assessPredictionConfidence(metadataExecution);
 assert.equal(rejectedQuality.coverage.keySupported,0);
 assert.ok(rejectedQuality.reasonCodes.includes('metadata_only_execution'));
-assert.notEqual(rejectedQuality.level,'high');
+assert.equal(rejectedQuality.status,'insufficient');
+assert.equal(rejectedQuality.level,'low');
 
 const mediumKeys=['chemistry','plot_engine','decision_logic','protagonist_competence','problem_solving','payoff','ending_quality'];
 const mixed=fingerprint({
@@ -121,6 +124,7 @@ assert.equal(mixedResult.level,'medium');
 assert.ok(mixedResult.reasonCodes.includes('declared_source_not_verified'));
 assert.ok(!mixedResult.reasonCodes.includes('metadata_mechanic'));
 assert.ok(!mixedResult.reasonCodes.includes('metadata_only_execution'));
+assert.ok(!mixedResult.reasonCodes.includes('evidence_shape'));
 assert.equal(mixedResult.coverage.keySupported,7);
 
 const lowItems=fingerprint({
@@ -138,7 +142,10 @@ const duplicated=fingerprint({
 });
 const dup=A.assessPredictionConfidence(duplicated);
 assert.ok(dup.reasonCodes.includes('duplicate_ref'));
-assert.notEqual(dup.level,'high');
+assert.equal(dup.status,'insufficient');
+assert.equal(dup.level,'low');
+assert.equal(dup.coverage.mechanicsSupported,1,'the repeated claim is still counted');
+assert.ok(dup.coverage.keySupported>0);
 
 const genreFree=A.assessPredictionConfidence(high);
 const genrePresent=fingerprint({
@@ -154,8 +161,20 @@ const genreMetadata=fingerprint({
  genre:{action_readability:'strong'},
  evidence:{...high.evidence,execution:{...high.evidence.execution,action_readability:[item('metadata',['metadata:synopsis'],'high')]}}
 });
-assert.notEqual(A.assessPredictionConfidence(genreMetadata).level,'high');
-assert.ok(A.assessPredictionConfidence(genreMetadata).reasonCodes.includes('metadata_only_execution'));
+const genreMetadataResult=A.assessPredictionConfidence(genreMetadata);
+assert.equal(genreMetadataResult.status,'insufficient');
+assert.equal(genreMetadataResult.level,'low');
+assert.ok(genreMetadataResult.reasonCodes.includes('metadata_only_execution'));
+assert.ok(genreMetadataResult.coverage.keySupported>0,'valid key claims stay counted beside the rejected genre claim');
+const genreConcrete=fingerprint({
+ execution:high.execution,
+ genre:{action_readability:'strong'},
+ evidence:high.evidence
+});
+const genreOptional=A.assessPredictionConfidence(genreConcrete);
+assert.equal(genreOptional.status,'evidenced');
+assert.equal(genreOptional.level,'high');
+assert.ok(!genreOptional.reasonCodes.includes('evidence_shape'),'a genre value with no evidence items is optional');
 
 const partialMechanics=fingerprint({
  mechanics:['heist','chase_escape'],
@@ -163,14 +182,29 @@ const partialMechanics=fingerprint({
  evidence:{plotMechanics:{heist:[model('medium')]},execution:Object.fromEntries(mediumKeys.map(key=>[key,[model('medium')]]))}
 });
 const partial=A.assessPredictionConfidence(partialMechanics);
-assert.equal(partial.level,'medium');
+assert.equal(partial.status,'insufficient');
+assert.equal(partial.level,'low');
+assert.ok(partial.reasonCodes.includes('evidence_shape'));
 assert.ok(partial.reasonCodes.includes('partial_mechanic_coverage'));
 assert.equal(partial.coverage.mechanicsAsserted,2);
 assert.equal(partial.coverage.mechanicsSupported,1);
+assert.equal(partial.coverage.keySupported,7,'valid execution claims do not keep a rejected map at medium');
+const unknownItems=fingerprint({
+ execution:high.execution,
+ evidence:{...high.evidence,execution:{...high.evidence.execution,pace:[model('high')]}}
+});
+const unknownClaim=A.assessPredictionConfidence(unknownItems);
+assert.equal(unknownClaim.status,'insufficient');
+assert.equal(unknownClaim.level,'low');
+assert.ok(unknownClaim.reasonCodes.includes('evidence_shape'),'items on an unknown dimension reject the map');
+assert.ok(unknownClaim.coverage.keySupported>0);
 
 const noMechanics=fingerprint({mechanics:[],execution:{plot_engine:'strong',decision_logic:'strong',protagonist_competence:'high',problem_solving:'strong'},evidence:{execution:{plot_engine:[model('high')],decision_logic:[model('high')],protagonist_competence:[model('high')],problem_solving:[model('high')]}}});
-assert.equal(A.assessPredictionConfidence(noMechanics).level,'low');
-assert.ok(A.assessPredictionConfidence(noMechanics).reasonCodes.includes('no_asserted_mechanics'));
+const noMechanicResult=A.assessPredictionConfidence(noMechanics);
+assert.equal(noMechanicResult.status,'evidenced');
+assert.equal(noMechanicResult.level,'low');
+assert.ok(noMechanicResult.reasonCodes.includes('no_asserted_mechanics'));
+assert.ok(!noMechanicResult.reasonCodes.includes('evidence_shape'));
 
 const privateUrl=fingerprint({
  evidence:{plotMechanics:{heist:[item('web_research',['https://127.0.0.1/secret'],'high')]},execution:{}}
