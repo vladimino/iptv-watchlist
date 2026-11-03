@@ -37,9 +37,18 @@
       </div>
     </section>
     <form id="limbo-find-form" class="limbo-find" action="/admin/limb" role="search">
+      <div id="limbo-modes" class="limbo-modes" role="group" aria-label="Режим очереди">
+        <button type="button" id="limbo-mode-now" aria-pressed="true">Требует моего внимания</button>
+        <button type="button" id="limbo-mode-all" aria-pressed="false">Все состояния</button>
+      </div>
       <label class="limbo-field limbo-find-field" for="limbo-find">Найти запись<input id="limbo-find" type="search" autocomplete="off" spellcheck="false" placeholder="название среди показанных строк"></label>
-      <label class="limbo-field limbo-cause-field" for="limbo-causes">Причина<select id="limbo-causes" name="cause"><option value="">все</option></select></label>
-      <p id="limbo-find-note" class="limbo-find-note">Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Причина в этой строке отбирает весь список.</p>
+      <div id="limbo-causes" class="limbo-causes" role="group" aria-label="Причины"></div>
+      <div class="limbo-cause-actions">
+        <button type="button" id="limbo-causes-all">Все причины</button>
+        <button type="button" id="limbo-causes-none">Снять выбор</button>
+      </div>
+      <p id="limbo-action-count" class="limbo-find-note"></p>
+      <p id="limbo-find-note" class="limbo-find-note">Поле сравнивает название с уже показанными строками и ничего не запрашивает. Незагруженные страницы оно не просматривает. Кнопки причин отбирают весь список: нажатая входит, отпущенная нет. Если отпущены все, список пуст.</p>
     </form>
     <div class="admin-layout limbo-layout">
       <section aria-labelledby="limbo-results-title">

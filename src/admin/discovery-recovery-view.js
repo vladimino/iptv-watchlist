@@ -1,7 +1,7 @@
 // The owner-facing explanation of one discovery observation (GET /api/admin/discovery-recovery) and of the guarded
 // action `discovery_reconsider`. Pure: it turns the typed answer into Russian HTML from closed copy tables and decides
 // nothing. A verdict, reason or refusal without declared copy makes the explanation unavailable rather than guessed.
-// Keys, digests, etags, the pin and the idempotency key appear only inside the closed «Технические подробности». The
+// Keys, digests, etags, the pin and the idempotency key appear only inside the closed «Техническая диагностика». The
 // action controls are rendered only when the server's preview is `eligible`; the server checks everything again.
 
 export const OBS_VERDICT_COPY = {
@@ -165,6 +165,19 @@ function obsDate(value) {
   return new Intl.DateTimeFormat('ru-RU', {timeZone: 'Europe/Madrid', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'}).format(new Date(parsed)) + ' Madrid';
 }
 
+function obsLead(answer, state) {
+  if (state?.receipt || state?.identityReceipt) return 'результат действия';
+  const execute = answer.assessment?.execute;
+  const identity = answer.identity;
+  if (execute?.available || identity?.available) return 'нужно действие сейчас';
+  const verdict = answer.assessment?.verdict;
+  const evidence = answer.assessment?.evidence;
+  if (verdict === 'unknown' || evidence?.completeness === 'missing') return 'данных недостаточно';
+  const reason = execute?.reason || identity?.reason;
+  if (answer.index?.state !== 'fresh' || reason === 'index_not_current' || reason === 'index_incomplete' || verdict === 'stale_generation') return 'изменения недоступны';
+  return 'ожидание';
+}
+
 function obsTone(verdict) {
   if (verdict === 'resolved' || verdict === 'excluded_nonfilm' || verdict === 'queued' || verdict === 'backoff') return 'reviewed';
   if (verdict === 'no_more_evidence' || verdict === 'identity_conflict') return 'provisional';
@@ -228,7 +241,7 @@ function obsDetails(answer, state) {
   ];
   if (state?.confirmation) rows.push(['idempotencyKey', state.confirmation.idempotencyKey], ['confirmation.expiresAt', state.confirmation.expiresAt]);
   if (state?.receipt) rows.push(['receipt', [state.receipt.state, state.receipt.refusal, ...(state.receipt.outcomes || []).map(item => item.outcome + (item.error ? ':' + item.error : ''))].filter(Boolean).join(' / ')]);
-  return `<details class="recovery-tech"><summary>Технические подробности</summary><dl>${rows.map(([name, value]) => `<div><dt>${obsEscape(name)}</dt><dd>${obsEscape(value)}</dd></div>`).join('')}</dl></details>`;
+  return `<details class="recovery-tech"><summary>Техническая диагностика</summary><dl>${rows.map(([name, value]) => `<div><dt>${obsEscape(name)}</dt><dd>${obsEscape(value)}</dd></div>`).join('')}</dl></details>`;
 }
 
 function obsFactsHtml(answer) {
@@ -435,13 +448,16 @@ export function obsRecoveryPanelHtml(answer, state = {}) {
   const stale = answer.index?.state === 'stale' ? `<p class="limbo-unavailable">${obsEscape(OBS_INDEX_COPY.stale)}</p>` : '';
   const checked = obsDate(answer.evaluatedAt), written = obsDate(answer.index?.writtenAt);
   const snapshot = [checked ? 'проверено ' + checked : null, written ? 'индекс записан ' + written : null].filter(Boolean).join(' · ');
-  return `${changed}${receipt}${error}${stale}<p class="recovery-headline"><span class="admin-status admin-status-${obsTone(assessment.verdict)}">${obsEscape(copy.title)}</span></p>`
-    + `<h4>Что с наблюдением</h4><p>${obsEscape(copy.what + reason)}</p>`
-    + `<h4>Что будет дальше</h4><p>${obsEscape(obsNextText(assessment.next))}</p>`
-    + (assessment.review?.reason === 'identity_ambiguous' && !assessment.execute?.available && !answer.identity ? '<p>Автоматическое исправление этой проблемы пока недоступно.</p>' : '')
-    + `<h4>Данные</h4>${obsFactsHtml(answer)}`
-    + obsIdentityHtml(answer, state)
-    + obsActionHtml(answer, state)
+  const reconsiderOn = assessment.execute?.available === true && answer.action?.status === 'eligible';
+  const identityOn = answer.identity?.available === true;
+  const primary = reconsiderOn ? obsActionHtml(answer, state) : identityOn ? obsIdentityHtml(answer, state) : '';
+  const parked = (reconsiderOn ? '' : obsActionHtml(answer, state)) + (identityOn && !reconsiderOn ? '' : obsIdentityHtml(answer, state));
+  const actor = assessment.next?.actor === 'owner_investigation' ? 'Дальше владелец. ' : assessment.next?.actor === 'scheduled_step' || assessment.next?.actor === 'epg_commit' ? 'Дальше система. ' : assessment.next?.actor === 'reread' ? 'Дальше перечитать. ' : assessment.next?.actor === 'new_epg_evidence' ? 'Дальше новые данные программы. ' : '';
+  return `${changed}${receipt}${error}${stale}<p class="recovery-lead"><span class="admin-status admin-status-${obsTone(assessment.verdict)}">${obsEscape(obsLead(answer, state))}</span> ${obsEscape(copy.title)}.</p>`
+    + `<p><b>Почему.</b> ${obsEscape(copy.what + reason)}</p>`
+    + `<p><b>Дальше.</b> ${obsEscape(actor + obsNextText(assessment.next))}</p>`
+    + primary
+    + `<details class="recovery-why"><summary>Почему система так решила?</summary>${obsFactsHtml(answer)}${parked}</details>`
     + (snapshot ? `<p class="muted recovery-snapshot">${obsEscape(snapshot)}.</p>` : '')
     + obsDetails(answer, state)
     + `<p class="recovery-controls">${recheck}</p>`;

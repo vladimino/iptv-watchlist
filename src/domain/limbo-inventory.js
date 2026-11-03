@@ -152,13 +152,28 @@ export function limboCounts(items) {
 
 // The filter is validated before it is applied: an unknown value is an error, never "everything". An age filter keeps
 // items whose age is at least that many days and items whose age is unknown: a missing clock never proves youth.
+// `cause` is one cause. `causes` is an OR of several, and an empty array keeps nothing: an unpressed set is not "all".
+// Passing both is `conflicting_cause`. `attention: 'now'` keeps only items whose `ownerAction.now` is true; omitted and
+// `'all'` keep every item. The default key stays `|||` so an old single-cause cursor still names the same filter.
 export function limboFilter(filter) {
   const kind = filter?.kind ?? null, subsystem = filter?.subsystem ?? null, cause = filter?.cause ?? null, minAgeDays = filter?.minAgeDays ?? null;
+  const causes = filter && Object.prototype.hasOwnProperty.call(filter, 'causes') && filter.causes != null ? filter.causes : null;
+  let attention = filter?.attention ?? null;
+  if (attention === 'all' || attention === '') attention = null;
   if (kind !== null && !LIMBO_KINDS.includes(kind)) return {error: 'unknown_kind'};
   if (subsystem !== null && !LIMBO_SUBSYSTEMS.includes(subsystem)) return {error: 'unknown_subsystem'};
   if (cause !== null && !LIMBO_CAUSES.includes(cause)) return {error: 'unknown_cause'};
+  if (causes !== null) {
+    if (cause !== null) return {error: 'conflicting_cause'};
+    if (!Array.isArray(causes) || causes.some(value => typeof value !== 'string' || !LIMBO_CAUSES.includes(value))) return {error: 'unknown_cause'};
+  }
+  if (attention !== null && attention !== 'now') return {error: 'unknown_attention'};
   if (minAgeDays !== null && (!Number.isInteger(minAgeDays) || minAgeDays < 0 || minAgeDays > LIMBO_AGE_MAX_DAYS)) return {error: 'invalid_age'};
-  return {kind, subsystem, cause, minAgeDays, key: [kind ?? '', subsystem ?? '', cause ?? '', minAgeDays ?? ''].join('|')};
+  const unique = causes ? [...new Set(causes)].sort(limboText) : null;
+  let key = [kind ?? '', subsystem ?? '', cause ?? '', minAgeDays ?? ''].join('|');
+  if (unique) key += '~' + unique.join(',');
+  if (attention === 'now') key += '@now';
+  return {kind, subsystem, cause: unique ? null : cause, causes: unique, minAgeDays, attention, key};
 }
 
 export function filterLimboItems(items, filter) {
@@ -167,7 +182,8 @@ export function filterLimboItems(items, filter) {
   const kept = items.filter(item =>
     (parsed.kind === null || item.kind === parsed.kind)
     && (parsed.subsystem === null || item.subsystem === parsed.subsystem)
-    && (parsed.cause === null || item.cause === parsed.cause)
+    && (parsed.causes ? parsed.causes.includes(item.cause) : (parsed.cause === null || item.cause === parsed.cause))
+    && (parsed.attention !== 'now' || item.ownerAction?.now === true)
     && (parsed.minAgeDays === null || item.age.ms === null || item.age.ms >= parsed.minAgeDays * LIMBO_DAY));
   return {items: kept, key: parsed.key};
 }
