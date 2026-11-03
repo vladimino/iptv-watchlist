@@ -424,7 +424,12 @@ async function copyEpgGeneration(env,runId){
   const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(!staged)continue;
   const dest=name==='programme.json'?name:'epg/'+name,meta={httpMetadata:{contentType:'application/json'}};
   // Copy the stored bytes. Parsing the ledger back into objects is the commit's memory peak.
-  if(staged.body&&typeof staged.body.getReader==='function'){await env.BUCKET.put(dest,staged.body,meta);continue;}
+  if(staged.body&&typeof staged.body.getReader==='function'){
+   const size=staged.size;
+   if(!Number.isSafeInteger(size)||size<0)throw new Error('R2 object length is not a safe integer');
+   await putKnownLength(env.BUCKET,dest,size,staged.body,meta);
+   continue;
+  }
   if(typeof staged.text==='function'){await env.BUCKET.put(dest,await staged.text(),meta);continue;}
   await saveJSON(env,dest,await staged.json());
  }
@@ -508,13 +513,20 @@ async function readLedgerView(env){
  requireRun(wrapper);
  return {kind:'stream',key:located.key,archive:wrapper.archive||null,prevKeys,duplicates};
 }
+// Prefix, comma and suffix are the bytes the generation document actually writes. The length is their size
+// plus the candidate bytes counted on the decision walk. workerd accepts a ReadableStream only when that
+// length is known: the readable side of FixedLengthStream. A content-length header is not that contract.
+function discoveryDocumentFraming(meta,ledger){
+ const encoder=new TextEncoder(),head=JSON.stringify(meta||{}),tail=JSON.stringify(ledger||{});
+ return {prefix:encoder.encode(head.slice(0,-1)+',"items":['),suffix:encoder.encode(tail==='{}'?']}':'],'+tail.slice(1)),comma:new Uint8Array([44])};
+}
+function discoveryDocumentLength(framing,itemBytes,itemCount){
+ return framing.prefix.byteLength+framing.suffix.byteLength+itemBytes+(itemCount>0?itemCount-1:0);
+}
 // One chunk per pull. The consumer reads the prefix, then one encoded candidate, then the suffix.
 // A repeated comma chunk is shared and never mutated. Nothing is enqueued until a pull asks for it.
-function discoveryDocumentStream(meta,items,ledger){
- const encoder=new TextEncoder(),head=JSON.stringify(meta||{}),tail=JSON.stringify(ledger||{});
- const prefix=encoder.encode(head.slice(0,-1)+',"items":[');
- const suffix=encoder.encode(tail==='{}'?']}':'],'+tail.slice(1));
- const comma=new Uint8Array([44]);
+function discoveryDocumentStream(framing,items){
+ const {prefix,suffix,comma}=framing;
  const iterator=items[Symbol.asyncIterator]();
  let stage='prefix',started=false,held=null;
  return new ReadableStream({async pull(controller){
@@ -527,12 +539,39 @@ function discoveryDocumentStream(meta,items,ledger){
    if(started){held=step.value;controller.enqueue(comma);stage='held';return;}
    started=true;controller.enqueue(step.value);
   }catch(error){try{await iterator.return?.();}catch{}throw error;}
- }});
+ }},{highWaterMark:1});
+}
+// Node has no FixedLengthStream. This stand-in pulls one chunk at a time and rejects a short or long body.
+// It is not a substitute for the workerd class: a plain ReadableStream is still refused by R2 there.
+function lengthLimitedStream(source,length){
+ let seen=0;const reader=source.getReader();
+ return new ReadableStream({async pull(controller){
+  const step=await reader.read();
+  if(step.done){if(seen!==length)throw new Error('Readable stream length does not match');controller.close();return;}
+  const bytes=step.value instanceof Uint8Array?step.value:new Uint8Array(step.value);
+  seen+=bytes.byteLength;
+  if(seen>length)throw new Error('Readable stream length does not match');
+  controller.enqueue(bytes);
+ },cancel(reason){return reader.cancel(reason);}},{highWaterMark:1});
+}
+async function putKnownLength(bucket,key,length,source,options){
+ if(!Number.isSafeInteger(length)||length<0)throw new Error('R2 object length is not a safe integer');
+ if(typeof FixedLengthStream!=='function'){await bucket.put(key,lengthLimitedStream(source,length),options);return;}
+ const pair=new FixedLengthStream(length);
+ const writing=source.pipeTo(pair.writable);
+ let stored;
+ try{stored=await bucket.put(key,pair.readable,options);}
+ catch(error){try{pair.writable.abort(error);}catch{}await writing.catch(()=>{});throw error;}
+ await writing;
+ return stored;
 }
 async function storePlannedDiscovery(env,runId,meta,planned,next){
  if(!planned.emit){next['discovery-latest.json']={...meta,items:planned.items,...planned.ledger};return;}
- try{await env.BUCKET.put(epgGenerationKey(runId,'discovery-latest.json'),discoveryDocumentStream(meta,planned.emit(),planned.ledger),{httpMetadata:{contentType:'application/json'}});}
- finally{if(planned.holder)planned.holder.discovery=null;}
+ try{
+  if(!Number.isSafeInteger(planned.itemBytes)||!Number.isSafeInteger(planned.itemCount)||planned.itemBytes<0||planned.itemCount<0)throw new Error('Discovery document length is unknown');
+  const framing=discoveryDocumentFraming(meta,planned.ledger);
+  await putKnownLength(env.BUCKET,epgGenerationKey(runId,'discovery-latest.json'),discoveryDocumentLength(framing,planned.itemBytes,planned.itemCount),discoveryDocumentStream(framing,planned.emit()),{httpMetadata:{contentType:'application/json'}});
+ }finally{if(planned.holder)planned.holder.discovery=null;}
 }
 // Departures (bounded mode) stay objects only for the archive write that follows; frozen mode keeps none.
 // The scan list stays reachable until the generation put has pulled the document. Encoding happens then, one row at a time.
@@ -542,11 +581,20 @@ async function collectLedgerDecisions(env,view,holder,reentry,options,active){
  if(!object)throw new Error('Discovery ledger is missing for the published generation');
  const departures=[],activeKeys=new Set();
  const place=item=>{if(!item)return;if(active(item))activeKeys.add(item.key);else departures.push(item);};
- await forEachJsonArrayItems(ledgerChunks(object),'items',raw=>{const item=merge.push(raw);if(item)place(item);});
+ const encoder=new TextEncoder(),bytesOf=item=>encoder.encode(JSON.stringify(item)).byteLength;
+ let itemBytes=0,itemCount=0,holeOpen=false;const parked=[],holes=new Map();
+ const add=n=>{itemBytes+=n;itemCount++;};
+ await forEachJsonArrayItems(ledgerChunks(object),'items',raw=>{
+  const item=merge.push(raw);
+  if(item){place(item);if(active(item)){const n=bytesOf(item);if(holeOpen)parked.push(n);else add(n);}return;}
+  const key=discoveryCandidateKey(raw);
+  if(!holes.has(key)){holes.set(key,parked.length);parked.push(null);holeOpen=true;}
+ });
  const tail=merge.end();
- for(const {item} of tail.deferred)place(item);
- for(const item of tail.appended)place(item);
- return {departures,activeKeys};
+ for(const {key,item} of tail.deferred){place(item);const at=holes.get(key);parked[at]=item&&active(item)?bytesOf(item):null;}
+ for(const n of parked)if(typeof n==='number')add(n);
+ for(const item of tail.appended){place(item);if(active(item))add(bytesOf(item));}
+ return {departures,activeKeys,itemBytes,itemCount};
 }
 // Yields one UTF-8 candidate at a time and waits until that chunk is taken. A repeated canonical key is the exception:
 // rows after its first copy stay buffered until the merged row can be placed there. Production ledgers are unique.
@@ -598,7 +646,8 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  if(effective==='full'){
   if(view.kind!=='stream'){const items=mergeDiscoveryCandidates(view.items,latestList,options);latestList=null;if(sourceHolder)sourceHolder.discovery=null;return {items,ledger:{}};}
   latestList=null;
-  return {emit:()=>iterateLedgerItems(env,view,sourceHolder,[],options,()=>true),holder:sourceHolder,ledger:{}};
+  const counted=await collectLedgerDecisions(env,view,sourceHolder,[],options,()=>true);
+  return {emit:()=>iterateLedgerItems(env,view,sourceHolder,[],options,()=>true),holder:sourceHolder,ledger:{},itemBytes:counted.itemBytes,itemCount:counted.itemCount};
  }
  const fence=async()=>{
   if(!await renewDiscoveryLease(env,lease))throw new Error('Discovery archive fence lost: lease');
@@ -614,10 +663,10 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  for(const key of latestKeys)if(!prevKeys.has(key)){const segment=ledgerArchiveSegment(key,start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS);if(!wanted.has(segment))wanted.set(segment,[]);wanted.get(segment).push(key);}
  if(start)for(const [segment,keys] of wanted){const items=await readLedgerSegment(env,start,segment);for(const key of keys)if(items[key]){reentry.push(items[key].payload);found.add(key);}}
  const keep=item=>effective!=='bounded'||latestKeys.has(item.key);
- let items=null,emit=null,departures,activeKeys;
+ let items=null,emit=null,departures,activeKeys,collected=null;
  if(view.kind==='stream'){
   latestList=null;
-  const collected=await collectLedgerDecisions(env,view,sourceHolder,reentry,options,keep);
+  collected=await collectLedgerDecisions(env,view,sourceHolder,reentry,options,keep);
   departures=collected.departures;activeKeys=collected.activeKeys;
   emit=()=>iterateLedgerItems(env,view,sourceHolder,reentry,options,keep);
  }else{
@@ -660,7 +709,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  }
  const alsoArchived=[...also].sort(),archive=manifest?{version:'v1',manifestId,segments:manifest.segmentCount,items:manifest.totals.items,bytes:manifest.totals.bytes,alsoArchived,uniqueArchivedItems:manifest.totals.items-alsoArchived.length}:null;
  const ledgerOut={ledgerMode:effective,archive};
- if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut};
+ if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut,itemBytes:collected.itemBytes,itemCount:collected.itemCount};
  return {items,ledger:ledgerOut};
 }
 // `ledger` (AIR-220): `{latest, meta, mode}` lets the generation's discovery ledger be planned under this lease, fenced on the
