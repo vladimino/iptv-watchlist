@@ -98,7 +98,7 @@ The aggregate walks mechanics in list order, then the general execution dimensio
 
 `contract.fingerprint.evidence` on `GET /api/enrichment/schema` is that optional contract: `required: false`, the bases, metadata tokens, bounds, which claims are covered, how the aggregate is computed, and the `prediction_validate` metadata preflight. It is not a key of `contract.fingerprint.rules`, so a fingerprint that omits the map still satisfies the rule table. The schema `rules` text does not tell the hourly task to emit the map.
 
-Rollback is reverting this Worker. There is no migration. Bodies that omit `evidence` stay valid on this code and on the previous code. A later authorized generation is what would write a body that contains the map; this change writes none. The live hourly task prompt is unchanged. Turning generation on is a later card: a schema or prompt bump, an ADR-0035 declaration, and a separate change to that task.
+Rollback is reverting this Worker. There is no migration. Bodies that omit `evidence` stay valid on this code and on the previous code. A later authorized generation is what would write a body that contains the map; this change writes none. The live hourly task prompt is unchanged. The proposed Stage B sentences, still not applied, are in [scheduled tasks](../scheduled-tasks.md#proposed-fingerprint-evidence-instruction-not-applied). Copying them into the task, or changing a version constant, needs a separate owner approval. This schema does not ask the caller to emit the map.
 
 ### Optional confidence assessment
 
