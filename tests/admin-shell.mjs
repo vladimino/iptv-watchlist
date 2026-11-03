@@ -538,7 +538,8 @@ assert.doesNotMatch(issuesHtml, /<button/, 'no execution controls in the issue l
 assert.match(issuesHtml, /Технические подробности/);
 assert.ok(issuesHtml.indexOf('health-group-why') < issuesHtml.indexOf('Технические подробности'), 'the reason stays outside the technical disclosure');
 assert.ok(issuesHtml.indexOf('health-band-act') < issuesHtml.indexOf('health-band-wait') && issuesHtml.indexOf('health-band-wait') < issuesHtml.indexOf('health-band-gap'), 'action, then routine waiting, then missing evidence');
-assert.match(issuesHtml, /Дальше само:|На другой странице:|Разобраться вручную:|Обновить оценку можно кнопкой|Проверить нельзя:/);
+assert.match(issuesHtml, /Дальше само:|Разобраться вручную:|Обновить оценку можно кнопкой|Проверить нельзя:|Ссылка только открывает страницу/);
+assert.doesNotMatch(issuesHtml, /На другой странице/);
 assert.doesNotMatch(issuesHtml, /Сейчас:/);
 assert.doesNotMatch(issuesHtml, /href="\/admin\/discovery|href="\/api\//);
 const issuesVisibleText = issuesHtml.replace(/<details class="health-tech">[\s\S]*?<\/details>/g, '').replace(/<[^>]+>/g, ' ');
@@ -549,7 +550,9 @@ assert.match(issuesVisibleText, /Неизвестно, сколько затро
 assert.doesNotMatch(issuesVisibleText, /Затронуто записей: 0/);
 assert.doesNotMatch(issuesVisibleText, /сведение|Эта страница ничего не выполняет|не запуск|не выполняет|сейчас недоступно/);
 assert.doesNotMatch(issuesVisibleText, /(^|[^а-яё])готово([^а-яё]|$)/i);
-assert.match(issuesVisibleText, /Запись к этому готова|Дальше само:|Проверить нельзя:/);
+assert.match(issuesVisibleText, /Обновления метаданных там нет/);
+assert.match(issuesVisibleText, /Дальше само:|Проверить нельзя:/);
+assert.doesNotMatch(issuesVisibleText, /На другой странице|Запись к этому готова/);
 assert.equal(nodes.get('#admin-health-empty').hidden, true);
 assert.equal(nodes.get('#admin-health-loading').hidden, true);
 assert.equal(nodes.get('#admin-health-error').hidden, true);
@@ -629,15 +632,25 @@ assert.equal(situation.partial, 'частично');
 const links = run(`({
   poster: healthNextStep({subsystem:'poster',reason:'posters_missing',action:{suggested:'bounded_action',code:'poster_hydration',eligible:true,reason:'eligible'}}),
   archive: healthNextStep({subsystem:'letterboxd_archive',action:{suggested:'bounded_action',code:'archive_import',eligible:true,reason:'eligible'}}),
+  metadata: healthNextStep({subsystem:'metadata',reason:'metadata_missing',action:{suggested:'bounded_action',code:'metadata_refresh',eligible:true,reason:'eligible'}}),
+  prediction: healthNextStep({subsystem:'prediction',reason:'prediction_missing',action:{suggested:'bounded_action',code:'prediction_retry',eligible:true,reason:'eligible'}}),
+  discovery: healthNextStep({subsystem:'discovery',reason:'work_pending',action:{suggested:'bounded_action',code:'discovery_retry',eligible:true,reason:'eligible'}}),
   limb: healthNextStep({subsystem:'metadata',action:{suggested:'investigate',code:'manual_review',eligible:null,reason:'evidence_incomplete'}}),
   programme: healthNextStep({subsystem:'programme',action:{suggested:'investigate',code:'check_scheduled_tasks',eligible:null,reason:'evidence_incomplete'}}),
   queue: healthNextStep({subsystem:'prediction_queue',reason:'work_queued',action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'already_queued'}}),
   retry: healthNextStep({subsystem:'prediction_queue',reason:'all_deferred_by_retry',retryAt:{earliest:'2026-11-03T00:00:00.000Z'},action:{suggested:'wait',code:'prediction_retry',eligible:false,reason:'in_backoff'}}),
   reread: healthNextStep({subsystem:'programme',reason:'projection_generation_differs',action:{suggested:'wait',code:'reread_snapshot',eligible:false,reason:'generation_changed'}}),
 })`);
-assert.equal(links.poster, 'На другой странице: гидрация постеров. Запись к этому готова. <a href="/admin/posters">Постеры</a>');
-assert.doesNotMatch(links.poster, /\bготово\b|недоступно|Сейчас:/);
-assert.equal(links.archive, 'На другой странице: импорт архива. Запись к этому готова. <a href="/admin/letterboxd">Архив Letterboxd</a>');
+assert.equal(links.poster, 'На странице «Постеры» есть свой запуск со своей проверкой. Ссылка только открывает страницу. <a href="/admin/posters">Постеры</a>');
+assert.doesNotMatch(links.poster, /На другой странице|Запись к этому готова|запускает|выполнит|<button/);
+assert.equal(links.archive, 'На странице «Архив Letterboxd» есть свой запуск со своей проверкой. Ссылка только открывает страницу. <a href="/admin/letterboxd">Архив Letterboxd</a>');
+assert.doesNotMatch(links.archive, /На другой странице|Запись к этому готова|<button/);
+assert.equal(links.metadata, 'Лимб только показывает записи. Обновления метаданных там нет. Ссылка только открывает страницу. <a href="/admin/limb?subsystem=metadata">Лимб</a>');
+assert.doesNotMatch(links.metadata, /На другой странице|Запись к этому готова/);
+assert.equal(links.prediction, 'Лимб только показывает записи. Повтора прогноза там нет. Ссылка только открывает страницу. <a href="/admin/limb?subsystem=prediction">Лимб</a>');
+assert.doesNotMatch(links.prediction, /На другой странице|Запись к этому готова/);
+assert.equal(links.discovery, 'Повтор discovery делает следующий шаг пайплайна. Страницы с этим действием нет.');
+assert.doesNotMatch(links.discovery, /На другой странице|href=/);
 assert.equal(links.limb, 'Разобраться вручную: ручная проверка. Хватит ли данных, неизвестно. <a href="/admin/limb?subsystem=metadata">Лимб</a>');
 assert.equal(links.programme, 'Разобраться вручную: проверить Scheduled Tasks. Хватит ли данных, неизвестно.');
 assert.doesNotMatch(links.programme, /href=/);

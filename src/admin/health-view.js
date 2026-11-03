@@ -182,9 +182,21 @@ function healthNextStep(group) {
     const retry = group.retryAt?.earliest ? ` Ближайший повтор ${healthDate(group.retryAt.earliest)}.` : '';
     return `Дальше само: ${body}.${retry}${links}`;
   }
-  if (action.eligible === true) return `На другой странице: ${concrete}. Запись к этому готова.${links}`;
+  if (action.eligible === true) return healthEligibleStep(action, concrete, links);
   const unknown = action.eligible === null ? ' Хватит ли данных, неизвестно.' : '';
   return `Разобраться вручную: ${concrete}.${unknown}${links}`;
+}
+
+// Eligible describes the subject in the health answer, not a control on this page. Only the poster and archive
+// pages expose that workflow, and each still confirms on its own. Limb is a read-only list. Discovery has no page.
+function healthEligibleStep(action, concrete, links) {
+  const nav = links ? ' Ссылка только открывает страницу.' : '';
+  if (action.code === 'poster_hydration') return `На странице «Постеры» есть свой запуск со своей проверкой.${nav}${links}`;
+  if (action.code === 'archive_import') return `На странице «Архив Letterboxd» есть свой запуск со своей проверкой.${nav}${links}`;
+  if (action.code === 'metadata_refresh') return `Лимб только показывает записи. Обновления метаданных там нет.${nav}${links}`;
+  if (action.code === 'prediction_retry') return `Лимб только показывает записи. Повтора прогноза там нет.${nav}${links}`;
+  if (action.code === 'discovery_retry') return 'Повтор discovery делает следующий шаг пайплайна. Страницы с этим действием нет.';
+  return `Шаг «${concrete}» отмечен у записи. Страницы с этим действием нет.`;
 }
 
 function healthAffectedText(group) {
