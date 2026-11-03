@@ -4,7 +4,29 @@ const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issu
 
 function archiveNode(selector) {return document.querySelector(selector);}
 
+function archiveCurrentStep(state) {
+  if (state === 'loading') return 2;
+  if (state !== 'ready') return 1;
+  const committed = archiveLive.committed || {};
+  for (const key in committed) if (Object.prototype.hasOwnProperty.call(committed, key)) return 5;
+  const issued = archiveLive.issued || {};
+  for (const key in issued) if (Object.prototype.hasOwnProperty.call(issued, key)) return 4;
+  return 3;
+}
+
+function archiveMarkStep(step) {
+  if (!document.querySelectorAll) return;
+  for (const item of document.querySelectorAll('[data-archive-step]')) {
+    const n = Number(item.getAttribute('data-archive-step'));
+    if (n === step) item.setAttribute('aria-current', 'step');
+    else if (item.removeAttribute) item.removeAttribute('aria-current');
+    if (n < step) item.setAttribute('data-reached', 'true');
+    else if (item.removeAttribute) item.removeAttribute('data-reached');
+  }
+}
+
 function archiveShow(state, payload) {
+  archiveMarkStep(archiveCurrentStep(state));
   archiveNode('#archive-loading').hidden = state !== 'loading';
   archiveNode('#archive-idle').hidden = state !== 'idle';
   const error = archiveNode('#archive-error');

@@ -30,6 +30,9 @@ assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through th
 assert.doesNotMatch(bundle, /localStorage|sessionStorage|indexedDB|caches\.|document\.cookie|Authorization|Bearer|history\.(push|replace)State|\/api\/letterboxd\/baseline|\/api\/sync|\/mcp/);
 assert.doesNotMatch(bundle + html, /Импортировать|Применить|\/commit|\/validate|data-archive-apply/i, 'no control commits by itself or calls the service-token route');
 assert.equal((html.match(/<button/g) || []).length, 3, 'submit, cancel and reset are the only buttons in the static page');
+assert.match(html, /<ol id="archive-steps" class="archive-steps" aria-label="Шаги проверки архива">/);
+assert.equal((html.match(/data-archive-step="/g) || []).length, 5);
+assert.doesNotMatch(html.slice(html.indexOf('id="archive-steps"'), html.indexOf('</ol>')), /<button/, 'the step list is not a row of buttons');
 assert.match(bundle, /data-archive-confirm/, 'a preview can offer a separate confirmation');
 assert.match(bundle, /data-archive-commit/, 'recording is a second control');
 assert.doesNotMatch(client, /Cf-Access|service.token|CF-Access-Client/, 'the page never carries an Access token');
@@ -80,7 +83,19 @@ function element(selector) {
   };
 }
 const nodes = new Map(['#archive-form', '#archive-file', '#archive-generated-at', '#archive-submit', '#archive-cancel', '#archive-reset', '#archive-loading', '#archive-error', '#archive-idle', '#archive-result'].map(selector => [selector, element(selector)]));
-const document = {activeElement: null, querySelector: selector => nodes.get(selector) || null};
+const steps = [1, 2, 3, 4, 5].map(n => ({
+  n, attrs: {},
+  getAttribute(name) {return name === 'data-archive-step' ? String(this.n) : (Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null);},
+  setAttribute(name, value) {this.attrs[name] = String(value);},
+  removeAttribute(name) {delete this.attrs[name];},
+}));
+const document = {activeElement: null, querySelector: selector => nodes.get(selector) || null, querySelectorAll: selector => selector === '[data-archive-step]' ? steps : []};
+function currentStep() {
+  const item = steps.find(step => step.attrs['aria-current'] === 'step');
+  assert.ok(item, 'one step is current');
+  assert.equal(steps.filter(step => step.attrs['aria-current'] === 'step').length, 1);
+  return item.n;
+}
 const windowListeners = [];
 const window = {addEventListener(type, fn) {windowListeners.push({type, fn});}};
 const ctx = vm.createContext({document, window, fetch: fakeFetch, FormData, File, Blob, Array, Object, String, Number, Boolean, Math, JSON, Map, Set, Error, Promise, Date, Intl, RegExp, setTimeout, clearTimeout, AbortController, console});
@@ -95,6 +110,7 @@ const submit = () => run('onArchiveSubmit({preventDefault(){}})');
 assert.deepEqual(requests, []);
 assert.equal(gets, 0);
 assert.equal(idle.hidden, false); assert.equal(loading.hidden, true); assert.equal(error.hidden, true); assert.equal(result.innerHTML, '');
+assert.equal(currentStep(), 1);
 
 // 2. Local checks stop the request before it is sent.
 for (const [setup, pattern] of [
@@ -110,6 +126,7 @@ for (const [setup, pattern] of [
   assert.match(error.textContent, pattern);
   assert.equal(error.hidden, false);
   assert.equal(document.activeElement, error, 'the error takes focus so a screen reader announces it');
+  assert.equal(currentStep(), 1);
 }
 assert.deepEqual(requests, []);
 
@@ -118,6 +135,7 @@ time.value = '';
 choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
 const pending = submit();
 assert.equal(loading.hidden, false);
+assert.equal(currentStep(), 2);
 assert.equal(nodes.get('#archive-submit').disabled, true);
 assert.equal(nodes.get('#archive-cancel').hidden, false);
 await pending;
@@ -133,6 +151,15 @@ assert.match(shown, /оценка в R2 новее этого архива/);
 assert.match(shown, /Изменений значений: 0\. Новых значений: 2\./);
 assert.match(shown, /Эти числа — факты среди проверенных фильмов, не весь архив/);
 assert.match(shown, /не проверено \(фильмов\)/);
+assert.equal(currentStep(), 3);
+assert.match(shown, /<div class="archive-total"><b>\d+<\/b><span>добавится<\/span>/);
+assert.match(shown, /<span>изменится<\/span>/);
+assert.match(shown, /<span>пропущено<\/span>/);
+assert.match(shown, /Шаг 2\. Свежесть/);
+assert.match(shown, /Шаг 5\. Квитанция/);
+assert.match(shown, /Квитанции ещё нет/);
+assert.match(shown, /<details class="archive-technical"><summary>Технические подробности<\/summary>[\s\S]*class="archive-sha"/);
+assert.doesNotMatch(shown.split('<details class="archive-technical">')[0], /archive-sha|Отпечаток плана/);
 assert.match(shown, /Новых или изменённых значений: 2\. Обновлений наблюдений без смены значения: 0\./);
 assert.match(shown, /20\.10\.2026, 10:15 Madrid/, 'the export time in Madrid time');
 assert.match(shown, /из имени файла/);
@@ -184,6 +211,7 @@ run('onArchiveReset()');
 assert.equal(result.innerHTML, ''); assert.equal(run('archiveLive.answer'), null);
 assert.deepEqual(fileInput.files, []); assert.equal(time.value, '');
 assert.equal(document.activeElement, fileInput);
+assert.equal(currentStep(), 1);
 // Leaving the page drops the answer.
 await submit().catch(() => {});
 choose(ARCHIVE, 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
@@ -215,19 +243,28 @@ const paintCommit = async (state, extra, replayed = false) => {
   ctx.fetch = previous;
   return result.innerHTML;
 };
+run('archiveLive.issued[0] = {idempotencyKey:"lb0123456789abcdef"}; archiveLive.committed = {}; archiveShow("ready", archiveLive.answer);');
+assert.equal(currentStep(), 4);
+assert.match(result.innerHTML, /Записать партию 1/);
+assert.match(result.innerHTML, /data-archive-commit="0"/);
+assert.doesNotMatch(result.innerHTML, /Повторить ту же запись/);
 const failedHtml = await paintCommit('failed', {skipped_changed: 2});
 assert.match(failedHtml, /Факты партии 1 не изменились/);
 assert.match(failedHtml, /пропущено: 2/);
 assert.doesNotMatch(failedHtml, /Партия 1 записана/);
+assert.doesNotMatch(failedHtml, /Повторить ту же запись/);
 const partialHtml = await paintCommit('partial', {written: 1, skipped_changed: 1, failed: 1});
 assert.match(partialHtml, /Партия 1 записана частично/);
 assert.match(partialHtml, /записано: 1/);
 assert.match(partialHtml, /пропущено: 1/);
 assert.match(partialHtml, /ошибки: 1/);
 assert.doesNotMatch(partialHtml, /записана полностью/);
+assert.doesNotMatch(partialHtml, /Повторить ту же запись/);
 const fullHtml = await paintCommit('succeeded', {written: 2});
 assert.match(fullHtml, /Партия 1 записана полностью/);
 assert.match(fullHtml, /записано: 2/);
+assert.doesNotMatch(fullHtml, /Повторить ту же запись/);
+assert.equal(currentStep(), 5);
 const replayHtml = await paintCommit('succeeded', {already_applied: 2}, true);
 assert.match(replayHtml, /уже была записана/);
 assert.match(replayHtml, /Повтор ничего не меняет/);
@@ -240,4 +277,23 @@ const replayFailed = await paintCommit('failed', {skipped_changed: 2}, true);
 assert.match(replayFailed, /Факты партии 1 не изменились/);
 assert.doesNotMatch(replayFailed, /записана полностью/);
 assert.doesNotMatch(replayFailed, /Партия 1 записана/);
+const unknownHtml = await paintCommit('unknown', {unknown: 2});
+assert.match(unknownHtml, /Исход партии 1 неизвестен/);
+assert.match(unknownHtml, /Повтор вслепую не запускается/);
+assert.match(unknownHtml, /Это не успех/);
+assert.match(unknownHtml, /Повторить ту же запись/);
+assert.match(unknownHtml, /data-archive-commit="0"/);
+assert.doesNotMatch(unknownHtml, /записана полностью|записана частично/);
+assert.equal(currentStep(), 5);
+const issued = run('JSON.stringify(archiveLive.issued[0])');
+const keyBefore = run('archiveLive.keys[0]');
+let posted = null;
+ctx.fetch = async (_url, init) => {
+  posted = init.body.get('confirmation');
+  return new Response(JSON.stringify({mode: 'apply', writes: false, replayed: true, state: 'unknown', receipt: {state: 'unknown', counts: counts({unknown: 2})}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+};
+await run('onArchiveCommit(0)');
+assert.equal(posted, issued);
+assert.equal(JSON.parse(posted).idempotencyKey, 'lb0123456789abcdef');
+assert.equal(run('archiveLive.keys[0]'), keyBefore);
 console.log('admin-letterboxd-page: ok');

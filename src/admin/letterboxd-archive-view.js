@@ -225,38 +225,40 @@ function archiveValueParagraph(answer) {
 function archiveSummaryHtml(answer) {
   const archive = answer.archive || {}, proposal = answer.proposal || {}, values = proposal.values || {}, details = answer.details || {};
   const tone = answer.status === 'complete' ? 'reviewed' : 'provisional';
+  const unverified = details.unverified && typeof details.unverified.total === 'number' ? details.unverified.total : '—';
   const cards = [
-    ['новых значений', values.newValues ?? '—'],
-    ['изменённых значений', values.changedValues ?? '—'],
-    ['то же значение, новое наблюдение', values.sameValueUpdates ?? '—'],
-    ['наблюдение совпало', values.unchanged ?? '—'],
-    ['в R2 новее', values.older ?? '—'],
-    ['не проверено (фильмов)', details.unverified ? details.unverified.total : '—'],
+    ['добавится', values.newValues ?? '—'],
+    ['изменится', values.changedValues ?? '—'],
+    ['пропущено', values.older ?? '—'],
   ];
+  const unread = typeof unverified === 'number' && unverified > 0 ? ' archive-callout archive-callout-warn' : '';
   return `<div class="archive-summary-head">${archiveBadge(tone, answer.status === 'complete' ? 'полный предпросмотр' : 'частичный предпросмотр')}${archiveBadge('plain', 'ничего не записано')}<span class="muted">оценка на ${archiveEscape(archiveDate(answer.evaluatedAt))}</span></div>`
     + `<div class="archive-totals">${cards.map(([name, value]) => `<div class="archive-total"><b>${archiveEscape(value)}</b><span>${archiveEscape(name)}</span></div>`).join('')}</div>`
+    + `<p class="archive-unverified${unread}" role="status"><b>${archiveEscape(unverified)}</b> <span>не проверено (фильмов)</span></p>`
     + archiveValueParagraph(answer)
-    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}; проверено: ${proposal.films ? proposal.films.compared : '—'}. Пять первых плиток считают факты среди проверенных фильмов. «Не проверено (фильмов)» считает фильмы, чьи записи не читались, и не входит в эти факты. «Новых» и «изменённых» — факты, у которых значение появится или станет другим. «То же значение, новое наблюдение» — факт с исходом replaces, но прежним значением: запись обновит источник и время. «Наблюдение совпало» — полностью то же наблюдение, это не «значение не менялось». Запись — отдельное подтверждение конкретной партии ниже.</p>`
+    + `<p class="muted archive-note">Фильмов в архиве: ${answer.export ? answer.export.films : '—'}; сопоставлено и принято: ${proposal.films ? proposal.films.accepted : '—'}; проверено: ${proposal.films ? proposal.films.compared : '—'}. «Добавится», «изменится» и «пропущено» считают факты среди проверенных фильмов. «Пропущено» — в R2 уже новее, запись это не перепишет. «Не проверено (фильмов)» считает фильмы, чьи записи не читались, и не входит в эти факты. «То же значение, новое наблюдение»: ${archiveEscape(values.sameValueUpdates ?? '—')}. Это факт с исходом replaces, но прежним значением: запись обновит источник и время. «Наблюдение совпало»: ${archiveEscape(values.unchanged ?? '—')}. Это полностью то же наблюдение, а не «значение не менялось». Запись — отдельное подтверждение конкретной партии.</p>`
     + (answer.consistency && answer.consistency.status !== 'stable' ? '<p class="archive-callout archive-callout-warn" role="alert"><b>Данные в R2 менялись во время проверки.</b> Сравнение смешивает два состояния: повтори проверку.</p>' : '')
     + (archive.generatedAtSource === 'owner_declared' ? '<p class="muted archive-note">Время экспорта указано вручную: имя файла нестандартное.</p>' : '');
 }
 
 function archiveArchiveHtml(answer) {
   const archive = answer.archive || {}, exported = answer.export || {}, completeness = answer.completeness || {};
-  const files = Object.entries(exported.files || {}).map(([kind, file]) => {
-    const entry = archive.files && archive.files[file.name];
-    if (!file.present) return `<tr><th scope="row">${archiveEscape(file.name)}</th><td colspan="5">${file.auxiliary ? 'нет (вспомогательный файл)' : 'нет в архиве'}</td></tr>`;
-    return `<tr><th scope="row">${archiveEscape(file.name)}${file.auxiliary ? ' <small class="muted">вспом.</small>' : ''}</th><td>${file.records}</td><td>${file.valid}</td><td>${Object.values(file.invalid || {}).reduce((a, b) => a + b, 0)}</td><td>${file.duplicates} / ${file.conflicts}</td><td><code title="${archiveEscape(entry && entry.sha256)}">${archiveEscape(entry ? entry.sha256.slice(0, 12) : '—')}</code></td></tr>`;
+  const files = Object.entries(exported.files || {}).map(([, file]) => {
+    if (!file.present) return `<tr><th scope="row">${archiveEscape(file.name)}</th><td colspan="4">${file.auxiliary ? 'нет (вспомогательный файл)' : 'нет в архиве'}</td></tr>`;
+    return `<tr><th scope="row">${archiveEscape(file.name)}${file.auxiliary ? ' <small class="muted">вспом.</small>' : ''}</th><td>${file.records}</td><td>${file.valid}</td><td>${Object.values(file.invalid || {}).reduce((a, b) => a + b, 0)}</td><td>${file.duplicates} / ${file.conflicts}</td></tr>`;
   }).join('');
+  const manual = archive.generatedAtSource === 'owner_declared';
+  const source = manual
+    ? 'Время на экране показано по Мадриду. Файл переименован, поэтому дата экспорта — то, что указано вручную в поле UTC, а не время из имени.'
+    : 'Время на экране показано по Мадриду. Дата экспорта прочитана из имени файла. Поле UTC нужно только для переименованного архива.';
   const rows = [
-    ['время экспорта', archiveEscape(archiveDate(archive.generatedAt)) + ' · ' + (archive.generatedAtSource === 'archive_name' ? 'из имени файла' : 'указано вручную') + ' · ' + archiveEscape(archiveAge(archive.ageMs)) + ' назад'],
-    ['SHA-256', `<code class="archive-sha">${archiveEscape(archive.sha256)}</code>`],
+    ['время экспорта', archiveEscape(archiveDate(archive.generatedAt)) + ' · ' + (manual ? 'указано вручную' : 'из имени файла') + ' · ' + archiveEscape(archiveAge(archive.ageMs)) + ' назад'],
     ['размер', archiveEscape(archiveBytes(archive.bytes)) + ' · файлов в архиве ' + archiveEscape(archive.entries) + ', из них не читались ' + archiveEscape(archive.ignoredEntries)],
     ['полнота', completeness.status === 'complete' ? 'все четыре файла на месте' : 'нет: ' + archiveEscape((completeness.missing || []).join(', '))],
     ['наборы', archiveCounts(exported.sets, ARCHIVE_SET_TEXT)],
     ['расхождения', 'название или год расходятся между файлами: ' + archiveEscape(exported.crossFileMismatches ?? 0) + ' · негодных строк: ' + archiveEscape(exported.invalidRows ?? 0) + (exported.invalidRows ? ' (' + archiveCounts(exported.invalidByReason, ARCHIVE_INVALID_TEXT) + ')' : '')],
   ];
-  return archiveFacts(rows) + `<div class="archive-table-wrap"><table class="archive-table"><caption>Файлы экспорта</caption><thead><tr><th scope="col">файл</th><th scope="col">записей</th><th scope="col">годных</th><th scope="col">негодных</th><th scope="col">дубли / конфликты</th><th scope="col">SHA-256</th></tr></thead><tbody>${files}</tbody></table></div>`;
+  return archiveFacts(rows) + `<p class="muted archive-note">${archiveEscape(source)}</p>` + `<div class="archive-table-wrap"><table class="archive-table"><caption>Файлы экспорта</caption><thead><tr><th scope="col">файл</th><th scope="col">записей</th><th scope="col">годных</th><th scope="col">негодных</th><th scope="col">дубли / конфликты</th></tr></thead><tbody>${files}</tbody></table></div>`;
 }
 
 function archiveBaselineHtml(answer) {
@@ -359,59 +361,84 @@ function archiveCommitText(number, done) {
     const replay = done.replayed ? ' Повтор ничего не меняет.' : '';
     return wrote ? `Партия ${number} записана полностью.${detail}${replay}` : `Партия ${number} уже была записана.${detail}${replay}`;
   }
-  if (done.state === 'partial') return `Партия ${number} записана частично.${detail}`;
+  if (done.state === 'partial') return `Партия ${number} записана частично.${detail} Это не успех.`;
   if (done.state === 'failed' && !wrote && !failed && skipped) return `Факты партии ${number} не изменились: более новые записи оставлены.${detail}`;
-  if (done.state === 'failed' || done.state === 'aborted' || done.state === 'refused') return `Партия ${number} не записана.${detail}`;
-  if (done.state === 'unknown') return `Исход партии ${number} неизвестен.${detail} Повтор вслепую не запускается.`;
+  if (done.state === 'failed' || done.state === 'aborted' || done.state === 'refused') return `Партия ${number} не записана.${detail} Это не успех.`;
+  if (done.state === 'unknown') return `Исход партии ${number} неизвестен.${detail} Повтор вслепую не запускается. Это не успех.`;
   return `Партия ${number}: состояние ${done.state || '—'}.${detail}`;
 }
-function archiveBatchesHtml(answer, session) {
+function archiveBatchIntro() {
+  return '<p class="muted archive-apply-note">Запись не начинается сама. Сначала «Подтвердить партию» — сервер запоминает только согласие, без фактов. Затем «Записать партию» отправляет тот же архив ещё раз. Откат — тоже два отдельных шага. Архив нигде не сохраняется, поэтому новая проверка и новая запись просят выбрать файл снова. Одной кнопки на весь архив нет.</p>';
+}
+function archiveRollbackHtml(chunk, number, rollback) {
+  return rollback
+    ? `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback="${chunk.chunk}">Откатить партию ${number}</button></div>`
+    : `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback-confirm="${chunk.chunk}">Подтвердить откат партии ${number}</button></div>`;
+}
+function archiveActionHtml(answer, session) {
   const batches = answer.batches;
-  if (!batches) return '';
+  if (!batches) return archiveBatchIntro() + '<p>Нет партии, которую можно подтвердить.</p>';
   const issued = session && session.issued || {};
   const committed = session && session.committed || {};
-  const rollbackIssued = session && session.rollbackIssued || {};
-  const intro = '<p class="muted archive-apply-note">Запись не начинается сама. Сначала «Подтвердить партию» — сервер запоминает только согласие, без фактов. Затем «Записать партию» отправляет тот же архив ещё раз. Откат — тоже два отдельных шага. Архив нигде не сохраняется.</p>';
   const chunks = batches.chunks || [];
-  if (!chunks.length) return `<section class="admin-card archive-result" aria-labelledby="archive-apply-title"><h2 id="archive-apply-title">Запись партии</h2>${intro}<p>${archiveEscape(ARCHIVE_BATCH_REASON[batches.reason] || 'Нет партии, которую можно подтвердить.')}</p></section>`;
-  const cards = chunks.map(chunk => {
+  if (!chunks.length) return archiveBatchIntro() + `<p>${archiveEscape(ARCHIVE_BATCH_REASON[batches.reason] || 'Нет партии, которую можно подтвердить.')}</p>`;
+  return archiveBatchIntro() + chunks.map(chunk => {
     const number = chunk.chunk + 1;
     const held = issued[chunk.chunk];
     const done = committed[chunk.chunk];
-    const rollback = rollbackIssued[chunk.chunk];
     const why = !chunk.confirmable ? `<p class="archive-callout archive-callout-warn" role="status">${archiveEscape(ARCHIVE_BATCH_REASON[chunk.reason] || 'Эту партию сейчас подтвердить нельзя.')}</p>` : '';
     let actions = '';
+    if (done || (chunk.receipt && chunk.receipt.status === 'committed')) actions += '<p class="muted">Эта партия уже отправлена или уже есть в квитанции импорта. Итог и откат — в квитанции, отдельным подтверждением.</p>';
+    else if (chunk.confirmable && held) actions += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Записать партию ${number}</button></div><p class="muted">Подтверждение выдано и ещё ничего не записало. Запись отправит архив заново. Это не новая партия.</p>`;
+    else if (chunk.confirmable) actions += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Подтвердить партию ${number}</button></div>`;
+    return `<article class="archive-batch"><h3>Партия ${number}</h3><p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p>${archiveValueLine(chunk.values)}${why}${actions}</article>`;
+  }).join('');
+}
+function archiveReceiptHtml(answer, session) {
+  const batches = answer.batches || {};
+  const issued = session && session.issued || {};
+  const committed = session && session.committed || {};
+  const rollbackIssued = session && session.rollbackIssued || {};
+  const chunks = batches.chunks || [];
+  if (!chunks.length) return '<p class="muted">Квитанции нет: записывать нечего. Проверка ничего не записала.</p>';
+  return chunks.map(chunk => {
+    const number = chunk.chunk + 1;
+    const done = committed[chunk.chunk];
+    const rollback = rollbackIssued[chunk.chunk];
+    let body = '';
     if (done && done.rolledBack) {
       const replay = done.replayed ? ' Повтор того же отката ничего не меняет.' : '';
-      actions += `<p role="status">Откат партии ${number} выполнен.${archiveEscape(replay)} Состояние: ${archiveEscape(done.state || '—')}. Более поздняя запись, если она была, сохранена.</p>`;
+      body += `<p role="status">Откат партии ${number} выполнен.${archiveEscape(replay)} Состояние: ${archiveEscape(done.state || '—')}. Более поздняя запись, если она была, сохранена.</p>`;
     } else if (done) {
-      actions += `<p role="status">${archiveEscape(archiveCommitText(number, done))}</p>`;
-      actions += rollback
-        ? `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback="${chunk.chunk}">Откатить партию ${number}</button></div>`
-        : `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback-confirm="${chunk.chunk}">Подтвердить откат партии ${number}</button></div>`;
+      body += `<p role="status">${archiveEscape(archiveCommitText(number, done))}</p>`;
+      if (done.state === 'unknown') body += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Повторить ту же запись</button></div><p class="muted">Кнопка отправляет то же подтверждение и тот же ключ. Новый запрос не создаётся, и повтор сам не начинается.</p>`;
+      body += archiveRollbackHtml(chunk, number, rollback);
     } else if (chunk.receipt && chunk.receipt.status === 'committed' && chunk.confirmable) {
-      actions += '<p class="muted">Эта партия уже есть в квитанции импорта. Повтор записи идемпотентен. Откат — отдельное подтверждение.</p>';
-      actions += rollback
-        ? `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback="${chunk.chunk}">Откатить партию ${number}</button></div>`
-        : `<div class="archive-actions"><button type="button" class="admin-more" data-archive-rollback-confirm="${chunk.chunk}">Подтвердить откат партии ${number}</button></div>`;
-    }
-    if (!done && chunk.confirmable) {
-      actions += held
-        ? `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Записать партию ${number}</button></div><p class="muted">Подтверждение выдано и ещё ничего не записало. Запись отправит архив заново.</p>`
-        : `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Подтвердить партию ${number}</button></div>`;
-    }
-    return `<article class="archive-batch"><h3>Партия ${number}</h3><p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p>${archiveValueLine(chunk.values)}<p class="muted">Отпечаток плана <code>${archiveEscape(String(chunk.planHash || '').slice(0, 12))}</code>${chunk.scopeFingerprint ? ' · область ' + archiveEscape(chunk.scopeFingerprint) : ''}</p>${why}${actions}</article>`;
+      body += '<p class="muted">Эта партия уже есть в квитанции импорта. Повтор записи идемпотентен. Откат — отдельное подтверждение.</p>';
+      body += archiveRollbackHtml(chunk, number, rollback);
+    } else if (issued[chunk.chunk]) body += '<p class="muted">Квитанции ещё нет: подтверждение выдано, запись не начиналась. Это не успех.</p>';
+    else body += '<p class="muted">Квитанции ещё нет. Проверка ничего не записала.</p>';
+    return `<article class="archive-batch"><h3>Квитанция партии ${number}</h3>${body}</article>`;
   }).join('');
-  return `<section class="admin-card archive-result" aria-labelledby="archive-apply-title"><h2 id="archive-apply-title">Запись партии</h2>${intro}${cards}</section>`;
 }
-
+function archiveTechnicalHtml(answer) {
+  const archive = answer.archive || {}, batches = answer.batches || {};
+  const files = Object.entries((answer.export && answer.export.files) || {}).map(([, file]) => {
+    const entry = archive.files && archive.files[file.name];
+    return `<li>${archiveEscape(file.name || 'файл')}: <code>${archiveEscape(entry && entry.sha256 || '—')}</code></li>`;
+  }).join('');
+  const chunks = (batches.chunks || []).map(chunk => `<li>партия ${chunk.chunk + 1}, id ${archiveEscape(chunk.chunk)}: хэш плана <code>${archiveEscape(chunk.planHash || '—')}</code>${chunk.scopeFingerprint ? '; отпечаток области <code>' + archiveEscape(chunk.scopeFingerprint) + '</code>' : ''}</li>`).join('');
+  return `<details class="archive-technical"><summary>Технические подробности</summary><p class="muted">Хэш плана — значение, с которым запись сверяет партию перед compare-and-swap (CAS). Отпечаток области — версии фактов на момент проверки. id прогона — опубликованная программа.</p><dl class="limbo-facts"><div><dt>SHA-256 архива</dt><dd><code class="archive-sha">${archiveEscape(archive.sha256)}</code></dd></div><div><dt>id прогона программы</dt><dd><code>${archiveEscape(batches.programmeRunId || '—')}</code></dd></div></dl><ul>${files}</ul><ul>${chunks}</ul></details>`;
+}
+function archiveStepPanel(n, title, body) {
+  return `<section class="admin-card archive-result archive-step" aria-labelledby="archive-step-${n}-title"><h2 id="archive-step-${n}-title">Шаг ${n}. ${archiveEscape(title)}</h2>${body}</section>`;
+}
 function archivePreviewHtml(answer, session) {
-  return `<section class="admin-card archive-result" aria-labelledby="archive-summary-title"><h2 id="archive-summary-title">Итог предпросмотра</h2>${archiveFreshnessHtml(answer)}${archiveSummaryHtml(answer)}</section>`
-    + `<section class="admin-card archive-result" aria-labelledby="archive-file-title"><h2 id="archive-file-title">Архив</h2>${archiveArchiveHtml(answer)}</section>`
-    + `<section class="admin-card archive-result" aria-labelledby="archive-baseline-title"><h2 id="archive-baseline-title">Базовая линия</h2>${archiveBaselineHtml(answer)}</section>`
-    + `<section class="admin-card archive-result" aria-labelledby="archive-matching-title"><h2 id="archive-matching-title">Сопоставление с R2</h2>${archiveMatchingHtml(answer)}</section>`
-    + `<section class="admin-card archive-result" aria-labelledby="archive-proposal-title"><h2 id="archive-proposal-title">Что сделал бы импорт</h2>${archiveProposalHtml(answer)}</section>`
-    + `<section class="admin-card archive-result" aria-labelledby="archive-details-title"><h2 id="archive-details-title">Фильмы</h2><p class="muted">В каждом списке не больше ${archiveEscape(archiveDetailLimit(answer))} строк.</p>${archiveDetailsHtml(answer)}</section>`
-    + archiveBatchesHtml(answer, session || {});
+  const held = session || {};
+  return archiveStepPanel(2, 'Свежесть, полнота и источник даты', archiveFreshnessHtml(answer) + archiveArchiveHtml(answer) + '<h3>Базовая линия</h3>' + archiveBaselineHtml(answer))
+    + archiveStepPanel(3, 'Точная разница', archiveSummaryHtml(answer) + '<h3>Сопоставление с R2</h3>' + archiveMatchingHtml(answer) + '<h3>Что сделал бы импорт</h3>' + archiveProposalHtml(answer) + `<h3>Фильмы</h3><p class="muted">В каждом списке не больше ${archiveEscape(archiveDetailLimit(answer))} строк.</p>` + archiveDetailsHtml(answer))
+    + archiveStepPanel(4, 'Подтвердить ровно эту партию', archiveActionHtml(answer, held))
+    + archiveStepPanel(5, 'Квитанция', archiveReceiptHtml(answer, held))
+    + archiveTechnicalHtml(answer);
 }
 function archiveDetailLimit(answer) {return answer.details && answer.details.limit || 25;}

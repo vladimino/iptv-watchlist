@@ -366,17 +366,18 @@ for (const label of ['programme unavailable', 'metadata unavailable']) {
   assert.doesNotMatch(production, /сопоставленных фильма|из 421|проверен 300/);
 }
 
-// The production shape: 0 / 0 / 487 facts beside 121 unread films. The last tile stays a film count.
+// The production shape: 0 additions, 0 changes and 0 skips beside 121 unread films. The film count stays outside those three totals.
 {
   const html = presentation.archiveSummaryHtml({
     status: 'partial', evaluatedAt: '2026-10-31T09:00:00.000Z', export: {films: 2461},
     proposal: {films: {accepted: 421, compared: 300, unverified: 121}, values: {newValues: 0, changedValues: 0, sameValueUpdates: 487, unchanged: 0, older: 0, unverified: 0, byFact: {watched: {sameValueUpdates: 103}, rating: {sameValueUpdates: 103}, watchlist: {sameValueUpdates: 281}}}},
     details: {unverified: {total: 121, rows: []}},
   });
-  assert.match(html, /<b>0<\/b><span>новых значений<\/span>/);
-  assert.match(html, /<b>0<\/b><span>изменённых значений<\/span>/);
-  assert.match(html, /<b>487<\/b><span>то же значение, новое наблюдение<\/span>/);
-  assert.match(html, /<b>121<\/b><span>не проверено \(фильмов\)<\/span>/);
+  assert.match(html, /<b>0<\/b><span>добавится<\/span>/);
+  assert.match(html, /<b>0<\/b><span>изменится<\/span>/);
+  assert.match(html, /<b>0<\/b><span>пропущено<\/span>/);
+  assert.match(html, /«То же значение, новое наблюдение»: 487/);
+  assert.match(html, /<b>121<\/b> <span>не проверено \(фильмов\)<\/span>/);
   assert.match(html, /обновятся 487 наблюдений без изменения оценок, просмотренного и watchlist \(103\/103\/281\)/);
   assert.match(html, /Эти числа — факты среди проверенных фильмов, не весь архив/);
   assert.match(html, /«Не проверено \(фильмов\)» считает фильмы/);
