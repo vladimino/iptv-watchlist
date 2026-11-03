@@ -22,7 +22,9 @@
         <p class="admin-intro">Проверка экспорта Letterboxd: свежий ли архив, всё ли в нём читается и что изменил бы импорт в фактах R2. Архив разбирается на сервере только в рамках запроса и нигде не сохраняется. Запись партии начинается только после отдельного подтверждения, не вместе с проверкой.</p>
       </div>
     </section>
-    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd" aria-current="page">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters">Постеры</a></nav>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd" aria-current="page">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters">Постеры</a></nav>
+      <div class="admin-main">
     <section class="admin-card archive-upload" aria-labelledby="archive-upload-title">
       <h2 id="archive-upload-title">Проверить архив</h2>
       <form id="archive-form" class="archive-form" action="/admin/letterboxd" novalidate>
@@ -41,6 +43,8 @@
     <p id="archive-error" class="admin-state admin-state-error" role="alert" tabindex="-1" hidden></p>
     <p id="archive-idle" class="empty" role="status"><span aria-hidden="true">∅</span><b>Архив ещё не проверялся</b><span>Выбери файл и нажми «Проверить архив». Результат живёт только в этой вкладке до очистки или ухода со страницы.</span></p>
     <div id="archive-result" class="archive-results" tabindex="-1" aria-live="polite"></div>
+      </div>
+    </div>
   </main>
   <script src="/admin-letterboxd.js"></script>
 </body>

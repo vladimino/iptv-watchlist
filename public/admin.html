@@ -39,7 +39,9 @@
         </div>
       </div>
     </section>
-    <nav class="admin-views" aria-label="Разделы"><a href="/admin" id="admin-view-catalog" data-admin-view="catalog" aria-current="page">Каталог</a><a href="/admin/health" id="admin-view-health" data-admin-view="health">Здоровье данных</a><a href="/admin/letterboxd" id="admin-view-letterboxd">Архив Letterboxd</a><a href="/admin/limb" id="admin-view-limbo">Лимб</a><a href="/admin/posters" id="admin-view-posters">Постеры</a></nav>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin" id="admin-view-catalog" data-admin-view="catalog" aria-current="page">Каталог</a><a href="/admin/health" id="admin-view-health" data-admin-view="health">Здоровье данных</a><a href="/admin/letterboxd" id="admin-view-letterboxd">Архив Letterboxd</a><a href="/admin/limb" id="admin-view-limbo">Лимб</a><a href="/admin/posters" id="admin-view-posters">Постеры</a></nav>
+      <div class="admin-main">
     <p id="admin-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="admin-snapshot-text">Снимок программы ещё не прочитан.</span></p>
     <section id="admin-health" class="admin-health" aria-labelledby="admin-health-title" hidden>
       <h2 id="admin-health-title">Здоровье данных</h2>
@@ -93,6 +95,8 @@
       </section>
       <article id="admin-detail" class="admin-card" aria-live="polite" hidden></article>
     </div>
+    </div>
+      </div>
     </div>
   </main>
   <script src="/admin.js"></script>

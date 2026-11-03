@@ -22,7 +22,9 @@
         <p class="admin-intro">Сколько записей каталога без постера, сколько можно дозагрузить сейчас, сколько TMDB уже ответил отказом и сколько без проверенного id. Чтение ничего не меняет; запись идёт только после вашего подтверждения, пакетами не больше 10 записей.</p>
       </div>
     </section>
-    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters" aria-current="page">Постеры</a></nav>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters" aria-current="page">Постеры</a></nav>
+      <div class="admin-main">
     <p id="posters-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="posters-snapshot-text">Каталог ещё не прочитан.</span></p>
     <p id="posters-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем обе копии каталога…</p>
     <p id="posters-error" class="admin-state admin-state-error" role="alert" hidden></p>
@@ -70,6 +72,8 @@
       <p class="posters-source">Эти записи страница не восстанавливает: маршрут берёт постер только по TMDB id, который подтверждён как идентичность записи. Исправление идентичности — отдельная работа.</p>
       <div id="posters-unverified"><p class="muted">Список появится после чтения каталога.</p></div>
     </section>
+      </div>
+    </div>
   </main>
   <script src="/admin-posters.js"></script>
 </body>

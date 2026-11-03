@@ -82,8 +82,19 @@ for (const [name, source] of [['admin', html], ['letterboxd', letterboxdHtml], [
   assert.ok(nav, name);
   const links = [...nav[0].matchAll(/<a\b([^>]*)>([^<]*)<\/a>/g)].map(match => [match[1].match(/href="([^"]+)"/)[1], match[2]]);
   assert.deepEqual(links, expectedNav, name);
+  assert.equal((source.match(/<nav class="admin-views"/g) || []).length, 1, name);
+  assert.ok(source.indexOf('class="admin-workspace"') < source.indexOf('<nav class="admin-views"') && source.indexOf('<nav class="admin-views"') < source.indexOf('class="admin-main"'), name);
   assert.doesNotMatch(source, /Лимбо|view=health|href="\/admin\/limbo"/, name);
 }
+assert.match(css, /\.admin-workspace\{display:grid;grid-template-columns:215px minmax\(0,1fr\)/);
+assert.match(css, /\.admin-main\{min-width:0\}/);
+assert.match(css, /\.admin-views\{display:flex;flex-direction:column;[^}]*border-right:1px solid var\(--line\)/);
+assert.match(css, /\.admin-views a\[aria-current=page\]\{[^}]*font-weight:650/);
+assert.match(css, /@media\(max-width:1130px\)\{\.admin-workspace\{grid-template-columns:180px minmax\(0,1fr\)/);
+assert.match(css, /@media\(max-width:760px\)\{\.admin-workspace\{display:flex;flex-direction:column;align-items:stretch/);
+assert.match(css, /@media\(max-width:760px\)\{[^}]*\}\.admin-views\{align-self:stretch;width:100%/);
+assert.doesNotMatch(css, /\.admin-views\{[^}]*overflow-x:auto/);
+assert.doesNotMatch(css, /\.admin-views a\{[^}]*white-space:nowrap/);
 assert.match(build, /src\/domain\/admin-query\.js/);
 assert.match(css, /overflow-wrap:anywhere/);
 assert.match(css, /minmax\(0,1fr\)/);

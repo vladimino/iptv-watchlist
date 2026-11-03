@@ -22,7 +22,9 @@
         <p class="admin-intro">Сначала очередь. Выбор записи показывает, что произошло, кто действует дальше и известен ли итог. Чтение ничего не запускает. Запись — только подтверждённое действие в разборе этой записи.</p>
       </div>
     </section>
-    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb" aria-current="page">Лимб</a><a href="/admin/posters">Постеры</a></nav>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb" aria-current="page">Лимб</a><a href="/admin/posters">Постеры</a></nav>
+      <div class="admin-main">
     <p id="limbo-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем опубликованный снимок и очередь прогнозов…</p>
     <div id="limbo-stale" class="admin-state admin-state-stale" role="alert" hidden><span id="limbo-stale-text">Снимок изменился. Показанные записи относятся к прежнему снимку. «Обновить» перечитает его.</span></div>
     <p id="limbo-error" class="admin-state admin-state-error" role="alert" hidden></p>
@@ -78,6 +80,8 @@
         <section id="verified-panel" data-obs-recovery-slot="verified" aria-label="Разбор проверенного совпадения" hidden></section>
       </section>
     </details>
+      </div>
+    </div>
   </main>
   <script src="/admin-limbo.js"></script>
 </body>
