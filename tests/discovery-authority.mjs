@@ -430,7 +430,7 @@ const guardedBucket={
  async delete(){throw new Error('delete');},
  async list(){throw new Error('list');},
 };
-const httpContext=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,Uint32Array,DataView,atob,btoa,crypto:webcrypto,console,setTimeout,structuredClone,encodeURIComponent,decodeURIComponent,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},FILM_TITLE_DICTIONARY:[],PERSON_NAME_DICTIONARY:[],fetch:async()=>new Response('{}'),DiscoveryAuthority:Authority});
+const httpContext=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,Uint32Array,DataView,ReadableStream,WritableStream,atob,btoa,crypto:webcrypto,console,setTimeout,structuredClone,encodeURIComponent,decodeURIComponent,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},FILM_TITLE_DICTIONARY:[],PERSON_NAME_DICTIONARY:[],fetch:async()=>new Response('{}'),DiscoveryAuthority:Authority});
 vm.runInContext(scoped('src/domain/discovery-observation-index.js','DiscoveryIndex'),httpContext);
 for(const file of ['src/domain/film-person.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),httpContext);
 vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),httpContext);
@@ -532,3 +532,107 @@ await httpBucket.put('epg/generations/'+otherRun+'/discovered-films.json',JSON.s
 const mismatched=await call('/api/catalog/available');
 assert.equal(mismatched.status,409,JSON.stringify(mismatched.body));
 assert.equal(mismatched.body.error,'Catalog generation copy is not in place');
+
+const recovered=migrated();
+open(recovered.db);
+const recoveredEnv=envFor(recovered.db);
+const originalLease=await Authority.acquireLease(recoveredEnv,{programmeRunId:null});
+recoveredEnv.discoveryLease=originalLease.lease;
+await Authority.replaceLedger(recoveredEnv,{programmeRunId:'run-old',items:[item]});
+const partialRows=Array.from({length:20},(_,index)=>({...item,key:'part-'+String(index).padStart(2,'0'),title:'P'+index}));
+await assert.rejects(()=>Authority.ingestLedger(recoveredEnv,{programmeRunId:'run-new',handoff:true,lease:originalLease.lease,items:(async function*(){for(const row of partialRows)yield row;throw new Error('killed');})()}),error=>error.code==='discovery_unavailable');
+assert.equal(one(recovered.db,"SELECT state FROM discovery_transfer WHERE id=1").state,'loading');
+assert.equal(one(recovered.db,"SELECT programme_run_id FROM discovery_authority WHERE id=1").programme_run_id,'run-old');
+await assert.rejects(()=>Authority.routeRead(recoveredEnv,'epg/discovery-latest.json'),error=>error.code==='discovery_incomplete');
+const flushed=count(recovered.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active'");
+assert.equal(flushed>0&&flushed<partialRows.length,true,'flushed '+flushed);
+assert.equal(count(recovered.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE observation_key='part-00' AND residence='active'"),1);
+assert.equal(count(recovered.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE observation_key='part-19'"),0);
+await assert.rejects(()=>Authority.acquireLease(recoveredEnv,{programmeRunId:'run-old'}),error=>error.code==='discovery_incomplete');
+assert.equal(one(recovered.db,'SELECT lease_id FROM discovery_lease WHERE id=1').lease_id,originalLease.lease.id);
+recovered.db.sql('UPDATE discovery_lease SET expires_at='+(Date.now()-1000)+' WHERE id=1');
+await assert.rejects(()=>Authority.ingestLedger(recoveredEnv,{programmeRunId:'run-new',handoff:true,lease:originalLease.lease,items:(async function*(){yield partialRows[0];})()}),error=>error.code==='discovery_incomplete');
+assert.equal(count(recovered.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active'"),flushed);
+assert.equal(one(recovered.db,"SELECT programme_run_id FROM discovery_authority WHERE id=1").programme_run_id,'run-old');
+const successorLease=await Authority.acquireLease(recoveredEnv,{programmeRunId:'run-old'});
+assert.ok(successorLease.lease);
+assert.notEqual(successorLease.lease.id,originalLease.lease.id);
+await assert.rejects(()=>Authority.ingestLedger(recoveredEnv,{programmeRunId:'run-new',handoff:true,lease:originalLease.lease,items:(async function*(){yield {...item,key:'stale-during'};})()}),error=>error.code==='discovery_incomplete');
+assert.equal(count(recovered.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE observation_key='stale-during'"),0);
+const sealReplay=[{...item,key:'kept-a'},{...item,key:'kept-b'}];
+await Authority.ingestLedger(recoveredEnv,{programmeRunId:'run-next',handoff:true,lease:successorLease.lease,items:(async function*(){for(const row of sealReplay)yield row;})()});
+const sealLedger=await Authority.routeRead(recoveredEnv,'epg/discovery-latest.json');
+assert.deepEqual(sealLedger.value.items.map(row=>row.key).sort(),['kept-a','kept-b']);
+assert.equal(sealLedger.value.programmeRunId,'run-next');
+assert.equal(one(recovered.db,"SELECT state FROM discovery_transfer WHERE id=1").state,'committed');
+assert.equal(count(recovered.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE observation_key='part-00' AND residence='active'"),0);
+await assert.rejects(()=>Authority.replaceLedger(recoveredEnv,{programmeRunId:'run-stale',items:[{...item,key:'stale-only'}]},{lease:originalLease.lease}),error=>error.code==='discovery_fence');
+assert.deepEqual((await Authority.routeRead(recoveredEnv,'epg/discovery-latest.json')).value.items.map(row=>row.key).sort(),['kept-a','kept-b']);
+assert.equal(count(recovered.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE observation_key='stale-only'"),0);
+
+const blockedLoad=migrated();
+open(blockedLoad.db);
+blockedLoad.db.sql("UPDATE discovery_authority SET programme_run_id='run-old', published_programme_run_id='run-old' WHERE id=1");
+blockedLoad.db.sql("UPDATE discovery_transfer SET state='loading', programme_run_id='run-old' WHERE id=1");
+blockedLoad.db.sql("UPDATE discovery_lease SET lease_id='gone', expires_at=0 WHERE id=1");
+await assert.rejects(()=>Authority.acquireLease(envFor(blockedLoad.db),{programmeRunId:'run-old'}),error=>error.code==='discovery_incomplete');
+await assert.rejects(()=>Authority.routeRead(envFor(blockedLoad.db),'epg/discovery-latest.json'),error=>error.code==='discovery_incomplete');
+
+const published=migrated();
+open(published.db);
+const publishedInner=new MemoryBucket();
+let failDiscoveryPut=true;
+const publishedBucket={
+ async get(key){return publishedInner.get(key);},
+ async head(key){return publishedInner.head(key);},
+ async delete(key){return publishedInner.delete(key);},
+ async list(options){return publishedInner.list(options);},
+ async put(key,body,options){
+  if(body&&typeof body.getReader==='function'){
+   const reader=body.getReader();
+   const chunks=[];
+   let seen=0;
+   while(true){
+    const step=await reader.read();
+    if(step.done)break;
+    seen++;
+    if(failDiscoveryPut&&key.endsWith('/discovery-latest.json')&&seen>=30){failDiscoveryPut=false;throw new Error('put failed');}
+    chunks.push(Buffer.from(step.value));
+   }
+   return publishedInner.put(key,Buffer.concat(chunks).toString('utf8'),options);
+  }
+  return publishedInner.put(key,body,options);
+ },
+};
+const publishedEnv=envFor(published.db,publishedBucket);
+const seedLease=await Authority.acquireLease(publishedEnv,{programmeRunId:null});
+publishedEnv.discoveryLease=seedLease.lease;
+await Authority.replaceLedger(publishedEnv,{programmeRunId:'run-old',items:[{...item,key:'obs-old',title:'Old Recovered Film',year:1981}]});
+await Authority.releaseLease(publishedEnv,seedLease.lease);
+publishedEnv.discoveryLease=null;
+const previousLedger={programmeRunId:'run-old',items:[{key:'old-recovered-film|1981',title:'Old Recovered Film',normalizedTitle:'old recovered film',year:1981,durations:[90],shows:[{channelId:'c',start:5,end:9}]}]};
+await publishedInner.put('epg/published-generation.json',JSON.stringify({programmeRunId:'run-old',phase:'published'}));
+await publishedInner.put('epg/generations/run-old/discovery-latest.json',JSON.stringify(previousLedger));
+const partialLatest=Array.from({length:20},(_,index)=>({title:'Partial Recovered '+String(index).padStart(2,'0'),year:2000+index,durations:[80],shows:[{channelId:'c',start:10+index,end:20+index}]}));
+await assert.rejects(()=>httpContext.publishEpgGeneration(publishedEnv,'run-pub',{},{latest:partialLatest,meta:{programmeRunId:'run-pub'},mode:'full',holder:{discovery:partialLatest}}),error=>error.message==='put failed');
+assert.equal(JSON.parse(await (await publishedInner.get('epg/published-generation.json')).text()).programmeRunId,'run-old');
+assert.equal(one(published.db,"SELECT programme_run_id FROM discovery_authority WHERE id=1").programme_run_id,'run-old');
+assert.equal(one(published.db,"SELECT state FROM discovery_transfer WHERE id=1").state,'loading');
+await assert.rejects(()=>Authority.routeRead(publishedEnv,'epg/discovery-latest.json'),error=>error.code==='discovery_incomplete');
+const publishedFlush=count(published.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active'");
+assert.equal(publishedFlush>0&&publishedFlush<21,true,'published flush '+publishedFlush);
+const interrupted=one(published.db,'SELECT lease_id, expires_at FROM discovery_lease WHERE id=1');
+assert.equal(Number(interrupted.expires_at)<=Date.now(),true);
+const keptLatest=[{title:'Kept Recovered Alpha',year:2011,durations:[90],shows:[{channelId:'c',start:30,end:40}]},{title:'Kept Recovered Beta',year:2012,durations:[90],shows:[{channelId:'c',start:50,end:60}]}];
+await httpContext.publishEpgGeneration(publishedEnv,'run-next',{},{latest:keptLatest,meta:{programmeRunId:'run-next'},mode:'full',holder:{discovery:keptLatest}});
+const publishedLedger=await Authority.routeRead(publishedEnv,'epg/discovery-latest.json');
+assert.equal(publishedLedger.value.programmeRunId,'run-next');
+assert.equal(publishedLedger.value.items.length,3,JSON.stringify(publishedLedger.value.items.map(row=>row.key)));
+assert.equal(publishedLedger.value.items.some(row=>String(row.title||'').startsWith('Partial Recovered')),false);
+assert.equal(publishedLedger.value.items.filter(row=>String(row.title||'').startsWith('Kept Recovered')).length,2);
+assert.equal(one(published.db,"SELECT state FROM discovery_transfer WHERE id=1").state,'committed');
+assert.equal(JSON.parse(await (await publishedInner.get('epg/published-generation.json')).text()).programmeRunId,'run-next');
+const servedKeys=publishedLedger.value.items.map(row=>row.key).sort();
+await assert.rejects(()=>Authority.ingestLedger(publishedEnv,{programmeRunId:'run-stale',handoff:true,lease:{id:interrupted.lease_id,expiresAt:0},items:(async function*(){yield {...item,key:'stale-only'};})()}),error=>error.code==='discovery_fence');
+assert.deepEqual((await Authority.routeRead(publishedEnv,'epg/discovery-latest.json')).value.items.map(row=>row.key).sort(),servedKeys);
+assert.equal(count(published.db,"SELECT COUNT(*) AS n FROM discovery_observation WHERE observation_key='stale-only'"),0);

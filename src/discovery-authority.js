@@ -366,7 +366,13 @@ export async function replaceLedger(env,document,context={}){
  return {handled:true,items:document.items.length};
 }
 // One item at a time. The caller is the publish handoff: it already holds the lease, and the
-// programme moves only inside the seal. A killed seal stays `loading` until that lease retries it.
+// programme moves only inside the seal. A killed seal stays `loading` and is not
+// served. The same live lease may retry it. Once that lease expires or is
+// released, the next handoff takes a new lease and replays the seal when the
+// in-progress programme differs from the published programme, or retiring rows
+// are present. Partial rows stay unserved until that replay commits. The
+// interrupted lease cannot commit after the takeover. A catalog, decision or
+// segment load is not taken over.
 export async function ingestLedger(env,spec){
  if(!spec||spec.handoff!==true)throw failed('discovery_fence');
  const run=typeof spec.programmeRunId==='string'?spec.programmeRunId:null;
@@ -553,11 +559,18 @@ export async function importSegment(env,segment){
  return {imported:segment.items.length,sha};
 }
 
+async function ledgerSealLoading(env){
+ const row=await one(database(env),'SELECT 1 AS ok FROM discovery_transfer t JOIN discovery_authority a ON a.id=1 WHERE t.id=1 AND t.state=\'loading\' AND (EXISTS (SELECT 1 FROM discovery_observation WHERE source_key=\'active\' AND residence=\'retiring\') OR t.programme_run_id IS NOT a.programme_run_id)');
+ return !!row;
+}
 export async function acquireLease(env,context={}){
  const gate=await readAuthority(env);
  if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,lease:null};
- if(gate.transfer==='loading')throw failed('discovery_incomplete');
+ if(gate.transfer==='loading'){
+  const live=await one(database(env),'SELECT lease_id FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND expires_at>?',[nowMs()]);
+  if(live?.lease_id||!await ledgerSealLoading(env))throw failed('discovery_incomplete');
+ }
  if(gate.programmeRunId&&context.programmeRunId&&gate.programmeRunId!==context.programmeRunId)return {handled:true,lease:null};
  const id=crypto.randomUUID(),expiresAt=nowMs()+LEASE_TTL_MS;
  const db=database(env);
