@@ -117,6 +117,18 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
    const results=await query(renderSql(sql,params)+';');
    return results[0]?.results||[];
   },
+  // A preflight read. Refuses anything that is not a single SELECT, and refuses a response that wrote rows.
+  async inspect(sql,params=[]){
+   if(state.buffer)throw new Error('Read inside the import transaction');
+   const text=renderSql(sql,params).trim();
+   if(!/^select\b/i.test(text))throw new D1Error('statement','inspect accepts a SELECT only');
+   stats.reads++;
+   const results=await query(text+';');
+   const item=results[0]||{};
+   const rowsWritten=Number(item.meta?.rows_written??0);
+   if(!Number.isFinite(rowsWritten)||rowsWritten!==0)throw new D1Error('statement','A read changed rows');
+   return {rows:item.results||[],rowsRead:Number(item.meta?.rows_read??0),rowsWritten,bookmark:typeof item.meta?.bookmark==='string'?item.meta.bookmark:null};
+  },
   async transaction(fn){
    if(state.buffer)return fn();
    state.buffer=[];
