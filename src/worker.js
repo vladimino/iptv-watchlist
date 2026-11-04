@@ -40,8 +40,10 @@ const loadJSON=async(env,key)=>{
   else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return object.json();}}}
  }
  if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key);if(routed.handled)return routed.value;}
+ if(typeof RatingsD1!=='undefined'){const routed=await RatingsD1.routeRead(env,key);if(routed.handled)return routed.value;}
  const o=await env.BUCKET.get(key);let value=o?await o.json():null;
  if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
+ if(key==='enrichment/view-index.json'&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);
  return value;
 };
 async function publishedOwnerReviews(env){

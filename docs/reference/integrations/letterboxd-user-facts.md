@@ -122,7 +122,7 @@ A complete films list or watchlist is one observation of every film it shows. It
 
 ## Projections
 
-- `enrichment/view-index.json` keeps `actualRating` and gains `watched: true|false`, written under **every** alias in `links` (the `lid` and the `tmdb_<n>` catalog id). It is rebuilt from fact records; the index is never the source of a fact.
+- `enrichment/view-index.json` keeps `actualRating` and gains `watched: true|false`, written under **every** alias in `links` (the `lid` and the `tmdb_<n>` catalog id). It is rebuilt from fact records; the index is never the source of a fact. While migration `0010` is absent, or `ratings_domain_authority` is not `d1` with cutover `open`, those fact records stay in R2 ([ADR 0084](../../adr/0084-d1-authoritative-ratings.md), Proposed). After that activation the personal fields on this index are replaced from `ratings_view` and the R2 copy does not compete. Missing watched stays null. An explicit null rating is kept. A removal is not a viewing.
 - Finds exclude a film whose record has `watched: true` or a rating, whatever id the catalog uses, so a prediction is never shown in place of an actual rating. They read this projection, not the records: an entry under `tmdb_<n>` names its TMDB film directly, and an entry under a Letterboxd id reaches the catalog's `tmdb_<n>` record through the TMDB id stored for that Letterboxd id, which also covers a record without a TMDB link. Titles are never used ([catalog API](../api/catalog.md#watched-and-rated-films)).
 
 ## Baseline import protocol
