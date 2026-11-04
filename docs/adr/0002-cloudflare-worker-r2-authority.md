@@ -5,7 +5,7 @@
 **Recorded at:** 2026-10-24 (retrospective, [AIR-116](https://trello.com/c/6MHbRFZR))  
 **Approval source:** [19 October production cutover](https://github.com/vladimino/iptv-watchlist/commit/58737738275fca182afd8afbdd035870db63315e)  
 **Supersedes:** None documented  
-**Superseded by:** [ADR 0078](0078-d1-authoritative-prediction-domain.md) only for mutable prediction-domain state when `prediction_domain_authority.mode` becomes `d1`; R2 continues to own all other domains covered here and the immutable prediction bodies remain in R2. ADR 0078 acceptance does not activate that marker.
+**Superseded by:** [ADR 0078](0078-d1-authoritative-prediction-domain.md) in part for mutable prediction state only after its marker activation, and [ADR 0085](0085-d1-authoritative-discovery.md) in part for the discovery ledger and decisions only while `discovery_authority.mode=d1` and `cutover=open`. Neither ADR acceptance itself changes its marker; other domains retain their own authority decisions.
 
 ## Context
 

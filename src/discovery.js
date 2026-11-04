@@ -131,6 +131,16 @@ function scorePreviewSummary(preview,currentProgrammeRunId){
 }
 async function saveScorePreview(env,source,preview,fence=null){if(fence)await fence();await saveJSON(env,DISCOVERY_SCORE_PREVIEW_KEY,{schemaVersion:1,mode:'on',programmeRunId:source.programmeRunId||null,items:preview});}
 async function acquireDiscoveryLease(env){
+ if(typeof DiscoveryAuthority!=='undefined'){
+  const gate=await DiscoveryAuthority.readAuthority(env);
+  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
+  if(gate.ready){
+   const published=await publishedPointer(env);
+   const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:published?.programmeRunId??null});
+   if(taken.lease)env.discoveryLease=taken.lease;
+   return taken.lease;
+  }
+ }
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY),old=object?await object.json():null;
  if(old?.expiresAt>Date.now())return null;
  const lease={id:crypto.randomUUID(),expiresAt:Date.now()+90000},saved=await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
@@ -143,13 +153,27 @@ async function acquireDiscoveryLease(env){
 // showing, the prediction-queue checkpoint, the score preview) renews first; the residual window is one storage write
 // of the old hop that is already in flight and itself lasts longer than the TTL.
 async function renewDiscoveryLease(env,lease){
+ if(typeof DiscoveryAuthority!=='undefined'){
+  const gate=await DiscoveryAuthority.readAuthority(env);
+  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
+  if(gate.ready){
+   const published=await publishedPointer(env);
+   const renewed=await DiscoveryAuthority.renewLease(env,lease,{programmeRunId:published?.programmeRunId??null});
+   return renewed.ok===true;
+  }
+ }
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);if(!object)return false;
  const current=await object.json();if(current?.id!==lease.id)return false;
  const next={...current,expiresAt:Date.now()+90000},saved=await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify(next),{onlyIf:{etagMatches:object.etag}});
  if(saved===null)return false;lease.expiresAt=next.expiresAt;return true;
 }
 const leaseLostError=()=>Object.assign(new Error('resolver lease lost'),{name:'LeaseLostError'});
-async function releaseDiscoveryLease(env,lease){const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);if(!object)return;const current=await object.json();if(current.id===lease.id)await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:object.etag}});}
+async function releaseDiscoveryLease(env,lease){
+ if(typeof DiscoveryAuthority!=='undefined'){
+  const released=await DiscoveryAuthority.releaseLease(env,lease);
+  if(released.handled)return;
+ }
+ const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);if(!object)return;const current=await object.json();if(current.id===lease.id)await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:object.etag}});}
 async function tmdbRequest(env,path){
  if(env.TMDB_REQUEST_INTERVAL_MS!==0)await new Promise(resolve=>setTimeout(resolve,200));
  const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(12000)});
@@ -498,11 +522,45 @@ async function resolveDiscoveryBatch(env,report,limit=24){
 // `checkpoint`, when given, is called with the chunk's summary immediately after the hop-marked final status is
 // saved and before any trailing write (score preview), so that the continuation checkpoint is the
 // very next durable write after the status; see advanceDiscovery.
+// A ledger above the in-memory cap is a cursor, not an array. One page is resident at a time, and only the
+// next `limit` actionable observations are kept for the TMDB calls.
+async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence){
+ const last=await loadJSON(env,'epg/discovery-status.json');
+ if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
+ const decisions=(await loadJSON(env,'epg/discovery-resolution.json'))||{};
+ const pending=[];
+ let remaining=0,after='',seen=0,maxPage=0;
+ for(;;){
+  const page=await DiscoveryAuthority.readObservationPage(env,{after});
+  maxPage=Math.max(maxPage,page.items.length);
+  seen+=page.items.length;
+  const now=Date.now();
+  for(const candidate of page.items){
+   if(!resolutionActionability(candidate,decisions[candidate.key],now))continue;
+   remaining++;
+   pending.push(candidate);
+   pending.sort((a,b)=>(candidateIsHot(b,now)?1:0)-(candidateIsHot(a,now)?1:0)||Number(!!b.year)-Number(!!a.year)||(Number(b.lastAiring)||0)-(Number(a.lastAiring)||0)||String(a.key).localeCompare(String(b.key)));
+   if(pending.length>limit)pending.pop();
+  }
+  if(!page.more)break;
+  after=page.after;
+ }
+ if(seen!==source.itemCount)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
+ let checked=0,tmdbCalls=0,error=null,retryAt=null;
+ const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
+ for(const candidate of pending){
+  try{await scoredSearchCandidates(query,candidate);checked++;}
+  catch(e){if(e?.name==='LeaseLostError')throw e;error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
+ }
+ const summary={schemaVersion:2,stage:error||remaining>checked?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked,remaining:Math.max(0,remaining-checked),error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls};
+ await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);return summary;
+}
 async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
  // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
  const [source,resolution,catalog,last]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json')]);
+ if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
  const decisions=resolution||{},films=catalog||{},watchlist=(report.films||[]),knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
@@ -604,6 +662,11 @@ async function writeObservationIndex(env,run,shards,fence,fields,layout){
 // error but a lost lease is swallowed, and a previous index whose etags no longer match is then read as stale. Owner
 // reads use an index instead of the ledger and the resolution map.
 async function saveObservationIndex(env,source,decisions,fence,writer){
+ if(typeof DiscoveryAuthority!=='undefined'){
+  const gate=await DiscoveryAuthority.readAuthority(env);
+  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
+  if(gate.ready)return {written:true,reason:null};
+ }
  const run=source.programmeRunId||null;
  try{
   const generation=run?await publishedPointer(env):null;
@@ -782,8 +845,14 @@ function continuationDecision(current,now){
 // `etag` is the precondition for the next write: the object's etag, `null` for a missing object (the write
 // then requires absence), or `undefined` when the store returned an object without an etag (no
 // precondition is possible, so the write is plain; R2 always supplies one).
-async function readContinuation(env){const object=await env.BUCKET.get(CONTINUATION_KEY);return {record:object?await object.json():null,etag:object?(object.etag||undefined):null};}
-async function replaceContinuation(env,record,etag){const saved=await env.BUCKET.put(CONTINUATION_KEY,JSON.stringify(record),{httpMetadata:{contentType:'application/json'},...(etag===undefined?{}:{onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}})});return saved!==null;}
+async function readContinuation(env){
+ if(typeof DiscoveryAuthority!=='undefined'){const routed=await DiscoveryAuthority.readContinuation(env);if(routed.handled)return {record:routed.record,etag:routed.etag};}
+ const object=await env.BUCKET.get(CONTINUATION_KEY);return {record:object?await object.json():null,etag:object?(object.etag||undefined):null};
+}
+async function replaceContinuation(env,record,etag){
+ if(typeof DiscoveryAuthority!=='undefined'){const routed=await DiscoveryAuthority.writeContinuation(env,record,etag);if(routed.handled)return routed.saved===true;}
+ const saved=await env.BUCKET.put(CONTINUATION_KEY,JSON.stringify(record),{httpMetadata:{contentType:'application/json'},...(etag===undefined?{}:{onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}})});return saved!==null;
+}
 // Writes the hop's checkpoint only while the record still names that hop. The result says whether the
 // write happened: `saved: false` with `reason: other_hop` when another hop owns the record, or
 // `reason: write_conflict` when both conditional writes were rejected; the caller must not report
@@ -890,7 +959,9 @@ async function advanceDiscovery(env,body={}){
  trace.branch=null;trace.entry=null;trace.lease=null;trace.health=null;trace.recovery=null;trace.decision=null;trace.hopId=null;trace.budget=null;trace.chunk=null;trace.saved=null;
  let stored=await readContinuation(env),current=stored.record;
  trace.entry=continuationSummary(current);
- const leaseObject=await env.BUCKET.get(DISCOVERY_LEASE_KEY),lease=leaseObject?await leaseObject.json():null;
+ let lease=null,leaseHandled=false;
+ if(typeof DiscoveryAuthority!=='undefined'){const routed=await DiscoveryAuthority.readLease(env);leaseHandled=routed.handled;if(routed.handled)lease=routed.lease;}
+ if(!leaseHandled){const leaseObject=await env.BUCKET.get(DISCOVERY_LEASE_KEY);lease=leaseObject?await leaseObject.json():null;}
  trace.lease=lease?.expiresAt>now?'live':lease?'expired':'none';
  const running=current?.stage==='running';
  const [last,generation,report]=await Promise.all([running?loadJSON(env,'epg/discovery-status.json'):null,loadJSON(env,EPG_GENERATION_KEY),loadJSON(env,'programme.json')]);

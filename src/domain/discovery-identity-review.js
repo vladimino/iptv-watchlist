@@ -45,6 +45,9 @@ export function identityStoreAuthority(generation, publishedEpg = null) {
   if (!identityObject(generation) || generation.phase !== 'published' || typeof generation.programmeRunId !== 'string' || !generation.programmeRunId) {
     return {authority: null, programmeRunId: null, reason: 'unknown_authority'};
   }
+  if (publishedEpg?.discoveryAuthority === 'd1' && publishedEpg.supported === true) {
+    return {authority: 'd1', programmeRunId: generation.programmeRunId, reason: null};
+  }
   const marker = generation.identityAuthority ?? generation.programmeAuthority ?? null;
   if (marker != null && marker !== 'r2') return {authority: null, programmeRunId: generation.programmeRunId, reason: 'unknown_authority'};
   if (publishedEpg && publishedEpg.supported === false) return {authority: null, programmeRunId: generation.programmeRunId, reason: 'unknown_authority'};
