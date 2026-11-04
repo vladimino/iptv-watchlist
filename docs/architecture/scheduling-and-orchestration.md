@@ -219,70 +219,59 @@ The run record is one D1 document. It admits one running run and one active step
 
 ```mermaid
 flowchart TD
-    cron["Worker cron, UTC firings<br/>Madrid logical schedule"]
-    subgraph ensureLayer["ensure per activated domain: reads only, at most one create, no chunk"]
-        ensureEpg["ensure EPG"]
-        ensureDisc["ensure Discovery"]
-        ensureRat["ensure Ratings"]
-    end
+    cron["Worker cron: UTC firings,<br/>Madrid logical schedule"]
     subgraph epgDomain["EPG domain"]
-        epgCtl[("EPG control record in D1:<br/>mode, epoch, Madrid date, budget")]
-        epgWf["EPG Workflow instance<br/>one bounded step each"]
+        ensureEpg["ensure: reads, at most one create"]
+        epgCtl[("D1 control record:<br/>mode, epoch, Madrid date, budget")]
+        epgWf["Workflow instance:<br/>one bounded step each"]
         epgAuth[("D1 published generation;<br/>R2 raw XML and mirrors")]
+        ensureEpg --> epgCtl --> epgWf -->|write, then checkpoint| epgAuth
     end
-    subgraph discDomain["Discovery domain, only after its D1 marker is open"]
-        discCtl[("Discovery control record in D1:<br/>generation, series, budget")]
-        discWf["Discovery Workflow instance<br/>one chunk per step, 20 then successor"]
+    subgraph discDomain["Discovery domain, after its D1 marker is open"]
+        ensureDisc["ensure: reads, at most one create"]
+        discCtl[("D1 control record:<br/>generation, series, budget")]
+        discWf["Workflow instance:<br/>one chunk per step"]
         discAuth[("D1 discovery ledger")]
+        ensureDisc --> discCtl --> discWf -->|write, then checkpoint| discAuth
     end
     subgraph ratDomain["Ratings domain"]
-        ratCtl[("Ratings control record in D1:<br/>Madrid date, budget")]
-        ratWf["Ratings Workflow instance<br/>one bounded step each"]
+        ensureRat["ensure: reads, at most one create"]
+        ratCtl[("D1 control record:<br/>Madrid date, budget")]
+        ratWf["Workflow instance:<br/>one bounded step each"]
         ratAuth[("D1 ratings documents;<br/>R2 removal events")]
+        ensureRat --> ratCtl --> ratWf -->|write, then checkpoint| ratAuth
     end
-    status["Read-only status routes:<br/>orchestration read model, no writes"]
+    status["Read-only status routes:<br/>orchestration read model"]
     monitor["External monitor and alert,<br/>outside ChatGPT"]
     hourly["Hourly ChatGPT Task:<br/>Predictions only"]
     cron --> ensureEpg & ensureDisc & ensureRat
-    ensureEpg -->|read, then create or attach| epgCtl
-    epgCtl --> epgWf
-    epgWf -->|write, then checkpoint| epgAuth
-    ensureDisc -->|read, then create or attach| discCtl
-    discCtl --> discWf
-    discWf -->|write, then checkpoint| discAuth
-    ensureRat -->|read, then create or attach| ratCtl
-    ratCtl --> ratWf
-    ratWf -->|write, then checkpoint| ratAuth
     epgAuth -.->|publication queues fenced intent| discCtl
-    epgCtl & discCtl & ratCtl -.-> status
+    epgAuth & discAuth & ratAuth -.->|read only| status
     status -.-> monitor
 ```
 
-The three domains share no lease, queue, store or Workflow instance; the only shared element is the clock. Each instance writes its domain data first and then its fenced checkpoint and budget into its own control record, compared against the epoch. Each `ensure` reads its own control record and creates or attaches at most one instance with an id derived from the run key, so a duplicate firing attaches to the same instance. EPG publication queues Discovery's fenced intent and does not wait for Discovery. The dotted arrows to the status routes are reads only.
+The three domains share no lease, queue, store or Workflow instance; the only shared element is the clock. Each instance writes its domain data first and then its fenced checkpoint and budget into its own control record, compared against the epoch. Each `ensure` runs no chunk, download or lookup. It reads its own control record and creates or attaches at most one instance with an id derived from the run key, so a duplicate firing attaches to the same instance. EPG publication queues Discovery's fenced intent and does not wait for Discovery. The dotted arrows to the status routes are reads only; the read model reads each domain's control record and its authority.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
     Idle --> Due: due
     Due --> Running: owner CAS won
-    Running --> Checkpointed: write, read back
-    Checkpointed --> Running: more work
-    Checkpointed --> Waiting: known wake
-    Checkpointed --> Idle: run key done
-    Waiting --> Due: wake time
+    Running --> Due: checkpoint read back, more work
+    Running --> Idle: checkpoint read back, run key done
     Running --> Unknown: outcome lost
-    Unknown --> Checkpointed: write found
-    Unknown --> Cooldown: no write, budget left
-    Running --> Cooldown: transient, budget left
+    Unknown --> Due: write found
+    Unknown --> Cooldown: no write
+    Running --> Cooldown: transient
     Cooldown --> Due: cooldown over
-    Unknown --> Quarantined: unreadable or cap
-    Running --> Quarantined: unsafe or cap
+    Running --> Quarantined: unsafe, or cap reached
+    Unknown --> Quarantined: unreadable, or cap reached
     Running --> FailedPermanent: credentials or contract
     FailedPermanent --> Due: precondition holds
     Quarantined --> Due: next run key or owner clear
 ```
 
-`Unknown` means a timeout, a lost response or a killed step, resolved only by reading back. A duplicate firing while a run is `Due` or `Running` attaches to it. `Quarantined` returns to `Due` on the next run key only after a budget exhaustion; after unsafe evidence only an owner-approved clear does. Only a read-back checkpoint that moved forward resets the consecutive failure count; a create, an HTTP 200 or a lease does not. The executor never forces a step, never resets a lease and never clears its own quarantine. Predictions are outside both diagrams and stay on the hourly ChatGPT task.
+`Due` includes a known future wake (`retryAt`, `Retry-After`, a pause or a lease), which the read model reports as `waiting`. `Unknown` means a timeout, a lost response or a killed step, resolved only by reading back. A duplicate firing while a run is `Due` or `Running` attaches to it. `Quarantined` returns to `Due` on the next run key only after a budget exhaustion; after unsafe evidence only an owner-approved clear does. Only a read-back checkpoint that moved forward resets the consecutive failure count; a create, an HTTP 200 or a lease does not. The executor never forces a step, never resets a lease and never clears its own quarantine. Predictions are outside both diagrams and stay on the hourly ChatGPT task.
 
 ## Timing and authority
 
