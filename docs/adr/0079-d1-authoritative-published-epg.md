@@ -6,7 +6,7 @@
 **Approval source:** [Explicit owner acceptance of ADR 0079 and visual approval of all three changed Mermaid diagrams on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44), after independent [technical PASS on PR #314](https://github.com/vladimino/iptv-watchlist/pull/314#pullrequestreview-5730366344) at HEAD `0a5f88c7a20131b31e43968473133dc74055eb6f` and [successful PR CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41351842228). Architecture and rendered diagrams only; no production migration, import, marker flip, R2/D1 write or other operation is authorized.  
 **Related work:** [AIR-319](https://trello.com/c/pQL8NUTC), [ADR 0008](0008-atomic-epg-publication.md), [ADR 0021](0021-staged-atomic-generation-import.md), [ADR 0073](0073-metadata-cache-d1-authority.md), [ADR 0051](0051-d1-domain-r2-blobs.md)  
 **Supersedes:** [ADR 0008](0008-atomic-epg-publication.md) in part, and only while `published_epg_authority.mode` is `d1` and `cutover` is `open`: the coherent snapshot is the D1 generation, and `epg/published-generation.json` is its compatibility mirror. The coherent-snapshot rule stands. [ADR 0073](0073-metadata-cache-d1-authority.md) decisions 3 and 5 in part: a contract version of 6 or later, with the cache tables present, follows the metadata marker. The accepted decision text of both records stays.  
-**Superseded by:** None
+**Superseded by:** [ADR 0085](0085-d1-authoritative-discovery.md) in part for decision 5's discovery ledger/decision R2 storage only when `discovery_authority.mode=d1` and `cutover=open`; accepted 2026-11-04, with separate cutover approval required. Published EPG authority is unchanged.
 
 ## Context
 
