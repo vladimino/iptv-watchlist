@@ -261,6 +261,8 @@ assert.equal(production.status,2);
 assert.match(production.stderr,/refuse/);
 const activate=spawnSync(process.execPath,['scripts/discovery-authority.mjs','--database',live.file,'--activate'],{encoding:'utf8'});
 assert.equal(activate.status,2);
+const resetLoad=spawnSync(process.execPath,['scripts/discovery-authority.mjs','--database',live.file,'--reset-load'],{encoding:'utf8'});
+assert.equal(resetLoad.status,2);
 
 await Authority.releaseLease(env,again.lease);
 const foreignLease=await Authority.acquireLease(env,{programmeRunId:'run-new'});
