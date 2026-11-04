@@ -69,17 +69,24 @@ export function decisionEntries(map){
  return entries;
 }
 
-export function assertDecisionEvidence(entries, evidenceByKey){
+// ADR 0022: a decision taken against earlier airings is copied with its stored
+// evidence key. The observation key is not substituted, and the disagreement
+// does not refuse the copy. A decision whose observation is absent is unchanged.
+export function staleEvidenceCount(entries, evidenceByKey){
+ let stale=0;
  for(const row of entries){
   if(row.decision.evidenceKey==null)continue;
   if(!evidenceByKey.has(row.key))continue;
-  if(evidenceByKey.get(row.key)!==row.decision.evidenceKey)stop('import_refused');
+  if(evidenceByKey.get(row.key)!==row.decision.evidenceKey)stale++;
  }
+ return stale;
 }
 
 export function scoreEntries(preview, programmeRunId){
  if(preview==null)return [];
- if(!preview||typeof preview!=='object'||Array.isArray(preview)||preview.programmeRunId!==programmeRunId)stop('import_refused');
+ if(!preview||typeof preview!=='object'||Array.isArray(preview))stop('import_refused');
+ // The resolver already treats a preview of another programme as stale and counts none of its rows.
+ if(preview.programmeRunId!==programmeRunId)return [];
  const items=preview.items&&typeof preview.items==='object'&&!Array.isArray(preview.items)?Object.values(preview.items):null;
  if(!items)stop('import_refused');
  if(items.length>SCORE_CAP)stop('import_refused');
