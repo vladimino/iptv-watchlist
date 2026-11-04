@@ -101,7 +101,7 @@ A miniseries that TMDB keeps as a TV entry is identified by `{scheme: 'tmdb_tv',
 
 ### Watchlist fact admission
 
-[ADR 0086](../../adr/0086-durable-watchlist-film-retention.md) (Proposed). The reader still builds Films from the current programme list, or from the watchlist list when the programme list is absent, and then from discovered films. It also keeps a Letterboxd lid whose `watchlistAdmissions` value is a boolean. The projector fills that map from `enrichment/view-index.json`: a lid matching `^[A-Za-z0-9_-]{1,80}$` and not starting with `tmdb_`, and only when `watchlist` is `true` or `false`. A missing index admits nobody.
+[ADR 0086](../../adr/0086-durable-watchlist-film-retention.md) (Accepted). The reader still builds Films from the current programme list, or from the watchlist list when the programme list is absent, and then from discovered films. It also keeps a Letterboxd lid whose `watchlistAdmissions` value is a boolean. The projector fills that map from `enrichment/view-index.json`: a lid matching `^[A-Za-z0-9_-]{1,80}$` and not starting with `tmdb_`, and only when `watchlist` is `true` or `false`. A missing index admits nobody.
 
 The metadata cache is the body of an admitted lid only when the row's id is absent or equals the lid. A row whose id names another film is not that body, and the lid stays a Film. A lid with no usable cache row is still a Film and keeps the Letterboxd id. A `tmdb_<n>` key, a mood facet, a watched flag, a rating, a diary title, a fingerprint, a slug, or a title and year do not mint a Film. `watchlist: false` is a removal of membership. It is not `watched: true` and it does not place the film on the watchlist grid. The grid still reads the watchlist document. Re-adding the same lid returns one Film.
 

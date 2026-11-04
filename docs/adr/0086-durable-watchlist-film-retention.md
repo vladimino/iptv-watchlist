@@ -1,9 +1,9 @@
 # ADR 0086: A watchlist fact keeps the Film after the current lists drop it
 
-**Status:** Proposed
+**Status:** Accepted
 **Original decision date:** 2026-11-04
 **Recorded at:** 2026-11-04
-**Approval source:** pending owner decision
+**Approval source:** [owner acceptance of ADR 0086 and visual approval of its Mermaid, 2026-11-04](https://trello.com/c/SBvIwv6P#comment-6aeafa5843c0dab3d80ec717); independent technical PASS on [PR #359](https://github.com/vladimino/iptv-watchlist/pull/359#pullrequestreview-5766152449) at reviewed HEAD `edaabb5dc29c3cb30c2c5545cb6d724c9ff3588c`. Architecture and visual decision only; no production write or merge GO.
 **Related work:** [AIR-191](https://trello.com/c/SBvIwv6P); historical class C audit [AIR-180](https://trello.com/c/NrsSc6gk); next Film/Person cutover [AIR-321](https://trello.com/c/KHJM2gnK). [AIR-77](https://trello.com/c/f3QzcNYf) was declined and is not a gate
 **Supersedes:** None
 **Superseded by:** None
@@ -51,7 +51,7 @@ Code rollback stops later runs from admitting further Films. It does not delete 
 
 ## Evidence
 
-- **Original decision:** pending. The card is [AIR-191](https://trello.com/c/SBvIwv6P)
+- **Original decision:** Accepted on 2026-11-04 ([owner decision](https://trello.com/c/SBvIwv6P#comment-6aeafa5843c0dab3d80ec717)). The card is [AIR-191](https://trello.com/c/SBvIwv6P). No production D1 write or merge authorization.
 - **Implementation:** the reader, the projector's optional view-index read, the membership-only write when the cache is missing, the Finds lid bridge, `tests/film-retention.mjs` and the departed-film section of `tests/d1-enrichment.mjs`
 - **Dated verification:** [synthetic reconciliation, 4 November 2026](../evidence/d1-migration/film-retention-reconciliation-2026-11-04.md). No production bucket was read
 - **Uncertainty:** how many production view-index lids already carry a watchlist boolean is not measured here. The October audit is not that count
