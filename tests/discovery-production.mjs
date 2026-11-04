@@ -94,6 +94,16 @@ assert.equal(resetDecision({...fresh,checkpoint:{hopId:'seal'},transfer:{state:'
 assert.throws(()=>ledgerStatements({programmeRunId:'run-old',items:[{key:'a',title:'x'.repeat(110000)}]}),error=>error.reason==='batch_too_large');
 assert.throws(()=>ledgerStatements({programmeRunId:'run-old',items:[{key:'a',shows:Array.from({length:97},()=>({start:1}))}]}),error=>error.reason==='ledger_refused');
 assert.throws(()=>ledgerStatements({programmeRunId:'run-old',items:[{key:'a'},{key:'a'}]}),error=>error.reason==='ledger_refused');
+assert.throws(()=>ledgerStatements({programmeRunId:'run-old',items:[{key:'fat',shows:Array.from({length:97},()=>({start:1}))},{key:'fat'}]}),error=>error.reason==='ledger_refused');
+assert.throws(()=>ledgerStatements({programmeRunId:'run-old',items:[{key:'keep',lastAiring:1.5},{key:'fat',shows:Array.from({length:97},()=>({start:1}))}]}),error=>error.reason==='ledger_refused');
+const mixedLedger=ledgerStatements({programmeRunId:'run-old',items:[{key:'keep',title:'Keep'},{key:'fat',shows:Array.from({length:97},()=>({start:1.5}))},{key:'next',title:'Next',shows:[{channelId:'c',channel:'C',start:2,end:3}]}]});
+assert.equal(mixedLedger.omitted,1);
+assert.equal(mixedLedger.items,2);
+assert.equal(mixedLedger.shows,1);
+assert.deepEqual(mixedLedger.kept.map(item=>item.key),['keep','next']);
+assert.equal(mixedLedger.statements.some(sql=>sql.includes("'fat'")),false);
+assert.equal(ledgerStatements({programmeRunId:'run-old',items:[{key:'cap',shows:Array.from({length:96},()=>({start:1}))}]}).omitted,0);
+assert.equal(ledgerStatements({programmeRunId:'run-old',items:[]}).omitted,0);
 
 const bare=spawnSync(process.execPath,[script],{encoding:'utf8'});
 assert.equal(bare.status,0,bare.stderr);
@@ -425,6 +435,7 @@ const sample={key:'obs-1',title:"O'Brien",normalizedTitle:'фильм',year:1999
  assert.equal(loaded.result.generation,1);
  assert.equal(loaded.result.observations,1);
  assert.equal(loaded.result.shows,1);
+ assert.equal(loaded.result.omitted,0);
  assert.equal(loaded.result.etagCompared,true);
  assert.equal(loaded.result.etagPrefix.length,12);
  assert.equal(loaded.result.shaPrefix.length,12);
@@ -512,10 +523,52 @@ const sample={key:'obs-1',title:"O'Brien",normalizedTitle:'фильм',year:1999
 
 {
  const installed=await appliedInstall();
+ const fat={key:'fat-show',title:'Slot',shows:Array.from({length:97},(_,index)=>({channelId:'c',channel:'C',start:index,end:index+1}))};
+ const second={key:'obs-2',title:'Second',normalizedTitle:'second',year:2001};
+ placeLedger(installed,{programmeRunId:'run-old',items:[sample,fat,second]});
+ installed.control.failAt=3;
+ const stopped=await run(['--load','--confirm','load','--target','iptv'], installed);
+ assert.equal(stopped.exit,4,JSON.stringify(stopped.result));
+ assert.equal(stopped.result.writeState,'unknown');
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_observation;',{json:true})[0].n,0);
+ assert.match(installed.calls.batches[1].join('\n'),/"items":2/);
+ assert.match(installed.calls.batches[1].join('\n'),/"shows":1/);
+ assert.equal(installed.calls.batches.flat().join('\n').includes("'fat-show'"),false);
+ installed.control.failAt=null;
+ const loaded=await run(['--load','--confirm','load','--target','iptv'], installed);
+ assert.equal(loaded.exit,0,JSON.stringify(loaded.result));
+ assert.equal(loaded.result.resumed,true);
+ assert.equal(loaded.result.observations,2);
+ assert.equal(loaded.result.shows,1);
+ assert.equal(loaded.result.omitted,1);
+ assert.equal(loaded.result.mode,'r2');
+ assert.equal(loaded.result.generation,1);
+ const keys=sql(installed.productionFile,'SELECT observation_key FROM discovery_observation ORDER BY observation_key;',{json:true}).map(row=>row.observation_key);
+ assert.deepEqual(keys,['obs-1','obs-2']);
+ assert.equal(sql(installed.productionFile,'SELECT evidence_key FROM discovery_observation WHERE observation_key=\'obs-1\';',{json:true})[0].evidence_key,evidenceKey(sample));
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_observation_show;',{json:true})[0].n,1);
+ assert.equal(sql(installed.productionFile,'SELECT hop_id FROM discovery_checkpoint WHERE id=1;',{json:true})[0].hop_id,null);
+ assert.equal(installed.calls.batches.flat().join('\n').includes("'fat-show'"),false);
+}
+
+{
+ const installed=await appliedInstall();
+ placeLedger(installed,{programmeRunId:'run-old',items:[{key:'only-fat',shows:Array.from({length:97},()=>({start:1}))}]});
+ const refused=await run(['--load','--confirm','load','--target','iptv'], installed);
+ assert.equal(refused.exit,3,JSON.stringify(refused.result));
+ assert.equal(refused.result.reason,'ledger_refused');
+ assert.equal(refused.result.writes,false);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_observation;',{json:true})[0].n,0);
+ assert.equal(sql(installed.productionFile,'SELECT state FROM discovery_transfer WHERE id=1;',{json:true})[0].state,'idle');
+}
+
+{
+ const installed=await appliedInstall();
  placeLedger(installed,{programmeRunId:'run-old',items:[]});
  const loaded=await run(['--load','--confirm','load','--target','iptv'], installed);
  assert.equal(loaded.exit,0,JSON.stringify(loaded.result));
  assert.equal(loaded.result.observations,0);
+ assert.equal(loaded.result.omitted,0);
  assert.equal(loaded.result.batches,2);
  assert.equal(sql(installed.productionFile,'SELECT generation, mode FROM discovery_authority WHERE id=1;',{json:true})[0].generation,1);
  const repeat=await run(['--load','--confirm','load','--target','iptv'], installed);

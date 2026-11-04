@@ -7,15 +7,19 @@
 // and only when the contract is a complete version 10 and every discovery table
 // is absent. The inserted marker stays mode r2, cutover open, generation 0.
 // --load --confirm load --target iptv copies the shared ledger into the
-// observation tables while the marker stays r2. A later --load resumes a clean
-// prefix: it compares the stored full etag, sha256, byte size and programme id,
-// reads the rows already stored, and sends only the missing suffix. A cursor
-// that is behind those rows is fenced forward. A torn or unknown prefix is
-// partial_mismatch and is not retried. --reset-load --confirm reset-load
-// discards an uncommitted copy only when the load checkpoint identity matches
-// the transfer. The first statement of that batch fails closed before any
-// delete. It does not download a replacement. Generation
-// becomes 1 only in the commit batch, after every key, payload and show matches.
+// observation tables while the marker stays r2. An observation with more than
+// 96 shows is left out of that copy and is not trimmed. A document whose every
+// observation is over that cap is refused before any write. A later --load
+// resumes a clean prefix of the copied rows: it compares the stored full etag,
+// sha256, byte size and programme id, reads the rows already stored, and sends
+// only the missing suffix. The checkpoint item and show counts are the copied
+// rows. A cursor that is behind those rows is fenced forward. A torn or
+// unknown prefix is partial_mismatch and is not retried. --reset-load
+// --confirm reset-load discards an uncommitted copy only when the load
+// checkpoint identity matches the transfer. The first statement of that batch
+// fails closed before any delete. It does not download a replacement.
+// Generation becomes 1 only in the commit batch, after every copied key,
+// payload and show matches.
 // Catalog, decisions, scores, continuation, workflow, archive segments and the
 // resolver lease are not copied. Hold, seal, activation, archive import and
 // revert are not commands. A deploy does not run this script. Each write needs
@@ -209,10 +213,14 @@ export function ledgerStatements(document){
  if(typeof run!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(run))throw new OperatorStop('ledger_refused',3);
  const seen=new Set();
  const groups=[];
+ const kept=[];
  let shows=0;
+ let omitted=0;
  for(const item of document.items){
   if(!item||typeof item!=='object'||Array.isArray(item)||typeof item.key!=='string'||!item.key||item.key.length>200||/[\u0000-\u001f]/.test(item.key)||seen.has(item.key))throw new OperatorStop('ledger_refused',3);
   seen.add(item.key);
+  const showList=Array.isArray(item.shows)?item.shows:[];
+  if(showList.length>SHOW_CAP){omitted++;continue;}
   const shape=observationShape(item);
   const group=[renderSql("INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES ('active',?,'active',?,?,?,?,?,?,?,?,?,?)",[item.key,run,item.normalizedTitle??null,item.title??null,Number.isInteger(item.year)?item.year:null,shape.evidence,item.seenInLatestSnapshot===true?1:item.seenInLatestSnapshot===false?0:null,item.lastSeenAt??null,storedInteger(item.lastAiring),item.confirmedTmdbId==null?null:String(item.confirmedTmdbId),shape.payload])];
   shape.shows.forEach(show=>{
@@ -220,9 +228,11 @@ export function ledgerStatements(document){
    group.push(renderSql("INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES ('active',?,?,?,?,?,?)",[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end]));
   });
   for(const sql of group)if(Buffer.byteLength(sql,'utf8')>STATEMENT_BYTES)throw new OperatorStop('batch_too_large',3);
+  kept.push(item);
   groups.push(group);
  }
- return {run,items:document.items.length,shows,groups,statements:groups.flat()};
+ if(document.items.length>0&&kept.length===0)throw new OperatorStop('ledger_refused',3);
+ return {run,items:kept.length,shows,groups,statements:groups.flat(),omitted,kept};
 }
 
 function fits(list, extra){
@@ -605,9 +615,9 @@ function sameIdentity(stored, identity){
  return stored.etag===identity.etag&&stored.sha256===identity.sha256&&stored.bytes===identity.bytes&&stored.programmeRunId===identity.programmeRunId&&stored.items===identity.items&&stored.shows===identity.shows;
 }
 
-async function proveRows(binding, document, built){
+async function proveRows(binding, built){
  const loaded=await snapshotOf(binding);
- const verified=loadPrefix(document.items, await readStored(binding));
+ const verified=loadPrefix(built.kept, await readStored(binding));
  if(verified.mismatch||verified.cursor!==built.items)throw new OperatorStop('readback_mismatch',4);
  if(loaded.observations!==built.items||loaded.foreignObservations||loaded.foreignShows||loaded.sideRows)throw new OperatorStop('readback_mismatch',4);
  const showCount=await binding.prepare('SELECT COUNT(*) AS n FROM discovery_observation_show').bind().first();
@@ -617,8 +627,8 @@ async function proveRows(binding, document, built){
  return loaded;
 }
 
-async function proveCommitted(binding, document, built, beforeMarkers){
- const loaded=await proveRows(binding, document, built);
+async function proveCommitted(binding, built, beforeMarkers){
+ const loaded=await proveRows(binding, built);
  if(loaded.transfer?.state!=='committed'||loaded.transfer.batches!==built.items||loaded.transfer.programmeRunId!==built.run)throw new OperatorStop('readback_mismatch',4);
  if(loaded.marker?.generation!==1||loaded.marker.programmeRunId!==built.run||loaded.marker.publishedProgrammeRunId!==built.run)throw new OperatorStop('readback_mismatch',4);
  if(loaded.checkpoint?.hopId!=null||loaded.checkpoint?.payload!=null)throw new OperatorStop('readback_mismatch',4);
@@ -768,7 +778,7 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
    if(!sameIdentity(stored,identity))throw new OperatorStop('source_changed',3);
    const state=snapshot.transfer?.state;
    if(state!=='loading'&&state!=='committed')throw new OperatorStop('partial_mismatch',3);
-   const prefixState=loadPrefix(ledger.document.items, await readStored(binding));
+   const prefixState=loadPrefix(built.kept, await readStored(binding));
    if(prefixState.mismatch)throw new OperatorStop('partial_mismatch',3);
    const recorded=snapshot.transfer?.batches;
    if(!Number.isInteger(recorded)||recorded<0||recorded>prefixState.cursor)throw new OperatorStop('partial_mismatch',3);
@@ -795,16 +805,16 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
   if(!finishCommitted){
    if(resumed&&fresh.transfer.batches<cursorStart)await send(cursorSql(built.run,fresh.transfer.batches,cursorStart));
    for(const batch of packLoadSlice(built.groups,built.run,cursorStart))await send(batch);
-   const ready=await proveRows(binding,ledger.document,built);
+   const ready=await proveRows(binding,built);
    const marker=ready.marker;
    const freshStart=marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null;
    const torn=marker.generation===1&&marker.programmeRunId===built.run&&marker.publishedProgrammeRunId===built.run;
    if((!freshStart&&!torn)||ready.transfer?.state!=='loading'||ready.transfer.programmeRunId!==built.run||ready.transfer.batches!==built.items)throw new OperatorStop('readback_mismatch',4);
   }
   await send(commitSql(built.run,built.items));
-  await proveCommitted(binding,ledger.document,built,beforeLoad);
+  await proveCommitted(binding,built,beforeLoad);
   writeState='committed';
-  return {exit:0,result:{operation:'load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:1,programmeRunId:built.run,observations:built.items,shows:built.shows,batches:sent,resumed,cursorStart,etagCompared:true,etagPrefix:prefix(ledger.etag),shaPrefix:prefix(ledger.sha256),bytes:ledger.bytes,decisions:0,admissions:0}};
+  return {exit:0,result:{operation:'load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:1,programmeRunId:built.run,observations:built.items,shows:built.shows,omitted:built.omitted,batches:sent,resumed,cursorStart,etagCompared:true,etagPrefix:prefix(ledger.etag),shaPrefix:prefix(ledger.sha256),bytes:ledger.bytes,decisions:0,admissions:0}};
  }catch(error){
   const stop=normalize(error);
   return {exit:stop.exitCode||1,result:{reason:stop.reason,writes:writeState==='committed'?true:writeState==='unknown'?null:false,writeState,rowsWritten:reads.rowsWritten}};
