@@ -633,7 +633,7 @@ async function linkLegacyRemovalRefs(env,{limit=LEGACY_LINK_PAGE,now=Date.now()}
 const REMOVAL_REF_ISSUES=['event_missing','film_not_in_event','event_unrated'];
 async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBefore=null}={}){
  const at=new Date(now).toISOString(),summary={written:0,resolved:0,waiting:0,mismatched:0,left:0};
- const object=await env.BUCKET.get(REMOVAL_LOOKUP_KEY),queue=object?await object.json():null;
+ const queue=await loadJSON(env,REMOVAL_LOOKUP_KEY);
  if(!removalQueueV2(queue))return summary;
  const work=[];
  for(const [id,entry] of Object.entries(queue.films)){
