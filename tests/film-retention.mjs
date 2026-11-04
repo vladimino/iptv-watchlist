@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
-import {enrichmentInputs,filmChangeKey,listedOnWatchlist,watchlistAdmissionsFromIndex} from '../src/enrichment-projection.js';
+import {archiveAdmissionsFromDocument,enrichmentInputs,filmChangeKey,listedOnWatchlist,watchlistAdmissionsFromIndex} from '../src/enrichment-projection.js';
 
 const reader=fs.readFileSync('src/domain/film-person-reader.js','utf8');
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,URL,encodeURIComponent});
@@ -151,4 +151,25 @@ assert.deepEqual(offerRun({alias:offer('tmdb_11','11')},{gone:{...facet,watchlis
 assert.deepEqual(offerRun({alias:offer('tmdb_11','11')},{gone:{...facet,watchlist:false},tmdb_11:facet},{gone:{id:'gone',tmdbId:'11'}},{films:[{id:'gone',tmdbId:'99'}]}),['tmdb_11'],'two stored TMDB ids do not bridge the fact');
 assert.deepEqual(offerRun({alias:offer('tmdb_11','11')},{gone:facet,tmdb_11:facet},{gone:{id:'gone',tmdbId:'11'}}),['tmdb_11'],'a missing watchlist field does not exclude');
 
-console.log('Film retention: departed watchlist films stay, re-add keeps one film, Finds skips a watchlist fact, orphan classes do not write');
+const ratedOnly=base();
+ratedOnly.archiveAdmissions={tmdb_77:{tmdb:'77',sourceCode:'Zz9',archiveSha256:'ab'.repeat(32),title:'Rated Only',year:1994}};
+assert.ok(ids(ratedOnly).includes('tmdb_77'),'a verified rated archive film is in the lifecycle');
+const ratedFilm=filmOf(ratedOnly,'tmdb_77');
+assert.equal(listedOnWatchlist(ratedOnly,ratedFilm),false,'a rating does not put the film on the watchlist');
+assert.equal(ratedFilm.canonicalIdentity,'tmdb:77');
+assert.equal(readLifecycle(ratedOnly,NOW).parity.ok,true);
+const aired=base();
+aired.programme={films:[body('shown',{tmdbId:'77',original:'Rated Only',title:'Rated Only'})],runId:'run-2'};
+aired.metadata={...aired.metadata,shown:body('shown',{tmdbId:'77',original:'Rated Only',title:'Rated Only'})};
+aired.archiveAdmissions=ratedOnly.archiveAdmissions;
+const sameMovie=readLifecycle(aired,NOW).films.filter(item=>(item.externalIds||[]).some(id=>id.scheme==='tmdb'&&id.value==='77'&&id.trusted&&!id.conflicting));
+assert.equal(sameMovie.length,1,'an EPG airing of the same movie stays one Film');
+assert.equal(readLifecycle(aired,NOW).parity.ok,true);
+const flagged=base();
+flagged.archiveAdmissions={tmdb_78:{tmdb:'78',watchlist:false,title:'Nope',year:1990}};
+assert.equal(ids(flagged).includes('tmdb_78'),false,'a watchlist field on an archive row admits nobody');
+assert.equal(ids(base()).includes('tmdb_77'),false,'a missing admissions object admits nobody');
+assert.deepEqual(archiveAdmissionsFromDocument(null),{});
+assert.deepEqual(archiveAdmissionsFromDocument({schemaVersion:1,films:{tmdb_77:{tmdb:'77',sourceCode:'Zz9',title:'Rated Only',year:1994},tmdb_78:{tmdb:'78',watchlist:true},bad:{tmdb:'1'},tmdb_79:{tmdb:'80'}}}),{tmdb_77:{tmdb:'77',sourceCode:'Zz9',archiveSha256:null,title:'Rated Only',year:1994}});
+
+console.log('Film retention: departed watchlist films stay, re-add keeps one film, Finds skips a watchlist fact, orphan classes do not write, a rated archive film stays without watchlist membership');

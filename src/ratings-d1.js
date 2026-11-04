@@ -117,6 +117,14 @@ export async function ratingsReady(env){
  return (await readRatingsAuthority(database(env),env)).ready===true;
 }
 
+// The generation the ZIP preview fences. A broken marker is an error, not an R2 fallback.
+export async function ratingsGate(env){
+ try{
+  const authority=await readRatingsAuthority(database(env),env);
+  return {ready:authority.ready===true,generation:authority.ready?authority.generation:null,error:false};
+ }catch{return {ready:false,generation:null,error:true};}
+}
+
 async function requireOpen(env,mode){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);

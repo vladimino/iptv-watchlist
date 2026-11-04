@@ -192,6 +192,16 @@ export function buildPreview({archive, parsed, comparison, now, archiveStaleMs, 
   const ratingsUnchecked = missing.includes('ratings.csv') || answer.matching.status !== 'complete' || answer.proposal.status !== 'complete';
   answer.freshness = previewFreshness({ageMs, archiveStaleMs, ratingsNewer, unchecked: ratingsUnchecked});
   answer.consistency = comparison.consistency;
+  if (comparison.ratedAdmission) {
+    const rated = comparison.ratedAdmission;
+    const brief = item => ({code: item.code, name: item.name, year: item.year, reason: item.reason});
+    answer.ratedAdmission = {
+      matched: rated.tally.matched, pending: rated.tally.pending, needsReview: rated.tally.needs_review, excluded: rated.tally.excluded,
+      historicalCountsIgnored: rated.historicalCountsIgnored,
+      pendingRows: rated.pending.slice(0, limits.detailRows).map(brief),
+      reviewRows: rated.review.slice(0, limits.detailRows).map(brief),
+    };
+  }
   answer.status = answer.completeness.status === 'complete' && answer.matching.status === 'complete' && answer.proposal.status === 'complete' ? 'complete' : 'partial';
   const limit = limits.detailRows;
   answer.details = {

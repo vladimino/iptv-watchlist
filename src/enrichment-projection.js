@@ -113,8 +113,21 @@ export function watchlistAdmissionsFromIndex(index){
  }
  return out;
 }
-export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,tmdbRetirements=null,watchlistAdmissions=null,filmTitles=[],personNames=[],personOverrides={}}={}){
- return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,tmdbRetirements,watchlistAdmissions,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
+// Verified rated-archive Films. A missing document admits nobody. A short boxd.it code is not a key, and watchlist is not a field.
+const ARCHIVE_FILM=/^tmdb_[1-9]\d{0,11}$/;
+export function archiveAdmissionsFromDocument(document){
+ const out={};
+ if(!document||document.schemaVersion!==1||!document.films||typeof document.films!=='object'||Array.isArray(document.films))return out;
+ for(const [id,item] of Object.entries(document.films)){
+  if(!ARCHIVE_FILM.test(id)||!item||typeof item!=='object'||Array.isArray(item))continue;
+  if(Object.prototype.hasOwnProperty.call(item,'watchlist'))continue;
+  if(String(item.tmdb)!==id.slice(5))continue;
+  out[id]={tmdb:String(item.tmdb),sourceCode:typeof item.sourceCode==='string'?item.sourceCode:null,archiveSha256:typeof item.archiveSha256==='string'?item.archiveSha256:null,title:typeof item.title==='string'?item.title:null,year:Number.isInteger(item.year)?item.year:null};
+ }
+ return out;
+}
+export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,tmdbRetirements=null,watchlistAdmissions=null,archiveAdmissions=null,filmTitles=[],personNames=[],personOverrides={}}={}){
+ return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,tmdbRetirements,watchlistAdmissions,archiveAdmissions,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
 }
 
 // One input per Film of the view and one per Person. A Film keeps only what the enrichment writer owns: fingerprint, prediction,

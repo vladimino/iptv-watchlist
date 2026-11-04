@@ -641,4 +641,33 @@ for (const [kind, setup, invoke, step, keyOf] of waitKinds) {
   assert.equal(effectivelyShown(nodes.get('#archive-cancel')), false, kind);
   assert.doesNotMatch(result.innerHTML, /не начиналась/);
 }
+
+// 16. A rated film the matcher does not accept is named before any write. The identity button waits for a candidates receipt.
+ctx.fetch = fakeFetch;
+run('archiveLive.committed = {}; archiveLive.confirmUnknown = {}; archiveLive.rollbackConfirmUnknown = {}; archiveLive.rollbackResult = {}; archiveLive.issued = {}; archiveLive.rollbackIssued = {};');
+requests = [];
+choose(exportArchive([{code: 'qq1', name: 'Quiet Quiz', year: 1991, watched: true, rating: 4}]), 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
+time.value = '';
+await submit();
+assert.equal(requests.at(-1).url, '/api/admin/letterboxd-archive/preview');
+assert.equal(requests.at(-1).headers['X-IPTV-Admin-Action'], undefined);
+run('onArchiveNav("3")');
+assert.match(result.innerHTML, /Уже сопоставлены/);
+assert.match(result.innerHTML, /Новые кандидаты на проверку/);
+assert.match(result.innerHTML, /Ошибки и неоднозначности/);
+assert.match(result.innerHTML, /Предпросмотр ничего не скачивает и не называет непроверенный фильм подтверждённым/);
+assert.match(result.innerHTML, /Quiet Quiz/);
+assert.doesNotMatch(result.innerHTML, /data-archive-identity/);
+run('onArchiveNav("4")');
+assert.match(result.innerHTML, /Запись сохраняет код и архив/);
+assert.match(result.innerHTML, /не подтверждает TMDB/);
+assert.match(result.innerHTML, /не ставит фильм в watchlist/);
+assert.match(result.innerHTML, /не скачивает страницу/);
+assert.doesNotMatch(result.innerHTML, /data-archive-identity/);
+run(`archiveLive.committed[0] = {kind:'candidates', state:'succeeded'}; archiveLive.reached = 5;`);
+run('onArchiveNav("5")');
+assert.equal(currentStep(), 5);
+assert.match(result.innerHTML, /Проверить одну идентичность/);
+assert.match(result.innerHTML, /Страница Letterboxd и TMDB ещё не читались/);
+assert.equal((result.innerHTML.match(/data-archive-identity/g) || []).length, 1);
 console.log('admin-letterboxd-page: ok');

@@ -34,6 +34,25 @@ function retainedWatchlistRecords(store,seen){
  }
  return records;
 }
+// A verified TMDB movie from a confirmed rated archive. The key is tmdb_<n>. There is no watchlist boolean and the short code is not the id.
+function retainedArchiveRecords(store,seen,tmdbSeen){
+ const admissions=store?.archiveAdmissions;
+ if(!admissions||typeof admissions!=='object'||Array.isArray(admissions))return [];
+ const records=[];
+ for(const id of Object.keys(admissions).sort()){
+  const item=admissions[id];
+  if(!item||typeof item.tmdb!=='string'||seen.has(id)||tmdbSeen.has(item.tmdb))continue;
+  if(Object.prototype.hasOwnProperty.call(item,'watchlist'))continue;
+  records.push({id,tmdbId:item.tmdb,canonicalIdentity:'tmdb:'+item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null,externalIds:[{scheme:'tmdb',value:item.tmdb,trusted:true,conflicting:false}]});
+  seen.add(id);tmdbSeen.add(item.tmdb);
+ }
+ return records;
+}
+function trustedTmdbIds(films){
+ const ids=new Set();
+ for(const film of films||[])if(film?.tmdbId)ids.add(String(film.tmdbId));
+ return ids;
+}
 function primaryFilmIds(store){return new Set((store.programme?.films||store.watchlist?.films||[]).map(film=>film?.id==null?'':String(film.id)).filter(Boolean));}
 function sidecarKey(key){return key.endsWith('.json')?key.slice(0,-5)+LIFECYCLE_SIDECAR:key+LIFECYCLE_SIDECAR;}
 // `compatible` is the fingerprint transition verdict (ADR-0035) when the store supplies one; without it the strict rule applies.
@@ -64,6 +83,13 @@ function predictionFailure(store,id){return store.predictionRun?.failures?.[id]|
 function peopleOn(record){return [...(record?.directors||[]),...(record?.actors||[]),...(record?.people?.directors||[]),...(record?.people?.actors||[])];}
 function recordById(records,id){return records?recordsById(records).get(id)||null:null;}
 function catalogRecord(store,id){return recordsById(store.discoveredFilms).get(id)||null;}
+// The title the lifecycle view already took from a verified rated-archive Film. It does not admit the Film.
+function archiveRecord(store,id){
+ const item=store?.archiveAdmissions?.[id];
+ if(!item||typeof item.tmdb!=='string'||Object.prototype.hasOwnProperty.call(item,'watchlist'))return null;
+ if(String(id)!=='tmdb_'+item.tmdb)return null;
+ return {id,tmdbId:item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null};
+}
 function presentTmdb(value){return value==null||value===''?null:String(value);}
 // Null does not hide a later id. Programme, metadata, watchlist, then the record itself. Two different ids stay a conflict.
 function identityEvidence(sources){
@@ -80,7 +106,7 @@ function reviewedTranslation(sources){
 function originalTitle(sources){for(const source of sources)if(source?.original)return source.original;return null;}
 function loadedSources(store,id,record){
  const metadata=cacheFor(store,id),programme=recordById(store.programme?.films,id),watchlist=recordById(store.watchlist?.films,id);
- return {metadata,programme,watchlist,record:record||catalogRecord(store,id)};
+ return {metadata,programme,watchlist,record:record||catalogRecord(store,id)||archiveRecord(store,id)};
 }
 function tmdbRetirementRecords(store,film){
  const lid=(film?.externalIds||[]).find(item=>item.scheme==='letterboxd'&&item.trusted&&!item.conflicting)?.value;
@@ -155,8 +181,10 @@ function legacyEnrichmentIds(store){
  const seen=new Set(),ids=[];
  const add=film=>{if(!film?.id)return;const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))return;seen.add(identity);ids.push(String(film.id));};
  const primaryIds=primaryFilmIds(store);
- for(const film of store.programme?.films||store.watchlist?.films||[])add(film);
+ const primaryFilms=store.programme?.films||store.watchlist?.films||[];
+ for(const film of primaryFilms)add(film);
  for(const film of retainedWatchlistRecords(store,primaryIds))add(film);
+ for(const film of retainedArchiveRecords(store,primaryIds,trustedTmdbIds(primaryFilms)))add(film);
  for(const film of [...listOf(store.discoveredFilms)].sort((a,b)=>String(a.id).localeCompare(String(b.id),'en')))add(film);
  return ids.sort((a,b)=>a.localeCompare(b,'en'));
 }
@@ -261,7 +289,8 @@ function readLifecycle(store,now,options={}){
  const resolution=store.discoveryResolution||{};
  const films=new Map();
  const primary=store.programme?.films||store.watchlist?.films||[];
- for(const record of [...primary,...retainedWatchlistRecords(store,primaryFilmIds(store))]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
+ const seenIds=primaryFilmIds(store);
+ for(const record of [...primary,...retainedWatchlistRecords(store,seenIds),...retainedArchiveRecords(store,seenIds,trustedTmdbIds(primary))]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
  // AIR-297 (ADR 0057): the owner-approved TMDB retirements, only when the object exists. Absent, the view is what it was.
  const retirements=store.tmdbRetirements==null?null:applyTmdbRetirements([...films.values()],store.tmdbRetirements,film=>tmdbRetirementRecords(context,film));
  if(retirements)for(const film of retirements.films)films.set(storedFilmId(film),film);

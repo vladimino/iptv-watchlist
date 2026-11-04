@@ -44,6 +44,13 @@ export function allowedHop(location,base){
 export const isFilmPage=url=>url?.hostname==='letterboxd.com'&&FILM_PATH.test(url.pathname)&&!url.search;
 
 // A bot-protection or challenge page. It stops the run: the resolver never tries to get past one.
+// A stop the bounded resolver must keep. A challenge, 403 or 429 is not a missing film and is not retried inside the same step.
+export function transportStop(status,headers,html=''){
+ if(isChallenge(status,headers,html))return 'challenge';
+ if(status===403)return 'forbidden';
+ if(status===429)return 'rate_limited';
+ return null;
+}
 export function isChallenge(status,headers,html=''){
  if(String(headers?.get?.('cf-mitigated')??'').toLowerCase()==='challenge')return true;
  if(status!==200&&status!==404&&/cf-chl|challenge-platform|just a moment\.\.\.|attention required|captcha/i.test(html))return true;

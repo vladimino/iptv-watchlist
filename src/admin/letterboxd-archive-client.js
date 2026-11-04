@@ -7,6 +7,7 @@ const ARCHIVE_CONFIRM_API='/api/admin/letterboxd-archive/apply-confirm';
 const ARCHIVE_APPLY_API='/api/admin/letterboxd-archive/apply';
 const ARCHIVE_ROLLBACK_CONFIRM_API='/api/admin/letterboxd-archive/rollback-confirm';
 const ARCHIVE_ROLLBACK_API='/api/admin/letterboxd-archive/rollback';
+const ARCHIVE_IDENTITY_API='/api/admin/letterboxd-archive/identity-step';
 const ARCHIVE_ACTION_HEADER='letterboxd_archive_apply';
 const ARCHIVE_CLIENT_MAX_BYTES=10*1024*1024;
 const ARCHIVE_STANDARD_NAME=/^letterboxd-[A-Za-z0-9_-]+-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-utc\.zip$/;
@@ -69,6 +70,9 @@ async function postArchiveCommit(file,declared,confirmation,options={}){
 }
 async function postArchiveRollbackConfirm(body,options={}){
  return archiveRequest(ARCHIVE_ROLLBACK_CONFIRM_API,JSON.stringify(body),{...options,action:true,json:true},'rollback_confirm');
+}
+async function postArchiveIdentity(body,options={}){
+ return archiveRequest(ARCHIVE_IDENTITY_API,JSON.stringify(body),{...options,action:true,json:true},'identity');
 }
 async function postArchiveRollback(confirmation,options={}){
  return archiveRequest(ARCHIVE_ROLLBACK_API,JSON.stringify({confirmation}),{...options,action:true,json:true},'rollback');

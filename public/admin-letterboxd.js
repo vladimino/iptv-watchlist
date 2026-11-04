@@ -332,7 +332,7 @@ function onArchiveConfirm(chunk) {
   archiveLive.confirmUnknown[chunk] = true;
   archiveRepaint();
   const pending = postArchiveConfirm(current.file, current.declared, {
-    chunk: String(chunk), planHash: batch.planHash, programmeRunId: archiveLive.answer.batches.programmeRunId,
+    chunk: String(chunk), planHash: batch.planHash, programmeRunId: batch.pin || archiveLive.answer.batches.programmeRunId,
     scopeFingerprint: batch.scopeFingerprint, idempotencyKey: archiveLive.keys[chunk], accepted: 'true',
   }, {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
@@ -363,10 +363,31 @@ function onArchiveCommit(chunk) {
     if (run.seq !== archiveLive.seq) return result;
     if (result.mode !== 'ready') return archiveApplyFailed(result);
     const receipt = result.answer.receipt || {};
-    archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, counts: receipt.counts || null};
+    archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, counts: receipt.counts || null, kind: result.answer.baseline && result.answer.baseline.kind || null};
     archiveLive.inflight = null;
     archiveLive.controller = null;
     archiveOfferReceipt();
+    archiveShow('ready', archiveLive.answer);
+    return result;
+  });
+  archiveLive.pending = pending;
+  return pending;
+}
+
+function onArchiveIdentity() {
+  if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
+  const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
+  if (!sha) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+  archiveLive.viewStep = 5;
+  const run = archiveBeginAction('identity', 0);
+  const pending = postArchiveIdentity({archiveSha256: sha, accepted: true, resume: false}, {signal: run.signal}).then(result => {
+    if (run.seq !== archiveLive.seq) return result;
+    if (result.mode !== 'ready') return archiveApplyFailed(result);
+    const answer = result.answer || {};
+    const stop = answer.stop && (answer.stop.reason || answer.stop);
+    archiveLive.identity = {verified: answer.verified === true, stop: typeof stop === 'string' ? stop : null, state: answer.state || null, reason: answer.reason || null};
+    archiveLive.inflight = null;
+    archiveLive.controller = null;
     archiveShow('ready', archiveLive.answer);
     return result;
   });
@@ -445,7 +466,7 @@ function onArchiveResultClick(event) {
   while (node && node !== archiveNode('#archive-result')) {
     if (node.getAttribute) {
       if (node.hasAttribute && node.hasAttribute('data-archive-nav')) {action = 'data-archive-nav'; chunk = node.getAttribute('data-archive-nav'); break;}
-      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon']) {
+      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon', 'data-archive-identity']) {
         if (node.hasAttribute && node.hasAttribute(name)) {action = name; chunk = Number(node.getAttribute(name)); break;}
       }
     }
@@ -453,6 +474,7 @@ function onArchiveResultClick(event) {
     node = node.parentElement || node.parentNode;
   }
   if (action === 'data-archive-nav') return onArchiveNav(chunk);
+  if (action === 'data-archive-identity') return onArchiveIdentity();
   if (action === 'data-archive-confirm') return onArchiveConfirm(chunk);
   if (action === 'data-archive-commit') return onArchiveCommit(chunk);
   if (action === 'data-archive-rollback-confirm') return onArchiveRollbackConfirm(chunk);

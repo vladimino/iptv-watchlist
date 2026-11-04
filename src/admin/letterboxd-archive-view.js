@@ -294,6 +294,13 @@ function archiveMatchingHtml(answer) {
   ]);
 }
 
+function archiveRatedHtml(answer) {
+  const rated = answer.ratedAdmission;
+  if (!rated) return '';
+  const item = (label, count) => `<li><b>${label}</b>: ${archiveEscape(count)}</li>`;
+  const names = list => (list || []).map(row => archiveEscape((row.name || row.code) + (row.year ? ' (' + row.year + ')' : ''))).join(', ');
+  return `<section class="archive-rated"><h3>Оценённые фильмы</h3><p class="muted">Предпросмотр ничего не скачивает и не называет непроверенный фильм подтверждённым. Короткий код boxd.it — это ключ кандидата, не id фильма и не членство в watchlist.</p><ul>${item('Уже сопоставлены', rated.matched || 0)}${item('Новые кандидаты на проверку', rated.pending || 0)}${item('Ошибки и неоднозначности', rated.needsReview || 0)}</ul>${rated.pendingRows && rated.pendingRows.length ? `<p>Кандидаты: ${names(rated.pendingRows)}.</p>` : ''}${rated.reviewRows && rated.reviewRows.length ? `<p>На проверке: ${names(rated.reviewRows)}.</p>` : ''}</section>`;
+}
 function archiveProposalHtml(answer) {
   const proposal = answer.proposal || {};
   if (proposal.status === 'unavailable') return '<p class="muted">Предложение не посчитано: факты в R2 не прочитались.</p>';
@@ -430,7 +437,10 @@ function archiveActionHtml(answer, session) {
     else if (confirmUnknown[chunk.chunk] && !held) actions += waiting ? '' : `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Повторить то же подтверждение</button></div><p class="muted">Ответ на подтверждение не получен. Согласие могло сохраниться. Повтор отправит тот же ключ и не создаёт новый. Это не запись фактов.</p>${archiveAbandonHtml(chunk.chunk)}`;
     else if (!stale && chunk.confirmable && held) actions += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-commit="${chunk.chunk}">Записать партию ${number}</button></div><p class="muted">Подтверждение выдано, запись ещё не отправлялась. Запись отправит архив заново. Это не новая партия.</p>`;
     else if (!stale && chunk.confirmable) actions += `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-confirm="${chunk.chunk}">Подтвердить партию ${number}</button></div>`;
-    return `<article class="archive-batch"><h3>Партия ${number}</h3><p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p>${archiveValueLine(chunk.values)}${why}${actions}</article>`;
+    const intro = chunk.kind === 'candidates'
+      ? `<p>${chunk.films} оценённых фильмов без принятой идентичности. Запись сохраняет код и архив. Она не подтверждает TMDB, не ставит фильм в watchlist и не скачивает страницу.</p>`
+      : `<p>${chunk.films} фильмов, которых предпросмотр сравнил. ${archiveEscape(archiveChangeLine(chunk.changes))}.</p>${archiveValueLine(chunk.values)}`;
+    return `<article class="archive-batch"><h3>Партия ${number}</h3>${intro}${why}${actions}</article>`;
   }).join('');
 }
 function archiveAbandonHtml(chunk) {
@@ -446,6 +456,8 @@ function archiveReceiptHtml(answer, session) {
   const rollbackResult = session && session.rollbackResult || {};
   const chunks = batches.chunks || [];
   if (!chunks.length) return '<p class="muted">Квитанции нет: записывать нечего. Проверка ничего не записала.</p>';
+  const identity = session && session.identity;
+  const identityHtml = identity ? `<article class="archive-batch"><h3>Проверка идентичности</h3><p role="status">${archiveEscape(identity.verified ? 'Один фильм сверен и добавлен по TMDB. Watchlist не менялся.' : identity.stop ? 'Проверка остановлена (' + identity.stop + '). Кандидат остаётся непроверенным. Это не подтверждение.' : identity.state === 'needs_review' ? 'Фильм неоднозначен и не добавлен. Это не подтверждение.' : 'Идентичность не подтверждена.')}</p></article>` : (session && session.committed && Object.values(session.committed).some(item => item && item.kind === 'candidates' && item.state === 'succeeded') ? '<article class="archive-batch"><h3>Проверка идентичности</h3><p class="muted">Кандидаты сохранены. Страница Letterboxd и TMDB ещё не читались. Одна кнопка проверяет один фильм и сама не повторяется.</p><div class="archive-actions"><button type="button" class="admin-refresh" data-archive-identity="1">Проверить одну идентичность</button></div></article>' : '');
   const inflight = session && session.inflight;
   return chunks.map(chunk => {
     const number = chunk.chunk + 1;
@@ -477,7 +489,7 @@ function archiveReceiptHtml(answer, session) {
     else if (!done && !attempt && issued[chunk.chunk]) body += '<p class="muted">Квитанции ещё нет: подтверждение выдано, запись ещё не отправлялась. Это не успех.</p>';
     else if (!body) body += '<p class="muted">Квитанции ещё нет. Проверка ничего не записала.</p>';
     return `<article class="archive-batch"><h3>Квитанция партии ${number}</h3>${body}</article>`;
-  }).join('');
+  }).join('') + identityHtml;
 }
 function archiveTechnicalHtml(answer) {
   const archive = answer.archive || {}, batches = answer.batches || {};
@@ -510,7 +522,7 @@ function archiveStepCheckHtml(answer) {
   return archiveStepPanel(2, 'Проверка и свежесть', archiveFreshnessHtml(answer) + archiveNavHtml({next: {step: '3', label: 'Посмотреть разницу'}}) + `<details class="archive-details"><summary>Подробности проверки</summary>${archiveArchiveHtml(answer)}<h3>Базовая линия</h3>${archiveBaselineHtml(answer)}${archiveTechnicalHtml(answer)}</details>`);
 }
 function archiveStepDiffHtml(answer) {
-  return archiveStepPanel(3, 'Разница', archiveSummaryCounts(answer) + archiveSummaryTail(answer) + archiveNavHtml({next: {step: '4', label: 'Выбрать партию'}}) + `<details class="archive-details"><summary>Показать подробности</summary>${archiveSummaryNote(answer)}<h3>Сопоставление с R2</h3>${archiveMatchingHtml(answer)}<h3>Что сделал бы импорт</h3>${archiveProposalHtml(answer)}<h3>Фильмы</h3><p class="muted">В каждом списке не больше ${archiveEscape(archiveDetailLimit(answer))} строк.</p>${archiveDetailsHtml(answer)}</details>`);
+  return archiveStepPanel(3, 'Разница', archiveSummaryCounts(answer) + archiveRatedHtml(answer) + archiveSummaryTail(answer) + archiveNavHtml({next: {step: '4', label: 'Выбрать партию'}}) + `<details class="archive-details"><summary>Показать подробности</summary>${archiveSummaryNote(answer)}<h3>Сопоставление с R2</h3>${archiveMatchingHtml(answer)}<h3>Что сделал бы импорт</h3>${archiveProposalHtml(answer)}<h3>Фильмы</h3><p class="muted">В каждом списке не больше ${archiveEscape(archiveDetailLimit(answer))} строк.</p>${archiveDetailsHtml(answer)}</details>`);
 }
 function archiveStepBatchHtml(answer, session) {
   const next = archiveSessionHasOutcome(session) ? {step: '5', label: 'Квитанция'} : null;
