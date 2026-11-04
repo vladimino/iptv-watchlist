@@ -102,8 +102,19 @@ export function listedOnWatchlist(store,film){
 // change only dimensions the enrichment writer does not own, so they are left out: the view is smaller and the change keys do
 // not move when a prediction does. The Worker projector and the offline seed both build their store here.
 // tmdbRetirements is the optional identity/tmdb-retirements.json body (ADR 0057); null while the object is absent.
-export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,tmdbRetirements=null,filmTitles=[],personNames=[],personOverrides={}}={}){
- return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,tmdbRetirements,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
+// The view index mixes facets and Letterboxd facts. Only a boolean `watchlist` on a Letterboxd lid admits a Film that has left the current lists. A mood facet, a rating, a watched flag, a title or a tmdb_<n> alias does not.
+const ADMISSION_LID=/^[A-Za-z0-9_-]{1,80}$/;
+export function watchlistAdmissionsFromIndex(index){
+ const out={};
+ if(!index||typeof index!=='object'||Array.isArray(index))return out;
+ for(const [id,item] of Object.entries(index)){
+  if(!ADMISSION_LID.test(id)||id.startsWith('tmdb_')||!item||typeof item.watchlist!=='boolean')continue;
+  out[id]=item.watchlist;
+ }
+ return out;
+}
+export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,tmdbRetirements=null,watchlistAdmissions=null,filmTitles=[],personNames=[],personOverrides={}}={}){
+ return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,tmdbRetirements,watchlistAdmissions,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
 }
 
 // One input per Film of the view and one per Person. A Film keeps only what the enrichment writer owns: fingerprint, prediction,
@@ -112,14 +123,29 @@ export function enrichmentStore({watchlist=null,programme=null,metadata=null,tit
 // metadataSha256 names the metadata.json version a row was read from. The offline import passes the snapshot object's checksum;
 // the projector and its seed pass none, so a projected film_metadata row carries content_sha256 NULL: it comes from a live read,
 // not from a pinned object version, and no checksum of another Film's change ever lands on it (ADR 0056).
+function letterboxdOf(film){return (film?.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||null;}
+function onCurrentList(store,lid){
+ if(!lid)return false;
+ const same=item=>item&&String(item.id)===String(lid);
+ return (store.watchlist?.films||[]).some(same)||(store.programme?.films||[]).some(same);
+}
+// A cache row whose id names another film is not usable. A missing id is this key's row.
+function usableMetadata(record,lid){
+ if(!record||typeof record!=='object'||Array.isArray(record))return null;
+ if(record.id!=null&&lid&&String(record.id)!==String(lid))return null;
+ return record;
+}
 export function enrichmentInputs({view,store,metadataSha256=null}){
  const sources=sourceIndex(store);
  const films=view.films.map(film=>{
   const {fingerprint,prediction,predictionHistory,availability,...owned}=film;
-  const roster=creditRoster(sources(film));
-  const record=metadataRecord(store.metadata,film);
-  const metadata=catalogMetadata(record,'metadata.json',metadataSha256);
-  return {id:film.id,film:owned,watchlist:listedOnWatchlist(store,film),credits:roster.unmatched.length?undefined:roster.credits,unmatched:roster.unmatched.length,metadata,sync:filmSyncState(record)};
+  const lid=letterboxdOf(film);
+  const body=usableMetadata(metadataRecord(store.metadata,film),lid);
+  // An admitted lid with no usable cache is not a new body. The writer keeps the stored Film and only moves membership.
+  const withhold=!!lid&&typeof store.watchlistAdmissions?.[lid]==='boolean'&&!onCurrentList(store,lid)&&!body;
+  const roster=withhold?null:creditRoster(sources(film));
+  const metadata=withhold?undefined:catalogMetadata(body,'metadata.json',metadataSha256);
+  return {id:film.id,film:owned,watchlist:listedOnWatchlist(store,film),credits:withhold||roster.unmatched.length?undefined:roster.credits,unmatched:roster?roster.unmatched.length:0,metadata,sync:withhold?null:filmSyncState(body),preserveCanonical:withhold||undefined};
  });
  return {films,people:view.people.map(person=>({id:person.id,person}))};
 }

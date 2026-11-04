@@ -2,8 +2,8 @@
 // One run reads the R2 records the enrichment writers keep (watchlist, programme, metadata, people, titles, the catalog of
 // discovered films, the discovery resolution and the Letterboxd diary), builds the whole Film/Person view with the same reader and
 // the same derivation as the offline import, and compares each Film and Person with the change key D1 holds for it. Only a changed
-// one is written, in one D1 batch that also stores its new key, so a key never claims a write that did not commit. A Film no R2
-// source lists any more loses its watchlist membership and is marked absent. The run works from a cron trigger, never from a sync
+// one is written, in one D1 batch that also stores its new key, so a key never claims a write that did not commit. A Film that no R2
+// source lists, and that no watchlist fact admits, loses its watchlist membership and is marked absent. A Film a watchlist fact admits stays in the view; only its membership is removed. The run works from a cron trigger, never from a sync
 // or discovery step, so it adds nothing to the R2 pipeline. D1_ENRICHMENT_WRITE: off (default) reads nothing; dry reads R2 and
 // the D1 keys and logs the diff without writing; on writes. Every batch starts with the lease fence, so a run that lost its lease
 // writes nothing and an older run cannot overwrite a newer one.
@@ -42,8 +42,9 @@ function d1EnrichmentAdapter(binding){
 }
 
 // The inputs fail closed. Every object the view needs must be present and of its shape: a missing object stops the run before
-// any D1 write, while a present, empty one is a real empty dataset. Two objects are optional: the Letterboxd diary, absent while its
-// own switch is off, and the owner-approved TMDB retirements (ADR 0057), absent until a correction is approved. A retirements
+// any D1 write, while a present, empty one is a real empty dataset. Three objects are optional: the Letterboxd diary, absent while its
+// own switch is off, the owner-approved TMDB retirements (ADR 0057), absent until a correction is approved, and the view index,
+// whose watchlist booleans admit Films that have left the current lists. A missing view index admits nobody. A retirements
 // object that is present but fails its check as a whole stops the run as input_invalid. The read must also be one consistent cut
 // of R2:
 // - it does not start while a writer of these objects is at work: a live discovery lease, or a sync in its metadata or EPG stage;
@@ -82,7 +83,7 @@ async function d1EnrichmentStore(env){
   if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
   runId=pointer.programmeRunId;
  }
- const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements]=await Promise.all([
+ const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex]=await Promise.all([
   published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
   published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
@@ -92,6 +93,7 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,'epg/discovery-resolution.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
+  d1EnrichmentRead(env,etags,'enrichment/view-index.json',d1EnrichmentRecord,false),
  ]);
  if(!published){watchlist=watchlistObject;programme=programmeObject;}
  let ownerGate=null,ownerMirror=null,ownerDocument=null;
@@ -115,7 +117,7 @@ async function d1EnrichmentStore(env){
   }
   if(ownerDocument){OwnerReview.stampLocalized(programme,ownerDocument);OwnerReview.stampLocalized(watchlist,ownerDocument);}
  }
- const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
+ const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
  if(ownerDocument)store.ownerReviews=ownerDocument;
  return {store,programmeRunId:runId};
 }
@@ -238,6 +240,8 @@ async function d1EnrichmentDiff(env,db,now,summary){
   for(const entry of inputs.films){
    if(held.has(entry.id))continue;
    viewed.add(entry.id);
+   // No usable cache: leave the stored clocks. A null sync here would delete them.
+   if(entry.preserveCanonical)continue;
    const key=EnrichmentProjection.filmSyncChangeKey(entry.sync);
    const previous=storedSync.get(entry.id);
    if(entry.sync){if(previous!==key)plan.sync.push({id:entry.id,sync:entry.sync,key});}
@@ -338,7 +342,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
     const entry=task.item;
     const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
-     await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined});
+     await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
      for(const redirect of entry.film.redirects||[])await repository.projectLink({survivor:entry.film,redirect});
      if(pending)await writeSync(pending);
      await state('film',entry.id,entry.key);
