@@ -670,4 +670,42 @@ assert.equal(currentStep(), 5);
 assert.match(result.innerHTML, /Проверить одну идентичность/);
 assert.match(result.innerHTML, /Страница Letterboxd и TMDB ещё не читались/);
 assert.equal((result.innerHTML.match(/data-archive-identity/g) || []).length, 1);
+
+// 17. Two identity steps stay available, a stop can be resumed, and a reload reads the stored queue.
+const identityAnswers = [
+  {mode: 'identity', writes: true, verified: true, enriched: false, fetched: true, pending: true, stop: null, code: 'Aa1', state: 'verified', phase: 'identity'},
+  {mode: 'identity', writes: false, verified: false, enriched: false, fetched: false, pending: true, stop: {reason: 'forbidden', code: 'Bb1'}, code: 'Bb1', state: 'pending', phase: 'identity'},
+  {mode: 'identity', writes: false, verified: false, enriched: false, fetched: false, pending: true, stop: {reason: 'forbidden', code: 'Bb1'}, code: 'Bb1', state: 'pending', phase: 'identity'},
+];
+let identityPosts = 0;
+const previousFetch = ctx.fetch;
+ctx.fetch = async (input, init = {}) => {
+  const url = String(input);
+  if (url.endsWith('/identity-step')) {
+    const body = JSON.parse(String(init.body));
+    const answer = identityAnswers[identityPosts++];
+    assert.equal(body.resume, identityPosts >= 3, 'resume follows a stored stop');
+    return new Response(JSON.stringify(answer), {status: 200, headers: {'Content-Type': 'application/json'}});
+  }
+  if (url.endsWith('/identity-status')) {
+    return new Response(JSON.stringify({mode: 'identity_status', writes: false, present: true, pending: 1, admitting: 0, verified: 1, needsReview: 0, enrichmentPending: 1, stopped: {reason: 'forbidden', code: 'Bb1'}, next: null, phase: 'identity'}), {status: 200, headers: {'Content-Type': 'application/json'}});
+  }
+  throw new Error('unexpected page request ' + url);
+};
+await run('onArchiveIdentity()');
+assert.match(result.innerHTML, /Один фильм сверен и добавлен по TMDB/);
+assert.match(result.innerHTML, /Проверить одну идентичность/);
+await run('onArchiveIdentity()');
+assert.match(result.innerHTML, /Проверка остановлена \(forbidden\)/);
+assert.match(result.innerHTML, /Продолжить проверку/);
+await run('onArchiveIdentity()');
+assert.equal(identityPosts, 3);
+run('archiveLive.committed = {}; archiveLive.identity = null; archiveLive.identityStatus = null; archiveLive.viewStep = 4; archiveLive.reached = 4;');
+run('archiveRepaint()');
+assert.match(result.innerHTML, /Прочитать сохранённое состояние/);
+await run('onArchiveStatus()');
+assert.equal(currentStep(), 5);
+assert.match(result.innerHTML, /Продолжить проверку/);
+assert.match(result.innerHTML, /ожидают 1/);
+ctx.fetch = previousFetch;
 console.log('admin-letterboxd-page: ok');

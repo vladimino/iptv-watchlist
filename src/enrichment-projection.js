@@ -122,7 +122,20 @@ export function archiveAdmissionsFromDocument(document){
   if(!ARCHIVE_FILM.test(id)||!item||typeof item!=='object'||Array.isArray(item))continue;
   if(Object.prototype.hasOwnProperty.call(item,'watchlist'))continue;
   if(String(item.tmdb)!==id.slice(5))continue;
-  out[id]={tmdb:String(item.tmdb),sourceCode:typeof item.sourceCode==='string'?item.sourceCode:null,archiveSha256:typeof item.archiveSha256==='string'?item.archiveSha256:null,title:typeof item.title==='string'?item.title:null,year:Number.isInteger(item.year)?item.year:null};
+  const film={tmdb:String(item.tmdb),sourceCode:typeof item.sourceCode==='string'?item.sourceCode:null,archiveSha256:typeof item.archiveSha256==='string'?item.archiveSha256:null,title:typeof item.title==='string'?item.title:null,year:Number.isInteger(item.year)?item.year:null};
+  if(typeof item.synopsis==='string')film.synopsis=item.synopsis;
+  if(typeof item.metadataAt==='string')film.metadataAt=item.metadataAt;
+  if(typeof item.synopsisFetchedAt==='string')film.synopsisFetchedAt=item.synopsisFetchedAt;
+  if(typeof item.url==='string')film.url=item.url;
+  if(Number.isInteger(item.runtime))film.runtime=item.runtime;
+  if(Array.isArray(item.genres))film.genres=item.genres;
+  if(Array.isArray(item.directors))film.directors=item.directors;
+  if(Array.isArray(item.actors))film.actors=item.actors;
+  if(item.peopleVersion===1)film.peopleVersion=1;
+  if(item.peopleNamesVersion===2)film.peopleNamesVersion=2;
+  if(typeof item.peopleLocalizedAt==='string')film.peopleLocalizedAt=item.peopleLocalizedAt;
+  if(typeof item.titleRu==='string'){film.titleRu=item.titleRu;film.titleStatus=item.titleStatus==='verified'?'verified':'provisional';}
+  out[id]=film;
  }
  return out;
 }
@@ -167,7 +180,7 @@ export function enrichmentInputs({view,store,metadataSha256=null}){
 // by id once, in the same order, and returns what recordsFor returns.
 function sourceIndex(store){
  const byId=new Map();
- for(const record of [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})]){
+ for(const record of [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{}),...archiveCreditRecords(store)]){
   if(!record)continue;
   const key=String(record.id);
   if(!byId.has(key))byId.set(key,[]);
@@ -181,12 +194,19 @@ function sourceIndex(store){
   return orderedRecords(store,byId,ids);
  };
 }
+function archiveCreditRecords(store){
+ const admissions=store?.archiveAdmissions;
+ if(!admissions||typeof admissions!=='object'||Array.isArray(admissions))return [];
+ return Object.entries(admissions).filter(([,item])=>item&&typeof item==='object'&&!Object.prototype.hasOwnProperty.call(item,'watchlist')).map(([id,item])=>({...item,id}));
+}
 function orderedRecords(store,byId,ids){
  const wanted=new Set();
  for(const id of ids)for(const record of byId.get(String(id))||[])wanted.add(record);
  if(wanted.size<2)return [...wanted];
  const order=[...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})];
- return order.filter(record=>wanted.has(record));
+ const listed=order.filter(record=>wanted.has(record));
+ for(const record of wanted)if(!listed.includes(record))listed.push(record);
+ return listed;
 }
 
 // The change key of one input. Values equal to the run's own clock are replaced first: the lifecycle reader stamps a dimension

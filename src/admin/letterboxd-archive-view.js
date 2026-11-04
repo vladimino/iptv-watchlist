@@ -424,7 +424,8 @@ function archiveActionHtml(answer, session) {
   const inflight = session && session.inflight;
   const chunks = batches.chunks || [];
   if (!chunks.length) return archiveBatchIntro() + `<p>${archiveEscape(ARCHIVE_BATCH_REASON[batches.reason] || 'Нет партии, которую можно подтвердить.')}</p>`;
-  return archiveBatchIntro() + chunks.map(chunk => {
+  const saved = chunks.some(chunk => chunk.kind === 'candidates') ? '<article class="archive-batch"><h3>Сохранённые кандидаты</h3><p class="muted">Повторная проверка этого архива читает очередь, которая уже записана. Она ничего не скачивает.</p><div class="archive-actions"><button type="button" class="admin-more" data-archive-status="1">Прочитать сохранённое состояние</button></div></article>' : '';
+  return archiveBatchIntro() + saved + chunks.map(chunk => {
     const number = chunk.chunk + 1;
     const held = issued[chunk.chunk];
     const done = committed[chunk.chunk];
@@ -446,6 +447,31 @@ function archiveActionHtml(answer, session) {
 function archiveAbandonHtml(chunk) {
   return `<div class="archive-actions"><button type="button" class="admin-more" data-archive-abandon="${chunk}">Забыть команду в этой вкладке</button></div><p class="muted">Это не откат. Команда для повтора исчезнет из вкладки, даже если сервер уже записал факты.</p>`;
 }
+function archiveIdentityOpen(session) {
+  const status = session && session.identityStatus;
+  const identity = session && session.identity;
+  const committed = session && session.committed && Object.values(session.committed).some(item => item && item.kind === 'candidates' && item.state === 'succeeded');
+  const durable = status && status.present && ((status.pending || 0) + (status.admitting || 0) + (status.enrichmentPending || 0) > 0 || status.stopped);
+  if (!committed && !durable && !identity) return null;
+  if (identity && identity.pending === false && !identity.stop && !durable) return 'done';
+  return 'open';
+}
+function archiveIdentityHtml(session) {
+  const open = archiveIdentityOpen(session);
+  if (!open) return '';
+  const identity = session && session.identity;
+  const status = session && session.identityStatus;
+  const stopped = (identity && identity.stop) || (status && status.stopped && (status.stopped.reason || status.stopped));
+  let note = 'Кандидаты сохранены. Страница Letterboxd и TMDB ещё не читались.';
+  if (identity && identity.verified) note = 'Один фильм сверен и добавлен по TMDB. Watchlist не менялся.';
+  else if (identity && identity.enriched) note = 'Один фильм получил метаданные или имена. Watchlist не менялся. Это не новая идентичность.';
+  else if (identity && identity.stop) note = 'Проверка остановлена (' + identity.stop + '). Кандидат остаётся непроверенным. Это не подтверждение.';
+  else if (identity && identity.state === 'needs_review') note = 'Фильм неоднозначен и не добавлен. Это не подтверждение.';
+  else if (identity) note = 'Идентичность не подтверждена.';
+  if (status && status.present) note += ' Сохранено: ожидают ' + (status.pending || 0) + ', сверяются ' + (status.admitting || 0) + ', метаданные ' + (status.enrichmentPending || 0) + '.';
+  const button = open === 'open' ? `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-identity="1">${archiveEscape(stopped ? 'Продолжить проверку' : 'Проверить одну идентичность')}</button></div>` : '';
+  return `<article class="archive-batch"><h3>Проверка идентичности</h3><p class="muted" role="status">${archiveEscape(note)}</p>${button}</article>`;
+}
 function archiveReceiptHtml(answer, session) {
   const batches = answer.batches || {};
   const issued = session && session.issued || {};
@@ -456,8 +482,7 @@ function archiveReceiptHtml(answer, session) {
   const rollbackResult = session && session.rollbackResult || {};
   const chunks = batches.chunks || [];
   if (!chunks.length) return '<p class="muted">Квитанции нет: записывать нечего. Проверка ничего не записала.</p>';
-  const identity = session && session.identity;
-  const identityHtml = identity ? `<article class="archive-batch"><h3>Проверка идентичности</h3><p role="status">${archiveEscape(identity.verified ? 'Один фильм сверен и добавлен по TMDB. Watchlist не менялся.' : identity.stop ? 'Проверка остановлена (' + identity.stop + '). Кандидат остаётся непроверенным. Это не подтверждение.' : identity.state === 'needs_review' ? 'Фильм неоднозначен и не добавлен. Это не подтверждение.' : 'Идентичность не подтверждена.')}</p></article>` : (session && session.committed && Object.values(session.committed).some(item => item && item.kind === 'candidates' && item.state === 'succeeded') ? '<article class="archive-batch"><h3>Проверка идентичности</h3><p class="muted">Кандидаты сохранены. Страница Letterboxd и TMDB ещё не читались. Одна кнопка проверяет один фильм и сама не повторяется.</p><div class="archive-actions"><button type="button" class="admin-refresh" data-archive-identity="1">Проверить одну идентичность</button></div></article>' : '');
+  const identityHtml = archiveIdentityHtml(session);
   const inflight = session && session.inflight;
   return chunks.map(chunk => {
     const number = chunk.chunk + 1;

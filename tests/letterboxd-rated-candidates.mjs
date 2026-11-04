@@ -15,7 +15,7 @@ const ORIGIN = 'https://iptv.test', G1 = '11111111-1111-4111-8111-111111111111';
 const NAME = 'letterboxd-demo-user-2026-10-20-08-15-utc.zip', GENERATED = '2026-10-20T08:15:00.000Z';
 const ACCESS = 'owner-session-assertion';
 const records = new Map();
-let calls = [], version = 0, failReceipt = false;
+let calls = [], version = 0, failReceipt = false, failPut = null;
 const net = {calls: []};
 function page({code, title, year, tmdb, type = 'movie', slug}) {
   const ld = JSON.stringify({name: title, releasedEvent: [{'@type': 'PublicationEvent', startDate: String(year)}]});
@@ -26,7 +26,7 @@ function page({code, title, year, tmdb, type = 'movie', slug}) {
 }
 const headersOf = map => ({get: key => map[String(key).toLowerCase()] ?? null});
 function http(status, body, headers = {}) {
-  return {status, headers: headersOf(headers), async text() {return body;}};
+  return {status, ok: status >= 200 && status < 300, headers: headersOf(headers), async text() {return body;}, async json() {return JSON.parse(body);}};
 }
 net.handler = async () => {throw new Error('unexpected outbound request');};
 const bucket = {
@@ -38,6 +38,7 @@ const bucket = {
   },
   async put(key, value, options = {}) {
     calls.push('put:' + key);
+    if (failPut && failPut(key)) {failPut = null; throw new Error('injected');}
     if (failReceipt && key.endsWith('/chunks/0.candidates.json')) {failReceipt = false; throw new Error('receipt interrupted');}
     const current = records.get(key);
     if (options.onlyIf?.etagMatches && current?.etag !== options.onlyIf.etagMatches) return null;
@@ -92,7 +93,7 @@ async function commit(bytes, confirmation) {
   return send('/api/admin/letterboxd-archive/apply', {form});
 }
 function seed(programme) {
-  records.clear(); calls = []; version = 0; net.calls = []; failReceipt = false; resetCache();
+  records.clear(); calls = []; version = 0; net.calls = []; failReceipt = false; failPut = null; resetCache();
   delete env.DB; delete env.TMDB_API_READ_ACCESS_TOKEN;
   put('epg/published-generation.json', {phase: 'published', programmeRunId: G1, publishedAt: new Date(NOW - DAY).toISOString()});
   put('epg/generations/' + G1 + '/programme.json', {runId: G1, updatedAt: new Date(NOW - DAY).toISOString(), films: programme, people: {directors: [], actors: []}, stats: {}});
@@ -315,6 +316,168 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(broken.status, 200, JSON.stringify(broken.body));
   assert.ok(broken.body.consistency.changed.includes('ratings_domain_unavailable'));
   assert.equal(broken.body.writes, false);
+}
+
+// 4. Two short codes for one movie, a code registered after the cursor, a bounded upstream, and a recoverable write.
+{
+  async function committed(films, key) {
+    seed([]);
+    const bytes = exportArchive(films);
+    const seen = await preview(bytes);
+    const chunk = seen.body.batches.chunks.find(item => item.kind === 'candidates');
+    const issued = await confirm(bytes, seen.body, chunk.chunk, key);
+    const written = await commit(bytes, issued.body.confirmation);
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+    assert.equal(written.body.baseline.fact, 'candidate');
+    assert.equal(written.body.receipt.outcomes.some(item => item.outcome === 'written'), true);
+    return seen.body.archive.sha256;
+  }
+  const sha = await committed([{code: 'Aa1', name: 'First Cut', year: 2001, rating: 4}, {code: 'Bb1', name: 'Second Cut', year: 2002, rating: 3}], 'rated-key-aabb0001');
+  const docKey = 'letterboxd/imports/' + sha + '/rated-candidates.json';
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  net.handler = async (url, init) => {
+    assert.ok(init && init.signal, 'identity fetch has a timeout');
+    const address = String(url);
+    if (address === 'https://boxd.it/Aa1') return http(301, '', {location: 'https://letterboxd.com/film/first-cut/'});
+    if (address === 'https://letterboxd.com/film/first-cut/') return http(200, page({code: 'Aa1', title: 'First Cut', year: 2001, tmdb: '900010', slug: 'first-cut'}));
+    if (address === 'https://boxd.it/Bb1') return http(301, '', {location: 'https://letterboxd.com/film/second-cut/'});
+    if (address === 'https://letterboxd.com/film/second-cut/') return http(200, page({code: 'Bb1', title: 'Second Cut', year: 2002, tmdb: '900010', slug: 'second-cut'}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900010')) return http(200, JSON.stringify({id: 900010, media_type: 'movie', title: 'First Cut', original_title: 'First Cut', release_date: '2001-01-01'}));
+    throw new Error('unexpected url ' + address);
+  };
+  failPut = key => key === 'letterboxd/admissions/verified-films.json';
+  let step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+  assert.equal(step.status, 500, JSON.stringify(step.body));
+  assert.equal(read(docKey).candidates.Aa1.state, 'admitting');
+  assert.equal(read('letterboxd/admissions/verified-films.json'), undefined);
+  assert.equal(read(Facts.FACTS_KEYS.links)['tmdb:900010'], undefined, 'a failed admission writes no rating');
+  const fetched = net.calls.length;
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+  assert.equal(step.body.verified, true, JSON.stringify(step.body));
+  assert.equal(net.calls.length, fetched, 'an admitting fence does not fetch again');
+  assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900010.sourceCode, 'Aa1');
+  const admissionAt = calls.findIndex(call => call === 'put:letterboxd/admissions/verified-films.json');
+  const ratingAt = calls.findIndex(call => call.startsWith('put:' + Facts.recordKey('tmdb-900010')));
+  assert.ok(admissionAt >= 0 && ratingAt > admissionAt, 'the admission is fenced before the rating');
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+  assert.equal(step.body.verified, false, JSON.stringify(step.body));
+  assert.equal(step.body.state, 'needs_review');
+  assert.equal(step.body.reason, 'tmdb_already_imported');
+  assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900010.sourceCode, 'Aa1', 'a second short code does not replace the Film');
+  assert.equal(read(docKey).candidates.Bb1.state, 'needs_review');
+  const late = read(docKey);
+  late.candidates.Cc1 = {code: 'Cc1', state: 'pending', reason: 'unmatched', rating: 4, observedAt: GENERATED, name: 'Late Cut', year: 1999, historicalTmdb: null, tmdb: null};
+  late.checkpoint.cursor = 'Zz9';
+  put(docKey, late);
+  net.handler = async (url, init) => {
+    assert.ok(init && init.signal);
+    const address = String(url);
+    if (address === 'https://boxd.it/Cc1') return http(301, '', {location: 'https://letterboxd.com/film/late-cut/'});
+    if (address === 'https://letterboxd.com/film/late-cut/') return http(200, page({code: 'Cc1', title: 'Late Cut', year: 1999, tmdb: '900011', slug: 'late-cut'}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900011')) return http(200, JSON.stringify({id: 900011, media_type: 'movie', title: 'Late Cut', original_title: 'Late Cut', release_date: '1999-01-01'}));
+    throw new Error('unexpected url ' + address);
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+  assert.equal(step.body.code, 'Cc1', JSON.stringify(step.body));
+  assert.equal(step.body.verified, true);
+  const sameName = await committed([{code: 'Dd1', name: 'Same Title', year: 2004, rating: 4}, {code: 'Ee1', name: 'Same Title', year: 2004, rating: 5}], 'rated-key-ddee0001');
+  net.calls = [];
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sameName, accepted: true}});
+  assert.equal(step.body.reason, 'same_title_year');
+  assert.equal(net.calls.length, 0, 'a namesake is not fetched');
+  assert.equal(read('letterboxd/admissions/verified-films.json'), undefined);
+
+  async function stopped(code, handler, reason) {
+    const archive = await committed([{code, name: 'Stop Cut', year: 2003, rating: 4}], 'rated-key-' + code + '000001');
+    net.handler = handler;
+    const result = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: archive, accepted: true}});
+    assert.equal(result.body.stop && result.body.stop.reason, reason, code + ' ' + JSON.stringify(result.body));
+    assert.equal(read('letterboxd/imports/' + archive + '/rated-candidates.json').candidates[code].state, 'pending');
+    return archive;
+  }
+  await stopped('Tm1', async (url, init) => {assert.ok(init.signal); throw Object.assign(new Error('timed out'), {name: 'TimeoutError'});}, 'timeout');
+  await stopped('Big1', async () => http(200, 'x'.repeat(3000001)), 'oversized');
+  await stopped('Rt1', async () => http(429, 'slow'), 'rate_limited');
+  await stopped('Ch1', async () => http(200, '<title>Just a moment...'), 'challenge');
+
+  const rich = await committed([{code: 'Ff1', name: 'Enrich Cut', year: 2005, rating: 4}], 'rated-key-ff1000001');
+  const richKey = 'letterboxd/imports/' + rich + '/rated-candidates.json';
+  const richPage = code => {
+    const ld = JSON.stringify({name: 'Enrich Cut', director: {name: 'Ada Queue', sameAs: 'https://letterboxd.com/director/ada-queue/'}, actor: [{name: 'Bo Queue', sameAs: 'https://letterboxd.com/actor/bo-queue/'}], releasedEvent: [{startDate: '2005'}]});
+    return '<html><head><meta name="description" content="A bounded invented synopsis."><link rel="canonical" href="https://letterboxd.com/film/enrich-cut/"><link rel="shortlink" href="https://boxd.it/' + code + '"><meta property="og:title" content="Enrich Cut (2005)"><script type="application/ld+json">' + ld + '</script></head><body data-tmdb-type="movie" data-tmdb-id="900012"></body></html>';
+  };
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  net.handler = async (url, init) => {
+    assert.ok(init && init.signal);
+    const address = String(url);
+    if (address === 'https://boxd.it/Ff1') return http(301, '', {location: 'https://letterboxd.com/film/enrich-cut/'});
+    if (address === 'https://letterboxd.com/film/enrich-cut/') return http(200, richPage('Ff1'));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900012')) return http(200, JSON.stringify({id: 900012, media_type: 'movie', title: 'Enrich Cut', original_title: 'Enrich Cut', release_date: '2005-01-01'}));
+    throw new Error('unexpected url ' + address);
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: rich, accepted: true}});
+  assert.equal(step.body.verified, true, JSON.stringify(step.body));
+  assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900012.metadataAt, undefined, 'verification does not pretend the page was enriched');
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: rich, accepted: true}});
+  assert.equal(step.body.enriched, true, JSON.stringify(step.body));
+  assert.equal(step.body.phase, 'enrich');
+  const admitted = read('letterboxd/admissions/verified-films.json').films.tmdb_900012;
+  assert.equal(admitted.synopsis, 'A bounded invented synopsis.');
+  assert.equal(admitted.directors[0].id, 'director/ada-queue');
+  assert.equal(read(richKey).candidates.Ff1.enrichment, 'metadata');
+  net.handler = async url => {
+    const address = String(url);
+    if (!address.startsWith('https://query.wikidata.org/')) throw new Error(address);
+    const query = new URL(address).searchParams.get('query') || '';
+    if (query.includes('?en')) return http(200, JSON.stringify({results: {bindings: []}}));
+    return http(200, JSON.stringify({results: {bindings: [{tmdb: {value: '900012'}, film: {value: 'http://www.wikidata.org/entity/Q9'}, ru: {value: 'Обогащённый'}}]}}));
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: rich, accepted: true}});
+  assert.equal(step.body.enriched, true, JSON.stringify(step.body));
+  assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900012.titleRu, 'Обогащённый');
+  assert.equal(read(richKey).candidates.Ff1.enrichment, 'done');
+
+  const broken = await committed([{code: 'Gg1', name: 'Fence Cut', year: 2006, rating: 4}], 'rated-key-gg1000001');
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  net.handler = async (url, init) => {
+    const address = String(url);
+    if (address === 'https://boxd.it/Gg1') return http(301, '', {location: 'https://letterboxd.com/film/fence-cut/'});
+    if (address === 'https://letterboxd.com/film/fence-cut/') return http(200, page({code: 'Gg1', title: 'Fence Cut', year: 2006, tmdb: '900013', slug: 'fence-cut'}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900013')) return http(200, JSON.stringify({id: 900013, media_type: 'movie', title: 'Fence Cut', original_title: 'Fence Cut', release_date: '2006-01-01'}));
+    throw new Error(address);
+  };
+  failPut = key => key.includes('/films/tmdb-');
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: broken, accepted: true}});
+  assert.equal(step.status, 500);
+  assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900013.sourceCode, 'Gg1');
+  assert.equal(read(Facts.recordKey('tmdb-900013')), undefined);
+  const before = net.calls.length;
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: broken, accepted: true}});
+  assert.equal(step.body.verified, true, JSON.stringify(step.body));
+  assert.equal(net.calls.length, before);
+  assert.equal(read(Facts.recordKey('tmdb-900013')).rating.value, 4);
+  const marked = await committed([{code: 'Hh1', name: 'Mark Cut', year: 2007, rating: 4}], 'rated-key-hh1000001');
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  let candidatePuts = 0;
+  failPut = key => {
+    if (!key.includes('/rated-candidates.json')) return false;
+    candidatePuts += 1;
+    return candidatePuts > 1;
+  };
+  net.handler = async (url) => {
+    const address = String(url);
+    if (address === 'https://boxd.it/Hh1') return http(301, '', {location: 'https://letterboxd.com/film/mark-cut/'});
+    if (address === 'https://letterboxd.com/film/mark-cut/') return http(200, page({code: 'Hh1', title: 'Mark Cut', year: 2007, tmdb: '900014', slug: 'mark-cut'}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900014')) return http(200, JSON.stringify({id: 900014, media_type: 'movie', title: 'Mark Cut', original_title: 'Mark Cut', release_date: '2007-01-01'}));
+    throw new Error(address);
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: marked, accepted: true}});
+  assert.equal(step.status, 500, JSON.stringify(step.body));
+  assert.equal(read('letterboxd/imports/' + marked + '/rated-candidates.json').candidates.Hh1.state, 'admitting');
+  assert.equal(read(Facts.recordKey('tmdb-900014')).rating.value, 4);
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: marked, accepted: true}});
+  assert.equal(step.body.verified, true, JSON.stringify(step.body));
+  assert.equal(read(Facts.recordKey('tmdb-900014')).rating.value, 4, 'resuming the verified mark does not write a second rating');
 }
 
 console.log('Rated archive candidates: preview is local, a commit keeps the code, a stop waits, a verified movie is not a watchlist fact, D1 wins only while open');

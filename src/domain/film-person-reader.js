@@ -43,10 +43,45 @@ function retainedArchiveRecords(store,seen,tmdbSeen){
   const item=admissions[id];
   if(!item||typeof item.tmdb!=='string'||seen.has(id)||tmdbSeen.has(item.tmdb))continue;
   if(Object.prototype.hasOwnProperty.call(item,'watchlist'))continue;
-  records.push({id,tmdbId:item.tmdb,canonicalIdentity:'tmdb:'+item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null,externalIds:[{scheme:'tmdb',value:item.tmdb,trusted:true,conflicting:false}]});
+  const record={id,tmdbId:item.tmdb,canonicalIdentity:'tmdb:'+item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null,externalIds:[{scheme:'tmdb',value:item.tmdb,trusted:true,conflicting:false}]};
+  if(item.synopsis)record.synopsis=item.synopsis;
+  if(item.synopsisFetchedAt)record.synopsisFetchedAt=item.synopsisFetchedAt;
+  if(item.metadataAt)record.metadataAt=item.metadataAt;
+  if(item.url)record.url=item.url;
+  if(Number.isInteger(item.runtime))record.runtime=item.runtime;
+  if(Array.isArray(item.genres))record.genres=item.genres;
+  if(Array.isArray(item.directors))record.directors=item.directors;
+  if(Array.isArray(item.actors))record.actors=item.actors;
+  if(item.peopleVersion)record.peopleVersion=item.peopleVersion;
+  if(item.peopleNamesVersion)record.peopleNamesVersion=item.peopleNamesVersion;
+  if(item.peopleLocalizedAt)record.peopleLocalizedAt=item.peopleLocalizedAt;
+  if(item.titleRu){record.titleRu=item.titleRu;record.titleStatus=item.titleStatus||'provisional';}
+  records.push(record);
   seen.add(id);tmdbSeen.add(item.tmdb);
  }
  return records;
+}
+function sourceRichness(record){
+ if(!record||typeof record!=='object')return 0;
+ let score=0;
+ if(record.synopsis||record.synopsisFetchedAt)score+=2;
+ if((record.directors&&record.directors.length)||(record.actors&&record.actors.length)||record.peopleVersion===1)score+=2;
+ if(record.metadataAt||record.discoveredAt)score+=1;
+ return score;
+}
+function archiveItemFor(store,id,tmdb){
+ const admissions=store?.archiveAdmissions;
+ if(!admissions||typeof admissions!=='object')return null;
+ if(id&&admissions[id]&&!Object.prototype.hasOwnProperty.call(admissions[id],'watchlist'))return admissions[id];
+ const key=tmdb?'tmdb_'+tmdb:null;
+ return key&&admissions[key]&&!Object.prototype.hasOwnProperty.call(admissions[key],'watchlist')?admissions[key]:null;
+}
+// The map entry came from the rated-archive stub, not from a programme or watchlist row.
+function occupantIsArchiveStub(store,prior,archive){
+ if(!prior||!archive)return false;
+ if(storedFilmId(prior)!=='tmdb_'+archive.tmdb)return false;
+ const onList=[...(store.programme?.films||[]),...(store.watchlist?.films||[])].some(film=>film&&(String(film.id)===storedFilmId(prior)||String(film.tmdbId)===String(archive.tmdb)));
+ return !onList;
 }
 function trustedTmdbIds(films){
  const ids=new Set();
@@ -88,7 +123,16 @@ function archiveRecord(store,id){
  const item=store?.archiveAdmissions?.[id];
  if(!item||typeof item.tmdb!=='string'||Object.prototype.hasOwnProperty.call(item,'watchlist'))return null;
  if(String(id)!=='tmdb_'+item.tmdb)return null;
- return {id,tmdbId:item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null};
+ const record={id,tmdbId:item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null};
+ if(item.synopsis)record.synopsis=item.synopsis;
+ if(item.metadataAt)record.metadataAt=item.metadataAt;
+ if(item.synopsisFetchedAt)record.synopsisFetchedAt=item.synopsisFetchedAt;
+ if(item.discoveredAt)record.discoveredAt=item.discoveredAt;
+ if(Array.isArray(item.directors))record.directors=item.directors;
+ if(Array.isArray(item.actors))record.actors=item.actors;
+ if(item.peopleVersion)record.peopleVersion=item.peopleVersion;
+ if(item.titleRu){record.titleRu=item.titleRu;record.titleStatus=item.titleStatus||'provisional';}
+ return record;
 }
 function presentTmdb(value){return value==null||value===''?null:String(value);}
 // Null does not hide a later id. Programme, metadata, watchlist, then the record itself. Two different ids stay a conflict.
@@ -295,10 +339,13 @@ function readLifecycle(store,now,options={}){
  const retirements=store.tmdbRetirements==null?null:applyTmdbRetirements([...films.values()],store.tmdbRetirements,film=>tmdbRetirementRecords(context,film));
  if(retirements)for(const film of retirements.films)films.set(storedFilmId(film),film);
  for(const record of listOf(store.discoveredFilms)){
-  if(films.has(String(record.id)))continue;
   const facts=filmFacts(record,context,resolution,now),incoming=projectFilm({...facts,letterboxdId:null,localId:null});
   if(!incoming)continue;
   const same=facts.tmdbId?[...films.values()].find(film=>(film.externalIds||[]).some(item=>item.scheme==='tmdb'&&item.trusted&&!item.conflicting&&item.value===facts.tmdbId)):null;
+  // A thin rated-archive stub uses the same stored id as a discovered film. Keep the discovered metadata and credits.
+  const archive=archiveItemFor(store,String(record.id),facts.tmdbId),prior=same||(films.has(String(record.id))?[...films.values()].find(film=>storedFilmId(film)===String(record.id)):null);
+  if(occupantIsArchiveStub(store,prior,archive)&&sourceRichness(record)>sourceRichness(archive)){films.delete(storedFilmId(prior));films.set(storedFilmId(incoming),incoming);continue;}
+  if(films.has(String(record.id)))continue;
   if(!same){films.set(storedFilmId(incoming),incoming);continue;}
   const linked=linkFilms(same,incoming,now);
   if(!linked.ok){films.set(storedFilmId(incoming),incoming);continue;}
@@ -323,7 +370,7 @@ function readLifecycle(store,now,options={}){
   candidates.push({key,film:null,identity:identityState({now,decision,discovery:decision.discovery||null,tmdbId:decision.tmdbId?String(decision.tmdbId):null}),excluded:false,missingCatalog:decision.status==='verified'});
  }
  const people=new Map();
- const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn)];
+ const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn),...listOf(store.archiveAdmissions).flatMap(peopleOn)];
  for(const person of embedded){if(!person?.id||people.has(person.id))continue;const view=personView(personFacts(person,context,now));if(view)people.set(person.id,view);}
  const filmList=[...films.values()].sort((a,b)=>storedFilmId(a).localeCompare(storedFilmId(b),'en'));
  const aliasConflicts=markSlugCollisions(filmList);

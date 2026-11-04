@@ -77,15 +77,21 @@ export function planRegistration(stored, incoming, generatedAt) {
   return {add, keep, skippedNewer};
 }
 
-// `cursor` is the last code a step finished. A stop leaves the same pending codes and fetches nothing until resume.
+// A stop fetches nothing until resume. The next code is an admitting fence, then any still-pending code.
+// A cursor is only a progress mark: a later chunk can register a code that sorts before it, and that code stays eligible.
+// Enrichment of a verified film waits until no identity work remains.
 export function resumePending(checkpoint, candidates) {
-  const pending = Object.values(candidates || {}).filter(item => item && item.state === 'pending').map(item => item.code).sort();
+  const items = Object.values(candidates || {}).filter(item => item && item.code);
+  const admitting = items.filter(item => item.state === 'admitting').map(item => item.code).sort();
+  const fresh = items.filter(item => item.state === 'pending').map(item => item.code).sort();
+  const pending = [...admitting, ...fresh.filter(code => !admitting.includes(code))];
   const stopped = checkpoint && checkpoint.stopped || null;
-  if (stopped) return {pending, next: null, stopped};
-  const cursor = checkpoint && checkpoint.cursor || null;
-  const rest = cursor ? pending.filter(code => code > cursor) : pending;
-  const next = rest[0] || null;
-  return {pending, next, stopped: null};
+  if (stopped) return {pending, next: null, stopped, phase: 'identity'};
+  if (admitting.length) return {pending, next: admitting[0], stopped: null, phase: 'identity'};
+  if (fresh.length) return {pending, next: fresh[0], stopped: null, phase: 'identity'};
+  const enrich = items.filter(item => item.state === 'verified' && item.enrichment !== 'done').map(item => item.code).sort();
+  if (enrich.length) return {pending: enrich, next: enrich[0], stopped: null, phase: 'enrich'};
+  return {pending: [], next: null, stopped: null, phase: null};
 }
 
 function norm(value) {

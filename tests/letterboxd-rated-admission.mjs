@@ -45,7 +45,9 @@ assert.equal(splitPending(archive.pending, 3)[0].chunk, 3);
 
 const stopped = resumePending({cursor: null, stopped: {reason: 'forbidden', code: 'Zz9'}}, {Zz9: {state: 'pending', code: 'Zz9'}, Aa1: {state: 'needs_review', code: 'Aa1'}});
 assert.equal(stopped.next, null);
-assert.equal(resumePending({cursor: 'Aa1', stopped: null}, {Aa1: {state: 'pending', code: 'Aa1'}, Zz9: {state: 'pending', code: 'Zz9'}}).next, 'Zz9');
+assert.equal(resumePending({cursor: 'Zz9', stopped: null}, {Zz9: {state: 'verified', code: 'Zz9', enrichment: 'done'}, Aa1: {state: 'pending', code: 'Aa1'}}).next, 'Aa1', 'a later chunk before the cursor stays eligible');
+assert.equal(resumePending({cursor: 'Zz9', stopped: null}, {Zz9: {state: 'pending', code: 'Zz9'}, Aa1: {state: 'admitting', code: 'Aa1'}}).next, 'Aa1', 'an admitting fence resumes before a new fetch');
+assert.equal(resumePending({cursor: 'Zz9', stopped: null}, {Zz9: {state: 'verified', code: 'Zz9', enrichment: 'pending'}}).phase, 'enrich');
 
 assert.equal(movieDetailAgrees({id: 900001, media_type: 'movie', title: 'Invented Alpha', release_date: '2001-06-01'}, '900001', 'Invented Alpha', 2001).ok, true);
 assert.equal(movieDetailAgrees({id: 900001, media_type: 'movie', title: 'Invented Alpha', release_date: '2002-01-01'}, '900001', 'Invented Alpha', 2001).ok, true);

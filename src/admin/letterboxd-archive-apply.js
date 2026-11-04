@@ -163,6 +163,8 @@ async function lbaAttachBatches(answer,comparison,now){
 function lbaFilmOutcome(entry,replay){
  if(entry.conflict)return {id:entry.lid,outcome:'failed',error:'conflict'};
  const outcomes=entry.outcomes||[];
+ if(outcomes.some(item=>item.fact==='candidate'&&item.outcome==='registered'))return {id:entry.lid,outcome:replay?'already_applied':'written'};
+ if(outcomes.some(item=>item.fact==='candidate'))return {id:entry.lid,outcome:'already_applied'};
  if(outcomes.some(item=>item.outcome==='new'||item.outcome==='replaces'))return {id:entry.lid,outcome:replay?'already_applied':'written'};
  if(outcomes.some(item=>item.outcome==='older'))return {id:entry.lid,outcome:'skipped_changed'};
  return {id:entry.lid,outcome:'already_applied'};
@@ -174,7 +176,7 @@ function lbaCommitOutcomes(result,ids){
 }
 function lbaBaselineView(result){
  const view={chunk:result.chunk,replay:result.replay===true,conflicts:result.conflicts||0,outcomes:result.outcomes||{}};
- if(result.kind==='candidates')view.kind='candidates';
+ if(result.kind==='candidates'){view.kind='candidates';view.fact='candidate';}
  return view;
 }
 async function lbaRollbackCandidates(env,sha,chunk,receipt){
@@ -188,6 +190,16 @@ async function lbaRollbackCandidates(env,sha,chunk,receipt){
  if(saved===null){const again=await lbaObject(env,key);if(again.value)return {replay:true,facts:{restored:again.value.removed||0,superseded:0}};}
  return {replay:false,facts:{restored:result.removed.length,superseded:0}};
 }
+async function lbaIdentityStatus(request,env){
+ const opened=await lbaRollbackBody(request);
+ if(opened.response)return opened.response;
+ const sha=opened.body.archiveSha256;
+ if(!LBA_HEX64.test(sha||''))return lbaRefuse('invalid_request',400);
+ const doc=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
+ if(doc.value===undefined)return json({error:'storage_unavailable'},503);
+ const status=LetterboxdRatedCandidates.statusOf(doc.value);
+ return json({mode:'identity_status',writes:false,...status});
+}
 async function lbaIdentityStep(request,env,url){
  const opened=await lbaRollbackBody(request);
  if(opened.response)return opened.response;
@@ -200,7 +212,7 @@ async function lbaIdentityStep(request,env,url){
   if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
   if(result.error==='storage_unavailable')return json({error:'storage_unavailable'},503);
   if(result.error)return lbaRefuse('invalid_request',400);
-  return json({mode:'identity',writes:result.verified===true,verified:result.verified===true,fetched:result.fetched===true,pending:result.pending!==false,stop:result.stop||null,code:result.code||null,state:result.state||(result.verified?'verified':'pending'),reason:result.reason||null,tmdb:result.tmdb||null,filmId:result.filmId||null,rating:result.rating||null});
+  return json({mode:'identity',writes:result.verified===true||result.enriched===true,verified:result.verified===true,enriched:result.enriched===true,fetched:result.fetched===true,pending:result.pending!==false,stop:result.stop||null,code:result.code||null,state:result.state||(result.verified?'verified':result.enriched?'enriched':'pending'),reason:result.reason||null,tmdb:result.tmdb||null,filmId:result.filmId||null,rating:result.verified===true?result.rating||null:null,phase:result.phase||null});
  }catch{return json({error:'storage_error'},500);}
  finally{lbaFreeSlot(started);}
 }
@@ -312,7 +324,7 @@ async function lbaCommitCandidates(env,origin,chunk,plan){
  if(existing.value===undefined)throw new Error('storage_unavailable');
  if(existing.value){
   if(existing.value.itemsHash!==plan.planHash)throw new LetterboxdFacts.FactsError('chunk_conflict','This chunk was committed with other items');
-  return {replay:true,chunk,entries:plan.batch.rows.map(row=>({lid:row.code,outcomes:[{fact:'rating',outcome:'unchanged'}]})),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};
+  return {replay:true,chunk,entries:lbaCandidateEntries(plan.batch.rows,null),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};
  }
  const registered=await LetterboxdRatedCandidates.registerCandidates(env,{sha:origin.sha256,generatedAt:origin.generatedAt,chunk,rows:plan.batch.rows});
  const added=new Set(registered.added);
@@ -320,10 +332,13 @@ async function lbaCommitCandidates(env,origin,chunk,plan){
  const saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
  if(saved===null){
   const again=await lbaObject(env,key);
-  if(again.value&&again.value.itemsHash===plan.planHash)return {replay:true,chunk,entries:plan.batch.rows.map(row=>({lid:row.code,outcomes:[{fact:'rating',outcome:'unchanged'}]})),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};
+  if(again.value&&again.value.itemsHash===plan.planHash)return {replay:true,chunk,entries:lbaCandidateEntries(plan.batch.rows,null),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};
   throw new LetterboxdFacts.FactsError('chunk_conflict','This chunk was committed with other items');
  }
- return {replay:false,chunk,kind:'candidates',conflicts:0,outcomes:{registered:registered.added.length,kept:registered.kept.length},entries:plan.batch.rows.map(row=>({lid:row.code,outcomes:[{fact:'rating',outcome:added.has(row.code)?'new':'unchanged'}]}))};
+ return {replay:false,chunk,kind:'candidates',conflicts:0,outcomes:{registered:registered.added.length,kept:registered.kept.length},entries:lbaCandidateEntries(plan.batch.rows,added)};
+}
+function lbaCandidateEntries(rows,added){
+ return rows.map(row=>({lid:row.code,outcomes:[{fact:'candidate',outcome:added&&added.has(row.code)?'registered':'kept'}]}));
 }
 function lbaRollbackPreview(sha,chunk,pin,now){
  const subject={kind:'letterboxd_archive_chunk',id:sha+':rollback:'+chunk};
@@ -416,6 +431,7 @@ async function lbaApplyRoute(request,env,url){
  if(!lbaPrincipal(request,url).owner)return lbaRefuse('access_denied',403);
  if(!lbaBucket(env))return json({error:'storage_unavailable'},503);
  const path=url.pathname;
+ if(path==='/api/admin/letterboxd-archive/identity-status')return lbaIdentityStatus(request,env);
  if(path==='/api/admin/letterboxd-archive/identity-step')return lbaIdentityStep(request,env,url);
  if(path==='/api/admin/letterboxd-archive/rollback-confirm')return lbaRollbackConfirm(request,env,url);
  if(path==='/api/admin/letterboxd-archive/rollback')return lbaRollback(request,env,url);
