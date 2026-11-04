@@ -90,4 +90,28 @@ flowchart LR
   rows -.->|may lag; not a read fallback| mirror
 ```
 
+## Watchlist fact keeps the Film
+
+**Visual review: owner approved 2026-11-04** ([explicit owner decision](https://trello.com/c/SBvIwv6P#comment-6aeafa5843c0dab3d80ec717)); fifth diagram, [ADR 0086](../adr/0086-durable-watchlist-film-retention.md) Accepted. This approval does not authorize production D1 writes or merge. It does not replace the four diagrams above. A Letterboxd lid whose view-index `watchlist` is `true` or `false` stays one Film after the current programme and watchlist drop it. Metadata fills that Film and does not mint one on its own. A cache row whose id names another film is not that body, and the lid stays. Membership is true only while the current watchlist document names the lid. The grid reads that document, not the Film. Either boolean keeps the film out of the Finds first-watch offer, including a catalog id `tmdb_<n>` when the lid bridges to `n` by one agreed stored id. Two stored ids, or none, do not bridge. A watched or rated entry still excludes it on its own. `watchlist: false` is not a watched mark. R2 stays the Film authority. Accepting the ADR does not authorize the projector write; that deploy is a separate owner approval.
+
+```mermaid
+flowchart LR
+  programme["Current programme"]
+  list["Current watchlist document"]
+  fact["Letterboxd lid<br/>watchlist true or false"]
+  body["Metadata of that same lid"]
+  view["One Film"]
+  member["Watchlist membership"]
+  grid["Watchlist grid"]
+  finds["Finds first-watch offer"]
+  programme -->|primary Film source| view
+  list -.->|Film fallback when programme unavailable| view
+  fact -->|retains Film after both lists drop it| view
+  body -.->|fills Film; cache alone does not mint it| view
+  view -->|independent dimension| member
+  list -->|true only when lid is listed| member
+  list -->|grid reads this document| grid
+  fact -.->|either boolean excludes offer| finds
+```
+
 **Current/future boundary:** existing Worker read/write paths and authoritative R2 objects continue to serve the site. The person identity GET reads D1 and calls the derived reference. Finds reads that GET for a selected actor or director and still takes eligibility from the published catalog. The watchlist grid does not. D1 is not the authority for Films or Persons. Owner reviews are D1-authoritative: the marker is `d1` at generation 1 ([activation record](../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)). The canonical domain model, offline D1 repositories and a later general page cutover stay distinct; do not depict them as one deployed transactional entity store. See [D1 schema](../reference/data/d1-schema.md) and [staged migration ADR](../adr/0017-staged-d1-migration.md).
