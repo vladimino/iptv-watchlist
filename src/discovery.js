@@ -82,24 +82,35 @@ function ledgerCountsFrom(source,counts){
 }
 // AIR-344: the status readers' view of the pinned ledger, read once. An R2 ledger is streamed item by item and no item is
 // kept: each one is counted as it is read (the same rules as ledgerCounts) and the per-status tallies are taken from the
-// decisions, so the document is never held whole. A D1-routed or non-streamable ledger is counted from its parsed items.
+// decisions, so the document is never held whole. A D1 ledger above READ_CAP is walked in LEDGER_PAGE rows with that
+// page's decisions only; it is not counted as an empty `items` array and READ_CAP is not raised. A held, loading or
+// unavailable marker fails closed and does not fall back to a stale R2 ledger once D1 is the authority.
 // `confirmed` is every verified tmdbId (String of it, as the pipeline status counts), `recognized` only the truthy ones
 // (as the footer counts). The returned `source` is the ledger's wrapper (programmeRunId, archive, ...) without items.
 async function ledgerStatusAggregates(pinned,decisions,now=Date.now()){
  const counts=emptyDiscoveryCounts(),statuses={},confirmed=new Set(),recognized=new Set(),map=decisions||{};
- const add=candidate=>{
-  const decision=map[candidate?.key];
+ const add=(candidate,decision)=>{
   countDiscoveryItem(counts,candidate,decision,now);
   if(decision){statuses[decision.status]=(statuses[decision.status]||0)+1;if(decision.status==='verified'){confirmed.add(String(decision.tmdbId));if(decision.tmdbId)recognized.add(String(decision.tmdbId));}}
  };
+ if(typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.streamActiveLedger==='function'){
+  const walked=await DiscoveryAuthority.streamActiveLedger(pinned,(item,decision)=>add(item,decision));
+  if(walked.handled){
+   const source={programmeRunId:walked.programmeRunId,itemCount:walked.itemCount,ledgerMode:walked.ledgerMode,archive:walked.archive};
+   return {source,counts:ledgerCountsFrom(source,counts),statuses,confirmed,recognized};
+  }
+ }
  let streamed=false,loaded;
- try{loaded=await loadJSON(pinned,'epg/discovery-latest.json',{item:item=>{streamed=true;add(item);return null;}});}
+ try{loaded=await loadJSON(pinned,'epg/discovery-latest.json',{item:item=>{streamed=true;add(item,map[item?.key]);return null;}});}
  catch(e){
   // A stored document without an `items` array is refused by the streamed reader; a whole parse reads it as before.
   if(e?.message!=='Discovery ledger JSON is incomplete')throw e;
   streamed=false;loaded=await loadJSON(pinned,'epg/discovery-latest.json');
  }
- if(!streamed)for(const item of loaded?.items||[])add(item);
+ if(!streamed){
+  if(loaded?.paged){const error=new Error('discovery_bounded');error.code='discovery_bounded';throw error;}
+  for(const item of loaded?.items||[])add(item,map[item.key]);
+ }
  const source=loaded?{...loaded,items:undefined}:null;
  return {source,counts:ledgerCountsFrom(source,counts),statuses,confirmed,recognized};
 }
@@ -1310,7 +1321,8 @@ async function discoveryPipelineStatus(env){
  // AIR-344: the small records are read together; the decisions, the ledger and the catalog one after another, and the
  // ledger is streamed and counted without keeping its items, so no two large documents are held at once.
  const [last,queue,continuation,persistedQueue,scorePreview,continuationDiagnostics,lease]=await Promise.all([loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY),loadJSON(env,DISCOVERY_LEASE_KEY)]);
- const decisionsMap=await loadJSON(pinned,'epg/discovery-resolution.json')||{};
+ const authority=typeof DiscoveryAuthority!=='undefined'?await DiscoveryAuthority.readAuthority(env):null;
+ const decisionsMap=authority?.ready?{}:await loadJSON(pinned,'epg/discovery-resolution.json')||{};
  const {source,counts,statuses,confirmed}=await ledgerStatusAggregates(pinned,decisionsMap,Date.now());
  const catalog=await loadJSON(pinned,'epg/discovered-films.json');
  // AIR-154: the raw record cannot tell a live writer from an orphan; the derived health can.
