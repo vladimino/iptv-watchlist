@@ -5,7 +5,7 @@
 **Method:** parse of extra `rel` tokens, a trailing slash, a protocol-relative href and an href-before-rel tag; `decide` with a missing tag plus `redirectCode`; `planIdentityRetry` of a `shortlink_missing` row beside a Stay pending row; identity-step of a film page without the tag; a review answer with `writes: true`; confirm and execute of the retry, including a stale etag and a verified skip
 **Scope:** contract test only. Not a live inventory and not a claim about production HTML
 **Verdict:** **SYNTHETIC CONTRACT HOLDS.** A matching hop proves the short code when the HTML tag is absent. A present tag that names another code stays a mismatch. Title and year alone do not verify. A review stores a bounded reason list and a `reasonKind`. `writes` is true when the candidate document changes. Retry returns only named `shortlink_missing` reviews to pending and leaves the other pending codes. A verified row is skipped. A missing or newer document version refuses. No production bucket was written
-**Used by:** [AIR-346](https://trello.com/c/49p4EZ8b), [ADR 0089](../../adr/0090-rated-identity-redirect-proof-and-retry.md) (Proposed)
+**Used by:** [AIR-346](https://trello.com/c/49p4EZ8b), [ADR 0090](../../adr/0090-rated-identity-redirect-proof-and-retry.md) (Proposed)
 
 ## What the fixtures show
 
