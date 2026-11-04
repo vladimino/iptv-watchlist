@@ -1,9 +1,9 @@
 # ADR 0084: Letterboxd ratings and viewing facts are D1-authoritative only after their own marker is open
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-03  
 **Recorded at:** 2026-11-03  
-**Approval source:** not documented  
+**Approval source:** [explicit owner ADR acceptance and Mermaid visual approval, 2026-11-04](https://github.com/vladimino/iptv-watchlist/pull/342#issuecomment-6620434921)  
 **Related work:** [AIR-318](https://trello.com/c/slj7UjN5), [ADR 0023](0023-letterboxd-user-facts.md), [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md), [ADR 0075](0075-retire-letterboxd-diary-history-switch.md), [ADR 0077](0077-retire-removal-rating-lookup-switch.md), [ADR 0078](0078-d1-authoritative-prediction-domain.md), [ADR 0079](0079-d1-authoritative-published-epg.md)  
 **Supersedes:** [ADR 0002](0002-cloudflare-worker-r2-authority.md) in part, for the mutable ratings documents named below, and only while `ratings_domain_authority.mode` is `d1` and `cutover` is `open`. [ADR 0023](0023-letterboxd-user-facts.md) remains the fact model. [ADR 0081](0081-d1-authoritative-owner-reviews.md) stays the owner-review reader: version 9 or later without all three owner-review tables fails closed. This record does not change that reader or `0009`.  
 **Superseded by:** None
@@ -40,7 +40,7 @@ Until `0010` is applied, production behaviour is unchanged: the Ratings Task and
 
 Code rollback does not drop the tables, does not return the contract version, and does not change the marker. A Worker that only reads R2, running while the marker is open, would show objects that may lag. A deploy that includes `RATINGS_DB_REQUIRED=on` fails a ratings read or write closed when `DB` is missing. It does not apply `0010` and does not switch the marker. This delivery does not deploy.
 
-The two Mermaid edits — the note on the ratings sequence, and the dashed ratings arrow on the persistence page — are part of this proposal and need owner visual approval. They are not a claim that production has applied `0010`.
+The two Mermaid edits — the note on the ratings sequence and the dashed ratings arrow on the persistence page — were [visually approved by the owner on 2026-11-04](https://github.com/vladimino/iptv-watchlist/pull/342#issuecomment-6620434921) on reviewed PR #342 HEAD `20c28aa0f36e37aaa01c99146b627bb07af4d98a`. They do not claim that production has applied `0010`.
 
 ## Recovery and migration boundary
 
@@ -51,7 +51,7 @@ Returning an open marker to `r2` is `--revert --confirm r2` after the documents 
 - **Original decision:** [AIR-318](https://trello.com/c/slj7UjN5)
 - **Implementation:** this record's pull request
 - **Dated verification:** [local contract check, 3 November 2026](../evidence/d1-migration/air-318-ratings-domain-contract-2026-11-03.md). No production migration, import or marker change.
-- **Uncertainty:** the live ratings objects were not read or copied for this delivery. Counts of facts, diary entries and queue rows are not claimed. Owner visual approval of the two Mermaid edits is not yet recorded.
+- **Uncertainty:** the live ratings objects were not read or copied for this delivery. Counts of facts, diary entries and queue rows are not claimed. Both changed Mermaid diagrams received explicit owner visual approval on 2026-11-04 ([decision](https://github.com/vladimino/iptv-watchlist/pull/342#issuecomment-6620434921)).
 
 ## Follow-ups
 
