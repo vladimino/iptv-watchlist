@@ -1,11 +1,11 @@
 # ADR 0085: D1 owns the discovery ledger only after its own marker is switched
 
-**Status:** Proposed  
-**Original decision date:** not yet accepted  
+**Status:** Accepted  
+**Original decision date:** 2026-11-04  
 **Recorded at:** 2026-11-03  
-**Approval source:** not documented. This record is proposed with the offline implementation. The 2 November 2026 card comment allows a separate code preparation and is not acceptance of this ADR and not a production GO.  
+**Approval source:** [Explicit owner acceptance of ADR 0085 and visual approval of all three changed Mermaid diagrams, 2026-11-04](https://trello.com/c/4cA5GlJn#comment-6aeaf246ff978bf24e21c639), after [independent PASS of PR #358](https://github.com/vladimino/iptv-watchlist/pull/358#pullrequestreview-5765653040) on HEAD `22e036b9fcc65e07df085408e792ca9eecec95f8` and [green exact-head PR CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41800587933). Architecture and diagrams only; no production migration, import, marker change, Discovery/TMDB run or R2/D1 write authorized.  
 **Related work:** [AIR-320](https://trello.com/c/4cA5GlJn), [ADR 0079](0079-d1-authoritative-published-epg.md), [ADR 0080](0080-discovery-identity-correction.md), [ADR 0081](0081-d1-authoritative-owner-reviews.md), [ADR 0083](0083-inert-discovery-workflow.md), [ADR 0034](0034-bounded-discovery-ledger.md)  
-**Supersedes:** None while this record is Proposed. On acceptance, and only while `discovery_authority.mode` is `d1` and `cutover` is `open`, it supersedes in part [ADR 0002](0002-cloudflare-worker-r2-authority.md) for the discovery ledger, the sentence in [ADR 0079](0079-d1-authoritative-published-epg.md) decision 5 that discovery candidate and decision objects stay R2, and the R2 shard index as the owner read in [ADR 0061](0061-discovery-observation-index-and-reconsider.md). The accepted text of those records stays until then.  
+**Supersedes:** In part, and only while `discovery_authority.mode` is `d1` and `cutover` is `open`, it supersedes in part [ADR 0002](0002-cloudflare-worker-r2-authority.md) for the discovery ledger, the sentence in [ADR 0079](0079-d1-authoritative-published-epg.md) decision 5 that discovery candidate and decision objects stay R2, and the R2 shard index as the owner read in [ADR 0061](0061-discovery-observation-index-and-reconsider.md). The earlier accepted text remains as history; D1 discovery authority takes effect only after the separate marker activation.  
 **Superseded by:** None
 
 ## Context
@@ -23,7 +23,7 @@ Production D1 is schema v9. Migration `0009` (owner reviews, [ADR 0081](0081-d1-
 5. **Owner actions are real D1 writes when discovery is ready.** `discovery_reconsider` and `discovery_identity_correct` (assign and reject) store the issued confirmation, the command (effect, movie id and the owner's basis), the expected decision hash and the issued expiry with the intent (`approved`, then `running`, then `receipt`). Execute binds the submitted confirmation to that issuance, rechecks the stored command, and writes the decision in one fenced batch. A different scope, hash, expiry, basis or identity target does not write. A replay returns the stored receipt and does not write again. The receipt GET reads that row and does not read the R2 action object. A `running` intent with no receipt answers `unknown` and does not write again. While discovery is not ready and the published EPG marker is `d1`, both actions stay `supported: false` and do not write R2. While discovery is held, the confirm is refused. The UI disable contract is unchanged: an action that cannot run is not offered as a write.
 6. **What does not move.** Canonical Film and Person, credits, owner-reviewed titles and names, ratings, prediction state, and raw EPG XML. R2 keeps immutable observation segments, snapshots, raw TMDB bodies, and the owner-action receipts of the `r2` path. `importSegment` copies an archive segment into D1 only when the marker is already authoritative, the source key starts with `archive:`, the SHA-256 matches, and no lease is live. The operator script does not expose it. No automatic merge. No AIR-131 group apply and no AIR-132 versioned revoke. `ensureDiscoveryWorkflow` and `reconcileDiscoveryWorkflow` are not rewritten and are not started by this marker. The external executor remains the executor until [AIR-324](https://trello.com/c/kNtaEbm8). No new feature flag.
 
-Not decided here, and not authorized by proposing this record: applying `0010` or `0011`, importing a ledger or an archive segment, holding or sealing the marker, setting `mode` to `d1`, any discovery or TMDB run, and any production R2 or D1 write. `0009` is already applied; that fact is not a GO for this file. Applying `0010` is a separate ratings GO and is not a discovery cutover.
+Not decided here, and not authorized by accepting this record: applying `0010` or `0011`, importing a ledger or an archive segment, holding or sealing the marker, setting `mode` to `d1`, any discovery or TMDB run, and any production R2 or D1 write. `0009` is already applied; that fact is not a GO for this file. Applying `0010` is a separate ratings GO and is not a discovery cutover.
 
 ## Alternatives considered
 
@@ -36,7 +36,7 @@ Not decided here, and not authorized by proposing this record: applying `0010` o
 
 Two chunks cannot hold the lease. A decision whose evidence key does not match the active observation fails the fence and leaves the stored decision. A catalog identity collision fails before the transfer goes `loading`. A killed multi-batch leaves `loading`, and every discovery read then fails closed. The same live lease may retry a ledger seal. After that lease expires or is released, the next handoff replays that seal; the interrupted lease cannot commit after the takeover. A catalog, decision or segment load is not replayed by that handoff. The owner page's index, when the marker is `d1` and open, is the D1 rows rather than the R2 shards. `saveObservationIndex` does not write those shards in that mode. While the marker is absent, `r2`, or the schema is below 11, the R2 shards remain the index.
 
-The discovery, EPG and persistence Mermaid diagrams change in this delivery. They need the owner's visual approval. That approval is not a production GO.
+The discovery, EPG and persistence Mermaid diagrams were visually approved by the owner on 2026-11-04. That approval is not a production GO.
 
 ## Recovery and migration boundary
 
@@ -44,11 +44,11 @@ A code rollback while the marker is `r2` leaves readers on R2, whether or not `0
 
 ## Evidence
 
-- **Original decision:** not accepted. The preparation comment is on [AIR-320](https://trello.com/c/4cA5GlJn).
+- **Owner ADR acceptance and Mermaid visual approval:** [explicit decision, 2026-11-04](https://trello.com/c/4cA5GlJn#comment-6aeaf246ff978bf24e21c639), after [independent review PASS](https://github.com/vladimino/iptv-watchlist/pull/358#pullrequestreview-5765653040). This authorizes no production operation.
 - **Implementation:** the pull request that introduces this record.
 - **Dated verification:** [local sqlite note, 3–4 November 2026](../evidence/d1-migration/air-320-discovery-authority-2026-11-03.md). No production D1 or R2 read or write. The 4 November cases add the generation fence, the paged continuation, the keyed index, crash recovery, expired-lease replay of a partial seal, and the local HTTP confirm/execute/receipt/replay/tamper/expiry path, including `GET /api/catalog/available` against the D1 catalog. TMDB answers in that note are a local stub.
 - **Uncertainty:** production D1 batch behavior for a real ledger was not measured. `0010` and `0011` are not applied. The local note is a sqlite stand-in, not a production read. The limbo page was not opened.
 
 ## Follow-ups
 
-Owner acceptance of this Proposed ADR, and visual approval of the changed Mermaid, are gates on the pull request. They do not apply a migration or flip the marker. The later operational GOs are schema `0011`, import, hold, seal, and activation, each separate. `0009` is already applied and is not one of those GOs. Ratings `0010` is a separate earlier GO owned by AIR-318; discovery does not require that marker to become `d1`. AIR-324 remains the Workflow switch. AIR-131 and AIR-132 stay out of this record.
+Owner acceptance of ADR 0085 and visual approval of all three changed Mermaid were recorded on 2026-11-04. They do not apply a migration or flip the marker. The later operational GOs are schema `0011`, import, hold, seal, and activation, each separate. `0009` is already applied and is not one of those GOs. Ratings `0010` is a separate earlier GO owned by AIR-318; discovery does not require that marker to become `d1`. AIR-324 remains the Workflow switch. AIR-131 and AIR-132 stay out of this record.
