@@ -19,11 +19,17 @@
 // of that batch fails closed before any delete. It does not download a
 // replacement. Generation becomes 1 only in the commit batch, after every key,
 // payload and show matches.
-// --import --confirm import copies the catalog, decisions, status, score
-// preview, continuation and workflow while mode stays r2. It does not copy an
-// archive segment or the resolver lease. --hold --confirm hold --producers-drained
-// sets mode d1 and cutover held. --activate --confirm activate --producers-drained
-// opens that held cutover. Revert is not a command. A deploy does not run this
+// --import --confirm import --producers-drained copies the catalog, decisions,
+// status, score preview, continuation and workflow while mode stays r2. The
+// commit pins that source on the checkpoint (hop imported) and keeps the pin
+// through hold. It does not copy an archive segment or the resolver lease.
+// --hold --confirm hold --producers-drained sets mode d1 and cutover held only
+// when a fresh read still matches that pin. --activate --confirm activate
+// --producers-drained opens that held cutover after the same comparison and
+// then clears the pin. --reset-import --confirm reset-import --producers-drained
+// deletes only that import's catalog, decisions, import history and scores and
+// restores the status, continuation, workflow and checkpoint. It does not
+// delete the loaded ledger. Revert is not a command. A deploy does not run this
 // script. Each write needs its own confirm. A write_uncertain result is not
 // retried inside the process.
 // This script does not call Time Travel restore. The D1 token is sent only to
@@ -33,7 +39,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {evidenceKey} from '../src/discovery-authority.js';
-import {activateDecision, activateSql, admissionSql, assertDecisionEvidence, bodySha, catalogEntries, commitImportSql, decisionEntries, decisionGroup, holdDecision, holdSql, importDecision, importIdentity, isCutoverStop, openingImportSql, packImportBatches, parseImportIdentity, recordText, sameImportIdentity, scoreEntries, SMALL_MAX_BYTES, statusText, valuePrefix} from './discovery-cutover.mjs';
+import {activateDecision, activateSql, admissionSql, assertDecisionEvidence, bodySha, catalogEntries, commitImportSql, decisionEntries, decisionGroup, holdDecision, holdSql, importDecision, importIdentity, isCutoverStop, openingImportSql, packImportBatches, parseImportIdentity, recordText, resetImportDecision, resetImportSql, sameImportIdentity, scoreEntries, SMALL_MAX_BYTES, statusText, valuePrefix} from './discovery-cutover.mjs';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
@@ -127,7 +133,7 @@ export function loadDecision(snapshot){
  const published=marker.publishedProgrammeRunId===programme&&snapshot.transfer?.programmeRunId===programme;
  const hop=snapshot.checkpoint?.hopId??null;
  if(marker.generation===0&&programme==null&&marker.publishedProgrammeRunId==null&&state==='idle'&&observations===0&&hop==null)return 'load';
- if(marker.generation>=1&&programme&&published&&state==='committed'&&hop==null)return 'already_loaded';
+ if(marker.generation>=1&&programme&&published&&state==='committed'&&hop!=='load')return 'already_loaded';
  if(state==='loading'||observations>0||hop==='load')return 'partial_load';
  return 'partial_load';
 }
@@ -398,15 +404,15 @@ function prefix(value){
 
 function parseArgs(argv){
  const args=argv.slice(2);
- const commands=['--apply','--load','--reset-load','--activate','--import','--hold','--revert'].filter(flag=>args.includes(flag));
+ const commands=['--apply','--load','--reset-load','--reset-import','--activate','--import','--hold','--revert'].filter(flag=>args.includes(flag));
  if(commands.length>1)throw new OperatorStop('usage',2);
  const command=commands[0]||'status';
- if(!['status','--apply','--load','--reset-load','--import','--hold','--activate'].includes(command))throw new OperatorStop('usage',2);
+ if(!['status','--apply','--load','--reset-load','--reset-import','--import','--hold','--activate'].includes(command))throw new OperatorStop('usage',2);
  const target=args.includes('--target')?args[args.indexOf('--target')+1]:undefined;
  const confirm=args.includes('--confirm')?args[args.indexOf('--confirm')+1]:undefined;
  const drained=args.includes('--producers-drained');
  if((args.includes('--target')&&!target)||(args.includes('--confirm')&&!confirm))throw new OperatorStop('usage',2);
- const known=new Set(['--apply','--load','--reset-load','--import','--hold','--activate','--target','--confirm','--producers-drained']);
+ const known=new Set(['--apply','--load','--reset-load','--reset-import','--import','--hold','--activate','--target','--confirm','--producers-drained']);
  for(let index=0;index<args.length;index++){
   const arg=args[index];
   if(!known.has(arg))throw new OperatorStop('usage',2);
@@ -421,10 +427,11 @@ function parseArgs(argv){
  if(command==='--load'&&confirm!=='load')throw new OperatorStop('confirm_required',2);
  if(command==='--reset-load'&&confirm!=='reset-load')throw new OperatorStop('confirm_required',2);
  if(command==='--import'&&confirm!=='import')throw new OperatorStop('confirm_required',2);
+ if(command==='--reset-import'&&confirm!=='reset-import')throw new OperatorStop('confirm_required',2);
  if(command==='--hold'&&confirm!=='hold')throw new OperatorStop('confirm_required',2);
  if(command==='--activate'&&confirm!=='activate')throw new OperatorStop('confirm_required',2);
- if((command==='--hold'||command==='--activate')&&!drained)throw new OperatorStop('drain_required',2);
- if(drained&&command!=='--hold'&&command!=='--activate')throw new OperatorStop('usage',2);
+ if((command==='--import'||command==='--reset-import'||command==='--hold'||command==='--activate')&&!drained)throw new OperatorStop('drain_required',2);
+ if(drained&&command!=='--import'&&command!=='--reset-import'&&command!=='--hold'&&command!=='--activate')throw new OperatorStop('usage',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
  return {command,target,confirm,drained};
 }
@@ -841,7 +848,7 @@ async function readSingletons(binding){
 async function executeCutover(args, adapter, binding, snapshot, client, now, reads, bookmark){
  const clock=typeof now==='function'?now():now;
  const decision=args.command==='--import'?importDecision(snapshot):args.command==='--hold'?holdDecision(snapshot):activateDecision(snapshot);
- if(['already_held','already_active','ledger_required','partial_mismatch','marker_refused'].includes(decision))throw new OperatorStop(decision,3);
+ if(['already_held','already_active','ledger_required','partial_mismatch','marker_refused','import_required'].includes(decision))throw new OperatorStop(decision,3);
  if(decision==='partial_import'&&args.command!=='--import')throw new OperatorStop('partial_import',3);
  if(decision==='hold'||decision==='activate'||decision==='import'||decision==='partial_import'){
   const guarded=await writerReport(client,binding,clock);
@@ -851,23 +858,30 @@ async function executeCutover(args, adapter, binding, snapshot, client, now, rea
  try{built=await buildCutover(client,binding,snapshot,new Date(clock).toISOString());}
  catch(error){if(isCutoverStop(error))throw new OperatorStop(error.reason,error.exitCode);throw error;}
  const proved=await proveCutover(binding,built);
+ const pinned=parseImportIdentity(snapshot.checkpoint?.payload??null);
+ const pinMatches=!!pinned&&sameImportIdentity(pinned,built.identity);
+ if((decision==='hold'||decision==='activate'||decision==='imported'||decision==='partial_import')&&!pinMatches)throw new OperatorStop('source_changed',3);
  if(proved.mismatch)throw new OperatorStop('partial_mismatch',3);
  const scores=await storedScores(binding,built.programme);
  const single=await readSingletons(binding);
  const ready=proved.complete&&cutoverReady(built,single.status,scores,single.continuation,single.workflow);
- if(decision==='import'&&ready)return {exit:0,result:{operation:'import',writes:false,writeState:'none',reason:'already_imported',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:built.generation,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length}};
- if((decision==='hold'||decision==='activate')&&!ready)throw new OperatorStop('import_required',3);
- if(decision==='partial_import'){
-  const stored=parseImportIdentity(snapshot.checkpoint?.payload);
-  if(!stored||!sameImportIdentity(stored,built.identity))throw new OperatorStop('source_changed',3);
+ if(decision==='imported'){
+  if(!pinMatches)throw new OperatorStop('source_changed',3);
+  if(!ready)throw new OperatorStop('partial_mismatch',3);
+  return {exit:0,result:{operation:'import',writes:false,writeState:'none',reason:'already_imported',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:built.generation,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length}};
  }
+ if(decision==='hold'||decision==='activate'){
+  if(snapshot.checkpoint?.hopId!=='imported'||!pinMatches)throw new OperatorStop('source_changed',3);
+  if(!ready)throw new OperatorStop('partial_mismatch',3);
+ }
+ if(decision==='partial_import'&&!pinMatches)throw new OperatorStop('source_changed',3);
+ if(decision==='import'&&(proved.filmCursor>0||proved.decisionCursor>0||ready))throw new OperatorStop('partial_mismatch',3);
  const spec={programmeRunId:built.programme,generation:built.generation,batches:built.batches,payload:built.payload,retryAt:built.statusBody.retryAt,statusText:built.statusBody.text,scores:built.scoreRows,continuation:built.continuationBody,workflow:built.workflowBody};
  let batches;
  try{
   if(decision==='hold')batches=[holdSql(spec)];
   else if(decision==='activate')batches=[activateSql(spec)];
   else{
-   if(decision==='import'&&(proved.filmCursor>0||proved.decisionCursor>0))throw new OperatorStop('partial_mismatch',3);
    if(proved.filmCursor<built.films.length&&proved.decisionCursor>0)throw new OperatorStop('partial_mismatch',3);
    const filmGroups=built.films.slice(proved.filmCursor).map(film=>[admissionSql(film,built.programme,built.generation)]);
    const decisionGroups=[];
@@ -894,11 +908,11 @@ async function executeCutover(args, adapter, binding, snapshot, client, now, rea
  const after=await snapshotOf(binding);
  const marker=after.marker;
  if(decision==='hold'){
-  if(marker?.mode!=='d1'||marker.cutover!=='held'||marker.generation!==built.generation||marker.programmeRunId!==built.programme)throw new OperatorStop('readback_mismatch',4);
+  if(marker?.mode!=='d1'||marker.cutover!=='held'||marker.generation!==built.generation||marker.programmeRunId!==built.programme||after.checkpoint?.hopId!=='imported'||after.checkpoint?.payload!==built.payload)throw new OperatorStop('readback_mismatch',4);
  }else if(decision==='activate'){
-  if(marker?.mode!=='d1'||marker.cutover!=='open'||marker.generation!==built.generation||marker.programmeRunId!==built.programme)throw new OperatorStop('readback_mismatch',4);
+  if(marker?.mode!=='d1'||marker.cutover!=='open'||marker.generation!==built.generation||marker.programmeRunId!==built.programme||after.checkpoint?.hopId!=null||after.checkpoint?.payload!=null)throw new OperatorStop('readback_mismatch',4);
  }else{
-  if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==built.generation||after.checkpoint?.hopId!=null)throw new OperatorStop('readback_mismatch',4);
+  if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==built.generation||after.checkpoint?.hopId!=='imported'||after.checkpoint?.payload!==built.payload)throw new OperatorStop('readback_mismatch',4);
   if(!await cutoverMatches(binding,built))throw new OperatorStop('readback_mismatch',4);
  }
  return {exit:0,result:{operation:args.command.slice(2),writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:marker?.mode??null,cutover:marker?.cutover??null,generation:marker?.generation??null,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length,scores:built.scoreRows.length,resumed:decision==='partial_import',neighboursMoved:neighbours}};
@@ -910,6 +924,48 @@ async function cutoverMatches(binding, built){
  const scores=await storedScores(binding,built.programme);
  const single=await readSingletons(binding);
  return cutoverReady(built,single.status,scores,single.continuation,single.workflow);
+}
+
+async function importCopyForeign(binding, programme, generation){
+ const row=await binding.prepare("SELECT (SELECT COUNT(*) FROM discovery_segment) AS segments, (SELECT COUNT(*) FROM discovery_intent) AS intents, (SELECT COUNT(*) FROM discovery_admission WHERE programme_run_id IS NOT ? OR generation<>? OR state<>'current') AS admissions, (SELECT COUNT(*) FROM discovery_decision WHERE programme_run_id IS NOT ? OR generation<>?) AS decisions, (SELECT COUNT(*) FROM discovery_decision_history WHERE writer<>'import' OR revision<>1 OR generation<>?) AS history, (SELECT COUNT(*) FROM discovery_score WHERE programme_run_id IS NOT ? OR generation<>?) AS scores").bind(programme,generation,programme,generation,generation,programme,generation).first();
+ return [row?.segments,row?.intents,row?.admissions,row?.decisions,row?.history,row?.scores].some(value=>Number(value)>0);
+}
+
+async function importCopyClear(binding){
+ const row=await binding.prepare("SELECT (SELECT COUNT(*) FROM discovery_decision_history) AS history, (SELECT COUNT(*) FROM discovery_admission) AS admissions, (SELECT payload_json FROM discovery_status WHERE id=1) AS status, (SELECT generation FROM discovery_status WHERE id=1) AS status_generation, (SELECT revision FROM discovery_continuation WHERE id=1) AS continuation, (SELECT payload_json FROM discovery_continuation WHERE id=1) AS continuation_payload, (SELECT revision FROM discovery_workflow WHERE id=1) AS workflow, (SELECT payload_json FROM discovery_workflow WHERE id=1) AS workflow_payload").bind().first();
+ return Number(row?.history)===0&&Number(row?.admissions)===0&&row?.status==null&&Number(row?.status_generation)===0&&Number(row?.continuation)===0&&row?.continuation_payload==null&&Number(row?.workflow)===0&&row?.workflow_payload==null;
+}
+
+async function executeResetImport(adapter, binding, snapshot, client, now, reads, bookmark){
+ const clock=typeof now==='function'?now():now;
+ const decision=resetImportDecision(snapshot);
+ if(['already_held','already_active','ledger_required','partial_mismatch','marker_refused'].includes(decision))throw new OperatorStop(decision,3);
+ if(decision==='already_reset'){
+  if(!await importCopyClear(binding))throw new OperatorStop('partial_mismatch',3);
+  return {exit:0,result:{operation:'reset-import',writes:false,writeState:'none',reason:'already_reset',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:snapshot.marker?.generation??null,observations:snapshot.observations}};
+ }
+ if(decision!=='reset_import')throw new OperatorStop('unknown_state',3);
+ const guarded=await writerReport(client,binding,clock);
+ if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
+ const programme=snapshot.marker.programmeRunId;
+ const generation=snapshot.marker.generation;
+ if(await importCopyForeign(binding,programme,generation))throw new OperatorStop('partial_mismatch',3);
+ const lease=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
+ if(lease?.leaseId!=null||Number(lease?.expiresAt)!==0)throw new OperatorStop('partial_mismatch',3);
+ const fresh=await snapshotOf(binding);
+ if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
+ if(fresh.marker?.mode!==snapshot.marker?.mode||fresh.marker?.cutover!==snapshot.marker?.cutover||fresh.marker?.generation!==generation||fresh.marker?.programmeRunId!==programme||fresh.transfer?.state!==snapshot.transfer?.state||fresh.transfer?.batches!==snapshot.transfer?.batches||fresh.checkpoint?.hopId!==snapshot.checkpoint?.hopId||fresh.checkpoint?.payload!==snapshot.checkpoint?.payload||fresh.observations!==snapshot.observations)throw new OperatorStop('source_changed',3);
+ const spec={programmeRunId:programme,generation,batches:snapshot.transfer.batches,payload:snapshot.checkpoint.payload,hop:snapshot.checkpoint.hopId,observations:snapshot.observations};
+ reads.writeState='unknown';
+ await adapter.executeRendered(resetImportSql(spec));
+ reads.writeState='committed';
+ const after=await snapshotOf(binding);
+ const marker=after.marker;
+ if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==generation||marker.programmeRunId!==programme||after.transfer?.state!=='committed'||after.transfer?.batches!==snapshot.transfer.batches||after.checkpoint?.hopId!=null||after.checkpoint?.payload!=null||after.observations!==snapshot.observations||after.sideRows!==0)throw new OperatorStop('readback_mismatch',4);
+ if(!await importCopyClear(binding))throw new OperatorStop('readback_mismatch',4);
+ const leaseAfter=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
+ if(leaseAfter?.leaseId!=null||Number(leaseAfter?.expiresAt)!==0)throw new OperatorStop('readback_mismatch',4);
+ return {exit:0,result:{operation:'reset-import',writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',cutover:'open',generation,programmeRunId:programme,observations:after.observations,neighboursMoved:neighboursMoved(snapshot.markers,after.markers)}};
 }
 
 export async function runDiscoveryProduction({argv=process.argv,env=process.env,fetchImpl=fetch,now=Date.now()}={}){
@@ -1003,6 +1059,7 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
    writeState='committed';
    return {exit:0,result:{operation:'reset-load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:0,observations:0}};
   }
+  if(args.command==='--reset-import')return await executeResetImport(adapter,binding,snapshot,client,now,reads,bookmark);
   if(args.command==='--import'||args.command==='--hold'||args.command==='--activate')return await executeCutover(args,adapter,binding,snapshot,client,now,reads,bookmark);
   const gate=loadDecision(snapshot);
   if(gate==='already_loaded')throw new OperatorStop(gate,3);

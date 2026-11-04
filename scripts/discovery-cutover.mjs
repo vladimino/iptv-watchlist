@@ -130,6 +130,7 @@ export function importDecision(snapshot){
  if(!loaded(snapshot))return 'ledger_required';
  const hop=snapshot.checkpoint?.hopId??null;
  if(hop==='import')return 'partial_import';
+ if(hop==='imported')return 'imported';
  if(hop!=null)return 'partial_mismatch';
  return 'import';
 }
@@ -139,15 +140,32 @@ export function holdDecision(snapshot){
  if(marker?.mode==='d1'&&marker.cutover==='held')return 'already_held';
  if(marker?.mode==='d1'&&marker.cutover==='open')return 'already_active';
  if(!loaded(snapshot))return 'ledger_required';
- if((snapshot.checkpoint?.hopId??null)!==null)return 'partial_import';
- return 'hold';
+ const hop=snapshot.checkpoint?.hopId??null;
+ if(hop==='import')return 'partial_import';
+ if(hop==='imported')return 'hold';
+ if(hop!=null)return 'partial_mismatch';
+ return 'import_required';
 }
 
 export function activateDecision(snapshot){
  const marker=snapshot?.marker;
  if(marker?.mode==='d1'&&marker.cutover==='open'&&marker.generation>=1&&marker.programmeRunId&&marker.programmeRunId===marker.publishedProgrammeRunId)return 'already_active';
- if(marker?.mode==='d1'&&marker.cutover==='held'&&marker.generation>=1&&marker.programmeRunId&&marker.programmeRunId===marker.publishedProgrammeRunId&&snapshot.transfer?.state==='committed'&&snapshot.transfer.programmeRunId===marker.programmeRunId)return 'activate';
+ if(marker?.mode==='d1'&&marker.cutover==='held'&&marker.generation>=1&&marker.programmeRunId&&marker.programmeRunId===marker.publishedProgrammeRunId&&snapshot.transfer?.state==='committed'&&snapshot.transfer.programmeRunId===marker.programmeRunId&&snapshot.checkpoint?.hopId==='imported')return 'activate';
  return 'marker_refused';
+}
+
+export function resetImportDecision(snapshot){
+ const marker=snapshot?.marker;
+ if(marker?.mode==='d1'&&marker.cutover==='held')return 'already_held';
+ if(marker?.mode==='d1'&&marker.cutover==='open')return 'already_active';
+ if(!loaded(snapshot))return 'ledger_required';
+ const hop=snapshot.checkpoint?.hopId??null;
+ if(hop==null)return Number(snapshot.sideRows)>0?'partial_mismatch':'already_reset';
+ if(hop!=='import'&&hop!=='imported')return 'partial_mismatch';
+ const identity=parseImportIdentity(snapshot.checkpoint?.payload??null);
+ if(!identity||identity.programmeRunId!==marker.programmeRunId||identity.generation!==marker.generation||identity.batches!==snapshot.transfer?.batches)return 'partial_mismatch';
+ if((snapshot.checkpoint?.programmeRunId??null)!==marker.programmeRunId)return 'partial_mismatch';
+ return 'reset_import';
 }
 
 export function importIdentity(spec){
@@ -261,31 +279,58 @@ export function commitImportSql(spec){
  }
  statements.push(renderSql("UPDATE discovery_continuation SET programme_run_id=?, payload_json=?, revision=? WHERE id=1",[spec.continuation.programmeRunId,spec.continuation.text,spec.continuation.revision]));
  statements.push(renderSql("UPDATE discovery_workflow SET instance_id=?, programme_run_id=?, series=?, payload_json=?, revision=? WHERE id=1",[spec.workflow.instanceId,spec.workflow.programmeRunId,spec.workflow.series,spec.workflow.text,spec.workflow.revision]));
- statements.push(renderSql("UPDATE discovery_checkpoint SET programme_run_id=NULL, generation=0, hop_id=NULL, payload_json=NULL WHERE id=1 AND hop_id='import' AND programme_run_id=? AND payload_json=?",[spec.programmeRunId,spec.payload]));
- statements.push("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id IS NULL AND payload_json IS NULL AND programme_run_id IS NULL AND generation=0)");
+ statements.push(renderSql("UPDATE discovery_checkpoint SET hop_id='imported', programme_run_id=?, generation=?, payload_json=? WHERE id=1 AND hop_id='import' AND programme_run_id=? AND payload_json=?",[spec.programmeRunId,spec.generation,spec.payload,spec.programmeRunId,spec.payload]));
+ statements.push(renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id='imported' AND programme_run_id=? AND generation=? AND payload_json=?)",[spec.programmeRunId,spec.generation,spec.payload]));
  statements.push(renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=? AND programme_run_id=? AND published_programme_run_id=?)",[spec.generation,spec.programmeRunId,spec.programmeRunId]));
  statements.push(renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='committed' AND programme_run_id=? AND batches=?)",[spec.programmeRunId,spec.batches]));
  if(statements.length>IMPORT_BATCH_STATEMENTS||statements.reduce((sum,sql)=>sum+Buffer.byteLength(sql,'utf8')+1,0)>IMPORT_BATCH_BYTES)stop('batch_too_large');
  return statements;
 }
 
-function markerFence(mode, cutover, spec){
- return renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority a, discovery_transfer t, discovery_checkpoint c, discovery_lease l WHERE a.id=1 AND t.id=1 AND c.id=1 AND l.id=1 AND a.mode=? AND a.cutover=? AND a.generation=? AND a.programme_run_id=? AND a.published_programme_run_id=? AND t.state='committed' AND t.programme_run_id=? AND t.batches=? AND c.hop_id IS NULL AND c.payload_json IS NULL AND l.lease_id IS NULL AND l.expires_at=0)",[mode,cutover,spec.generation,spec.programmeRunId,spec.programmeRunId,spec.programmeRunId,spec.batches]);
+function markerFence(mode, cutover, spec, hop){
+ const pinned=hop==='imported';
+ const hopSql=pinned?"c.hop_id='imported' AND c.programme_run_id=? AND c.payload_json=?":"c.hop_id IS NULL AND c.payload_json IS NULL AND c.programme_run_id IS NULL";
+ const params=[mode,cutover,spec.generation,spec.programmeRunId,spec.programmeRunId,spec.programmeRunId,spec.batches];
+ if(pinned)params.push(spec.programmeRunId,spec.payload);
+ return renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority a, discovery_transfer t, discovery_checkpoint c, discovery_lease l WHERE a.id=1 AND t.id=1 AND c.id=1 AND l.id=1 AND a.mode=? AND a.cutover=? AND a.generation=? AND a.programme_run_id=? AND a.published_programme_run_id=? AND t.state='committed' AND t.programme_run_id=? AND t.batches=? AND "+hopSql+" AND l.lease_id IS NULL AND l.expires_at=0)",params);
 }
 
 export function holdSql(spec){
  return [
-  markerFence('r2','open',spec),
+  markerFence('r2','open',spec,'imported'),
   renderSql("UPDATE discovery_authority SET mode='d1', cutover='held' WHERE id=1 AND mode='r2' AND cutover='open' AND generation=? AND programme_run_id=? AND published_programme_run_id=?",[spec.generation,spec.programmeRunId,spec.programmeRunId]),
-  markerFence('d1','held',spec),
+  markerFence('d1','held',spec,'imported'),
  ];
 }
 
 export function activateSql(spec){
  return [
-  markerFence('d1','held',spec),
+  markerFence('d1','held',spec,'imported'),
   renderSql("UPDATE discovery_authority SET cutover='open' WHERE id=1 AND mode='d1' AND cutover='held' AND generation=? AND programme_run_id=? AND published_programme_run_id=?",[spec.generation,spec.programmeRunId,spec.programmeRunId]),
-  markerFence('d1','open',spec),
+  renderSql("UPDATE discovery_checkpoint SET programme_run_id=NULL, generation=0, hop_id=NULL, payload_json=NULL WHERE id=1 AND hop_id='imported' AND programme_run_id=? AND payload_json=?",[spec.programmeRunId,spec.payload]),
+  markerFence('d1','open',spec,null),
+ ];
+}
+
+export function resetImportSql(spec){
+ if((spec.hop!=='import'&&spec.hop!=='imported')||typeof spec.payload!=='string'||!Number.isInteger(spec.observations)||spec.observations<0)stop('partial_mismatch');
+ const hopSql=spec.hop==='imported'?"c.hop_id='imported'":"c.hop_id='import'";
+ const owned="NOT EXISTS (SELECT 1 FROM discovery_segment) AND NOT EXISTS (SELECT 1 FROM discovery_intent) AND NOT EXISTS (SELECT 1 FROM discovery_admission WHERE programme_run_id IS NOT ? OR generation<>? OR state<>'current') AND NOT EXISTS (SELECT 1 FROM discovery_decision WHERE programme_run_id IS NOT ? OR generation<>?) AND NOT EXISTS (SELECT 1 FROM discovery_decision_history WHERE writer<>'import' OR revision<>1 OR generation<>?) AND NOT EXISTS (SELECT 1 FROM discovery_score WHERE programme_run_id IS NOT ? OR generation<>?) AND (SELECT COUNT(*) FROM discovery_observation)=?";
+ const ownedParams=[spec.programmeRunId,spec.generation,spec.programmeRunId,spec.generation,spec.generation,spec.programmeRunId,spec.generation,spec.observations];
+ const gate="EXISTS (SELECT 1 FROM discovery_authority a, discovery_transfer t, discovery_checkpoint c, discovery_lease l WHERE a.id=1 AND t.id=1 AND c.id=1 AND l.id=1 AND a.mode='r2' AND a.cutover='open' AND a.generation=? AND a.programme_run_id=? AND a.published_programme_run_id=? AND t.state='committed' AND t.programme_run_id=? AND t.batches=? AND "+hopSql+" AND c.programme_run_id=? AND c.payload_json=? AND l.lease_id IS NULL AND l.expires_at=0 AND "+owned+")";
+ const gateParams=[spec.generation,spec.programmeRunId,spec.programmeRunId,spec.programmeRunId,spec.batches,spec.programmeRunId,spec.payload,...ownedParams];
+ const fenced=(sql,params)=>renderSql(sql+' AND '+gate,params.concat(gateParams));
+ return [
+  renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority a, discovery_transfer t, discovery_checkpoint c, discovery_lease l WHERE a.id=1 AND t.id=1 AND c.id=1 AND l.id=1 AND a.mode='r2' AND a.cutover='open' AND a.generation=? AND a.programme_run_id=? AND a.published_programme_run_id=? AND t.state='committed' AND t.programme_run_id=? AND t.batches=? AND "+hopSql+" AND c.programme_run_id=? AND c.payload_json=? AND l.lease_id IS NULL AND l.expires_at=0 AND "+owned+")",gateParams),
+  fenced("DELETE FROM discovery_decision_history WHERE writer='import' AND revision=1 AND generation=?",[spec.generation]),
+  fenced("DELETE FROM discovery_decision WHERE programme_run_id=? AND generation=?",[spec.programmeRunId,spec.generation]),
+  fenced("DELETE FROM discovery_admission WHERE programme_run_id=? AND generation=? AND state='current'",[spec.programmeRunId,spec.generation]),
+  fenced("DELETE FROM discovery_score WHERE programme_run_id=? AND generation=?",[spec.programmeRunId,spec.generation]),
+  fenced("UPDATE discovery_status SET programme_run_id=NULL, generation=0, retry_at=NULL, payload_json=NULL WHERE id=1",[]),
+  fenced("UPDATE discovery_continuation SET programme_run_id=NULL, payload_json=NULL, revision=0 WHERE id=1",[]),
+  fenced("UPDATE discovery_workflow SET instance_id=NULL, programme_run_id=NULL, series=NULL, payload_json=NULL, revision=0 WHERE id=1",[]),
+  renderSql("UPDATE discovery_checkpoint SET programme_run_id=NULL, generation=0, hop_id=NULL, payload_json=NULL WHERE id=1 AND "+hopSql.replaceAll('c.','')+" AND programme_run_id=? AND payload_json=? AND "+gate,[spec.programmeRunId,spec.payload,...gateParams]),
+  renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority a, discovery_transfer t, discovery_checkpoint c, discovery_lease l, discovery_status s, discovery_continuation k, discovery_workflow w WHERE a.id=1 AND t.id=1 AND c.id=1 AND l.id=1 AND s.id=1 AND k.id=1 AND w.id=1 AND a.mode='r2' AND a.cutover='open' AND a.generation=? AND a.programme_run_id=? AND a.published_programme_run_id=? AND t.state='committed' AND t.programme_run_id=? AND t.batches=? AND c.hop_id IS NULL AND c.payload_json IS NULL AND l.lease_id IS NULL AND l.expires_at=0 AND s.programme_run_id IS NULL AND s.generation=0 AND s.payload_json IS NULL AND k.revision=0 AND k.payload_json IS NULL AND w.revision=0 AND w.payload_json IS NULL AND NOT EXISTS (SELECT 1 FROM discovery_admission) AND NOT EXISTS (SELECT 1 FROM discovery_decision) AND NOT EXISTS (SELECT 1 FROM discovery_decision_history) AND NOT EXISTS (SELECT 1 FROM discovery_score) AND (SELECT COUNT(*) FROM discovery_observation)=?)",[spec.generation,spec.programmeRunId,spec.programmeRunId,spec.programmeRunId,spec.batches,spec.observations]),
  ];
 }
 
