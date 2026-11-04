@@ -161,6 +161,14 @@ The production split replaces the Worker's own first bounded commit, which would
 
 `node scripts/discovery-ledger-benchmark.mjs --output /absolute/dir/outside/repo [--sizes 20,40,63,90]` builds synthetic stores and reports the active and archive sizes, plus the smallest Node old space at which the commit and a chunk complete in each mode. It is offline: no network, no R2, no production data. The numbers are relative to Node, not the Workers isolate limit. See the dated [benchmark evidence](../evidence/discovery-ledger-benchmark-2026-10-27.md).
 
+## Chunk memory diagnostics (AIR-342)
+
+- **Confirm the cause.** Telemetry of the resolve request or the `POST /mcp` step shows `outcome: exceededMemory`. A status left at `checkpoint: cheap_pass` with an `orphaned` continuation is a chunk that died after its cheap pass. Read it with `epg_pipeline_status`; never repeat the chunk to observe it.
+- **Offline profile.** Run `npm run build`, then `node --expose-gc scripts/discovery-chunk-profile.mjs [--items 37000] [--films 3300] [--decisions 4400]`.
+  - It replays one chunk of the built Worker against a synthetic generation of production size. It makes no request and needs no data.
+  - Compare the smallest `--max-old-space-size` a run completes in; the script header shows the loop.
+- **Reading the figures.** Node heap ranks code versions; it is not workerd's 128 MB limit. The dated reading is in the [AIR-342 evidence](../evidence/discovery/air-342-chunk-memory-2026-11-04.md).
+
 ## Commit memory diagnostics (AIR-263)
 
 **Phase markers.** Every EPG commit logs one `{"event":"epg_phase"}` line per phase edge (`enter`, `exit` or `error`). Each line holds `runId`, `phase`, `at`, `elapsedMs` on exit, and only counts or byte sizes the step already holds. It never holds titles, film ids, slugs, HTML or payloads.

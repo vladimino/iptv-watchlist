@@ -1,7 +1,10 @@
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
 function addGroup(left,right,displayed){const group={compared:(left?.compared||0)+(right?.compared||0),mismatched:(left?.mismatched||0)+(right?.mismatched||0)};if(displayed)group.displayed=(left?.displayed||0)+(right?.displayed||0);return group;}
 function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count?.films)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,films:addGroup(prior?.films,count.films,true),people:addGroup(prior?.people,count.people,true),cache:addGroup(prior?.cache,count.cache,false)}};}
-const loadJSON=async(env,key)=>{
+// `options.item`, for a discovery ledger stored in R2, parses the `items` array one element at a time and keeps what
+// `item` returns for each (AIR-342): the document is never held whole as text and tree. Any other key, a D1-routed
+// read, or an object without a readable body is parsed as before.
+const loadJSON=async(env,key,options=null)=>{
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeRead(env,key);
   if(routed.handled)return routed.value;
@@ -24,24 +27,24 @@ const loadJSON=async(env,key)=>{
    if(stagedName){
     if(!run)return null;
     const copy=await env.BUCKET.get(epgGenerationKey(run,stagedName));
-    if(copy)return copy.json();
+    if(copy)return storedJSON(copy,key,options);
     if(run!==live.programmeRunId)return null;
     const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),body=pointer?await pointer.json():null;
     if(body?.phase!=='published'||body.programmeRunId!==run)return null;
     const shared=await env.BUCKET.get(key);
-    return shared?shared.json():null;
+    return shared?storedJSON(shared,key,options):null;
    }
   }
  }
  const staged=key==='programme.json'?'programme.json':key==='epg/discovery-latest.json'?'discovery-latest.json':key==='epg/discovered-films.json'?'discovered-films.json':null;
  if(staged){
   const pinned=env.epgPin?.programmeRunId;
-  if(pinned){const object=await env.BUCKET.get(epgGenerationKey(pinned,staged));if(object)return object.json();}
-  else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return object.json();}}}
+  if(pinned){const object=await env.BUCKET.get(epgGenerationKey(pinned,staged));if(object)return storedJSON(object,key,options);}
+  else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return storedJSON(object,key,options);}}}
  }
  if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key);if(routed.handled)return routed.value;}
  if(typeof RatingsD1!=='undefined'){const routed=await RatingsD1.routeRead(env,key);if(routed.handled)return routed.value;}
- const o=await env.BUCKET.get(key);let value=o?await o.json():null;
+ const o=await env.BUCKET.get(key);let value=o?await storedJSON(o,key,options):null;
  if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
  if(key==='enrichment/view-index.json'&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);
  return value;
@@ -478,6 +481,12 @@ async function readLedgerSegment(env,manifest,segment){const entry=manifest?.seg
 function discoveryHolder(value){
  if(value&&typeof value==='object'&&!Array.isArray(value)&&Object.prototype.hasOwnProperty.call(value,'discovery'))return value;
  return {discovery:value||[]};
+}
+async function storedJSON(object,key,options){
+ if(typeof options?.item!=='function'||key!=='epg/discovery-latest.json'||!ledgerStreamable(object))return object.json();
+ const items=[];
+ const wrapper=await forEachJsonArrayItems(ledgerChunks(object),'items',item=>{items.push(options.item(item));});
+ return {...wrapper,items};
 }
 function ledgerStreamable(object){return !!(object&&(object.body&&typeof object.body.getReader==='function'||typeof object.text==='function'));}
 async function* ledgerChunks(object){

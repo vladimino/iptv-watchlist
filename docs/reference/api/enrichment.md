@@ -128,7 +128,16 @@ The canonical cache is persistent, independently of current broadcasts. `hot` is
 
 `POST /api/enrichment/discovery/resolve` keeps the existing `limit` (1–24) contract. A chunk is also bounded by 22 seconds and 16 TMDB requests, with 200 ms pacing. Each confirmed cache record and resolution decision is persisted individually; a conditional R2 lease prevents overlapping resolver writers. On restart, already confirmed identities are reused. HTTP 429 retains work and stores `retryAt`; no busy retry loop. Ambiguous/no-match decisions remain unresolved with exponential daily retry, capped at seven days.
 
-One request runs one discovery chunk and does not schedule another. A separate HTTP request does not guarantee a new Cloudflare isolate; one chunk per request is a memory hypothesis to verify in production after this change is deployed. `chunks:0` reports the contract without running a chunk. The `DiscoveryContinuation` entrypoint (`src/continuation.js`) stays internal-only and also runs one chunk. Public HTTP always reaches the default export, so the entrypoint has no internet-facing route. A public self-fetch is not a fallback: Access would refuse it, and Cloudflare rejects a Worker's subrequest to its own zone (error 1042). No cookie, Access JWT, `OAI-Sites-Authorization`, or other credential is forwarded or stored. The Sites-era `EPG_SITE_SERVICE_TOKEN` is no longer read.
+One request runs one discovery chunk and does not schedule another. A separate HTTP request does not guarantee a new Cloudflare isolate; one chunk per request is a memory hypothesis to verify in production after this change is deployed.
+
+**Chunk memory (AIR-342).** A chunk reads its inputs one after another.
+- **Streamed ledger.** An R2 ledger is streamed item by item. Each observation keeps only what the chunk reads: the EPG description, the airing counters and the last-seen run are dropped.
+- **Released detail.** Once the chunk has chosen its candidates, the others also release their raw titles.
+- **Description on demand.** A chosen candidate whose TMDB detail has no overview reads its description back with one more streamed pass.
+- **Released catalog.** The catalog is released before the programme re-read, the prediction queue and the observation index.
+- **Unchanged.** A D1-routed ledger is read as before. Decisions, the catalog, the status and the indexes are the same as when the chunk kept everything.
+
+Measurements: [AIR-342 evidence](../../evidence/discovery/air-342-chunk-memory-2026-11-04.md). `chunks:0` reports the contract without running a chunk. The `DiscoveryContinuation` entrypoint (`src/continuation.js`) stays internal-only and also runs one chunk. Public HTTP always reaches the default export, so the entrypoint has no internet-facing route. A public self-fetch is not a fallback: Access would refuse it, and Cloudflare rejects a Worker's subrequest to its own zone (error 1042). No cookie, Access JWT, `OAI-Sites-Authorization`, or other credential is forwarded or stored. The Sites-era `EPG_SITE_SERVICE_TOKEN` is no longer read.
 
 `epg/resolver-continuation.json` (shown as `continuation` in pipeline status) records `paused` (`epg_committed`, `scan_committed`, `chunk_budget`, `backoff`, `programme_changed`, `interrupted`), `running`, `complete`, or `error`. A live lease (`expiresAt` still in the future) returns `discovery.state: busy` and `nextAction: wait` without overwriting the continuation or writing decisions. An expired lease is not deleted ahead of that call.
 

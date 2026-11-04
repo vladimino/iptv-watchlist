@@ -555,15 +555,54 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const summary={schemaVersion:2,stage:error||remaining>checked?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked,remaining:Math.max(0,remaining-checked),error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls};
  await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);return summary;
 }
+// AIR-342. The chunk's ledger is its own parse and is never written back. Its fields serve three readers:
+// - the cheap pass, the counts, the filters and the observation index read the key, titles, year, durations, shows,
+//   lastAiring, lastSeenAt, seenInLatestSnapshot and the confirmed id;
+// - the cheap pass also adds the raw titles of a touched observation to its Film's aliases;
+// - a detail-verified Film takes the raw titles and, when TMDB has no overview, the EPG description of its candidate.
+// So an R2 ledger is streamed without the description and the airing counters (`compactLedgerItem`), which are about
+// half of its bytes, and once the chunk has chosen its candidates every other observation also releases its raw
+// titles (`releaseLedgerDetail`). A chosen candidate whose description was not kept reads it back on demand.
+const LEDGER_DETAIL_FIELDS=['description','rawTitles','firstAiring','airings','lastSeenProgrammeRunId'];
+const LEDGER_STREAM_DROPPED=['description','firstAiring','airings','lastSeenProgrammeRunId'];
+function compactLedgerItem(item){
+ if(item&&typeof item==='object')for(const field of LEDGER_STREAM_DROPPED)if(item[field]!==undefined)item[field]=undefined;
+ return item;
+}
+function releaseLedgerDetail(items,keep){
+ for(const item of items){
+  if(keep.has(item))continue;
+  for(const field of LEDGER_DETAIL_FIELDS)if(item[field]!==undefined)item[field]=undefined;
+ }
+}
+// The EPG description of one observation, streamed from the same ledger the chunk pinned. Null when the ledger or the
+// observation is gone or carries none.
+async function ledgerDescription(pinned,key){
+ let found=null;
+ await loadJSON(pinned,'epg/discovery-latest.json',{item:item=>{if(item?.key===key&&typeof item.description==='string')found=item.description;return null;}});
+ return found;
+}
 async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
  // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
- const [source,resolution,catalog,last]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json')]);
+ // AIR-342: the inputs are read one after another. Each R2 JSON is held as its text and its parsed tree while it is
+ // parsed, so reading the ledger (tens of MB) beside the catalog and the decisions put all of them in memory at once.
+ let streamed=false,source;
+ try{source=await loadJSON(pinned,'epg/discovery-latest.json',{item:item=>{streamed=true;return compactLedgerItem(item);}});}
+ catch(e){
+  // The streamed reader refuses a document without an `items` array, which a whole parse returns as is; that ledger
+  // keeps its old outcome below (awaiting_epg_discovery). Any other failure is the chunk's error, as before.
+  if(e?.message!=='Discovery ledger JSON is incomplete')throw e;
+  streamed=false;source=await loadJSON(pinned,'epg/discovery-latest.json');
+ }
  if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
+ const last=await loadJSON(pinned,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
- const decisions=resolution||{},films=catalog||{},watchlist=(report.films||[]),knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
+ const resolution=await loadJSON(pinned,'epg/discovery-resolution.json');
+ let films=await loadJSON(pinned,'epg/discovered-films.json')||{};
+ const decisions=resolution||{},watchlist=(report.films||[]),knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
  const indexFilm=film=>{if(!film?.tmdbId)return;for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=epgTitleParts(alias).normalizedTitle;if(!key)continue;const entries=aliasIndex.get(key)||new Map();entries.set(String(film.tmdbId),film);aliasIndex.set(key,entries);}};
  for(const film of [...Object.values(films),...watchlist])indexFilm(film);
  let screenedOut=0,knownAliases=0,touched=0,migrated=0;for(const film of Object.values(films))if(film.tmdbId&&film.canonicalIdentity!=='tmdb:'+film.tmdbId){film.canonicalIdentity='tmdb:'+film.tmdbId;migrated++;}
@@ -576,9 +615,12 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  await fence();await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
  const preview={},now=Date.now(),pending=source.items.filter(c=>resolutionActionability(c,decisions[c.key],now)),hotRank=new Map(pending.map(c=>[c,candidateIsHot(c,now)?1:0]));
  pending.sort((a,b)=>hotRank.get(b)-hotRank.get(a)||Number(!!b.year)-Number(!!a.year)||b.lastAiring-a.lastAiring||a.key.localeCompare(b.key));
+ const selected=pending.slice(0,limit);
+ pending.length=0;hotRank.clear();
+ releaseLedgerDetail(source.items,new Set(selected));
  let checked=0,added=0,tmdbCalls=0,error=null,retryAt=null;
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
- for(const candidate of pending.slice(0,limit)){
+ for(const candidate of selected){
   if(Date.now()>deadline||tmdbCalls>=16)break;
   try{
    let candidates=knownScorerCandidates(aliasIndex,candidate);
@@ -602,7 +644,10 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
     const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
     let saved=true;
     if(knownTmdb.has(String(movie.id)))saved=await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence);
-    else{const old=films[id];if(!old)added++;films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
+    else{
+     const old=films[id];if(!old)added++;
+     if(streamed&&!movie.overview&&candidate.description===undefined)candidate.description=await ledgerDescription(pinned,candidate.key)??undefined;
+     films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
     if(!saved||!await publishedGenerationMatches(env,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
     decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,identitySource:'tmdb_detail',checkedAt:new Date().toISOString(),evidenceKey:candidateEvidence(candidate),provenance:{authority:'tmdb_detail',searchHit:searched,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null},scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null},...ownerMarkerCarry(decisions[candidate.key])};
    }
@@ -610,6 +655,9 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
    await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);checked++;
   }catch(e){if(e?.name==='LeaseLostError')throw e;error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
  }
+ // The catalog and its alias index serve only the lookups above. Released here, before the programme, the prediction
+ // queue (which reads its own copy of the catalog) and the observation index allocate their own copies.
+ films=null;aliasIndex.clear();knownTmdb.clear();
  const currentReport=await loadJSON(env,'programme.json');
  if(source.programmeRunId&&currentReport?.runId&&currentReport.runId!==source.programmeRunId){
   const changed={schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:source.items.filter(c=>discoveryReady(c,decisions[c.key],Date.now())).length,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,programmeChanged:true,...VARIANT_DIAGNOSTIC};
