@@ -200,8 +200,14 @@ const LetterboxdDiary=(()=>{
  }
  // ratings_storage_migrate: the merge form of the current cursor, its progress and diagnostics unchanged.
  const migrateCursor=(state,writer)=>sorted({...emptyState(),...(state||{}),schemaVersion:2,writer});
- async function readCursor(env){const object=await env.BUCKET.get(KEYS.state);return {object,state:object?await object.json():null};}
- const putCursor=(env,object,value)=>env.BUCKET.put(KEYS.state,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ async function readCursor(env){
+  if(typeof RatingsD1!=='undefined'){const owned=await RatingsD1.readOwned(env,KEYS.state);if(owned.owned)return {object:owned.etag?{etag:owned.etag}:null,state:owned.value};}
+  const object=await env.BUCKET.get(KEYS.state);return {object,state:object?await object.json():null};
+ }
+ const putCursor=async(env,object,value)=>{
+  if(typeof RatingsD1!=='undefined'){const owned=await RatingsD1.putOwned(env,KEYS.state,object?.etag??null,value);if(owned.owned)return owned.saved;}
+  return env.BUCKET.put(KEYS.state,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+ };
  // Every cursor write is conditional on the version read, and the rule follows the version found at the write: a
  // version 1 cursor gets this run's state as before; a merge-form cursor gets this run's state merged in, with its
  // writer, so no write of this code turns a migrated cursor back into version 1. `progressOnly` (a per-page checkpoint)

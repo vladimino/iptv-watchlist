@@ -112,9 +112,13 @@ This is not a storage migration and it is not a reason to repeat the cutover abo
 
 `isolated` means two consecutive runs were interrupted in the same phase at the same checkpoint: the step dies at the same place, typically a Worker resource limit. Record `isolation` (phase, checkpoint, run ids) and the Workers Observability end reason, and stop. Clearing it is an owner decision: one `ratings_sync_start({trigger:'manual', clearIsolation:true})`, normally after the cause has been fixed. A Scheduled Task never clears it.
 
+### Ratings storage marker
+
+[ADR 0084](../adr/0084-d1-authoritative-ratings.md) (Proposed). Migration `0010` is not applied. This page does not apply it, does not import the ratings objects, and does not start a ratings run. While the marker is absent or `mode` is `r2`, the Diary cursor, history, facts, run, migration witness and removal queue stay in R2. Diary page 1, the removal-lookup budgets, and the fail-closed states `none`, `partial` and `regressed` are unchanged. The EPG commit still does not read Diary. After a separate activation sets `mode` `d1` and `cutover` `open`, those writers use D1 and do not fall back to R2. The event log stays in R2. A confirmed rating on a removal event is a projection of the fact. The production entry is `scripts/ratings-domain-production.mjs`. Status is the default. Each of `--apply`, `--load`, `--activate`, `--release-hold`, `--seal-hold` and `--revert` needs its own `--confirm` and `--target iptv`. Activate and seal also need `--producers-drained`. None of those commands is authorized here. The procedure is in the [backfill runbook](d1-backfill.md#ratings-domain-schema-v10).
+
 ### Rollback
 
-1. Disable the Ratings Task, if enabled. That stops the scheduled run. It does not put Diary back inside the EPG commit.
+1. Disable the Ratings Task, if enabled. That stops the scheduled run. It does not put Diary back inside the EPG commit. It does not change `ratings_domain_authority`.
 2. Do not set `RATINGS_PIPELINE=inline` and do not delete the binding as a rollback. The Worker ignores the binding. After the leftover binding is deleted, code from before ADR 0074 must not be deployed until `RATINGS_PIPELINE=separate` is restored and read back: that older code treats a missing binding as `inline`.
 3. Once migrated (cutover step 3), a code revert is **not** a rollback of R2. Earlier code prunes the version 2 queue without its references and writes the cursor back as version 1. Undoing it needs a separate owner decision on the stored objects. A run left `running` stays until a later start closes it.
 
