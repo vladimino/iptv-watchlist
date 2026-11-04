@@ -247,47 +247,42 @@ flowchart TD
     ensureEpg -->|read, then create or attach| epgCtl
     epgCtl --> epgWf
     epgWf -->|write, then checkpoint| epgAuth
-    epgWf -->|fenced checkpoint and budget| epgCtl
     ensureDisc -->|read, then create or attach| discCtl
     discCtl --> discWf
     discWf -->|write, then checkpoint| discAuth
-    discWf -->|fenced checkpoint and budget| discCtl
     ensureRat -->|read, then create or attach| ratCtl
     ratCtl --> ratWf
     ratWf -->|write, then checkpoint| ratAuth
-    ratWf -->|fenced checkpoint and budget| ratCtl
     epgAuth -.->|publication queues fenced intent| discCtl
     epgCtl & discCtl & ratCtl -.-> status
     status -.-> monitor
 ```
 
-The three domains share no lease, queue, store or Workflow instance; the only shared element is the clock. Each `ensure` reads its own control record and creates or attaches at most one instance with an id derived from the run key, so a duplicate firing attaches to the same instance. EPG publication queues Discovery's fenced intent and does not wait for Discovery. The dotted arrows to the status routes are reads only.
+The three domains share no lease, queue, store or Workflow instance; the only shared element is the clock. Each instance writes its domain data first and then its fenced checkpoint and budget into its own control record, compared against the epoch. Each `ensure` reads its own control record and creates or attaches at most one instance with an id derived from the run key, so a duplicate firing attaches to the same instance. EPG publication queues Discovery's fenced intent and does not wait for Discovery. The dotted arrows to the status routes are reads only.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Due: schedule reached or work queued
-    Due --> Running: ensure wins the owner CAS
-    Due --> Due: duplicate firing attaches
-    Running --> Checkpointed: write, then read-back checkpoint
-    Checkpointed --> Running: more work, same run key
-    Checkpointed --> Waiting: retryAt, Retry-After, pause or lease
+    Idle --> Due: due
+    Due --> Running: owner CAS won
+    Running --> Checkpointed: write, read back
+    Checkpointed --> Running: more work
+    Checkpointed --> Waiting: known wake
     Checkpointed --> Idle: run key done
-    Waiting --> Due: wake time reached
-    Running --> Unknown: timeout, lost response or killed step
-    Unknown --> Checkpointed: read-after-unknown finds the write
-    Unknown --> Cooldown: no write found, budget left
-    Running --> Cooldown: transient failure, budget left
-    Cooldown --> Due: cooldownUntil reached
-    Unknown --> Quarantined: evidence unreadable or contradictory, or cap reached
-    Running --> Quarantined: unsafe evidence, or transient at the cap
+    Waiting --> Due: wake time
+    Running --> Unknown: outcome lost
+    Unknown --> Checkpointed: write found
+    Unknown --> Cooldown: no write, budget left
+    Running --> Cooldown: transient, budget left
+    Cooldown --> Due: cooldown over
+    Unknown --> Quarantined: unreadable or cap
+    Running --> Quarantined: unsafe or cap
     Running --> FailedPermanent: credentials or contract
-    FailedPermanent --> Due: precondition holds again
-    Quarantined --> Due: next run key, only for budget exhaustion
-    Quarantined --> Due: owner-approved clear
+    FailedPermanent --> Due: precondition holds
+    Quarantined --> Due: next run key or owner clear
 ```
 
-Only a read-back checkpoint that moved forward resets the consecutive failure count; a create, an HTTP 200 or a lease does not. The executor never forces a step, never resets a lease and never clears its own quarantine. An `unsafe` quarantine stays across run keys until the owner clears it; a budget exhaustion ends only the current run key. Predictions are outside both diagrams and stay on the hourly ChatGPT task.
+`Unknown` means a timeout, a lost response or a killed step, resolved only by reading back. A duplicate firing while a run is `Due` or `Running` attaches to it. `Quarantined` returns to `Due` on the next run key only after a budget exhaustion; after unsafe evidence only an owner-approved clear does. Only a read-back checkpoint that moved forward resets the consecutive failure count; a create, an HTTP 200 or a lease does not. The executor never forces a step, never resets a lease and never clears its own quarantine. Predictions are outside both diagrams and stay on the hourly ChatGPT task.
 
 ## Timing and authority
 
