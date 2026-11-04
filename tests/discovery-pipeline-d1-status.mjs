@@ -37,7 +37,7 @@ for(let index=0;index<80;index++){
  else if(kind===3)decisions[item.key]={status:'no_confident_match',retryAt:new Date(now+D).toISOString()};
  else if(kind===4)decisions[item.key]={status:'no_confident_match',terminalReason:'repeated_uncertain_match',attempts:5,evidenceKey:[item.normalizedTitle,item.year,item.durations.join(','),`${item.shows[0].channelId}:${item.shows[0].start}`].join('|')};
 }
-const extras=21001-items.length;
+const extras=36999-items.length;
 for(let index=0;index<extras;index++){
  items.push({key:'wide-'+String(index).padStart(5,'0'),title:'Wide '+index,normalizedTitle:'wide '+index,year:1990,durations:[90],shows:[],seenInLatestSnapshot:false,lastSeenAt:1,lastAiring:1});
 }
@@ -77,7 +77,7 @@ for(const name of ['src/domain/scored-resolution.js','src/domain/resolution-acce
 assert.match(fs.readFileSync('src/discovery-authority.js','utf8'),/const READ_CAP=20000/);
 const paged=await Authority.routeRead(env,'epg/discovery-latest.json');
 assert.equal(paged.value.paged,true);
-assert.equal(paged.value.itemCount,21001);
+assert.equal(paged.value.itemCount,36999);
 assert.equal(paged.value.items,null);
 assert.equal(paged.value.archive.uniqueArchivedItems,1);
 
@@ -88,8 +88,8 @@ for(const item of items){const decision=decisions[item.key];if(decision){statuse
 const origin='https://iptv.vladimino.workers.dev';
 const pipeline=await (await live.worker.fetch(new Request(origin+'/api/enrichment/pipeline/status'),env,{waitUntil(){}})).json();
 assert.equal(pipeline.ledgerTotal,expected.ledgerTotal);
-assert.equal(pipeline.candidates,21001+1);
-assert.equal(pipeline.archive.activeItems,21001);
+assert.equal(pipeline.candidates,36999+1);
+assert.equal(pipeline.archive.activeItems,36999);
 assert.equal(pipeline.archive.uniqueArchivedItems,1);
 assert.equal(pipeline.currentUnresolved,expected.currentUnresolved);
 assert.equal(pipeline.readyNow,expected.readyNow);

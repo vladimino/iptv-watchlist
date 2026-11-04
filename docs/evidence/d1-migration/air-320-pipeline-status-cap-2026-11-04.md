@@ -10,7 +10,7 @@ The coordinator compared that HTTP 200 body with an operator D1 count of 36999 a
 
 The fix walks active observations in `LEDGER_PAGE` rows with that page's decisions only (`streamActiveLedger`). A whole-document `routeRead` of the ledger is still paged above the cap. Held stays on R2. `loading` and a torn version-11 marker fail closed.
 
-Local proof is `tests/discovery-pipeline-d1-status.mjs` (21001 active rows plus one archive-only key) and the existing streamed R2 status test.
+Local proof is `tests/discovery-pipeline-d1-status.mjs` (36999 active rows plus one archive-only key) and the existing streamed R2 status test.
 
 ## Verdict
 
