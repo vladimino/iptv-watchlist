@@ -8,6 +8,7 @@ import path from 'node:path';
 import {mkdtemp} from 'node:fs/promises';
 import {createD1Adapter} from '../scripts/d1-backfill.mjs';
 import {evidenceKey} from '../src/discovery-authority.js';
+import {activateDecision, activateSql, catalogEntries, decisionEntries, holdDecision, holdSql, importDecision, packImportBatches, valuePrefix} from '../scripts/discovery-cutover.mjs';
 import {applyDecision, commitSql, DISCOVERY_TABLES, discoveryStatements, LEDGER_MAX_BYTES, ledgerStatements, loadDecision, loadPrefix, migrationStatements, observationShape, packLoadSlice, parseLoadIdentity, PREREQUISITE, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, resetDecision, resetSql, runDiscoveryProduction} from '../scripts/discovery-production.mjs';
 
 const TOKEN='test-token-value';
@@ -127,11 +128,24 @@ assert.equal(mixedLedger.statements.filter(sql=>sql.includes("'fat'")).length,98
 const bare=spawnSync(process.execPath,[script],{encoding:'utf8'});
 assert.equal(bare.status,0,bare.stderr);
 assert.deepEqual(JSON.parse(bare.stdout),{configured:false,writes:false,writeState:'none'});
-for(const flag of ['--activate','--import','--revert']){
- const refused=spawnSync(process.execPath,[script,flag,'--confirm','apply','--target','iptv'],{encoding:'utf8'});
- assert.equal(refused.status,2,flag+' '+refused.stdout);
+{
+ const refused=spawnSync(process.execPath,[script,'--revert','--confirm','apply','--target','iptv'],{encoding:'utf8'});
+ assert.equal(refused.status,2,refused.stdout);
  assert.match(refused.stdout,/usage/);
 }
+for(const [flag,confirm] of [['--import','import'],['--hold','hold'],['--activate','activate']]){
+ const missing=spawnSync(process.execPath,[script,flag,'--target','iptv'],{encoding:'utf8'});
+ assert.equal(missing.status,2,flag+' '+missing.stdout);
+ assert.match(missing.stdout,/confirm_required/);
+ const wrong=spawnSync(process.execPath,[script,flag,'--confirm','apply','--target','iptv'],{encoding:'utf8'});
+ assert.equal(wrong.status,2,flag);
+ assert.match(wrong.stdout,/confirm_required/);
+}
+const undrained=spawnSync(process.execPath,[script,'--hold','--confirm','hold','--target','iptv'],{encoding:'utf8'});
+assert.equal(undrained.status,2);
+assert.match(undrained.stdout,/drain_required/);
+const offlineHold=spawnSync(process.execPath,['scripts/discovery-authority.mjs','--database','/tmp/iptv/discovery.sqlite','--hold'],{encoding:'utf8'});
+assert.equal(offlineHold.status,2);
 const missingLoad=spawnSync(process.execPath,[script,'--load','--target','iptv'],{encoding:'utf8'});
 assert.equal(missingLoad.status,2);
 assert.match(missingLoad.stdout,/confirm_required/);
@@ -928,4 +942,119 @@ async function tornCommit(){
 {
  const adapter=createD1Adapter({target:{accountId:PRODUCTION_ACCOUNT_ID,apiToken:TOKEN,endpoint:'https://api.cloudflare.com/client/v4'},databaseId:PRODUCTION_DATABASE_ID,fetchImpl(){throw new Error('sent');}});
  await assert.rejects(()=>adapter.inspect('UPDATE schema_contract SET version=11'),error=>error.kind==='statement');
+}
+
+const loadedSnapshot={schemaVersion:11,marker:{mode:'r2',cutover:'open',generation:1,programmeRunId:'run-old',publishedProgrammeRunId:'run-old'},transfer:{state:'committed',programmeRunId:'run-old',batches:1},checkpoint:{hopId:null,payload:null}};
+assert.equal(importDecision({...loadedSnapshot,marker:{mode:'r2',cutover:'open',generation:0,programmeRunId:null,publishedProgrammeRunId:null},transfer:{state:'idle',programmeRunId:null,batches:0}}),'ledger_required');
+assert.equal(importDecision(loadedSnapshot),'import');
+assert.equal(importDecision({...loadedSnapshot,checkpoint:{hopId:'import',payload:'{}'}}),'partial_import');
+assert.equal(holdDecision(loadedSnapshot),'hold');
+assert.equal(holdDecision({...loadedSnapshot,marker:{...loadedSnapshot.marker,mode:'d1',cutover:'held'}}),'already_held');
+assert.equal(activateDecision({...loadedSnapshot,marker:{...loadedSnapshot.marker,mode:'d1',cutover:'held'}}),'activate');
+assert.equal(activateDecision({...loadedSnapshot,marker:{...loadedSnapshot.marker,mode:'d1',cutover:'open'}}),'already_active');
+assert.throws(()=>catalogEntries({'':{tmdbId:1,canonicalIdentity:'tmdb:1'}}),error=>error.reason==='import_refused');
+const decisions=decisionEntries({'b':{status:'matched',evidenceKey:'keep'},'a':{status:'matched',evidenceKey:'other'},'__canonicalizedAt':'2026-11-04T00:00:00.000Z'});
+assert.deepEqual(decisions.map(row=>row.key),['a','b']);
+assert.equal(valuePrefix([{filmId:'a'}],[{filmId:'a'},{filmId:'b'}],(left,right)=>left.filmId===right.filmId).cursor,1);
+assert.equal(valuePrefix([{filmId:'b'}],[{filmId:'a'}],(left,right)=>left.filmId===right.filmId).mismatch,true);
+const manyDecisions=Array.from({length:101},(_,index)=>['INSERT '+index,'HISTORY '+index]);
+const packedDecisions=packImportBatches(manyDecisions);
+assert.equal(packedDecisions.flat().filter(sql=>sql.startsWith('INSERT ')).length,101);
+assert.equal(packedDecisions.some(batch=>batch.some(sql=>sql.includes('discovery_transfer'))),false);
+assert.equal(packedDecisions.every(batch=>batch.length<=100),true);
+const held=holdSql({programmeRunId:'run-old',generation:1,batches:4});
+assert.match(held[1],/mode='d1', cutover='held'/);
+assert.equal(held.join('\n').includes('generation+1'),false);
+const opened=activateSql({programmeRunId:'run-old',generation:1,batches:4});
+assert.match(opened[1],/cutover='open'/);
+assert.match(opened[0],/cutover='held'/);
+assert.equal(opened.join('\n').includes('generation+1'),false);
+
+{
+ const installed=await appliedInstall();
+ sql(installed.productionFile,`UPDATE discovery_authority SET generation=1, programme_run_id='run-old', published_programme_run_id='run-old' WHERE id=1;
+UPDATE discovery_transfer SET state='committed', programme_run_id='run-old', batches=1 WHERE id=1;
+UPDATE discovery_checkpoint SET hop_id='import', payload_json='{}' WHERE id=1;`);
+ const heldEarly=await run(['--hold','--confirm','hold','--producers-drained','--target','iptv'], installed);
+ assert.equal(heldEarly.exit,3,JSON.stringify(heldEarly.result));
+ assert.equal(heldEarly.result.reason,'partial_import');
+ assert.equal(heldEarly.result.writes,false);
+ assert.equal(sql(installed.productionFile,"SELECT mode FROM discovery_authority WHERE id=1;",{json:true})[0].mode,'r2');
+ assert.equal(installed.calls.batches.length,1);
+}
+
+{
+ const installed=await appliedInstall();
+ const early=await run(['--import','--confirm','import','--target','iptv'], installed);
+ assert.equal(early.exit,3,JSON.stringify(early.result));
+ assert.equal(early.result.reason,'ledger_required');
+ assert.equal(early.result.writes,false);
+ assert.equal(installed.calls.batches.length,1);
+}
+
+{
+ const installed=await appliedInstall();
+ const item={key:'obs-1',title:'Kept',normalizedTitle:'kept',year:1999,shows:[]};
+ const key=evidenceKey(item);
+ sql(installed.productionFile,`UPDATE discovery_authority SET generation=1, programme_run_id='run-old', published_programme_run_id='run-old' WHERE id=1;
+UPDATE discovery_transfer SET state='committed', programme_run_id='run-old', batches=1 WHERE id=1;
+INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, evidence_key, payload_json) VALUES ('active','obs-1','active','run-old','${key}','{}');`);
+ const film={'film-1':{tmdbId:'7',canonicalIdentity:'tmdb:7',observationKey:'obs-1',title:'Kept'}};
+ const resolution={__canonicalizedAt:'2026-11-04T00:00:00.000Z','obs-1':{status:'matched',evidenceKey:key,tmdbId:'7',filmId:'film-1',canonicalIdentity:'tmdb:7'}};
+ const status={schemaVersion:2,stage:'complete',programmeRunId:'run-old'};
+ const scores={schemaVersion:1,mode:'on',programmeRunId:'run-old',items:{'obs-1':{observationKey:'obs-1',outcome:'keep',reason:'fit'}}};
+ const continuation={programmeRunId:'run-old',stage:'paused'};
+ const workflow={instanceId:'wf-1',programmeRunId:'run-old',series:1,stage:'idle'};
+ const put=(objectKey,value,etag)=>installed.putObject(objectKey,value,{etag});
+ put('epg/discovered-films.json',film,'catalog-etag');
+ put('epg/generations/run-old/discovered-films.json',film,'catalog-etag');
+ put('epg/discovery-resolution.json',resolution,'resolution-etag');
+ put('epg/discovery-status.json',status,'status-etag');
+ put('epg/discovery-score-preview.json',scores,'score-etag');
+ put('epg/resolver-continuation.json',continuation,'continuation-etag');
+ put('epg/discovery-workflow.json',workflow,'workflow-etag');
+ const mismatched=JSON.parse(JSON.stringify(resolution));
+ mismatched['obs-1'].evidenceKey='different';
+ installed.putObject('epg/discovery-resolution.json',mismatched,{etag:'resolution-etag'});
+ const refused=await run(['--import','--confirm','import','--target','iptv'], installed);
+ assert.equal(refused.exit,3,JSON.stringify(refused.result));
+ assert.equal(refused.result.reason,'import_refused');
+ assert.equal(refused.result.writes,false);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_admission;',{json:true})[0].n,0);
+ installed.putObject('epg/discovery-resolution.json',resolution,{etag:'resolution-etag'});
+ installed.control.failAt=installed.calls.batches.length+2;
+ const interrupted=await run(['--import','--confirm','import','--target','iptv'], installed);
+ assert.equal(interrupted.exit,4,JSON.stringify(interrupted.result));
+ assert.equal(interrupted.result.writeState,'unknown');
+ assert.equal(sql(installed.productionFile,"SELECT hop_id FROM discovery_checkpoint WHERE id=1;",{json:true})[0].hop_id,'import');
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_admission;',{json:true})[0].n,0);
+ installed.control.failAt=null;
+ const imported=await run(['--import','--confirm','import','--target','iptv'], installed);
+ assert.equal(imported.exit,0,JSON.stringify(imported.result));
+ assert.equal(imported.result.resumed,true);
+ assert.equal(imported.result.mode,'r2');
+ assert.equal(imported.result.generation,1);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_admission;',{json:true})[0].n,1);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_decision;',{json:true})[0].n,1);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_decision_history;',{json:true})[0].n,1);
+ assert.equal(sql(installed.productionFile,"SELECT payload_json FROM discovery_decision;",{json:true})[0].payload_json.includes('__canonicalizedAt'),false);
+ assert.equal(sql(installed.productionFile,"SELECT state FROM discovery_transfer WHERE id=1;",{json:true})[0].state,'committed');
+ assert.equal(sql(installed.productionFile,'SELECT hop_id FROM discovery_checkpoint WHERE id=1;',{json:true})[0].hop_id,null);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_segment;',{json:true})[0].n,0);
+ assert.equal(installed.calls.gets.includes('epg/discovery-segments.json'),false);
+ const again=await run(['--import','--confirm','import','--target','iptv'], installed);
+ assert.equal(again.exit,0,JSON.stringify(again.result));
+ assert.equal(again.result.reason,'already_imported');
+ assert.equal(again.result.writes,false);
+ const heldRun=await run(['--hold','--confirm','hold','--producers-drained','--target','iptv'], installed);
+ assert.equal(heldRun.exit,0,JSON.stringify(heldRun.result));
+ assert.equal(heldRun.result.mode,'d1');
+ assert.equal(heldRun.result.cutover,'held');
+ assert.equal(heldRun.result.generation,1);
+ const openedRun=await run(['--activate','--confirm','activate','--producers-drained','--target','iptv'], installed);
+ assert.equal(openedRun.exit,0,JSON.stringify(openedRun.result));
+ assert.equal(openedRun.result.mode,'d1');
+ assert.equal(openedRun.result.cutover,'open');
+ assert.equal(sql(installed.productionFile,'SELECT generation FROM discovery_authority WHERE id=1;',{json:true})[0].generation,1);
+ assert.equal(sql(installed.productionFile,'SELECT lease_id FROM discovery_lease WHERE id=1;',{json:true})[0].lease_id,null);
 }
