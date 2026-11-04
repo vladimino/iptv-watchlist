@@ -72,6 +72,19 @@ The daily commit reads the active discovery ledger as bytes when the stored obje
 
 Node measurements of this path are not the isolate limit. The dated synthetic reading and its limits are in [the 3 November memory evidence](../evidence/epg-commit-memory-2026-11-03.md). A separate workerd reading of the fixed-length put is in [the 3 November R2 length evidence](../evidence/epg-r2-known-length-2026-11-03.md). Neither applies an isolate memory cap, and a green deploy does not by itself show that a live commit will stay under the limit.
 
+## Moving a pipeline to a Cloudflare executor
+
+This is the operator sequence of the accepted but not yet activated shared reliability contract ([ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md), Accepted; [reference](../reference/orchestration-reliability.md#rollout-and-rollback)). It applies to EPG publication, Discovery and Ratings one domain at a time; Predictions stay on the hourly ChatGPT task. No step below is part of a deploy, and every numbered step is its own owner approval.
+
+1. **Inert code.** The executor, its `ensure`, the read model and the tests are merged and deployed with the domain mode `external`. Both GitHub Actions jobs succeed. Verify with the domain's read-only status route that `orchestration.mode` is `external` and no Cloudflare owner is live. Nothing else is called.
+2. **Close admission, drain, complete.** Each is its own owner GO for this domain only. First close admission (`mode: switching`, new `epoch`); read it back. Then wait for the read model's `drain` to report `verified` (old lease absent or expired with margin over the longest step, old Workflow instance finished or absent, domain lease released). Only then complete the switch to `cloudflare` and read it back. Until completion both paths answer `switch_in_progress`; afterwards the external tool path answers `external_writer_fenced`. Do not test either with a write. An unverifiable drain is not completed.
+3. **Acceptance.** Observe at least one complete run through the read model: `health` `healthy` or `idle`, `lastDurableProgressAt` advancing, no `quarantine`. Do not trigger a run to speed this up unless that run has its own GO.
+4. **Retire the task path.** With a separate owner GO, change the ChatGPT task registry so the task no longer drives this domain, and read the registry back. The hourly task keeps Predictions.
+
+**Rollback.** The same three steps in the other direction, each with an owner GO: close admission (the epoch increases and the running instance's D1 commits are refused), verified drain, complete the switch back to `external`. Only then, with its own GO, re-enable the ChatGPT task path. A code rollback alone leaves the mode, the data, the cron trigger and the task registry as they were.
+
+**Quarantine.** `quarantined` with reason `budget_exhausted` ends only the current run key; the next run key retries by itself. Any other quarantine reason is `unsafe` and stays until an owner-approved clear. Read the `failure` fingerprint and the domain's checkpoint first; clearing never resets a lease or forces a step.
+
 ## Troubleshooting and recovery
 
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
