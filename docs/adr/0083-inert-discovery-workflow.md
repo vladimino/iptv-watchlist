@@ -6,7 +6,7 @@
 **Approval source:** explicit owner decision in the AIR-323 conversation on 2026-11-02: ADR 0083 Accepted, and both changed Mermaid diagrams visually approved, after [independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/325#pullrequestreview-5740324161) and [green exact-head CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41486148024). Decision recorded under [AIR-323](https://trello.com/c/SrWM43h0); architecture acceptance does not authorize a production cutover  
 **Related work:** [AIR-323](https://trello.com/c/SrWM43h0); switch successor [AIR-324](https://trello.com/c/kNtaEbm8); flag removal [AIR-325](https://trello.com/c/Q416Mx7v) after AIR-324  
 **Supersedes:** [ADR 0005](0005-external-chatgpt-tasks.md) and [ADR 0006](0006-one-chunk-discovery.md) in part, only while `DISCOVERY_EXECUTOR=workflow`  
-**Superseded by:** None
+**Superseded by:** [ADR 0089](0089-shared-orchestration-reliability-contract.md), decisions 7 and 8 in part for the future Cloudflare executor only, per the owner decision on 2026-11-04. Inert and external behavior is unchanged.
 
 ## Context
 
