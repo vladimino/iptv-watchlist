@@ -9,9 +9,36 @@ export const DECISIONS=Object.freeze(['accepted','provisional','owner_review','c
 // Queue order: title/year candidates and ambiguous rows first, then unmatched, then any other unresolved status.
 export const QUEUE_ORDER=Object.freeze(['candidate','ambiguous','unmatched','provisional','conflict']);
 export const CODE=/^[A-Za-z0-9]{1,16}$/;
+export const RETRYABLE_REASONS=Object.freeze(['shortlink_missing']);
 const TMDB=/^\d{1,10}$/;
 const FILM_PATH=/^\/film\/[a-z0-9-]+\/$/;
 const yearOf=value=>/^\d{4}$/.test(String(value??''))?Number(value):null;
+const relTokens=value=>String(value||'').toLowerCase().trim().split(/\s+/).filter(Boolean);
+const CONFLICT_REASONS=new Set(['shortlink_mismatch','canonical_mismatch','tmdb_multiple','title_differs','year_disagrees','tmdb_already_imported','duplicate_tmdb','historical_alias_conflict','intent_conflict','verified_conflict']);
+const PARSER_REASONS=new Set(['unparsable_page','metadata_unparsed']);
+const INCOMPLETE_REASONS=new Set(['shortlink_missing','tmdb_missing','tmdb_type_missing','title_missing','page_year_missing','export_year_missing']);
+
+export function boundReasons(reasons){
+ return [...new Set((Array.isArray(reasons)?reasons:[reasons]).filter(reason=>typeof reason==='string'&&reason.length>0&&reason.length<=64))].slice(0,8);
+}
+export function reasonKind(reasons){
+ const list=boundReasons(reasons);
+ if(list.some(reason=>CONFLICT_REASONS.has(reason)))return 'conflict';
+ if(list.some(reason=>PARSER_REASONS.has(reason)))return 'parser';
+ if(list.some(reason=>INCOMPLETE_REASONS.has(reason)))return 'page_incomplete';
+ return 'review';
+}
+export function isRetryableReason(reason){return RETRYABLE_REASONS.includes(reason);}
+
+// A boxd.it short code from a link href. Extra rel tokens, a trailing slash and a protocol-relative URL are the same code.
+export function parseBoxdCode(href,base){
+ if(!href)return null;
+ let url;try{url=new URL(String(href),base||'https://letterboxd.com/');}catch{return null;}
+ if(url.protocol!=='https:'||url.hostname!=='boxd.it'||url.username||url.password||url.port)return null;
+ const parts=url.pathname.split('/').filter(Boolean);
+ if(parts.length!==1||!CODE.test(parts[0]))return null;
+ return parts[0];
+}
 
 // ledgerRows: parsed matches.jsonl lines of the reconciliation; importedItems: parsed plan.jsonl items ({lid, tmdb}).
 // Returns the ordered queue of unresolved export films and the identities that are already imported.
@@ -61,10 +88,10 @@ export function isChallenge(status,headers,html=''){
 // The returned object holds no HTML; it is what the private checkpoint stores.
 export function pageEvidence(html,landing,{parseFilm,attr,extractYear}){
  let film;try{film=parseFilm(html,{});}catch{return {kind:'unparsable_page',path:landing.pathname};}
- const linkHref=rel=>{const tag=[...html.matchAll(/<link\b[^>]*>/gi)].map(m=>m[0]).find(tag=>attr(tag,'rel').toLowerCase()===rel);return tag?attr(tag,'href'):null;};
+ const linkHref=rel=>{const tag=[...html.matchAll(/<link\b[^>]*>/gi)].map(m=>m[0]).find(tag=>relTokens(attr(tag,'rel')).includes(rel));return tag?attr(tag,'href'):null;};
  const shortlink=linkHref('shortlink'),canonical=linkHref('canonical');
- const shortCode=shortlink?.match(/^https:\/\/boxd\.it\/([A-Za-z0-9]+)$/)?.[1]??null;
- let canonicalPath=null;if(canonical){try{const url=new URL(canonical);canonicalPath=url.hostname==='letterboxd.com'?url.pathname:'off_site';}catch{canonicalPath='invalid';}}
+ const shortCode=parseBoxdCode(shortlink,landing);
+ let canonicalPath=null;if(canonical){try{const url=new URL(canonical,landing);canonicalPath=url.hostname==='letterboxd.com'?url.pathname:'off_site';}catch{canonicalPath='invalid';}}
  // parseFilm reads the first data-tmdb-id; every one is collected so that a page carrying two different ids is a conflict.
  const tmdbIds=[...new Set([film.tmdbId,...[...html.matchAll(/data-tmdb-id="(\d+)"/g)].map(m=>m[1])].filter(Boolean).map(String))].sort();
  const tmdbTypes=[...new Set([...html.matchAll(/data-tmdb-type="([a-z]+)"/g)].map(m=>m[1]))].sort();
@@ -86,8 +113,8 @@ function ownChecks(entry,obs){
  if(!obs)return {status:'pending',reasons:['not_fetched']};
  if(obs.kind==='failed')return {status:'pending',reasons:['fetch_failed']};
  if(obs.kind!=='page')return {status:'owner_review',reasons:[obs.kind]};
- if(!obs.shortlinkPresent)review.push('shortlink_missing');
- else if(obs.shortCode!==entry.code)conflict.push('shortlink_mismatch');
+ if(obs.shortlinkPresent){if(obs.shortCode!==entry.code)conflict.push('shortlink_mismatch');}
+ else if(obs.redirectCode!==entry.code)review.push('shortlink_missing');
  if(obs.canonicalPath&&obs.canonicalPath!==obs.path)conflict.push('canonical_mismatch');
  if(!obs.tmdbIds.length)review.push('tmdb_missing');
  else if(obs.tmdbIds.length>1)conflict.push('tmdb_multiple');
