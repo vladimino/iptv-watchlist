@@ -356,4 +356,24 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  assert.equal(one(kept,"SELECT COUNT(*) FROM film WHERE id='film:heat'"),1);
 }
 
-console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed');
+// 19. A missing rated-archive admissions object admits nobody. A present one is the next cron's Film, still not watchlist membership.
+{
+ const {db:fresh}=migrated();
+ const sourceBucket=r2();
+ const before=await run({DB:fresh,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(before.outcome,'complete',JSON.stringify(before));
+ assert.equal(one(fresh,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:77'"),0,'deploy with no admissions object upserts no rated-only film');
+ await sourceBucket.put('letterboxd/admissions/verified-films.json',JSON.stringify({schemaVersion:1,films:{tmdb_77:{tmdb:'77',sourceCode:'Zz9',archiveSha256:'ab'.repeat(32),title:'Rated Only',year:1994}}}));
+ const after=await run({DB:fresh,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(after.outcome,'complete',JSON.stringify(after));
+ assert.equal(one(fresh,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:77'"),1);
+ assert.equal(one(fresh,"SELECT COUNT(*) FROM watchlist_film WHERE film_id='film:tmdb:77'"),0,'the rating does not create watchlist membership');
+ const {db:invalid}=migrated();
+ const bad=r2();
+ await bad.put('letterboxd/admissions/verified-films.json','{"schemaVersion":1,"films":[]}');
+ const stopped=await run({DB:invalid,BUCKET:bad,D1_ENRICHMENT_WRITE:'on'});
+ assert.deepEqual([stopped.outcome,stopped.reason,stopped.inputKey],['failed','input_invalid','letterboxd/admissions/verified-films.json']);
+ assert.equal(one(invalid,'SELECT COUNT(*) FROM film'),0,'an invalid admissions object writes nothing');
+}
+
+console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed, a missing rated-archive object admits nobody');

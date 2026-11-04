@@ -113,8 +113,34 @@ export function watchlistAdmissionsFromIndex(index){
  }
  return out;
 }
-export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,tmdbRetirements=null,watchlistAdmissions=null,filmTitles=[],personNames=[],personOverrides={}}={}){
- return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,tmdbRetirements,watchlistAdmissions,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
+// Verified rated-archive Films. A missing document admits nobody. A short boxd.it code is not a key, and watchlist is not a field.
+const ARCHIVE_FILM=/^tmdb_[1-9]\d{0,11}$/;
+export function archiveAdmissionsFromDocument(document){
+ const out={};
+ if(!document||document.schemaVersion!==1||!document.films||typeof document.films!=='object'||Array.isArray(document.films))return out;
+ for(const [id,item] of Object.entries(document.films)){
+  if(!ARCHIVE_FILM.test(id)||!item||typeof item!=='object'||Array.isArray(item))continue;
+  if(Object.prototype.hasOwnProperty.call(item,'watchlist'))continue;
+  if(String(item.tmdb)!==id.slice(5))continue;
+  const film={tmdb:String(item.tmdb),sourceCode:typeof item.sourceCode==='string'?item.sourceCode:null,archiveSha256:typeof item.archiveSha256==='string'?item.archiveSha256:null,title:typeof item.title==='string'?item.title:null,year:Number.isInteger(item.year)?item.year:null};
+  if(typeof item.synopsis==='string')film.synopsis=item.synopsis;
+  if(typeof item.metadataAt==='string')film.metadataAt=item.metadataAt;
+  if(typeof item.synopsisFetchedAt==='string')film.synopsisFetchedAt=item.synopsisFetchedAt;
+  if(typeof item.url==='string')film.url=item.url;
+  if(Number.isInteger(item.runtime))film.runtime=item.runtime;
+  if(Array.isArray(item.genres))film.genres=item.genres;
+  if(Array.isArray(item.directors))film.directors=item.directors;
+  if(Array.isArray(item.actors))film.actors=item.actors;
+  if(item.peopleVersion===1)film.peopleVersion=1;
+  if(item.peopleNamesVersion===2)film.peopleNamesVersion=2;
+  if(typeof item.peopleLocalizedAt==='string')film.peopleLocalizedAt=item.peopleLocalizedAt;
+  if(typeof item.titleRu==='string'){film.titleRu=item.titleRu;film.titleStatus=item.titleStatus==='verified'?'verified':'provisional';}
+  out[id]=film;
+ }
+ return out;
+}
+export function enrichmentStore({watchlist=null,programme=null,metadata=null,titles=null,people=null,discoveredFilms=null,discoveryResolution=null,diaryHistory=null,tmdbRetirements=null,watchlistAdmissions=null,archiveAdmissions=null,filmTitles=[],personNames=[],personOverrides={}}={}){
+ return {watchlist,programme,metadata,titles:titles||{},people:people||{},sync:{failures:[]},discoveredFilms:discoveredFilms||{},discoveryResolution:discoveryResolution||{},discoveryLatest:{items:[]},profile:null,diaryHistory,tmdbRetirements,watchlistAdmissions,archiveAdmissions,fingerprints:{},predictions:{},persistedSidecars:{},filmTitles,personNames,personOverrides};
 }
 
 // One input per Film of the view and one per Person. A Film keeps only what the enrichment writer owns: fingerprint, prediction,
@@ -154,7 +180,7 @@ export function enrichmentInputs({view,store,metadataSha256=null}){
 // by id once, in the same order, and returns what recordsFor returns.
 function sourceIndex(store){
  const byId=new Map();
- for(const record of [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})]){
+ for(const record of [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{}),...archiveCreditRecords(store)]){
   if(!record)continue;
   const key=String(record.id);
   if(!byId.has(key))byId.set(key,[]);
@@ -168,12 +194,19 @@ function sourceIndex(store){
   return orderedRecords(store,byId,ids);
  };
 }
+function archiveCreditRecords(store){
+ const admissions=store?.archiveAdmissions;
+ if(!admissions||typeof admissions!=='object'||Array.isArray(admissions))return [];
+ return Object.entries(admissions).filter(([,item])=>item&&typeof item==='object'&&!Object.prototype.hasOwnProperty.call(item,'watchlist')).map(([id,item])=>({...item,id}));
+}
 function orderedRecords(store,byId,ids){
  const wanted=new Set();
  for(const id of ids)for(const record of byId.get(String(id))||[])wanted.add(record);
  if(wanted.size<2)return [...wanted];
  const order=[...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})];
- return order.filter(record=>wanted.has(record));
+ const listed=order.filter(record=>wanted.has(record));
+ for(const record of wanted)if(!listed.includes(record))listed.push(record);
+ return listed;
 }
 
 // The change key of one input. Values equal to the run's own clock are replaced first: the lifecycle reader stamps a dimension
