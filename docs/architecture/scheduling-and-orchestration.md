@@ -215,7 +215,7 @@ The run record is one D1 document. It admits one running run and one active step
 
 ## Proposed Cloudflare executors and shared recovery
 
-**Proposed, not live.** Both diagrams below show the target of [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Proposed). Nothing in this section is deployed as drawn: today EPG, Discovery and Ratings are driven by the external tasks above, the Discovery Workflow is inert, and the cron runs only the enrichment projector. Each domain moves to its executor only through its own owner-approved switch; the field-level contract is the [orchestration reliability reference](../reference/orchestration-reliability.md).
+**Accepted architecture, not live.** Both diagrams below show the future implementation of [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Accepted; both diagrams visually approved by the owner on 2026-11-04). Nothing in this section is deployed as drawn: today EPG, Discovery and Ratings are driven by the external tasks above, the Discovery Workflow is inert, and the cron runs only the enrichment projector. Each domain moves to its executor only through its own owner-approved switch; the field-level contract is the [orchestration reliability reference](../reference/orchestration-reliability.md).
 
 ```mermaid
 flowchart TD
