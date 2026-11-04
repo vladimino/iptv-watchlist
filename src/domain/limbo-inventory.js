@@ -150,15 +150,62 @@ export function limboCounts(items) {
   return counts;
 }
 
+// One signature per canonical film in the inventory already evaluated. Several issue rows of one film are one film.
+// Age, a retry clock and the read time are not a change of diagnostic state. An observation is not a film. A film
+// with no canonical id makes the whole set incomparable: the caller must not invent a count.
+export function limboFilmStates(items) {
+  const byId = new Map();
+  let unnamed = false;
+  for (const item of Array.isArray(items) ? items : []) {
+    if (item?.kind !== 'film') continue;
+    const id = typeof item.film?.id === 'string' && item.film.id ? item.film.id : typeof item.subjectId === 'string' && item.subjectId ? item.subjectId : '';
+    if (!id) {unnamed = true; continue;}
+    const part = [item.subsystem || '', item.cause || '', item.category || '', item.progress?.status || '', item.reason || ''].join('|');
+    const parts = byId.get(id);
+    if (parts) parts.push(part);
+    else byId.set(id, [part]);
+  }
+  const films = [...byId.entries()].sort((left, right) => limboText(left[0], right[0])).map(([id, parts]) => ({id, signature: parts.slice().sort(limboText).join(';')}));
+  return {comparable: !unnamed, count: films.length, films};
+}
+
+// How many canonical films were added, removed or changed between two comparable sets of the same generation.
+// A signature change counts once. The caller passes `programmeRunId`; a missing or different generation is not a count.
+export function limboFilmDelta(previous, next) {
+  if (!previous || previous.comparable !== true || !next || next.comparable !== true) return {comparable: false, changed: null};
+  if (!previous.programmeRunId || previous.programmeRunId !== next.programmeRunId) return {comparable: false, changed: null};
+  const before = new Map((Array.isArray(previous.films) ? previous.films : []).map(film => [film.id, film.signature]));
+  const after = new Map((Array.isArray(next.films) ? next.films : []).map(film => [film.id, film.signature]));
+  let changed = 0;
+  for (const [id, signature] of after) if (before.get(id) !== signature) changed += 1;
+  for (const id of before.keys()) if (!after.has(id)) changed += 1;
+  return {comparable: true, changed};
+}
+
 // The filter is validated before it is applied: an unknown value is an error, never "everything". An age filter keeps
 // items whose age is at least that many days and items whose age is unknown: a missing clock never proves youth.
+// `cause` is one cause. `causes` is an OR of several, and an empty array keeps nothing: an unpressed set is not "all".
+// Passing both is `conflicting_cause`. `attention: 'now'` keeps only items whose `ownerAction.now` is true; omitted and
+// `'all'` keep every item. The default key stays `|||` so an old single-cause cursor still names the same filter.
 export function limboFilter(filter) {
   const kind = filter?.kind ?? null, subsystem = filter?.subsystem ?? null, cause = filter?.cause ?? null, minAgeDays = filter?.minAgeDays ?? null;
+  const causes = filter && Object.prototype.hasOwnProperty.call(filter, 'causes') && filter.causes != null ? filter.causes : null;
+  let attention = filter?.attention ?? null;
+  if (attention === 'all' || attention === '') attention = null;
   if (kind !== null && !LIMBO_KINDS.includes(kind)) return {error: 'unknown_kind'};
   if (subsystem !== null && !LIMBO_SUBSYSTEMS.includes(subsystem)) return {error: 'unknown_subsystem'};
   if (cause !== null && !LIMBO_CAUSES.includes(cause)) return {error: 'unknown_cause'};
+  if (causes !== null) {
+    if (cause !== null) return {error: 'conflicting_cause'};
+    if (!Array.isArray(causes) || causes.some(value => typeof value !== 'string' || !LIMBO_CAUSES.includes(value))) return {error: 'unknown_cause'};
+  }
+  if (attention !== null && attention !== 'now') return {error: 'unknown_attention'};
   if (minAgeDays !== null && (!Number.isInteger(minAgeDays) || minAgeDays < 0 || minAgeDays > LIMBO_AGE_MAX_DAYS)) return {error: 'invalid_age'};
-  return {kind, subsystem, cause, minAgeDays, key: [kind ?? '', subsystem ?? '', cause ?? '', minAgeDays ?? ''].join('|')};
+  const unique = causes ? [...new Set(causes)].sort(limboText) : null;
+  let key = [kind ?? '', subsystem ?? '', cause ?? '', minAgeDays ?? ''].join('|');
+  if (unique) key += '~' + unique.join(',');
+  if (attention === 'now') key += '@now';
+  return {kind, subsystem, cause: unique ? null : cause, causes: unique, minAgeDays, attention, key};
 }
 
 export function filterLimboItems(items, filter) {
@@ -167,7 +214,8 @@ export function filterLimboItems(items, filter) {
   const kept = items.filter(item =>
     (parsed.kind === null || item.kind === parsed.kind)
     && (parsed.subsystem === null || item.subsystem === parsed.subsystem)
-    && (parsed.cause === null || item.cause === parsed.cause)
+    && (parsed.causes ? parsed.causes.includes(item.cause) : (parsed.cause === null || item.cause === parsed.cause))
+    && (parsed.attention !== 'now' || item.ownerAction?.now === true)
     && (parsed.minAgeDays === null || item.age.ms === null || item.age.ms >= parsed.minAgeDays * LIMBO_DAY));
   return {items: kept, key: parsed.key};
 }

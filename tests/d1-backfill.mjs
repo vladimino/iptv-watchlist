@@ -18,7 +18,7 @@ assert.equal(fs.existsSync('tests/d1-scratch-g4.mjs'),false);
 assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/d1-backfill/);
 // AIR-275 phase 1: the Worker is bound to D1 as DB, and only the read-only catalog views reach it.
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"d1_databases"[\s\S]*"binding": "DB"[\s\S]*"database_name": "iptv"/);
-for(const file of ['src/worker.js','src/discovery.js','src/enrichment.js','src/sources.js','src/mcp.js','src/letterboxd-facts.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\.DB\b/,file);
+for(const file of ['src/worker.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/sources.js','src/mcp.js','src/letterboxd-facts.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/env\.DB\b/,file);
 
 const rules=loadDomainRules();
 const sha256=value=>createHash('sha256').update(value).digest('hex');

@@ -62,9 +62,11 @@ assert.equal(one(v9,"SELECT COUNT(*) FROM sqlite_master WHERE name='owner_review
 
 const after=load(chainNames);
 after.sql(fs.readFileSync('migrations/0010_ratings_authority.sql','utf8'));
-after.sql(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8'));
+let refusedAfter=false;
+try{after.sql(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8'));}catch{refusedAfter=true;}
+assert.equal(refusedAfter,true);
 assert.equal(one(after,'SELECT version FROM schema_contract'),10);
-assert.equal(one(after,"SELECT mode FROM owner_review_authority"),'r2');
+assert.equal(one(after,"SELECT COUNT(*) FROM sqlite_master WHERE name='owner_review_authority'"),0);
 assert.equal(one(after,"SELECT mode FROM ratings_domain_authority"),'r2');
 
 assert.equal((await readRatingsAuthority(v8,{})).ready,false);

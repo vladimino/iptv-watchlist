@@ -22,36 +22,40 @@
         <p class="admin-intro">Сколько записей каталога без постера, сколько можно дозагрузить сейчас, сколько TMDB уже ответил отказом и сколько без проверенного id. Чтение ничего не меняет; запись идёт только после вашего подтверждения, пакетами не больше 10 записей.</p>
       </div>
     </section>
-    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters" aria-current="page">Постеры</a></nav>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters" aria-current="page">Постеры</a></nav>
+      <div class="admin-main">
     <p id="posters-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="posters-snapshot-text">Каталог ещё не прочитан.</span></p>
     <p id="posters-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем обе копии каталога…</p>
     <p id="posters-error" class="admin-state admin-state-error" role="alert" hidden></p>
     <div id="posters-backlog" class="admin-state admin-state-stale posters-backlog" role="alert" hidden></div>
-    <div class="admin-layout posters-layout">
-      <section aria-labelledby="posters-coverage-title" class="admin-card posters-coverage">
+    <section aria-labelledby="posters-coverage-title" class="admin-card posters-coverage">
+      <div class="posters-coverage-head">
         <h2 id="posters-coverage-title">Покрытие постерами</h2>
-        <div id="posters-coverage"><p class="muted">Покрытие появится после чтения каталога.</p></div>
-      </section>
-      <section aria-labelledby="posters-dynamics-title" class="admin-card posters-dynamics">
-        <h2 id="posters-dynamics-title">Динамика и последние запуски</h2>
-        <p class="posters-source">Источник: история этого браузера. Сервер не хранит журнал запусков; в другом браузере здесь будет пусто.</p>
-        <div id="posters-dynamics"><p class="muted">Истории пока нет.</p></div>
-        <button type="button" id="posters-forget" class="admin-more">Забыть историю этого браузера</button>
-      </section>
-    </div>
+        <button type="button" id="posters-recheck" class="admin-more posters-reread">Перечитать</button>
+      </div>
+      <div id="posters-coverage"><p class="muted">Покрытие появится после чтения каталога.</p></div>
+    </section>
     <section aria-labelledby="posters-action-title" class="admin-card action-panel posters-action">
       <h2 id="posters-action-title">Ручная дозагрузка из TMDB</h2>
-      <p class="posters-action-intro">Каждый пакет — один явный вызов существующего маршрута обслуживания. Он берёт блокировку резолвера, проверяет поколение перед каждой записью и пишет только поле постера в обе копии каталога с проверкой версии. Подтверждение ниже защищает от случайного нажатия; доступ по-прежнему решает Cloudflare Access.</p>
-      <form id="posters-form" class="limbo-form posters-form" action="/admin/posters">
-        <label class="limbo-field">Записей в пакете<select id="posters-limit" name="limit"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10" selected>10 (максимум)</option></select></label>
-        <label class="limbo-field">Вызовов не больше<select id="posters-calls" name="calls"><option value="1" selected>1 пакет</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="30">30 (максимум)</option></select></label>
-        <label class="limbo-field">Начать<select id="posters-start" name="start"><option value="continue" selected>с сохранённой позиции</option><option value="first">с начала очереди</option></select></label>
-      </form>
+      <p class="posters-action-intro">Сначала проверка очереди и объёма — она ничего не пишет. Затем подтверждение именно этого объёма и поколения, затем пакеты. Подтверждение защищает от случайного нажатия; доступ по-прежнему решает Cloudflare Access.</p>
+      <details class="action-tech">
+        <summary>Как устроена запись</summary>
+        <p>Каждый пакет — один явный вызов существующего маршрута обслуживания. Он берёт блокировку резолвера, проверяет поколение перед каждой записью и пишет только поле постера в обе копии каталога с проверкой версии.</p>
+      </details>
+      <details id="posters-settings" class="posters-settings">
+        <summary>Дополнительные настройки</summary>
+        <p class="posters-source">По умолчанию один пакет из 10 записей с сохранённой позиции. Сервер не примет больше 10 записей за один вызов. Эта страница сама не отправит больше 30 вызовов за один подтверждённый запуск; маршрут число вызовов не считает.</p>
+        <form id="posters-form" class="limbo-form posters-form" action="/admin/posters">
+          <label class="limbo-field">Записей в пакете<select id="posters-limit" name="limit"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10" selected>10 (максимум)</option></select></label>
+          <label class="limbo-field">Вызовов не больше<select id="posters-calls" name="calls"><option value="1" selected>1 пакет</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="30">30 (максимум)</option></select></label>
+          <label class="limbo-field">Начать<select id="posters-start" name="start"><option value="continue" selected>с сохранённой позиции</option><option value="first">с начала очереди</option></select></label>
+        </form>
+      </details>
       <div id="posters-preview" aria-live="polite"><p class="muted">Проверка появится после чтения каталога.</p></div>
       <label class="action-accept" id="posters-accept-label" hidden><input type="checkbox" id="posters-accept"><span id="posters-accept-text"></span></label>
       <div class="action-buttons">
         <button type="button" id="posters-run" data-action-confirm disabled>Запустить</button>
-        <button type="button" id="posters-recheck">Проверить заново</button>
         <button type="button" id="posters-stop" hidden>Остановить после текущего пакета</button>
       </div>
       <p id="posters-refusal" class="admin-state admin-state-error" role="alert" hidden></p>
@@ -70,7 +74,16 @@
       <p class="posters-source">Эти записи страница не восстанавливает: маршрут берёт постер только по TMDB id, который подтверждён как идентичность записи. Исправление идентичности — отдельная работа.</p>
       <div id="posters-unverified"><p class="muted">Список появится после чтения каталога.</p></div>
     </section>
+    <section aria-labelledby="posters-dynamics-title" class="admin-card posters-dynamics">
+      <h2 id="posters-dynamics-title">История этого браузера</h2>
+      <p class="posters-source">Хранится в localStorage этого браузера, общем для его вкладок. Сервер не хранит журнал запусков, очередь по нему не строится, в другом браузере здесь будет пусто.</p>
+      <div id="posters-dynamics"><p class="muted">Истории пока нет.</p></div>
+      <button type="button" id="posters-forget" class="admin-more">Забыть историю этого браузера</button>
+    </section>
+      </div>
+    </div>
   </main>
   <script src="/admin-posters.js"></script>
+  <script src="/status-footer.js"></script>
 </body>
 </html>

@@ -237,7 +237,7 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
    directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
    shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
    availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),
-   prediction:{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds},
+   prediction:{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds},
    fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
   posterSource.set(entry,artwork.source);
   const kept=byIdentity.get(identity);
@@ -422,7 +422,19 @@ async function queueCommittedDiscovery(env,run){
  try{await noteDiscoveryWorkflow(env);}catch(e){run.discoveryError=String(e.message).slice(0,160);}
 }
 async function copyEpgGeneration(env,runId){
- for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(staged)await saveJSON(env,name==='programme.json'?name:'epg/'+name,await staged.json());}
+ for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){
+  const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(!staged)continue;
+  const dest=name==='programme.json'?name:'epg/'+name,meta={httpMetadata:{contentType:'application/json'}};
+  // Copy the stored bytes. Parsing the ledger back into objects is the commit's memory peak.
+  if(staged.body&&typeof staged.body.getReader==='function'){
+   const size=staged.size;
+   if(!Number.isSafeInteger(size)||size<0)throw new Error('R2 object length is not a safe integer');
+   await putKnownLength(env.BUCKET,dest,size,staged.body,meta);
+   continue;
+  }
+  if(typeof staged.text==='function'){await env.BUCKET.put(dest,await staged.text(),meta);continue;}
+  await saveJSON(env,dest,await staged.json());
+ }
 }
 // AIR-220 / ADR 0034: the discovery ledger of a commit in `bounded` or `frozen` mode. Runs under the discovery lease that
 // publishEpgGeneration holds, before the generation's files are written. It reads the predecessor's active ledger (the
@@ -437,33 +449,239 @@ async function writeLedgerSegment(env,key,value,fence){
 }
 async function readLedgerManifest(env,manifestId){return manifestId?loadJSON(env,ledgerArchiveManifestKey(manifestId)):null;}
 async function readLedgerSegment(env,manifest,segment){const entry=manifest?.segments?.[segment];return entry?.object?(await loadJSON(env,entry.object))?.items||{}:{};}
-async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publishedRunId,kind='commit'}){
- const previous=await loadJSON(env,'epg/discovery-latest.json');
+function discoveryHolder(value){
+ if(value&&typeof value==='object'&&!Array.isArray(value)&&Object.prototype.hasOwnProperty.call(value,'discovery'))return value;
+ return {discovery:value||[]};
+}
+function ledgerStreamable(object){return !!(object&&(object.body&&typeof object.body.getReader==='function'||typeof object.text==='function'));}
+async function* ledgerChunks(object){
+ if(object?.body&&typeof object.body.getReader==='function'){
+  const reader=object.body.getReader(),decoder=new TextDecoder();
+  try{while(true){const {done,value}=await reader.read();if(done){const tail=decoder.decode();if(tail)yield tail;return;}const chunk=decoder.decode(value,{stream:true});if(chunk)yield chunk;}}
+  finally{try{reader.releaseLock();}catch{}}
+  return;
+ }
+ if(typeof object.text==='function')yield await object.text();
+}
+// The same object loadJSON would parse for epg/discovery-latest.json, without parsing it.
+// A published programme run must resolve to that run's ledger. Null is only the first programme, before any run is published.
+async function locateDiscoveryLedger(env){
+ const shared='epg/discovery-latest.json',stagedName='discovery-latest.json';
+ const mismatch=()=>{throw new Error('Discovery ledger does not match the published generation');};
+ if(typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live){
+   const run=env.epgPin?.authority==='d1'&&env.epgPin.programmeRunId?env.epgPin.programmeRunId:live.programmeRunId;
+   if(!run)return null;
+   const copyKey=epgGenerationKey(run,stagedName);
+   if(await env.BUCKET.get(copyKey))return {key:copyKey,expectRun:run};
+   if(run!==live.programmeRunId)mismatch();
+   const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),body=pointer?await pointer.json():null;
+   if(body?.phase!=='published'||body.programmeRunId!==run)mismatch();
+   return {key:shared,expectRun:run};
+  }
+ }
+ const pinned=env.epgPin?.programmeRunId;
+ if(pinned){const copyKey=epgGenerationKey(pinned,stagedName);if(await env.BUCKET.get(copyKey))return {key:copyKey,expectRun:pinned};}
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);
+ if(pointer){
+  const generation=await pointer.json();
+  if(generation?.phase==='published'&&generation.programmeRunId){
+   const copyKey=epgGenerationKey(generation.programmeRunId,stagedName);
+   if(await env.BUCKET.get(copyKey))return {key:copyKey,expectRun:generation.programmeRunId};
+  }
+ }
+ // No published D1 programme, or an R2 pointer whose ledger file is not there yet: an absent object is an empty predecessor.
+ return {key:shared,expectRun:null};
+}
+async function readLedgerView(env){
+ const located=await locateDiscoveryLedger(env);
+ if(!located)return {kind:'missing',items:[],archive:null,prevKeys:new Set(),duplicates:new Set()};
+ const object=await env.BUCKET.get(located.key);
+ if(!object){
+  if(located.expectRun)throw new Error('Discovery ledger is missing for the published generation');
+  return {kind:'missing',items:[],archive:null,prevKeys:new Set(),duplicates:new Set()};
+ }
+ const requireRun=wrapper=>{if(located.expectRun&&wrapper?.programmeRunId!==located.expectRun)throw new Error('Discovery ledger does not match the published generation');};
+ if(!ledgerStreamable(object)){
+  const value=typeof object.json==='function'?await object.json():null;
+  requireRun(value);
+  if(!Array.isArray(value?.items))throw new Error('Discovery ledger JSON is incomplete');
+  const items=value.items;
+  return {kind:'materialized',items,archive:value?.archive||null,prevKeys:new Set(items.map(item=>item?.key)),duplicates:new Set()};
+ }
+ const prevKeys=new Set(),duplicates=new Set(),seen=new Set();
+ const wrapper=await forEachJsonArrayItems(ledgerChunks(object),'items',item=>{prevKeys.add(item?.key);const key=discoveryCandidateKey(item);if(seen.has(key))duplicates.add(key);else seen.add(key);});
+ requireRun(wrapper);
+ return {kind:'stream',key:located.key,archive:wrapper.archive||null,prevKeys,duplicates};
+}
+// Prefix, comma and suffix are the bytes the generation document actually writes. The length is their size
+// plus the candidate bytes counted on the decision walk. workerd accepts a ReadableStream only when that
+// length is known: the readable side of FixedLengthStream. A content-length header is not that contract.
+function discoveryDocumentFraming(meta,ledger){
+ const encoder=new TextEncoder(),head=JSON.stringify(meta||{}),tail=JSON.stringify(ledger||{});
+ return {prefix:encoder.encode(head.slice(0,-1)+',"items":['),suffix:encoder.encode(tail==='{}'?']}':'],'+tail.slice(1)),comma:new Uint8Array([44])};
+}
+function discoveryDocumentLength(framing,itemBytes,itemCount){
+ return framing.prefix.byteLength+framing.suffix.byteLength+itemBytes+(itemCount>0?itemCount-1:0);
+}
+// One chunk per pull. The consumer reads the prefix, then one encoded candidate, then the suffix.
+// A repeated comma chunk is shared and never mutated. Nothing is enqueued until a pull asks for it.
+function discoveryDocumentStream(framing,items){
+ const {prefix,suffix,comma}=framing;
+ const iterator=items[Symbol.asyncIterator]();
+ let stage='prefix',started=false,held=null;
+ return new ReadableStream({async pull(controller){
+  try{
+   if(stage==='prefix'){controller.enqueue(prefix);stage='item';return;}
+   if(stage==='held'){controller.enqueue(held);held=null;stage='item';return;}
+   if(stage!=='item')return;
+   const step=await iterator.next();
+   if(step.done){controller.enqueue(suffix);controller.close();stage='done';return;}
+   if(started){held=step.value;controller.enqueue(comma);stage='held';return;}
+   started=true;controller.enqueue(step.value);
+  }catch(error){try{await iterator.return?.();}catch{}throw error;}
+ }},{highWaterMark:1});
+}
+// Node has no FixedLengthStream. This stand-in pulls one chunk at a time and rejects a short or long body.
+// It is not a substitute for the workerd class: a plain ReadableStream is still refused by R2 there.
+function lengthLimitedStream(source,length){
+ let seen=0;const reader=source.getReader();
+ return new ReadableStream({async pull(controller){
+  const step=await reader.read();
+  if(step.done){if(seen!==length)throw new Error('Readable stream length does not match');controller.close();return;}
+  const bytes=step.value instanceof Uint8Array?step.value:new Uint8Array(step.value);
+  seen+=bytes.byteLength;
+  if(seen>length)throw new Error('Readable stream length does not match');
+  controller.enqueue(bytes);
+ },cancel(reason){return reader.cancel(reason);}},{highWaterMark:1});
+}
+async function putKnownLength(bucket,key,length,source,options){
+ if(!Number.isSafeInteger(length)||length<0)throw new Error('R2 object length is not a safe integer');
+ if(typeof FixedLengthStream!=='function'){await bucket.put(key,lengthLimitedStream(source,length),options);return;}
+ const pair=new FixedLengthStream(length);
+ const writing=source.pipeTo(pair.writable);
+ let stored;
+ try{stored=await bucket.put(key,pair.readable,options);}
+ catch(error){try{pair.writable.abort(error);}catch{}await writing.catch(()=>{});throw error;}
+ await writing;
+ return stored;
+}
+async function storePlannedDiscovery(env,runId,meta,planned,next){
+ if(!planned.emit){next['discovery-latest.json']={...meta,items:planned.items,...planned.ledger};return;}
+ try{
+  if(!Number.isSafeInteger(planned.itemBytes)||!Number.isSafeInteger(planned.itemCount)||planned.itemBytes<0||planned.itemCount<0)throw new Error('Discovery document length is unknown');
+  const framing=discoveryDocumentFraming(meta,planned.ledger);
+  await putKnownLength(env.BUCKET,epgGenerationKey(runId,'discovery-latest.json'),discoveryDocumentLength(framing,planned.itemBytes,planned.itemCount),discoveryDocumentStream(framing,planned.emit()),{httpMetadata:{contentType:'application/json'}});
+ }finally{if(planned.holder)planned.holder.discovery=null;}
+}
+// Departures (bounded mode) stay objects only for the archive write that follows; frozen mode keeps none.
+// The scan list stays reachable until the generation put has pulled the document. Encoding happens then, one row at a time.
+async function collectLedgerDecisions(env,view,holder,reentry,options,active){
+ const merge=openDiscoveryMerge(holder?.discovery||[],reentry,options,view.duplicates);
+ const object=await env.BUCKET.get(view.key);
+ if(!object)throw new Error('Discovery ledger is missing for the published generation');
+ const departures=[],activeKeys=new Set();
+ const place=item=>{if(!item)return;if(active(item))activeKeys.add(item.key);else departures.push(item);};
+ const encoder=new TextEncoder(),bytesOf=item=>encoder.encode(JSON.stringify(item)).byteLength;
+ let itemBytes=0,itemCount=0,holeOpen=false;const parked=[],holes=new Map();
+ const add=n=>{itemBytes+=n;itemCount++;};
+ await forEachJsonArrayItems(ledgerChunks(object),'items',raw=>{
+  const item=merge.push(raw);
+  if(item){place(item);if(active(item)){const n=bytesOf(item);if(holeOpen)parked.push(n);else add(n);}return;}
+  const key=discoveryCandidateKey(raw);
+  if(!holes.has(key)){holes.set(key,parked.length);parked.push(null);holeOpen=true;}
+ });
+ const tail=merge.end();
+ for(const {key,item} of tail.deferred){place(item);const at=holes.get(key);parked[at]=item&&active(item)?bytesOf(item):null;}
+ for(const n of parked)if(typeof n==='number')add(n);
+ for(const item of tail.appended){place(item);if(active(item))add(bytesOf(item));}
+ return {departures,activeKeys,itemBytes,itemCount};
+}
+// Yields one UTF-8 candidate at a time and waits until that chunk is taken. A repeated canonical key is the exception:
+// rows after its first copy stay buffered until the merged row can be placed there. Production ledgers are unique.
+async function* iterateLedgerItems(env,view,holder,reentry,options,active){
+ const queue=[];
+ let wake=null,gate=null,stopped=false,failure=null;
+ const kick=()=>{const fn=wake;wake=null;if(fn)fn();};
+ const release=()=>{const fn=gate;gate=null;if(fn)fn();};
+ const task=(async()=>{
+  try{
+   const merge=openDiscoveryMerge(holder?.discovery||[],reentry,options,view.duplicates);
+   const object=await env.BUCKET.get(view.key);
+   if(!object)throw new Error('Discovery ledger is missing for the published generation');
+   const encoder=new TextEncoder(),encode=item=>encoder.encode(JSON.stringify(item));
+   const send=async bytes=>{if(stopped)return;queue.push(bytes);kick();while(queue.length>0&&!stopped)await new Promise(resolve=>{gate=resolve;});};
+   let holeOpen=false;const parked=[],holes=new Map();
+   await forEachJsonArrayItems(ledgerChunks(object),'items',async raw=>{
+    const item=merge.push(raw);
+    if(item){if(active(item)){const bytes=encode(item);if(holeOpen)parked.push(bytes);else await send(bytes);}return;}
+    const key=discoveryCandidateKey(raw);
+    if(!holes.has(key)){holes.set(key,parked.length);parked.push(null);holeOpen=true;}
+   });
+   const tail=merge.end();
+   for(const {key,item} of tail.deferred){const at=holes.get(key);parked[at]=item&&active(item)?encode(item):null;}
+   for(const bytes of parked)if(bytes)await send(bytes);
+   for(const item of tail.appended)if(active(item))await send(encode(item));
+  }catch(error){if(!stopped)failure=error;}
+  finally{stopped=true;kick();}
+ })();
+ try{
+  while(true){
+   while(!queue.length&&!stopped)await new Promise(resolve=>{wake=resolve;});
+   if(failure)throw failure;
+   if(!queue.length)break;
+   const bytes=queue.shift();release();yield bytes;
+  }
+ }finally{stopped=true;release();kick();try{await task;}catch{}}
+}
+async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publishedRunId,kind='commit',holder=null}){
+ const sourceHolder=holder||discoveryHolder(latest);
+ const view=await readLedgerView(env);
  const archivePointer=await env.BUCKET.get(LEDGER_ARCHIVE_POINTER),archiveEtag=archivePointer?.etag??null,startId=archivePointer?(await archivePointer.json())?.manifestId||null:null;
  // Without an archive, `frozen` (and `full`) is the single growing ledger. Once an archive exists, `full` acts as `frozen`:
  // the full ledger is never rebuilt inside the Worker (ADR 0034, rollback R1).
  const effective=mode==='bounded'?'bounded':startId?'frozen':'full';
- if(effective==='full')return {items:mergeDiscoveryCandidates(previous?.items,latest,{replaceShows:true,programmeRunId:runId}),ledger:{}};
+ const options={replaceShows:true,programmeRunId:runId};
+ let latestList=sourceHolder.discovery||[];
+ const latestKeys=new Set(latestList.map(raw=>discoveryCandidateKey(raw)));
+ if(effective==='full'){
+  if(view.kind!=='stream'){const items=mergeDiscoveryCandidates(view.items,latestList,options);latestList=null;if(sourceHolder)sourceHolder.discovery=null;return {items,ledger:{}};}
+  latestList=null;
+  const counted=await collectLedgerDecisions(env,view,sourceHolder,[],options,()=>true);
+  return {emit:()=>iterateLedgerItems(env,view,sourceHolder,[],options,()=>true),holder:sourceHolder,ledger:{},itemBytes:counted.itemBytes,itemCount:counted.itemCount};
+ }
  const fence=async()=>{
   if(!await renewDiscoveryLease(env,lease))throw new Error('Discovery archive fence lost: lease');
   if(typeof PublishedEpg!=='undefined'){const gate=await PublishedEpg.readAuthority(env);if(gate.cutover==='held')throw new Error('Discovery archive fence lost: published generation changed');const live=await PublishedEpg.currentGeneration(env);if(live){if(live.fence!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}return;}}
   const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if((pointer?.etag??null)!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');
   if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}
  };
- const prevItems=previous?.items||[],prevKeys=new Set(prevItems.map(item=>item.key));
+ const prevKeys=view.prevKeys;
  const start=await readLedgerManifest(env,startId);
  if(startId&&!start)throw new Error('Discovery archive manifest missing');
  // Re-entry: keys of the new scan that are not in P's active ledger, read from the segments the starting manifest names.
- const latestKeys=new Set((latest||[]).map(raw=>canonicalDiscoveryCandidate(raw).key)),reentry=[],found=new Set(),wanted=new Map();
+ const reentry=[],found=new Set(),wanted=new Map();
  for(const key of latestKeys)if(!prevKeys.has(key)){const segment=ledgerArchiveSegment(key,start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS);if(!wanted.has(segment))wanted.set(segment,[]);wanted.get(segment).push(key);}
  if(start)for(const [segment,keys] of wanted){const items=await readLedgerSegment(env,start,segment);for(const key of keys)if(items[key]){reentry.push(items[key].payload);found.add(key);}}
- const merged=mergeDiscoveryCandidates([...prevItems,...reentry],latest,{replaceShows:true,programmeRunId:runId});
- const items=effective==='bounded'?merged.filter(item=>latestKeys.has(item.key)):merged;
- const departures=effective==='bounded'?merged.filter(item=>!latestKeys.has(item.key)):[];
+ const keep=item=>effective!=='bounded'||latestKeys.has(item.key);
+ let items=null,emit=null,departures,activeKeys,collected=null;
+ if(view.kind==='stream'){
+  latestList=null;
+  collected=await collectLedgerDecisions(env,view,sourceHolder,reentry,options,keep);
+  departures=collected.departures;activeKeys=collected.activeKeys;
+  emit=()=>iterateLedgerItems(env,view,sourceHolder,reentry,options,keep);
+ }else{
+  const merged=mergeDiscoveryCandidates([...(view.items||[]),...reentry],latestList,options);
+  items=effective==='bounded'?merged.filter(keep):merged;
+  departures=effective==='bounded'?merged.filter(item=>!latestKeys.has(item.key)):[];
+  activeKeys=new Set(items.map(item=>item.key));
+  if(sourceHolder)sourceHolder.discovery=null;
+ }
  // alsoArchived: P's list is exact only for the manifest P names. Keys that writers after it archived while they were still
  // in P's active ledger (a writer that swapped the archive pointer and died before publishing) are added from the manifests'
  // upsertedKeys, walking back from the starting manifest; a long or broken chain is recounted one segment at a time.
- const also=new Set(previous?.archive?.alsoArchived||[]),named=previous?.archive?.manifestId||null;
+ const also=new Set(view.archive?.alsoArchived||[]),named=view.archive?.manifestId||null;
  if(start&&startId!==named){
   let current=start,steps=0;
   while(current&&current.manifestId!==named&&steps<LEDGER_ARCHIVE_CHAIN_LIMIT){for(const key of current.upsertedKeys||[])if(prevKeys.has(key))also.add(key);current=current.parentManifestId?await readLedgerManifest(env,current.parentManifestId):null;steps++;}
@@ -471,7 +689,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   if(!reached){also.clear();for(let segment=0;segment<start.segmentCount;segment++){const segmentItems=await readLedgerSegment(env,start,segment);for(const key of Object.keys(segmentItems))if(prevKeys.has(key))also.add(key);}}
  }
  for(const key of found)also.add(key);
- const activeKeys=new Set(items.map(item=>item.key));for(const key of [...also])if(!activeKeys.has(key))also.delete(key);
+ for(const key of [...also])if(!activeKeys.has(key))also.delete(key);
  let manifestId=startId,manifest=start;
  if(departures.length){
   const writeId=crypto.randomUUID(),at=new Date().toISOString(),count=start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS,bySegment=new Map();
@@ -492,7 +710,9 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   if(swapped===null)throw new Error('Discovery archive fence lost: archive pointer changed');
  }
  const alsoArchived=[...also].sort(),archive=manifest?{version:'v1',manifestId,segments:manifest.segmentCount,items:manifest.totals.items,bytes:manifest.totals.bytes,alsoArchived,uniqueArchivedItems:manifest.totals.items-alsoArchived.length}:null;
- return {items,ledger:{ledgerMode:effective,archive}};
+ const ledgerOut={ledgerMode:effective,archive};
+ if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut,itemBytes:collected.itemBytes,itemCount:collected.itemCount};
+ return {items,ledger:ledgerOut};
 }
 // `ledger` (AIR-220): `{latest, meta, mode}` lets the generation's discovery ledger be planned under this lease, fenced on the
 // published pointer read here; without it `files` already carry the ledger (full mode, unchanged).
@@ -501,14 +721,14 @@ async function publishD1Generation(env,runId,files,ledger,watchlist,publication)
  try{
   const next={...files};
   if(ledger){
-   const planned=await planDiscoveryLedger(env,{runId,latest:ledger.latest,mode:ledger.mode,lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null});
-   next['discovery-latest.json']={...ledger.meta,items:planned.items,...planned.ledger};
+   const planned=await planDiscoveryLedger(env,{runId,latest:ledger.holder?.discovery??ledger.latest,mode:ledger.mode,lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null,holder:ledger.holder||null});
+   await storePlannedDiscovery(env,runId,ledger.meta,planned,next);
   }
   if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
-  for(const [name,value] of Object.entries(next))await saveJSON(env,epgGenerationKey(runId,name),value);
+  for(const [name,value] of Object.entries(next)){if(value==null)continue;await saveJSON(env,epgGenerationKey(runId,name),value);next[name]=null;if(name!=='programme.json')files[name]=null;}
   const live=await PublishedEpg.currentGeneration(env);
   if(!live||live.fence!==publication.fence)throw new Error('EPG generation changed during publish');
-  const programme=next['programme.json'];
+  const programme=files['programme.json'];
   const list=watchlist||{updatedAt:programme?.updatedAt||null,films:[]};
   const result=await PublishedEpg.publishGeneration(env,{programmeRunId:runId,phase:'published',publishedAt:programme?.updatedAt||null,expectedProgrammeRunId:publication.programmeRunId,programme,watchlist:list});
   let mirrored=false;
@@ -525,11 +745,11 @@ async function publishEpgGeneration(env,runId,files,ledger=null,watchlist=null){
   let fencedEtag;
   if(ledger){
    const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),published=pointer?await pointer.json():null;fencedEtag=pointer?.etag??null;
-   const planned=await planDiscoveryLedger(env,{runId,latest:ledger.latest,mode:ledger.mode,lease,pointerEtag:fencedEtag,publishedRunId:published?.phase==='published'?published.programmeRunId||null:null});
-   next['discovery-latest.json']={...ledger.meta,items:planned.items,...planned.ledger};
+   const planned=await planDiscoveryLedger(env,{runId,latest:ledger.holder?.discovery??ledger.latest,mode:ledger.mode,lease,pointerEtag:fencedEtag,publishedRunId:published?.phase==='published'?published.programmeRunId||null:null,holder:ledger.holder||null});
+   await storePlannedDiscovery(env,runId,ledger.meta,planned,next);
   }
   if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
-  for(const [name,value] of Object.entries(next))await saveJSON(env,epgGenerationKey(runId,name),value);
+  for(const [name,value] of Object.entries(next)){if(value==null)continue;await saveJSON(env,epgGenerationKey(runId,name),value);next[name]=null;if(name!=='programme.json')files[name]=null;}
   const current=await env.BUCKET.get(EPG_GENERATION_KEY),previous=current?await current.json():null;
   if(ledger&&!(previous?.programmeRunId===runId&&previous.phase==='published')&&(current?.etag??null)!==fencedEtag)throw new Error('EPG generation changed during publish');
   if(!(previous?.programmeRunId===runId&&previous.phase==='published')){
@@ -539,12 +759,13 @@ async function publishEpgGeneration(env,runId,files,ledger=null,watchlist=null){
   await copyEpgGeneration(env,runId);
  }finally{await releaseDiscoveryLease(env,lease);}
 }
-// The commit's publication with its discovery ledger. In `full` mode without an archive this is the unchanged single growing
-// ledger; otherwise (AIR-220, ADR 0034) the ledger is planned under the publish lease.
+// The commit's publication with its discovery ledger. The active ledger is folded under the publish lease.
+// A bucket object that exposes `text` or `body` is read one candidate at a time; a `json`-only object keeps
+// the single in-memory merge. The stored ledger, the archive and the published generation are unchanged.
 async function publishGenerationWithLedger(env,runId,discovery,meta,files,watchlist=null){
- const mode=discoveryLedgerMode(env),old=mode==='full'&&!await env.BUCKET.get(LEDGER_ARCHIVE_POINTER)?await loadJSON(env,'epg/discovery-latest.json'):null;
- if(old)return publishEpgGeneration(env,runId,{...files,'discovery-latest.json':{...meta,items:mergeDiscoveryCandidates(old.items,discovery,{replaceShows:true,programmeRunId:runId})}},null,watchlist);
- return publishEpgGeneration(env,runId,files,{latest:discovery,meta,mode},watchlist);
+ const holder=discoveryHolder(discovery);
+ const mode=discoveryLedgerMode(env);
+ return publishEpgGeneration(env,runId,files,{latest:holder.discovery,meta,mode,holder},watchlist);
 }
 // ADR 0074: the ratings pipeline is permanently separate. It acts once ratings_storage_migrate has migrated the
 // queue and the Diary cursor. The EPG commit then hands the films its watchlist diff removed to the queue as
@@ -650,15 +871,23 @@ async function epgSync(env,run){
  applyEpgLocalization(run.watchlist,people);
  // AIR-263: the source fetch and the scan are one traced phase; an error logs `error` and rethrows unchanged.
  const sources=sourceConfig(env);
- const {now,cache,result}=await tracedPhase(run.runId,'epg_input_scan',async()=>{const now=Date.now(),r=await fetch(sources.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);return {now,cache,result};},value=>({films:value.result.films.length,discovery:value.result.discovery?.length??0,catalog:Object.keys(value.cache).length}));if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
- const previous=await loadJSON(env,'programme.json');assertEPGContinuity(result,previous,run.watchlist.length,now);const fresh=new Map(result.films.map(f=>[f.id,{...f,shows:dedupeShows(f.shows)}]));
- const matched=[...fresh.values()].map(f=>({...f,shows:f.shows.sort((a,b)=>a.start-b.start)}));const currentById=new Map(matched.map(f=>[String(f.id),f]));const films=run.watchlist.map(f=>withAvailability({...f,...currentById.get(String(f.id)),shows:currentById.get(String(f.id))?.shows||[]}));const countShows=matched.reduce((n,f)=>n+f.shows.length,0);
- const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:matched.length,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels:result.coverage.length,futureFullChannels:result.coverage.filter(c=>c.max>=now+24*3600000).length},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
+ const scanned=await tracedPhase(run.runId,'epg_input_scan',async()=>{const now=Date.now(),r=await fetch(sources.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);return {now,cache,result};},value=>({films:value.result.films.length,discovery:value.result.discovery?.length??0,catalog:Object.keys(value.cache).length}));
+ const now=scanned.now,result=scanned.result;let cache=scanned.cache;if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
+ let previous=await loadJSON(env,'programme.json');assertEPGContinuity(result,previous,run.watchlist.length,now);
+ const byId=new Map();for(const film of result.films){film.shows=dedupeShows(film.shows).sort((a,b)=>a.start-b.start);byId.set(String(film.id),film);}
+ const films=run.watchlist.map(f=>withAvailability({...f,...byId.get(String(f.id)),shows:byId.get(String(f.id))?.shows||[]}));
+ const countShows=[...byId.values()].reduce((n,f)=>n+f.shows.length,0),channels=result.coverage.length,futureFullChannels=result.coverage.filter(c=>c.max>=now+24*3600000).length;
+ const discoveryHolder={discovery:result.discovery};result.films=null;result.coverage=null;result.discovery=null;
+ const report={runId:run.runId,updatedAt:new Date(now).toISOString(),watchlistUpdatedAt:run.startedAt,cutoff:now,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:run.watchlist.length,watchlistPages:run.pages,films,people:peopleCatalog(run.watchlist),stats:{...result.stats,broadcasts:countShows,uniqueFilms:byId.size,metadataMissing:run.watchlist.filter(f=>!f.metadataAt).length,titleMissing:run.watchlist.filter(f=>!f.titleRu).length,titleProvisional:run.watchlist.filter(f=>f.titleStatus==='provisional').length,titleLocalizationErrors:run.titleLocalizationErrors||0,synopsisAvailable:run.watchlist.filter(f=>!!f.synopsis).length,synopsisMissing:run.watchlist.filter(f=>!f.synopsis).length,peopleMissing:run.watchlist.filter(f=>f.peopleVersion!==1).length,peopleFilms:run.watchlist.filter(f=>f.peopleVersion===1).length,channels,futureFullChannels},sources:{epg:sources.epg,watchlist:sources.watchlist},archiveVerified:false};
+ byId.clear();
  const nextWatchlist={updatedAt:report.updatedAt,films:run.watchlist};
  const gate=await ratingsGate(env);
  if(!run.events){const before=await loadJSON(env,'watchlist.json');run.events=[watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};const films=removedFilms(),ref=films.length?removalHandoverRef(run):null;const prior=removalRefItems(run.removalRefs).filter(item=>!ref||item.ref.eventKey!==ref.eventKey);const next=ref?[...prior,{ref,films}]:prior;if(next.length)run.removalRefs=storedRemovalRefs(next);else delete run.removalRefs;await saveJSON(env,'sync.json',run);}
  if(gate.active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
- let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,result.discovery,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},{'discovered-films.json':replaceCatalogAvailability(cache,result.discovery,run.runId).catalog,'programme.json':report},nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
+ previous=null;
+ const pending={'discovered-films.json':replaceCatalogAvailability(cache,discoveryHolder.discovery,run.runId).catalog,'programme.json':report};
+ cache=null;
+ let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,discoveryHolder,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
  if(!published?.authoritative||!published.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }

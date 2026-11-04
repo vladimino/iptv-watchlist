@@ -8,7 +8,12 @@ let ratingsLoaded=false;
 const MECHANIC_LABELS={heist:'Ограбление',scam:'Афера',investigation:'Расследование',mystery:'Загадка',puzzle:'Головоломка',chase_escape:'Погоня / побег',rescue:'Спасение',escort_protection:'Защита / сопровождение',survival:'Выживание',siege:'Осада',ticking_clock:'Гонка со временем',expedition_discovery:'Экспедиция / исследование',plan_counterplan:'План / контрплан',multi_party_conflict:'Несколько сторон'};
 const normalizeMood=value=>typeof value==='string'?value.normalize('NFKC').toLocaleLowerCase('ru').replace(/\s+/g,' ').trim():'';
 const MOOD_LABELS={tense:'Напряжённый',dark:'Мрачный',light:'Лёгкий',adventurous:'Приключенческий',dynamic:'Динамичный',epic:'Масштабный',violent:'Жёсткий',funny:'Комедийный',black_humor:'Чёрный юмор',satirical:'Сатирический',absurd:'Абсурдный',romantic:'Романтический',warm:'Тёплый',touching:'Трогательный',inspiring:'Вдохновляющий',melancholic:'Меланхоличный',tragic:'Трагический',contemplative:'Созерцательный',surreal:'Сюрреалистический',eerie:'Мистический / пугающий',paranoid:'Параноидальный',noir:'Нуарный',military:'Военная тема',historical:'Историческая тема',family:'Семья и отношения',friendship:'Дружба и команда',political:'Политика и общество',revenge:'Месть и возмездие'};
+const MOOD_GROUPS={tone:['tense','dark','light','adventurous','dynamic','epic','funny','black_humor','satirical','romantic','warm','touching','inspiring','melancholic','tragic','contemplative','paranoid','eerie'],theme:['military','historical','political','family','friendship','revenge'],style:['noir','surreal','absurd'],property:['violent']};
+const MOOD_GROUP_ORDER=['tone','theme','style','property'];
+const MOOD_GROUP_LABELS={tone:'Настроение',theme:'Темы',style:'Стиль',property:'Особенности'};
+const GENERIC_THEME_IDS=new Set(['family','military','political','historical','revenge']);
 const moodLabel=id=>MOOD_LABELS[id]||id;
+function moodBucket(id){for(const bucket of MOOD_GROUP_ORDER)if(MOOD_GROUPS[bucket].includes(id))return bucket;return '';}
 const EXECUTION_FILTERS=[
  {id:'plot_engine',label:'Сюжетный двигатель',values:[['weak','слабый'],['medium','средний'],['strong','сильный']]},
  {id:'pace',label:'Темп',values:[['slow','медленный'],['medium','средний'],['fast','быстрый'],['variable','переменный']]},
@@ -410,9 +415,12 @@ function renderFacetBody(){
  const key=focused?facetInputKey(focused):'',index=focused?before.indexOf(focused):-1;
  const query=normalizeTitle(search?.value||'');
  const show=label=>!query||normalizeTitle(label).includes(query);
+ const optionHtml=(item,checked)=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(item.value)}"${checked?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`;
  const html=openFacetName==='execution'
   ?facetCatalog.execution.map(group=>{const options=group.options.filter(item=>show(item.label)||show(group.label));if(!options.length)return '';return `<section class="execution-facet"><h3 class="execution-name">${escapeHTML(group.label)}</h3>${options.map(item=>`<label class="genre-label"><input type="checkbox" data-execution="${escapeHTML(group.id)}" value="${escapeHTML(item.value)}"${state.execution[group.id].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('')}</section>`;}).join('')
-  :(facetCatalog[openFacetName]||[]).filter(item=>show(item.label)).map(item=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(item.value)}"${state[openFacetName].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('');
+  :openFacetName==='moods'
+  ?MOOD_GROUP_ORDER.map(bucket=>{const heading=MOOD_GROUP_LABELS[bucket],ids=new Set(MOOD_GROUPS[bucket]),options=(facetCatalog.moods||[]).filter(item=>ids.has(item.value)&&(show(item.label)||show(heading)));if(!options.length)return '';return `<section class="mood-facet-group" aria-labelledby="mood-group-${bucket}"><h3 class="mood-group-name" id="mood-group-${bucket}">${escapeHTML(heading)}</h3>${options.map(item=>optionHtml(item,state.moods.has(item.value))).join('')}</section>`;}).join('')
+  :(facetCatalog[openFacetName]||[]).filter(item=>show(item.label)).map(item=>optionHtml(item,state[openFacetName].has(item.value))).join('');
  body.innerHTML=html;
  if(!focused||typeof body.querySelectorAll!=='function')return;
  const inputs=[...body.querySelectorAll('input')];
@@ -723,7 +731,27 @@ function recommendation(film){
  const predictedBadge=p?`<div class="score-badge score-predicted${p.stale?' is-stale':''}" aria-label="Прогноз ${Number(p.predictedRating).toFixed(1)} из 5${p.stale?', ожидает пересчёта':chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${Number(p.predictedRating).toFixed(1)}</strong>${p.stale?'<small>ожидает пересчёта</small>':chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'';
  return `<div class="film-score-badges">${actualBadge}${predictedBadge}</div>`;
 }
-function moodTags(film){const ids=[...filmFacets(film).moods];return ids.length?`<div class="film-moods">${ids.slice(0,4).map(id=>`<span>${escapeHTML(moodLabel(id))}</span>`).join('')}</div>`:'';}
+function presentationGroups(film){const item=enrichment.films[String(film.id)]||{};if(Array.isArray(item.moodGroups))return item.moodGroups.filter(group=>Array.isArray(group)).map(group=>group.filter(id=>Object.hasOwn(MOOD_LABELS,id)));return [...filmFacets(film).moods].map(id=>[id]);}
+function presentationChips(film){
+ const lists={tone:[],theme:[],style:[],property:[]},seen={tone:new Set(),theme:new Set(),style:new Set(),property:new Set()};
+ for(const ids of presentationGroups(film)){const same=new Set(ids),list=same.has('funny')&&same.has('black_humor')?ids.filter(id=>id!=='funny'):ids;for(const id of list){const bucket=moodBucket(id);if(!bucket||seen[bucket].has(id))continue;seen[bucket].add(id);lists[bucket].push(id);}}
+ const genres=new Set(film.genres||[]);
+ let themes=lists.theme;
+ if(lists.tone.length)themes=themes.filter(id=>id!=='family');
+ if(genres.has('Военный'))themes=themes.filter(id=>id!=='military');
+ if(genres.has('Исторический'))themes=themes.filter(id=>id!=='historical');
+ const chips=[];
+ if(genres.has('Телефильм'))chips.push({bucket:'format',label:'Телефильм'});
+ const mechanic=(enrichment.films[String(film.id)]?.fingerprint?.plotMechanics||[]).find(id=>Object.hasOwn(MECHANIC_LABELS,id));
+ if(mechanic)chips.push({bucket:'mechanic',id:mechanic,label:MECHANIC_LABELS[mechanic]});
+ if(themes[0])chips.push({bucket:'theme',id:themes[0],label:moodLabel(themes[0])});
+ if(lists.style[0])chips.push({bucket:'style',id:lists.style[0],label:moodLabel(lists.style[0])});
+ if(lists.property[0])chips.push({bucket:'property',id:lists.property[0],label:moodLabel(lists.property[0])});
+ if(lists.tone[0])chips.push({bucket:'tone',id:lists.tone[0],label:moodLabel(lists.tone[0])});
+ if(chips.length===1&&chips[0].bucket==='theme'&&GENERIC_THEME_IDS.has(chips[0].id))return [];
+ return chips.slice(0,3);
+}
+function moodTags(film){const chips=presentationChips(film);return chips.length?`<div class="film-moods">${chips.map(chip=>`<span data-chip-bucket="${escapeHTML(chip.bucket)}"${chip.id?` data-chip-id="${escapeHTML(chip.id)}"`:''}>${escapeHTML(chip.label)}</span>`).join('')}</div>`:'';}
 function lastChanceBadge(film){
  if(!isLastChance(film))return '';
  const until=new Date(availabilityTime(film)),label=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(until);
@@ -891,7 +919,26 @@ function findsShows(film,now,scope=findsScope()){
 function findsUntil(film,now,scope=findsScope()){const shows=findsShows(film,now,scope);return shows.length?Math.max(...shows.map(show=>show.start))+72*3600000:null;}
 function findsIdentity(film){return String(film.canonicalIdentity||(film.tmdbId?'tmdb:'+film.tmdbId:'')||film.id);}
 function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film of films||[]){ids.add(String(film.id));if(film.tmdbId)tmdb.add(String(film.tmdbId));}return {ids,tmdb};}
-function findsStrong(prediction){return !!prediction&&!prediction.stale&&Number.isFinite(prediction.predictedRating)&&prediction.predictedRating>=FINDS_MIN_RATING&&Number.isFinite(prediction.probability4Plus)&&prediction.probability4Plus>=FINDS_MIN_PROBABILITY&&typeof prediction.confidence==='string'&&prediction.confidence!==''&&prediction.confidence!=='low';}
+function effectiveConfidence(prediction){
+ if(!prediction||typeof prediction!=='object'||Array.isArray(prediction))return '';
+ const model=typeof prediction.confidence==='string'?prediction.confidence:'';
+ if(!Object.hasOwn(prediction,'confidenceAssessment'))return model;
+ const value=prediction.confidenceAssessment;
+ if(!value||typeof value!=='object'||Array.isArray(value)||value.assessmentVersion!==1)return 'low';
+ if(typeof value.level!=='string'||!Object.hasOwn(EVIDENCE_CONFIDENCE_LEVEL,value.level))return 'low';
+ if(typeof value.status!=='string'||!['evidenced','legacy','insufficient'].includes(value.status))return 'low';
+ if(value.status!=='evidenced'&&value.level!=='low')return 'low';
+ if(!Array.isArray(value.reasonCodes)||!value.coverage||typeof value.coverage!=='object'||Array.isArray(value.coverage))return 'low';
+ for(const key of ['mechanicsAsserted','mechanicsSupported','keyApplicable','keyConcrete','keySupported','keyUnknown','keyNotApplicable','genrePresent','genreSupported']){
+  const number=value.coverage[key];
+  if(typeof number!=='number'||!Number.isInteger(number)||number<0||number>99)return 'low';
+ }
+ const bound=typeof prediction.fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(prediction.fingerprintHash)?prediction.fingerprintHash:null;
+ const assessed=typeof value.fingerprintHash==='string'&&/^[a-f0-9]{64}$/.test(value.fingerprintHash)?value.fingerprintHash:null;
+ if(!bound||assessed!==bound)return 'low';
+ return value.level;
+}
+function findsStrong(prediction){const confidence=effectiveConfidence(prediction);return !!prediction&&!prediction.stale&&Number.isFinite(prediction.predictedRating)&&prediction.predictedRating>=FINDS_MIN_RATING&&Number.isFinite(prediction.probability4Plus)&&prediction.probability4Plus>=FINDS_MIN_PROBABILITY&&confidence!==''&&confidence!=='low';}
 // Contextual finds: every filter a catalog record can answer from its own fields (title search, genres, years, runtime, mechanics,
 // moods, execution, prediction thresholds, last chance, channel and period) is a hard constraint, with the same AND/OR rules as the
 // watchlist grid. Mechanics, moods and execution come only from the record's current fingerprint and prediction. The people search
@@ -1007,7 +1054,7 @@ function similarVerifiedIdentity(film){const tmdb=film?.tmdbId==null?'':String(f
 function similarCreditIds(people){const ids=[];for(const person of people||[]){const id=typeof person?.id==='string'?person.id:'';if(id&&!ids.includes(id))ids.push(id);}return ids;}
 function similarKnownExecution(execution){const out=[];if(!execution||typeof execution!=='object')return out;for(const dimension of EXECUTION_FILTERS){const value=execution[dimension.id];if(!value||value==='unknown'||value==='not_applicable'||!EXECUTION_VALUES[dimension.id]?.[value])continue;out.push(dimension.id+':'+value);}return out;}
 function similarFacetBundle(fingerprint,prediction){const fresh=prediction&&!prediction.stale?prediction:null;return {mechanics:knownFacetIds(fingerprint?.plotMechanics,MECHANIC_LABELS),moods:knownFacetIds([...(fingerprint?.moodIds||[]),...(fresh?.moodIds||[])],MOOD_LABELS),execution:similarKnownExecution(fingerprint?.execution)};}
-function similarNumbers(prediction){if(!prediction||prediction.stale||!Number.isFinite(prediction.predictedRating))return null;return {rating:prediction.predictedRating,probability:Number.isFinite(prediction.probability4Plus)?prediction.probability4Plus:null,confidence:prediction.confidence};}
+function similarNumbers(prediction){if(!prediction||prediction.stale||!Number.isFinite(prediction.predictedRating))return null;const numbers={rating:prediction.predictedRating,probability:Number.isFinite(prediction.probability4Plus)?prediction.probability4Plus:null,confidence:prediction.confidence};if(Object.hasOwn(prediction,'confidenceAssessment'))numbers.confidenceAssessment=prediction.confidenceAssessment;if(typeof prediction.fingerprintHash==='string')numbers.fingerprintHash=prediction.fingerprintHash;return numbers;}
 function similarViewItem(id){const item=enrichment.films?.[String(id)];return item&&typeof item==='object'?item:null;}
 function similarHasRating(item){return !!item&&item.actualRating!==null&&item.actualRating!==undefined;}
 function similarRewatch(item){return !!item&&(item.watched===true||similarHasRating(item));}
@@ -1088,7 +1135,7 @@ function buildSimilar(source,now=nowMs()){
   if(!findsShows(film,now,null).length)return;
   if(sourceName==='catalog'&&!findsStrong(film.prediction))return;
   const overlap=similarOverlap(origin.bundle,view.bundle,{directors:people.directors,actors:people.actors},{directors:similarCreditIds(film.directors),actors:similarCreditIds(film.actors)});
-  const substantive=similarSubstantive(overlap),fallback=!substantive&&!view.rewatch&&findsStrong({predictedRating:view.prediction?.rating,probability4Plus:view.prediction?.probability,confidence:view.prediction?.confidence,stale:false});
+  const fallbackPrediction={predictedRating:view.prediction?.rating,probability4Plus:view.prediction?.probability,confidence:view.prediction?.confidence,stale:false};if(view.prediction&&Object.hasOwn(view.prediction,'confidenceAssessment'))fallbackPrediction.confidenceAssessment=view.prediction.confidenceAssessment;if(typeof view.prediction?.fingerprintHash==='string')fallbackPrediction.fingerprintHash=view.prediction.fingerprintHash;const substantive=similarSubstantive(overlap),fallback=!substantive&&!view.rewatch&&findsStrong(fallbackPrediction);
   if(view.rewatch&&!substantive)return;
   const options=similarOptions(overlap,fallback);if(!options.length)return;
   const verified=similarVerifiedIdentity(film);
@@ -1345,7 +1392,7 @@ function applyFilters(input){
 }
 const LIVE_REFRESH_MS=60000;
 let programmeKey='',programmeSeen=false,programmeReady=false,programmeLoading=false;
-let enrichmentKey='',enrichmentLoading=false,footerReady=false,footerLoading=false;
+let enrichmentKey='',enrichmentLoading=false,footerReady=false,footerLoading=false,footerReadAt=0;
 let liveTimer=null,liveHandlers=null,liveRunning=false,livePending=false,liveCoalesced=false,controlsReady=false;
 function setYearBounds(followValue){
  const yearTo=$('#year-to'),yearFrom=$('#year-from'),yearError=$('#year-error');
@@ -1695,10 +1742,10 @@ function queueOutcomeText(queue,referenceMs=Date.now(),coverage=null){
  return {state:'waiting',short:`${count(outstanding)} без актуального прогноза`,long:head};
 }
 function footerStatusText(data){
- const n=value=>(Number.isFinite(Number(value))?Number(value):0).toLocaleString('ru'),pct=value=>Number.isFinite(Number(value))?` · ${formatCoveragePercent(value)}`:'',date=(value,options)=>{const ms=typeof value==='number'?value:Date.parse(value);return Number.isFinite(ms)?new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',...options}).format(new Date(ms)):'—';};
+ const n=value=>(Number.isFinite(Number(value))?Number(value):0).toLocaleString('ru'),finiteCount=value=>typeof value==='number'&&Number.isFinite(value)?value:null,pct=value=>finiteCount(value)===null?'':` · ${formatCoveragePercent(value)}`,coverageLine=(current,total,percent)=>{const left=finiteCount(current),right=finiteCount(total);return left===null||right===null?'нет данных':`${left.toLocaleString('ru')}/${right.toLocaleString('ru')} с актуальным прогнозом${pct(percent)}`;},date=(value,options)=>{const ms=typeof value==='number'?value:Date.parse(value);return Number.isFinite(ms)?new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',...options}).format(new Date(ms)):'—';};
  const c=data.coverage||{},p=data.predictions||{},epg=data.epgTmdb||{},watchlist=data.watchlist||{},run=data.lastRun,profile=data.profile;
- const local=`${n(c.currentPredictionsTotal)}/${n(c.confirmedFilmsTotal)} с актуальным прогнозом${pct(c.localPercent)}`;
- const windowCoverage=`${n(c.windowCurrentPredictions)}/${n(c.windowFilmsTotal)} с актуальным прогнозом${pct(c.windowPercent)}`;
+ const local=coverageLine(c.currentPredictionsTotal,c.confirmedFilmsTotal,c.localPercent);
+ const windowCoverage=coverageLine(c.windowCurrentPredictions,c.windowFilmsTotal,c.windowPercent);
  const active=run?.status==='running',runStatus=run?FOOTER_RUN_STATUS[run.status]||'завершён':'не запускался',outcome=queueOutcomeText({...p,hotPending:p.pendingHot,coldPending:p.pendingCold},Number.isFinite(Date.parse(data.generatedAt))?Date.parse(data.generatedAt):Date.now(),c),normalRun=!!run&&!active&&(!run.reason||NORMAL_RUN_REASONS.includes(run.reason))&&['completed','blocked'].includes(run.status),next=date(p.nextScheduledRun,{hour:'2-digit',minute:'2-digit'}),nextDetail=date(p.nextScheduledRun,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
  let runReason=active||!run?'':normalRun?(outcome?.short??FOOTER_RUN_REASON[run.reason]??''):run.reason?FOOTER_RUN_REASON[run.reason]||'ошибка':'';
  if(!active&&run?.reason==='quota'){const confirmed=date(run.finishedAt,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});runReason=confirmed==='—'?'лимит использования':`лимит использования · подтверждено ${confirmed}`;}
@@ -1722,7 +1769,8 @@ function renderFooterStatus(data){const text=footerStatusText(data),values={
  'detail-run-started':text.runStarted,'detail-run-added':text.runAdded,'detail-run-failed':text.runFailed,'detail-run-reason':text.runResult,'detail-run-next':text.nextRun,'detail-profile-version':text.profileVersion,'detail-profile-updated':text.profileUpdated,'status-integrations':text.integrationAggregate,'integration-watchlist':text.integrations.letterboxd_watchlist,'integration-ratings':text.integrations.letterboxd_ratings,'integration-epg':text.integrations.epg,'integration-resolver':text.integrations.resolver,'integration-predictions':text.integrations.predictions,'integration-metadata':text.integrations.metadata};for(const [id,value] of Object.entries(values)){const node=$('#'+id);if(node)node.textContent=value;}
  const metadata=$('[data-integration="metadata"]');if(metadata)metadata.hidden=!text.integrations.metadata;
  for(const [id,key] of [['integration-watchlist','letterboxd_watchlist'],['integration-ratings','letterboxd_ratings'],['integration-epg','epg'],['integration-resolver','resolver'],['integration-predictions','predictions'],['integration-metadata','metadata']]){const node=$('#'+id),source=(data.integrations?.sources||[]).find(item=>item.id===key);if(!node)continue;node.classList.remove('is-failed','is-attention');if(source?.state==='failed')node.classList.add('is-failed');else if(source&&['degraded','stale','unknown'].includes(source.state))node.classList.add('is-attention');}}
-async function loadPredictionQueue(options={}){if(footerLoading)return 'busy';footerLoading=true;try{const response=await fetch('/api/enrichment/footer/status');if(!response.ok)throw new Error();renderFooterStatus(await response.json());footerReady=true;return true;}catch{if(!footerReady&&!options.quiet){const unavailable='статус недоступен';$('#status-local-coverage').textContent=unavailable;$('#status-window-coverage').textContent=unavailable;$('#status-last-run').textContent=unavailable;$('#status-integrations').textContent=unavailable;}return false;}finally{footerLoading=false;}}
+function markFooterUnreadable(){const unavailable='статус недоступен';for(const id of ['status-local-coverage','status-window-coverage','status-last-run','status-integrations','detail-local-coverage','detail-window-coverage']){const node=$('#'+id);if(node)node.textContent=unavailable;}const next=$('#status-next-run');if(next)next.textContent=footerReadAt?`Последнее чтение: ${madridStamp(footerReadAt)}`:'Последнее чтение: —';for(const id of ['integration-watchlist','integration-ratings','integration-epg','integration-resolver','integration-predictions','integration-metadata']){const node=$('#'+id);if(!node)continue;node.classList.remove('is-failed','is-attention');node.classList.add('is-attention');node.textContent=unavailable;}}
+async function loadPredictionQueue(options={}){if(footerLoading)return 'busy';footerLoading=true;try{const response=await fetch('/api/enrichment/footer/status');if(!response.ok)throw new Error();renderFooterStatus(await response.json());footerReady=true;footerReadAt=Date.now();return true;}catch{if(footerReady)markFooterUnreadable();else if(!options.quiet){const unavailable='статус недоступен';$('#status-local-coverage').textContent=unavailable;$('#status-window-coverage').textContent=unavailable;$('#status-last-run').textContent=unavailable;$('#status-integrations').textContent=unavailable;}return false;}finally{footerLoading=false;}}
 function endedPhrase(at,now){const hours=Math.max(0,Math.floor((now-at)/3600000));let previous=now;const today=madridDay(now);do{previous-=3600000;}while(madridDay(previous)===today);if(madridDay(at)===madridDay(previous))return 'вчера';if(hours<1)return 'только что';return `${hours} ч назад`;}
 function programmeStatus(model=viewingWindow()){
  const title='Границы сохранённого снимка. Это не гарантия, что у каждого канала есть передача до конца окна.';

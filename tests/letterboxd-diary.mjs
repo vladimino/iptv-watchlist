@@ -28,7 +28,7 @@ const ctx=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextE
   return respond(404,'');
  }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const D=vm.runInContext('LetterboxdDiary',ctx);
 const off={LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket};
 const env={...off,LETTERBOXD_DIARY_HISTORY:'on'};

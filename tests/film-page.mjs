@@ -381,6 +381,7 @@ assert.doesNotMatch(css,/\.film-why\{[^}]*max-width:420px/);
 assert.match(css,/#film-screen-identity\{display:none\}/);
 assert.match(css,/html\.film-screen \.workspace\{display:none!important\}/);
 assert.match(css,/html\.film-screen \.search-panel\{display:none!important\}/);
+assert.doesNotMatch(css,/html\.film-screen \.status-footer\{display:\s*none/,'the film screen keeps the status footer');
 assert.match(html,/id="film-screen-availability"/);
 assert.match(html,/id="film-similar"/);
 assert(html.indexOf('id="film-screen-availability"')<html.indexOf('id="film-similar"')&&html.indexOf('id="film-similar"')<html.indexOf('id="film-screen-identity"'),'similar films follow the open film availability');

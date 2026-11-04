@@ -1,11 +1,13 @@
 -- Schema v10: Letterboxd ratings, viewing facts, diary cursor and history,
 -- the ratings run, and the removal queue (ADR 0084).
--- The prerequisite is a complete version 8: the ten prediction tables, the
--- nine published-EPG tables, and both authority rows. Version 9 is accepted
--- and is not required. Owner-review tables are not required.
+-- The operational path is a complete version 9. Production already has that
+-- contract, including the owner-review tables. The file still accepts a
+-- complete version 8: the ten prediction tables, the nine published-EPG
+-- tables, and both authority rows. Owner-review tables are not part of
+-- this file's prerequisite.
 -- The first statement refuses anything else and creates nothing.
--- The version becomes 10 and never goes down. 0009 applied after this file
--- still creates owner reviews and does not lower 10.
+-- The version becomes 10 and never goes down. This file does not rewrite
+-- 0009. 0009 does not install after the contract is already 10.
 -- A deploy does not apply this file. The inserted marker is mode r2 and
 -- cutover open. Applying it copies no fact, diary, run or queue, and it
 -- does not set mode d1.
@@ -94,5 +96,5 @@ INSERT INTO ratings_domain_cas (id, ok) VALUES (1, 1);
 
 UPDATE schema_contract
 SET version = 10,
-    note = 'Schema v10: ratings authority. Marker mode r2 until a separate activation. Version 10 follows a complete version 8 and does not require owner reviews.'
+    note = 'Schema v10: ratings authority. Marker mode r2 until a separate activation. Version 10 follows a complete version 8 or 9. This file does not rewrite 0009.'
 WHERE id = 1 AND version >= 8 AND version < 10;

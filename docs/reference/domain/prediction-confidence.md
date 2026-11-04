@@ -2,7 +2,7 @@
 
 Pure function `assessPredictionConfidence` in `src/domain/prediction-confidence.js`. It reads one fingerprint and returns a versioned `confidenceAssessment`. It does not read storage, a rating, a prediction, or the fingerprint's derived `sourceBasis`. It does not fetch a URL. The result is not written into the fingerprint and is not part of `fingerprintHash`.
 
-The Worker bundle does not load the module. Submit, the catalog, the view index, Finds, Similar, EPG and the hourly task do not call it. Stored `prediction.confidence` stays the value the model submitted. The film page renders an assessment only when that object is already on the prediction DTO. Putting the assessment on a live snapshot is a later card, not this contract.
+The Worker loads the module and calls it once, when submit writes a new prediction snapshot. The call uses the fingerprint of that request, including its `fingerprintHash`: the body just accepted, or the stored fingerprint reused by `prediction_only`. The result is stored on that snapshot as `confidenceAssessment`. A caller-supplied `confidenceAssessment` is removed before storage and replaced by this result. `prediction.confidence` stays the model's enum. `prediction_validate`, the schema endpoint, catalog, view, Finds, Similar, EPG and the hourly task do not call the function. A read does not recompute the object and does not add it to a snapshot that was stored without the key. Versions stay `FINGERPRINT_SCHEMA_VERSION=1`, `FINGERPRINT_PROMPT_VERSION=1` and `PREDICTION_PROMPT_VERSION=1`. There is no feature flag and no backfill.
 
 `presentConfidenceAssessment` returns a copy of a version-1 object whose `level`, `status`, reason codes and coverage are in the lists below, or `null`. A `legacy` or `insufficient` result whose level is not `low` is `null`.
 
@@ -51,12 +51,28 @@ Thresholds live in `CONFIDENCE_ASSESSMENT_THRESHOLDS` (`highUnknownMax: 2`, `hig
 
 `evidence_shape` covers a claim list that is not 1–4 items, an item the shape rejects, a mechanic that is not in the asserted list or has no usable items, evidence items on an `unknown` or `not_applicable` dimension, and a concrete key dimension with no usable items. An `unknown` or `not_applicable` dimension with no evidence entry is not `evidence_shape`. Together with `duplicate_ref` and `metadata_only_execution`, it fails the whole map closed. The assessor does not try to detect a contradiction between two URLs.
 
+## Effective level
+
+`effectivePredictionConfidence` is the level Finds and Similar use. It is derived when the page reads a prediction. It is not a second stored field.
+
+| Stored snapshot | Effective level |
+| --- | --- |
+| No `confidenceAssessment` key | the model's `prediction.confidence` (`low`, `medium` or `high`), or `null` when that field is not one of those three |
+| The key is present, including `null`, but the object is not a complete bound version-1 assessment (`reasonCodes`, every coverage count, and a matching 64-character lowercase hex `fingerprintHash`), or the snapshot has no such hash | `low` |
+| A version-1 assessment whose `fingerprintHash` equals the snapshot hash | `assessment.level` |
+
+`legacy` and `insufficient` are stored as `low`, so a bound assessment in either status is effective `low`. A missing evidence map is `legacy` / `low` / `legacy_no_evidence`. A rejected map (`evidence_shape`, `duplicate_ref`, `metadata_only_execution`) is `insufficient` / `low`. Neither is presented as `medium` or `high`. The model's `confidence` is left unchanged and is not used once the key is present. Rating and probability thresholds are not part of this function.
+
+The page copies the same rule in `effectiveConfidence`. It does not call `assessPredictionConfidence`.
+
 ## Film page
 
-When `prediction.confidenceAssessment` is absent, the forecast shows the stored `prediction.confidence` as it did before (`уверенность` plus низкая / средняя / высокая). Finds and Similar keep reading that stored field. When a version-1 assessment is present, `level` and `status` are exactly `high` / `medium` / `low` and `evidenced` / `legacy` / `insufficient` (an inherited name such as `toString` or `constructor` does not match), its reason codes are an array, and every coverage count is an integer from 0 to 99, the stored field is labelled `уверенность модели` and a second block says `Качество доказательств` with the level in words. Up to three reason sentences are visible; the `title` carries the same sentences. The level is also a `data-level` attribute. Color is not the only signal, and the block does not reuse the rating numeral's fill. Text is escaped. An object outside that shape, including one that has only version, level and status, renders nothing. When the prediction object already has a 64-character lowercase hex `fingerprintHash`, the block renders only if the assessment hash is that same value. This delivery does not add the hash or the assessment to the view or catalog response, and the page does not fetch either one.
+When `prediction.confidenceAssessment` is absent, the forecast shows the stored `prediction.confidence` as before (`уверенность` plus низкая / средняя / высокая). Finds and Similar then use that same model field. When a version-1 assessment is present, `level` and `status` are exactly `high` / `medium` / `low` and `evidenced` / `legacy` / `insufficient` (an inherited name such as `toString` or `constructor` does not match), its reason codes are an array, and every coverage count is an integer from 0 to 99, the stored model field is labelled `уверенность модели` and a second block says `Качество доказательств` with the assessment level in words. Up to three reason sentences are visible; the `title` carries the same sentences. The level is also a `data-level` attribute. Color is not the only signal, and the block does not reuse the rating numeral's fill. Text is escaped. An object outside that shape, including one that has only version, level and status, renders nothing. When the prediction object already has a 64-character lowercase hex `fingerprintHash`, the block renders only if the assessment hash is that same value. The view and catalog responses copy `confidenceAssessment` and `fingerprintHash` whenever the stored snapshot has the `confidenceAssessment` key, including when the value is `null` or otherwise not a complete assessment. The page does not fetch either field on its own.
 
-History events keep the stored `confidence` of that record. A reader does not invent an assessment for them.
+Finds and the catalog half of Similar apply the effective level above. The floor stays a fresh `predictedRating` of at least 4.0 and a `probability4Plus` of at least 0.70. A snapshot without the key still passes or fails on the model field. A snapshot with the key passes only when the effective level is `medium` or `high`. A new snapshot whose fingerprint has no usable evidence is effective `low` and leaves Finds even when the model submitted `high`.
+
+History events keep the stored `confidence` of that record. The event whitelist does not copy `confidenceAssessment`, and a reader does not invent one. The immutable prediction version body includes the assessment because that body is the snapshot minus the pointer fields.
 
 ## Rollback
 
-Revert the Worker. No stored prediction, fingerprint or index changes shape because of this module, so there is nothing to migrate back. Activating the assessment on new snapshots is out of scope here.
+Revert the Worker. Snapshots already written keep `confidenceAssessment` on their immutable bodies; reverting the code does not strip them and does not recompute older snapshots. After a revert, a later submit stops attaching the object, and Finds again reads the model field even on a snapshot that still carries the key. No migration runs in either direction.

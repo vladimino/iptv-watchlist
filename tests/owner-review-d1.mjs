@@ -79,42 +79,7 @@ function refuses(list){
  assert.equal((await readAuthority(missingRow)).failClosed,true);
  const numbered=migrated(base);
  numbered.sql('UPDATE schema_contract SET version=9');
- assert.equal((await readAuthority(numbered)).legacy,true,'a version number without the owner-review tables stays on R2');
- assert.equal((await readAuthority(numbered)).failClosed,false);
-}
-
-{
- const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority'];
- const db=migrated(chain);
- db.sql(fs.readFileSync('migrations/0010_ratings_authority.sql','utf8'));
- assert.equal(one(db,'SELECT version FROM schema_contract'),10);
- assert.equal(one(db,"SELECT COUNT(*) FROM sqlite_master WHERE name='owner_review_authority'"),0);
- const gate=await readAuthority(db);
- assert.equal(gate.legacy,true);
- assert.equal(gate.failClosed,false);
- const bucket=new MemoryBucket();
- const document={contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{}};
- assert.equal(await commit({DB:db,BUCKET:bucket},{document}),null,'version 10 without 0009 keeps the caller on its R2 put');
- const stored=await bucket.put(OWNER_REVIEWS_KEY,JSON.stringify(document));
- const loaded=await loadForRead({DB:db,BUCKET:bucket});
- assert.equal(loaded.ok,true);
- assert.equal(loaded.body.films.heat.localization.value,'Хозяин');
- db.sql(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8'));
- assert.equal(one(db,'SELECT version FROM schema_contract'),10);
- const installed=await readAuthority(db);
- assert.equal(installed.legacy,false);
- assert.equal(installed.mode,'r2');
- assert.equal(installed.failClosed,false);
- const saved=await commit({DB:db,BUCKET:bucket},{expectedRevision:stored.etag,document:{...document,films:{heat:filmSlice('Дальше')}}});
- assert.equal(saved.ok,true);
- assert.equal(JSON.parse(bucket.objects.get(OWNER_REVIEWS_KEY).text).films.heat.localization.value,'Дальше');
- const after=await loadForRead({DB:db,BUCKET:bucket});
- assert.equal(after.ok,true);
- assert.equal(after.mode,'r2');
- assert.equal(after.body.films.heat.localization.value,'Дальше');
- db.sql('DROP TABLE owner_review_cas');
- assert.equal((await readAuthority(db)).failClosed,true,'a partial owner-review schema fails closed');
- assert.equal((await loadForRead({DB:db,BUCKET:bucket})).ok,false);
+ assert.equal((await readAuthority(numbered)).failClosed,true,'version 9 without the owner-review tables does not fall back to R2');
 }
 
 {

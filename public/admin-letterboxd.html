@@ -19,29 +19,37 @@
       <div>
         <p class="eyebrow">ВЛАДЕЛЕЦ · ПРЕДПРОСМОТР БЕЗ ЗАПИСИ</p>
         <h1>Архив Letterboxd</h1>
-        <p class="admin-intro">Проверка экспорта Letterboxd: свежий ли архив, всё ли в нём читается и что изменил бы импорт в фактах R2. Архив разбирается на сервере только в рамках запроса и нигде не сохраняется. Запись партии начинается только после отдельного подтверждения, не вместе с проверкой.</p>
+        <p class="admin-intro">Один шаг за раз. Сначала проверка экспорта Letterboxd, и только отдельным шагом запись одной партии. Архив разбирается на сервере в рамках запроса и нигде не сохраняется. Время на экране — Europe/Madrid. Поле UTC нужно только если файл переименовали.</p>
       </div>
     </section>
-    <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd" aria-current="page">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters">Постеры</a></nav>
-    <section class="admin-card archive-upload" aria-labelledby="archive-upload-title">
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd" aria-current="page">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters">Постеры</a></nav>
+      <div class="admin-main">
+    <ol id="archive-steps" class="archive-steps" aria-label="Шаги проверки архива"><li data-archive-step="1">Выбрать ZIP</li><li data-archive-step="2">Проверка и свежесть</li><li data-archive-step="3">Разница</li><li data-archive-step="4">Одна партия</li><li data-archive-step="5">Квитанция</li></ol>
+    <section id="archive-upload" class="admin-card archive-upload" aria-labelledby="archive-upload-title">
       <h2 id="archive-upload-title">Проверить архив</h2>
       <form id="archive-form" class="archive-form" action="/admin/letterboxd" novalidate>
         <label class="limbo-field archive-file">ZIP-архив экспорта<input id="archive-file" name="archive" type="file" accept=".zip,application/zip" aria-describedby="archive-file-hint"></label>
         <p id="archive-file-hint" class="muted archive-hint">Letterboxd → Settings → Data → Export your data. Обычное имя: letterboxd-&lt;имя&gt;-ГГГГ-ММ-ДД-ЧЧ-ММ-utc.zip. Не больше 10 МБ.</p>
         <label class="limbo-field archive-time">Время экспорта, UTC<input id="archive-generated-at" name="generatedAt" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="40" placeholder="только для переименованного файла, напр. 2026-10-31T08:15Z" aria-describedby="archive-time-hint"></label>
-        <p id="archive-time-hint" class="muted archive-hint">Заполняй, только если файл переименован: тогда время экспорта из имени не прочитать.</p>
+        <p id="archive-time-hint" class="muted archive-hint">Только для переименованного файла: у обычного имени время читается из имени, а на экране показывается по Мадриду. Поле UTC оставь пустым, если файл не переименовывали.</p>
         <div class="archive-actions">
           <button type="submit" id="archive-submit" class="admin-refresh">Проверить архив</button>
-          <button type="button" id="archive-cancel" class="admin-more" hidden>Отменить</button>
           <button type="button" id="archive-reset" class="admin-more">Очистить</button>
         </div>
       </form>
     </section>
-    <p id="archive-loading" class="admin-state" role="status" aria-busy="true" hidden>Сервер проверяет архив и сравнивает его с R2…</p>
+    <div id="archive-progress" class="archive-progress" hidden>
+      <p id="archive-loading" class="admin-state" role="status" aria-busy="true" hidden>Сервер проверяет архив и сравнивает его с R2…</p>
+      <button type="button" id="archive-cancel" class="admin-more" hidden>Отменить</button>
+    </div>
     <p id="archive-error" class="admin-state admin-state-error" role="alert" tabindex="-1" hidden></p>
     <p id="archive-idle" class="empty" role="status"><span aria-hidden="true">∅</span><b>Архив ещё не проверялся</b><span>Выбери файл и нажми «Проверить архив». Результат живёт только в этой вкладке до очистки или ухода со страницы.</span></p>
     <div id="archive-result" class="archive-results" tabindex="-1" aria-live="polite"></div>
+      </div>
+    </div>
   </main>
   <script src="/admin-letterboxd.js"></script>
+  <script src="/status-footer.js"></script>
 </body>
 </html>

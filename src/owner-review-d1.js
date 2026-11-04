@@ -1,10 +1,7 @@
 // ADR 0081. Owner-reviewed Film titles and Person names.
-// None of the three owner-review tables means this domain is not installed:
-// Admin and the programme reads keep the R2 object at any contract version,
-// including after migration 0010 has moved a complete version 8 to version 10
-// (ADR 0084). A partial set fails closed. A missing binding, a missing
-// schema_contract, or a missing version row fails closed unless the caller
-// sets OWNER_REVIEW_DB_OPTIONAL to standin.
+// A confirmed contract below version 9, with these tables absent, keeps the R2
+// object. A missing binding, a missing schema_contract, or a missing version
+// row fails closed unless the caller sets OWNER_REVIEW_DB_OPTIONAL to standin.
 // Once the tables exist, mode r2 still stores the object and fences generation
 // before the put. Mode d1 reads and writes the rows and does not fall back to
 // the object. A d1 read takes the marker, the rows and the marker again. One
@@ -94,9 +91,8 @@ export async function readAuthority(source){
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('owner_review_entry','owner_review_authority','owner_review_cas')")).map(row=>row.name);}
  catch{return closedResult(numeric);}
- const present=['owner_review_entry','owner_review_authority','owner_review_cas'].filter(name=>names.includes(name)).length;
- if(present===0)return legacyResult(numeric);
- if(present!==3)return closedResult(numeric);
+ const tables=names.includes('owner_review_entry')&&names.includes('owner_review_authority')&&names.includes('owner_review_cas');
+ if(!tables)return numeric>=9?closedResult(numeric):legacyResult(numeric);
  let row;
  try{row=await one(db,'SELECT mode, generation, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag, writes FROM owner_review_authority WHERE id=1');}
  catch{return {legacy:false,mode:null,tables:true,version,failClosed:true};}
