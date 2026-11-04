@@ -9,7 +9,7 @@ const PRODUCTION=/3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb|(?:^|[\\/])iptv(?:[\\/]|$
 const args=process.argv.slice(2);
 const database=args.includes('--database')?args[args.indexOf('--database')+1]:undefined;
 const refuse=message=>{console.error('refuse: '+message);process.exit(2);};
-if(args.includes('--apply')||args.includes('--activate')||args.includes('--import')||args.includes('--load')||args.includes('--reset-load'))refuse('schema apply, import and activation are not this command');
+if(args.includes('--apply')||args.includes('--activate')||args.includes('--import')||args.includes('--hold')||args.includes('--load')||args.includes('--reset-load')||args.includes('--reset-import'))refuse('schema apply, import, hold and activation are not this command');
 if(!database){console.log(JSON.stringify({configured:false,writes:false,mode:null}));process.exit(0);}
 if(PRODUCTION.test(database))refuse('this script does not select production D1');
 const result=spawnSync('sqlite3',['-json','-bail',database],{input:"SELECT mode, cutover, generation, programme_run_id FROM discovery_authority WHERE id=1;",encoding:'utf8'});

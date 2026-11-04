@@ -19,10 +19,19 @@
 // of that batch fails closed before any delete. It does not download a
 // replacement. Generation becomes 1 only in the commit batch, after every key,
 // payload and show matches.
-// Catalog, decisions, scores, continuation, workflow, archive segments and the
-// resolver lease are not copied. Hold, seal, activation, archive import and
-// revert are not commands. A deploy does not run this script. Each write needs
-// its own confirm. A write_uncertain result is not retried inside the process.
+// --import --confirm import --producers-drained copies the catalog, decisions,
+// status, score preview, continuation and workflow while mode stays r2. The
+// commit pins that source on the checkpoint (hop imported) and keeps the pin
+// through hold. It does not copy an archive segment or the resolver lease.
+// --hold --confirm hold --producers-drained sets mode d1 and cutover held only
+// when a fresh read still matches that pin. --activate --confirm activate
+// --producers-drained opens that held cutover after the same comparison and
+// then clears the pin. --reset-import --confirm reset-import --producers-drained
+// deletes only that import's catalog, decisions, import history and scores and
+// restores the status, continuation, workflow and checkpoint. It does not
+// delete the loaded ledger. Revert is not a command. A deploy does not run this
+// script. Each write needs its own confirm. A write_uncertain result is not
+// retried inside the process.
 // This script does not call Time Travel restore. The D1 token is sent only to
 // https://api.cloudflare.com/client/v4, and only for database iptv.
 import {createHash} from 'node:crypto';
@@ -30,6 +39,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {evidenceKey} from '../src/discovery-authority.js';
+import {activateDecision, activateSql, admissionSql, assertDecisionEvidence, bodySha, catalogEntries, commitImportSql, decisionEntries, decisionGroup, holdDecision, holdSql, importDecision, importIdentity, isCutoverStop, openingImportSql, packImportBatches, parseImportIdentity, recordText, resetImportDecision, resetImportSql, sameImportIdentity, scoreEntries, SMALL_MAX_BYTES, statusText, valuePrefix} from './discovery-cutover.mjs';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
@@ -123,7 +133,7 @@ export function loadDecision(snapshot){
  const published=marker.publishedProgrammeRunId===programme&&snapshot.transfer?.programmeRunId===programme;
  const hop=snapshot.checkpoint?.hopId??null;
  if(marker.generation===0&&programme==null&&marker.publishedProgrammeRunId==null&&state==='idle'&&observations===0&&hop==null)return 'load';
- if(marker.generation>=1&&programme&&published&&state==='committed'&&hop==null)return 'already_loaded';
+ if(marker.generation>=1&&programme&&published&&state==='committed'&&hop!=='load')return 'already_loaded';
  if(state==='loading'||observations>0||hop==='load')return 'partial_load';
  return 'partial_load';
 }
@@ -394,14 +404,15 @@ function prefix(value){
 
 function parseArgs(argv){
  const args=argv.slice(2);
- const commands=['--apply','--load','--reset-load','--activate','--import','--revert'].filter(flag=>args.includes(flag));
+ const commands=['--apply','--load','--reset-load','--reset-import','--activate','--import','--hold','--revert'].filter(flag=>args.includes(flag));
  if(commands.length>1)throw new OperatorStop('usage',2);
  const command=commands[0]||'status';
- if(command!=='status'&&command!=='--apply'&&command!=='--load'&&command!=='--reset-load')throw new OperatorStop('usage',2);
+ if(!['status','--apply','--load','--reset-load','--reset-import','--import','--hold','--activate'].includes(command))throw new OperatorStop('usage',2);
  const target=args.includes('--target')?args[args.indexOf('--target')+1]:undefined;
  const confirm=args.includes('--confirm')?args[args.indexOf('--confirm')+1]:undefined;
+ const drained=args.includes('--producers-drained');
  if((args.includes('--target')&&!target)||(args.includes('--confirm')&&!confirm))throw new OperatorStop('usage',2);
- const known=new Set(['--apply','--load','--reset-load','--target','--confirm']);
+ const known=new Set(['--apply','--load','--reset-load','--reset-import','--import','--hold','--activate','--target','--confirm','--producers-drained']);
  for(let index=0;index<args.length;index++){
   const arg=args[index];
   if(!known.has(arg))throw new OperatorStop('usage',2);
@@ -415,8 +426,14 @@ function parseArgs(argv){
  if(command==='--apply'&&confirm!=='apply')throw new OperatorStop('confirm_required',2);
  if(command==='--load'&&confirm!=='load')throw new OperatorStop('confirm_required',2);
  if(command==='--reset-load'&&confirm!=='reset-load')throw new OperatorStop('confirm_required',2);
+ if(command==='--import'&&confirm!=='import')throw new OperatorStop('confirm_required',2);
+ if(command==='--reset-import'&&confirm!=='reset-import')throw new OperatorStop('confirm_required',2);
+ if(command==='--hold'&&confirm!=='hold')throw new OperatorStop('confirm_required',2);
+ if(command==='--activate'&&confirm!=='activate')throw new OperatorStop('confirm_required',2);
+ if((command==='--import'||command==='--reset-import'||command==='--hold'||command==='--activate')&&!drained)throw new OperatorStop('drain_required',2);
+ if(drained&&command!=='--import'&&command!=='--reset-import'&&command!=='--hold'&&command!=='--activate')throw new OperatorStop('usage',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
- return {command,target,confirm};
+ return {command,target,confirm,drained};
 }
 
 function productionTarget(env){
@@ -695,6 +712,262 @@ function normalize(error){
  return new OperatorStop('unknown_state',3);
 }
 
+async function readImportBody(client, key, {required,maxBytes}){
+ const head=await client.head(key);
+ if(!head){
+  if(required)throw new OperatorStop('source_missing',3);
+  return {present:false,etag:null,sha256:null,bytes:0,value:null};
+ }
+ if(head.size>maxBytes)throw new OperatorStop('import_too_large',3);
+ const got=await client.get(key,{ifMatch:head.etag});
+ if(!got)throw new OperatorStop('source_changed',3);
+ const text=Buffer.from(await new Response(got.body).arrayBuffer()).toString('utf8');
+ if(Buffer.byteLength(text)!==head.size)throw new OperatorStop('source_changed',3);
+ const again=await client.head(key,{ifMatch:head.etag});
+ if(!again||again.etag!==head.etag||again.size!==head.size)throw new OperatorStop('source_changed',3);
+ let value;
+ try{value=JSON.parse(text);}catch{throw new OperatorStop('import_refused',3);}
+ return {present:true,etag:head.etag,sha256:bodySha(text),bytes:head.size,value};
+}
+
+async function readPaged(binding, sql, cursorColumn, map){
+ const rows=[];
+ let cursor='';
+ for(;;){
+  const page=(await binding.prepare(sql).bind(cursor).all()).results;
+  if(!page.length)break;
+  if(page.at(-1)[cursorColumn]<=cursor)throw new OperatorStop('unknown_state',3);
+  for(const row of page)rows.push(map(row));
+  cursor=page.at(-1)[cursorColumn];
+  if(page.length<20)break;
+ }
+ return rows;
+}
+
+function requireLoadedProgramme(snapshot){
+ const programme=snapshot.marker?.programmeRunId??null;
+ if(!programme||snapshot.markers.publishedEpg?.programmeRunId!==programme)throw new OperatorStop('source_changed',3);
+ return programme;
+}
+
+async function buildCutover(client, binding, snapshot, writtenAt){
+ const programme=requireLoadedProgramme(snapshot);
+ const generation=snapshot.marker.generation;
+ const batches=snapshot.transfer.batches;
+ const catalogHead=await client.head('epg/generations/'+programme+'/discovered-films.json');
+ const catalog=await readImportBody(client,'epg/discovered-films.json',{required:true,maxBytes:LEDGER_MAX_BYTES});
+ if(!catalogHead)throw new OperatorStop('source_missing',3);
+ if(catalogHead.etag!==catalog.etag||catalogHead.size!==catalog.bytes)throw new OperatorStop('source_changed',3);
+ const decisions=await readImportBody(client,'epg/discovery-resolution.json',{required:true,maxBytes:LEDGER_MAX_BYTES});
+ const status=await readImportBody(client,'epg/discovery-status.json',{required:true,maxBytes:SMALL_MAX_BYTES});
+ const scores=await readImportBody(client,'epg/discovery-score-preview.json',{required:false,maxBytes:SMALL_MAX_BYTES});
+ const continuation=await readImportBody(client,'epg/resolver-continuation.json',{required:false,maxBytes:SMALL_MAX_BYTES});
+ const workflow=await readImportBody(client,'epg/discovery-workflow.json',{required:false,maxBytes:SMALL_MAX_BYTES});
+ let films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody;
+ try{
+  films=catalogEntries(catalog.value);
+  decisionRows=decisionEntries(decisions.value);
+  const evidence=new Map(await readPaged(binding,"SELECT observation_key AS key, evidence_key AS evidence FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key>? ORDER BY observation_key LIMIT 20",'key',row=>[row.key,row.evidence]));
+  assertDecisionEvidence(decisionRows,evidence);
+  scoreRows=scoreEntries(scores.value,programme);
+  statusBody=statusText(status.value,programme);
+  continuationBody=recordText(continuation.value,programme);
+  workflowBody=recordText(workflow.value,programme);
+ }catch(error){
+  if(isCutoverStop(error))throw new OperatorStop(error.reason,error.exitCode);
+  throw error;
+ }
+ const identity={
+  programmeRunId:programme,
+  generation,
+  batches,
+  catalog:{present:true,etag:catalog.etag,sha256:catalog.sha256,bytes:catalog.bytes},
+  decisions:{present:true,etag:decisions.etag,sha256:decisions.sha256,bytes:decisions.bytes},
+  status:{present:true,etag:status.etag,sha256:status.sha256,bytes:status.bytes},
+  scores:scores.present?{present:true,etag:scores.etag,sha256:scores.sha256,bytes:scores.bytes}:{present:false,etag:null,sha256:null,bytes:0},
+  continuation:continuation.present?{present:true,etag:continuation.etag,sha256:continuation.sha256,bytes:continuation.bytes}:{present:false,etag:null,sha256:null,bytes:0},
+  workflow:workflow.present?{present:true,etag:workflow.etag,sha256:workflow.sha256,bytes:workflow.bytes}:{present:false,etag:null,sha256:null,bytes:0},
+ };
+ const payload=importIdentity(identity);
+ return {programme,generation,batches,films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody,identity,payload,writtenAt};
+}
+
+async function proveCutover(binding, built){
+ const films=await readPaged(binding,"SELECT film_id AS filmId, payload_json AS payload FROM discovery_admission WHERE state='current' AND film_id>? ORDER BY film_id LIMIT 20",'filmId',row=>{
+  let film;try{film=JSON.parse(row.payload);}catch{throw new OperatorStop('partial_mismatch',3);}
+  return {filmId:row.filmId,film};
+ });
+ const filmPrefix=valuePrefix(films,built.films,(stored,expected)=>stored.filmId===expected.filmId&&JSON.stringify(stored.film)===JSON.stringify(expected.film));
+ if(filmPrefix.mismatch)return {complete:false,mismatch:true,filmCursor:filmPrefix.cursor,decisionCursor:0};
+ if(filmPrefix.cursor!==built.films.length)return {complete:false,mismatch:false,filmCursor:filmPrefix.cursor,decisionCursor:0};
+ const decisions=await readPaged(binding,"SELECT observation_key AS key, payload_json AS payload FROM discovery_decision WHERE observation_key>? ORDER BY observation_key LIMIT 20",'key',row=>{
+  let decision;try{decision=JSON.parse(row.payload);}catch{throw new OperatorStop('partial_mismatch',3);}
+  return {key:row.key,decision};
+ });
+ const decisionPrefix=valuePrefix(decisions,built.decisionRows,(stored,expected)=>stored.key===expected.key&&JSON.stringify(stored.decision)===JSON.stringify(expected.decision));
+ if(decisionPrefix.mismatch)return {complete:false,mismatch:true,filmCursor:filmPrefix.cursor,decisionCursor:decisionPrefix.cursor};
+ return {complete:decisionPrefix.cursor===built.decisionRows.length,mismatch:false,filmCursor:filmPrefix.cursor,decisionCursor:decisionPrefix.cursor};
+}
+
+async function storedScores(binding, programme){
+ const rows=[];
+ let cursor='';
+ for(;;){
+  const page=(await binding.prepare("SELECT observation_key AS key, payload_json AS payload FROM discovery_score WHERE programme_run_id IS ? AND observation_key>? ORDER BY observation_key LIMIT 20").bind(programme,cursor).all()).results;
+  if(!page.length)break;
+  if(page.at(-1).key<=cursor)throw new OperatorStop('unknown_state',3);
+  for(const row of page){
+   try{rows.push(JSON.parse(row.payload));}
+   catch{throw new OperatorStop('partial_mismatch',3);}
+  }
+  cursor=page.at(-1).key;
+  if(page.length<20)break;
+ }
+ return rows;
+}
+
+function cutoverReady(built, status, scores, continuation, workflow){
+ if(!status||status.payload!==built.statusBody.text||(status.retryAt??null)!==built.statusBody.retryAt)return false;
+ if(scores.length!==built.scoreRows.length)return false;
+ for(let index=0;index<scores.length;index++)if(JSON.stringify(scores[index])!==JSON.stringify(built.scoreRows[index]))return false;
+ if((continuation?.payload??null)!==built.continuationBody.text||Number(continuation?.revision)!==built.continuationBody.revision)return false;
+ if((workflow?.payload??null)!==built.workflowBody.text||Number(workflow?.revision)!==built.workflowBody.revision)return false;
+ if((workflow?.instanceId??null)!==built.workflowBody.instanceId)return false;
+ const storedSeries=workflow?.series==null?null:Number(workflow.series);
+ if(storedSeries!==built.workflowBody.series)return false;
+ return true;
+}
+
+async function readSingletons(binding){
+ const status=await binding.prepare('SELECT payload_json AS payload, retry_at AS retryAt FROM discovery_status WHERE id=1').bind().first();
+ const continuation=await binding.prepare('SELECT payload_json AS payload, revision, programme_run_id AS programmeRunId FROM discovery_continuation WHERE id=1').bind().first();
+ const workflow=await binding.prepare('SELECT payload_json AS payload, revision, instance_id AS instanceId, programme_run_id AS programmeRunId, series FROM discovery_workflow WHERE id=1').bind().first();
+ return {status,continuation,workflow};
+}
+
+async function executeCutover(args, adapter, binding, snapshot, client, now, reads, bookmark){
+ const clock=typeof now==='function'?now():now;
+ const decision=args.command==='--import'?importDecision(snapshot):args.command==='--hold'?holdDecision(snapshot):activateDecision(snapshot);
+ if(['already_held','already_active','ledger_required','partial_mismatch','marker_refused','import_required'].includes(decision))throw new OperatorStop(decision,3);
+ if(decision==='partial_import'&&args.command!=='--import')throw new OperatorStop('partial_import',3);
+ if(decision==='hold'||decision==='activate'||decision==='import'||decision==='partial_import'){
+  const guarded=await writerReport(client,binding,clock);
+  if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
+ }
+ let built;
+ try{built=await buildCutover(client,binding,snapshot,new Date(clock).toISOString());}
+ catch(error){if(isCutoverStop(error))throw new OperatorStop(error.reason,error.exitCode);throw error;}
+ const proved=await proveCutover(binding,built);
+ const pinned=parseImportIdentity(snapshot.checkpoint?.payload??null);
+ const pinMatches=!!pinned&&sameImportIdentity(pinned,built.identity);
+ if((decision==='hold'||decision==='activate'||decision==='imported'||decision==='partial_import')&&!pinMatches)throw new OperatorStop('source_changed',3);
+ if(proved.mismatch)throw new OperatorStop('partial_mismatch',3);
+ const scores=await storedScores(binding,built.programme);
+ const single=await readSingletons(binding);
+ const ready=proved.complete&&cutoverReady(built,single.status,scores,single.continuation,single.workflow);
+ if(decision==='imported'){
+  if(!pinMatches)throw new OperatorStop('source_changed',3);
+  if(!ready)throw new OperatorStop('partial_mismatch',3);
+  return {exit:0,result:{operation:'import',writes:false,writeState:'none',reason:'already_imported',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:built.generation,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length}};
+ }
+ if(decision==='hold'||decision==='activate'){
+  if(snapshot.checkpoint?.hopId!=='imported'||!pinMatches)throw new OperatorStop('source_changed',3);
+  if(!ready)throw new OperatorStop('partial_mismatch',3);
+ }
+ if(decision==='partial_import'&&!pinMatches)throw new OperatorStop('source_changed',3);
+ if(decision==='import'&&(proved.filmCursor>0||proved.decisionCursor>0||ready))throw new OperatorStop('partial_mismatch',3);
+ const spec={programmeRunId:built.programme,generation:built.generation,batches:built.batches,payload:built.payload,retryAt:built.statusBody.retryAt,statusText:built.statusBody.text,scores:built.scoreRows,continuation:built.continuationBody,workflow:built.workflowBody};
+ let batches;
+ try{
+  if(decision==='hold')batches=[holdSql(spec)];
+  else if(decision==='activate')batches=[activateSql(spec)];
+  else{
+   if(proved.filmCursor<built.films.length&&proved.decisionCursor>0)throw new OperatorStop('partial_mismatch',3);
+   const filmGroups=built.films.slice(proved.filmCursor).map(film=>[admissionSql(film,built.programme,built.generation)]);
+   const decisionGroups=[];
+   const decisionStart=proved.filmCursor===built.films.length?proved.decisionCursor:0;
+   for(const row of built.decisionRows.slice(decisionStart))decisionGroups.push(await decisionGroup(row,built.programme,built.generation,built.writtenAt));
+   batches=[];
+   if(decision==='import')batches.push(openingImportSql(spec));
+   batches.push(...packImportBatches(filmGroups),...packImportBatches(decisionGroups),commitImportSql(spec));
+  }
+ }catch(error){if(isCutoverStop(error))throw new OperatorStop(error.reason,error.exitCode);throw error;}
+ let neighbours=false;
+ for(const statements of batches){
+  const guarded=await writerReport(client,binding,clock);
+  if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
+  const fresh=await snapshotOf(binding);
+  if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
+  if(fresh.marker?.mode!==snapshot.marker?.mode||fresh.marker?.cutover!==snapshot.marker?.cutover||fresh.marker?.generation!==snapshot.marker?.generation||fresh.marker?.programmeRunId!==snapshot.marker?.programmeRunId||fresh.transfer?.batches!==snapshot.transfer?.batches||fresh.transfer?.state!==snapshot.transfer?.state)throw new OperatorStop('source_changed',3);
+  reads.writeState='unknown';
+  await adapter.executeRendered(statements);
+  reads.writeState='committed';
+  const moved=await snapshotOf(binding);
+  if(neighboursMoved(snapshot.markers,moved.markers))neighbours=true;
+ }
+ const after=await snapshotOf(binding);
+ const marker=after.marker;
+ if(decision==='hold'){
+  if(marker?.mode!=='d1'||marker.cutover!=='held'||marker.generation!==built.generation||marker.programmeRunId!==built.programme||after.checkpoint?.hopId!=='imported'||after.checkpoint?.payload!==built.payload)throw new OperatorStop('readback_mismatch',4);
+ }else if(decision==='activate'){
+  if(marker?.mode!=='d1'||marker.cutover!=='open'||marker.generation!==built.generation||marker.programmeRunId!==built.programme||after.checkpoint?.hopId!=null||after.checkpoint?.payload!=null)throw new OperatorStop('readback_mismatch',4);
+ }else{
+  if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==built.generation||after.checkpoint?.hopId!=='imported'||after.checkpoint?.payload!==built.payload)throw new OperatorStop('readback_mismatch',4);
+  if(!await cutoverMatches(binding,built))throw new OperatorStop('readback_mismatch',4);
+ }
+ return {exit:0,result:{operation:args.command.slice(2),writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:marker?.mode??null,cutover:marker?.cutover??null,generation:marker?.generation??null,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length,scores:built.scoreRows.length,resumed:decision==='partial_import',neighboursMoved:neighbours}};
+}
+
+async function cutoverMatches(binding, built){
+ const proved=await proveCutover(binding,built);
+ if(proved.mismatch||!proved.complete)return false;
+ const scores=await storedScores(binding,built.programme);
+ const single=await readSingletons(binding);
+ return cutoverReady(built,single.status,scores,single.continuation,single.workflow);
+}
+
+async function importCopyForeign(binding, programme, generation){
+ const row=await binding.prepare("SELECT (SELECT COUNT(*) FROM discovery_segment) AS segments, (SELECT COUNT(*) FROM discovery_intent) AS intents, (SELECT COUNT(*) FROM discovery_admission WHERE programme_run_id IS NOT ? OR generation<>? OR state<>'current') AS admissions, (SELECT COUNT(*) FROM discovery_decision WHERE programme_run_id IS NOT ? OR generation<>?) AS decisions, (SELECT COUNT(*) FROM discovery_decision_history WHERE writer<>'import' OR revision<>1 OR generation<>?) AS history, (SELECT COUNT(*) FROM discovery_score WHERE programme_run_id IS NOT ? OR generation<>?) AS scores").bind(programme,generation,programme,generation,generation,programme,generation).first();
+ return [row?.segments,row?.intents,row?.admissions,row?.decisions,row?.history,row?.scores].some(value=>Number(value)>0);
+}
+
+async function importCopyClear(binding){
+ const row=await binding.prepare("SELECT (SELECT COUNT(*) FROM discovery_decision_history) AS history, (SELECT COUNT(*) FROM discovery_admission) AS admissions, (SELECT payload_json FROM discovery_status WHERE id=1) AS status, (SELECT generation FROM discovery_status WHERE id=1) AS status_generation, (SELECT revision FROM discovery_continuation WHERE id=1) AS continuation, (SELECT payload_json FROM discovery_continuation WHERE id=1) AS continuation_payload, (SELECT revision FROM discovery_workflow WHERE id=1) AS workflow, (SELECT payload_json FROM discovery_workflow WHERE id=1) AS workflow_payload").bind().first();
+ return Number(row?.history)===0&&Number(row?.admissions)===0&&row?.status==null&&Number(row?.status_generation)===0&&Number(row?.continuation)===0&&row?.continuation_payload==null&&Number(row?.workflow)===0&&row?.workflow_payload==null;
+}
+
+async function executeResetImport(adapter, binding, snapshot, client, now, reads, bookmark){
+ const clock=typeof now==='function'?now():now;
+ const decision=resetImportDecision(snapshot);
+ if(['already_held','already_active','ledger_required','partial_mismatch','marker_refused'].includes(decision))throw new OperatorStop(decision,3);
+ if(decision==='already_reset'){
+  if(!await importCopyClear(binding))throw new OperatorStop('partial_mismatch',3);
+  return {exit:0,result:{operation:'reset-import',writes:false,writeState:'none',reason:'already_reset',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:snapshot.marker?.generation??null,observations:snapshot.observations}};
+ }
+ if(decision!=='reset_import')throw new OperatorStop('unknown_state',3);
+ const guarded=await writerReport(client,binding,clock);
+ if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
+ const programme=snapshot.marker.programmeRunId;
+ const generation=snapshot.marker.generation;
+ if(await importCopyForeign(binding,programme,generation))throw new OperatorStop('partial_mismatch',3);
+ const lease=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
+ if(lease?.leaseId!=null||Number(lease?.expiresAt)!==0)throw new OperatorStop('partial_mismatch',3);
+ const fresh=await snapshotOf(binding);
+ if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
+ if(fresh.marker?.mode!==snapshot.marker?.mode||fresh.marker?.cutover!==snapshot.marker?.cutover||fresh.marker?.generation!==generation||fresh.marker?.programmeRunId!==programme||fresh.transfer?.state!==snapshot.transfer?.state||fresh.transfer?.batches!==snapshot.transfer?.batches||fresh.checkpoint?.hopId!==snapshot.checkpoint?.hopId||fresh.checkpoint?.payload!==snapshot.checkpoint?.payload||fresh.observations!==snapshot.observations)throw new OperatorStop('source_changed',3);
+ const spec={programmeRunId:programme,generation,batches:snapshot.transfer.batches,payload:snapshot.checkpoint.payload,hop:snapshot.checkpoint.hopId,observations:snapshot.observations};
+ reads.writeState='unknown';
+ await adapter.executeRendered(resetImportSql(spec));
+ reads.writeState='committed';
+ const after=await snapshotOf(binding);
+ const marker=after.marker;
+ if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==generation||marker.programmeRunId!==programme||after.transfer?.state!=='committed'||after.transfer?.batches!==snapshot.transfer.batches||after.checkpoint?.hopId!=null||after.checkpoint?.payload!=null||after.observations!==snapshot.observations||after.sideRows!==0)throw new OperatorStop('readback_mismatch',4);
+ if(!await importCopyClear(binding))throw new OperatorStop('readback_mismatch',4);
+ const leaseAfter=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
+ if(leaseAfter?.leaseId!=null||Number(leaseAfter?.expiresAt)!==0)throw new OperatorStop('readback_mismatch',4);
+ return {exit:0,result:{operation:'reset-import',writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',cutover:'open',generation,programmeRunId:programme,observations:after.observations,neighboursMoved:neighboursMoved(snapshot.markers,after.markers)}};
+}
+
 export async function runDiscoveryProduction({argv=process.argv,env=process.env,fetchImpl=fetch,now=Date.now()}={}){
  const args=parseArgs(argv);
  if(args.local)return {exit:0,result:{configured:false,writes:false,writeState:'none'}};
@@ -786,6 +1059,8 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
    writeState='committed';
    return {exit:0,result:{operation:'reset-load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:0,observations:0}};
   }
+  if(args.command==='--reset-import')return await executeResetImport(adapter,binding,snapshot,client,now,reads,bookmark);
+  if(args.command==='--import'||args.command==='--hold'||args.command==='--activate')return await executeCutover(args,adapter,binding,snapshot,client,now,reads,bookmark);
   const gate=loadDecision(snapshot);
   if(gate==='already_loaded')throw new OperatorStop(gate,3);
   if(gate!=='load'&&gate!=='partial_load')throw new OperatorStop(gate,3);
@@ -848,7 +1123,8 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
   return {exit:0,result:{operation:'load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:1,programmeRunId:built.run,observations:built.items,shows:built.shows,batches:sent,resumed,cursorStart,etagCompared:true,etagPrefix:prefix(ledger.etag),shaPrefix:prefix(ledger.sha256),bytes:ledger.bytes,decisions:0,admissions:0}};
  }catch(error){
   const stop=normalize(error);
-  return {exit:stop.exitCode||1,result:{reason:stop.reason,writes:writeState==='committed'?true:writeState==='unknown'?null:false,writeState,rowsWritten:reads.rowsWritten}};
+   const reported=reads.writeState??writeState;
+   return {exit:stop.exitCode||1,result:{reason:stop.reason,writes:reported==='committed'?true:reported==='unknown'?null:false,writeState:reported,rowsWritten:reads.rowsWritten}};
  }
 }
 
