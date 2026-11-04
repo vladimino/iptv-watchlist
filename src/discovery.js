@@ -522,11 +522,45 @@ async function resolveDiscoveryBatch(env,report,limit=24){
 // `checkpoint`, when given, is called with the chunk's summary immediately after the hop-marked final status is
 // saved and before any trailing write (score preview), so that the continuation checkpoint is the
 // very next durable write after the status; see advanceDiscovery.
+// A ledger above the in-memory cap is a cursor, not an array. One page is resident at a time, and only the
+// next `limit` actionable observations are kept for the TMDB calls.
+async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence){
+ const last=await loadJSON(env,'epg/discovery-status.json');
+ if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
+ const decisions=(await loadJSON(env,'epg/discovery-resolution.json'))||{};
+ const pending=[];
+ let remaining=0,after='',seen=0,maxPage=0;
+ for(;;){
+  const page=await DiscoveryAuthority.readObservationPage(env,{after});
+  maxPage=Math.max(maxPage,page.items.length);
+  seen+=page.items.length;
+  const now=Date.now();
+  for(const candidate of page.items){
+   if(!resolutionActionability(candidate,decisions[candidate.key],now))continue;
+   remaining++;
+   pending.push(candidate);
+   pending.sort((a,b)=>(candidateIsHot(b,now)?1:0)-(candidateIsHot(a,now)?1:0)||Number(!!b.year)-Number(!!a.year)||(Number(b.lastAiring)||0)-(Number(a.lastAiring)||0)||String(a.key).localeCompare(String(b.key)));
+   if(pending.length>limit)pending.pop();
+  }
+  if(!page.more)break;
+  after=page.after;
+ }
+ if(seen!==source.itemCount)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
+ let checked=0,tmdbCalls=0,error=null,retryAt=null;
+ const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
+ for(const candidate of pending){
+  try{await scoredSearchCandidates(query,candidate);checked++;}
+  catch(e){if(e?.name==='LeaseLostError')throw e;error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
+ }
+ const summary={schemaVersion:2,stage:error||remaining>checked?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked,remaining:Math.max(0,remaining-checked),error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls};
+ await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);return summary;
+}
 async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
  // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
  const [source,resolution,catalog,last]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json')]);
+ if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
  const decisions=resolution||{},films=catalog||{},watchlist=(report.films||[]),knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();

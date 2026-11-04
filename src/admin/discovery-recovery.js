@@ -305,7 +305,7 @@ async function drConfirm(request,env,url){
   const gate=await DiscoveryAuthority.readAuthority(env);
   if(gate.held)return drRefused('unknown_authority',409);
   if(gate.ready){
-   const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:'reconsider',observationKey:key});
+   const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:'reconsider',observationKey:key,issued,expectedHash:observed.record?.decisionHash??null,expiresAt:Date.parse(issued.expiresAt)});
    if(!intent.saved)return drRefused('idempotency_conflict',409);
    return json({confirmation:issued,preview:drPreviewView(observed.preview,observed.assessment)});
   }
@@ -356,6 +356,9 @@ async function drExecuteD1(request,env,url){
  if(!intent.intent)return drRefused('confirmation_missing',409);
  if(intent.intent.receipt)return json({replayed:true,receipt:intent.intent.receipt,state:'applied',durable:true});
  if(intent.intent.state==='running')return drRefused('in_progress',409,{state:'unknown',note:'An earlier submission with this key started and left no receipt. Its outcome is unknown: read the observation again; nothing is retried.'});
+ const bound=AdminActions.bindIssuance(intent.intent.issued,confirmation,new Date().toISOString());
+ if(!bound.ok)return drRefused(bound.refusal,409);
+ if(intent.intent.observationKey!==submitted.subject.id)return drRefused('confirmation_mismatch',409);
  const {bucket,versions}=drReadOnly(env.BUCKET);
  const observed=await drObserve(bucket,versions,submitted.subject.id,Date.now(),null,env);
  if(!observed.record||observed.preview.status!=='eligible')return drRefused('not_eligible',409);
@@ -363,7 +366,7 @@ async function drExecuteD1(request,env,url){
  if(!lease)return drRefused('lease_held',409);
  try{
   const next=DiscoveryRecovery.reconsideredDecision(observed.record.decision,{at:new Date().toISOString(),idempotencyKey:submitted.idempotencyKey});
-  const result=await DiscoveryAuthority.ownerDecision(env,{idempotencyKey:submitted.idempotencyKey,key:submitted.subject.id,expectedHash:observed.record.decisionHash,next,lease,writer:'discovery_reconsider',expiresAt:Date.parse(confirmation.expiresAt||'')||null,receipt:{state:'applied',capability:'discovery_reconsider',decisionHash:await DiscoveryAuthority.decisionHash(next)}});
+  const result=await DiscoveryAuthority.ownerDecision(env,{idempotencyKey:submitted.idempotencyKey,key:intent.intent.observationKey,expectedHash:intent.intent.expectedHash,next,lease,writer:'discovery_reconsider',receipt:{state:'applied',capability:'discovery_reconsider',decisionHash:await DiscoveryAuthority.decisionHash(next)}});
   if(result.outcome==='written'||result.outcome==='replay')return json({replayed:result.outcome==='replay',receipt:result.receipt,state:'applied',durable:true});
   if(result.outcome==='unknown')return drRefused('in_progress',409,{state:'unknown'});
   if(result.outcome==='expired')return drRefused('confirmation_expired',409);
@@ -434,9 +437,20 @@ async function drExecute(request,env,url){
  }finally{await releaseDiscoveryLease(env,lease);}
 }
 
+function drIntentReceipt(idempotencyKey,intent){
+ if(!intent)return adminError('not_found',404);
+ const record={schemaVersion:1,state:intent.state,issued:intent.issued??null,command:intent.command??null,observationKey:intent.observationKey,receipt:intent.receipt??null};
+ const state=record.receipt?'applied':record.state==='running'?'unknown':record.state??'unknown';
+ return json({idempotencyKey,state,record});
+}
 async function drReceipt(env,url){
  const idempotencyKey=url.searchParams.get('idempotencyKey');
  if(!idempotencyKey||!DR_IDEMPOTENCY.test(idempotencyKey))return adminError('invalid_request',400);
+ if(typeof DiscoveryAuthority!=='undefined'){
+  const gate=await DiscoveryAuthority.readAuthority(env);
+  if(gate.held)return adminError('storage_unavailable',503);
+  if(gate.ready)return drIntentReceipt(idempotencyKey,(await DiscoveryAuthority.readIntent(env,idempotencyKey)).intent);
+ }
  const {bucket}=drReadOnly(env.BUCKET);
  let object;
  try{object=await bucket.get(drActionKey(idempotencyKey));}catch{return adminError('storage_unavailable',503);}
@@ -590,7 +604,7 @@ async function diConfirm(request,env,url){
   const gate=await DiscoveryAuthority.readAuthority(env);
   if(gate.held)return drRefused('unknown_authority',409);
   if(gate.ready){
-   const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:command.effect==='assign'?'identity_assign':'identity_reject',observationKey:key});
+   const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:command.effect==='assign'?'identity_assign':'identity_reject',observationKey:key,issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},expectedHash:observed.record?.decisionHash??null,expiresAt:Date.parse(issued.expiresAt)});
    if(!intent.saved)return drRefused('idempotency_conflict',409);
    return json({confirmation:issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},plan,application,scope:{key,programmeRunId:observed.index.programmeRunId,decisionHash:observed.record.decisionHash}});
   }
@@ -671,18 +685,22 @@ async function diExecuteD1(request,env,url){
  if(!intent.intent)return drRefused('confirmation_missing',409);
  if(intent.intent.receipt)return json({replayed:true,receipt:intent.intent.receipt,state:'applied',durable:true});
  if(intent.intent.state==='running')return drRefused('in_progress',409,{state:'unknown',note:'An earlier submission with this key started and left no receipt. Its outcome is unknown: read the observation again; nothing is retried.'});
+ const bound=AdminActions.bindIssuance(intent.intent.issued,confirmation,new Date().toISOString());
+ if(!bound.ok)return drRefused(bound.refusal,409);
  if(intent.intent.kind!==(parsed.effect==='assign'?'identity_assign':'identity_reject'))return drRefused('confirmation_mismatch',409);
+ if(!intent.intent.command||intent.intent.command.effect!==parsed.effect||String(intent.intent.command.tmdbId)!==String(parsed.tmdbId))return drRefused('confirmation_mismatch',409);
+ if(intent.intent.observationKey!==submitted.subject.id)return drRefused('confirmation_mismatch',409);
  const {bucket,versions}=drReadOnly(env.BUCKET);
  const observed=await drObserve(bucket,versions,submitted.subject.id,Date.now(),null,env);
  if(!observed.record)return drRefused('not_eligible',409);
  const film=parsed.effect==='assign'?await diCatalogFilm(env,parsed.tmdbId):{status:'recorded',film:null};
- const command=DiscoveryIdentity.identityCommand(observed.record,{effect:parsed.effect,tmdbId:parsed.tmdbId,accepted:true},film.film);
+ const command=DiscoveryIdentity.identityCommand(observed.record,intent.intent.command,film.film);
  if(!command.ok)return drRefused('not_eligible',409,{reason:command.reason});
  const lease=await acquireDiscoveryLease(env);
  if(!lease)return drRefused('lease_held',409);
  try{
   const next=DiscoveryIdentity.appliedIdentityDecision(observed.record.decision,command,{at:new Date().toISOString(),requestId:submitted.idempotencyKey,programmeRunId:observed.index.programmeRunId});
-  const result=await DiscoveryAuthority.ownerDecision(env,{idempotencyKey:submitted.idempotencyKey,key:submitted.subject.id,expectedHash:observed.record.decisionHash,next,lease,writer:'discovery_identity_correct',expiresAt:Date.parse(confirmation.expiresAt||'')||null,receipt:{state:'applied',capability:'discovery_identity_correct',effect:parsed.effect,tmdbId:parsed.tmdbId,decisionHash:await DiscoveryAuthority.decisionHash(next)}});
+  const result=await DiscoveryAuthority.ownerDecision(env,{idempotencyKey:submitted.idempotencyKey,key:intent.intent.observationKey,expectedHash:intent.intent.expectedHash,next,lease,writer:'discovery_identity_correct',receipt:{state:'applied',capability:'discovery_identity_correct',effect:intent.intent.command.effect,tmdbId:intent.intent.command.tmdbId,decisionHash:await DiscoveryAuthority.decisionHash(next)}});
   if(result.outcome==='written'||result.outcome==='replay')return json({replayed:result.outcome==='replay',receipt:result.receipt,state:'applied',durable:true,application:DiscoveryIdentity.identityApplication(parsed.effect,observed.identity,command)});
   if(result.outcome==='unknown')return drRefused('in_progress',409,{state:'unknown'});
   if(result.outcome==='expired')return drRefused('confirmation_expired',409);
@@ -776,6 +794,15 @@ async function diExecute(request,env,url){
 async function diReceipt(env,url){
  const idempotencyKey=url.searchParams.get('idempotencyKey');
  if(!idempotencyKey||!DR_IDEMPOTENCY.test(idempotencyKey))return adminError('invalid_request',400);
+ if(typeof DiscoveryAuthority!=='undefined'){
+  const gate=await DiscoveryAuthority.readAuthority(env);
+  if(gate.held)return adminError('storage_unavailable',503);
+  if(gate.ready){
+   const intent=await DiscoveryAuthority.readIntent(env,idempotencyKey);
+   if(intent.intent&&intent.intent.kind!=='reconsider')return drIntentReceipt(idempotencyKey,intent.intent);
+   if(intent.handled)return adminError('not_found',404);
+  }
+ }
  const {bucket}=drReadOnly(env.BUCKET);
  let object;
  try{object=await bucket.get(diActionKey(idempotencyKey));}catch{return adminError('storage_unavailable',503);}

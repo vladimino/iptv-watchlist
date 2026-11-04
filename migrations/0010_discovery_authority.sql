@@ -200,6 +200,10 @@ CREATE TABLE discovery_intent (
  observation_key TEXT NOT NULL,
  before_json TEXT,
  receipt_json TEXT,
+ issued_json TEXT,
+ command_json TEXT,
+ expected_hash TEXT,
+ expires_at INTEGER,
  generation INTEGER
 ) STRICT;
 

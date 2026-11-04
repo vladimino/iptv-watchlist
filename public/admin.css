@@ -353,7 +353,20 @@
 .archive-row-facts{color:#c5d0c2}
 @media(max-width:800px){.archive-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.archive-totals .archive-total:last-child:nth-child(odd){grid-column:1 / -1}.archive-actions button,.archive-progress .admin-more{flex:1 1 100%}.archive-steps{flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px}.archive-steps li{flex:0 0 auto;max-width:11rem}}
 .posters-layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
-.posters-action,.posters-unverified{margin-top:22px}
+.posters-coverage-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}
+.posters-coverage-head h2{margin:0}
+.posters-reread{width:auto;margin:0;min-height:44px}
+.posters-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:12px 0 14px;padding:0;list-style:none}
+.posters-kpi{display:flex;flex-direction:column;justify-content:flex-end;gap:4px;min-width:0;min-height:108px;padding:14px;border:1px solid var(--line);border-radius:16px;background:#141914}
+.posters-kpi-value{font-size:40px;line-height:.9;letter-spacing:-1px;font-weight:650}
+.posters-kpi-unknown .posters-kpi-value,.posters-kpi-stale .posters-kpi-value{font-size:18px;letter-spacing:0;font-weight:600;color:var(--muted)}
+.posters-stale{margin:0 0 12px;padding:10px 12px;border:1px solid #8a7a45;border-radius:8px;color:#f3dd9a;font-size:14px;line-height:1.45}
+.posters-kpi-label{font-size:15px;font-weight:650}
+.posters-kpi small{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.posters-settings{margin:0 0 14px}
+.posters-settings summary,.posters-all-counts summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.posters-settings summary:focus-visible,.posters-all-counts summary:focus-visible,.posters-held-row summary:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.posters-action,.posters-unverified,.posters-dynamics{margin-top:22px}
 .posters-action-intro,.posters-source{font-size:14px;line-height:1.5;color:var(--muted);margin:0 0 10px}
 .posters-form{margin:0 0 14px}
 .posters-facts{margin:0 0 10px;font-size:14px}
@@ -371,7 +384,7 @@
 .posters-progress{margin:14px 0 0;padding:10px 12px;border-left:3px solid var(--lime);font-size:14px;line-height:1.5}
 .posters-outcomes span{color:var(--muted)}
 .posters-dynamics h3{margin:12px 0 6px;font-size:15px}
-@media(max-width:800px){.posters-layout{grid-template-columns:minmax(0,1fr)}.posters-form{flex-direction:column;align-items:stretch}}
+@media(max-width:800px){.posters-layout{grid-template-columns:minmax(0,1fr)}.posters-form{flex-direction:column;align-items:stretch}.posters-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.posters-kpi{min-height:0;padding:12px}.posters-kpi-value{font-size:28px}.posters-kpi-unknown .posters-kpi-value,.posters-kpi-stale .posters-kpi-value{font-size:16px}.posters-reread{width:100%}}
 .admin-original{margin:4px 0 10px}
 .other-titles{margin:12px 0}
 .other-titles summary{cursor:pointer;min-height:44px;display:flex;align-items:center}

@@ -13,7 +13,12 @@ export const STATEMENT_CAP=40;
 const SHOW_CAP=96;
 export const INDEX_CAP=3000;
 const READ_CAP=20000;
+export const LEDGER_PAGE=500;
 const GENERATION_KEY=/^epg\/generations\/([^/]+)\/(discovery-latest|discovered-films)\.json$/;
+function generationRequest(key){
+ const match=GENERATION_KEY.exec(key);
+ return match?match[1]:null;
+}
 
 function failed(code,cause){const error=new Error(code);error.code=code;if(cause)error.cause=cause;return error;}
 function binding(db){return typeof db?.prepare==='function';}
@@ -111,9 +116,11 @@ export async function routeRead(env,key){
  return {handled:true,value};
 }
 async function readKey(env,key,gate){
+ const requested=generationRequest(key);
+ if(requested&&requested!==gate.programmeRunId)return null;
  if(key==='epg/discovery-resolution.json')return readDecisions(env,gate);
- if(key==='epg/discovered-films.json'||GENERATION_KEY.test(key)&&key.endsWith('discovered-films.json'))return readCatalog(env,gate);
- if(key==='epg/discovery-latest.json'||GENERATION_KEY.test(key)&&key.endsWith('discovery-latest.json'))return readLedger(env,gate);
+ if(key==='epg/discovered-films.json'||requested&&key.endsWith('discovered-films.json'))return readCatalog(env,gate);
+ if(key==='epg/discovery-latest.json'||requested&&key.endsWith('discovery-latest.json'))return readLedger(env,gate);
  if(key==='epg/discovery-status.json')return readPayload(env,'discovery_status');
  if(key==='epg/discovery-score-preview.json')return readScores(env,gate);
  if(key==='epg/resolver-continuation.json')return (await readContinuation(env)).record;
@@ -128,9 +135,15 @@ export async function routeWrite(env,key,value,context={}){
  if(!gate.ready)return {handled:false};
  if(key==='epg/resolver-lease.json')throw failed('discovery_fence');
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
+ const requested=generationRequest(key);
+ if(requested&&key.endsWith('discovery-latest.json')){
+  const run=typeof value?.programmeRunId==='string'?value.programmeRunId:null;
+  if(!run||run!==requested)throw failed('discovery_fence');
+  if(gate.programmeRunId&&run!==gate.programmeRunId&&context.handoff!==true)throw failed('discovery_fence');
+ }else if(requested&&gate.programmeRunId&&requested!==gate.programmeRunId)throw failed('discovery_fence');
  if(key==='epg/discovery-resolution.json')await writeDecisions(env,value,gate,context);
- else if(key==='epg/discovered-films.json'||GENERATION_KEY.test(key)&&key.endsWith('discovered-films.json'))await replaceCatalog(env,value,context);
- else if(key==='epg/discovery-latest.json'||GENERATION_KEY.test(key)&&key.endsWith('discovery-latest.json'))await replaceLedger(env,value,context);
+ else if(key==='epg/discovered-films.json'||requested&&key.endsWith('discovered-films.json'))await replaceCatalog(env,value,context);
+ else if(key==='epg/discovery-latest.json'||requested&&key.endsWith('discovery-latest.json'))await replaceLedger(env,value,context);
  else if(key==='epg/discovery-status.json')await writeStatus(env,value,gate,context);
  else if(key==='epg/discovery-score-preview.json')await writeScores(env,value,gate,context);
  else if(key==='epg/resolver-continuation.json')await writeContinuation(env,value,undefined,context);
@@ -294,54 +307,90 @@ function loadingFence(generation,lease){
   [FENCE_SQL,[]],
  ];
 }
+async function beginLedgerSeal(env,run,lease){
+  if(!lease)throw failed('discovery_lease');
+  const gate=await readAuthority(env);
+  const db=database(env);
+  if(gate.transfer==='loading'){
+   const holder=await one(db,'SELECT lease_id FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?',[lease.id,nowMs()]);
+   if(!holder)throw failed('discovery_incomplete');
+  }else assertOpen(gate);
+  await commit(db,[
+   ['UPDATE discovery_lease SET expires_at=?, programme_run_id=COALESCE(programme_run_id,?) WHERE id=1 AND lease_id=? AND expires_at>?',[nowMs()+LEASE_TTL_MS,gate.programmeRunId,lease.id,nowMs()]],
+   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1',[gate.generation]],
+   [FENCE_SQL,[]],
+   ['UPDATE discovery_transfer SET state=\'loading\', programme_run_id=?, batches=batches+1 WHERE id=1',[run]],
+   ['UPDATE discovery_observation SET residence=\'retiring\' WHERE source_key=\'active\' AND residence=\'active\'',[]],
+  ]);
+  let pending=[];
+  const flush=async()=>{
+   if(!pending.length)return;
+   const current=await readAuthority(env);
+   if(current.transfer!=='loading')throw failed('discovery_incomplete');
+   await commit(db,[...loadingFence(current.generation,lease),...pending]);
+   pending=[];
+  };
+  return {
+   async push(item){
+    for(const statement of itemStatements(item,run)){
+     if(pending.length+3>STATEMENT_CAP)await flush();
+     pending.push(statement);
+    }
+   },
+   async finish(){
+    await flush();
+    const end=await readAuthority(env);
+    await commit(db,[
+     ...loadingFence(end.generation,lease),
+     ['UPDATE discovery_observation_show SET source_key=\'archive:\'||(SELECT programme_run_id||\':\'||(SELECT generation FROM discovery_authority WHERE id=1)||\':\'||observation_key FROM discovery_observation o WHERE o.source_key=\'active\' AND o.residence=\'retiring\' AND o.observation_key=discovery_observation_show.observation_key) WHERE source_key=\'active\' AND observation_key IN (SELECT observation_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'retiring\')',[]],
+     ['UPDATE discovery_observation SET residence=\'archive\', source_key=\'archive:\'||programme_run_id||\':\'||(SELECT generation FROM discovery_authority WHERE id=1)||\':\'||observation_key WHERE source_key=\'active\' AND residence=\'retiring\'',[]],
+     ['UPDATE discovery_lease SET programme_run_id=? WHERE id=1 AND lease_id=?',[run,lease.id]],
+     ['UPDATE discovery_authority SET programme_run_id=?, published_programme_run_id=? WHERE id=1',[run,run]],
+     ['UPDATE discovery_transfer SET state=\'committed\', programme_run_id=?, batches=batches+1 WHERE id=1',[run]],
+    ]);
+   },
+  };
+}
 export async function replaceLedger(env,document,context={}){
  const lease=context.lease||leaseOf(env);
- if(!lease)throw failed('discovery_lease');
  if(!document||typeof document!=='object'||!Array.isArray(document.items))throw failed('discovery_conflict');
  const run=typeof document.programmeRunId==='string'?document.programmeRunId:null;
  if(!run)throw failed('discovery_fence');
  validateItems(document.items);
- const gate=await readAuthority(env);
- assertOpen(gate);
- const db=database(env);
- await commit(db,[
-  ['UPDATE discovery_lease SET expires_at=?, programme_run_id=COALESCE(programme_run_id,?) WHERE id=1 AND lease_id=? AND expires_at>?',[nowMs()+LEASE_TTL_MS,gate.programmeRunId,lease.id,nowMs()]],
-  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1',[gate.generation]],
-  [FENCE_SQL,[]],
-  ['UPDATE discovery_transfer SET state=\'loading\', programme_run_id=?, batches=batches+1 WHERE id=1',[run]],
-  ['UPDATE discovery_observation SET residence=\'retiring\' WHERE source_key=\'active\' AND residence=\'active\'',[]],
- ]);
- let pending=[];
- const flush=async()=>{
-  if(!pending.length)return;
-  const current=await readAuthority(env);
-  if(current.transfer!=='loading')throw failed('discovery_incomplete');
-  await commit(db,[...loadingFence(current.generation,lease),...pending]);
-  pending=[];
- };
+ const seal=await beginLedgerSeal(env,run,lease);
  try{
-  for(const item of document.items){
-   for(const statement of itemStatements(item,run)){
-    if(pending.length+3>STATEMENT_CAP)await flush();
-    pending.push(statement);
-   }
-  }
-  await flush();
-  const end=await readAuthority(env);
-  await commit(db,[
-   ...loadingFence(end.generation,lease),
-   ['UPDATE discovery_observation_show SET source_key=\'archive:\'||(SELECT programme_run_id||\':\'||(SELECT generation FROM discovery_authority WHERE id=1)||\':\'||observation_key FROM discovery_observation o WHERE o.source_key=\'active\' AND o.residence=\'retiring\' AND o.observation_key=discovery_observation_show.observation_key) WHERE source_key=\'active\' AND observation_key IN (SELECT observation_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'retiring\')',[]],
-   ['UPDATE discovery_observation SET residence=\'archive\', source_key=\'archive:\'||programme_run_id||\':\'||(SELECT generation FROM discovery_authority WHERE id=1)||\':\'||observation_key WHERE source_key=\'active\' AND residence=\'retiring\'',[]],
-   ['UPDATE discovery_lease SET programme_run_id=? WHERE id=1 AND lease_id=?',[run,lease.id]],
-   ['UPDATE discovery_authority SET programme_run_id=?, published_programme_run_id=? WHERE id=1',[run,run]],
-   ['UPDATE discovery_transfer SET state=\'committed\', programme_run_id=?, batches=batches+1 WHERE id=1',[run]],
-  ]);
+  for(const item of document.items)await seal.push(item);
+  await seal.finish();
  }catch(error){throw error.code?error:failed('discovery_unavailable',error);}
  return {handled:true,items:document.items.length};
 }
+// One item at a time. The caller is the publish handoff: it already holds the lease, and the
+// programme moves only inside the seal. A killed seal stays `loading` until that lease retries it.
+export async function ingestLedger(env,spec){
+ if(!spec||spec.handoff!==true)throw failed('discovery_fence');
+ const run=typeof spec.programmeRunId==='string'?spec.programmeRunId:null;
+ if(!run||!spec.items||typeof spec.items[Symbol.asyncIterator]!=='function')throw failed('discovery_fence');
+ const lease=spec.lease||leaseOf(env);
+ const seal=await beginLedgerSeal(env,run,lease);
+ const seen=new Set();
+ let count=0;
+ try{
+  for await(const item of spec.items){
+   if(!item||typeof item.key!=='string'||!item.key||item.key.length>200||/[\u0000-\u001f]/.test(item.key)||seen.has(item.key))throw failed('discovery_conflict');
+   seen.add(item.key);
+   showsOf(item);
+   await seal.push(item);
+   count++;
+  }
+  await seal.finish();
+ }catch(error){throw error.code?error:failed('discovery_unavailable',error);}
+ return {handled:true,items:count};
+}
 async function readLedger(env,gate){
+ const counted=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\'');
+ const itemCount=Number(counted?.n||0);
+ if(itemCount>READ_CAP)return {programmeRunId:gate.programmeRunId,paged:true,itemCount,items:null,ledgerMode:gate.programmeRunId?'bounded':null};
  const rows=await many(database(env),'SELECT observation_key, payload_json, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' ORDER BY observation_key');
- if(rows.length>READ_CAP)throw failed('discovery_bounded');
  const showRows=await many(database(env),'SELECT observation_key, ordinal, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key=\'active\' ORDER BY observation_key, ordinal');
  const shows=new Map();
  for(const show of showRows){const list=shows.get(show.observation_key)||[];list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});shows.set(show.observation_key,list);}
@@ -350,6 +399,28 @@ async function readLedger(env,gate){
  const unreferenced=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE residence=\'unreferenced\'');
  const segments=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_segment WHERE residence=\'archive\'');
  return {programmeRunId:gate.programmeRunId,items,ledgerMode:gate.programmeRunId?'bounded':null,archive:{uniqueArchivedItems:Number(archive?.n||0),unreferencedItems:Number(unreferenced?.n||0),segments:Number(segments?.n||0)}};
+}
+function observationFromRow(row,shows){
+ let payload;try{payload=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
+ return {...payload,key:row.observation_key,shows:shows||[]};
+}
+export async function readObservationPage(env,options={}){
+ const gate=await readAuthority(env);
+ if(gate.held)throw failed('discovery_fence');
+ if(!gate.ready)throw failed('discovery_not_authoritative');
+ if(gate.transfer==='loading')throw failed('discovery_incomplete');
+ const limit=Math.min(LEDGER_PAGE,Number.isInteger(options.limit)&&options.limit>0?options.limit:LEDGER_PAGE);
+ const after=typeof options.after==='string'?options.after:'';
+ const rows=await many(database(env),'SELECT observation_key, payload_json FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key>? ORDER BY observation_key LIMIT ?',[after,limit+1]);
+ const more=rows.length>limit;
+ const page=more?rows.slice(0,limit):rows;
+ const shows=new Map();
+ if(page.length){
+  const marks=page.map(()=>'?').join(',');
+  const showRows=await many(database(env),`SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN (${marks}) ORDER BY observation_key, ordinal`,page.map(row=>row.observation_key));
+  for(const show of showRows){const list=shows.get(show.observation_key)||[];list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});shows.set(show.observation_key,list);}
+ }
+ return {programmeRunId:gate.programmeRunId,items:page.map(row=>observationFromRow(row,shows.get(row.observation_key)||[])),more,after:page.length?page[page.length-1].observation_key:after};
 }
 
 function validateCatalog(films){
@@ -425,16 +496,27 @@ export async function importSegment(env,segment){
  const sha=await segmentContentSha(segment.items);
  if(segment.contentSha256!==sha)throw failed('discovery_conflict');
  const gate=await readAuthority(env);
- assertOpen(gate);
+ const db=database(env);
+ if(gate.transfer==='loading'){
+  const live=await one(db,'SELECT lease_id FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND expires_at>?',[nowMs()]);
+  if(live?.lease_id)throw failed('discovery_incomplete');
+  const partial=await one(db,'SELECT source_key FROM discovery_segment WHERE residence=\'archive\' ORDER BY rowid DESC LIMIT 1');
+  if(!partial||partial.source_key!==segment.sourceKey)throw failed('discovery_incomplete');
+  await commit(db,[
+   ['DELETE FROM discovery_observation_show WHERE source_key=?',[segment.sourceKey]],
+   ['DELETE FROM discovery_observation WHERE source_key=?',[segment.sourceKey]],
+   ['DELETE FROM discovery_segment WHERE source_key=?',[segment.sourceKey]],
+  ]);
+ }else assertOpen(gate);
  const seen=new Set();
  for(const item of segment.items){if(seen.has(item.key))throw failed('discovery_conflict');seen.add(item.key);}
- const db=database(env);
  const run=segment.programmeRunId||gate.programmeRunId;
  if(!run)throw failed('discovery_fence');
  const chunks=[];
  let current=[
   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)',[gate.generation,nowMs()]],
   [FENCE_SQL,[]],
+  ['UPDATE discovery_transfer SET state=\'loading\', batches=batches+1 WHERE id=1',[]],
   ['INSERT INTO discovery_segment (source_key, programme_run_id, residence, r2_key, content_sha256, item_count) VALUES (?,?,\'archive\',?,?,?)',[segment.sourceKey,run,segment.r2Key??null,sha,segment.items.length]],
  ];
  const push=()=>{chunks.push(current);current=[];};
@@ -461,6 +543,12 @@ export async function importSegment(env,segment){
   }
   await commit(db,chunks[index]);
  }
+ const end=await readAuthority(env);
+ await commit(db,[
+  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)',[end.generation,nowMs()]],
+  [FENCE_SQL,[]],
+  ['UPDATE discovery_transfer SET state=\'committed\', batches=batches+1 WHERE id=1',[]],
+ ]);
  return {imported:segment.items.length,sha};
 }
 
@@ -573,11 +661,13 @@ export async function readObservationIndex(env,options={}){
  if(!gate.programmeRunId)return {handled:true,index:{programmeRunId:null,manifest:null,manifestEtag:null,records:[],state:'unavailable',reasons:['no_published_generation'],generation:null,indexScope:options.scope||'current_unresolved_with_decision',resolutionEtag:null}};
  if(options.expectedGeneration!=null&&options.expectedGeneration!==gate.generation)return {handled:true,index:{programmeRunId:gate.programmeRunId,manifest:null,manifestEtag:'d1:'+gate.generation,records:[],state:'stale',reasons:['generation_moved'],generation:{phase:'published',programmeRunId:gate.programmeRunId,identityAuthority:'d1'},indexScope:options.scope||'current_unresolved_with_decision',resolutionEtag:'d1:'+gate.generation}};
  const verified=options.scope==='current_verified';
+ const keyed=typeof options.key==='string'&&options.key.length>0;
  const limit=Number.isInteger(options.limit)?options.limit:INDEX_CAP;
- const rows=await many(database(env),`SELECT o.observation_key, o.payload_json, o.evidence_key, d.payload_json AS decision_json, d.decision_hash, d.status, d.terminal_reason FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND d.status IS NOT NULL AND d.status<>'excluded_nonfilm' AND ${verified?'d.status=\'verified\'':'d.status<>\'verified\''} ORDER BY CASE WHEN d.terminal_reason IS NOT NULL THEN 0 ELSE 1 END, o.observation_key LIMIT ?`,[limit+1]);
- const capped=rows.length>limit;
- const page=rows.slice(0,limit);
- const wanted=options.key?page.filter(row=>row.observation_key===options.key):page;
+ const rows=keyed
+  ?await many(database(env),`SELECT o.observation_key, o.payload_json, o.evidence_key, d.payload_json AS decision_json, d.decision_hash, d.status, d.terminal_reason FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.observation_key=? AND d.status IS NOT NULL AND d.status<>'excluded_nonfilm' AND ${verified?'d.status=\'verified\'':'d.status<>\'verified\''}`,[options.key])
+  :await many(database(env),`SELECT o.observation_key, o.payload_json, o.evidence_key, d.payload_json AS decision_json, d.decision_hash, d.status, d.terminal_reason FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND d.status IS NOT NULL AND d.status<>'excluded_nonfilm' AND ${verified?'d.status=\'verified\'':'d.status<>\'verified\''} ORDER BY CASE WHEN d.terminal_reason IS NOT NULL THEN 0 ELSE 1 END, o.observation_key LIMIT ?`,[limit+1]);
+ const capped=!keyed&&rows.length>limit;
+ const wanted=keyed?rows:rows.slice(0,limit);
  const records=[];
  for(const row of wanted){
   let payload,decision;try{payload=JSON.parse(row.payload_json);decision=JSON.parse(row.decision_json);}catch{return {handled:true,index:indexShell(gate,'malformed')};}
@@ -595,17 +685,23 @@ export async function putIntent(env,spec){
  const gate=await readAuthority(env);
  assertOpen(gate);
  if(!spec?.idempotencyKey||!spec.observationKey)throw failed('discovery_conflict');
+ const issued=spec.issued&&typeof spec.issued==='object'?JSON.stringify(spec.issued):null;
+ const command=spec.command&&typeof spec.command==='object'?JSON.stringify(spec.command):null;
+ const expected=typeof spec.expectedHash==='string'?spec.expectedHash:null;
+ const expires=Number.isFinite(spec.expiresAt)?spec.expiresAt:null;
  try{
-  await commit(database(env),[['INSERT INTO discovery_intent (idempotency_key, kind, state, observation_key, before_json, receipt_json, generation) VALUES (?,?,\'approved\',?,NULL,NULL,?)',[spec.idempotencyKey,spec.kind,spec.observationKey,gate.generation]]]);
+  await commit(database(env),[['INSERT INTO discovery_intent (idempotency_key, kind, state, observation_key, before_json, receipt_json, issued_json, command_json, expected_hash, expires_at, generation) VALUES (?,?,\'approved\',?,NULL,NULL,?,?,?,?,?)',[spec.idempotencyKey,spec.kind,spec.observationKey,issued,command,expected,expires,gate.generation]]]);
  }catch(error){if(error.code==='discovery_conflict')return {saved:false};throw error;}
  return {saved:true};
 }
 export async function readIntent(env,idempotencyKey){
  const gate=await readAuthority(env);
  if(!gate.ready)return {handled:false,intent:null};
- const row=await one(database(env),'SELECT idempotency_key, kind, state, observation_key, before_json, receipt_json, generation FROM discovery_intent WHERE idempotency_key=?',[idempotencyKey]);
+ const row=await one(database(env),'SELECT idempotency_key, kind, state, observation_key, before_json, receipt_json, issued_json, command_json, expected_hash, expires_at, generation FROM discovery_intent WHERE idempotency_key=?',[idempotencyKey]);
  if(!row)return {handled:true,intent:null};
- return {handled:true,intent:{idempotencyKey:row.idempotency_key,kind:row.kind,state:row.state,observationKey:row.observation_key,before:row.before_json?JSON.parse(row.before_json):null,receipt:row.receipt_json?JSON.parse(row.receipt_json):null,generation:row.generation==null?null:Number(row.generation)}};
+ let issued=null,command=null;
+ try{issued=row.issued_json?JSON.parse(row.issued_json):null;command=row.command_json?JSON.parse(row.command_json):null;}catch{throw failed('discovery_unavailable');}
+ return {handled:true,intent:{idempotencyKey:row.idempotency_key,kind:row.kind,state:row.state,observationKey:row.observation_key,before:row.before_json?JSON.parse(row.before_json):null,receipt:row.receipt_json?JSON.parse(row.receipt_json):null,issued,command,expectedHash:row.expected_hash??null,expiresAt:row.expires_at==null?null:Number(row.expires_at),generation:row.generation==null?null:Number(row.generation)}};
 }
 export async function markIntentRunning(env,spec){
  const gate=await readAuthority(env);
@@ -627,15 +723,30 @@ export async function ownerDecision(env,spec){
  if(!existing.intent)return {outcome:'missing'};
  if(existing.intent.receipt)return {outcome:'replay',receipt:existing.intent.receipt};
  if(existing.intent.state==='running')return {outcome:'unknown'};
- if(spec.expiresAt!=null&&spec.expiresAt<=nowMs())return {outcome:'expired'};
- const row=await one(database(env),'SELECT decision_hash, payload_json FROM discovery_decision WHERE observation_key=?',[spec.key]);
+ const storedExpires=existing.intent.expiresAt;
+ if(storedExpires!=null){if(storedExpires<=nowMs())return {outcome:'expired'};}
+ else if(spec.expiresAt!=null&&spec.expiresAt<=nowMs())return {outcome:'expired'};
+ const key=existing.intent.observationKey;
+ if(spec.key&&spec.key!==key)return {outcome:'conflict'};
+ if(existing.intent.expectedHash&&spec.expectedHash&&spec.expectedHash!==existing.intent.expectedHash)return {outcome:'conflict'};
+ const expectedHash=existing.intent.expectedHash||spec.expectedHash;
+ if(existing.intent.command&&spec.next){
+  const command=existing.intent.command;
+  if(command.effect==='assign'&&(String(spec.next.tmdbId)!==String(command.tmdbId)||spec.next.status!=='verified'))return {outcome:'conflict'};
+  if(command.effect==='reject'){
+   const ids=Array.isArray(spec.next.rejectedTmdbIds)?spec.next.rejectedTmdbIds.map(String):[];
+   if(!ids.includes(String(command.tmdbId)))return {outcome:'conflict'};
+  }
+ }
+ const bound={...spec,key,expectedHash};
+ const row=await one(database(env),'SELECT decision_hash, payload_json FROM discovery_decision WHERE observation_key=?',[key]);
  let previous=null;try{previous=row?JSON.parse(row.payload_json):null;}catch{return {outcome:'malformed'};}
- if(!row||await decisionHash(previous)!==row.decision_hash||row.decision_hash!==spec.expectedHash)return {outcome:'conflict'};
+ if(!row||await decisionHash(previous)!==row.decision_hash||row.decision_hash!==expectedHash)return {outcome:'conflict'};
  const lease=spec.lease||leaseOf(env);
  if(!lease)return {outcome:'lease'};
  try{await markIntentRunning(env,{idempotencyKey:spec.idempotencyKey,before:previous,lease});}
  catch{return {outcome:'unknown'};}
- try{await commitOwnerWrite(env,spec,previous);}
+ try{await commitOwnerWrite(env,bound,previous);}
  catch{return {outcome:'unknown'};}
  const after=await readIntent(env,spec.idempotencyKey);
  return {outcome:'written',receipt:after.intent?.receipt||spec.receipt||null};
