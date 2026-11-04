@@ -5,11 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {retryFingerprint} from '../src/domain/letterboxd-rated-admission.js';
 import {putOwned} from '../src/ratings-d1.js';
 import {d1Standin} from './d1-standin.mjs';
 import {loadArchiveWorker} from './fixtures/letterboxd-archive-worker.mjs';
 import {exportArchive} from './fixtures/letterboxd-archive.mjs';
 
+function expectRow(row) {
+  return {state: row.state, reason: row.reason || null, fingerprint: row.fingerprint || retryFingerprint(row), observedAt: row.observedAt || null, registeredAt: row.registeredAt || null};
+}
 const NOW = Date.parse('2026-10-31T09:00:00.000Z'), DAY = 86400000;
 const ORIGIN = 'https://iptv.test', G1 = '11111111-1111-4111-8111-111111111111';
 const NAME = 'letterboxd-demo-user-2026-10-20-08-15-utc.zip', GENERATED = '2026-10-20T08:15:00.000Z';
@@ -675,8 +679,12 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   const fetchedAtStatus = net.calls.length;
   const retryKey = 'rated-retry-key000001';
   const retryRow = status.body.retryable[0];
-  const expected = {Rv1: {state: retryRow.state, reason: retryRow.reason, fingerprint: retryRow.fingerprint, observedAt: retryRow.observedAt}};
-  const previewed = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1', 'Stay'], expected: {...expected, Stay: {state: 'pending', reason: 'no_stored_title'}}, documentEtag: etag, idempotencyKey: retryKey, accepted: true}});
+  const omitted = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], documentEtag: etag, idempotencyKey: 'rated-retry-key000006', accepted: true}});
+  assert.equal(omitted.status, 400, JSON.stringify(omitted.body));
+  const incomplete = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: {Rv1: {state: 'needs_review', reason: 'shortlink_missing'}}, documentEtag: etag, idempotencyKey: 'rated-retry-key000007', accepted: true}});
+  assert.equal(incomplete.status, 400, JSON.stringify(incomplete.body));
+  const expected = {Rv1: expectRow(retryRow), Stay: expectRow(read(reviewKey).candidates.Stay)};
+  const previewed = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1', 'Stay'], expected, documentEtag: etag, idempotencyKey: retryKey, accepted: true}});
   assert.equal(previewed.status, 200, JSON.stringify(previewed.body));
   assert.equal(previewed.body.writes, false);
   assert.equal(previewed.body.retryable, 1);
@@ -700,7 +708,7 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   put(reviewKey, resetReview);
   const statusDrift = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: reviewSha}});
   const driftRow = statusDrift.body.retryable[0];
-  const driftExpected = {Rv1: {state: driftRow.state, reason: driftRow.reason, fingerprint: driftRow.fingerprint, observedAt: driftRow.observedAt}};
+  const driftExpected = {Rv1: expectRow(driftRow)};
   const driftConfirm = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: statusDrift.body.documentEtag, idempotencyKey: 'rated-retry-key000004', accepted: true}});
   assert.equal(driftConfirm.status, 200, JSON.stringify(driftConfirm.body));
   const drifted = read(reviewKey);
@@ -710,6 +718,28 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(driftExec.status, 409, JSON.stringify(driftExec.body));
   drifted.candidates.Rv1.observedAt = driftRow.observedAt;
   put(reviewKey, drifted);
+
+  failPut = key => {
+    if (!String(key).includes('letterboxd_identity_retry')) return false;
+    const stored = records.get(key);
+    if (!stored) return false;
+    const record = JSON.parse(stored.text);
+    if (record.state === 'approved' && !record.receipt) {
+      const live = JSON.parse(records.get(reviewKey).text);
+      live.candidates.Rv1.registeredAt = '2026-11-04T12:00:00.000Z';
+      records.set(reviewKey, {text: JSON.stringify(live), etag: 'raced-registeredAt'});
+    }
+    return false;
+  };
+  const raceConfirm = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: records.get(reviewKey).etag, idempotencyKey: 'rated-retry-key000008', accepted: true}});
+  assert.equal(raceConfirm.status, 200, JSON.stringify(raceConfirm.body));
+  const raced = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: raceConfirm.body.confirmation}});
+  assert.equal(raced.status, 409, JSON.stringify(raced.body));
+  assert.equal(read(reviewKey).candidates.Rv1.state, 'needs_review', 'a write between checkSubmission and CAS is not requeued');
+  failPut = null;
+  const unraced = read(reviewKey);
+  unraced.candidates.Rv1.registeredAt = driftRow.registeredAt;
+  put(reviewKey, unraced);
 
   failPut = key => {
     if (!String(key).includes('letterboxd_identity_retry')) return false;
@@ -736,11 +766,11 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   verifiedDoc.candidates.Rv1.state = 'verified';
   verifiedDoc.candidates.Rv1.reason = null;
   put(reviewKey, verifiedDoc);
-  const refuseVerified = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: {Rv1: {state: 'needs_review', reason: 'shortlink_missing'}}, idempotencyKey: 'rated-retry-key000002', accepted: true}});
+  const refuseVerified = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, idempotencyKey: 'rated-retry-key000002', accepted: true}});
   assert.equal(refuseVerified.status, 409, JSON.stringify(refuseVerified.body));
 
-  const stale = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: {Rv1: {state: 'verified', reason: null}}, documentEtag: 'not-the-etag', idempotencyKey: 'rated-retry-key000003', accepted: true}});
-  assert.equal(stale.status, 409);
+  const stale = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: 'not-the-etag', idempotencyKey: 'rated-retry-key000003', accepted: true}});
+  assert.equal(stale.status, 409, JSON.stringify(stale.body));
 }
 
 console.log('Rated archive candidates: preview is local, a commit keeps the code, a stop waits, a verified movie is not a watchlist fact, D1 wins only while open');

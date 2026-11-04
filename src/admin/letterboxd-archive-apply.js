@@ -227,7 +227,8 @@ async function lbaIdentityStep(request,env,url){
 }
 function lbaRetryFields(body){
  const codes=Array.isArray(body.codes)?[...new Set(body.codes.map(code=>String(code||'')))]:[];
- const expected=body.expected&&typeof body.expected==='object'&&!Array.isArray(body.expected)?body.expected:{};
+ const expected=body.expected&&typeof body.expected==='object'&&!Array.isArray(body.expected)?body.expected:null;
+ if(!expected||!codes.length||codes.some(code=>!LetterboxdRatedAdmission.isCompleteExpected(expected[code])))return null;
  return LBA_HEX64.test(body.archiveSha256||'')&&codes.length>=1&&codes.length<=8&&codes.every(code=>/^[A-Za-z0-9]{1,16}$/.test(code))&&LBA_KEY.test(body.idempotencyKey||'')&&body.accepted===true?{codes,expected}:null;
 }
 function lbaRetryVersion(item){
@@ -253,7 +254,9 @@ async function lbaRetryConfirm(request,env){
   if(doc.value===undefined)return json({error:'storage_unavailable'},503);
   if(!doc.value)return lbaRefuse('not_eligible',409);
   if(body.documentEtag&&doc.etag&&body.documentEtag!==doc.etag)return lbaRefuse('record_changed',409);
-  const plan=LetterboxdRatedAdmission.planIdentityRetry(doc.value,{codes:fields.codes,expected:fields.expected});
+  const validated=LetterboxdRatedAdmission.validatedRetryExpected(doc.value,fields.codes,fields.expected);
+  if(!validated.ok)return lbaRefuse(validated.refusal||'invalid_request',validated.refusal==='record_changed'?409:400);
+  const plan=LetterboxdRatedAdmission.planIdentityRetry(doc.value,{codes:fields.codes,expected:validated.expected});
   if(!plan.ok)return lbaRefuse(plan.refusal||'invalid_request',400);
   if(!plan.requeue.length&&!plan.outcomes.some(entry=>entry.outcome==='already_applied'))return lbaRefuse('not_eligible',409);
   const now=new Date(started).toISOString();
@@ -267,7 +270,7 @@ async function lbaRetryConfirm(request,env){
    if(lbaSameIssued(existing.record.issued,issued))return json({mode:'identity_retry_confirm',writes:false,confirmation:existing.record.issued,retryable:plan.requeue.length,preview:{codes:fields.codes,requeue:plan.requeue}});
    return lbaRefuse('idempotency_conflict',409);
   }
-  const record={schemaVersion:1,kind:'letterboxd_identity_retry',idempotencyKey:body.idempotencyKey,state:'approved',issued,createdAt:now,archiveSha256:body.archiveSha256,codes:fields.codes,expected:fields.expected,documentEtag:doc.etag||null,receipt:null};
+  const record={schemaVersion:1,kind:'letterboxd_identity_retry',idempotencyKey:body.idempotencyKey,state:'approved',issued,createdAt:now,archiveSha256:body.archiveSha256,codes:fields.codes,expected:validated.expected,documentEtag:doc.etag||null,receipt:null};
   const saved=await lbaActionWrite(env,LBA_RETRY_PREFIX,body.idempotencyKey,record,null);
   if(saved===null)return lbaRefuse('idempotency_conflict',409);
   return json({mode:'identity_retry_confirm',writes:false,confirmation:issued,retryable:plan.requeue.length,preview:{codes:fields.codes,requeue:plan.requeue}});
@@ -305,10 +308,15 @@ async function lbaRetry(request,env,url){
    const marked=await lbaActionWrite(env,LBA_RETRY_PREFIX,submitted.idempotencyKey,running,stored.etag);
    if(marked===null)return lbaRefuse('in_progress',409);
    stored={record:running,etag:marked.etag};
+   const live=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
+   if(live.value===undefined)return json({error:'storage_unavailable'},503);
+   const still=LetterboxdRatedAdmission.validatedRetryExpected(live.value,stored.record.codes,stored.record.expected);
+   if(!still.ok)return lbaRefuse(still.refusal==='record_changed'?'record_changed':'invalid_request',still.refusal==='record_changed'?409:400);
   }
   const result=await LetterboxdRatedCandidates.retryCandidates(env,{sha,codes:stored.record.codes,expected:stored.record.expected});
   if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
   if(result.error)return lbaRefuse(result.error,400);
+  if(!resume&&result.changed!==true&&result.outcomes&&result.outcomes.some(entry=>entry.outcome==='skipped_changed')&&!result.outcomes.some(entry=>entry.outcome==='written'||entry.outcome==='already_applied'))return lbaRefuse('record_changed',409);
   const receipt=AdminActions.receiptOf({confirmation,capability:LBA_RETRY_CAP,startedAt:stored.record.startedAt||now,finishedAt:new Date().toISOString(),outcomes:result.outcomes});
   const saved={...stored.record,state:receipt.state,finishedAt:receipt.finishedAt,receipt};
   let durable;

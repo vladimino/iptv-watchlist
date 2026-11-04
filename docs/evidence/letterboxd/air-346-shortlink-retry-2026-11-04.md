@@ -21,6 +21,8 @@
 | Confirm then execute of two `shortlink_missing` codes | Those two become `pending` with `retryOf`. A Stay pending row is unchanged |
 | Execute of a verified or other-reason row | `skipped_changed` |
 | Confirm with a stale `documentEtag` | 409 `record_changed` |
+| Confirm without `expected`, or with only `state:reason` | 400 `invalid_request` |
+| A write of `registeredAt` between `checkSubmission` and the candidate CAS | 409 `record_changed`. The row stays `needs_review` |
 | Same `state:reason`, newer `observedAt` | 409 `record_changed`. The approved fingerprint does not match |
 | Receipt put fails after the candidate CAS | HTTP 500. The same confirmation then stores the receipt as `already_applied` |
 | Verified film, unparsable enrichment page | `metadata_unparsed`, `writes: true`, `persisted: enrichment` |

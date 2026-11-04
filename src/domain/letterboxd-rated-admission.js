@@ -82,10 +82,10 @@ export function planRegistration(stored, incoming, generatedAt) {
 // Enrichment of a verified film waits until no identity work remains.
 export const RETRY_LIMIT = 8;
 
-// The observation id is the archive write, not just state:reason. A later import that keeps
-// needs_review / shortlink_missing still changes this fingerprint.
+// The observation id is the archive write, not just state:reason. observedAt and registeredAt
+// both change when a later import rewrites the same row.
 export function retryObservationId(item) {
-  return item && (item.observedAt || item.registeredAt) || '';
+  return [item && item.observedAt || '', item && item.registeredAt || ''].join('|');
 }
 
 export function retryFingerprint(item) {
@@ -93,33 +93,64 @@ export function retryFingerprint(item) {
   return [item.state || '', item.reason || '', retryObservationId(item)].join('|');
 }
 
+export function expectedSnapshot(item) {
+  if (!item) return null;
+  return {
+    state: item.state || null,
+    reason: item.reason || null,
+    fingerprint: retryFingerprint(item),
+    observedAt: item.observedAt || null,
+    registeredAt: item.registeredAt || null,
+  };
+}
+
+export function isCompleteExpected(expect) {
+  return !!(expect && typeof expect === 'object' && !Array.isArray(expect)
+    && typeof expect.fingerprint === 'string' && expect.fingerprint !== 'missing' && expect.fingerprint.includes('|')
+    && typeof expect.state === 'string' && expect.state
+    && Object.prototype.hasOwnProperty.call(expect, 'reason'));
+}
+
+export function validatedRetryExpected(doc, codes, expected) {
+  const requested = [...new Set((Array.isArray(codes) ? codes : []).map(code => String(code || '')).filter(Boolean))];
+  if (!requested.length || requested.length > RETRY_LIMIT) return {ok: false, refusal: 'invalid_request', expected: {}};
+  const snapshot = {};
+  for (const code of requested) {
+    if (!CODE.test(code) || !isCompleteExpected(expected && expected[code])) return {ok: false, refusal: 'invalid_request', expected: {}};
+    const item = doc && doc.candidates && doc.candidates[code];
+    if (!item) return {ok: false, refusal: 'invalid_request', expected: {}};
+    if (retryFingerprint(item) !== expected[code].fingerprint) return {ok: false, refusal: 'record_changed', expected: {}};
+    snapshot[code] = expectedSnapshot(item);
+  }
+  return {ok: true, expected: snapshot};
+}
+
 function observationIdFromExpect(expect) {
-  if (!expect) return '';
-  if (expect.observedAt) return expect.observedAt;
-  if (expect.fingerprint && expect.fingerprint !== 'missing') return String(expect.fingerprint).split('|').slice(2).join('|');
-  return expect.registeredAt || '';
+  if (!isCompleteExpected(expect)) return '';
+  if (expect.observedAt != null || expect.registeredAt != null) return retryObservationId(expect);
+  return String(expect.fingerprint).split('|').slice(2).join('|');
 }
 
 function expectedMatches(item, expect) {
-  if (!expect) return true;
-  if (expect.fingerprint && retryFingerprint(item) !== expect.fingerprint) return false;
-  if (expect.observedAt != null && (item.observedAt || null) !== expect.observedAt) return false;
-  if (Object.prototype.hasOwnProperty.call(expect, 'state') && item.state !== expect.state) return false;
-  if (Object.prototype.hasOwnProperty.call(expect, 'reason') && (item.reason || null) !== (expect.reason || null)) return false;
-  return true;
+  if (!isCompleteExpected(expect)) return false;
+  return retryFingerprint(item) === expect.fingerprint;
 }
 
 function observationMatches(item, expect) {
-  if (!expect) return true;
+  if (!isCompleteExpected(expect)) return false;
   const want = observationIdFromExpect(expect);
-  return !want || retryObservationId(item) === want;
+  return !!want && retryObservationId(item) === want;
 }
 
 // Requeue only needs_review rows whose stored reason is a proven parser/markup defect.
-// A verified, admitting, removed or other-reason row is left alone.
+// A verified, admitting, removed or other-reason row is left alone. Every named code needs a
+// complete expected fingerprint; an empty expected map is not a match.
 export function planIdentityRetry(doc, {codes = [], expected = {}} = {}) {
   const requested = [...new Set((Array.isArray(codes) ? codes : []).map(code => String(code || '')).filter(Boolean))];
   if (!requested.length || requested.length > RETRY_LIMIT) return {ok: false, refusal: 'invalid_request', requeue: [], outcomes: []};
+  if (requested.some(code => CODE.test(code) && !isCompleteExpected(expected && expected[code]))) {
+    return {ok: false, refusal: 'invalid_request', requeue: [], outcomes: []};
+  }
   const outcomes = [];
   const requeue = [];
   for (const code of requested) {
